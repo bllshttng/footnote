@@ -948,11 +948,12 @@ pub(crate) struct View {
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
     questions_fold: Option<crate::needs_overlay::QuestionsFold>,
+    /// The question pages index, read in-process: the bell's fast seed.
+    questions_index: Option<crate::needs_overlay::QuestionsFold>,
     questions_degraded: bool,
     questions_degraded_reason: Option<String>,
-    /// The full question view's list/detail split.
+    /// The opened question's page view.
     question_detail: Option<questions::Detail>,
-    questions_split: u8,
     question_esc: Vec<u8>,
     /// Latest questions fold and its single-flight refresh while visible.
     questions_kick_at: Option<Instant>,
@@ -1986,11 +1987,11 @@ impl View {
             mine_action: None,
             mine_acting: false,
             questions_fold: None,
+            questions_index: None,
             questions_degraded: false,
             questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
-            questions_split: view_store::load_questions_split(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -2288,9 +2289,9 @@ impl View {
     /// either one failing degrades the whole lane - a bare "half of what
     /// should be here loaded" is not worth rendering as a clean "as of now".
     fn needs_footer(&self) -> NeedsFooter {
-        if self.needs_degraded || self.questions_degraded {
+        if self.needs_degraded || (self.questions_degraded && self.questions_index.is_none()) {
             NeedsFooter::Degraded
-        } else if self.needs_fold.is_none() || self.questions_fold.is_none() {
+        } else if self.needs_fold.is_none() || self.questions_merged().is_none() {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
@@ -7617,11 +7618,8 @@ async fn attach_and_run(
     // other.
     let (question_act_tx, mut question_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
-    // The bell's question list uses the same questions projection as the
-    // detail view; reads stay off the UI loop and apply the latest fold.
-    let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
-        Result<crate::needs_overlay::QuestionsFold, String>,
-    >();
+    let (questions_tx, mut questions_rx) = questions::fold_channel();
+    let (questions_index_tx, mut questions_index_rx) = questions::index_channel();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -7765,11 +7763,8 @@ async fn attach_and_run(
                 let _ = tx.send(result);
             });
         }
-        // task 2.3: kick a queued question answer off the UI loop.
-        // `question_acting` is set by the stdin handler at enqueue time,
-        // same discipline as the MINE mutation above.
-        // Refresh the questions projection while the sidebar is shown.
-        questions::maybe_kick(&mut view, &questions_tx);
+        // task 2.3: kick a queued answer; refresh the projection and index.
+        questions::maybe_kick(&mut view, &questions_tx, &questions_index_tx);
         questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
             view.yard_want = false;
@@ -8407,8 +8402,13 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some(fold) = questions_index_rx.recv() => {
+                view.apply_questions_index(fold);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(fold) = questions_rx.recv() => {
-                // The questions fold landed: apply and repaint.
                 view.apply_questions_fold(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));

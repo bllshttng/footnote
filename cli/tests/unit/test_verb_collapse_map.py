@@ -294,8 +294,11 @@ def test_map_covers_current_surface_once():
     # create` spelling, the thin forwarder beside pr push/rebase/heal
     # (hidden, per the forwarder convention): 596 -> 598.
     # The worked-nodes verb joined the registry the PR that ported the
-    # worked overlay to Rust: 598 -> 599.
-    assert len(mapped) == 599, (
+    # worked overlay to Rust: 598 -> 599 on that branch.
+    # The org alias mount allocates the king app's fourteen leaves under the
+    # canonical spelling both fronts accept: 599 -> 613 counted over the
+    # merged file.
+    assert len(mapped) == 613, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -12,14 +12,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-
-STORE_SCHEMA_VERSION = 2
 
 
 class EventStoreUnavailable(RuntimeError):
@@ -110,35 +107,33 @@ def native_rows(
         return None
 
 
-def _refuse_newer_schema(conn: sqlite3.Connection, db: Path) -> None:
-    """Fail closed on a store written by a NEWER build: today every version
-    from 2 up reads as v2, and silently accepting rows whose shape this
-    build does not know is the fail-open this guard exists to refuse."""
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version > STORE_SCHEMA_VERSION:
-        raise EventStoreUnavailable(
-            f"events store schema v{version} is newer than this build understands "
-            f"(v{STORE_SCHEMA_VERSION}); upgrade fno before touching {db}"
-        )
+def _native_json(cmd_tail: list[str], what: str) -> Any:
+    """Run one native event verb and parse its JSON stdout. A failure raises
+    with the native diagnostic; it never reads as an empty result."""
+    try:
+        proc = subprocess.run([resolve_native_bin(), "doctor", "event", *cmd_tail],
+                              capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise EventStoreUnavailable(f"native event {what} unavailable: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or f"exit {proc.returncode}").strip()
+        raise EventStoreUnavailable(f"native event {what} refused: {detail}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise EventStoreUnavailable(f"unreadable native event {what}: {proc.stdout[:200]!r}") from exc
 
 
 def read_committed_lines(events_path: Path) -> list[str]:
-    """Committed envelope lines, direct SQL, never importing.
+    """Committed envelope lines, never importing.
 
     A read with no side effects: retention pruning rides the import the
     rows verb runs, so callers asserting exact store contents (gc, parity)
     use this and stay out of the retention business.
     """
-    db = store_db_path(events_path)
-    if not db.exists():
-        return []
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        _refuse_newer_schema(conn, db)
-        rows = conn.execute("SELECT line FROM events ORDER BY seq").fetchall()
-    finally:
-        conn.close()
-    return [row[0] for row in rows]
+    return _native_json(
+        ["rows", "--events", str(events_path), "--include-rejected", "--no-import"], "rows"
+    )
 
 
 def query_rows(
@@ -182,44 +177,15 @@ def gc_ephemeral(
     from fno.events import RETENTION_MINIMUM_TTL_HOURS
 
     horizon = max(ttl_hours or 0, 0) or RETENTION_MINIMUM_TTL_HOURS
-    db = store_db_path(events_path)
-    if not db.exists():
-        return {
-            "scanned": 0,
-            "deleted": 0,
-            "kept": 0,
-            "malformed": 0,
-            "ttl_hours": horizon,
-        }
     cutoff_ms = (now_ms if now_ms is not None else _now_ms()) - horizon * 3_600_000
-    conn = sqlite3.connect(f"file:{db}?mode=rw", uri=True)
-    try:
-        _refuse_newer_schema(conn, db)
-        scanned, malformed = conn.execute(
-            "SELECT count(*), coalesce(sum(reject_reason IS NOT NULL), 0) FROM events"
-        ).fetchone()
-        if dry_run:
-            expired = conn.execute(
-                "SELECT count(*) FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?",
-                (cutoff_ms,),
-            ).fetchone()[0]
-            deleted = 0
-        else:
-            expired = None
-            deleted = conn.execute(
-                "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?",
-                (cutoff_ms,),
-            ).rowcount
-            conn.commit()
-    except sqlite3.Error as exc:
-        raise EventStoreUnavailable(f"event store unreadable at {db}: {exc}") from exc
-    finally:
-        conn.close()
+    cmd = ["prune", "--events", str(events_path), "--cutoff-ms", str(cutoff_ms)]
+    receipt = _native_json(cmd + (["--dry-run"] if dry_run else []), "prune")
+    scanned, expired = receipt["scanned"], receipt["expired"]
     return {
         "scanned": scanned,
-        "deleted": expired if dry_run else deleted,
-        "kept": scanned - (expired if dry_run else deleted),
-        "malformed": malformed,
+        "deleted": expired,
+        "kept": scanned - expired,
+        "malformed": receipt["malformed"],
         "ttl_hours": horizon,
     }
 

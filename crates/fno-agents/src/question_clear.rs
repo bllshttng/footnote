@@ -245,7 +245,7 @@ mod tests {
             .unwrap();
         for path in [&req.journal_path, &req.decisions_path] {
             let store = crate::event_store::store_path(path);
-            let conn = Connection::open(&store).unwrap();
+            let conn = rusqlite::Connection::open(&store).unwrap();
             conn.execute_batch(
                 "CREATE TABLE recovery_history(event_id TEXT PRIMARY KEY, batch TEXT NOT NULL);
                  INSERT INTO recovery_history SELECT event_id, 'copy-batch' FROM events;",
@@ -259,7 +259,7 @@ mod tests {
         assert!(result.lines[0].contains("(decision d-recovery1 resumed)"));
         for path in [&req.journal_path, &req.decisions_path] {
             let store = crate::event_store::store_path(path);
-            let conn = Connection::open(&store).unwrap();
+            let conn = rusqlite::Connection::open(&store).unwrap();
             let (count, line): (i64, String) = conn
                 .query_row(
                     "SELECT COUNT(*), COALESCE(MAX(line), '') FROM events
@@ -737,7 +737,7 @@ mod tests {
 }
 use crate::backlog::api::{self, Store};
 use crate::decision_trace::{actor_kind_from_authority, Trace};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -1262,11 +1262,7 @@ fn stored_event_id(path: &Path, line: &str) -> Result<Option<String>, String> {
     if !store.exists() {
         return Ok(None);
     }
-    let mut connection =
-        Connection::open(&store).map_err(|error| format!("{}: {error}", store.display()))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| format!("{}: {error}", store.display()))?;
+    let mut connection = crate::store_conn::open_write(&store)?;
     crate::event_store::ensure_schema(&mut connection, &store)?;
     let hash = Sha256::digest(line.trim().as_bytes()).to_vec();
     let stored: Option<(String, String)> = connection

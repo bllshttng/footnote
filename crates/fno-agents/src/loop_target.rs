@@ -659,7 +659,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // ── preflight (all before any dispatch) ───────────────────────────────────
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
     // driver: a lead reads its per-scope file `<space>/leads/<scope>.md` (expired
-    // by `fno agents lead done` on abdication) and never touches the target one.
+    // by `fno agents org done` on abdication) and never touches the target one.
     let driver_name = driver.clone().unwrap_or_else(|| "target".to_string());
     let mut target_queue: Option<TargetQueue> = None;
     let mut lead_queue: Option<crate::loop_lead::LeadQueue> = None;
@@ -952,7 +952,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // manifest, so its sidecar lives beside its own canonical team manifest.
     let sentinel = cancel_path_for_driver(&cwd, lead_queue.as_ref().map(|q| q.manifest_path()));
     let clear_hint = if let Some(kq) = lead_queue.as_ref() {
-        format!("fno agents lead cancel --scope {} --clear", kq.scope())
+        format!("fno agents org cancel --scope {} --clear", kq.scope())
     } else {
         format!("rm {}", sentinel.display())
     };

@@ -145,6 +145,84 @@ pub(crate) fn rerun_recovery<P: GhProbe>(
     recovery_from_run_rows(capped, &attempts_of, &failed_jobs_of)
 }
 
+/// The GitHub platform-incident fact for a cancelled-only take-away: the
+/// unresolved status-page incidents whose name or updates name Actions. A
+/// reader that sees this holds reruns instead of burning attempts against a
+/// degraded platform (2026-10-05: three sessions reran killed jobs for hours
+/// during a critical Actions incident the surface could not name). Read-only
+/// and fail-open: an unreachable page reads null, never a second red.
+pub(crate) fn platform_incident() -> Value {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sf",
+            "--max-time",
+            "5",
+            "https://www.githubstatus.com/api/v2/incidents.json",
+        ])
+        .output();
+    let Ok(out) = out else {
+        return Value::Null;
+    };
+    if !out.status.success() {
+        return Value::Null;
+    }
+    incidents_from_body(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure over a status-page incidents body: the unresolved incidents whose
+/// name or any update body mentions Actions. The feed carries component ids,
+/// not names, so the words are the portable signal. Resolved and postmortem
+/// rows are history, not live. Empty or unreadable reads null.
+pub(crate) fn incidents_from_body(body: &str) -> Value {
+    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+        return Value::Null;
+    };
+    let Some(incidents) = parsed.get("incidents").and_then(Value::as_array) else {
+        return Value::Null;
+    };
+    let mut live: Vec<Value> = Vec::new();
+    for incident in incidents {
+        let status = incident.get("status").and_then(Value::as_str).unwrap_or("");
+        if matches!(status, "" | "resolved" | "postmortem" | "completed") {
+            continue;
+        }
+        let name = incident.get("name").and_then(Value::as_str).unwrap_or("");
+        let updates = incident.get("incident_updates").and_then(Value::as_array);
+        let mentions_actions = name.to_lowercase().contains("action")
+            || updates.is_some_and(|rows| {
+                rows.iter().any(|u| {
+                    u.get("body")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains("action")
+                })
+            });
+        if !mentions_actions {
+            continue;
+        }
+        let updated_at = updates
+            .and_then(|rows| rows.first())
+            .and_then(|u| u.get("created_at"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        live.push(json!({
+            "name": name,
+            "status": status,
+            "created_at": incident.get("created_at").cloned().unwrap_or(Value::Null),
+            "updated_at": updated_at,
+        }));
+        if live.len() >= 3 {
+            break;
+        }
+    }
+    if live.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(live)
+    }
+}
+
 /// The resolved merge-authority axes. Both keys fail-open to null on an
 /// unreadable settings load: a receipt that cannot read config says so
 /// rather than asserting "disabled" - a guessed NO is the direction a wedged

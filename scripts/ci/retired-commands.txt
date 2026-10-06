@@ -65,3 +65,7 @@ fno mux block annotate|fno mux block annotate still shells note --blocking (inte
 # 2026-10-02: the bg substrate spelling is retired outright (user ruling, no
 # alias release). thread is the only spelling of the persistent lane.
 --substrate bg|--substrate thread|the bg alias retirement (user 2026-10-02)
+
+# The crown-role group is org on both fronts; the pre-rename spelling is what
+# the beat callers kept emitting after the rename, one refused reader per beat.
+fno agents lead|fno agents org (the canonical group on both fronts)|the lead-to-org rename
