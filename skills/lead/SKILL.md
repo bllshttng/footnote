@@ -109,7 +109,10 @@ A failed reader prints `READER FAILED <name>: <reason>` on its own line, and the
 
  Before the levers, the finish line. When `fno do pr status <n>` reads `ready: true`, run `fno do pr merge <n>` yourself. Standing law: the team merges green, covered PRs. The user does not. This role is the team. `ready` IS the merge decision: the authorized-merge preview verdict, the same gate chain the merge verb runs. CI, review coverage, base staleness, the merge slot, and merge authority all fold into it. When it reads false, the payload's `merge_decision.blockers` names what holds. One guard keeps the lever honest: resolve the row's project cwd and run both verbs from there. A PR number is repository-local. Both verbs derive their repo from the ambient cwd, so a portfolio role can merge an unrelated same-numbered PR. The open-PR count and the free-claim rows printed above are that read's inputs, not report-only indicators.
 
+Spawn records a machine first-check deadline, default 10 minutes (`agents.first_check_minutes`). The daemon checks new transcript activity, worker claim acquisition, tools, and commits. If none is observed, it mails the spawning lead with evidence and checks once more after the same interval. An automatic claim transfer alone is not worker progress. On that receipt, inspect `fno agents peek <handle>` and apply the stalled-worker lever now; do not wait for the hourly beat. The spawn write transfers the lead's claim on that node to the child under the claim recovery lock. Other sessions' claims remain protected.
+
 Apply the first matching lever to each row, in this order:
+
 1. Mail the stalled worker.
 2. Run `fno backlog encounter <node> --evidence "what it cost"` to vote the node up. When evidence contradicts the filed priority, use `fno backlog update <node> --priority p1`. `p0` needs `--blocks-everything` and means the fleet is down.
 3. If no role covers a row, start a new small epic. Do not grow a running epic. A vote or priority does not dispatch. See [A finding starts a new epic](#a-finding-starts-a-new-epic).

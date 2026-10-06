@@ -1069,6 +1069,9 @@ pub fn append_envelope(
     if let Some(seq) = existing {
         tx.commit()
             .map_err(|e| format!("{}: {e}", store.display()))?;
+        if ty == "agent_spawned" {
+            crate::first_check::record_birth(journal, &event_id, &value["data"], ts_ms)?;
+        }
         return Ok(AppendReceipt {
             store,
             event_id: event_id.clone(),
@@ -1164,6 +1167,9 @@ pub fn append_envelope(
     }
     tx.commit()
         .map_err(|e| format!("{}: {e}", store.display()))?;
+    if ty == "agent_spawned" {
+        crate::first_check::record_birth(journal, &event_id, &value["data"], ts_ms)?;
+    }
     Ok(AppendReceipt {
         store,
         event_id,
