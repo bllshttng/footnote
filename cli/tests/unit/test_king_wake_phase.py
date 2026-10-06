@@ -2530,4 +2530,5 @@ def test_a_blocked_court_read_ends_the_pass_with_its_note(tmp_path, monkeypatch)
 
     assert summary["crowns"] == 0
     assert "court read did not complete" in summary["note"]
+    assert summary["court_incomplete"] is True
     assert rec.dispatches == []
