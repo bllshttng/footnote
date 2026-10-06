@@ -67,7 +67,7 @@ One file per install. These belong at the root.
 
 ## Frozen root rows (2026-09-27 backfill)
 
-The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. The crown verified and deleted the backups whose data a `.db` provably holds. The ephemeral writers below learned to clean up after themselves. Every remaining real entry got its row here. The section is FROZEN: shrink-only, like every root row. When one of these writers moves into a subfolder, delete its row in the same PR.
+The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. The role verified and deleted the backups whose data a `.db` provably holds. The ephemeral writers below learned to clean up after themselves. Every remaining real entry got its row here. The section is FROZEN: shrink-only, like every root row. When one of these writers moves into a subfolder, delete its row in the same PR.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
@@ -78,7 +78,7 @@ The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. T
 | `intel/` | the intel fold behind `fno intel` | regenerated per run; safe to delete |
 | `sidecar/` | `cli/src/fno/paths.py::sidecar_dir()` | per-item sidecar files owned by their writers |
 | `blueprinters/` | the blueprinter sessions (one hash dir per session) | session-keyed; a dead session's dir is inert |
-| `reign-watch/` | the reign-watch tool deploy (its `bin/`, `src/`, and `fno-mux` copy) | operator-managed |
+| `reign-watch/` | the lead-watch tool deploy (its `bin/`, `src/`, and `fno-mux` copy) | operator-managed |
 | `jobs/` | event-snapshot dirs from isolation and repro runs (`events-global-<date>/`) | repro residue; safe to delete once a run ends |
 | `backup/` | the operator, by hand: pre-store graph exports (`fno.json`, `etl.json`, node-list jsons) | permanent until the operator rules on them |
 | `stable-bin/` | the operator, by hand: a stable-channel binary copy (`bin/`, `src/`) | operator-managed |
@@ -109,13 +109,13 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `attention/items.json` | `crates/fno-agents/src/attention_arm.rs` (the `attention` arm) | the attention projection cache plus `questions_dir`, rewritten every beat; the king check-in reads it and refuses when it is missing or over 600 s old, safe to delete, next beat rebuilds it |
+| `attention/items.json` | `crates/fno-agents/src/attention_arm.rs` (the `attention` arm) | the attention projection cache plus `questions_dir`, rewritten every beat; the lead check-in reads it and refuses when it is missing or over 600 s old, safe to delete, next beat rebuilds it |
 | `attention/questions.json` | `crates/fno-agents/src/attention_arm.rs` | page settle state (body hashes and since-stamps); deleting it restarts every settle window and cannot double-deliver, because a page's existence proves delivery |
 | `attest/` | `hooks/attest-model.sh`, `hooks/review-hold.sh` | one attestation sidecar per reviewed session |
 | `backups/` | `crates/fno-agents/src/graph_store.rs` backup rotation (pruned to `GRAPH_BACKUP_KEEP`), and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. A backup at most a tenth the size of its predecessor moves that predecessor to `backups/pre-shrink.<name>`, and pins are never pruned. |
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |
 | `bus/` | `paths.bus_dir()`, written by `cli/src/fno/bus/` (`messages.jsonl`, `cursors/`) | append-only mail log; each consumer's cursor is overwritten |
-| `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`), `cli/src/fno/king/drain_cache.py` (`cache/king-drain.json`), `crates/fno/src/model_catalog.rs` (`cache/models-dev.json`) | regenerated PR-status cache; king-drain counts keyed on graph stat identity, rewritten per fresh drain read; the models.dev catalog cache, refreshed on a composer open when older than 24 h, safe to delete |
+| `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`), `cli/src/fno/king/drain_cache.py` (`cache/king-drain.json`), `crates/fno/src/model_catalog.rs` (`cache/models-dev.json`) | regenerated PR-status cache; lead-drain counts keyed on graph stat identity, rewritten per fresh drain read; the models.dev catalog cache, refreshed on a composer open when older than 24 h, safe to delete |
 | `events.jsonl.ephemeral` | retired. Ephemeral-class rows commit to the store with `retention_class = 'ephemeral'` and expire at the schema floor | no new writes |
 | `events.jsonl.shell-writers.d/` | retired. The shell writer makes one native store commit; no writer-liveness markers exist | no new writes |
 | `failover-state.json`, `.lock` | `cli/src/fno/adapters/providers/failover.py`, `runtime_state.py` | permanent breaker state: storm-cap and no-swap-back phases |
@@ -259,9 +259,9 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 | `<space>/events.jsonl` | `paths.project_events_json()`; legacy bytes only since the event-store cutover | import source |
 | `<space>/events.db`, `.db-wal`, `.db-shm` | the `fno-event-store` crate, the authoritative event store beside each journal | durable and gate rows forever, ephemeral 672 h |
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
-| `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
+| `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents org init` | one loop-state file per live role scope; stale files are inert without a live registry role and cleanup is best-effort (`fno agents org done` on abdication) |
 | `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
-| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local trigger cache with no reign meaning: `board_hash` + `board_rows` (the board-change trigger) and `answered_cursor` (the answered-escalation trigger); refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local trigger cache with no lead meaning: `board_hash` + `board_rows` (the board-change trigger) and `answered_cursor` (the answered-escalation trigger); refreshed only when a wake fires, so it never outlives the manifest beside it |
 | `<space>/kings/<scope>.wake.json.lock`, `.json.<pid>.tmp` | `pr_watch/_king_wake.py` over the manifest-lock helper | lock lives only for the sidecar's read-modify-write critical section; the pid-suffixed tmp is replaced on every locked write |
 | `<space>/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
 | `<space>/plans/` | `paths.plans_dir()` default (a configured vault template still wins) | permanent plan docs |
@@ -277,9 +277,9 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 | `<space>/worktrees/<name>/codemap.md` | `fno doctor codemap` | regenerated |
 | `<space>/worktrees/<name>/scratchpad/` | `/target` sessions, per the manifest's `scratchpad_path` | live session scratch; archived at session end |
 
-Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
+Target state is write-once after init. Lead state is atomically refreshed at coronation and both gate a stop hook.
 
-A king runs in the canonical checkout. A target manifest can sit there too. So the king gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.
+A lead runs in the canonical checkout. A target manifest can sit there too. So the lead gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say lead is how two sessions come to share one discriminator.
 
 ## The checkout-local exceptions
 
@@ -307,7 +307,7 @@ Event families use `event_id` rather than the source sequence. Recovery preserve
 
 For copied stores, use `--apply --copy-proof --packet-digest <digest>`. The physical root must be under an OS temporary directory. Each destination must have a different inode from its live counterpart. Pass copied consumer files with repeatable `--sidecar <path>` arguments. Sidecar bytes are captured before the audit, so a later genuine edit differs from its recovery baseline.
 
-Live apply requires `--apply --packet-digest <digest> --packet <file> --approval <decision-id>`. The packet names the absolute root, audit digest, zero historical effects, genuine controls handled once, consumer inventory, verified artifacts and consumer sidecars. An active operator law must state `approve state recovery <absolute-root> <audit-digest> <packet-file-sha256>`. Agent or crown coordination cannot grant apply. A worktree binary cannot apply to operator stores.
+Live apply requires `--apply --packet-digest <digest> --packet <file> --approval <decision-id>`. The packet names the absolute root, audit digest, zero historical effects, genuine controls handled once, consumer inventory, verified artifacts and consumer sidecars. An active operator law must state `approve state recovery <absolute-root> <audit-digest> <packet-file-sha256>`. Agent or role coordination cannot grant apply. A worktree binary cannot apply to operator stores.
 
 Before any family writes, recovery snapshots all five stores through SQLite's backup API and checks integrity. Snapshot receipts include hashes, inode identities, schema versions, row counts and sequence high-water marks. Required sidecar failures abort. Resuming the same packet verifies its original sources and snapshots, then imports only its remaining approved identities. Conflicting live identities refuse instead of overwriting concurrent writes.
 

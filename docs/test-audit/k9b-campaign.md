@@ -46,7 +46,7 @@ The keep rule stops each file at its honest floor.
 Scoped green lanes per file on the file's own module path (the
 `server::tests::server_restore_tests::` lesson: filename-based filters
 match zero tests when the mod is nested). Lane counts match the table:
-restore 11+1 ignored, board 16, court 11, questions 11, pty 18,
+restore 11+1 ignored, board 16, org 11, questions 11, pty 18,
 proto 29 with its nested file modules, digest 14, feed 8. Assert
 proofs per family: 564 of 564 asserts kept across the six later files,
 133 of 133 across restore, 89 of 89 across board. Duplicate body-local

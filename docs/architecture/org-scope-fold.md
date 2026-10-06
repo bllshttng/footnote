@@ -1,15 +1,15 @@
-# The court scope fold
+# The org scope fold
 
-`fno agents org -n` folds every crown's scope into its row: counts by
+`fno agents org -n` folds every role's scope into its row: counts by
 status for the whole scope, the active nodes with their worker, PR and
 session ids, and the omitted count stated rather than implied. Design
 notes gathered here.
 
 ## Layering: the section crosses layers as a file, not an import
 
-The board's court section (a follow-up node; the readout below ships
+The board's org section (a follow-up node; the readout below ships
 first) renders the same fold as HTML. Its data is the agents runtime's
-own (registry, claims, crown verdicts), while the board renderer is L1
+own (registry, claims, role verdicts), while the board renderer is L1
 core and must not import `fno/agents/*` (L5 runtime); the
 company-boundary gate prohibits new edges. The contract between the
 layers is therefore a file: the runtime writes a section fragment and
@@ -17,18 +17,18 @@ the renderer splices that fragment between markers on the local board.
 The section's CSS ships inside the fragment, so the board never needs to
 know the section exists.
 
-The fragment is one court read behind the board that splices it. A graph mutation re-renders the board in-process with the previous fragment, and the next fragment write closes the gap. Refresh cadence belongs to the caller (hooks, or the operator).
+The fragment is one org read behind the board that splices it. A graph mutation re-renders the board in-process with the previous fragment, and the next fragment write closes the gap. Refresh cadence belongs to the caller (hooks, or the operator).
 
 ## The fold lives in the native binary
 
-`fno-agents court-fold` reads the graph, the claims dir, and the registry. It compiles each crown's scope with the rules `king_board/scope.rs` applies. Workers are named through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the crowns `gather_court` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the crown `unresolved` with the reason rather than rendering an empty table.
+`fno-agents court-fold` reads the graph, the claims dir, and the registry. It compiles each role's scope with the rules `king_board/scope.rs` applies. Workers are named through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the roles `gather_court` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the role `unresolved` with the reason rather than rendering an empty table.
 
 The fold resolves its own claims directory. Every key it asks after is a `node:` key. Those route to the global claims root on both the Rust and the Python side. One resolver answers, and no caller passes a path. `--claims-dir` stays as an override for tests.
 
 Until 2026-09-12 the one Python caller passed no directory. The Rust side then returned an empty map on its `None` arm. So the worker column read null on every row of every surface, while the help string already documented the flag. That is the false-zero shape AGENTS.md names: the instrument ran, it reported clean, and it had read nothing.
 
 The scope compile is a FORCED-level arm of the board's compiler: the
-level comes from the crown row the court already adjudicated, never
+level comes from the role row the org already adjudicated, never
 re-resolved from config. A row reading level=2 over a project folds as
 epics and fails; it does not silently re-resolve into the project's
 nodes.
@@ -40,10 +40,10 @@ statuses a reader means by "what is being worked on": neither closed
 (done, superseded) nor unstarted (idea, deferred). It lives in
 `court_fold.rs`; the Python tree holds no second literal. Counts cover
 every status present in the whole scope and render in lifecycle order;
-`omitted` is always stated, so a crown whose active list is empty reads
+`omitted` is always stated, so a role whose active list is empty reads
 as "N nodes, none active", never as "nothing here".
 
-The fold pays one whole-graph read and one claim sweep per call. Over 2037 nodes it measured 8.5 s of CPU, and a busy fleet stretches that past 30 s of wall clock. The caller waits 120 s. A court that reads blind whenever the fleet is busy is blind at the one moment anybody asks it.
+The fold pays one whole-graph read and one claim sweep per call. Over 2037 nodes it measured 8.5 s of CPU, and a busy fleet stretches that past 30 s of wall clock. The caller waits 120 s. A org that reads blind whenever the fleet is busy is blind at the one moment anybody asks it.
 
 ## What a node row carries
 
@@ -57,11 +57,11 @@ When `claim_state` is `live` or `suspect`, `worker` names the holder. On any oth
 
 The board's HTML section renders `claim` and `age` as their own columns, because the section and the JSON come from one fold.
 
-`owned` says which live crown answers for a node. The candidates are the registry's live crowns, read the way the drain reads them (`territory::live_crowns`), never the crowns one caller happens to pass. The deepest crown level holds the node, then the lowest canonical scope on a tie. A crown with no live registry row owns nothing. That covers a manifest-only crown and a king whose row went terminal while its session still runs. Its fold reads `owned_total` and `owned_counts` null with `owned_reason`, never 0. A failed owner read makes every fold's `owned` fields null with `owned_reason`. Measured 2026-09-21: 11 of the L1 crown's 13 PR-bearing rows also sat in an L2 fold.
+`owned` says which live role answers for a node. The candidates are the registry's live roles, read the way the drain reads them (`territory::live_crowns`), never the roles one caller happens to pass. The deepest role level holds the node, then the lowest canonical scope on a tie. A role with no live registry row owns nothing. That covers a manifest-only role and a lead whose row went terminal while its session still runs. Its fold reads `owned_total` and `owned_counts` null with `owned_reason`, never 0. A failed owner read makes every fold's `owned` fields null with `owned_reason`. Measured 2026-09-21: 11 of the L1 role's 13 PR-bearing rows also sat in an L2 fold.
 
 ## Owned counts
 
-`owned_total` and `owned_counts` count every status of the nodes this fold owns. The rule is the row `owned` mark. The deepest live crown whose scope holds a node owns it. On a tie, the lowest canonical scope wins (`territory::node_owners`). For an L1 crown that is the work no L2 king holds. That is the work the L1 can crown or dispatch. Measured 2026-09-22 on the live machine. The fno L1 fold reads a total of 2559 with 216 active rows. 76 of the 216 carry `owned: true`. The four live L2 folds own 18, 52, 19 and 51. 76 + 18 + 52 + 19 + 51 = 216. The king's scope line leads with this number.
+`owned_total` and `owned_counts` count every status of the nodes this fold owns. The rule is the row `owned` mark. The deepest live role whose scope holds a node owns it. On a tie, the lowest canonical scope wins (`territory::node_owners`). For an L1 role that is the work no L2 lead holds. That is the work the L1 can role or dispatch. Measured 2026-09-22 on the live machine. The fno L1 fold reads a total of 2559 with 216 active rows. 76 of the 216 carry `owned: true`. The four live L2 folds own 18, 52, 19 and 51. 76 + 18 + 52 + 19 + 51 = 216. The lead's scope line leads with this number.
 
 ## The stuck verdict
 
@@ -74,13 +74,13 @@ A node counts as stuck under exactly these rules, with the threshold at 60 minut
 - An unproven claim (`corrupted` or `unreadable`). An unproven claim blocks a dispatch as hard as a held one does.
 - `in_review` with a `pr_number`, older than the threshold.
 
-A node is counted ONCE. An L1 crown folds the nodes its L2 epics also fold. An overlapping node therefore reaches the verdict once per crown covering it. Counting it twice reports more stuck work than exists. Several crowns failing the same way is one fault and prints one line.
+A node is counted ONCE. An L1 role folds the nodes its L2 epics also fold. An overlapping node therefore reaches the verdict once per role covering it. Counting it twice reports more stuck work than exists. Several roles failing the same way is one fault and prints one line.
 
-Each fold also carries its own verdict at `scope_nodes[<scope>].stuck`. It is computed by the same function over that fold alone, so a scope's answer lives beside the rows it judges. No second reader can disagree about what a row means. The per-scope verdict does not dedupe across crowns, because it judges only its own fold. The top-level `stuck` still counts a node once across all of them. The two answer different questions. A fold whose `status` is not `ok` yields a per-scope verdict with a populated `blind` list and an empty `unclaimed`. For a reader of that scope alone that is a fail-closed marker, never a clean board.
+Each fold also carries its own verdict at `scope_nodes[<scope>].stuck`. It is computed by the same function over that fold alone, so a scope's answer lives beside the rows it judges. No second reader can disagree about what a row means. The per-scope verdict does not dedupe across roles, because it judges only its own fold. The top-level `stuck` still counts a node once across all of them. The two answer different questions. A fold whose `status` is not `ok` yields a per-scope verdict with a populated `blind` list and an empty `unclaimed`. For a reader of that scope alone that is a fail-closed marker, never a clean board.
 
-A clause names five ids and then counts the rest, because a live court put 40 ids in one clause. The full list stays in the JSON.
+A clause names five ids and then counts the rest, because a live org put 40 ids in one clause. The full list stays in the JSON.
 
-The caller adds only what the fold cannot see. `fno agents court` appends the spawn gate's refusal. An unknown gate is itself a blind spot, so it lands in `blind` rather than being dropped. When nothing is stuck and the gate accepts, the line reads `stuck: nothing`. When the fold, the sweep or the gate cannot answer, the line says which one cannot answer. A clean line and a blind line must never look the same.
+The caller adds only what the fold cannot see. `fno agents org` appends the spawn gate's refusal. An unknown gate is itself a blind spot, so it lands in `blind` rather than being dropped. When nothing is stuck and the gate accepts, the line reads `stuck: nothing`. When the fold, the sweep or the gate cannot answer, the line says which one cannot answer. A clean line and a blind line must never look the same.
 
 Live PR state is deliberately out of scope. `merge_status` on a graph entry is a closure stamp that only ever reads `merged` or null. It cannot say CONFLICTING or red. The honest verdict needs a network read, and `fno do pr status <n>` already performs it. The row carries `pr_number` and an age, so an `in_review` node past the threshold surfaces without one.
 

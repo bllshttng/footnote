@@ -1,152 +1,152 @@
-<!-- style-exception: verbatim move of the one-wave pass from the retired king skill -->
-# The one-wave pass (reign --once)
+<!-- style-exception: verbatim move of the one-wave pass from the retired lead skill -->
+# The one-wave pass (lead --once)
 
-You have been crowned over one scope, and the crown expires when you exit. That is the whole shape: real authority, no tenure. Tenure instead - a king that stays active over a territory for days, checking in on a schedule - is `/fno:lead <scope>` without `--once`. This page is the one-wave pass and court.
+You have been titled over one scope, and the role expires when you exit. That is the whole shape: real authority, no tenure. Tenure instead - a lead that stays active over a territory for days, checking in on a schedule - is `/fno:lead <scope>` without `--once`. This page is the one-wave pass and org.
 
-One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the reign.
+One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the lead.
 
-Pending work once let the session exit immediately. Setting `config.king.enabled` now makes `fno agents crown` or `fno agents spawn --crown` arm the scope manifest.
+Pending work once let the session exit immediately. Setting `config.king.enabled` now makes `fno agents org promote` or `fno agents spawn --promote` arm the scope manifest.
 
-The `fno-agents loop-check --driver king` loop holds the session while `fno inbox board` lists work to shrink. A bare call uses the crown manifest. `--state <path>` reads outside it.
+The `fno-agents loop-check --driver king` loop holds the session while `fno inbox board` lists work to shrink. A bare call uses the role manifest. `--state <path>` reads outside it.
 
-Exit requires a clean board. This limits abdication but does not supervise the tail. The change follows an incident: a king filed eight nodes, dispatched none, and sat idle for an hour with a full board.
+Exit requires a clean board. This limits abdication but does not supervise the tail. The change follows an incident: a lead filed eight nodes, dispatched none, and sat idle for an hour with a full board.
 
-A clean board exits the session. When the board refills, a human crowns the next king. If a full board stops shrinking, the loop records one user question with the stalled rows before exit. It never exits silently with a stuck board.
+A clean board exits the session. When the board refills, a human promotes the next lead. If a full board stops shrinking, the loop records one user question with the stalled rows before exit. It never exits silently with a stuck board.
 
 The core loop is **keep-map-true + promote-next-wave**.
 It is never dispatch-ordering: you do not hand work to workers, you make the graph say what should run next and let the existing hands do their job.
-If you find yourself wanting to watch a worker, your reign is already over.
+If you find yourself wanting to watch a worker, your lead is already over.
 
 Rule like it matters, because it does; the graph you leave behind is the only thing that outlives you.
 
-## Who runs this: the crown is bestowed
+## Who runs this: the role is bestowed
 
 Orchestrator authority is not a role you infer from what you were asked to do.
 It is granted, it is explicit, and you know you hold it.
-`crown <epic>` is the dispatch act; a crowned session is named `king-<epic>`.
+The dispatch act is a spawn with `--promote <scope>` (or an in-place `fno agents org promote`); the registry row records the title.
 
-**A crown is three things: who bestowed it, what level you hold, and what scope you rule.**
+**A role is three things: who bestowed it, what level you hold, and what scope you rule.**
 
 - **Level 0** is bestowed by a human. Its scope is whatever the human named.
-- **Level N+1** is bestowed by a level-N king, and *only* by one.
-- **No crown means you are a worker.** That is the default and it fails closed: a session that cannot name who crowned it does not hold the authority.
+- **Level N+1** is bestowed by a level-N lead, and *only* by one.
+- **No role means you are a worker.** That is the default and it fails closed: a session that cannot name who titled it does not hold the authority.
 
-Two rules keep the court from growing:
+Two rules keep the org from growing:
 
-1. **A crown's scope must be a strict subset of the grantor's scope.** You cannot bestow authority you do not hold, and you cannot bestow all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
+1. **A role's scope must be a strict subset of the grantor's scope.** You cannot bestow authority you do not hold, and you cannot bestow all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
 2. **The ladder is three rungs, and the rung is a fact about the territory, not a number you pick:**
-   - **Level 0** - several projects; a portfolio. Its court is project kings.
-   - **Level 1** - one project. Its court is epic kings.
-   - **Level 2** - one epic, or a set of epics (one king over two epics at once is one crown, not two). Its court is the workers on those epics' nodes.
+   - **Level 0** - several projects; a portfolio. Its org is project leads.
+   - **Level 1** - one project. Its org is epic leads.
+   - **Level 2** - one epic, or a set of epics (one lead over two epics at once is one role, not two). Its org is the workers on those epics' nodes.
 
-   **There is no rung for an implementer.** A node that is not an epic is work, not a territory, and nobody reigns for a day over a single task, so a crown aimed at one is refused rather than granted at some bottom rung. Each king courts its *direct reports only*: a portfolio king reconciles project kings and never reaches past one to drive an epic. Because projects contain epics contain nodes, you run out of scope before you run out of rungs, so the subset rule is the whole bound. Most reigns stay single-level - one epic king over one epic is the common case; anoint a portfolio king only when several projects genuinely run at once.
+   **There is no rung for an implementer.** A node that is not an epic is work, not a territory, and nobody leads for a day over a single task, so a role aimed at one is refused rather than granted at some bottom rung. Each lead's org is its *direct reports only*: a portfolio lead reconciles project leads and never reaches past one to drive an epic. Because projects contain epics contain nodes, you run out of scope before you run out of rungs, so the subset rule is the whole bound. Most roles stay single-level - one epic lead over one epic is the common case; anoint a portfolio lead only when several projects genuinely run at once.
 
 State your level, altitude, and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
-**The crown is stamped by a grantor, never self-declared.**
-Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio or a set of epics.
+**The role is stamped by a grantor, never self-declared.**
+Bestow it at spawn: `fno agents spawn ... --promote <scope>` (short form `-k`), repeating the flag for a portfolio or a set of epics.
 
-When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents org promote <printed-handle> --scope <scope>` from another attended terminal. When its own crown strictly contains the scope, a live king can run this path too, to re-scope a subordinate. The registry records the actual grantor, either the attended `human` or the granting king. It preserves the target's transcript and placement and never performs succession.
+When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents org promote <printed-handle> --scope <scope>` from another attended terminal. When its own role strictly contains the scope, a live lead can run this path too, to re-scope a subordinate. The registry records the actual grantor, either the attended `human` or the granting lead. It preserves the target's transcript and placement and never performs succession.
 You never pass a level.
-Naming one epic makes an epic king, several epics one epic king over the set, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
-The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
+Naming one epic makes an epic lead, several epics one epic lead over the set, one project a project lead, and several projects a portfolio lead; naming anything else is refused, because a scope that is not a territory has no rung to derive.
+The row records the derived `level`, the `scope`, and the grantor (a live superset-lead, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
 That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
 
-A crown is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark crowned rows, so a minion resolves who to escalate to. `fno agents court` names every live crown, whether the registry and the graph agree, and any scope two live rows hold at once. When the session holds a crown, `fno whoami` prints it as a `crown:` line, so you recover your own authority after a compaction.
+A role is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark titled rows, so a minion resolves who to escalate to. `fno agents org` names every live role, whether the registry and the graph agree, and any scope two live rows hold at once. When the session holds a role, `fno whoami` prints it as a `crown:` line, so you recover your own authority after a compaction.
 
-Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
+Role liveness is just row liveness - the role dies with the session, no separate lifecycle.
 
 **Abdicate.**
-This is orthogonal to the crown and equally load-bearing.
-A king who crowns a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
+This is orthogonal to the role and equally load-bearing.
+A lead who promotes a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
 Fan out, record what you fanned out, exit.
-If a crowned session dies, the next one sees it in the graph and re-crowns; that is the recovery path, not a regency.
+If a titled session dies, the next one sees it in the graph and re-roles; that is the recovery path, not a regency.
 
-It restores planning continuity, not court coverage. Without a next king, a worker can wait indefinitely for an in-scope ruling.
-So do not let a spawning reign depend on a successor materializing - hand off before you exit ([What a pass is not](#what-a-pass-is-not)).
+It restores planning continuity, not org coverage. Without a next lead, a worker can wait indefinitely for an in-scope ruling.
+So do not let a spawning lead depend on a successor materializing - hand off before you exit ([What a pass is not](#what-a-pass-is-not)).
 
-**Crown kings on a frontier model at high effort.**
+**Role leads on a frontier model at high effort.**
 A pass makes judgment calls (which wave, what to park, what to supersede) and those are the calls not to cheap out on.
-Grooming stays on a small model because it is daily and levers-only; a reign is rare and bounded, so the cost argument does not apply to it.
+Grooming stays on a small model because it is daily and levers-only; a lead is rare and bounded, so the cost argument does not apply to it.
 
 ```bash
-fno agents spawn --name king-<epic> "<brief>" --effort high --model <your frontier model> \
-  --crown <epic> --substrate pane --workspace <epic>
+fno agents spawn --name lead-<epic> "<brief>" --effort high --model <your frontier model> \
+  --promote <epic> --substrate pane --workspace <epic>
 ```
 
-`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default. When the flag is absent, `config.agents.defaults.substrate` takes precedence and is injected. If the user set `thread`, this command becomes a placement flag on a non-pane substrate and exits 2. Crowning then fails because you cannot see or change that config here.
+`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default. When the flag is absent, `config.agents.defaults.substrate` takes precedence and is injected. If the user set `thread`, this command becomes a placement flag on a non-pane substrate and exits 2. Promotion then fails because you cannot see or change that config here.
 
-What `pane` buys here is the COURT, not the crown.
+What `pane` buys here is the ORG, not the role.
 
-The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The retired `bg` spelling refuses with a redirect to `thread`.
-What a thread king loses is placement.
+The role itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--promote` because role support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can lead. The retired `bg` spelling refuses with a redirect to `thread`.
+What a thread lead loses is placement.
 The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a thread session does not have.
-So a thread king seats teammates in fresh tabs instead of beside itself, and the court stops cohering around one screen.
-Crown a thread king for a pass, which abdicates before layout matters; crown a pane king for a reign that runs a court.
+So a thread lead seats teammates in fresh tabs instead of beside itself, and the org stops cohering around one screen.
+Promote a thread lead for a pass, which abdicates before layout matters; promote a pane lead for a lead that runs an org.
 
-**Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
+**Place the lead in the mission workspace too, and for an org that is not optional.** Org teammates anchor to the lead's own pane, so wherever the lead sits IS the org. Pass `--workspace <epic>` at coronation and again when you anoint a sub-lead, and the naming stays legible; skip it and the org still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
 **Anoint with the skill invocation as the prompt, never prose wrapping it.**
 
 A wrapped prompt ("run $fno:target ... and here is why") does not reliably load this file. One night's codex spawns, audited by `scripts/diagnostics/codex-skill-load-audit.py`, tell the shape. The harness injected the skill in 4 of 15 wrapped prompts. The worker's own first read carried 9 more. Three sessions never loaded it at all.
 
-The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. Single-quote the codex payload: in double quotes the shell eats `$fno` and the verb with it. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a crown is the defect this rule exists to prevent.
+The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. Single-quote the codex payload: in double quotes the shell eats `$fno` and the verb with it. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a role is the defect this rule exists to prevent.
 
-**A crown said in prose is not a crown.** Telling a session it is king does not stamp anything. Authority lives in three registry fields (`crown_level`, `crown_scope`, `crown_grantor`) that only `fno agents crown` and spawn-time `--crown` write, and `fno agents org init` deliberately never writes them: a session enabled to stamp its own crown could crown itself. So the handshake is two steps and both are required. The target runs `fno agents register` and prints a handle. An attended shell, or a king whose own crown strictly contains the scope, runs `fno agents org promote <handle> --scope <scope>`.
+**A role said in prose is not a role.** Telling a session it is lead does not stamp anything. Authority lives in three registry fields (`crown_level`, `crown_scope`, `crown_grantor`) that only `fno agents org promote` and spawn-time `--promote` write, and `fno agents org init` deliberately never writes them: a session enabled to stamp its own role could role itself. So the handshake is two steps and both are required. The target runs `fno agents register` and prints a handle. An attended shell, or a lead whose own role strictly contains the scope, runs `fno agents org promote <handle> --scope <scope>`.
 
-**What an unstamped row costs, so nobody mistakes the silence for success.** Three readers key on those fields and every one of them fails CLOSED and QUIETLY. `fno agents org done` refuses, so the king cannot abdicate and its manifest is orphaned on disk. `fno agents king manifest-path` exits non-zero and prints no path, so the stop hook leaves `KING_STATE_FILE` unset. `hooks/king-postcompact-reinject.sh` exits 0 before injecting, so the post-compact brief - the one that tells you to reuse a live session with `fno agents retask` before spawning a cold one - never arrives. A king with an armed manifest and an unstamped row looks exactly like a working king until it tries to put the crown down. `king init` now warns when it sees that state, and warns the same way when the row's crown names OTHER territory, because these three readers key on `crown_scope` and a crown over somewhere else is as absent to them as no crown at all. Heed the warning rather than proceeding.
+**What an unstamped row costs, so nobody mistakes the silence for success.** Three readers key on those fields and every one of them fails CLOSED and QUIETLY. `fno agents org done` refuses, so the lead cannot abdicate and its manifest is orphaned on disk. `fno agents org manifest-path` exits non-zero and prints no path, so the stop hook leaves `KING_STATE_FILE` unset. `hooks/king-postcompact-reinject.sh` exits 0 before injecting, so the post-compact brief - the one that tells you to reuse a live session with `fno agents retask` before spawning a cold one - never arrives. A lead with an armed manifest and an unstamped row looks exactly like a working lead until it tries to put the role down. `king init` now warns when it sees that state, and warns the same way when the row's role names OTHER territory, because these three readers key on `crown_scope` and a role over somewhere else is as absent to them as no role at all. Heed the warning rather than proceeding.
 
 **That same silence has more than one cause, and the unstamped row is not the only one.** `manifest-path` also exits 1 with empty streams when the `--state-root` it was handed holds no `kings/<scope>.md`, which is what a repo-local `.fno` does - manifests live under the space dir, and both hooks used to pass the wrong root. Tell the causes apart: silent with `--state-root` and correct without it is the flag, silent both ways is the row. Since 2026-09-12 the verb prints the reason on stderr, so one run answers it.
 
-**If you crown a peer, run the verb or say you cannot.** Mailing "you are crowned L2 over x-aaaa" and stopping there leaves that session believing it holds authority the machine cannot see. Either run `fno agents crown` yourself, or tell them plainly that the grant needs an attended shell, and name the command they should ask for.
+**If you promote a peer, run the verb or say you cannot.** Mailing "you are titled L2 over x-aaaa" and stopping there leaves that session believing it holds authority the machine cannot see. Either run `fno agents org promote` yourself, or tell them plainly that the grant needs an attended shell, and name the command they should ask for.
 
-**In-place coronation keeps the session where it is.** `fno agents org promote <handle> --scope <scope>` changes only the crown fields on an existing live registered row. Its transcript, process, and pane stay in place. Run it from an attended terminal, or from a live king whose own crown strictly contains the scope. A session cannot crown itself, with one exception. A king over a set of epics can add an epic its own session created. It names every epic it holds plus the new one. Same-scope succession is refused here. When creating a king, placing a court, or handing your own scope to an heir, use spawn-time `--crown`.
+**In-place coronation keeps the session where it is.** `fno agents org promote <handle> --scope <scope>` changes only the role fields on an existing live registered row. Its transcript, process, and pane stay in place. Run it from an attended terminal, or from a live lead whose own role strictly contains the scope. A session cannot role itself, with one exception. A lead over a set of epics can add an epic its own session created. It names every epic it holds plus the new one. Same-scope succession is refused here. When creating a lead, placing an org, or handing your own scope to an heir, use spawn-time `--promote`.
 
-**Succession happens at spawn too, but it is explicit.** An abdicating king that spawns a successor over its OWN scope must pass `--succeed`; without it, the spawn is refused and the caller keeps its crown. With it, the vacate and stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. It has to happen while you still reign - a session that has already exited spawns nothing. A transferred heir can return the crown with `fno agents org promote --reclaim`, which uses the recorded grantor and creates no session. An attended shell can also move a crown between two LIVE sessions without spawning anyone. Re-scope the incumbent first with `fno agents org promote <incumbent> --scope <other territory>`, which frees the old scope in the same write. Then crown the newcomer over it. The order is the non-obvious half. Crowning the newcomer first is refused with the incumbent named and the same three remedies spelled out.
+**Succession happens at spawn too, but it is explicit.** An abdicating lead that spawns a successor over its OWN scope must pass `--hand-off`; without it, the spawn is refused and the caller keeps its role. With it, the vacate and stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. It has to happen while you still lead - a session that has already exited spawns nothing. A transferred heir can return the role with `fno agents org promote --reclaim`, which uses the recorded grantor and creates no session. An attended shell can also move a role between two LIVE sessions without spawning anyone. Re-scope the incumbent first with `fno agents org promote <incumbent> --scope <other territory>`, which frees the old scope in the same write. Then promote the newcomer over it. The order is the non-obvious half. Promoting the newcomer first is refused with the incumbent named and the same three remedies spelled out.
 
-Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at coronation before teammates exist, never mid-wave with a court arranged around you.
+Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at coronation before teammates exist, never mid-wave with an org arranged around you.
 
-What a reign actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
+What a lead actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
 How you spell that depends on your provider, so take the requirement and not this line's defaults.
 
 - **`--effort high`** is the portable half: it is validated against whichever provider is selected, and unset just takes that provider's default.
 - **`--model`** takes a provider-specific id, so name your own provider's current frontier model. Do not expect any list of those to stay true; the frontier turns over every few months and a model named in a doc is a doc with an expiry date.
 
 There is a rot-proof abstraction for this: set the node's work-difficulty band, `fno backlog update <id> --difficulty high`, and the dispatch grid resolves harness and model from live provider capacity rather than a hardcoded name.
-It is not a spawn-time flag; set it on the node before crowning, and the grid fires at spawn when no model or provider is pinned.
+It is not a spawn-time flag; set it on the node before titling, and the grid fires at spawn when no model or provider is pinned.
 
 The band is an intrinsic property of the work (expected time, edge cases, unknowns), not a quality-tier hint about models.
-- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `thread` is the persistent continuation lane; the capability rows and refusals are maintained in `docs/architecture/thread-lanes.md`. The retired `bg` spelling refuses with a redirect to `thread`. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
+- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `thread` is the persistent continuation lane; the capability rows and refusals are maintained in `docs/architecture/thread-lanes.md`. The retired `bg` spelling refuses with a redirect to `thread`. `headless` is a one-shot and does **not** fit a multi-step lead, whatever the provider.
 
-**Authority for the worker you crown.**
+**Authority for the worker you role.**
 `--yolo` means "full auto, no gates", and the *skill* surface translates it per provider: through `/fno:agent spawn` it maps to `--permission-mode bypassPermissions` on claude, while codex gets its literal bypass flag.
 An explicit `--permission-mode` you pass always wins over the mapping.
 The trap is that this translation lives in the skill's normalize step, so `fno agents spawn --yolo` called directly on claude is a genuine no-op with only a stderr note.
 Prefer the skill surface, or pass your provider's own posture flag when you go straight to the CLI.
 
-## Two reign shapes: pass and court
+## Two lead shapes: pass and org
 
-The crown model above is unchanged. What changes is *tenure*: the crown has two shapes, and you resolve which one you hold before you do anything else.
+The role model above is unchanged. What changes is *tenure*: the role has two shapes, and you resolve which one you hold before you do anything else.
 
-- **Pass** (the default): read the track, encode the wave into the graph, kick off, abdicate. Nothing supervises afterward; the daemon's reflexes carry the tail. This is the whole of [Run it in this order](#run-it-in-this-order), and a court reign runs that same spine to kick off before it settles in to watch.
-- **Court**: you reign for the duration of one wave as a working orchestrator. You spawn your teammates into the panes around yourself, monitor them, answer their questions, reconcile each finished unit, route the next phase, and abdicate when the wave completes - running the same encode-before-exit ritual on the way out. The duties are in [Court mode: reign over the wave](#court-mode-reign-over-the-wave).
+- **Pass** (the default): read the track, encode the wave into the graph, kick off, abdicate. Nothing supervises afterward; the daemon's reflexes carry the tail. This is the whole of [Run it in this order](#run-it-in-this-order), and an org lead runs that same spine to kick off before it settles in to watch.
+- **Org**: you lead for the duration of one wave as a working orchestrator. You spawn your teammates into the panes around yourself, monitor them, answer their questions, reconcile each finished unit, route the next phase, and abdicate when the wave completes - running the same encode-before-exit ritual on the way out. The duties are in [Org mode: lead over the wave](#org mode-lead-over-the-wave).
 
 **Resolve the shape, first match wins:**
 
-1. The crowning brief names monitoring, answering questions, or running a team -> **court**.
-2. The crown is bestowed autonomously (daemon, cron, another king) with no monitoring language -> **pass**.
-3. Ambiguous human crowning -> ask in your first reply; if unattended, default to **pass** - the shape that completes with nobody awake to carry it.
-4. Workers who need live decisions or monitoring -> **not pass**. A pure pass abdicates at kickoff. Workers review their diffs inline, but blocked workers still need a live king for in-scope rulings. Pick court, or hand off before exit by spawning your heir.
+1. The titling brief names monitoring, answering questions, or running a team -> **org**.
+2. The role is bestowed autonomously (daemon, cron, another lead) with no monitoring language -> **pass**.
+3. Ambiguous human titling -> ask in your first reply; if unattended, default to **pass** - the shape that completes with nobody awake to carry it.
+4. Workers who need live decisions or monitoring -> **not pass**. A pure pass abdicates at kickoff. Workers review their diffs inline, but blocked workers still need a live lead for in-scope rulings. Pick org, or hand off before exit by spawning your heir.
 
-**What court actually costs.**
+**What org actually costs.**
 Not idle tokens.
-A worker waiting on a wake runs no inference and neither does a king, so "court burns frontier tokens idling" is false and is not a reason to pick pass.
-The cost is **per wake**: every time a court king is woken it re-reads context to act, and that re-read churns the prompt cache.
-Court is therefore dearer than pass by its number of wakes, not by its tenure, and the gap is narrower than the tenure makes it look.
+A worker waiting on a wake runs no inference and neither does a lead, so "org burns frontier tokens idling" is false and is not a reason to pick pass.
+The cost is **per wake**: every time an org lead is woken it re-reads context to act, and that re-read churns the prompt cache.
+Org is therefore dearer than pass by its number of wakes, not by its tenure, and the gap is narrower than the tenure makes it look.
 What the wakes buy is the class of wedge a pass structurally cannot catch, because a pass is gone before it can act: a duplicate thread on a node someone already claimed, a report that landed `queued (durable)` and was never read, a green PR nobody merged.
-Pick pass when nothing needs to stay awake; pick court when something does.
+Pick pass when nothing needs to stay awake; pick org when something does.
 
-Court composes down the ladder: a portfolio king runs a court over its project kings, a project king over its epic kings, an epic king over the workers on its nodes, each over its direct reports only. Most reigns are a single epic king over one epic, which is court mode over a handful of worker teammates.
+Org composes down the ladder: a portfolio lead runs an org over its project leads, a project lead over its epic leads, an epic lead over the workers on its nodes, each over its direct reports only. Most tenures are a single epic lead over one epic, which is org mode over a handful of worker teammates.
 
 ## Your hands
 
@@ -158,9 +158,9 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 
 **Rule.** Every ruling channel is in [Recording a ruling](../SKILL.md#recording-a-ruling).
 
-**Priority.** High-priority work comes from the user or a KING SUPERIOR. It does not come from whoever mails most. If you disagree, push back and advocate for your team and epic.
+**Priority.** High-priority work comes from the user or a LEAD SUPERIOR. It does not come from whoever mails most. If you disagree, push back and advocate for your team and epic.
 
-The failure mode is structural. Mail has a discrete event id and queue, so it gets recorded. User conversation has no boundary, so it does not. A king's recorded direction controls where work is pushed.
+The failure mode is structural. Mail has a discrete event id and queue, so it gets recorded. User conversation has no boundary, so it does not. A lead's recorded direction controls where work is pushed.
 
 Make capture part of each tick. Run `fno inbox operator status`. Disposition every queued user turn before the tick ends. File a user ask with `fno backlog idea --source-kind operator_request` or `fno backlog capture add`. New work follows the same rule. Record a superuser ruling with `fno inbox law set`. Then ack with the outcome: `fno inbox user ack <turn-id> --outcome law:<id>|capture:<fu-id>|node:<id>|nothing`.
 
@@ -179,8 +179,8 @@ Both are refused outside `--substrate pane`: `thread` and `headless` have no mux
 The consequence splits cleanly by substrate.
 A pass dispatching on `thread` or `headless` carries its mission in the graph and the spawn provenance, and names no placement flag at all.
 Which placement flag depends on whether you are already in the target workspace, and the two cases split by shape.
-A **court** teammate anchors to your own pane with `--at current --split <dir>`, never `--workspace --split` - see [the court spawn contract](#spawn-each-teammate-into-your-mission-workspace) for why aiming at a workspace races on focus.
-The **ad-hoc pane a pass launches mid-kickoff** has no king pane to anchor to, so it takes explicit `--workspace <mission-workspace> --split <dir>` and accepts that race, which is harmless for a one-off it never has to sit beside.
+A **org** teammate anchors to your own pane with `--at current --split <dir>`, never `--workspace --split` - see [the org spawn contract](#spawn-each-teammate-into-your-mission-workspace) for why aiming at a workspace races on focus.
+The **ad-hoc pane a pass launches mid-kickoff** has no lead pane to anchor to, so it takes explicit `--workspace <mission-workspace> --split <dir>` and accepts that race, which is harmless for a one-off it never has to sit beside.
 You never create the workspace first: the first placement into a name creates it, and there is no create verb to run.
 A blank name is a CLI error, not an implicit default, and an ambiguous one is refused rather than silently picked.
 
@@ -217,14 +217,14 @@ No observation probe is proof a peer is dead: `peek`, discovery, a stale status 
 
 `fno agents attach <name>` joins a running session interactively, claude only. `resume` restarts a codex, gemini, or opencode row through the provider's own resume CLI. For a claude row that is still supervised (blocked at a prompt or idle), resume wakes it headlessly in place with no attach or exec. It then checks the state moved. A claude row whose process has exited relaunches instead via `claude --resume`, which execs. `stop` ends it.
 `stop` and `peek` work everywhere, so on a non-claude provider observe with `peek` and end with `stop`.
-Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
+Prefer `peek` first: attaching is a drive action, and a lead that starts driving has stopped ruling.
 
 **Orient yourself after a compaction.**
 
-`fno whoami` (project, fleet, walker, session, your mail handle) · `fno whoami status` (gate satisfaction + events tail). `fno agents court` answers whether the coronations worked - every live crown, and whether the registry and the graph agree.
+`fno whoami` (project, fleet, walker, session, your mail handle) · `fno whoami status` (gate satisfaction + events tail). `fno agents org` answers whether the coronations worked - every live role, and whether the registry and the graph agree.
 Run these instead of grepping state files.
-`fno whoami` also prints your own context line - `context: NN% used (X of Y tokens)` - and your crown, so after a compaction you read both your window pressure and your authority from the one verb you are already told to run.
-Check it at boundaries (after a compaction, after reconciling a report, before arming a wait), never on a timer; the king Stop hook nudges you past your trigger regardless, so a hand-rolled poll only burns cache.
+`fno whoami` also prints your own context line - `context: NN% used (X of Y tokens)` - and your role, so after a compaction you read both your window pressure and your authority from the one verb you are already told to run.
+Check it at boundaries (after a compaction, after reconciling a report, before arming a wait), never on a timer; the lead Stop hook nudges you past your trigger regardless, so a hand-rolled poll only burns cache.
 
 ## Run it in this order
 
@@ -273,7 +273,7 @@ Confirm the watcher is running before you conclude the track is simply idle.
 Add or refresh an `## Orchestration status` section in the epic's plan doc.
 Keep it short: the wave strata, one line of why, and the receipts from step 3.
 This is the half a human reads; the graph carries the machine-readable half.
-A pass that only mutates the graph leaves no trace of its reasoning, and the next king re-derives it from nothing.
+A pass that only mutates the graph leaves no trace of its reasoning, and the next lead re-derives it from nothing.
 
 ### 3. Encode
 
@@ -302,7 +302,7 @@ fno backlog update <id> --plan-path <doc>
 ```
 
 Status is derived on read, never stored.
-Lifecycle facts win over plan-existence, so `blocked`, `deferred`, and `claimed` all outrank whatever the plan says. A node with no plan is not target-dispatchable, but an idea node can enter the king board's `unplanned` queue for blueprinting.
+Lifecycle facts win over plan-existence, so `blocked`, `deferred`, and `claimed` all outrank whatever the plan says. A node with no plan is not target-dispatchable, but an idea node can enter the lead board's `unplanned` queue for blueprinting.
 The consequence: linking a plan to a node that is otherwise unencumbered is what makes it selectable for target execution.
 That is the right move for the head of a wave and the wrong move for a design doc you are filing for later.
 Check what a link will actually do before you make it (`fno backlog get <id>` for the current state), and park anything that should not arm yet on `blocked` or `deferred`, or leave it unlinked.
@@ -321,7 +321,7 @@ When an S node is next in a chain you just serialized but unselectable for want 
 The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
 
-The machine enforces the implementation half in a court session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the user lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
+The machine enforces the implementation half in an org session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the user lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
 
 Use `fno do plan path` for the canonical filename.
 
@@ -329,7 +329,7 @@ Use `fno do plan path` for the canonical filename.
 
 One session takes up to **three** blueprints in sequence. A fourth blueprint starts a second dispatch. The number is the rule: a rule with no number is advice nobody applies.
 
-A blueprint can also run as a subagent of the court session: `/fno:blueprint subagent <id>` (Substrate in `skills/blueprint/SKILL.md`). It cannot orphan, because its completion IS the tool result, and it spends no spawn share, because the gate counts spawned workers; it still takes the node claim, writes the blueprint row and runs every blueprint gate. Never hand-type a planning prompt into the Agent tool. A node-specific constraint goes on the node with `fno backlog update <id> --dispatch-brief "..."`, where the planner reads it.
+A blueprint can also run as a subagent of the org session: `/fno:blueprint subagent <id>` (Substrate in `skills/blueprint/SKILL.md`). It cannot orphan, because its completion IS the tool result, and it spends no spawn share, because the gate counts spawned workers; it still takes the node claim, writes the blueprint row and runs every blueprint gate. Never hand-type a planning prompt into the Agent tool. A node-specific constraint goes on the node with `fno backlog update <id> --dispatch-brief "..."`, where the planner reads it.
 
 Group the wave by shape before you count dispatches. When one plan can name the same files or fix the same defect from two sides, the two nodes are the same shape. Title words do not decide this. The file and the defect decide it, the same identity test the Consolidation Gate uses (`skills/blueprint/SKILL.md` step 2d).
 
@@ -339,7 +339,7 @@ Fifteen one-node spawns re-read the repo fifteen times. Each spawn is a process.
 
 Note what these two verbs do and do not do.
 They change *how* a dispatcher launches a node it has already selected; they do not make it selectable.
-The king board's `unplanned` queue selects an otherwise dispatchable plan-less idea for `/fno:blueprint`.
+The lead board's `unplanned` queue selects an otherwise dispatchable plan-less idea for `/fno:blueprint`.
 Setting `--dispatch-verb` still governs how a dispatcher launches a node it has already selected; it does not select the node or replace the board's blueprint verb.
 Autonomous selection is not the only route: naming a node is itself the consent, so a plan-less node gets its think pass from an attended `/think <id>` or an explicit `fno agents spawn --name <n> "/think <id>"`.
 Set the dispatch verb anyway when you file the node, so the routing is already correct on the day it does become selectable.
@@ -361,7 +361,7 @@ This is what makes the mission render as its own group in the mux sideline.
 On a default setup this command therefore does nothing at all and says so quietly.
 Confirm with `fno config get auto_continue.enabled` and arm it if the track is meant to walk itself.
 
-A crown over an epic arms the mission by itself: the grant sets `mission_active` and emits `mission_activated` with `source: crown`.
+A role over an epic arms the mission by itself: the grant sets `mission_active` and emits `mission_activated` with `source: crown`.
 So `fno backlog advance --epic` is the dispatch lever, not the activation step - the epic it names is already a mission.
 
 The verb is idempotent and respects `config.parallel.max_lanes` per project, but it dispatches real workers.
@@ -414,19 +414,19 @@ A refusal is an answer, so record it and move on. Do not re-run join against the
 
 Before you abdicate, record every ruling that changes what a worker does, through the channels in [Recording a ruling](../SKILL.md#recording-a-ruling). Your context is the only place these rulings live, and it is about to end.
 
-Expire your crown as the last act of the reign: `fno agents org done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. It also writes one `agent_crown_vacated` event to `~/.fno/events.jsonl`; a reader that finds a crown missing should look there before reading the absence as a loss. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
+Expire your role as the last act of the lead: `fno agents org done`. It vacates your row and clears the scope manifest, so the next lead's role arms without `--force`. It also writes one `agent_crown_vacated` event to `~/.fno/events.jsonl`; a reader that finds a role missing should look there before reading the absence as a loss. A lead that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
 
-No king outlives its day.
+No lead outlives its day.
 Do not stay to watch, and do not re-plan mid-batch.
 Re-planning is a *new* pass with fresh context reading the map, which is the point: a monarch that persists accrues drift, and drift is what the graph exists to prevent.
 
-## Court mode: reign over the wave
+## Org mode: lead over the wave
 
-Everything above ships a pass. Court adds the duties below and runs them until the wave completes. The mechanics of every verb here - placement, injection, lifecycle, reads - are in [court-operations.md](court-operations.md); this section is the *contract*, that reference is the *operations manual*.
+Everything above ships a pass. Org adds the duties below and runs them until the wave completes. The mechanics of every verb here - placement, injection, lifecycle, reads - are in [org-operations.md](org-operations.md); this section is the *contract*, that reference is the *operations manual*.
 
 Before you reach for any CLI verb, load [cli-commands.md](cli-commands.md).
 
-The whole of court is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn --substrate pane` accepts `--workspace` and `--split left|right|up|down` end to end, with a min-size fallback to a tab in the same workspace. What follows is the contract that makes you use it.
+The whole of org is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn --substrate pane` accepts `--workspace` and `--split left|right|up|down` end to end, with a min-size fallback to a tab in the same workspace. What follows is the contract that makes you use it.
 
 ### Spawn each teammate into your mission workspace
 
@@ -438,37 +438,37 @@ CLAUSE
 fno agents spawn --name <node-name> "$payload" --substrate pane --at current --split <dir> --effort <e>
 ```
 
-- **Anchor to your own pane, do not aim at the workspace.** `--workspace <name> --split <dir>` splits that workspace's *focused* pane, and focus is shared mutable state: another client can move it between the moment you build the command and the moment the server runs it, landing your teammate in a different tab from you. `--at current` pins the new pane to the calling pane - yours - by resolving `FNO_PANE`, so the court accretes around the king by construction rather than by hoping focus held. It is strict: if the anchor is gone or the split cannot fit, it refuses rather than minting a tab somewhere else, and the `--json` receipt reports the server-committed anchor and tab so you read where it actually landed. It requires `--split` and `--substrate pane`, and it only works from inside a mux pane.
-- **The workspace comes from where you are.** Because the teammate anchors to your pane, it inherits your workspace - which is the mission workspace, provided you were coronated with `--workspace <epic>` as above. That is why the king's own placement is load-bearing and not cosmetic. Use explicit `--workspace <name> --split <dir>` only when you must place into a workspace you are not in, and accept the focus race when you do. An older deprecated alias for that flag still resolves, so a stale command runs clean and teaches the wrong spelling anyway - see the migration note in [the spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
+- **Anchor to your own pane, do not aim at the workspace.** `--workspace <name> --split <dir>` splits that workspace's *focused* pane, and focus is shared mutable state: another client can move it between the moment you build the command and the moment the server runs it, landing your teammate in a different tab from you. `--at current` pins the new pane to the calling pane - yours - by resolving `FNO_PANE`, so the org accretes around the lead by construction rather than by hoping focus held. It is strict: if the anchor is gone or the split cannot fit, it refuses rather than minting a tab somewhere else, and the `--json` receipt reports the server-committed anchor and tab so you read where it actually landed. It requires `--split` and `--substrate pane`, and it only works from inside a mux pane.
+- **The workspace comes from where you are.** Because the teammate anchors to your pane, it inherits your workspace - which is the mission workspace, provided you were coronated with `--workspace <epic>` as above. That is why the lead's own placement is load-bearing and not cosmetic. Use explicit `--workspace <name> --split <dir>` only when you must place into a workspace you are not in, and accept the focus race when you do. An older deprecated alias for that flag still resolves, so a stale command runs clean and teaches the wrong spelling anyway - see the migration note in [the spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
 - **Creation is implicit.** The first placement into a workspace name creates it. There is no create verb, and nothing to set up before the first spawn. A blank name is refused at the CLI boundary rather than falling back to a default.
-- **Split.** First teammate `--split right`, subsequent teammates `--split down`, accreting quarters in your active tab so your viewport shows the whole court. Exact sequencing is yours; the invariant is only that every teammate lands in the one mission workspace. Treat a split direction as a placement *intent* at spawn time: several teammates launching at once are laid out concurrently, so the direction says where each one goes in, not what the final tab arrangement will be.
+- **Split.** First teammate `--split right`, subsequent teammates `--split down`, accreting quarters in your active tab so your viewport shows the whole org. Exact sequencing is yours; the invariant is only that every teammate lands in the one mission workspace. Treat a split direction as a placement *intent* at spawn time: several teammates launching at once are laid out concurrently, so the direction says where each one goes in, not what the final tab arrangement will be.
 - **Overflow refuses rather than degrades, and later moves are layout operations.** On a placement refusal, re-spawn with explicit `--workspace <mission-workspace> --split <dir>` (min-size fallback to a tab in that workspace); read the receipt, a fallback is a tab not a split. Relocating a live pane afterwards is `fno mux layout apply` (a whole-shape operation) or nothing - decoded refusals and the layout doctrine: [workflow-routes.md](workflow-routes.md).
 
 ### The minion contract rides every spawn payload
 
 The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [minion-clause.md](minion-clause.md)**, the single source. Do not compose it freehand: the Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers five behaviors:
 
-1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek; only if it did not already land, re-resolve and re-send; never re-queue. The verbatim report line and the full delivery doctrine live in the template.
-2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
-3. **Review inline.** Run `$fno:review <level> --comment` in Codex or `/fno:review <level> --comment` in Claude before you report a completed diff. Use `medium` below 300 lines, `high` at 300 or more, and `xhigh` for risky state or protocol changes. Fix valid findings. Run round two with `--verify-fixes`. Never mail the king to fire a review verb or spawn a reviewer.
+1. **Report.** On finishing a unit of work or blocking, mail the lead a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek; only if it did not already land, re-resolve and re-send; never re-queue. The verbatim report line and the full delivery doctrine live in the template.
+2. **Ask for help.** A question the minion cannot answer from its own scope goes to its lead by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the lead's job.
+3. **Review inline.** Run `$fno:review <level> --comment` in Codex or `/fno:review <level> --comment` in Claude before you report a completed diff. Use `medium` below 300 lines, `high` at 300 or more, and `xhigh` for risky state or protocol changes. Fix valid findings. Run round two with `--verify-fixes`. Never mail the lead to fire a review verb or spawn a reviewer.
 
 **Rebase first, review once.** A rebase moves the head. Every attestation reads pinned to the head it reviewed, so a rebase after a review re-buys it. `CarriedBaseSync` exists but fires rarely, so it rarely helps in practice. Measured one night: about ten rebases ordered with a review after each one bought ten reviews for one PR's worth of code. When a PR needs both, order the rebases first, all of them, not one at a time. Wait for green, then request the review once on the final head. A rebase ordered after a review is a bug in the ordering, not a cost of doing business.
 
-4. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno agents mail is universal - but decisions stay with the king, and anything that changes routing must reach the king so it lands in the graph.
-5. **Escalate one level at a time.** worker -> epic king -> project king -> portfolio king -> superuser. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent. The calls that jump the ladder to the superuser are the four classes in [Recording a ruling](../SKILL.md#recording-a-ruling).
+4. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno agents mail is universal - but decisions stay with the lead, and anything that changes routing must reach the lead so it lands in the graph.
+5. **Escalate one level at a time.** worker -> epic lead -> project lead -> portfolio lead -> superuser. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent. The calls that jump the ladder to the superuser are the four classes in [Recording a ruling](../SKILL.md#recording-a-ruling).
 
-Reporting is push-based - the completion mail live-injects into your pane and wakes you that turn. It is the piece the live king's teammates never received, which is why a worker once shipped a PR in silence.
+Reporting is push-based - the completion mail live-injects into your pane and wakes you that turn. It is the piece the live lead's teammates never received, which is why a worker once shipped a PR in silence.
 
 ### Route the next phase, qualified and target-first
 
-- **Every dispatched verb is plugin-qualified** (`/fno:think`, `/fno:blueprint`, `/fno:target`) in spawn payloads, routing mail, and `--dispatch-verb` values. The old bare `/do` spelling once resolved to a *different* plugin's `do` in a live reign and ran a foreign pipeline silently; qualification costs five characters and removes the whole failure class.
+- **Every dispatched verb is plugin-qualified** (`/fno:think`, `/fno:blueprint`, `/fno:target`) in spawn payloads, routing mail, and `--dispatch-verb` values. The old bare `/do` spelling once resolved to a *different* plugin's `do` in a live lead and ran a foreign pipeline silently; qualification costs five characters and removes the whole failure class.
 - **The execution phase routes through `/fno:target <node>`, at every size.** Raw `/execute` executes a plan with no node claim, no review gates, no ship phase, and no finalize record; `/fno:target` is the loop with external done-proof. A small PR earns no exemption - the gates are cheapest when the diff is small.
 - **The routing mail is your fan-in moment.** You are the only participant who sees every session, so sibling facts that bear on this node (a locked interface, a file another teammate owns, a merge-order constraint, a superseded decision) get stated explicitly rather than left implied. Write them into the node's `--dispatch-brief` and have the mail point there (see *One session per node* below); state `Cross-node: none` in the mail when there are none.
-- **Every authored payload always carries the `<fno_mail>` envelope** - `fno agents mail send` wraps it, so a mailed ruling is marked. The one exception is `fno agents mail send --raw`. A verb invocation is not authored text. It is injected unwrapped at the recipient's prompt line. That is the only way to fire a verb the model is barred from invoking. It is recorded in the event ledger (`agent_raw_inject`) rather than the transcript. This keeps the eval corpus exactly as clean. If the crowning brief routes you through a pane-layer prompt verb, wrap the text yourself. Template: ``<fno_mail from="<your-handle>" to="<teammate>">...ruling...\n</fno_mail>``. An injected prompt lands in the teammate's transcript as *user-role* text. The envelope is the only marker distinguishing you from the human at the keyboard. An unwrapped ruling impersonates the maintainer. This holds for teammate-to-teammate messages too - agent-to-agent, always wrapped.
+- **Every authored payload always carries the `<fno_mail>` envelope** - `fno agents mail send` wraps it, so a mailed ruling is marked. The one exception is `fno agents mail send --raw`. A verb invocation is not authored text. It is injected unwrapped at the recipient's prompt line. That is the only way to fire a verb the model is barred from invoking. It is recorded in the event ledger (`agent_raw_inject`) rather than the transcript. This keeps the eval corpus exactly as clean. If the titling brief routes you through a pane-layer prompt verb, wrap the text yourself. Template: ``<fno_mail from="<your-handle>" to="<teammate>">...ruling...\n</fno_mail>``. An injected prompt lands in the teammate's transcript as *user-role* text. The envelope is the only marker distinguishing you from the human at the keyboard. An unwrapped ruling impersonates the maintainer. This holds for teammate-to-teammate messages too - agent-to-agent, always wrapped.
 
 ### One session per node, across phases
 
-The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds. A finished blueprint closes its provenance before the pane is cleared, then the king calls one read-and-verified retask transaction:
+The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds. A finished blueprint closes its provenance before the pane is cleared, then the lead calls one read-and-verified retask transaction:
 
 ```bash
 read -r WORKER_HARNESS WORKER_SESSION < <(fno agents list --json | jq -r '.agents[] | select(.name == "<blueprint-worker>") | "\(.harness) \(.harness_session_id)"')
@@ -485,13 +485,13 @@ fno backlog update <node> --dispatch-brief "<sibling facts that bear on this nod
 fno agents mail send <teammate-handle> "Ruling: <approve/revise summary>. Cross-node: see --dispatch-brief on <node>. Next: /fno:blueprint <node>." --from-self
 ```
 
-**Write sibling facts once, into the brief; the mail points at them.** The ruling is per-teammate and cannot be shared, but cross-node facts are the same payload for everyone who touches the node, so restating them in every envelope costs you that context once per teammate and leaves the durable copy unwritten. The brief is already where a ruling has to land to outlive you (see *Reconcile on every report* below), so putting the facts there first is not an extra step - it is the encode step, done before the mail instead of after. Measured over three real reigns, outbound mail cost more context than inbound did, and this duplicated term is the part of it you can actually delete.
+**Write sibling facts once, into the brief; the mail points at them.** The ruling is per-teammate and cannot be shared, but cross-node facts are the same payload for everyone who touches the node, so restating them in every envelope costs you that context once per teammate and leaves the durable copy unwritten. The brief is already where a ruling has to land to outlive you (see *Reconcile on every report* below), so putting the facts there first is not an extra step - it is the encode step, done before the mail instead of after. Measured over three real tenures, outbound mail cost more context than inbound did, and this duplicated term is the part of it you can actually delete.
 
 Context pressure is not a handoff trigger. A harness compacts its current session and preserves the node claim, worktree, branch, and PR. A fresh successor is allowed only for explicit capability escalation to an externally selected harness/model/account coordinate, and only after the destination passes the capability probe. Never spawn a successor because a teammate reported a high context percentage.
 
-**The king's compact threshold is lower than a teammate's.** `config.target.handoff.king_used_pct_trigger` defaults to 40, below the general-session threshold of 50, because degraded king decisions affect the whole fleet. The Stop hook tells the king to compact in place. It never authorizes a successor.
+**The lead's compact threshold is lower than a teammate's.** `config.target.handoff.king_used_pct_trigger` defaults to 40, below the general-session threshold of 50, because degraded lead decisions affect the whole fleet. The Stop hook tells the lead to compact in place. It never authorizes a successor.
 
-**A king arriving on a node it did not spawn looks up the existing agent before it spawns.** The lookup ladder is claim status -> `fno agents top` (REACH column) -> transcript mtime -> resume/adopt, each step naming the store it reads; the default end is spawn-and-record with a `--dispatch-brief`, not resume. The ladder and the eight-spawn failure it prevents: [workflow-routes.md](workflow-routes.md).
+**A lead arriving on a node it did not spawn looks up the existing agent before it spawns.** The lookup ladder is claim status -> `fno agents top` (REACH column) -> transcript mtime -> resume/adopt, each step naming the store it reads; the default end is spawn-and-record with a `--dispatch-brief`, not resume. The ladder and the eight-spawn failure it prevents: [workflow-routes.md](workflow-routes.md).
 
 ### Monitor: report first, sweep as backstop
 
@@ -509,28 +509,28 @@ Context pressure is not a handoff trigger. A harness compacts its current sessio
 3. **Route** the next phase per the session-reuse policy above.
 4. **Encode:** update the graph (`--dispatch-verb`, `--dispatch-brief`, blockers, rank) so the ruling survives you. A ruling delivered only by mail dies with the transcript.
 
-### Post-epic: interview the court
+### Post-epic: interview the org
 
-When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard court step before you abdicate. This is the ceremony the synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
+When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard org step before you abdicate. This is the ceremony the synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
 
 Interview each builder session that carried a node in this epic - mail it the prompt, collect its first-person account, write the account to your project's retros directory (the template names how to resolve it; do not assume the gitignored `internal/` vault path exists). The dogfooding-lens questions and the dig-deeper follow-up are baked into the template so it fires without prodding. The full prompt, delivery mechanics, landing path, and retro epistemics (how much to trust what comes back) are in [retro-interview.md](retro-interview.md) - load it when the epic completes.
 
-This is one pass, one interview per builder, then exit; it is not a synthesis (that is a separate pass under a two-plus-sessions bar). A wave-scoped court over a single wave of a larger epic skips this step and leaves it for whoever abdicates the epic's final wave.
+This is one pass, one interview per builder, then exit; it is not a synthesis (that is a separate pass under a two-plus-sessions bar). A wave-scoped org over a single wave of a larger epic skips this step and leaves it for whoever abdicates the epic's final wave.
 
 ### Abdicate at the wave boundary
 
-The crown expires when the wave completes - every teammate unit reconciled, the wave gate satisfied or explicitly parked - not at kickoff. Run the encode-before-exit ritual and exit. A court king that outlives its wave is the same permanent-monarch drift the pass shape guards against. An empty wave (no ready teammate work in scope) is reported and abdicated immediately, never idled on.
+The role expires when the wave completes - every teammate unit reconciled, the wave gate satisfied or explicitly parked - not at kickoff. Run the encode-before-exit ritual and exit. A org lead that outlives its wave is the same permanent-monarch drift the pass shape guards against. An empty wave (no ready teammate work in scope) is reported and abdicated immediately, never idled on.
 
 ## What a pass is not
 
-These bound the **pass** shape - the abdicate-at-kickoff reign. Court explicitly lifts the first and fourth for the duration of one wave (it monitors, and it answers), but never the rest, and never the *driver* line.
+These bound the **pass** shape - the abdicate-at-kickoff lead. Org explicitly lifts the first and fourth for the duration of one wave (it monitors, and it answers), but never the rest, and never the *driver* line.
 
-- **Not a supervisor (pass only).** A pass narrows what the daemon may select and abdicates; it never stays to watch. Court monitors by contract, but only its own wave, and it still adds no second dispatch path - it encodes and lets the hands run.
-- **Not a shape for active court.** A pure pass abdicates at kickoff. It cannot answer in-scope questions or monitor the wave. Workers review their diffs inline. They do not need a king to fire a review verb. If active monitoring or questions are part of the grant, pick court or hand off to the heir before exit.
+- **Not a supervisor (pass only).** A pass narrows what the daemon may select and abdicates; it never stays to watch. Org monitors by contract, but only its own wave, and it still adds no second dispatch path - it encodes and lets the hands run.
+- **Not a shape for active org.** A pure pass abdicates at kickoff. It cannot answer in-scope questions or monitor the wave. Workers review their diffs inline. They do not need a lead to fire a review verb. If active monitoring or questions are part of the grant, pick org or hand off to the heir before exit.
 - **Not self-appointed.** Being handed an epic to work on is not a tag. If nobody granted you orchestrator authority with a level and a scope, you are a worker on that epic, and spawning subordinates is out of bounds.
-- **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A king promotes and wires. A king's one supersession is the consolidation gate above, receipted with `--replaces` and a reason and reversible via `unsupersede`; outside it, quarantine means defer, and supersede stays with the groom pass or a human.
-- **Not a driver (both shapes).** You may `peek` at anything, and a court king mails rulings - but neither shape attaches and steers a worker's pane. Driving means burning frontier tokens on work a builder already owns, and a human at the wheel of a session outranks the crown: peek before you send, and never inject a ruling into a session a human is actively driving.
-- **Not a decider of unknowns (pass only).** In a pass, a question you cannot answer from the track goes to the triage pile (`fno backlog defer <id> -R "<question>"`), not into a guessed edge. In court, answering a teammate's in-scope question is the job; a question outside your crown's scope still escalates rather than guesses.
+- **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A lead promotes and wires. A lead's one supersession is the consolidation gate above, receipted with `--replaces` and a reason and reversible via `unsupersede`; outside it, quarantine means defer, and supersede stays with the groom pass or a human.
+- **Not a driver (both shapes).** You may `peek` at anything, and an org lead mails rulings - but neither shape attaches and steers a worker's pane. Driving means burning frontier tokens on work a builder already owns, and a human at the wheel of a session outranks the role: peek before you send, and never inject a ruling into a session a human is actively driving.
+- **Not a decider of unknowns (pass only).** In a pass, a question you cannot answer from the track goes to the triage pile (`fno backlog defer <id> -R "<question>"`), not into a guessed edge. In org, answering a teammate's in-scope question is the job; a question outside your role's scope still escalates rather than guesses.
 
 ## Done when
 

@@ -888,6 +888,7 @@ fn argv_has_team(argv: &[String]) -> bool {
         .skip(1)
         .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
         .any(|t| {
+            // retired-ok: the daemon accepts the retired alias for one release
             t == "--crown"
                 || t.starts_with("--crown=")
                 || t == "-k"

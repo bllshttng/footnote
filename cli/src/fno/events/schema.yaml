@@ -2780,7 +2780,7 @@ event_types:
           type: string
 
   - name: reign_armed
-    description: "A crowned reign finished arming its beat: the self-injected /loop. Journaled by the reigning session through fno doctor event emit."
+    description: "A titled lead finished arming its beat: the self-injected /loop. Journaled by the leading session through fno doctor event emit."
     sources: [loop, daemon]
     data:
       required: []
@@ -2794,7 +2794,7 @@ event_types:
 
   - {name: lead_armed, alias_of: reign_armed, sources: [loop, daemon]}
   - name: reign_checkin
-    description: "One completed check-in body of a reign: indicators printed, levers pulled (if any). Carries canonical scope and change; crown_scope, crown, and result are refused aliases. The king stop hook writes a mechanical row when a beat is missed."
+    description: "One completed check-in body of a lead: indicators printed, levers pulled (if any). Carries canonical scope and change; crown_scope, role, and result are refused aliases. The lead stop hook writes a mechanical row when a beat is missed."
     sources: [loop, daemon, hook]
     data:
       required: [scope, change]
@@ -2807,7 +2807,7 @@ event_types:
 
   - {name: lead_checkin, alias_of: reign_checkin, sources: [loop, daemon, hook]}
   - name: reign_dispatch_exception
-    description: "A reign spawned despite the no-dispatch rule, justified by a red dispatching arm in fno agents status. Names the arm and the node."
+    description: "A lead spawned despite the no-dispatch rule, justified by a red dispatching arm in fno agents status. Names the arm and the node."
     sources: [loop, daemon]
     data:
       required: []
@@ -2821,7 +2821,7 @@ event_types:
 
   - {name: lead_dispatch_exception, alias_of: reign_dispatch_exception, sources: [loop, daemon]}
   - name: king_term
-    description: "A crown's term was declared or extended via `fno agents king term <spec> [--reason]`, or the Stop-hook gate observed it reached. The receipt a reign's tenure bound leaves."
+    description: "A role's term was declared or extended via `fno agents org term <spec> [--reason]`, or the Stop-hook gate observed it reached. The receipt a lead's tenure bound leaves."
     sources: [loop, daemon, hook]
     data:
       required: [scope, term]
@@ -2907,7 +2907,7 @@ event_types:
           type: integer
 
   - name: agent_crown_vacated
-    description: "A crown left its holder. The dead-crown sweep emits it with cause holder_dead when a manifest-only crown's holder session is proven dead: evidence carries the death receipt, inheritor names the live crown one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale crown fields cleared in the same registry write. The attended `fno agents king done` emits the same kind with its own cause. The sweep grants no crown; territory falls back to its project by construction."
+    description: "A role left its holder. The dead-role sweep emits it with cause holder_dead when a manifest-only role's holder session is proven dead: evidence carries the death receipt, inheritor names the live role one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale role fields cleared in the same registry write. The attended `fno agents org done` emits the same kind with its own cause. The sweep grants no role; territory falls back to its project by construction."
     sources: [daemon, agents]
     data:
       required: [scope, cause]
@@ -2935,7 +2935,7 @@ event_types:
 
   - {name: agent_team_vacated, alias_of: agent_crown_vacated, sources: [daemon]}
   - name: crown_succession_reverted
-    description: "A succession whose heir died before binding reverted: the reap sweep restored the predecessor's session on the crown-name record past the revert window, with the heir's registry row removed or terminal as the evidence. The pending marker cleared; the regnal stays bumped as lineage."
+    description: "A succession whose heir died before binding reverted: the reap sweep restored the predecessor's session on the role-name record past the revert window, with the heir's registry row removed or terminal as the evidence. The pending marker cleared; the regnal stays bumped as lineage."
     sources: [daemon]
     data:
       required: [scope, heir_name]
@@ -3009,7 +3009,7 @@ event_types:
         succession_id:
           type: string
   - name: team_succession_released
-    description: "The release readback passed at verify: no live registry row still holds the predecessor's crown over the scope."
+    description: "The release readback passed at verify: no live registry row still holds the predecessor's role over the scope."
     sources: [agents, daemon]
     data:
       required: [scope, heir_name]
@@ -3021,7 +3021,7 @@ event_types:
         succession_id:
           type: string
   - name: team_succession_release_unproven
-    description: "The release readback could not prove the predecessor's crown vacated over the scope: a live row still holds it, or the registry read failed. reason names the row or the error."
+    description: "The release readback could not prove the predecessor's role vacated over the scope: a live row still holds it, or the registry read failed. reason names the row or the error."
     sources: [agents, daemon]
     data:
       required: [scope]
@@ -3320,7 +3320,7 @@ event_types:
           type: string
 
   - name: stale_sweep
-    description: "The daemon's stale-row reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the lane's fleet tasks (the former [watchdog-stale:*] operator question, now filed in the fleet-task channel) to the measured fleet. Report-only by construction: a king reads open tasks on the board's fleet_task queue. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    description: "The daemon's stale-row reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the lane's fleet tasks (the former [watchdog-stale:*] operator question, now filed in the fleet-task channel) to the measured fleet. Report-only by construction: a lead reads open tasks on the board's fleet_task queue. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
     data:
       required: []
@@ -3390,7 +3390,7 @@ event_types:
           description: "The validated SpawnOrigin (session parent or named non-session source)."
         owner:
           type: object
-          description: "The validated SpawnOwner (session, mission, crown, operator or test run)."
+          description: "The validated SpawnOwner (session, mission, role, operator or test run)."
         substrate:
           type: string
         harness:
@@ -3838,7 +3838,7 @@ event_types:
           description: "Resolved manifest path, or an empty string when no manifest owned the fire."
         scope:
           type: string
-          description: "Manifest scope/crown scope, or an empty string when unscoped."
+          description: "Manifest scope/role scope, or an empty string when unscoped."
         node_id:
           type: string
           description: "Manifest node identity, or an empty string when no node is bound."
@@ -3945,7 +3945,7 @@ event_types:
           description: "Optional. RFC3339 UTC of the pair's newest file mtime."
         monitor:
           type: boolean
-          description: "Optional. True when any file in the pair is an emit-on-change while/until-sleep loop (the reign-mandated monitor idiom)."
+          description: "Optional. True when any file in the pair is an emit-on-change while/until-sleep loop (the lead-mandated monitor idiom)."
     consumers: [operator, scratch]
 
   - name: scratch_shape_filed
@@ -4062,7 +4062,7 @@ event_types:
         driver:
           type: string
           enum: [target, king]
-          description: "Which driver's done() produced this terminal. Absent on a target fire (the historical default); 'king' on a board-empty fire, which is also what the king freshness probe reads."
+          description: "Which driver's done() produced this terminal. Absent on a target fire (the historical default); 'lead' on a board-empty fire, which is also what the lead freshness probe reads."
     consumers: [operator, megawalk]
 
   - name: transition_rejected
@@ -4174,7 +4174,7 @@ event_types:
     consumers: [operator, fno-agents needs]
 
   - name: fleet_task
-    description: "A machine chore that names its own clearing command, filed by a lane writer (heal, pr-nudge, the daemon reconcile lanes) instead of an operator_question, so the operator's question list carries only rows needing a human ruling. Written only by Rust (fleet_task.rs); never written by Python. A king reads open tasks on the board's fleet_task queue, report-only; the operator question surfaces never show one."
+    description: "A machine chore that names its own clearing command, filed by a lane writer (heal, pr-nudge, the daemon reconcile lanes) instead of an operator_question, so the operator's question list carries only rows needing a human ruling. Written only by Rust (fleet_task.rs); never written by Python. A lead reads open tasks on the board's fleet_task queue, report-only; the operator question surfaces never show one."
     sources: [daemon, test]
     data:
       required: [task_id]
@@ -4184,7 +4184,7 @@ event_types:
           description: "Stable id for this task (ft-<hex>), what a fleet_task_closed row names to close it."
         lane:
           type: string
-          description: "The writer family that owns the chore: heal, pr-nudge, watchdog-stale, reap-hold, king-escalation, watchdog-unfinished-work, watchdog-friction."
+          description: "The writer family that owns the chore: heal, pr-nudge, watchdog-stale, reap-hold, lead-escalation, watchdog-unfinished-work, watchdog-friction."
         key:
           type: string
           description: "The dedup key within the lane, e.g. 'PR 2226 rebase conflict'."
@@ -4280,7 +4280,7 @@ event_types:
 
   - name: attention_delivery
     retention: durable
-    description: "One delivery outcome for an answered attention item: the daemon arm's reply ladder records which rung delivered the answer (the clear's mail leg, a resume of an idle asker, or a wrapped mail to the crown over the asker's node) and how it ended. One row per item's ladder, written by the attention arm beside the answer row it delivers. The panel shows the rung on the answered row for 15 minutes."
+    description: "One delivery outcome for an answered attention item: the daemon arm's reply ladder records which rung delivered the answer (the clear's mail leg, a resume of an idle asker, or a wrapped mail to the role over the asker's node) and how it ended. One row per item's ladder, written by the attention arm beside the answer row it delivers. The panel shows the rung on the answered row for 15 minutes."
     sources: [daemon, test]
     data:
       required: [item_id, rung, outcome]
@@ -4290,19 +4290,19 @@ event_types:
           description: "The answered item this ladder carried."
         rung:
           type: string
-          description: "The rung that ended the ladder: `mail` (the clear's mail leg landed), `resume` (a resume confirmed by content in the asker's transcript), `crown` (a wrapped mail to the crown over the asker's node), or `none` (undelivered, the evidence names why)."
+          description: "The rung that ended the ladder: `mail` (the clear's mail leg landed), `resume` (a resume confirmed by content in the asker's transcript), `crown` (a wrapped mail to the role over the asker's node), or `none` (undelivered, the evidence names why)."
         outcome:
           type: string
           description: "landed | confirmed | sent | failed."
         evidence:
           type: string
-          description: "Optional. The posture line, the resume reason, or the no-crown reason, cut to a one-line read."
+          description: "Optional. The posture line, the resume reason, or the no-role reason, cut to a one-line read."
         session_id:
           type: string
           description: "Optional. The asker session the ladder resumed or mailed."
         holder:
           type: string
-          description: "Optional. The crown holder the escalation mailed."
+          description: "Optional. The role holder the escalation mailed."
         at:
           type: string
           description: "Optional. When the ladder ended."
@@ -4468,7 +4468,7 @@ event_types:
             actor_kind:
               type: string
               enum: [user, lead, worker, sweep]
-              description: "Who acted: user (attended terminal, no session identity), lead (live crown holder), worker (any other resolved session), sweep (daemon work)."
+              description: "Who acted: user (attended terminal, no session identity), lead (live role holder), worker (any other resolved session), sweep (daemon work)."
             comms:
               type: string
               enum: [mail, chat, question]
@@ -4817,7 +4817,7 @@ event_types:
           description: "The status word after the write."
         cause:
           enum: [pid_proven, revival, probe_inferred]
-          description: "The evidence word: the row's own dead pid, a guarded crown revival, or the probe's inference."
+          description: "The evidence word: the row's own dead pid, a guarded role revival, or the probe's inference."
     consumers: [operator]
 
   - name: composer_shell_ran
@@ -5180,7 +5180,7 @@ event_types:
     consumers: [operator, megawalk]
 
   - name: cancel_signal_set
-    description: "A target or king cancel sentinel was written and the operator can audit which lane it controls."
+    description: "A target or lead cancel sentinel was written and the operator can audit which lane it controls."
     sources: [target, hook, agents]
     data:
       required: [lane, path]
@@ -5194,7 +5194,7 @@ event_types:
           description: "Absolute path of the written cancel sentinel."
         scope:
           type: string
-          description: "King crown scope when lane=king."
+          description: "Lead role scope when lane=lead."
         reason:
           type: string
           description: "Why the sentinel was written, such as operator or claim_held_by_other."
@@ -5361,10 +5361,10 @@ event_types:
           description: "The resolver's decision trail joined with '; ' (harness=config(codex); substrate=default(thread); ...): which rung supplied each axis."
         territory:
           type: string
-          description: "The territory key the verdict door attributed this dispatch to (a crown scope, or loose:<project>); null when nothing could read the attribution."
+          description: "The territory key the verdict door attributed this dispatch to (a role scope, or loose:<project>); null when nothing could read the attribution."
         kingless:
           type: boolean
-          description: "False on a crowned territory, true on a kingless one, null when the attribution was unreadable (territory_unknown or a read failure) - an absence is never read as a boolean. The record, not the veto: a kingless territory still drains."
+          description: "False on a titled territory, true on a kingless one, null when the attribution was unreadable (territory_unknown or a read failure) - an absence is never read as a boolean. The record, not the veto: a kingless territory still drains."
     consumers: [operator]
 
   - name: advance_dispatched
@@ -5419,7 +5419,7 @@ event_types:
         reason:
           type: string
           enum: [disabled, walker-live, no-work, already-claimed, next-error, select-unmeasured, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error, capacity-refused, gate-unavailable, sandbox-unreachable, state-root-ungranted, slot-queue-deferred]
-          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on, so it stays ready until the reset. The epic-advance-path reasons (epic advance, K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed. The machine-scoped reasons : capacity-refused = the spawn gate refused on a machine-wide condition (spawn-gate exits 75-80, 86 and 88: queue timeout, no-wait, RAM, provider cap, load, king share, territory cap, blueprint cap), so the row stays ready and neither its failure budget nor its streak moves; gate-unavailable = spawn-gate exit 81, 82, 83 or 87: a registry no spawn on this machine can pass, a gate that could not answer at all, or the fleet incident stop standing; sandbox-unreachable = exit 85 from the codex sandbox probe at the spawn seam, a sandbox that blocks a tool every code payload on that lane needs (gh or a git ref write); state-root-ungranted = spawn-gate exit 84, the lane declares no stance toward the state root and a human grants; slot-queue-deferred = the retired exit-78 defer path, kept in the enum because journal rows already carry it."
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on, so it stays ready until the reset. The epic-advance-path reasons (epic advance, K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed. The machine-scoped reasons : capacity-refused = the spawn gate refused on a machine-wide condition (spawn-gate exits 75-80, 86 and 88: queue timeout, no-wait, RAM, provider cap, load, lead share, territory cap, blueprint cap), so the row stays ready and neither its failure budget nor its streak moves; gate-unavailable = spawn-gate exit 81, 82, 83 or 87: a registry no spawn on this machine can pass, a gate that could not answer at all, or the fleet incident stop standing; sandbox-unreachable = exit 85 from the codex sandbox probe at the spawn seam, a sandbox that blocks a tool every code payload on that lane needs (gh or a git ref write); state-root-ungranted = spawn-gate exit 84, the lane declares no stance toward the state root and a human grants; slot-queue-deferred = the retired exit-78 defer path, kept in the enum because journal rows already carry it."
         node_id:
           type: string
           description: "The candidate next node, when a reason references one (already-claimed, quota-deferred, lane-cap, unmapped-project)."
@@ -5488,7 +5488,7 @@ event_types:
     consumers: [operator]
 
   - name: mission_activated
-    description: "Emitted by `fno backlog advance --epic <id>` (K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched). A crown grant over an epic (fno agents crown / fno agents spawn --crown) also emits this with source=crown, so a crowned epic can never lack the flag the drain reads."
+    description: "Emitted by `fno backlog advance --epic <id>` (K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched). A role grant over an epic (fno agents org promote / fno agents spawn --promote) also emits this with source=role, so a titled epic can never lack the flag the drain reads."
     sources: [backlog]
     data:
       required: [epic_id]
@@ -5499,7 +5499,7 @@ event_types:
         source:
           type: string
           enum: [advance, crown]
-          description: "What armed the mission. Absent means the epic advance; `crown` means a crown grant armed it."
+          description: "What armed the mission. Absent means the epic advance; `crown` means a role grant armed it."
     consumers: [operator]
 
   - name: mission_deactivated
@@ -5928,7 +5928,7 @@ event_types:
           description: "Why the PR was parked: 'closed', 'max-age', 'retries-exhausted', or decide()'s park reason."
 
   - name: pr_watch_unparked
-    description: "A parked PR resumes polling: retries reset to 0, either by hand (fno-agents pr-park unpark, the king row's verb) or by the sweep (head moved or 24h old)."
+    description: "A parked PR resumes polling: retries reset to 0, either by hand (fno-agents pr-park unpark, the lead row's verb) or by the sweep (head moved or 24h old)."
     sources: [pr-park, daemon]
     data:
       required: [pr, by]
@@ -7552,7 +7552,7 @@ event_types:
     consumers: [fno-agents loop-check, finalize handoff]
 
   - name: king_context_nudge
-    description: "Emitted by hooks/context-nudge.sh (Stop) when a crowned session ends a turn past king_used_pct_trigger. The arming proof the hook's predecessor (arm-handoff-precompact.sh, gated on a pid dead ~1s after init) could never produce: `fno doctor event audit` answers whether the nudge ever fired in a real reign."
+    description: "Emitted by hooks/context-nudge.sh (Stop) when a titled session ends a turn past king_used_pct_trigger. The arming proof the hook's predecessor (arm-handoff-precompact.sh, gated on a pid dead ~1s after init) could never produce: `fno doctor event audit` answers whether the nudge ever fired in a real lead."
     sources: [hook]
     data:
       required: [used_pct, trigger, crown_level, crown_scope]
@@ -7565,18 +7565,18 @@ event_types:
           description: "config.target.handoff.king_used_pct_trigger (default 40)."
         crown_level:
           type: integer
-          description: "The king's crown altitude (0 VP, 1 Director, 2 IC)."
+          description: "The lead's role altitude (0 VP, 1 Director, 2 IC)."
         crown_scope:
           type: string
-          description: "The scope the crown rules over (project/epic/node id)."
+          description: "The scope the role rules over (project/epic/node id)."
         session_id:
           type: string
-          description: "The crowned session's id."
+          description: "The titled session's id."
     consumers: [operator]
 
   - {name: lead_context_nudge, alias_of: king_context_nudge, sources: [hook]}
   - name: session_context_nudge
-    description: "Emitted by hooks/context-nudge.sh (Stop) when any non-crowned session ends a turn past used_pct_trigger (default 50). The every-session generalization of king_context_nudge: the probe already ran for every session at the old crown gate and was discarded, so this stops wasting that reading. `fno doctor event audit` distinguishes a king nudge (king_context_nudge) from a general-session nudge."
+    description: "Emitted by hooks/context-nudge.sh (Stop) when any non-titled session ends a turn past used_pct_trigger (default 50). The every-session generalization of king_context_nudge: the probe already ran for every session at the old role gate and was discarded, so this stops wasting that reading. `fno doctor event audit` distinguishes a lead nudge (king_context_nudge) from a general-session nudge."
     sources: [hook]
     data:
       required: [used_pct, trigger]
@@ -7593,7 +7593,7 @@ event_types:
     consumers: [operator]
 
   - name: king_orphan_block
-    description: "Emitted by hooks/context-nudge.sh (Stop) when a crowned session ends a turn with workers it spawned still live and no resolution recorded. Names the workers and the three legal resolutions; a carveout carrying the scope (structured field) satisfies it and stops the block."
+    description: "Emitted by hooks/context-nudge.sh (Stop) when a titled session ends a turn with workers it spawned still live and no resolution recorded. Names the workers and the three legal resolutions; a carveout carrying the scope (structured field) satisfies it and stops the block."
     sources: [hook]
     data:
       required: [crown_level, crown_scope, workers, count]
@@ -7667,14 +7667,14 @@ event_types:
     consumers: [operator]
 
   - name: king_action
-    description: "A king shrank one of its own board queues: dispatched an undispatched node, woke a stalled claim holder, reaped a stale claim, or merged a green PR. This is the king loop's PROGRESS MARKER, and it is a positive marker on purpose. Board size cannot serve, because a king's board refills while it works: dispatching and merging both create future work. Progress is therefore a target_id this run has not acted on before; re-emitting the same target_id is not progress and does not reset the dry-fire counter, which is what keeps a stalled_holder row that survives its only available action from holding the loop open forever."
+    description: "A lead shrank one of its own board queues: dispatched an undispatched node, woke a stalled claim holder, reaped a stale claim, or merged a green PR. This is the lead loop's PROGRESS MARKER, and it is a positive marker on purpose. Board size cannot serve, because a lead's board refills while it works: dispatching and merging both create future work. Progress is therefore a target_id this run has not acted on before; re-emitting the same target_id is not progress and does not reset the dry-fire counter, which is what keeps a stalled_holder row that survives its only available action from holding the loop open forever."
     sources: [target]
     data:
       required: [session_id, kind, target_id]
       properties:
         session_id:
           type: string
-          description: "The king session's fno_id, from .fno/king-state.md."
+          description: "The lead session's fno_id, from .fno/lead-state.md."
         kind:
           type: string
           enum: [dispatch, wake, reap, merge]
@@ -7686,14 +7686,14 @@ event_types:
 
   - {name: lead_action, alias_of: king_action, sources: [target]}
   - name: king_loop_check
-    description: "One king loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
+    description: "One lead loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
     sources: [hook]
     data:
       required: [session_id]
       properties:
         session_id:
           type: string
-          description: "The king session's fno_id."
+          description: "The lead session's fno_id."
         actionable:
           type: integer
           description: "Actionable row count at this fire."
@@ -7701,18 +7701,18 @@ event_types:
           type: array
           items:
             type: string
-          description: "Every actionable row identity on this board, as queue:id. THIS is the progress signal: a row present here and absent on the next fire is work the king cleared, read back off the board rather than self-reported. Count alone cannot serve, because the board refills while the king works, so it can rise on the very fire that clears a row."
+          description: "Every actionable row identity on this board, as queue:id. THIS is the progress signal: a row present here and absent on the next fire is work the lead cleared, read back off the board rather than self-reported. Count alone cannot serve, because the board refills while the lead works, so it can rise on the very fire that clears a row."
         board_error:
           type: string
-          description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
+          description: "Why the board could not be read. Present only on a blind fire; a blind lead blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
         provider_goal_pause_error:
           type: string
-          description: "Why a quiet Codex reign could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
+          description: "Why a quiet Codex lead could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
     consumers: [operator]
 
   - {name: lead_loop_check, alias_of: king_loop_check, sources: [hook]}
   - name: king_goal_resumed
-    description: "An admitted Codex king wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
+    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
     sources: [loop]
     data:
       required: [session_id, scope, resumed, successor, provider_receipt]
@@ -7722,7 +7722,7 @@ event_types:
           description: "The exact harness session whose provider goal resumed."
         scope:
           type: string
-          description: "The crown scope whose goal was resumed."
+          description: "The role scope whose goal was resumed."
         resumed:
           type: boolean
         successor:
@@ -7740,17 +7740,17 @@ event_types:
 
   - {name: lead_goal_resumed, alias_of: king_goal_resumed, sources: [loop]}
   - name: king_drain_reserve
-    description: "One king fire whose drain read spent at least half the reserve held back for it. The reserve is silent by design, so this row is the series that shows how close each fire's kill came: elapsed_ms near bound_ms means an expensive read, remaining_budget_ms near zero means a starved fire, and the pair separates the two."
+    description: "One lead fire whose drain read spent at least half the reserve held back for it. The reserve is silent by design, so this row is the series that shows how close each fire's kill came: elapsed_ms near bound_ms means an expensive read, remaining_budget_ms near zero means a starved fire, and the pair separates the two."
     sources: [hook]
     data:
       required: [session_id, scope, bound_ms, elapsed_ms, remaining_budget_ms]
       properties:
         session_id:
           type: string
-          description: "The king session's fno_id."
+          description: "The lead session's fno_id."
         scope:
           type: string
-          description: "The crowned scope whose drain read ran."
+          description: "The titled scope whose drain read ran."
         bound_ms:
           type: integer
           description: "The wall-clock bound the drain read was granted (the configured ceiling clamped to the fire's remaining budget, floored at 250ms)."

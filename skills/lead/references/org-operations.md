@@ -1,13 +1,15 @@
-<!-- style-exception: canonical court prose predates the style rules; bundled into skills/lead verbatim -->
-# Court operations
+<!-- style-exception: canonical org prose predates the style rules; bundled into skills/lead verbatim -->
+# Org operations
 
-The operations manual for [court mode](once.md#court-mode-reign-over-the-wave).
-The skill carries the *contract* (what a court king owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
+The operations manual for [org mode](once.md#org mode-lead-over-the-wave).
 
-Court needs five worker primitives: **spawn** a teammate, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
+The skill carries the *contract* (what an org lead owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
+
+Org needs five worker primitives: **spawn** a teammate, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
 Sweep and wait are separate on purpose: sweeping is a nonblocking look at a teammate you are already awake to check, waiting is the only one of the five that will wake you.
+
 The verbs below are fno's own.
-In an environment whose pane layer is something other than fno mux, the crowning brief names that layer's equivalents; the *duties* are identical either way, and every ruling still lands in the graph via `fno backlog` verbs and every node is still claimed through `/fno:target`.
+In an environment whose pane layer is something other than fno mux, the titling brief names that layer's equivalents; the *duties* are identical either way, and every ruling still lands in the graph via `fno backlog` verbs and every node is still claimed through `/fno:target`.
 The pane layer owns placement, lifecycle, and I/O; fno stays the authority for identity, claims, the graph, and dispatch.
 
 Codex app-server threads do not have a prompt line. Their native provider
@@ -29,7 +31,7 @@ the pane receipt before sending the next task.
 
 ## The `<fno_mail>` envelope, on every lane
 
-Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king to teammate, teammate to teammate, on every lane. The reason is a transcript-safety one: an injected message lands in the recipient's transcript as *user-role* text, indistinguishable from the human at the keyboard, and the envelope is the only marker that says "an agent said this." An unwrapped ruling impersonates the maintainer. The one exception is `fno agents mail send --raw`: a verb invocation is not authored text, so it is injected unwrapped at the recipient's prompt line (the only way to fire a verb the model is barred from invoking) and recorded in the event ledger (`agent_raw_inject`) rather than the transcript - the eval corpus stays exactly as clean.
+Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - lead to teammate, teammate to teammate, on every lane. The reason is a transcript-safety one: an injected message lands in the recipient's transcript as *user-role* text, indistinguishable from the human at the keyboard, and the envelope is the only marker that says "an agent said this." An unwrapped ruling impersonates the maintainer. The one exception is `fno agents mail send --raw`: a verb invocation is not authored text, so it is injected unwrapped at the recipient's prompt line (the only way to fire a verb the model is barred from invoking) and recorded in the event ledger (`agent_raw_inject`) rather than the transcript - the eval corpus stays exactly as clean.
 
 - **`fno agents mail send` wraps automatically.** Nothing to do; the ruling is already marked.
 - **A pane-layer prompt verb** does not wrap automatically. Wrap the ruling yourself:
@@ -55,10 +57,10 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 | Spawn a teammate thread | `fno agents spawn --name <n> "<payload>" --substrate thread --effort <e>` |
 | Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template (or a spec file) plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
 | Arm a wake before you stop | ONE unreconciled teammate: `fno-agents wait --agent <name> --state done --timeout-ms <n>` · a fleet: `fno-agents subscribe` unfiltered, armed once (harness-tracked either way; never `idle`, never `&`) |
-| Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate thread --crown <scope>` (a king running a court belongs in its own mission workspace). Repeat `--crown`/`-k` for a portfolio; the rung is derived from what you name |
-| Crown an existing session in place | The target runs `fno agents register`; from another attended terminal run `fno agents org promote <printed-handle> --scope <scope>`. A live king may run it too, but only over a scope its own crown strictly contains. It preserves the target's transcript and placement. A king can also add an epic its own session created to its own crown: `fno agents org promote <own handle> --scope <each held epic> --scope <new epic>` |
-| Hand your crown to a successor | Spawn the heir over your OWN scope with `--succeed`: without the explicit transfer flag the spawn is refused and you keep the crown. The vacate and stamp are one registry write. Announce first: an outgoing king that owes the team a handoff notice sends it BEFORE `--succeed`, while the crown still answers for it; after the transfer the outgoing session holds no crown and no send authority. Return it with `fno agents org promote --reclaim`; that uses `crown_grantor` and creates no session. The attended in-place verb is a re-scope, not succession: it moves a crown between two live rows (re-scope the incumbent first, then crown the heir) but never creates an heir at spawn |
-| Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
+| Anoint a sub-lead at spawn | `fno agents spawn --name <n> "<payload>" --substrate thread --promote <scope>` (a lead running an org belongs in its own mission workspace). Repeat `--promote`/`-k` for a portfolio; the rung is derived from what you name |
+| Role an existing session in place | The target runs `fno agents register`; from another attended terminal run `fno agents org promote <printed-handle> --scope <scope>`. A live lead may run it too, but only over a scope its own role strictly contains. It preserves the target's transcript and placement. A lead can also add an epic its own session created to its own role: `fno agents org promote <own handle> --scope <each held epic> --scope <new epic>` |
+| Hand your role to a successor | Spawn the heir over your OWN scope with `--hand-off`: without the explicit transfer flag the spawn is refused and you keep the role. The vacate and stamp are one registry write. Announce first: an outgoing lead that owes the team a handoff notice sends it BEFORE `--hand-off`, while the role still answers for it; after the transfer the outgoing session holds no role and no send authority. Return it with `fno agents org promote --reclaim`; that uses `crown_grantor` and creates no session. The attended in-place verb is a re-scope, not succession: it moves a role between two live rows (re-scope the incumbent first, then role the heir) but never creates an heir at spawn |
+| Read your own role | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno agents mail send <handle> "<msg>" --from-self` |
 | Steer a running teammate | `fno agents ask <name> "<instruction>"` pauses or redirects it WITHOUT ending it. `fno agents stop` is teardown, never steering: on claude it ends the session and the worker reads Done |
 | Resolve a handle you lost | `fno agents discovered-json` · `fno agents top` |
@@ -68,18 +70,19 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 | Wake a blocked/stopped teammate | `fno agents resume <handle>` (then re-send) |
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
 | End a thread/daemon worker | `fno agents stop <name>` |
-| Halt the fleet, a scope, or one crown | `fno agents incident stop --reason "<why>"` arms the fleet breaker: new spawns, dispatch ticks, and `fno doctor test` admissions refuse fleet-wide (a suite started outside that path is not gated) until `fno agents incident clear --reason "<why>"`; a default stop holds live loops at their next turn end, `--hold spawns` keeps them running, and `--session <id>` or `--territory <scope>` applies a bounded halt. Matching watchdog wakes and PR nudges refuse until clear or expiry; mail stays open, `fno agents incident status` reads the generation. Arming is outward and no standing law grants an agent the authority, so escalate with evidence and arm on user order. `fno agents org cancel --scope <scope>` cancels one scope's walk; `fno agents org done` ends one crown |
+| Halt the fleet, a scope, or one role | `fno agents incident stop --reason "<why>"` arms the fleet breaker: new spawns, dispatch ticks, and `fno doctor test` admissions refuse fleet-wide (a suite started outside that path is not gated) until `fno agents incident clear --reason "<why>"`; a default stop holds live loops at their next turn end, `--hold spawns` keeps them running, and `--session <id>` or `--territory <scope>` applies a bounded halt. Matching watchdog wakes and PR nudges refuse until clear or expiry; mail stays open, `fno agents incident status` reads the generation. Arming is outward and no standing law grants an agent the authority, so escalate with evidence and arm on user order. `fno agents org cancel --scope <scope>` cancels one scope's walk; `fno agents org done` ends one role |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
 | Land a green child | `fno do pr merge <n>` (only when config permits) |
 
 **Anointing on the thread substrate.**
 
-`--crown` rides `--substrate thread` for Claude only. Non-Claude thread spawns reject it. For Claude, only `headless` is refused, since a one-shot exits before it can reign. The retired `bg` spelling refuses with a redirect to `thread`.
+`--promote` rides `--substrate thread` for Claude only. Non-Claude thread spawns reject it. For Claude, only `headless` is refused, since a one-shot exits before it can lead. The retired `bg` spelling refuses with a redirect to `thread`.
 
-What a thread sub-king gives up is placement, not authority.
+What a thread sub-lead gives up is placement, not authority.
+
 The placement flags are mux geometry and refuse outside a pane, and `--at current` resolves the anchor from `FNO_PANE`, which a thread session does not have.
-So a thread sub-king seats its own teammates in fresh tabs and never forms a co-located court.
-Anoint on thread for a sub-king that will pass; anoint on a pane for one that will hold court.
+So a thread sub-lead seats its own teammates in fresh tabs and never forms a co-located org.
+Anoint on thread for a sub-lead that will pass; anoint on a pane for one that will hold org.
 
 ## Lifecycle state semantics
 
@@ -108,7 +111,7 @@ CLAUSE
 See the canonical implementation worker spawn under [Control surfaces](#control-surfaces).
 ```
 
-`--at current` anchors the teammate to the king's own pane, so it lands in the king's workspace and tab with no focus race. The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
+`--at current` anchors the teammate to the lead's own pane, so it lands in the lead's workspace and tab with no focus race. The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
 
 **Route the next phase into the live session (reuse):**
 
@@ -147,14 +150,14 @@ gh pr list --head feature/     # already shipped?
 
 ```bash
 # read the artifact, rule, then:
-fno backlog update --dispatch-verb /fno:target --dispatch-brief "Blueprint approved; ship the court section + short_id fix."
+fno backlog update --dispatch-verb /fno:target --dispatch-brief "Blueprint approved; ship the org section + short_id fix."
 fno backlog update --add-blocker   # if a merge-order constraint applies
 ```
 
 ## Caveats
 
 - **`--workspace` is the canonical spelling.** A deprecated alias still resolves, which is the trap: a stale command runs clean in a manual test and teaches the wrong flag anyway. The migration note is in the [spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
-- **Placement is pane-only.** `--workspace`/`-s`, `--split`/`-x`, and `--at` are refused for `thread` and `headless`, which have no mux geometry. A court teammate is a pane, so this never binds court; it binds a pass that dispatches unattended, which carries mission provenance in the graph instead.
+- **Placement is pane-only.** `--workspace`/`-s`, `--split`/`-x`, and `--at` are refused for `thread` and `headless`, which have no mux geometry. A org teammate is a pane, so this never binds org; it binds a pass that dispatches unattended, which carries mission provenance in the graph instead.
 - **You never create a workspace first.** The first placement into a name creates it; there is no create verb. A blank name is a CLI error, not a fallback to the default.
 - **Moving a running pane is a layout operation, not a pane verb.** No `fno mux pane` verb migrates one - `break` detaches a pane into a new tab in the same session. `fno mux layout apply` does relocate a bound live pane, PTY intact, but it applies a whole shape to the destination tab and needs that template's full slot set, so use it to shape a tab rather than to shuffle a worker. A human at the TUI also has lighter paths you do not: move-pane, move-tab, and recruiting a running agent into a named workspace as a watch-only member (create-if-absent, persisted). Default to adopting an already-running worker logically (claim + mail), and do not kill a healthy one for layout.
 - **Sweep at boundaries, not on a repeating clock.** A heartbeat poll re-reads context every pass. It surfaces nothing the teammate's projected events do not. But never stop with a live teammate and no armed wake. A report can land `queued (durable)`. A pane can die reporting nothing. So an expected report is not coverage. The teammate you counted on to write is the one that strands you. Cover every live teammate you have not yet reconciled, owed report or not. Use one `wait` each, or one `subscribe` stream for the whole fleet. A reconciled `done` row matches instantly and spins, so it leaves the set. One armed wake is a backstop. A timer that fires regardless is the poll.
@@ -162,13 +165,13 @@ fno backlog update --add-blocker   # if a merge-order constraint applies
 - **Read decisions before dispatch.** Before dispatching any node, run `fno backlog decisions <id>` in addition to reading status and `plan_path`. A recorded verdict is the same stop signal as a closure. Reconcile it before deciding whether work remains.
 - **Qualified verbs, always.** Bare `/execute`, `/think`, `/blueprint` in a mixed-plugin session can resolve to a different plugin. Use `/fno:...` in every payload, routing mail, and `--dispatch-verb`.
 - **`/fno:target` is the execution verb, all sizes.** Raw `/fno:execute` has no claim, no gates, no ship, no finalize. A small PR is not an exemption.
-- **Lane accounting counts corpses.** Dead thread claims can starve court spawns; check `fno agents claim` liveness before concluding the project is saturated.
-- **`done` is stamped at finalize, not merge.** The wave gate needs `gh pr view --json state` truth, and pr-watch can be silently dead - verify it at crowning.
+- **Lane accounting counts corpses.** Dead thread claims can starve org spawns; check `fno agents claim` liveness before concluding the project is saturated.
+- **`done` is stamped at finalize, not merge.** The wave gate needs `gh pr view --json state` truth, and pr-watch can be silently dead - verify it at titling.
 - **Linking a plan to an unencumbered node arms the daemon within about a minute.** Wire blockers first, then link - same ordering as the pass (3a before 3b).
-- `--to-project` is anycast into a possibly-ghost inbox. It can return a success-shaped receipt for an undelivered message. When you mean the role, use `--to-king <scope>`. A stale direct handle keeps arriving after succession. An abdicated session keeps answering, crowned in name only. `--to-king` resolves the holder off the registry at send time. When nobody holds the scope, it refuses. If a handoff notice is owed, send it before `--succeed`. Send it while the crown still answers for you. After the transfer, direct crown-scoped mail to the successor or through `--to-king`. The abdicated session sends nothing. No notice is re-mailed per peer by hand.
+- `--to-project` is anycast into a possibly-ghost inbox. It can return a success-shaped receipt for an undelivered message. When you mean the role, use `--to-king <scope>`. A stale direct handle keeps arriving after succession. An abdicated session keeps answering, titled in name only. `--to-king` resolves the holder off the registry at send time. When nobody holds the scope, it refuses. If a handoff notice is owed, send it before `--hand-off`. Send it while the role still answers for you. After the transfer, direct role-scoped mail to the successor or through `--to-king`. The abdicated session sends nothing. No notice is re-mailed per peer by hand.
 - **The retired `<harness>-<short-id>` mail form is refused.** Use the bare 8-hex id.
-- **One input path per teammate.** The crowning brief fixes whether a teammate is driven by mail-inject or the pane layer's own prompt verb; the two never both drive one pane.
+- **One input path per teammate.** The titling brief fixes whether a teammate is driven by mail-inject or the pane layer's own prompt verb; the two never both drive one pane.
 
 ## The minion side
 
-Every teammate spawned into a court owes its king four behaviors - report, ask, message-peers, escalate - stated in the spawn payload. The canonical, pasteable form (report line, delivery doctrine, `context: NN% used` field) is [minion-clause.md](minion-clause.md); it is the single source, and both this reference and the SKILL body point to it rather than restating it, so it cannot fork.
+Every teammate spawned into an org owes its lead four behaviors - report, ask, message-peers, escalate - stated in the spawn payload. The canonical, pasteable form (report line, delivery doctrine, `context: NN% used` field) is [minion-clause.md](minion-clause.md); it is the single source, and both this reference and the SKILL body point to it rather than restating it, so it cannot fork.

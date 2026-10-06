@@ -39,7 +39,7 @@ Each phrasing below was weighed against the table during the authority rename an
 
 - **operator ruling** - a dated decision citation ("operator ruling 2026-08-13"). It records who ruled. It is history, not a live gate. New rulings say superuser in their prose.
 - **operator override** - config precedence the human set (`EVENTS_SCHEMA_PATH`, `FNO_AGENTS_BIN`). It names a setting, not the authority a gate checks.
-- **queue lanes** - the king board's `operator-request` lane, the `fno inbox user` queue's internal `operator lane` file name, and the origin-keyed voter lane. They hang off the wire value and the stored rows.
+- **queue lanes** - the lead board's `operator-request` lane, the `fno inbox user` queue's internal `operator lane` file name, and the origin-keyed voter lane. They hang off the wire value and the stored rows.
 - **`operator` typing** for pane provenance - keystroke provenance in `mux_cli.rs`, not the mail-probe warning. The mail-probe pitfall family says superuser typing.
 
 ## A deliberate omission

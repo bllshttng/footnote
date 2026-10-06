@@ -326,19 +326,10 @@ fn live_frame(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     // A sizing client reports the content area, as a real client does.
-    let dims = size.filter(|_| fit).map(|t| {
-        let empty = LayoutView {
-            squads: Vec::new(),
-            active_squad: 0,
-            panes: Vec::new(),
-            focus: 0,
-            area: (0, 0),
-            agents: Vec::new(),
-            focus_node: None,
-        };
-        View::new(t, server.into(), empty).content_dims()
-    });
-    let mut seen = runtime.block_on(observe(&socket, cwd, dims))?;
+    let dims = size
+        .filter(|_| fit)
+        .map(|t| View::new(t, server.into(), LayoutView::default()).content_dims());
+    let mut seen = runtime.block_on(observe(&socket, cwd.clone(), dims))?;
     if let Some(name) = squad {
         let target = seen
             .layout
@@ -361,6 +352,9 @@ fn live_frame(
     let area = seen.layout.area;
     let mut view = View::new(area, server.into(), seen.layout);
     view.theme = chrome;
+    // The snapshot paints what a live client in this cwd would, so the
+    // card-graph config latches here the way attach_and_run does.
+    view.card_graph = crate::digest_overlay::card_graph(Path::new(&cwd));
     view.frames = seen.frames;
     view.term = match size {
         Some(t) => t,

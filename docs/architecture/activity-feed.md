@@ -122,7 +122,7 @@ Tab completes the token before the cursor. A key prefix completes from the share
 
 ## Day boundaries
 
-`fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and reign check-ins. The native fold returns JSON or a short text readback. The native verb's `--commit` writes one bounded `day_boundary` row to the project journal first. It then writes the same row to `~/.fno/questions.jsonl` for durable cross-rotation recall. The inbox relay only selects the destination, so the operator command lives under the inbox. The row carries ids and counts only. The writer sizes the row against the validated event limit before any write. If the row is over the limit, the writer refuses it and never substitutes.
+`fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and lead check-ins. The native fold returns JSON or a short text readback. The native verb's `--commit` writes one bounded `day_boundary` row to the project journal first. It then writes the same row to `~/.fno/questions.jsonl` for durable cross-rotation recall. The inbox relay only selects the destination, so the operator command lives under the inbox. The row carries ids and counts only. The writer sizes the row against the validated event limit before any write. If the row is over the limit, the writer refuses it and never substitutes.
 
 The permanent question index stores the boundary reference because the project journal rotates at 8 MiB and keeps only one rotated file. The index is recall and provenance, not a second source of question truth. Open questions still come from the existing lifecycle fold, and a failed index append names the boundary id after the project append. The boundary id is stable per kind and local day. A retry after that failure recognizes its own journal row and appends only the index leg, so no orphan row accumulates.
 
@@ -144,7 +144,7 @@ It does NOT borrow the asking row's session. That session asked the question. It
 
 A row with a session and no harness reads the lane its session ran. The projection builds one session-to-harness map from the graph's `sessions[]` rows and the spawn events. It joins on the session id. A session in neither source stays absent. No guess.
 
-A row that rolls up to a held team scope carries `lead`: the crown holder's name, beside the `owner` spelling the panel groups on. A row with no node whose parent session IS a held crown holder's session rolls up to that holder.
+A row that rolls up to a held team scope carries `lead`: the role holder's name, beside the `owner` spelling the panel groups on. A row with no node whose parent session IS a held role holder's session rolls up to that holder.
 
 ## A click opens provenance, not a deep link
 
@@ -160,7 +160,7 @@ Three of those nine are measured to be mostly unrecorded. So the view separates 
 
 Which silence a cell shows is read from the ROW, never from its kind. A `node_ended` on a node that ran carries the last do or ship session, so its blank lane is `NOT RECORDED`. A `node_ended` on a node nothing ever ran carries no session, and only then is the lane inapplicable.
 
-Pane, parent and king are a live lookup against the roster, joined on the exact `harness_session_id`. Never on the row NAME. A later worker can reuse a name, and the view then answers about a different session.
+Pane, parent and lead are a live lookup against the roster, joined on the exact `harness_session_id`. Never on the row NAME. A later worker can reuse a name, and the view then answers about a different session.
 
 The deep link is this view's footer ACTION, not the gesture that opened it. Inspecting attaches and resumes nothing on its own.
 
@@ -170,7 +170,7 @@ For a `node_created` row with a node id, the footer offers `b: blueprint`. Press
 
 ## Open questions in the sideline
 
-Open questions also show as a block in the sideline, pinned above the court block. The block reads `fno-agents needs --items`, not the feed: the feed shows a question's history, and the block shows only what is open. An answer picked in the block's overlay records `sink: mux`, and the row shows the delivery rung for 15 minutes. See [attention-items](attention-items.md) for the delivery ladder.
+Open questions also show as a block in the sideline, pinned above the org block. The block reads `fno-agents needs --items`, not the feed: the feed shows a question's history, and the block shows only what is open. An answer picked in the block's overlay records `sink: mux`, and the row shows the delivery rung for 15 minutes. See [attention-items](attention-items.md) for the delivery ladder.
 
 ## Deploy rule
 

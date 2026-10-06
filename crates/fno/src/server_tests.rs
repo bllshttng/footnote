@@ -8317,7 +8317,6 @@ pub(super) fn empty_core() -> Core {
         portal_session_guards: std::collections::BTreeMap::new(),
     }
 }
-
 fn placement_core() -> Core {
     let mut core = empty_core();
     core.session.add_squad(

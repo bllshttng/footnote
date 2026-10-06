@@ -906,7 +906,9 @@ def test_us2_schema_version_is_three() -> None:
     # v34: additive `lineage_kind` - the served CHILD/PEER word the liveness
     # sweep stamps on rows with a spawn edge.
     # v38: sweep-owned context and unread facts survive compatibility writes.
-    assert SCHEMA_VERSION == 38
+    # v39 (x-fdab): additive `tool_calls`/`tool_errors` - the daemon's
+    # incremental transcript fold, the sideline card graph's input.
+    assert SCHEMA_VERSION == 39
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:

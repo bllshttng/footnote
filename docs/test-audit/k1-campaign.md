@@ -16,7 +16,7 @@ The campaign stops at 2,776, above the 1,504 ceiling, because the keep rule keep
   - `cli/tests/test_lazy_imports.py` (48): lazy-import contracts. Menu projection, import cycles, error paths, race windows.
   - `cli/tests/unit/test_route_resolve.py` (50): already row-declared. The docstring records the earlier conversion.
   - `cli/tests/goldens/*` (46): byte pins of the fno-agents receipts, named as pins by `scripts/ci/reachable-paths-baseline.txt` (`msg-twin` rows). User-facing bytes at the strongest boundary. Deleting them breaks the provenance gate's documented evidence.
-  - `tests/hooks/*` (121 across push, merge-guard, coverage): fail-closed path guards. The king's red line: never delete a test that is the only guard for a fail-closed path. Folded where branches repeat, kept one row per branch.
+  - `tests/hooks/*` (121 across push, merge-guard, coverage): fail-closed path guards. The lead's red line: never delete a test that is the only guard for a fail-closed path. Folded where branches repeat, kept one row per branch.
 - Five files in the top ten spot-verdicted: doctor (136), update (110), the cli_hooks family, the route pieces, the config cluster. Their tests are distinct contracts, mostly already post-audit. Docstrings cite sigma reviews, PR review rounds and measured incidents. The plan's 678 one-assert signal counted shapes, not redundancy.
 
 ## Folded files
@@ -33,6 +33,6 @@ The campaign stops at 2,776, above the 1,504 ceiling, because the keep rule keep
 
 Owed before any deeper cut resumes. The fold deltas above are covered by their file-scoped test runs, all green locally. The whole-file keepers were not edited, so no keeper contract changed.
 
-## Next lever (for the king)
+## Next lever (for the lead)
 
 Halving K1 by deletion means deleting distinct-contract tests of fail-closed tooling. That is an executive call against the keep rule, not a campaign gap. The honest ways to the 50 percent suite goal: rule whole owner-areas deletable, then cut them wholesale. Or concentrate campaigns on the Rust suites (K8, K9), whose declaration families fold mechanically.

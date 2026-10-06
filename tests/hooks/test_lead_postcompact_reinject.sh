@@ -47,6 +47,9 @@ if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
   cat "$LEAD_REG_FIXTURE"
 elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
   cat "$LEAD_FAQ_FIXTURE" 2>/dev/null || true
+elif [ "$1" = "agents" ] && [ "$2" = "org" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
+  # The canonical org spelling forwards the same action.
+  cat "$LEAD_FAQ_FIXTURE" 2>/dev/null || true
 elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
   cat "$LEAD_HANDOFF_PATH_FIXTURE" 2>/dev/null || true
 elif [ "$1" = "backlog" ] && [ "$2" = "get" ]; then
