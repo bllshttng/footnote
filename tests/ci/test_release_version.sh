@@ -51,11 +51,14 @@ printf '[package]\nname = "fno-agents"\nversion = "0.3.2"\nedition = "2021"\n' >
 # the metadata parse below tests the VERSION, not the skeleton's shape.
 printf 'fn main() {}\n' > "$sync/crates/fno/src/main.rs"
 printf 'fn main() {}\n' > "$sync/crates/fno-agents/src/main.rs"
-json_manifests=".claude-plugin/plugin.json .claude-plugin/marketplace.json gemini-extension.json .codex-plugin/plugin.json .opencode/package.json plugins/openclaw/promise-tag-reader/package.json plugins/buddy/.claude-plugin/plugin.json"
+json_manifests=".claude-plugin/plugin.json .claude-plugin/marketplace.json gemini-extension.json .codex-plugin/plugin.json .opencode/package.json plugins/openclaw/promise-tag-reader/package.json"
 for j in $json_manifests; do
   mkdir -p "$sync/$(dirname "$j")"
   printf '{\n  "name": "t",\n  "version": "0.3.2"\n}\n' > "$sync/$j"
 done
+# buddy versions on its own, outside the fno lockstep: seed it at 0.0.1.
+mkdir -p "$sync/plugins/buddy/.claude-plugin"
+printf '{\n  "name": "buddy",\n  "version": "0.0.1"\n}\n' > "$sync/plugins/buddy/.claude-plugin/plugin.json"
 sv() { bash "$sync/scripts/release/sync-version.sh" "$@"; }
 
 # AC4: a semver spelling or a partial version exits 2 and writes nothing.
@@ -83,6 +86,13 @@ check "plugin.json reads 0.4.0rc1" $?
 run "$work/o" "$work/e" sv --check
 rc=$?
 check_rc "--check agrees after an rc bump (exit 0)" "$rc" "0"
+
+# buddy is not in the lockstep: the manifest list omits it, an fno bump leaves
+# it at 0.0.1, and --check passes while its version differs from the wheel.
+! grep -q 'plugins/buddy' "$sync/scripts/release/sync-version.sh"
+check "sync-version.sh does not list buddy" $?
+grep -q '"version": "0.0.1"' "$sync/plugins/buddy/.claude-plugin/plugin.json"
+check "buddy plugin.json stays at 0.0.1 through an fno bump" $?
 
 # Dev shape converts the same way.
 run "$work/o" "$work/e" sv 0.4.0.dev20260925

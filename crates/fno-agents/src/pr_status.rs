@@ -93,6 +93,42 @@ pub(crate) fn without_coverage_statuses(rollup: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Conclusions that prove a check genuinely failed: the settled fail states
+/// minus the take-aways. A CANCELLED row classifies fail upstream but never
+/// settled, so the infra-kill shape needs its own list here.
+const REAL_FAIL_STATES: [&str; 5] = [
+    "FAILURE",
+    "TIMED_OUT",
+    "STARTUP_FAILURE",
+    "ACTION_REQUIRED",
+    "ERROR",
+];
+
+/// True when every non-green row is a CANCELLED take-away: no real failure,
+/// nothing still running. That is the infra-kill signature - a platform that
+/// takes runners away reds nothing and finishes nothing - and the gate that
+/// decides the payload carries GitHub's incident word. Empty rollups and
+/// in-progress rows read false: the shape must be settled-and-taken-away.
+pub(crate) fn cancelled_only(rollup: &[Value]) -> bool {
+    let deduped = crate::check_supersession::latest_per_name(&Value::Array(rollup.to_vec()));
+    let deduped = deduped.as_array().cloned().unwrap_or_default();
+    let mut cancelled = 0;
+    for check in &deduped {
+        let raw = alt_conclusion(check);
+        if raw == "CANCELLED" {
+            cancelled += 1;
+            continue;
+        }
+        if !has_settled_marker(check) {
+            return false;
+        }
+        if REAL_FAIL_STATES.contains(&raw.as_str()) {
+            return false;
+        }
+    }
+    cancelled > 0
+}
+
 /// The pure verdict: (word, exit code, counts). Empty rollup reads unknown
 /// and so does an all-StatusContext one - zero real check-runs never reads
 /// green (docs/architecture/pr-status-verdict.md).
@@ -813,21 +849,6 @@ pub(crate) fn status_payload<P: GhProbe>(
             .cloned()
             .unwrap_or_default();
 
-    // An Actions incident beside the verdict: a CANCELLED latest row whose
-    // job never got a runner is an infrastructure casualty, not a test
-    // failure, and githubstatus confirms before the note prints.
-    let incident: Value = if !is_terminal && verdict != "green" {
-        incident_for_checks(
-            probe,
-            cwd,
-            slug,
-            &latest_rows,
-            &crate::gh_incident::components_page,
-        )
-    } else {
-        Value::Null
-    };
-
     // A job id is minted per attempt, so a known id is the same completed job.
     let prior_payload = prior.unwrap_or(&Value::Null);
     let mut known: BTreeMap<String, Value> = BTreeMap::new();
@@ -1078,6 +1099,23 @@ pub(crate) fn status_payload<P: GhProbe>(
         }]);
     }
 
+    // The infra-kill receipt: only a cancelled-only take-away spends the
+    // status-page read, and an unreachable page leaves the field out.
+    let platform_incident = if !is_terminal {
+        let rollup = pr_json
+            .get("statusCheckRollup")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if cancelled_only(&without_coverage_statuses(&rollup)) {
+            seams::platform_incident()
+        } else {
+            Value::Null
+        }
+    } else {
+        Value::Null
+    };
+
     let inputs = compose::ComposeInputs {
         pr: pr.to_string(),
         pr_json,
@@ -1097,59 +1135,9 @@ pub(crate) fn status_payload<P: GhProbe>(
         },
         failures,
         review_lane: lane,
+        platform_incident,
     };
-    let (code, mut payload, mut stderr) = compose::compose_payload(&inputs);
-    if !incident.is_null() {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("incident".into(), incident.clone());
-        }
-        stderr.push(crate::gh_incident::incident_note(&incident));
-    }
-    (code, payload, stderr)
-}
-
-/// The incident probe over a PR's latest check rows: a CANCELLED row whose
-/// linked job never got a runner, confirmed by githubstatus. Capped at
-/// three job reads, and the components fetch rides a closure seam so a
-/// confirmed casualty is the only thing that pays for it. Fail-open: every
-/// read error answers Null and the verdict stands alone.
-fn incident_for_checks<P: GhProbe>(
-    probe: &P,
-    cwd: &Path,
-    slug: &str,
-    latest: &[Value],
-    components: &dyn Fn() -> Option<Value>,
-) -> Value {
-    for check in latest
-        .iter()
-        .filter(|c| alt_conclusion(c) == "CANCELLED")
-        .take(3)
-    {
-        let Some((_owner, _repo, job_id)) = job_ref(check) else {
-            continue;
-        };
-        let args = vec![
-            "api".to_string(),
-            format!("repos/{slug}/actions/jobs/{job_id}"),
-        ];
-        let Ok((ok, stdout, _)) = probe.run_gh(cwd, &args) else {
-            continue;
-        };
-        let job = if ok {
-            serde_json::from_str::<Value>(&stdout).ok()
-        } else {
-            None
-        };
-        let Some(job) = job else { continue };
-        if !crate::gh_incident::cancelled_no_runner(std::slice::from_ref(&job)) {
-            continue;
-        }
-        // One confirmed casualty decides: a second job read buys nothing.
-        return components()
-            .and_then(|page| crate::gh_incident::actions_incident(&page))
-            .unwrap_or(Value::Null);
-    }
-    Value::Null
+    compose::compose_payload(&inputs)
 }
 
 /// Serializes tests that point the process-global FNO_PR_STATUS_CACHE_DIR

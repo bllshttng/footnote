@@ -50,6 +50,8 @@ is_release_version() {
 
 # The manifests whose top-level `"version"` must track the release. __init__.py
 # is the source of truth, so --check compares everything else against it.
+# buddy is deliberately absent: it versions on its own (0.0.1 today); a release
+# is a PR that bumps its plugin.json, never fno's stable promotion.
 JSON_MANIFESTS=(
   .claude-plugin/plugin.json
   .claude-plugin/marketplace.json
@@ -57,7 +59,6 @@ JSON_MANIFESTS=(
   .codex-plugin/plugin.json
   .opencode/package.json
   plugins/openclaw/promise-tag-reader/package.json
-  plugins/buddy/.claude-plugin/plugin.json
 )
 
 # --check: fail (exit 1) if any surface disagrees with the wheel version. The

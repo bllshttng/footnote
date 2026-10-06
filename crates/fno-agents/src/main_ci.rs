@@ -137,10 +137,10 @@ fn main_ci_token_from_pages<'a>(
 }
 
 /// The incident attachment: a red verdict whose run ended `cancel` reads the
-/// run's jobs for the never-got-a-runner shape, then confirms against
-/// githubstatus before the explanation rides the token. Every read is
-/// fail-open - a jobs or status-site failure leaves the token exactly as
-/// the fold built it.
+/// run's jobs for the never-got-a-runner shape, then confirms against the
+/// shared status-page seam before the explanation rides the token. Every
+/// read is fail-open - a jobs or status-site failure leaves the token
+/// exactly as the fold built it.
 fn attach_incident(cwd: &Path, token: &mut Value, red: Option<&Value>) {
     let Some(run) = red else {
         return;
@@ -162,15 +162,18 @@ fn attach_incident(cwd: &Path, token: &mut Value, red: Option<&Value>) {
     let Ok(jobs_page) = serde_json::from_str::<Value>(&raw) else {
         return;
     };
-    let Some(components) = crate::gh_incident::components_page() else {
+    let jobs = jobs_page.get("jobs").and_then(Value::as_array);
+    let Some(true) = jobs.map(|jobs| crate::gh_incident::cancelled_no_runner(jobs)) else {
         return;
     };
-    if let Some(incident) = crate::gh_incident::run_incident(run, &jobs_page, &components) {
-        token
-            .as_object_mut()
-            .expect("token is built as an object")
-            .insert("incident".into(), incident);
+    let incidents = crate::pr_status::seams::platform_incident();
+    if incidents.is_null() {
+        return;
     }
+    token
+        .as_object_mut()
+        .expect("token is built as an object")
+        .insert("platform_incident".into(), incidents);
 }
 
 /// The `main ci:` line body: a red verdict names the workflow and sha, a
@@ -189,9 +192,9 @@ pub(crate) fn main_ci_render(v: Option<&Value>) -> String {
                 ),
                 None => field("verdict").to_string(),
             };
-            match o.get("incident") {
-                Some(incident) => {
-                    format!("{base} {}", crate::gh_incident::incident_line(incident))
+            match o.get("platform_incident") {
+                Some(incidents) => {
+                    format!("{base} {}", crate::gh_incident::incident_line(incidents))
                 }
                 None => base,
             }
@@ -685,8 +688,12 @@ mod tests {
     }
 
     /// The rendered line names the workflow and sha; a plain verdict is the
-    /// word alone, legacy string tokens pass through untouched, and an
-    /// incident rides the explanation beside the verdict.
+    /// word alone, legacy string tokens pass through untouched, and a live
+    /// platform incident rides the explanation beside the verdict. The
+    /// casualty discrimination feeding the attachment lives here too: only a
+    /// cancelled, never-started, runnerless job set is a casualty - a
+    /// started job (manual or timeout cancel), a failure conclusion, and an
+    /// empty job set are causes.
     #[test]
     fn main_ci_render_names_the_failed_workflow_and_sha() {
         let red = serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"});
@@ -700,16 +707,38 @@ mod tests {
             "green".to_string()
         );
         assert_eq!(main_ci_render(None), "-".to_string());
-        let incident = red.clone();
-        let mut with_incident = incident.as_object().unwrap().clone();
-        with_incident.insert(
-            "incident".into(),
-            serde_json::json!({"status": "Degraded performance", "since": "2026-10-05T19:11:58Z"}),
-        );
+        let casualty = serde_json::json!({
+            "name": "cargo audit", "status": "completed", "conclusion": "cancelled",
+            "runner_name": null, "started_at": null, "completed_at": "2026-10-05T19:48:00Z",
+        });
+        assert!(crate::gh_incident::cancelled_no_runner(&[casualty.clone()]));
+        let ran_then_cancelled = serde_json::json!({
+            "name": "cli-ci", "status": "completed", "conclusion": "cancelled",
+            "runner_name": null, "started_at": "2026-10-05T19:27:00Z",
+        });
+        assert!(!crate::gh_incident::cancelled_no_runner(&[
+            ran_then_cancelled
+        ]));
+        let test_failure = serde_json::json!({
+            "name": "rollup", "status": "completed", "conclusion": "failure",
+            "runner_name": null, "started_at": "2026-10-05T19:27:00Z",
+        });
+        assert!(!crate::gh_incident::cancelled_no_runner(&[test_failure]));
+        assert!(!crate::gh_incident::cancelled_no_runner(&[]));
+        let incidents = serde_json::json!([
+            {"name": "Incident with Actions", "status": "investigating",
+             "created_at": "2026-10-05T19:11:58Z", "updated_at": "2026-10-05T21:32:31Z"},
+        ]);
+        let mut with_incident = red.as_object().unwrap().clone();
+        with_incident.insert("platform_incident".into(), incidents.clone());
         assert_eq!(
             main_ci_render(Some(&Value::Object(with_incident))),
-            "red (cli-ci at a1) GitHub Actions incident: Degraded performance since 2026-10-05T19:11:58Z"
+            "red (cli-ci at a1) GitHub Actions incident: investigating since 2026-10-05T21:32:31Z"
                 .to_string()
+        );
+        assert_eq!(
+            crate::gh_incident::incident_line(&Value::Array(vec![])),
+            "GitHub Actions incident: unknown since unknown"
         );
     }
 

@@ -28,6 +28,7 @@ pub(crate) struct ComposeInputs {
     pub merge_execution: Value,
     pub failures: Value,
     pub review_lane: bool,
+    pub platform_incident: Value,
 }
 
 /// One status read: the exit code, the stdout JSON payload, the stderr lines
@@ -206,6 +207,11 @@ pub(crate) fn compose_payload(inputs: &ComposeInputs) -> (i32, Value, Vec<String
     }
     for (k, v) in &rerun_fields {
         payload.insert(k.clone(), v.clone());
+    }
+    // The infra-kill receipt: the live half resolves it only for a
+    // cancelled-only take-away shape, so its presence IS the signal.
+    if !inputs.platform_incident.is_null() {
+        payload.insert("platform_incident".into(), inputs.platform_incident.clone());
     }
     payload.insert("optional_reviews".into(), reviews_list);
     payload.insert(
@@ -602,7 +608,7 @@ pub(crate) fn error_payload(pr: &str, reason: &super::RestReason) -> (i32, Value
 }
 
 /// The stderr notes a cache serve replays, in the Python `_serve` order:
-/// coverage recompute, failure detail, rerun recovery, incident.
+/// coverage recompute, failure detail, rerun recovery.
 pub(crate) fn serve_notes(payload: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(coverage) = payload.get("review_coverage") {
@@ -615,11 +621,6 @@ pub(crate) fn serve_notes(payload: &Value) -> Vec<String> {
     if let Some(obj) = payload.as_object() {
         failures_note(obj, &mut out);
         rerun_recovery_note(obj, &mut out);
-    }
-    if let Some(incident) = payload.get("incident") {
-        if !incident.is_null() {
-            out.push(crate::gh_incident::incident_note(incident));
-        }
     }
     out
 }
