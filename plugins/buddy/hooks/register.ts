@@ -565,7 +565,7 @@ export function register(on: On) {
       justifyContent: 'flex-end',
       height: e.props.scroll?.bodyRows ?? 12,
       children: [
-        ...(words ? [Text({ wrap: 'wrap', children: [words] }), Text({ children: [' '] })] : []),
+        ...(words ? [Box({ borderStyle: 'round', children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: ['  ◦ ·'] })] : []),
         ...(fleet ? [Text({ dimColor: true, wrap: 'wrap', children: [fleet] }), Text({ children: [' '] })] : []),
         ...sprite(buddy, now).map(line => Text({ color, children: [line] })),
         Button({ key: 'pet', label: buddy.name, hotkey: 'p', plain: true, dimColor: true, onPress: async () => {
