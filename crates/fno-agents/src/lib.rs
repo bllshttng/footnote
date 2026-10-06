@@ -473,6 +473,7 @@ pub mod wake_name;
 pub mod watch_expiry;
 pub mod wave;
 pub mod worked_nodes;
+pub mod worker_wake;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1695,6 +1696,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The lead-wake arm's receipt: one row per daemon wake episode, the
     // dedupe memory the arm folds before it wakes again (lead_wake.rs).
     "lead_wake",
+    "worker_wake",
     // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
