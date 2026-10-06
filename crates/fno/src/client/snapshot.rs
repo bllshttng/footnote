@@ -15,18 +15,46 @@ use std::time::{Duration, Instant};
 
 use super::{LayoutView, View};
 use crate::frame_html::{self, Theme};
+use crate::popup::Anchor;
 use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSION};
 
 const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
 [--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
-[--font <family>] [--message <fmail-id>]";
+[--font <family>] [--message <fmail-id>] \
+[--view bell|row-menu|tab-menu|sideline-menu]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
     Html,
     Svg,
     Png,
+}
+
+/// A client-local surface a snapshot opens before composing. These live in
+/// the client's own state, so the server frame never carries them; the seam
+/// flips the same state the live keys flip, then paints.
+#[derive(Debug, PartialEq)]
+pub enum ViewKind {
+    /// The notifications bell panel, with one synchronous gather like the
+    /// live panel's `maybe_kick`.
+    Bell,
+    /// The sideline row context menu on the first agent row.
+    RowMenu,
+    /// The tab-strip context menu on the first tab.
+    TabMenu,
+    /// The sideline menu popup.
+    SidelineMenu,
+}
+
+fn parse_view(v: &str) -> Option<ViewKind> {
+    match v {
+        "bell" => Some(ViewKind::Bell),
+        "row-menu" => Some(ViewKind::RowMenu),
+        "tab-menu" => Some(ViewKind::TabMenu),
+        "sideline-menu" => Some(ViewKind::SidelineMenu),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -49,6 +77,9 @@ pub struct SnapshotArgs {
     /// subprocess, so the snapshot runs one gather synchronously; the id
     /// resolves to its thread and positions the cursor there.
     pub message: Option<String>,
+    /// The client-local surface to open before composing, for shots of a
+    /// bell panel or a menu no server frame ever carries.
+    pub view: Option<ViewKind>,
 }
 
 /// True when a `serve` tail asks for a snapshot rather than the web bridge.
@@ -67,6 +98,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
     let mut fit = false;
     let mut font = None;
     let mut message = None;
+    let mut view = None;
     let mut it = tail.iter();
     while let Some(a) = it.next() {
         let a = a.to_str().ok_or_else(|| USAGE.to_string())?;
@@ -90,6 +122,12 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
             }
             "--out" => out = Some(PathBuf::from(value()?)),
             "--message" => message = Some(value()?),
+            "--view" => {
+                let v = value()?;
+                view = Some(parse_view(&v).ok_or_else(|| {
+                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, row-menu, tab-menu or sideline-menu")
+                })?)
+            }
             tok @ ("--server" | "--session") => {
                 crate::mux_cli::note_server_flag(tok);
                 server = Some(value()?)
@@ -156,6 +194,7 @@ session text, run scripts/ops/mux-demo-snapshot.sh"
         fit,
         font,
         message,
+        view,
     })
 }
 
@@ -180,6 +219,7 @@ pub fn run(args: SnapshotArgs) -> i32 {
         args.fit,
         chrome,
         args.message.as_deref(),
+        args.view.as_ref(),
     );
     match frame.and_then(|f| write(&f, &args)) {
         Ok(()) => {
@@ -278,6 +318,7 @@ fn live_frame(
     fit: bool,
     chrome: crate::theme::Theme,
     message: Option<&str>,
+    kind: Option<&ViewKind>,
 ) -> Result<Frame, String> {
     let socket = proto::socket_path(server)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
@@ -351,6 +392,38 @@ fn live_frame(
             .unwrap_or_default();
         let mail = runtime.block_on(crate::messages_model::gather());
         crate::client::messages_view::apply_gather(&mut view, gen, mail, Err("no org tree".into()));
+    }
+    // The messages seam above is the shape: flip the client state the live
+    // keys flip, run one synchronous gather where the live panel would kick
+    // one, then compose. Menus build from the layout the server sent, so
+    // they need no gather.
+    match kind {
+        Some(ViewKind::Bell) => {
+            let gen = crate::client::bell::open(&mut view);
+            let projection = runtime.block_on(crate::messages_model::gather());
+            crate::client::bell::apply(&mut view, gen, projection);
+        }
+        Some(ViewKind::RowMenu) => {
+            let i = view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, super::DisplayRow::Agent(_)))
+                .ok_or("no agent rows to open a row menu on")?;
+            view.open_row_menu(i, Anchor::Center);
+        }
+        Some(ViewKind::TabMenu) => {
+            let tid = view
+                .layout
+                .squads
+                .iter()
+                .flat_map(|s| s.tabs.iter())
+                .next()
+                .map(|t| t.id)
+                .ok_or("no tabs to open a tab menu on")?;
+            view.open_tab_menu_by_id(tid, Anchor::Center);
+        }
+        Some(ViewKind::SidelineMenu) => view.open_sideline_menu(Anchor::Center),
+        None => {}
     }
     crate::lattice::freeze_spin();
     Ok(view.compose())
@@ -445,4 +518,36 @@ async fn observe(socket: &Path, cwd: String, dims: Option<(u16, u16)>) -> Result
     let layout = layout.expect("loop exits with a layout");
     frames.retain(|id, _| layout.panes.iter().any(|(p, _)| p == id));
     Ok(Observed { layout, frames })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_extra(extra: &[&str]) -> Result<SnapshotArgs, String> {
+        let mut tail: Vec<OsString> = ["--snapshot", "--server", "demo", "--out", "/tmp/s.png"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        tail.extend(extra.iter().map(OsString::from));
+        parse(&tail)
+    }
+
+    #[test]
+    fn view_flag_names_every_kind_and_refuses_the_rest() {
+        for (name, kind) in [
+            ("bell", ViewKind::Bell),
+            ("row-menu", ViewKind::RowMenu),
+            ("tab-menu", ViewKind::TabMenu),
+            ("sideline-menu", ViewKind::SidelineMenu),
+        ] {
+            let args = parse_extra(&["--view", name]).expect(name);
+            assert_eq!(args.view, Some(kind), "{name}");
+        }
+        let e = parse_extra(&["--view", "feed"]).expect_err("unknown view names the options");
+        assert!(
+            e.contains("bell, row-menu, tab-menu or sideline-menu"),
+            "{e}"
+        );
+    }
 }
