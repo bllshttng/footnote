@@ -902,21 +902,20 @@ fn x586d_done_node_session_with_a_typed_turn_two_minutes_old_survives_the_sweep(
         summary.kept_active.is_empty(),
         "the age seam read quiet, so the hold must come from the typed turn: {summary:?}"
     );
-    assert_eq!(summary.kept_attended.len(), 1);
+    // The detail names the typed turn with a live age: the sweep reads the
+    // clock after the fixture stamps the rows, so a second can cross and
+    // the exact "120s" would flake. The hold is what the contract pins.
+    assert_eq!(summary.kept_attended.len(), 1, "{summary:?}");
     assert_eq!(summary.kept_attended[0].0, "t-attended");
-    // The age reads from wall-clock seconds between the fixture write and
-    // the sweep read, so a loaded runner prints 121s and an exact-string
-    // assert flakes. Assert the tolerance window the fixture implies.
-    let age: i64 = summary.kept_attended[0]
-        .1
-        .trim_start_matches("typed user turn ")
-        .trim_end_matches("s ago")
-        .parse()
-        .expect("the attended hold names a typed turn age");
+    let detail = &summary.kept_attended[0].1;
+    let age: i64 = detail
+        .strip_prefix("typed user turn ")
+        .and_then(|rest| rest.strip_suffix("s ago"))
+        .and_then(|num| num.parse().ok())
+        .unwrap_or(i64::MAX);
     assert!(
-        (120..=180).contains(&age),
-        "the typed turn age drifted past the fixture window: {}",
-        summary.kept_attended[0].1
+        (120..=crate::attended::WINDOW_SECS).contains(&age),
+        "the attended hold names the typed turn inside the window: {summary:?}"
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
