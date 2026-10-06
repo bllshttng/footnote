@@ -139,7 +139,6 @@ fn read_legacy_directory(dir: &Path) -> Result<Vec<ClaimRecord>, String> {
 
 fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     let parent = dir
         .parent()
         .ok_or_else(|| "claims directory has no parent".to_string())?;
@@ -200,25 +199,20 @@ fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
         return Err(error.to_string());
     }
     drop(file);
-    if let Some(metadata) = &metadata {
-        let permissions = metadata.permissions();
-        std::fs::set_permissions(
-            dir,
-            std::fs::Permissions::from_mode(permissions.mode() & !0o222),
-        )
-        .map_err(|e| e.to_string())?;
+    if let Some(source) = &source {
         if let Err(error) = read_legacy_directory(dir) {
-            std::fs::set_permissions(dir, permissions)
-                .map_err(|e| format!("{error}; restoring claims permissions failed: {e}"))?;
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
         }
-        let source = source.as_ref().expect("directory has a backup path");
+        // Legacy writers publish at the original path. Once it is retired,
+        // their final rename or link cannot reach the archived snapshot.
         if let Err(error) = std::fs::rename(dir, source) {
-            std::fs::set_permissions(dir, permissions)
-                .map_err(|e| format!("{error}; restoring claims permissions failed: {e}"))?;
             let _ = std::fs::remove_file(&temporary);
-            return Err(error.to_string());
+            return Err(format!(
+                "claims migration could not retire {} to {}: {error}",
+                dir.display(),
+                source.display()
+            ));
         }
     }
     if let Err(error) = std::fs::rename(&temporary, dir) {
@@ -229,18 +223,12 @@ fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
                     source.display()
                 )
             })?;
-            std::fs::set_permissions(dir, metadata.as_ref().unwrap().permissions())
-                .map_err(|e| e.to_string())?;
         }
         let _ = std::fs::remove_file(&temporary);
         return Err(format!(
             "{}: claims migration fence failed: {error}",
             dir.display()
         ));
-    }
-    if let Some(source) = &source {
-        std::fs::set_permissions(source, metadata.as_ref().unwrap().permissions())
-            .map_err(|e| e.to_string())?;
     }
     Ok(source)
 }
