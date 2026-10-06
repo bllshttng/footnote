@@ -493,7 +493,7 @@ def test_a_race_holder_still_declines_in_the_write(court, monkeypatch, capsys) -
 
     assert _row("heir").crown_level is None
     assert _row("other-king").crown_level == 2, "the actual holder is untouched"
-    assert "crown declined" in capsys.readouterr().err
+    assert "role declined" in capsys.readouterr().err
 
 
 def test_a_name_rebound_since_the_plan_keeps_its_crown(court, monkeypatch, capsys) -> None:
@@ -517,7 +517,7 @@ def test_a_name_rebound_since_the_plan_keeps_its_crown(court, monkeypatch, capsy
     assert heir is not None and heir.crown_level is None
     assert holder is not None
     assert (holder.crown_level, holder.harness_session_id) == (2, "new-session")
-    assert "crown declined" in capsys.readouterr().err
+    assert "role declined" in capsys.readouterr().err
     assert not any(
         event["kind"] == "agent_crown_vacated" and event["holder"] == "other-king"
         for event in _events()
