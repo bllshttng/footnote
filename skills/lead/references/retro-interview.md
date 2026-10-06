@@ -1,6 +1,6 @@
 # The retro-interview prompt (canonical)
 
-The template an epic king runs as a **standard post-epic court step** - epic complete (every wave merged), before final abdication. Load it from [Post-epic: interview the court](once.md#post-epic-interview-the-court).
+The template an epic lead runs as a **standard post-epic org step** - epic complete (every wave merged), before final abdication. Load it from [Post-epic: interview the org](once.md#post-epic-interview-the-org).
 
 This is the ceremony the synthesis marked `ADD`: the retro interviews were the best-performing ritual of that evening, yet they were not a ceremony at all - the maintainer hand-asked the Director to interview each builder and had to prod with follow-ups carrying the dogfooding lens. The lens is now baked in, so the interview fires without human prodding. The output turns one epic's chaos into filed, mechanism-bearing graph items instead of folklore.
 
@@ -8,7 +8,7 @@ This is the ceremony the synthesis marked `ADD`: the retro interviews were the b
 
 - **When:** the epic's last wave has merged and you are about to abdicate. One pass, one interview per builder, then exit.
 - **Who:** every builder that carried a node in this epic. By the time the epic is done the builders have shipped and released their node claims, so `fno backlog epic status` (which derives `worker` from a live claim) and `top` / `discovered-json` (live sessions only) no longer map node -> builder - they show only who is still up. The durable map is the **ledger** (`fno.paths.ledger_json()`, `~/.fno/ledger.json` by default but honor a `config.paths.ledger_json` / `config.state_dir` override), which records `node -> run -> pr` per shipped node; read it to enumerate the epic's builders. Reaching a specific builder to interview it is then best-effort: mail the still-reachable ones (resolve a live handle from `fno agents discovered-json` / `top`), and for a builder gone to transcript-and-artifacts only, reconstruct its account from its transcript or note it unreachable. Do not treat the ledger's run id as a resumable session handle - it is the target run id, not the provider session id `fno agents resume` takes.
-- The king interviews because it holds cross-session knowledge a builder lacks. It saw every workspace, so it can ask the sibling-aware follow-up a siloed builder cannot self-generate.
+- The lead interviews because it holds cross-session knowledge a builder lacks. It saw every workspace, so it can ask the sibling-aware follow-up a siloed builder cannot self-generate.
 
 ## Delivery mechanics
 
@@ -36,7 +36,7 @@ Lens: footnote building footnote. Answer as the fresh agent you were when you ju
 2. ROUGH EDGES needing polish - what worked but cost you time, retries, or a workaround? Include anything you had to rediscover that should have been handed to you.
 3. WHAT WORKED vs WHAT DID NOT - which contracts/gates/verbs earned their place, and which fought you? Be specific about which, not "the tooling".
 4. CEREMONY audit - which steps felt unnecessary, confusing, or inverted for the size of your change? Which would you delete, and which would you keep even though they slowed you?
-5. <session-specific questions - the king fills these from what it saw this builder hit: a claim flap, a stale base, a review it drained, a fork it survived. One or two, concrete. Omit the line if none.>
+5. <session-specific questions - the lead fills these from what it saw this builder hit: a claim flap, a stale base, a review it drained, a fork it survived. One or two, concrete. Omit the line if none.>
 
 Reply by mail (--from-self). I will ask one follow-up per thin answer.
 ```

@@ -218,7 +218,7 @@ Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
 
 ## cmd_retract
 
-Measured 2026-09-13 at a cost of three dispatches: a king filed a row on
+Measured 2026-09-13 at a cost of three dispatches: a lead filed a row on
 a false premise, wrote the retraction as a progress note, and the row
 stayed plannable. Three blueprint sessions then each spent a spawn proving
 the same premise false. A note is prose beside the status every reader
@@ -285,7 +285,7 @@ Auto-bind closure claims for every OTHER merged PR this sweep just
 discovered on its own (). --pr-number above covers the two paths
 that already KNOW the PR number (the post-merge ritual, `fno do pr
 merge`); a THIRD path merges with no caller ever naming a number at
-all - an operator merging in the GitHub UI, or a king's automation -
+all - an operator merging in the GitHub UI, or a lead's automation -
 and is caught only later by this bare sweep's own forward/reverse scan.
 Full sweep only: a --pr-number call is scoped to its own PR above, and
 discovering totally unrelated merged PRs is this bare sweep's job (it

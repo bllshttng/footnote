@@ -4,8 +4,8 @@
 #
 # Format: <literal form>|<space-separated ruling ids>|<comma-separated repo paths>
 # An exempt path column is allowed only with a reason: exempt: <reason>.
---substrate thread|d-b1a7afe2|skills/lead/references/court-operations.md,skills/lead/references/postcompact-brief.md
-glm-5.3-flash[1m]|d-20293d74 d-94853e86|skills/lead/references/court-operations.md,skills/lead/references/postcompact-brief.md
-fno agents spawn|d-fa1a58ee d-496680aa d-dd8e2743|skills/lead/references/court-operations.md
+--substrate thread|d-b1a7afe2|skills/lead/references/org-operations.md,skills/lead/references/postcompact-brief.md
+glm-5.3-flash[1m]|d-20293d74 d-94853e86|skills/lead/references/org-operations.md,skills/lead/references/postcompact-brief.md
+fno agents spawn|d-fa1a58ee d-496680aa d-dd8e2743|skills/lead/references/org-operations.md
 fno do pr merge|d-a44a5a00|skills/lead/SKILL.md
 -|d-f2d9cfa7 d-8bc9f91e d-058e4e17 d-384d967c d-c4c1b9fc d-dbf83820 d-7c2908c8 d-b97b70eb|exempt: these rulings mention one-off, descriptive, or non-reusable forms; they do not teach a later implementation worker a command

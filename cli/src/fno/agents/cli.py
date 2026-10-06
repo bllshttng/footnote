@@ -1322,23 +1322,26 @@ def cmd_spawn(
             "panes per tab."
         ),
     ),
-    crown: list[str] = typer.Option(
+    promote: list[str] = typer.Option(
         [],
+        "--promote",
         "--crown",
         "-k",
         help=(
-            "Grant an orchestrator crown: epic id(s), one project, or "
-            "several. Refused on headless. Contract: "
-            "docs/guides/agents-spawn-flags.md."
+            "Promote the spawned worker to a titled role over a territory: "
+            "epic id(s), one project, or several. Contract: "
+            "docs/guides/agents-spawn-flags.md. --crown/-k is the retired "
+            "spelling; it answers for one release."
         ),
     ),
-    succeed: bool = typer.Option(
+    hand_off: bool = typer.Option(
         False,
+        "--hand-off",
         "--succeed",
         help=(
-            "Explicitly transfer a caller-held --crown territory to the spawned "
-            "heir. Without this flag, a same-scope crown is refused and the "
-            "caller keeps its crown."
+            "Hand the caller-held role to the spawned worker. Without it, a "
+            "same-scope promote is refused and the caller keeps its role. "
+            "--succeed is the retired spelling."
         ),
     ),
     node: str | None = typer.Option(
@@ -1593,9 +1596,30 @@ def cmd_spawn(
 
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
+    # Retired spellings bind the same options; name the replacement when the
+    # argv used one. The process argv is exact for the real door; a test
+    # runner's argv is its own, so the notice test pins the argv it asserts.
+    _args = sys.argv[1:]
+
+    def _used(flag: str) -> bool:
+        return any(t == flag or t.startswith(flag + "=") for t in _args)
+
+    if _used("--crown") or any(
+        t.startswith("-k") and not t.startswith("--") for t in _args
+    ):
+        print(
+            "--crown is now --promote; the old spelling answers for one release.",
+            file=sys.stderr,
+        )
+    if _used("--succeed"):
+        print(
+            "--succeed is now --hand-off; the old spelling answers for one release.",
+            file=sys.stderr,
+        )
+
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
     seedless = seedless_thread_refusal(
-        harness, substrate, message, resume=resume, crown=bool(crown), name=name, node=node
+        harness, substrate, message, resume=resume, crown=bool(promote), name=name, node=node
     )
     if seedless:
         print(f"fno agents spawn: {seedless}", file=sys.stderr)
@@ -1728,33 +1752,19 @@ def cmd_spawn(
         print(refusal, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # --crown/-k <scope>... : the operator names the TERRITORY and the ladder
-    # altitude is derived from it (crown.derive_crown_level). The grantor is
-    # stamped ambiently at spawn from this session, so the child's row records who
-    # actually bestowed the crown, never a value it could forge.
-    #
-    # The substrate axis the crown actually cares about is REIGN LENGTH, not pane
-    # geometry. A crown is three registry fields; nothing in it needs a PTY. What
-    # it needs is a session that outlives the grant, because a king that exits
-    # mid-wave orphans its scope. `pane` and `bg` both qualify - a bg worker is a
-    # full persistent conversation in claude's agent view, attachable, replyable,
-    # and resumable, differing from a pane only in who draws it. `headless` is the
-    # one-shot: it answers once and exits, so a crown on it names a dead ruler
-    # before the grantor's next turn. That one stays refused.
-    #
-    # A bg king does lose the pane-layer PLACEMENT primitive (`--at current`
-    # resolves the calling pane from FNO_PANE, which a bg session has none of), so
-    # it seats minions in fresh tabs rather than beside itself. That degrades the
-    # court's ergonomics, not its authority: mail, peek, top, and wait are all
-    # substrate-blind. Court-mode briefs that need adjacency should ask for a pane
-    # king; the crown itself does not.
+    # --promote <scope>... : the operator names the TERRITORY, the ladder altitude
+    # derives from it (crown.derive_crown_level), and the grantor is stamped
+    # ambiently from this session - never a value the child could forge. The role
+    # needs a session that outlives the grant, so `headless` (one answer, then
+    # exit) is refused; `pane` and `bg` both qualify. A bg holder loses only the
+    # pane PLACEMENT primitives; mail, peek, top, and wait are substrate-blind.
     crown_level: int | None = None
     crown_scope: str | None = None
-    if crown:
+    if promote:
         if once or substrate == "headless":
             print(
-                "--crown needs a session that outlives the grant; headless is a "
-                "one-shot that exits after one answer, so its crown would be "
+                "--promote needs a session that outlives the grant; headless is a "
+                "one-shot that exits after one answer, so its role would be "
                 "orphaned at birth. Use --substrate pane or --substrate thread.",
                 file=sys.stderr,
             )
@@ -1762,9 +1772,9 @@ def cmd_spawn(
         from fno.agents.crown import CrownScopeError, resolve_crown
 
         try:
-            crown_level, crown_scope = resolve_crown(list(crown))
+            crown_level, crown_scope = resolve_crown(list(promote))
         except CrownScopeError as exc:
-            print(f"--crown: {exc}", file=sys.stderr)
+            print(f"--promote: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
 
     # --account names a claude account PROFILE (config_dir/settings/plugins); a
@@ -2328,7 +2338,7 @@ def cmd_spawn(
                 account=account or dispatch_account,
                 seed=message,
                 session_phase=session_phase,
-                succession_scope=crown_scope if succeed else None,
+                succession_scope=crown_scope if hand_off else None,
             )
             break
         except GateRefused as exc:
@@ -2404,7 +2414,7 @@ def cmd_spawn(
                     bounded_placement=bounded_placement,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
-                    succession=succeed,
+                    succession=hand_off,
                     provenance=prov_env,
                     account_env=account_env,
                     route_env=route_env,
@@ -2668,7 +2678,7 @@ def cmd_spawn(
                 account_record_id=dispatch_account or account,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
-                succession=succeed,
+                succession=hand_off,
                 route_provider=route_provider,
                 provider_gate=gate,
                 sandbox_settings=sandbox_settings,

@@ -34,12 +34,12 @@ Delivery takes exactly one path: a live transport or the durable queue. The bus 
 The wire format is rendered once in Python. `cli/src/fno/mail/envelope.py` is the sole renderer. The Rust mirror in `claude_drive.rs` was deleted as dead code once the live inject path moved to the bracketed-paste transport. The Rust injection door validates `from_rank` claims against the live registry. `test_fno_mail_envelope.py` pins the renderer's own output contract.
 
 ```
-<fno_mail from="<full-sid|handle>"[ harness="<harness>"][ from_rank="<crown>"][ to="<short-sid>"][ to_rank="<crown|none>"][ id="<msg-id>"][ reply_to="<msg-id>"][ node="<id>"][ origin="<origin>"]>
+<fno_mail from="<full-sid|handle>"[ harness="<harness>"][ from_rank="<role>"][ to="<short-sid>"][ to_rank="<role|none>"][ id="<msg-id>"][ reply_to="<msg-id>"][ node="<id>"][ origin="<origin>"]>
 message text
 </fno_mail>
 ```
 
-When one is proven, `from` holds the sender's FULL session id (the collision-safe reply address), falling back to the compact handle for an unregistered sender. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). `from_rank` and `to_rank` are live crowns read from the registry at render time. `to_rank="none"` means a resolved reader with no crown in a crowned fleet. Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `model` renders nowhere, and the bus record keeps it for audit. The envelope carries no footer lines of any kind: only fno writes the tag, so the tag itself marks agent text.
+When one is proven, `from` holds the sender's FULL session id (the collision-safe reply address), falling back to the compact handle for an unregistered sender. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). `from_rank` and `to_rank` are live roles read from the registry at render time. `to_rank="none"` means a resolved reader with no role in a titled fleet. Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `model` renders nowhere, and the bus record keeps it for audit. The envelope carries no footer lines of any kind: only fno writes the tag, so the tag itself marks agent text.
 
 The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 

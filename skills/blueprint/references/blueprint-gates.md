@@ -33,7 +33,7 @@ if [[ -n "${CLAIMS_ID:-}" ]]; then
 fi
 ```
 
-**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller covers this run (the subagent wrapper, a spawn-handover worker, a crown): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder. Keep `BLUEPRINT_STARTED_AT` as well. The close passes it on, so a run that plans under another holder's claim still records its start.
+**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller covers this run (the subagent wrapper, a spawn-handover worker, a role): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder. Keep `BLUEPRINT_STARTED_AT` as well. The close passes it on, so a run that plans under another holder's claim still records its start.
 
 ```bash
 OPENED_HOLDER=""
@@ -144,7 +144,7 @@ Start the row's Action cell with one of three words:
 - `Delete` - the row removes Python and adds none.
 - `Grant d-XXXXXXXX +N` - cite a live approval. Its subject must be the plan's node, or its decision text must name this row's path. General laws, including the Python repair law, do not approve a change by themselves. A row can cite a general law with its approval. The gate reads every cited id. Use `+N` for added lines. The gate sums Grant rows against `config.blueprint.python_repair_added_lines` (default 30). A Grant without `+N` is a finding.
 
-Before writing a Grant row, run `fno backlog decisions <node>` and find the approval. If none exists, ask the king with `fno inbox outstanding ask "<question>" --node <node>`. Stop before validation. The scope gate warns on plans created on or before its gate date.
+Before writing a Grant row, run `fno backlog decisions <node>` and find the approval. If none exists, ask the lead with `fno inbox outstanding ask "<question>" --node <node>`. Stop before validation. The scope gate warns on plans created on or before its gate date.
 
 Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
 
@@ -583,7 +583,7 @@ Ask the author who hands out the plan's remaining waves. Record the answer as on
 join: manual | auto   # default manual
 ```
 
-`manual` waits for a person or a crowned `/fno:reign` king to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan, so an author who does not answer changes nothing. `auto` means `fno do target init` hands the remainder to `fno backlog join`, at init, in the holder's worktree.
+`manual` waits for a person or a titled `/fno:reign` lead to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan, so an author who does not answer changes nothing. `auto` means `fno do target init` hands the remainder to `fno backlog join`, at init, in the holder's worktree.
 
 The gate runs after the Execution Strategy is enriched and before `validate-plan.sh`. The key therefore lands in the same save the validator then reads. `join` sits in `BLUEPRINT_WRITE_ALLOWLIST`, so the write is permitted. Its reader is `hooks/helpers/init-target-state.sh` at target init.
 
@@ -739,7 +739,7 @@ blasting.
 
 Every plan answers five questions before designing, into a `## Five questions` section (schema: `quick-template.md`). Each answer is a named thing or the word `none`. The word `none` is a claim, judged like any other.
 
-1. **Persona**: who hits this, what do they do today instead, and what does it cost them per week? Name the person: user, crowned king, worker session, or plugin user. Tie the cost to a source the plan cites.
+1. **Persona**: who hits this, what do they do today instead, and what does it cost them per week? Name the person: user, titled lead, worker session, or plugin user. Tie the cost to a source the plan cites.
 2. **Surface fit**: which existing verb, skill or config does this extend? Name it, or name the one you searched for and why it does not cover this.
 3. **Uncovered case**: which realistic input or state breaks the design as written? Two sessions at once, a moved index or branch, an empty or stale input the plan already relies on.
 4. **Deletable**: what can you delete and still ship the stated goal?

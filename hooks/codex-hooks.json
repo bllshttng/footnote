@@ -67,8 +67,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/king-delegation-guard.sh",
-            "statusMessage": "checking crown delegation"
+            "command": "bash ${PLUGIN_ROOT}/hooks/lead-delegation-guard.sh",
+            "statusMessage": "checking role delegation"
           }
         ]
       },

@@ -86,36 +86,36 @@ Project/cwd is demoted from address to resolver. `fno agents send --to-project X
 
 `ProjectResolution` enforces exactly-one-outcome at construction. `ask` is synchronous, so `ask --to-project` requires exactly one live peer (none/ambiguous is an error; use `send` for the durable path).
 
-## Crown-destination addressing (anycast over the crown)
+## Role-destination addressing (anycast over the role)
 
-`fno agents mail send --to-king <scope> <msg>` addresses the ROLE, not the session. The holder is resolved from the registry at SEND time. The resolver is `resolve_to_king` in `cli/src/fno/agents/crown.py`. It uses `crown_scope_matches`, the same territory rule the row-keyed king readers use.
+`fno agents mail send --to-king <scope> <msg>` addresses the ROLE, not the session. The holder is resolved from the registry at SEND time. The resolver is `resolve_to_king` in `cli/src/fno/agents/crown.py`. It uses `crown_scope_matches`, the same territory rule the row-keyed lead readers use.
 
-Succession moves the crown row. It does not move the mail handle a peer learned while that handle was crowned. So a handle send after an abdication reaches the wrong session. Both failures are silent: the message was delivered, a session woke, and it answered.
+Succession moves the role row. It does not move the mail handle a peer learned while that handle was titled. So a handle send after an abdication reaches the wrong session. Both failures are silent: the message was delivered, a session woke, and it answered.
 
 The rule:
 
-- exactly one live crowned row over that scope: deliver live to it.
-- none: refuse, exit 16, queue nothing. A project queue has a future drain that reads it as that project. A vacant crown has no such reader. Queueing strands the message at the address.
-- more than one: refuse, naming both holders. That is the split crown `fno agents court` already reports. It is not a multiplicity to pick between, so there is no `--any` tie-break here.
+- exactly one live titled row over that scope: deliver live to it.
+- none: refuse, exit 16, queue nothing. A project queue has a future drain that reads it as that project. A vacant role has no such reader. Queueing strands the message at the address.
+- more than one: refuse, naming both holders. That is the split role `fno agents org` already reports. It is not a multiplicity to pick between, so there is no `--any` tie-break here.
 
 `resolve_to_king` returns the holder names as a plain list. A list has no illegal state to guard, so unlike `ProjectResolution` there is no construction-time check. The one caller reads the three outcomes off the length.
 
-`--to-king` is exclusive with every other addressing mode: `--to-project`, `--to-self`, `--kind`, `--raw`, `--force`, `--any`, and a second positional. A second address decides where the message lands. The crown deciding that is the point.
+`--to-king` is exclusive with every other addressing mode: `--to-project`, `--to-self`, `--kind`, `--raw`, `--force`, `--any`, and a second positional. A second address decides where the message lands. The role deciding that is the point.
 
-A forwarding pointer written at abdication is the cheaper-looking fix, and it is refused on purpose. The pointer is itself a recorded identity. A second succession leaves it naming a session that is no longer crowned either.
+A forwarding pointer written at abdication is the cheaper-looking fix, and it is refused on purpose. The pointer is itself a recorded identity. A second succession leaves it naming a session that is no longer titled either.
 
-## Crown attributes
+## Role attributes
 
-Every envelope carries the live crowns of its sender and its reader as header attributes, read at render time from the same registry:
+Every envelope carries the live roles of its sender and its reader as header attributes, read at render time from the same registry:
 
 ```
 from_rank="L1 fno"
 to_rank="L1 fno"     (or to_rank="none")
 ```
 
-`from_rank` is the sender's verified crown. The Rust injection door refuses a payload whose `from_rank` does not match the live registry read for its sender. `to_rank` names the RECIPIENT's own crown. `from_rank` and `to_rank` name verified standing, never authority: they are a display of who holds what, not a grant.
+`from_rank` is the sender's verified role. The Rust injection door refuses a payload whose `from_rank` does not match the live registry read for its sender. `to_rank` names the RECIPIENT's own role. `from_rank` and `to_rank` name verified standing, never authority: they are a display of who holds what, not a grant.
 
-Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted. `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well. `fleet_has_crown()` fails open while the crown read fails closed. The two alone once told a live king it had been deposed, so an unreadable registry claims nothing.
+Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted. `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well. `fleet_has_crown()` fails open while the role read fails closed. The two alone once told a live lead it had been deposed, so an unreadable registry claims nothing.
 
 ## Job-address lane
 
@@ -138,7 +138,7 @@ The durable copy must be addressed to the RESOLVED session's canonical handle. D
 
 A non-id token, such as a spawn `--name` like `blueprint-auth-glm`, is not a mail address. The drain is handle-keyed, so a name never matches a session's handle and a durable write under it strands. `--force` is the exception, and for that same reason: it writes no durable row. It types at a pane the registry names, and the registry is what resolves a friendly name to the session behind it.
 
-The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the address was never typed as a bare positional. `--to-project` holds the BODY in the positional, so an eight-hex there is content nobody is addressing. `--to-king` and `--to-self` DERIVE the handle they hand the name lane. A derived handle names exactly one live row, so the ambiguity the head-8 rule guards cannot arise. A crowned row's own `--name` can legitimately be a codex head-8, and the guard there refuses a send the crown resolved correctly.
+The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the address was never typed as a bare positional. `--to-project` holds the BODY in the positional, so an eight-hex there is content nobody is addressing. `--to-king` and `--to-self` DERIVE the handle they hand the name lane. A derived handle names exactly one live row, so the ambiguity the head-8 rule guards cannot arise. A titled row's own `--name` can legitimately be a codex head-8, and the guard there refuses a send the role resolved correctly.
 
 ## `fno inbox` alias + legacy migration
 
@@ -172,7 +172,7 @@ One announcement is ONE `kind: "announce"` envelope on the shared bus. It is app
 
 **Envelope.** Key order matches `to_json_line`. `to: "fleet:<scope>"` and `to_kind: "fleet"` mean no Python address can ever equal it, so `scan_unread` and every addressed-mail reader cannot deliver it. `meta` carries `scope`, `audience` (the snapshot), `subject`, `expires_at`, `urgent`, `supersedes`.
 
-**Audience snapshot.** At send time the writer records each matching row's identity-normalized full `harness_session_id`. It never records the Claude transport `short_id`. It leaves the sender's own row out. The row filters: non-terminal status, a session id, `crown_level` set for `kings`. A crown scope answers to territory equality, alias-normalized. `project:<p>` adds a cwd path match. That list is the receipt denominator.
+**Audience snapshot.** At send time the writer records each matching row's identity-normalized full `harness_session_id`. It never records the Claude transport `short_id`. It leaves the sender's own row out. The row filters: non-terminal status, a session id, `crown_level` set for `kings`. A role scope answers to territory equality, alias-normalized. `project:<p>` adds a cwd path match. That list is the receipt denominator.
 
 **Late arrivals.** A session outside the snapshot that matches the scope at read time still sees a standing announcement. Receipts count it as `late`, never in the audience N.
 
@@ -184,7 +184,7 @@ One announcement is ONE `kind: "announce"` envelope on the shared bus. It is app
 
 **Expiry and supersession.** `--expires` defaults to 24h and caps at 7d. Readers skip expired rows. A newer announcement with the same `subject` and scope lists the older standing one in `meta.supersedes`. Readers skip superseded rows, so a woken session only ever sees current news.
 
-**Authority and rate limit.** The Python shim keeps the three body guards: forged envelope, byte cap, and style lint (the single style implementation stays there). The shim also resolves the sender: a session whose harness identity the process can prove it owns stamps `agent`. Everything else stamps `operator`. Rust accepts an operator, or an `agent` whose live registry row holds a crown. Anything else refuses with exit 2. Six announcements per sender per rolling hour, counted from the bus itself.
+**Authority and rate limit.** The Python shim keeps the three body guards: forged envelope, byte cap, and style lint (the single style implementation stays there). The shim also resolves the sender: a session whose harness identity the process can prove it owns stamps `agent`. Everything else stamps `operator`. Rust accepts an operator, or an `agent` whose live registry row holds a role. Anything else refuses with exit 2. Six announcements per sender per rolling hour, counted from the bus itself.
 
 **Boundaries.** Claude: `inject-announce.sh` on SessionStart and UserPromptSubmit, with a SessionStart source of `compact` mapped to the compact boundary. Codex: UserPromptSubmit, PostCompact, and section 6a of `session-start.sh`. The target loop reads natively in `nudge.rs` at its block paths. opencode reads in `experimental.chat.system.transform`. pi reads in `before_agent_start`, the pre-turn event whose returned message is injected into the session. A plain Stop is not a delivery boundary (the turn is over). Urgent wake for idle sessions is wave 4 and waits on the wake-lane fix it depends on.
 

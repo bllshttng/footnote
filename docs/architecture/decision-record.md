@@ -33,9 +33,9 @@ When every id succeeds, clear exits 0. An unknown id exits 4, a different-answer
 
 ## Authority lanes
 
-Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and role authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
 
-`--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a king ruling inside its own crown scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Kings wrote them because no correct value existed. The scope belongs on the crown row, so the value carries no suffix.
+`--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a lead ruling inside its own role scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Leads wrote them because no correct value existed. The scope belongs on the role row, so the value carries no suffix.
 
 The closed set is NOT in `schema.yaml`. The index already holds those invented spellings. A schema enum makes `fno backlog decide-reindex` reject them, which drops recall for real rulings.
 
@@ -107,7 +107,7 @@ A failed PROJECTION does not fail the command at all. Both durable stores alread
 
 Agents answer by default (ruling of 2026-09-14): an agent session records coordination decisions with `fno backlog decide`. Only the `operator` authority refuses an agent session there, because the superuser lane is not an agent's to claim. An agent that rules out another node's work records the verdict where that node's readers already look.
 
-The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A crown can clear only a question it asked itself, with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
+The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A role can clear only a question it asked itself, with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
 
 The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
 
@@ -151,7 +151,7 @@ The graph projection stamps that mark at write time under the lock. The index is
 
 ## Traced decisions
 
-Every cross-rung ask is one traced decision. The ask, the lead's route (answer-self versus escalate, with the class), the question, the answer, and the correction all link by id. One hop is one `decision_span` row in the project journal. Hops that already have a natural id (the question row, the decision row) carry the same `trace` envelope instead of a second row. The envelope is `{trace_id, span_id, parent_span_id?, actor_session?, actor_kind, comms, recipient_session?, recipient_kind?}`. When the session holds a live crown, `actor_kind` is `lead`, and any other resolved session is `worker`. An attended terminal with no session identity is `user`, and daemon or scheduler work is `sweep`. The class enum is `public-surface`, `irreversible`, `money-security`, `law-change`, `gate-override`, `none`. The spans:
+Every cross-rung ask is one traced decision. The ask, the lead's route (answer-self versus escalate, with the class), the question, the answer, and the correction all link by id. One hop is one `decision_span` row in the project journal. Hops that already have a natural id (the question row, the decision row) carry the same `trace` envelope instead of a second row. The envelope is `{trace_id, span_id, parent_span_id?, actor_session?, actor_kind, comms, recipient_session?, recipient_kind?}`. When the session holds a live role, `actor_kind` is `lead`, and any other resolved session is `worker`. An attended terminal with no session identity is `user`, and daemon or scheduler work is `sweep`. The class enum is `public-surface`, `irreversible`, `money-security`, `law-change`, `gate-override`, `none`. The spans:
 
 | Span | Row | Emitted by |
 |---|---|---|

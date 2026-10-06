@@ -23,7 +23,7 @@ cd "$REPO_ROOT" || exit 1
 KING_SURFACES=(
     skills/lead/SKILL.md
     skills/lead/references/once.md
-    skills/lead/references/court-operations.md
+    skills/lead/references/org-operations.md
     skills/lead/references/minion-clause.md
 )
 SPAWN_GUIDE=docs/guides/fno-agents-spawn.md
@@ -67,7 +67,7 @@ fi
 
 # --- 3. Canonical spelling is actually taught --------------------------------
 for f in skills/lead/references/once.md \
-         skills/lead/references/court-operations.md \
+         skills/lead/references/org-operations.md \
          skills/lead/references/minion-clause.md \
          "$SPAWN_GUIDE"; do
     grep -q -- '--workspace' "$f" ||
@@ -124,7 +124,7 @@ done
 # corrected in SKILL.md while court-operations.md kept teaching the old one.
 # The split is deliberate (contract vs hands) and nothing mechanically ties the
 # two, so pin the load-bearing wait invariants in both.
-COURT_OPS=skills/lead/references/court-operations.md
+COURT_OPS=skills/lead/references/org-operations.md
 for f in skills/lead/references/once.md "$COURT_OPS"; do
     grep -q 'fno-agents wait' "$f" ||
         note "$f does not name the lifecycle wait primitive"

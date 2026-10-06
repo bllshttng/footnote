@@ -286,6 +286,7 @@ fn team_spawn_command(target: &str) -> bool {
             && args.iter().skip(3).any(|arg| {
                 arg == "--team"
                     || arg.starts_with("--team=")
+                    // retired-ok: the daemon accepts the retired alias here
                     || arg == "--crown"
                     || arg.starts_with("--crown=")
             })

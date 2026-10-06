@@ -183,6 +183,9 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     agents[1].last_activity_age_s = Some(36);
     agents[1].node = Some("x-4310".into());
     agents[1].model = Some("gpt-6.1-sol".into());
+    // The activity fixture: four intervals, the last idle, so the ramp
+    // scales to the card's own max (8) and grades one warn, one error.
+    agents[1].activity = Some(vec![(2, 0), (4, 1), (8, 4), (0, 0)]);
     agents[0].model = Some("claude-opus-5-5".into());
     agents[0].crown_title = Some("Lead of mux".into());
     let mut v = card_view(agents);
@@ -217,8 +220,62 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].context_used_pct = Some(129);
     let over_frame = v.compose();
     let over_window = frame_text(&over_frame);
-    assert!(over_window.contains("▄▅▆▇ 129%"), "{over_window:?}");
+    assert!(over_window.contains("▁▁▁▁▃▅█▁ · 129%"), "{over_window:?}");
+    // The ramp math: heights scale to the card's own max over the served
+    // intervals, the max reads the full block, and each cell's failed share
+    // grades its color kind (0 ok, 1 warn, 2 error).
+    let cell = card_line::activity_cell(&v.layout.agents[1], card_line::CardGraph::Activity)
+        .expect("served intervals draw");
+    assert_eq!(
+        cell.text,
+        "\u{2581}\u{2581}\u{2581}\u{2581}\u{2583}\u{2585}\u{2588}\u{2581}"
+    );
+    assert_eq!(cell.kinds, vec![0, 0, 0, 0, 0, 1, 2, 0]);
+    // The slot stays blank before two intervals, whatever they hold.
+    v.layout.agents[1].activity = Some(vec![(3, 0)]);
+    assert!(
+        card_line::activity_cell(&v.layout.agents[1], card_line::CardGraph::Activity).is_none()
+    );
+    v.layout.agents[1].activity = Some(vec![(0, 0)]);
+    assert!(
+        card_line::activity_cell(&v.layout.agents[1], card_line::CardGraph::Activity).is_none()
+    );
+    v.layout.agents[1].activity = Some(vec![]);
+    assert!(
+        card_line::activity_cell(&v.layout.agents[1], card_line::CardGraph::Activity).is_none()
+    );
+    // Context mode: the steady fill bar of the context percent, bare of
+    // the number (the number sits beside it), for the whole session.
+    v.layout.agents[1].activity = Some(vec![(3, 0)]);
+    v.layout.agents[1].context_used_pct = Some(26);
+    let bar = card_line::activity_cell(&v.layout.agents[1], card_line::CardGraph::Context)
+        .expect("the context bar draws from the first reading");
+    assert_eq!(
+        bar.text, "\u{2588}\u{258d}   ",
+        "26% fills 11 of 40 eighths"
+    );
+    assert_eq!(
+        bar.kinds,
+        vec![0, 0, 0, 0, 0],
+        "the context bar never grades"
+    );
+    // The painter wears each ramp cell in its kind's theme color: the
+    // fixture's majority-failed max cell paints error, the clean pads ok.
+    let theme = v.theme;
+    let mut saw_ok = false;
+    let mut saw_error = false;
+    for c in &frame.cells {
+        if c.c == '\u{2588}' && c.fg == theme.error {
+            saw_error = true;
+        }
+        if c.c == '\u{2581}' && c.fg == theme.ok {
+            saw_ok = true;
+        }
+    }
+    assert!(saw_error, "the majority-failed cell wears the error color");
+    assert!(saw_ok, "the clean cell wears the ok color");
     v.layout.agents[1].context_used_pct = None;
+    v.layout.agents[1].activity = None;
     v.layout.agents[1].compaction_count = None;
     v.layout.agents[1].session_cost_cents = None;
     v.layout.agents[1].session_tokens = None;
@@ -227,7 +284,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs());
     let unmeasured = frame_text(&v.compose());
     assert!(
-        unmeasured.contains("░░░░░░░░░░░░░ · ░░░ · ░░░░░░░░"),
+        unmeasured.contains("░░░░ · ░░░ · ░░░░░░░░"),
         "a claude card whose fold has not landed pulses every field: {unmeasured:?}"
     );
     // Past 10s the fold-less row gives up the pulse: static dashes at the
@@ -235,7 +292,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     v.layout.agents[1].started_at = Some(crate::digest_overlay::now_secs() - 11);
     let gave_up = frame_text(&v.compose());
     assert!(
-        gave_up.contains("-             · -   · -"),
+        gave_up.contains("-    · -   · -"),
         "a row past 10s holds static dashes: {gave_up:?}"
     );
     assert!(text.contains("w1"), "{text:?}");
@@ -245,8 +302,8 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
     assert!(
-        text.contains("▂▃▄▅ 26% · 3c · 12.3k tok · one message"),
-        "the compact sparkline line matches its display contract: {text:?}"
+        text.contains("▁▁▁▁▃▅█▁ · 26% · 3c · 12.3k tok · one message"),
+        "the compact metrics line matches its display contract: {text:?}"
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
     // A worker names its lead, and a teamed row names its role.
@@ -257,37 +314,41 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     // skeletons, never `?`.
     let hidden = |c: &card_line::MetricCell| matches!(c, card_line::MetricCell::Hidden);
     let mut bare = agent_row("w9", 6, Some(AgentBadge::Working), false);
-    assert!(card_line::metric_cells(&bare, 0).iter().all(hidden));
+    assert!(
+        card_line::metric_cells(&bare, card_line::CardGraph::Activity)
+            .iter()
+            .all(hidden)
+    );
     bare.harness = Some("claude".into());
     bare.harness_session_id = Some("sess-w9".into());
     bare.crown_level = Some(2);
     bare.context_used_pct = Some(26);
     bare.session_tokens = Some(999);
     bare.session_cost_cents = Some(77);
-    let cells = card_line::metric_cells(&bare, 0);
-    assert!(matches!(cells[0], card_line::MetricCell::Value(_)));
-    assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "999 tok"));
+    let cells = card_line::metric_cells(&bare, card_line::CardGraph::Activity);
+    assert!(
+        matches!(cells[0], card_line::MetricCell::Hidden),
+        "activity stays blank until two intervals land, it never fakes a line"
+    );
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
     // Cost left the metrics line (it rides line 2, served-only): a crowned
     // lead's session_cost_cents never reach this line at all.
     // A codex row keeps the populated-paint contract off its unreportable
     // fields: context and compactions hide even when the wire carries them,
-    // while its tokens still arrive.
+    // while its tokens land and its activity stays blank until two
+    // intervals exist.
     let mut cx = agent_row("w10", 7, Some(AgentBadge::Working), false);
     cx.harness = Some("codex".into());
     cx.harness_session_id = Some("sess-w10".into());
     cx.context_used_pct = Some(40);
     cx.session_tokens = Some(500);
-    let cells = card_line::metric_cells(&cx, 0);
+    let cells = card_line::metric_cells(&cx, card_line::CardGraph::Activity);
     assert!(
-        hidden(&cells[0]) && hidden(&cells[1]),
+        hidden(&cells[1]) && hidden(&cells[2]),
         "codex never reports context or compactions"
     );
-    assert!(matches!(&cells[2], card_line::MetricCell::Value(v) if v == "500 tok"));
-    // The history ramp's bar math (pct -> bar height); the full ramp itself
-    // only paints under the spin clock, so the static cell stands in tests.
-    assert_eq!(card_line::ramp_char(0), '▁');
-    assert_eq!(card_line::ramp_char(50), '▄');
-    assert_eq!(card_line::ramp_char(100), '▇');
+    assert!(hidden(&cells[0]));
+    assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "500 tok"));
 }
 
 #[test]
