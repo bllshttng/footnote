@@ -1619,54 +1619,9 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci base compare unreadable: {error}"))
             }
         };
-        let base_tip = match endpoint(
-            format!("repos/{{owner}}/{{repo}}/commits/{}", facts.base_ref),
-            ".commit.committer.date",
-        ) {
-            Ok((true, output)) => output.trim().to_string(),
-            Ok((false, output)) => {
-                return ProbeOutcome::Inconclusive(format!(
-                    "ci base tip unreadable: {}",
-                    first_line(&output)
-                ))
-            }
-            Err(error) => {
-                return ProbeOutcome::Inconclusive(format!("ci base tip unreadable: {error}"))
-            }
-        };
-        let runs = match endpoint(
-            format!(
-                "repos/{{owner}}/{{repo}}/actions/runs?event=pull_request&head_sha={}&per_page=100",
-                facts.head_sha
-            ),
-            ".workflow_runs[] | [.name, .created_at] | @tsv",
-        ) {
-            Ok((true, output)) => {
-                let mut runs = Vec::new();
-                for line in output.lines().filter(|line| !line.trim().is_empty()) {
-                    let Some((name, created_at)) = line.split_once('\t') else {
-                        return ProbeOutcome::Inconclusive(format!(
-                            "ci runs unreadable: expected workflow and created_at, got {}",
-                            first_line(line)
-                        ));
-                    };
-                    runs.push((name.to_string(), created_at.to_string()));
-                }
-                runs
-            }
-            Ok((false, output)) => {
-                return ProbeOutcome::Inconclusive(format!(
-                    "ci runs unreadable: {}",
-                    first_line(&output)
-                ))
-            }
-            Err(error) => {
-                return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
-            }
-        };
         // No disjoint-files waiver: two PRs that share no file still break
         // main together when one's test reads what the other moved.
-        ci_base_verdict(compare, &base_tip, &runs)
+        ci_base_verdict(compare)
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
@@ -2294,73 +2249,18 @@ pub fn classify_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> Probe
     })
 }
 
-fn valid_github_timestamp(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 20
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes[19] == b'Z'
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
-        })
-}
-
-fn oldest_current_run(runs: &[(String, String)]) -> Option<(String, String)> {
-    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
-    for (name, created_at) in runs {
-        if let Some((_, newest)) = newest_by_workflow
-            .iter_mut()
-            .find(|(known, _)| known == name)
-        {
-            if created_at > newest {
-                *newest = created_at.clone();
-            }
-        } else {
-            newest_by_workflow.push((name.clone(), created_at.clone()));
-        }
-    }
-    newest_by_workflow
-        .into_iter()
-        .min_by(|(_, left), (_, right)| left.cmp(right))
-}
-
-/// Did the green runs test a merge ref that already held the base tip?
-pub fn ci_base_verdict(
-    behind_by: u64,
-    base_tip_at: &str,
-    runs: &[(String, String)],
-) -> ProbeOutcome {
+/// Did the CI at this head test a tree that already held the base tip? Only
+/// the ancestry answers that. The run-timestamp heuristic this replaces
+/// cleared a head whose runs started after the base tip moved, but a run at a
+/// head that lacks the tip still never tested the merge - the back-to-back
+/// merge race that went red on main three times in two days (2026-10-04/05).
+pub fn ci_base_verdict(behind_by: u64) -> ProbeOutcome {
     if behind_by == 0 {
         return ProbeOutcome::Clear;
     }
-    if runs.is_empty() {
-        return ProbeOutcome::Refused(format!(
-            "ci_base_stale: no pull_request run at the head proves its CI base; PR is {behind_by} behind"
-        ));
-    }
-    if !valid_github_timestamp(base_tip_at)
-        || runs
-            .iter()
-            .any(|(_, created_at)| !valid_github_timestamp(created_at))
-    {
-        return ProbeOutcome::Inconclusive(
-            "ci base freshness unreadable: timestamp is not YYYY-MM-DDTHH:MM:SSZ".to_string(),
-        );
-    }
-
-    let Some((name, created_at)) = oldest_current_run(runs) else {
-        return ProbeOutcome::Clear;
-    };
-    if created_at.as_str() >= base_tip_at {
-        ProbeOutcome::Clear
-    } else {
-        ProbeOutcome::Refused(format!(
-            "ci_base_stale: the oldest current run ({name}, created {created_at}) predates base tip {base_tip_at}; PR is {behind_by} behind"
-        ))
-    }
+    ProbeOutcome::Refused(format!(
+        "ci_base_stale: PR is {behind_by} behind its base; no run at this head tested the merged tree"
+    ))
 }
 
 /// The head sha from the latest covered `review_coverage` event that matches the
@@ -3404,36 +3304,14 @@ mod tests {
 
     #[test]
     fn ci_base_verdict_reads_each_branch() {
-        let runs = (0..8)
-            .map(|i| (format!("workflow-{i}"), "2026-09-16T09:17:32Z".to_string()))
-            .collect::<Vec<_>>();
-        let outcome = ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs);
+        // Ancestry is the whole verdict now: behind_by 0 clears, anything
+        // behind refuses, because no run at a head that lacks the base tip
+        // can have tested the merged tree.
+        assert_eq!(ci_base_verdict(0), ProbeOutcome::Clear);
+        let outcome = ci_base_verdict(3);
         assert!(
             matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
         );
-        let runs = vec![
-            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-        ];
-        assert_eq!(
-            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
-            ProbeOutcome::Clear
-        );
-        let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
-        assert_eq!(
-            ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
-            ProbeOutcome::Clear
-        );
-        assert!(matches!(
-            ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
-            ProbeOutcome::Refused(reason) if reason.contains("no pull_request run")
-        ));
-        let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
-        assert!(matches!(
-            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
-            ProbeOutcome::Inconclusive(_)
-        ));
     }
 
     #[test]

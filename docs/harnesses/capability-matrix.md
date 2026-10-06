@@ -3,7 +3,7 @@
      regenerate from crates/fno-agents/src/harness_capabilities.toml. -->
 # Harness capability matrix (features)
 
-What each harness can DO, rendered from the capability table (map_version 23). One row per supported harness, including roster entries with no capability row, which read unmeasured everywhere, and one column per feature key. The table carries 8 feature-key instruments that were refused as blind and converted to honest unprobeables: their word-match patterns matched a sentence denying the capability as readily as support, so the reader could not report absence, and a state they settled renders unmeasured with the reason reader refused as blind.
+What each harness can DO, rendered from the capability table (map_version 24). One row per supported harness, including roster entries with no capability row, which read unmeasured everywhere, and one column per feature key. The table carries 8 feature-key instruments that were refused as blind and converted to honest unprobeables: their word-match patterns matched a sentence denying the capability as readily as support, so the reader could not report absence, and a state they settled renders unmeasured with the reason reader refused as blind.
 
 | State | Meaning |
 |---|---|

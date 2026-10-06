@@ -6,8 +6,8 @@
 use super::keys_modal::keys_modal_keys;
 use super::*;
 use super::{
-    attach_place_keys, confirm_keys, connections_keys, is_sideline_verb, move_pick_keys, peek_keys,
-    portal_pick_keys, row_menu_keys, selector_keys, yard_keys, StdinFlow, View,
+    attach_place_keys, confirm_keys, connections_keys, move_pick_keys, peek_keys, portal_pick_keys,
+    row_menu_keys, selector_keys, yard_keys, StdinFlow, View,
 };
 use super::{aux_keys, questions, sideline};
 use super::{backlog_board, org_board};
@@ -81,22 +81,8 @@ pub(super) async fn route(
         // (j/k, Esc, later digit/attach) never leak to the selector underneath.
         return Some(peek_keys(view, bytes, sock_w).await);
     }
-    // A hover-armed selector is motion-fresh: only the action-verb set
-    // acts on the pointed-at row; the first key OUTSIDE it disarms the arm and
-    // falls through to the pane, so a pointer parked over the sideline never
-    // swallows typing into the focused shell (AC2-EDGE). An explicitly-opened
-    // selector (sel_hover_armed=false) stays fully modal below.
-    if view.selector.is_some() && view.sel_hover_armed {
-        if bytes.is_empty() {
-            return Some(Ok(StdinFlow::Continue));
-        }
-        if bytes.first().is_some_and(|&b| is_sideline_verb(b)) {
-            return Some(selector_keys(view, bytes, sock_w).await);
-        }
-        view.selector = None;
-        view.sel_hover_armed = false;
-        // fall through: forward this chunk to the focused pane.
-    }
+    // The selector is fully modal: hover never opens or arms it, so only an
+    // explicit open (prefix+w, a click) ever reaches here.
     if view.selector.is_some() {
         return Some(selector_keys(view, bytes, sock_w).await);
     }

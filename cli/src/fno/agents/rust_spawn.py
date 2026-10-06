@@ -32,6 +32,7 @@ def _opencode_serve_spawn(
     from_name: str,
     model: Optional[str],
     node: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> str:
     """Delegate an opencode bg spawn to the Rust serve lane; return short_id.
 
@@ -70,6 +71,10 @@ def _opencode_serve_spawn(
         argv += [f"--from-name={from_name}"]
     if model:
         argv += [f"--model={model}"]
+    if effort:
+        # The serve lane applies effort as opencode's persisted model variant
+        # (apply_opencode_variant); the row's carries list answers for the axis.
+        argv += [f"--effort={effort}"]
     if node:
         argv += ["--node", node]
     # The seed rides as the fenced positional tail, never a bare flag value:

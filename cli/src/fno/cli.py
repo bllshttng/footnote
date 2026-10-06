@@ -841,12 +841,27 @@ def _run_rust_front(args: list[str]) -> None:
     (d-cf2d6fe1): a user typing `fno mux ...` never reaches Python (the Rust
     binary intercepts), but `fno-py mux ...` must still work and the two
     listings must show real rows rather than footnotes about an absence.
+
+    The hand-off marker breaks the fno -> fno-py -> fno loop: a PATH `fno`
+    that is a shim forwarding to fno-py re-enters here, and without the marker
+    every level spawns another until the machine drowns (2026-10-02: ~9,000
+    `fno-py mux workspace prune` processes, 89 GB resident). One re-entry is a
+    mis-resolution, never a legitimate nesting, so refuse and name it.
     """
+    import os
     import shutil
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
 
+    if os.environ.get("FNO_PY_HANDOFF"):
+        typer.echo(
+            "fno-py: recursive hand-off refused (FNO_PY_HANDOFF is already set): "
+            "the `fno` found on PATH forwards back to fno-py. Run the Rust front "
+            "binary directly, or fix the shim so `fno` resolves to it.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     binary = shutil.which("fno")
     if binary is None:
         typer.echo(
@@ -855,7 +870,7 @@ def _run_rust_front(args: list[str]) -> None:
             err=True,
         )
         raise typer.Exit(code=127)
-    result = subprocess.run([binary, *args], check=False)
+    result = subprocess.run([binary, *args], check=False, env=dict(os.environ, FNO_PY_HANDOFF="1"))
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 

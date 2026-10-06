@@ -93,8 +93,13 @@ impl View {
         // Display row i is painted at `i - offset` (draw_sideline, since
         // the sideline owns the top painted row), so invert with the paint
         // offset - else a click on a scrolled row activates the wrong row.
-        // Mirrors sideline_row_at.
-        let i = row as usize - top + self.sideline_offset();
+        // The pinned footer answers ahead of the offset path, through the
+        // same resolver hover and the row menus use: a click on the pinned
+        // row is the footer's row even though its display row has scrolled
+        // away.
+        let i = self
+            .pinned_footer_row_index(row, top)
+            .unwrap_or_else(|| row as usize - top + self.sideline_offset());
         if let Some(hit) = self.table_header_hit(i, col) {
             return Some(hit);
         }
