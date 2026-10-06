@@ -254,6 +254,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "confirm",
         "defaults",
         "fallback",
+        "first_check_minutes",
         "footprint_sustained_cpu_cores",
         "gemini",
         "happy_routed_panes",
