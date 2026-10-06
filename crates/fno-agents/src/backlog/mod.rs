@@ -2106,9 +2106,15 @@ mod tests {
             ttl_ms: Some(60_000),
             ..Default::default()
         };
-        crate::claim_store::acquire_db("node:q-live", "test-worker", &claim_options).unwrap();
-        crate::claim_store::acquire_db("node:q-archived", "blueprint-session:test", &claim_options)
-            .unwrap();
+        for (key, holder) in [
+            ("node:q-live", "test-worker"),
+            ("node:q-archived", "blueprint-session:test"),
+        ] {
+            assert!(matches!(
+                crate::claims::acquire(key, holder, claim_options.clone()),
+                crate::claims::AcquireOutcome::Acquired(_)
+            ));
+        }
         let whole = crate::graph_store::read_rows_where(
             &query_graph,
             &RowQuery {
@@ -2153,14 +2159,14 @@ mod tests {
             crate::graph_store::read_rows_where(&query_graph, &claimed_query).unwrap(),
             vec![serde_json::json!({"id":"q-live", "status":"in_progress"})]
         );
-        crate::claim_store::release_db(
+        crate::claims::release(
             "node:q-live",
             "test-worker",
             Some(dir.path()),
             Some(dir.path()),
         )
         .unwrap();
-        crate::claim_store::release_db(
+        crate::claims::release(
             "node:q-archived",
             "blueprint-session:test",
             Some(dir.path()),
@@ -2176,11 +2182,13 @@ mod tests {
                 serde_json::json!({"id":"q-claimed","status":"in_progress"})
             ]
         );
-        assert!(crate::graph_store::read_rows_where_strict(
-            &dir.path().join("missing.db"),
-            &projected
-        )
-        .is_err());
+        let unreadable_graph = dir.path().join("unreadable.json");
+        crate::graph_store::seed_rows(&unreadable_graph, &[]).unwrap();
+        open(&unreadable_graph)
+            .unwrap()
+            .execute("DELETE FROM graph_meta WHERE key = 'version'", [])
+            .unwrap();
+        assert!(crate::graph_store::read_rows_where_strict(&unreadable_graph, &projected).is_err());
         let connection = open(&query_graph).unwrap();
         let mut done = nodes::load(&connection, "q-done").unwrap().unwrap();
         done.completed_at = None;

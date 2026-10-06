@@ -66,6 +66,7 @@ def stub_exec(monkeypatch, tmp_path):
 
 
 def _graph(monkeypatch, entries):
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda *a, **k: entries)
     monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda *a, **k: {"entries": entries, "missing": []})
 
 

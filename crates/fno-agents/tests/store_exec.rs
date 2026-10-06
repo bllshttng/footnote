@@ -208,8 +208,14 @@ fn store_exec_serves_read_begin_commit_across_processes() {
         );
         assert_eq!(reply.unwrap()["error"]["kind"], "invalid");
     }
+    let unreadable_graph = dir.path().join("unreadable.json");
+    fno_agents::graph_store::seed_rows(&unreadable_graph, &[]).unwrap();
+    rusqlite::Connection::open(fno_agents::backlog::database_path(&unreadable_graph))
+        .unwrap()
+        .execute("DELETE FROM graph_meta WHERE key = 'version'", [])
+        .unwrap();
     let (_, unreadable) = exec_request(
-        &dir.path().join("missing.json"),
+        &unreadable_graph,
         r#"{"id":13,"method":"read_strict","params":{"fields":["id"]}}"#,
     );
     assert_eq!(unreadable.unwrap()["error"]["kind"], "unreadable");
