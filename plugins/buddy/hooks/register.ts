@@ -776,7 +776,8 @@ export function register(on: On) {
 
   // The band only holds a one-line face, and only where neither the status line nor the dock has the buddy.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!buddy || muted || wrapped || e.props.hasSurvey) return next(e)
+    // Desktop draws no status line but shares its settings, so a wrapped status line hides nothing there.
+    if (!buddy || muted || (wrapped && e.surface !== 'desktop') || e.props.hasSurvey) return next(e)
     const now = await $.clock.now()
     if (now - paneDrawnAt < SEEN_MS) return next(e)
     if (!paneAsked && e.viewport?.isFullscreen === true) {

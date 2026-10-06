@@ -35,6 +35,8 @@ The buddy has three places. It uses the first place that is available.
 2. **A narrow pane on the right.** Type `/buddy pane` to put the buddy here. The sprite stands at the bottom, and its words are above it. Claude Code shows this pane only in the fullscreen layout, at 110 columns or more. If you never typed `/buddy statusline`, the buddy opens this pane by itself at 144 columns or more.
 3. **One line above the prompt.** If the first two places are not available, the buddy shows a one-line face above the prompt.
 
+In the Claude Desktop app, the buddy shows as the one-line face above the prompt. Desktop has no status line, so `/buddy statusline` changes nothing there, even when it is on in your terminal. The card and its hatch work in both apps.
+
 The length of your status line does not move the buddy. The buddy always aligns to the right edge of the terminal. If a row of your status line is too wide to share, the buddy first moves down a row. If no row count up to 6 fits, it keeps the full sprite and cuts your rows. If your status line already uses all 6 rows, it changes to the one-line face.
 
 ### Your status line, and how to undo it

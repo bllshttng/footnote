@@ -183,3 +183,20 @@ test('a fresh buddy hatches from the egg into the original card, and any key clo
   const gone = await $.ui.mount(row)
   expect(await gone.find({ type: 'Text', text: /chime in as you code$/ })).toBeUndefined()
 })
+
+test('on Desktop the buddy shows above the prompt even when it wraps the terminal status line', async ($, on) => {
+  const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus' })]])
+  boot(on, OLD_CONFIG, new Map(), files)
+  on('process.run', ($: any, e: any) =>
+    e.argv.join(' ') === 'fno config get state_dir'
+      ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run({ command: 'buddy', args: 'statusline' })
+
+  const terminal = await $.ui.mount(band(3))
+  expect(await terminal.find({ type: 'Text', text: /Quip/ })).toBeUndefined()
+  await terminal.unmount()
+  const desktop = await $.ui.mount({ ...band(3), surface: 'desktop' })
+  expect(await desktop.find({ type: 'Text', text: /Quip/ })).toBeDefined()
+})
