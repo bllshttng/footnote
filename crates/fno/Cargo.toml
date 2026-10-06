@@ -81,6 +81,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "alloc"
 # locked at 0.11.1 as a transitive dep, so no new download).
 strsim = "0.11"
 thiserror = "2"
+tempfile = "3"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
@@ -92,6 +93,3 @@ tokio = { version = "1", features = [
     # bounded, fail-open shell-out to `fno-agents digest` on attach.
     "process",
 ] }
-
-[dev-dependencies]
-tempfile = "3"
