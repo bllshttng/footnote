@@ -303,6 +303,7 @@ pub mod org_rivals;
 pub mod orphan_reap;
 pub mod osc;
 pub mod otel_ingest;
+pub mod otel_read;
 pub mod pane_keeper;
 pub mod pane_rebind;
 pub mod pane_relaunch;

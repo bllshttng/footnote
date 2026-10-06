@@ -523,19 +523,7 @@ fn store_record(conn: &Connection, record: &Value) -> rusqlite::Result<()> {
 /// absent or holds no rows for the session - the caller falls back to the
 /// ledger estimate.
 pub fn session_cost_usd(db: &Path, session_id: &str) -> Option<f64> {
-    if !db.is_file() {
-        return None;
-    }
-    let conn = Connection::open(db).ok()?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-    conn.query_row(
-        "SELECT SUM(cost_usd_micros) FROM api_requests
-         WHERE session_id = ?1 AND cost_usd_micros IS NOT NULL",
-        [session_id],
-        |r| r.get::<_, Option<i64>>(0),
-    )
-    .ok()?
-    .map(|micros| micros as f64 / 1_000_000.0)
+    crate::otel_read::session_cost_usd(db, session_id)
 }
 
 #[cfg(test)]

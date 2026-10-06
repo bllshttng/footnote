@@ -153,6 +153,7 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    DoctorCost(Vec<OsString>),
     /// `fno doctor lint style ...`: the native style check, exec'd through
     /// the sibling fno-agents `style-check` verb. Args from the check name
     /// onward; Python keeps every other lint check until its port.
@@ -274,10 +275,15 @@ fn classify_mail_show(args: &[OsString]) -> Option<Role> {
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
+    #[cfg(not(test))]
+    fno::doctor_cost::default_report(args);
     use cli_args::FrontDoor;
     // The native `doctor event` storage verbs are classified lexically,
     // before clap: the Python CLI still owns the `doctor` tree for every
     // other name, so `fno doctor event emit` must keep forwarding.
+    if let Some(rest) = fno::doctor_cost::classify(args) {
+        return Role::DoctorCost(rest);
+    }
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
     }
@@ -505,6 +511,7 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::DoctorCost(rest) => std::process::exit(fno::doctor_cost::run(&rest)),
         Role::DoctorLintStyle(rest) => {
             // The argv the sibling answers is the verb name plus the tail
             // the classifier sliced: `style-check --stdin ...`.
