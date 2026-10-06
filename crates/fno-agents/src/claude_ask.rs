@@ -2083,6 +2083,8 @@ fn now_iso() -> String {
 /// Commit one agents event through the event store beside the journal, in the
 /// Python-agents dual shape (flat `{...fields, ts, kind}` plus
 /// `type`/`source`/`data`), so kind-keyed and type-keyed readers both work.
+/// ts is millisecond-precision so two distinct same-second events never build
+/// byte-identical lines (the store commits those as one logical write).
 /// Free function (not `.emit(`) so the crate's daemon-emit-kind scanner ignores
 /// these Python-side audit kinds, matching `client_verbs::append_agents_event`.
 ///
@@ -2104,7 +2106,11 @@ pub fn emit_event(events_path: &Path, kind: &str, fields: &[(&str, serde_json::V
         }
     }
     // ts/kind/type/source/data are envelope keys; no caller field may use them (none does today).
-    let ts = json_string_ascii(&now_iso());
+    let ts = json_string_ascii(
+        &chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string(),
+    );
     let k = json_string_ascii(kind);
     let body = fields
         .iter()
