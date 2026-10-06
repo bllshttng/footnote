@@ -60,10 +60,16 @@ fn the_strip_presents_tabs_density_and_the_tab_bar_bell() {
     assert_eq!(pad_cell.c, ' ', "plain pad before the gap");
     assert_eq!(pad_cell.flags, 0, "pad stays plain");
     assert_eq!(range.end, pw - 1, "the density button ends the strip");
-    assert_eq!(bell.end, v.term.1 as usize, "the bell ends the tab bar");
+    // One column in from the edge: the last bell cell sits beside
+    // the pane border's top-right corner, never on it.
+    assert_eq!(
+        bell.end,
+        v.term.1 as usize - 1,
+        "the bell ends one column in"
+    );
     assert!(
         matches!(
-            v.chrome_hit(0, (v.term.1 - 1) as u16),
+            v.chrome_hit(0, (v.term.1 - 2) as u16),
             Some(ChromeHit::Bell(bell::Hit::Toggle))
         ),
         "the tab-bar bell toggles"

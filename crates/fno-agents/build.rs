@@ -71,7 +71,9 @@ fn main() {
         println!("cargo:rerun-if-changed={gitdir}/HEAD");
         if let Ok(head) = std::fs::read_to_string(format!("{gitdir}/HEAD")) {
             if let Some(reference) = head.strip_prefix("ref: ") {
-                println!("cargo:rerun-if-changed={gitdir}/{}", reference.trim());
+                if let Some(path) = run("git", &["rev-parse", "--git-path", reference.trim()]) {
+                    println!("cargo:rerun-if-changed={}", path.trim());
+                }
             }
         }
     }

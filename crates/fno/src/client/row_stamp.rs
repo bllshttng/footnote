@@ -167,12 +167,16 @@ impl View {
     pub(super) fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
         let (full, _) = self.notice.as_ref()?;
         // The open feed panel is senior: the toast right-aligns to the
-        // panel's edge, so it never paints under the feed. Every caller goes
-        // through this one function, so the hit test and the paint agree.
+        // panel's edge, so it never paints under the feed. The bell is
+        // senior too: the toast ends left of its seat, so the bell's move
+        // one column in keeps both the toast and the glyph readable. Every
+        // caller goes through this one function, so the hit test and the
+        // paint agree.
         let right = cols.saturating_sub(self.feed_panel_w() as usize);
-        let room = right.saturating_sub(1);
+        let edge = right.min(super::bell::button_range(self).start);
+        let room = edge.saturating_sub(1);
         let text = crate::chrome::fit_ellipsis(full, room);
-        let start = right.saturating_sub(crate::chrome::str_cols(&text) + 1);
+        let start = edge.saturating_sub(crate::chrome::str_cols(&text) + 1);
         Some((start, text))
     }
 }
@@ -495,10 +499,16 @@ mod tests {
             end <= 80,
             "the toast ends at {end}, past the panel's left edge"
         );
-        // A closed panel keeps the old full-width behaviour.
+        // A closed panel keeps the old full-width behaviour, minus the
+        // bell's seat: the toast ends left of the bell's range.
         view.feed = None;
         let (start, text) = view.notice_overlay(120).expect("a notice is set");
         let end = start + text.chars().count();
-        assert_eq!(end, 119, "closed panel: the toast hugs the right edge");
+        let bell_start = crate::client::bell::button_range(&view).start;
+        assert_eq!(
+            end,
+            bell_start.saturating_sub(1),
+            "closed panel: the toast hugs the bell's left edge"
+        );
     }
 }
