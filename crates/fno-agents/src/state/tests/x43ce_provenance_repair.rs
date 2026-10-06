@@ -104,9 +104,10 @@ fn a_well_formed_spawn_provenance_block_decodes_intact() {
 
 #[test]
 fn damage_elsewhere_still_fails_the_read() {
-    // The heal is narrow: a row broken outside the provenance block (here a
-    // status value with the wrong type) still fails the same-schema read by
-    // name, exactly as before this repair existed.
+    // The heal is narrow: a row that CARRIES a healable-looking block but
+    // fails elsewhere (here a status value with the wrong type) is not
+    // healed - the same-schema read still fails by name, exactly as before
+    // this repair existed.
     let dir = tmpdir("x43ce-damage-elsewhere");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
@@ -114,7 +115,7 @@ fn damage_elsewhere_still_fails_the_read() {
         &path,
         r#"{"schema_version":35,"agents":[
             {"name":"worker-alpha","cwd":"/w","harness":"claude","harness_session_id":"alpha-sess","status":"live","created_at":"2026-10-06T00:00:00Z"},
-            {"name":"broken","cwd":"/w","harness":"claude","harness_session_id":"broken-sess","status":17,"created_at":"2026-10-06T00:00:00Z"}
+            {"name":"broken","cwd":"/w","harness":"claude","harness_session_id":"broken-sess","status":17,"created_at":"2026-10-06T00:00:00Z","spawn_provenance":{"origin":{"kind":"session","parent":{"harness":"claude","session_id":"p-sess","cwd":"/w"},"invocation":null},"owner":{"kind":"session","harness":"claude","session_id":"p-sess","cwd":"/w"}}}
         ]}"#,
     )
     .unwrap();
