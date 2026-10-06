@@ -317,6 +317,7 @@ pub mod planning_lane;
 pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
+pub mod pr_admission;
 pub mod pr_body_check;
 pub mod pr_create;
 pub mod pr_draft_ready;
