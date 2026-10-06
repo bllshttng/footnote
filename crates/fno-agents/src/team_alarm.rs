@@ -23,6 +23,16 @@ pub const TEAM_EMPTY_GRACE_S: u64 = 1800;
 /// 2518-node scope, and a busy fleet stretches past 30s of wall clock.
 const ORG_READ_BUDGET_S: u64 = 30;
 
+/// The org read's ceiling: half the arm_watch beat (300s), so the longest
+/// read still answers inside the tick that paid for it.
+const ORG_READ_MAX_S: u64 = 150;
+
+/// The load-scaled budget, `bounded_cmd::load_scaled_budget_s` with this
+/// read's floor and ceiling.
+fn org_read_budget() -> u64 {
+    crate::bounded_cmd::load_scaled_budget_s(ORG_READ_BUDGET_S, ORG_READ_MAX_S)
+}
+
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
@@ -195,20 +205,40 @@ pub(crate) fn collect_from(
 }
 
 pub(crate) fn read_org_payload(config_cwd: &Path) -> Result<Value, String> {
+    let budget = org_read_budget();
     let fno = crate::scrape::fno_bin();
     let mut cmd = std::process::Command::new(&fno);
     cmd.args(["agents", "org", "--nodes"])
         .current_dir(config_cwd)
         .stdin(std::process::Stdio::null());
-    let out = crate::bounded_cmd::output_with_timeout(cmd, ORG_READ_BUDGET_S)
-        .ok_or_else(|| format!("the org read timed out after {ORG_READ_BUDGET_S}s"))?;
-    org_payload_from(out.status.success(), &out.stdout, &out.stderr)
+    let out = crate::bounded_cmd::output_with_timeout(cmd, budget)
+        .ok_or_else(|| format!("the org read timed out after {budget}s"))?;
+    org_payload_from(
+        budget,
+        out.status.code().is_none(),
+        out.status.success(),
+        &out.stdout,
+        &out.stderr,
+    )
 }
 
 /// The read's verdict over one child's output: the parsed payload, or the
 /// fault that says why the board is unknown - never an empty, clear board.
-fn org_payload_from(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<Value, String> {
+/// `killed` (signal death) is the bound's own kill, so the verdict names the
+/// bound instead of quoting whatever stderr fragment a SIGKILLed child left.
+fn org_payload_from(
+    budget: u64,
+    killed: bool,
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Value, String> {
     if !success {
+        if killed {
+            return Err(format!(
+                "the org read was killed at its {budget}s load-scaled bound"
+            ));
+        }
         let stderr = String::from_utf8_lossy(stderr);
         return Err(format!(
             "the org read failed: {}",
@@ -371,21 +401,62 @@ mod tests {
 
     #[test]
     fn a_failed_org_read_is_an_error_never_a_clear_board() {
-        let err = org_payload_from(false, b"", b"boom").unwrap_err();
+        let err = org_payload_from(30, false, false, b"", b"boom").unwrap_err();
         assert!(err.contains("the org read failed"), "{err}");
-        let err = org_payload_from(true, b"not json", b"").unwrap_err();
+        let err = org_payload_from(30, false, true, b"not json", b"").unwrap_err();
         assert!(err.contains("did not parse"), "{err}");
     }
 
     #[test]
     fn a_failed_org_read_names_the_last_non_config_line() {
         let err = org_payload_from(
+            30,
+            false,
             false,
             b"",
             b"fno config: x is not modeled\nError: org store locked",
         )
         .unwrap_err();
         assert_eq!(err, "the org read failed: Error: org store locked");
+        // 2026-10-05 shape: the bound SIGKILLed the read on a fork-starved
+        // machine and the only stderr left was the harmless config warning,
+        // so the verdict quoted the warning as the failure cause. A signal
+        // death names the bound instead.
+        let err = org_payload_from(
+            150,
+            true,
+            false,
+            b"",
+            b"fno config: merge.visual_paint_paths is not a modeled config key; ignored",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("killed at its 150s load-scaled bound"),
+            "{err}"
+        );
+        assert!(!err.contains("fno config:"), "{err}");
+        // The load-scaled budget: the floor idle, doubling per 2 jobs per
+        // core, capped at half the 300s beat.
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(None, 30, 150),
+            30
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(0.0), 30, 150),
+            30
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(2.0), 30, 150),
+            30
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(4.0), 30, 150),
+            60
+        );
+        assert_eq!(
+            crate::bounded_cmd::load_scaled_budget_for_s(Some(41.6), 30, 150),
+            150
+        );
     }
 
     #[test]
