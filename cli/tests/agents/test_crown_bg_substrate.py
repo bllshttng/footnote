@@ -361,8 +361,8 @@ def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> Non
         if "--" in argv:
             seen["seed"] = argv[argv.index("--") + 1]
         if harness == "codex":
-            assert "--team-level=2" in tokens
-            assert "--team-scope=epic-x" in tokens
+            assert "--role-level=2" in tokens
+            assert "--role-scope=epic-x" in tokens
         update_registry(
             lambda rows: rows
             + [

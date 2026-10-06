@@ -918,22 +918,15 @@ pub(crate) fn decide_with_payload(
                 "cwd": &cwd,
                 "codex_thread_id": codex_thread,
             });
-            // On codex the event IS the daemon's watch registration, so the
-            // idle only stands when the registration landed (AC4-ERR); a
-            // claude watcher is agent-armed and needs no registration.
-            let emit_ok = match &codex_thread {
-                Some(_) => fire_history::emit_to_both_checked(
-                    &project_events,
-                    &global_events,
-                    "loop_check_watch_idle",
-                    idle_row,
-                )
-                .is_ok(),
-                None => {
-                    emit("loop_check_watch_idle", idle_row);
-                    true
-                }
-            };
+            // The daemon owns settle and expiry wakes on every harness;
+            // a harness task alone cannot guarantee a wake across context boundaries.
+            let emit_ok = fire_history::emit_to_both_checked(
+                &project_events,
+                &global_events,
+                "loop_check_watch_idle",
+                idle_row,
+            )
+            .is_ok();
             if emit_ok {
                 emit(
                     "loop_check",

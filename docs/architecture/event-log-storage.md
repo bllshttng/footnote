@@ -1,10 +1,6 @@
 # Event log storage: events.db is the only authoritative store
 
-One SQLite database (`events.db`) sits beside each resolved journal path
-(project, global, agents lifecycle). Every writer in every language commits
-through the `fno-event-store` crate's single transaction, and every reader
-queries committed rows in commit order. The JSONL files are legacy import
-sources and explicit export targets only; nothing treats them as authoritative.
+One SQLite database (`events.db`) serves each resolved journal path (project, global, agents lifecycle). State-root journals route through the layout table. Other journals retain sibling stores. Writers commit through the Rust `event_store` owner in `fno-agents`. The `fno` crate receives a generated copy. Readers query committed rows. JSONL files are legacy import sources and explicit export targets.
 
 ## Schema (user_version 2)
 
@@ -63,6 +59,16 @@ Projections can join these owners by stable id. They must not copy them into the
 ## Import and export
 
 The importer walks every retained journal generation oldest-first, then the live file, then the ephemeral sibling. Each pass runs in one transaction and keys on row hash, so replays are free and a crash mid-import loses nothing. `fno doctor event export` writes the JSONL snapshot atomically from committed rows. An export is a snapshot for downgrades and audits, never re-ingested as new identity.
+
+## Diagnose a malformed store on a copy
+
+A journal path is an import anchor. Resolve its database with `fno doctor event rows --events <journal> --store-path-only` before interpreting a SQLite error. State-root journals can route to `db/events.db`. Agents journals retain their sibling store. Import SQL failures name the database and journal. History query failures name the database. File read failures continue to name the journal.
+
+Copy the database and journal family into an isolated directory. When a WAL exists, copy it too. Record source sizes and modification times before and after copying. Discard a copy whose sources changed during capture. Run `PRAGMA integrity_check` and every recovery attempt on copies only. Retain an untouched copy before attempting `REINDEX`, logical reconstruction, or SQLite recovery.
+
+Inspect tables with `SELECT * FROM <table> NOT INDEXED` to distinguish damaged indexes from damaged table pages. A readable events table does not prove a readable ingest cursor. The cursor records import progress. Before resetting it in a reconstruction, preserve every readable authoritative table, schema version, row identity, sequence, and observation state. Verify row counts, content digests, integrity, check-in readback, and repeated-import deduplication on the reconstructed copy. An unreadable authoritative table requires separate recovery assessment. Rebuilding from retained JSONL alone can lose committed history.
+
+Readers refuse corruption. They never repair, replace, or silently rebuild a live store. A copy proof does not authorize installation of a repaired store or deployment of a worktree build.
 
 ## Grammar
 

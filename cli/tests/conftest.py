@@ -1574,6 +1574,12 @@ def _no_status_ci_door(monkeypatch):
             return []
         if verb == "authorized-merge" and op == "status-rerun":
             raise unavailable(f"fno-agents {verb} {op} unavailable in tests")
+        if verb == "authorized-merge" and op == "pr-head":
+            from fno.pr import _merge
+            from fno.pr._rest import fetch_pr_info_rest
+
+            info, _ = fetch_pr_info_rest(str(payload["pr"]), cwd=payload["cwd"], runner=_merge.run)
+            return {"head": info.get("head_sha") if info else None}
         return real_verb_call(verb, payload, unavailable=unavailable, **kwargs)
 
     monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)

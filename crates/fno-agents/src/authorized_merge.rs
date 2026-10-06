@@ -439,10 +439,19 @@ pub struct Authorized {
 /// come first, then the holds, then the head pin, then the effect's own
 /// preconditions.
 pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Outcome> {
+    decide_observed(probes, request, &mut None)
+}
+
+fn decide_observed<P: Probes>(
+    probes: &P,
+    request: &Request,
+    observed_head: &mut Option<String>,
+) -> Result<Authorized, Outcome> {
     let cwd = request.cwd.as_path();
     let facts = probes
         .pr_facts(cwd, request.pr)
         .map_err(|reason| Outcome::Unknown { reason })?;
+    *observed_head = Some(facts.head_sha.clone());
 
     // The preview arm answers the same gates read-only and never reaches an
     // effect: `fno do pr status` reads its receipt as `ready`.
@@ -1268,7 +1277,15 @@ fn authority_refusal<P: Probes>(
 
 /// Decide, then run the effect unless the caller asked to stop at the decision.
 pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
-    match decide(probes, request) {
+    run_observed(probes, request, &mut None)
+}
+
+fn run_observed<P: Probes>(
+    probes: &P,
+    request: &Request,
+    observed_head: &mut Option<String>,
+) -> Outcome {
+    match decide_observed(probes, request, observed_head) {
         Ok(authorized) if request.decide_only || request.effect == Effect::Preview => {
             Outcome::Authorized {
                 head: authorized.head,
@@ -1505,31 +1522,13 @@ impl RealProbes {
     }
 
     fn fno_strings(cwd: &Path, args: &[String]) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
-        let out = Command::new(crate::scrape::fno_bin())
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .map_err(|error| error.to_string())?;
-        Ok((out.status.code(), out.stdout, out.stderr))
+        Self::fno(cwd, &args.iter().map(String::as_str).collect::<Vec<_>>())
     }
 }
 
 impl Probes for RealProbes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String> {
-        let number = pr.map(|n| n.to_string());
-        let mut args = vec!["do", "pr", "info"];
-        if let Some(number) = number.as_deref() {
-            args.push(number);
-        }
-        let (_code, stdout, stderr) = Self::fno(cwd, &args)?;
-        let payload: Value = serde_json::from_slice(&stdout).map_err(|error| {
-            let detail = String::from_utf8_lossy(&stderr);
-            format!(
-                "fno do pr info returned unreadable JSON ({error}): {}",
-                detail.trim()
-            )
-        })?;
-        parse_pr_facts(&payload)
+        head_probe::read(cwd, pr)
     }
 
     fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
@@ -1960,8 +1959,9 @@ fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 /// The graph tag that declares a repair lane: a node carrying it may merge
-/// through a red main, because it IS the repair.
-const MAIN_REPAIR_TAG: &str = "main-repair";
+/// through a red main, because it IS the repair. The visual gate reads it
+/// too: the lane's whole point is merging without further ceremony.
+pub(crate) const MAIN_REPAIR_TAG: &str = "main-repair";
 
 /// The refusal: the red run named, then the repair lane.
 fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {
@@ -1973,11 +1973,23 @@ fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {
 }
 
 /// Does one graph entry carry the tag?
-fn node_carries_tag(entry: &Value, tag: &str) -> bool {
+pub(crate) fn node_carries_tag(entry: &Value, tag: &str) -> bool {
     entry
         .get("tags")
         .and_then(Value::as_array)
         .is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(|t| t == tag))
+}
+
+/// The graph entry bound to this PR by its recorded `pr_number`. `None` on an
+/// unreadable graph or no bound node: callers above treat absent as "not
+/// bound", which for every gate here must hold rather than release.
+pub(crate) fn pr_bound_entry(cwd: &Path, pr: u64) -> Option<Value> {
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
+    let store = GraphStore::new(&graph_path);
+    let entries = backlog_api::rows(&store).ok()?;
+    entries
+        .into_iter()
+        .find(|e| e.get("pr_number").and_then(Value::as_i64) == Some(pr as i64))
 }
 
 /// The main-repair exemption probe over the live graph: `None` when this
@@ -2356,6 +2368,13 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Ok(value) => value,
         Err(message) => return (2, String::new(), message),
     };
+    if payload.get("op").and_then(Value::as_str) == Some("pr-head") {
+        return (
+            0,
+            format!("{}\n", head_probe::receipt(&payload)),
+            String::new(),
+        );
+    }
     // The hold ops are merge-authority writes riding this verb's payload, not
     // a new top-level root: `{"op": "hold-set"|"freeze-set"|..., ...}` answers
     // with one receipt instead of a merge verdict.
@@ -2461,10 +2480,14 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // RAN: 0 with a receipt on stdout, 2 when the payload was unusable. A code
     // that also encoded refusal would make a held merge indistinguishable from a
     // binary that could not start, and the caller reads the receipt either way.
-    let outcome = run(&RealProbes, &request);
-    (0, format!("{}\n", outcome.to_json()), String::new())
+    let mut observed_head = None;
+    let outcome = run_observed(&RealProbes, &request, &mut observed_head);
+    let mut receipt = outcome.to_json();
+    receipt["observed_head"] = json!(observed_head);
+    (0, format!("{receipt}\n"), String::new())
 }
 
+mod head_probe;
 mod preview_receipt;
 
 pub(crate) use preview_receipt::{
@@ -3828,7 +3851,9 @@ mod tests {
             checks: Some("red".to_string()),
             ..clean()
         };
-        let held = run(&red, &req);
+        let mut observed_head = None;
+        let held = run_observed(&red, &req, &mut observed_head);
+        assert_eq!(observed_head.as_deref(), Some("abc123"));
         assert_eq!(held.word(), "held");
         assert!(held
             .detail()
@@ -4256,12 +4281,6 @@ mod tests {
 
         let unarmed = json!({"pr": 7, "head_sha": "abc123", "auto_merge": Value::Null});
         assert!(!parse_pr_facts(&unarmed).expect("facts parse").armed);
-    }
-
-    #[test]
-    fn pr_facts_refuses_a_payload_with_no_head_sha() {
-        assert!(parse_pr_facts(&json!({"pr": 7})).is_err());
-        assert!(parse_pr_facts(&json!({"error": "gh api failed"})).is_err());
     }
 
     #[test]
@@ -4730,23 +4749,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fno")).unwrap();
         // questions_dir falls back to the space dir, and the hermetic guard
-        // refuses a HOME-derived one under test; point it at a tempdir.
-        struct RestoreEnv(Option<std::ffi::OsString>);
+        // refuses a HOME-derived one under test; point it at a tempdir. The
+        // graph store reads the state root too (the bound-node lookup), so
+        // FNO_HOME is declared as well.
+        struct RestoreEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
         impl Drop for RestoreEnv {
             fn drop(&mut self) {
                 match self.0.take() {
                     Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
                     None => std::env::remove_var("FNO_SPACES_DIR"),
                 }
+                match self.1.take() {
+                    Some(v) => std::env::set_var("FNO_HOME", v),
+                    None => std::env::remove_var("FNO_HOME"),
+                }
             }
         }
         let spaces = std::env::temp_dir().join(format!("xc129-spaces-{}", std::process::id()));
         std::fs::create_dir_all(&spaces).unwrap();
         let _env_lock = crate::pr_status::cache_env_lock();
+        // The bound-node lookup transitively resolves the global claims root.
+        crate::paths::pin_test_claims_root(&spaces);
         let _env = {
             let prior = std::env::var_os("FNO_SPACES_DIR");
             std::env::set_var("FNO_SPACES_DIR", &spaces);
-            RestoreEnv(prior)
+            let prior_home = std::env::var_os("FNO_HOME");
+            std::env::set_var("FNO_HOME", &tmp);
+            RestoreEnv(prior, prior_home)
         };
         std::fs::write(
             tmp.join(".fno/config.toml"),
@@ -4804,22 +4833,30 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("xc39f-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fno")).unwrap();
-        struct RestoreEnv(Option<std::ffi::OsString>);
+        struct RestoreEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
         impl Drop for RestoreEnv {
             fn drop(&mut self) {
                 match self.0.take() {
                     Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
                     None => std::env::remove_var("FNO_SPACES_DIR"),
                 }
+                match self.1.take() {
+                    Some(v) => std::env::set_var("FNO_HOME", v),
+                    None => std::env::remove_var("FNO_HOME"),
+                }
             }
         }
         let spaces = std::env::temp_dir().join(format!("xc39f-spaces-{}", std::process::id()));
         std::fs::create_dir_all(&spaces).unwrap();
         let _env_lock = crate::pr_status::cache_env_lock();
+        // The bound-node lookup transitively resolves the global claims root.
+        crate::paths::pin_test_claims_root(&spaces);
         let _env = {
             let prior = std::env::var_os("FNO_SPACES_DIR");
             std::env::set_var("FNO_SPACES_DIR", &spaces);
-            RestoreEnv(prior)
+            let prior_home = std::env::var_os("FNO_HOME");
+            std::env::set_var("FNO_HOME", &tmp);
+            RestoreEnv(prior, prior_home)
         };
         std::fs::write(
             tmp.join(".fno/config.toml"),
