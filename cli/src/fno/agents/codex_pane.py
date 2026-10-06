@@ -10,10 +10,12 @@ import re
 import subprocess
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
+from fno.agents.registry import TERMINAL_STATUSES, load_registry, update_registry
 
 _CODEX_DAEMON_START_TIMEOUT_S = 15  # `daemon start` no-ops when running.
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -268,6 +270,31 @@ def _make_codex_bind_probe(
         return candidate
 
     return _probe
+
+
+def stamp_late_bind(name, session_id, child_pid, mux, registry_path=None) -> bool:
+    """Stamp a post-window codex bind onto the pane's id-less row; True on success.
+
+    Compare-and-set as reconcile's backfill: only this pane's codex row, id-less
+    and non-terminal, never an id another row holds. A raced miss leaves the row
+    `spawning` for the next reconcile to heal (x-3b89).
+    """
+    def apply(rows):
+        dup = any(r.name != name and r.harness_session_id == session_id for r in rows)
+        return [
+            replace(r, harness_session_id=session_id, status="live")
+            if (not dup and r.name == name and r.harness == "codex"
+                and r.pid == child_pid and r.mux == mux and not r.harness_session_id
+                and r.status not in TERMINAL_STATUSES)
+            else r
+            for r in rows
+        ]
+
+    update_registry(apply, path=registry_path)
+    row = next((r for r in load_registry(path=registry_path) if r.name == name), None)
+    return bool(row and row.harness_session_id == session_id)
+
+
 def deliver_seed(thread_id: str, seed: str, cwd: Path, dirs: Sequence[str]) -> bool:
     """Send a bounded pane's seed as a fno turn/start, which carries the roots."""
     from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV

@@ -4807,7 +4807,33 @@ def dispatch_spawn_pane(
             if backfilled_row is not None and backfilled_row.harness_session_id:
                 stored_session_uuid = backfilled_row.harness_session_id
                 row_status = backfilled_row.status
-            elif binding_caps["required"]:
+            else:
+                # x-3b89: a bind landing just past the window left a live worker
+                # whose row was dropped; one pid-tied re-probe, and a late bind
+                # is stamped so the row is kept under its name.
+                from fno.agents.codex_pane import stamp_late_bind
+
+                try:
+                    late_sid = (
+                        _codex_session_id_for_pid(child_pid)
+                        if child_pid is not None
+                        else None
+                    )
+                    late_bound = bool(late_sid) and stamp_late_bind(
+                        name, late_sid, child_pid, this_mux, registry_path
+                    )
+                except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+                    late_sid, late_bound = None, False
+                if late_bound:
+                    stored_session_uuid, row_status = late_sid, "live"
+                elif late_sid:
+                    raise DispatchAskError(
+                        f"agent {name!r} bound {late_sid} past the window but the row "
+                        "could not be stamped (raced or write failed); the pane is "
+                        "alive and kept - `fno agents reconcile` will backfill it",
+                        exit_code=1,
+                    )
+            if binding_caps["required"] and stored_session_uuid is None:
                 # Reconcile's one extra chance came up empty too: a required
                 # binding that is STILL id-less is the same unusable pane the
                 # earlier required-binding gate reaps for every other unbound
