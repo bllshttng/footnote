@@ -9,6 +9,8 @@ struct Fake {
     /// Answer for the binding probe alone; `None` (the default) reads Clear.
     node_binding: Option<ProbeOutcome>,
     dispatch_hold: Option<ProbeOutcome>,
+    outside_pr: Option<ProbeOutcome>,
+    pr_hold: Option<ProbeOutcome>,
     review_hold: Option<ProbeOutcome>,
     lineage: Option<ProbeOutcome>,
     merge_result: Option<ProbeOutcome>,
@@ -203,6 +205,12 @@ impl Probes for Fake {
             return hold.clone();
         }
         self.dispatch_hold.clone().unwrap_or(ProbeOutcome::Clear)
+    }
+    fn outside_pr(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        self.outside_pr.clone().unwrap_or(ProbeOutcome::Clear)
+    }
+    fn pr_hold(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        self.pr_hold.clone().unwrap_or(ProbeOutcome::Clear)
     }
     fn review_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
         self.review_hold.clone().unwrap_or(ProbeOutcome::Clear)
@@ -1942,6 +1950,26 @@ fn merge_and_preview_name_the_same_first_blocker_for_every_gate() {
             },
         ),
         (
+            "outside_pr",
+            Fake {
+                outside_pr: Some(ProbeOutcome::Refused(
+                    "outside_pr: PR #7 is from stranger/footnote; fleet automation never \
+                     merges, heals, binds or reviews an outside pull request"
+                        .to_string(),
+                )),
+                ..base()
+            },
+        ),
+        (
+            "pr_hold",
+            Fake {
+                pr_hold: Some(ProbeOutcome::Refused(
+                    "pr_hold: the owner holds PR #7 (d-1); release it to clear".to_string(),
+                )),
+                ..base()
+            },
+        ),
+        (
             "review_in_flight",
             Fake {
                 review_hold: Some(ProbeOutcome::Refused(
@@ -2011,6 +2039,36 @@ fn merge_and_preview_name_the_same_first_blocker_for_every_gate() {
             outcome.detail(),
             blockers[0].detail,
             "{code}: merge detail and the preview's first blocker ({first}) disagree"
+        );
+    }
+
+    // The two admission gates answer the Arm effect identically: finalize's
+    // auto-merge arm passes through decide, so the same gate holds it.
+    let outside = Fake {
+        outside_pr: Some(ProbeOutcome::Refused(
+            "outside_pr: PR #7 is from stranger/footnote".to_string(),
+        )),
+        ..base()
+    };
+    let held = Fake {
+        pr_hold: Some(ProbeOutcome::Refused(
+            "pr_hold: the owner holds PR #7".to_string(),
+        )),
+        ..base()
+    };
+    for (code, fake, word) in [
+        ("outside_pr", outside, "refused"),
+        ("pr_hold", held, "held"),
+    ] {
+        let req_arm = Request {
+            require_checks: true,
+            ..request(Effect::Arm)
+        };
+        let outcome = run(&fake, &req_arm);
+        assert_eq!(
+            outcome.word(),
+            word,
+            "{code}: the arm did not answer {word}: {outcome:?}"
         );
     }
 }

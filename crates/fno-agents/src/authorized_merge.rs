@@ -422,6 +422,17 @@ pub trait Probes {
     fn main_repair_hold(&self, _cwd: &Path, _facts: &PrFacts) -> Option<String> {
         None
     }
+    /// The outside-PR gate: fleet automation never acts on outside code, and
+    /// no admit door exists. Default `Clear` keeps an impl that does not read
+    /// origin facts inert.
+    fn outside_pr(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        ProbeOutcome::Clear
+    }
+    /// The owner's per-PR hold, an operator law row at `pr-hold:<slug>#<n>`.
+    /// Default `Clear` keeps an impl that does not read law rows inert.
+    fn pr_hold(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        ProbeOutcome::Clear
+    }
 }
 
 /// A cleared decision: the effect may run, pinned to this head.
@@ -492,6 +503,14 @@ fn decide_observed<P: Probes>(
         });
     }
 
+    // The outside-PR gate: outside is final. An unreadable origin read is
+    // Unknown (fail closed), never a quiet Clear.
+    match probes.outside_pr(cwd, &facts) {
+        ProbeOutcome::Clear => {}
+        ProbeOutcome::Refused(reason) => return Err(Outcome::Refused { reason }),
+        ProbeOutcome::Inconclusive(reason) => return Err(Outcome::Unknown { reason }),
+    }
+
     if let Some((_, reason)) = authority_refusal(probes, cwd, request, &facts) {
         return Err(Outcome::Refused { reason });
     }
@@ -522,6 +541,12 @@ fn decide_observed<P: Probes>(
     }
 
     if let Some(blocked) = probes.dispatch_hold(cwd, &facts).fail_closed() {
+        return Err(Outcome::Held { reason: blocked });
+    }
+
+    // The owner's per-PR hold answers beside the dispatch hold: held, not
+    // refused, because the owner releasing it clears it.
+    if let Some(blocked) = probes.pr_hold(cwd, &facts).fail_closed() {
         return Err(Outcome::Held { reason: blocked });
     }
 
@@ -874,6 +899,18 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
     }
 
+    // (3c) the outside-PR gate, the same refusal the effect path raises, so
+    // `fno do pr status` never says ready where merge refuses.
+    match probes.outside_pr(cwd, facts) {
+        ProbeOutcome::Clear => {}
+        ProbeOutcome::Refused(reason) => {
+            blockers.push(Blocker::refused("outside_pr", reason));
+        }
+        ProbeOutcome::Inconclusive(reason) => {
+            blockers.push(Blocker::unknown("outside_pr_unreadable", reason));
+        }
+    }
+
     // (4) holds, in decide's order. A preview ask may carry the dispatch-hold
     // answer its caller already probed; the supplied value rides only the
     // preview (advisory) walk, never decide's own merge chain.
@@ -895,6 +932,9 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     };
     if let Some(reason) = review_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("review_in_flight", reason));
+    }
+    if let Some(reason) = probes.pr_hold(cwd, facts).fail_closed() {
+        blockers.push(Blocker::held("pr_hold", reason));
     }
 
     // (4b) the user's look: a PR touching the configured paint surface holds
@@ -1541,6 +1581,14 @@ impl Probes for RealProbes {
 
     fn main_repair_hold(&self, cwd: &Path, facts: &PrFacts) -> Option<String> {
         main_repair_hold_probe(cwd, facts)
+    }
+
+    fn outside_pr(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        crate::pr_admission::outside_pr(cwd, facts)
+    }
+
+    fn pr_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        crate::pr_admission::pr_hold(cwd, facts)
     }
 
     fn dispatch_hold(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
