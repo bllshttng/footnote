@@ -78,7 +78,7 @@ The keeper's `read_ids` preserves argument order and exact id-before-slug resolu
 
 Whole reads retain their existing export and archive meaning. Rust whole reads include archived rows. The Python `wire_rows` client excludes them by default. Narrow callers state their archive policy explicitly. Typed pagination preserves the previous whole-export cursor positions through an ordinal-only scan, without adding metadata keys to node replies.
 
-Whole API rows retain stored statuses, including when the caller filters archived rows. Filtered or projected queries can serve active work as `in_progress`.
+Whole API rows retain stored statuses under archive filtering. Filtered or projected queries can serve active work as `in_progress`.
 
 Strict query reads report an unreadable store as an error. They never answer with an empty set to imply that no node exists. Verify read performance and row parity through the store-exec lane on a database copy. `FNO_STORE_EXEC_LOG` records `wall_us`, returned row count, and reply bytes for each request.
 
