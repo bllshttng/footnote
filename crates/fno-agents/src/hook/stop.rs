@@ -1591,6 +1591,15 @@ mod tests {
             arbitrate_codex_continuation_from_reading("lead", &fire, &stale_manifest, Ok(None)),
             GoalArbitration::None
         ));
+        // The self-heal trigger is the bare word alone: a scope-carrying
+        // or differently spelled objective is a real goal, never a resume's
+        // stub, so only the exact word arms the repair.
+        assert!(goal_arbitration::is_bare_resume_objective("resume"));
+        assert!(goal_arbitration::is_bare_resume_objective(" resume "));
+        assert!(!goal_arbitration::is_bare_resume_objective(
+            "$fno:lead scope-a"
+        ));
+        assert!(!goal_arbitration::is_bare_resume_objective(""));
     }
 
     #[test]
