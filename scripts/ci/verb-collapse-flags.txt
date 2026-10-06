@@ -13,6 +13,7 @@ agents gate !--record
 agents heal-token !--all-sources
 agents heal-token !--cross-project
 agents list !--provider
+agents mail hold-release !--now
 agents mail hold-release !--poll-s
 agents mail pane-prepare !--session
 agents mail send !--origin
@@ -41,6 +42,7 @@ do target start !--provider
 doctor footprint !--cause-only
 doctor event find !--session
 event find !--session
+mail hold-release !--now
 mail hold-release !--poll-s
 mail pane-prepare !--session
 mail send !--origin
