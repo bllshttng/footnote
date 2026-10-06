@@ -531,10 +531,10 @@ fn apply_with_projects(
     } else {
         ("granted", Vec::new())
     };
-    // Succession re-homes the org: every live child whose CURRENT owner
-    // (the provenance owner, else the birth edge on a pre-v33 row) names a
-    // vacated holder's session follows the team to the successor. The birth edge
-    // itself stays history - ownership is what the sideline reads.
+    // Succession re-homes the org: every live child whose CURRENT owner (the
+    // provenance owner) names a vacated holder's session follows the team to
+    // the successor. The birth edge itself stays history - ownership is what the
+    // sideline reads.
     let vacated_sessions: HashSet<String> = if outcome == "succeeded" {
         occupancy
             .holders
@@ -557,12 +557,15 @@ fn apply_with_projects(
                 if Some(row.get("name").and_then(Value::as_str).unwrap_or("")) == exclude_name {
                     return false;
                 }
+                // Reown only rows that already carry provenance. Falling back
+                // to the birth edge selected provenance-less rows (adopt,
+                // pre-v33), and the applier then forked an origin-less block
+                // onto them that the typed reader rejects row-wide.
                 let owner = row
                     .get("spawn_provenance")
                     .and_then(|p| p.get("owner"))
                     .and_then(|o| o.get("session_id"))
                     .and_then(Value::as_str)
-                    .or_else(|| row.get("spawned_by_session").and_then(Value::as_str))
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_ascii_lowercase);
@@ -925,9 +928,10 @@ mod tests {
         assert_eq!(out["caller"], json!({"kind": "human"}));
 
         // Succession re-homes the org. A live child whose CURRENT
-        // owner (the provenance owner, else the birth edge on a pre-v33 row)
-        // names a vacated holder's session follows the team; a child already
-        // owned by another session stays put; a terminal row never moves.
+        // owner (the provenance owner) names a vacated holder's session
+        // follows the team; a child already owned by another session stays
+        // put; a provenance-less child (birth edge only) is never selected,
+        // and a terminal row never moves.
         let out = resolve(&json!({
             "kind": "role-settle", "scope": "epic-a", "successor": "Taylor",
             "successor_identity": {"harness": "codex", "session_id": "sess-successor", "cwd": "/w"},
@@ -956,7 +960,7 @@ mod tests {
         .unwrap();
         assert_eq!(out["outcome"], "succeeded");
         assert_eq!(out["vacate_rows"], json!([0]));
-        assert_eq!(out["reown_rows"], json!([1, 3]));
+        assert_eq!(out["reown_rows"], json!([1]));
         assert_eq!(out["reown_owner"]["session_id"], "sess-successor");
         assert_eq!(out["reown_owner"]["kind"], "session");
 

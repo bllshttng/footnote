@@ -382,7 +382,7 @@ def test_settle_spawn_role_outcomes(tmp_path: Path, monkeypatch, native_backlog_
 
     def plan_for(rows, succession=False):
         update_registry(lambda _: rows)
-        refusal, plan = plan_spawn_role("epic-x", None, succession)
+        refusal, plan = plan_spawn_role("epic-x", None, succession, proposed_name="Avery" if succession else None)
         assert refusal is None
         assert plan is not None
         return plan
@@ -408,7 +408,7 @@ def test_settle_spawn_role_outcomes(tmp_path: Path, monkeypatch, native_backlog_
     succeeded_plan = plan_for([caller, child], succession=True)
     rows, outcome, vacated = settle_spawn_role(
         [caller, child], scope="epic-x", plan=succeeded_plan,
-        successor="successor", successor_harness="codex", successor_session="successor-sess", successor_cwd="/w",
+        successor="Avery", successor_harness="codex", successor_session="successor-sess", successor_cwd="/w",
     )
     assert outcome == "succeeded"
     assert [r.role_scope for r in rows] == [None, None]
@@ -422,7 +422,7 @@ def test_settle_spawn_role_outcomes(tmp_path: Path, monkeypatch, native_backlog_
     stranger = _role_row("stranger")
     race_plan = plan_for([caller, child], succession=True)
     rows, outcome, vacated = settle_spawn_role(
-        [stranger, child], scope="epic-x", plan=race_plan,
+        [stranger, child], scope="epic-x", plan=race_plan, successor="Avery", successor_harness="codex", successor_session="successor-sess", successor_cwd="/w",
     )
     assert outcome == "declined"
     assert rows[0].role_scope == "epic-x", "a declined spawn leaves the holder alone"
@@ -441,11 +441,87 @@ def test_settle_spawn_role_outcomes(tmp_path: Path, monkeypatch, native_backlog_
     rebound_plan = plan_for([caller, child], succession=True)
     rebound = replace(caller, harness_session_id="caller-sess-2")
     rows, outcome, vacated = settle_spawn_role(
-        [rebound, child], scope="epic-x", plan=rebound_plan,
+        [rebound, child], scope="epic-x", plan=rebound_plan, successor="Avery", successor_harness="codex", successor_session="successor-sess", successor_cwd="/w",
     )
     assert outcome == "declined"
     assert rows[0].role_scope == "epic-x"
     assert vacated == []
+
+
+def test_settle_spawn_role_reown_skips_a_provenance_less_child(
+    tmp_path: Path, monkeypatch, native_backlog_door,
+) -> None:
+    """A child with no spawn_provenance (adopt, pre-v33 birth edge) is never
+    reowned: the planner selects provenance-carrying rows only, and the
+    applier must not fork a block onto one (an origin-less block zeroed the
+    Rust decode fleet-wide)."""
+    from dataclasses import replace
+
+    from fno.agents.role import plan_spawn_role, settle_spawn_role
+    from fno.agents.registry import update_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    caller = _role_row("caller")
+    child = replace(
+        _role_row("w5", scope=None),
+        spawned_by_session="caller-sess",
+    )
+    update_registry(lambda _: [caller, child])
+    refusal, plan = plan_spawn_role("epic-x", None, True, proposed_name="Avery")
+    assert refusal is None
+    rows, outcome, vacated = settle_spawn_role(
+        [caller, child], scope="epic-x", plan=plan,
+        successor="Avery", successor_harness="codex", successor_session="successor-sess", successor_cwd="/w",
+    )
+    assert outcome == "succeeded"
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")], (
+        "the provenance-less child is not reowned"
+    )
+    assert rows[1].spawn_provenance is None, (
+        "no provenance block is forked onto the child"
+    )
+
+
+def test_settle_spawn_role_applier_never_forks_provenance(
+    tmp_path: Path, monkeypatch, native_backlog_door,
+) -> None:
+    """The write-site guard: even a plan naming a provenance-less row in
+    reown_rows leaves the row alone - the applier moves an existing block,
+    never mints one."""
+    from fno.agents import spawn_overlay_client
+    from fno.agents.role import settle_spawn_role
+    from fno.agents.registry import update_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    caller = _role_row("caller")
+    child = replace(
+        _role_row("w5", scope=None),
+        spawned_by_session="caller-sess",
+    )
+    update_registry(lambda _: [caller, child])
+
+    def stale_plan(*args, **kwargs):
+        return {
+            "outcome": "succeeded",
+            "clear_terminal_rows": [],
+            "vacate_rows": [0],
+            "reown_rows": [1],
+            "reown_owner": {
+                "kind": "session", "harness": "codex",
+                "session_id": "successor-sess", "cwd": "/w",
+            },
+        }
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", stale_plan)
+    rows, outcome, vacated = settle_spawn_role(
+        [caller, child], scope="epic-x", plan={"caller": {"kind": "human"}},
+        successor="Avery", successor_harness="codex", successor_session="successor-sess", successor_cwd="/w",
+    )
+    assert outcome == "succeeded"
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
+    assert rows[1].spawn_provenance is None, "the guard skips the fork"
 
 
 def test_settle_spawn_role_declines_when_rust_is_unavailable(
@@ -461,7 +537,7 @@ def test_settle_spawn_role_declines_when_rust_is_unavailable(
     use_tmpdir(monkeypatch, tmp_path)
     caller = _role_row("caller")
     update_registry(lambda _: [caller])
-    refusal, plan = plan_spawn_role("epic-x", None, True)
+    refusal, plan = plan_spawn_role("epic-x", None, True, proposed_name="Avery")
     assert refusal is None
     assert plan is not None
     before = asdict(caller)

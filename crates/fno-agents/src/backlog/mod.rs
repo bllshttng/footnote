@@ -331,7 +331,7 @@ fn migrate_role_provenance(connection: &mut Connection) -> Result<(), String> {
     }
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     nodes::migrate_role_provenance(&tx)?;
-    stamp_meta(&tx, "role_provenance_v1", 1)?;
+    stamp_meta(&tx, "role_provenance_v1", "1")?;
     tx.commit().map_err(|e| e.to_string())
 }
 
