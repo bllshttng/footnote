@@ -389,8 +389,6 @@ pub fn run() -> Result<(), String> {
             migrate_file(&config)?;
         }
     }
-    let feature_build = option_env!("CARGO_MANIFEST_DIR")
-        .is_some_and(|dir| Path::new(dir).ancestors().any(|p| p.join(".git").is_file()));
     if let Ok(cwd) = std::env::current_dir() {
         roots.insert(cwd.join(".fno"));
     }
@@ -443,7 +441,7 @@ pub fn upgrade_event_store(conn: &mut rusqlite::Connection) -> Result<(), String
         if current_type != event_type || current_line != line {
             let hash = sha2::Sha256::digest(current_line.as_bytes()).to_vec();
             tx.execute(
-                "UPDATE events SET type = ?1, line = ?2, row_hash = ?3 WHERE seq = ?4",
+                "UPDATE events SET type = ?1, line = ?2, row_hash = CASE WHEN EXISTS(SELECT 1 FROM events other WHERE other.row_hash = ?3 AND other.seq <> ?4) THEN row_hash ELSE ?3 END WHERE seq = ?4",
                 rusqlite::params![current_type, current_line, hash, seq],
             )
             .map_err(|e| e.to_string())?;
@@ -520,14 +518,32 @@ mod tests {
             [r#"{"type":"reign_checkin","data":{"heir_name":"Avery"}}"#],
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO events VALUES(2, 'second-id', 'lead_checkin', ?1, x'02')",
+            [r#"{"type":"lead_checkin","data":{"successor_name":"Avery"}}"#],
+        )
+        .unwrap();
         upgrade_event_store(&mut db).unwrap();
         upgrade_event_store(&mut db).unwrap();
         let row: (String, String, String) = db
-            .query_row("SELECT event_id, type, line FROM events", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_row(
+                "SELECT event_id, type, line FROM events WHERE seq = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .unwrap();
         assert_eq!(row.0, "stable-id");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT event_id FROM events WHERE seq = 2", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "second-id"
+        );
         assert_eq!(row.1, "lead_checkin");
         assert!(row.2.contains("successor_name"));
         assert!(!row.2.contains("heir_name"));

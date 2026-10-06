@@ -390,8 +390,6 @@ pub fn run() -> Result<(), String> {
             migrate_file(&config)?;
         }
     }
-    let feature_build = option_env!("CARGO_MANIFEST_DIR")
-        .is_some_and(|dir| Path::new(dir).ancestors().any(|p| p.join(".git").is_file()));
     if let Ok(cwd) = std::env::current_dir() {
         roots.insert(cwd.join(".fno"));
     }
@@ -444,7 +442,7 @@ pub fn upgrade_event_store(conn: &mut rusqlite::Connection) -> Result<(), String
         if current_type != event_type || current_line != line {
             let hash = sha2::Sha256::digest(current_line.as_bytes()).to_vec();
             tx.execute(
-                "UPDATE events SET type = ?1, line = ?2, row_hash = ?3 WHERE seq = ?4",
+                "UPDATE events SET type = ?1, line = ?2, row_hash = CASE WHEN EXISTS(SELECT 1 FROM events other WHERE other.row_hash = ?3 AND other.seq <> ?4) THEN row_hash ELSE ?3 END WHERE seq = ?4",
                 rusqlite::params![current_type, current_line, hash, seq],
             )
             .map_err(|e| e.to_string())?;
