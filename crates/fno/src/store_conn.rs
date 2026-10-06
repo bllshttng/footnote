@@ -20,7 +20,6 @@ pub fn open_write(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| named(parent, error))?;
     }
-    refuse_non_database(path)?;
     let connection = Connection::open(path).map_err(|error| named(path, error))?;
     connection
         .busy_timeout(BUSY_WAIT)
@@ -51,26 +50,6 @@ pub fn open_read(path: &Path) -> Result<Connection, String> {
         .busy_timeout(BUSY_WAIT)
         .map_err(|error| named(path, error))?;
     Ok(connection)
-}
-
-fn refuse_non_database(path: &Path) -> Result<(), String> {
-    let size = match path.metadata() {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(named(path, error)),
-    };
-    if size == 0 {
-        return Ok(());
-    }
-    let mut header = [0; 16];
-    let mut file = std::fs::File::open(path).map_err(|error| named(path, error))?;
-    use std::io::Read;
-    file.read_exact(&mut header)
-        .map_err(|error| named(path, error))?;
-    if &header != b"SQLite format 3\0" {
-        return Err(format!("{}: file is not a database", path.display()));
-    }
-    Ok(())
 }
 
 fn ensure_wal(connection: &Connection, path: &Path) -> Result<(), String> {

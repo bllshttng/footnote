@@ -534,6 +534,9 @@ fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
     }
     let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
     assert!(attention.contains("event-store-integrity"));
+    let items = crate::attention::project(&attention, &[], "", 0);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].ready, "{:?}", items[0].missing);
 }
 
 #[test]

@@ -351,6 +351,8 @@ fn open_store(store: &Path) -> Result<Connection, String> {
         let check = Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))
             .and_then(|conn| {
+                conn.busy_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
                 let result: String = conn
                     .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
                     .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
@@ -371,11 +373,14 @@ fn open_store(store: &Path) -> Result<Connection, String> {
                 parent
             };
             let attention = root.join("questions.jsonl");
-            let id = format!(
-                "q-store-{:x}",
-                Sha256::digest(store.as_os_str().as_encoded_bytes())
-            );
-            let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "kind": "pin", "subject": "event-store-integrity", "blocks": []}});
+            let mut identity = Sha256::new();
+            identity.update(store.as_os_str().as_encoded_bytes());
+            if let Ok(meta) = store.metadata() {
+                identity.update(meta.dev().to_le_bytes());
+                identity.update(meta.ino().to_le_bytes());
+            }
+            let id = format!("q-store-{:x}", identity.finalize());
+            let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "asker": "event-store", "node": "none", "context": {"blocked_because": error, "unknowns": "The original corruption interleaving and live installation safety have not been verified."}, "subject": "event-store-integrity", "blocks": []}});
             use std::io::Write;
             let notice = std::fs::OpenOptions::new()
                 .create(true)

@@ -199,6 +199,11 @@ fn recover(source: &Path, output: &Path) -> Result<Json, String> {
         serde_json::to_vec_pretty(&result).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    for path in [destination.as_path(), &output.join("recovery.json"), output] {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
     Ok(result)
 }
 
