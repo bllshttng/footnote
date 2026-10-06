@@ -1600,7 +1600,10 @@ mod tests {
             assert_eq!(dump["teams"]["x-bbbb"]["holder_session"], json!("sess-k"));
             assert_eq!(dump["teams"]["x-bbbb"]["regnal"], json!(2));
             assert_eq!(dump["teams"]["x-bbbb"]["theme"], json!("native backlog"));
-            assert_eq!(dump["teams"]["x-bbbb"]["title"], json!("Lead of x-bbbb"));
+            assert_eq!(
+                dump["teams"]["x-bbbb"]["title"],
+                json!("Lead of native backlog")
+            );
             // A record bound to another session refuses and stays put.
             seed(&store);
             assert!(carry_rescope(&store, "x-aaaa", "x-bbbb", "sess-other", 2).is_err());
@@ -1609,11 +1612,15 @@ mod tests {
             // and a same-scope re-grant moves nothing.
             assert!(!carry_rescope(&store, "x-zzzz", "x-cccc", "sess-z", 2).unwrap());
             assert!(!carry_rescope(&store, "x-bbbb", "x-bbbb", "sess-k", 2).unwrap());
-            // The landing team is named, so the holder-name carry is a no-op.
+            // The scope already has a record, so the holder-name carry is a
+            // no-op; a colliding name over an unnamed scope refuses naming
+            // the team that holds it.
             assert_eq!(
-                carry_holder_name(&store, "sess-k", 2, "x-bbbb", "kestrel").unwrap(),
+                carry_holder_name(&store, "sess-k", 2, "x-aaaa", "kestrel").unwrap(),
                 None
             );
+            let err = carry_holder_name(&store, "sess-b", 2, "x-bbbb", "kestrel").unwrap_err();
+            assert!(err.contains("Kestrel"), "{err}");
             // A fresh crown with a people-shaped row name names the team from
             // the row; a hex-shaped name and a sessionless carry stay unnamed.
             assert_eq!(
