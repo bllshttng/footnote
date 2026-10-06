@@ -269,12 +269,12 @@ def _coverage_sources(repo: str) -> list[str]:
 
 def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     """The PR's current ``headRefOid`` for a staleness check, or None."""
-    from fno.pr._rest import fetch_pr_info_rest
-
-    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
-    if info is None:
+    from fno.rust_binary import VerbUnavailable, verb_call
+    try:
+        info = verb_call("authorized-merge", {"op": "pr-head", "pr": pr_number, "cwd": repo})
+    except VerbUnavailable:
         return None
-    return str(info.get("head_sha") or "").strip() or None
+    return info.get("head")
 
 
 def _pr_head_ref_and_oid(
@@ -282,8 +282,7 @@ def _pr_head_ref_and_oid(
 ) -> Optional[Tuple[str, str, str]]:
     """``(branch, head_sha, state)`` for a PR, or None when the read failed.
 
-    One REST request answers all three, the same one ``_pr_head_oid`` already
-    makes. Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr
+    One REST request answers all three. Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr
     view``, which bills the per-user GraphQL quota every watcher on the machine
     shares. The state rides along because it is already in the payload, and the
     in-flight guard needs it to exempt a terminal PR. ``runner`` is injectable
@@ -1986,6 +1985,7 @@ def _emit_authorized_outcome(pr_number: int, receipt: dict, strategy: str) -> in
     word, code, err = _OUTCOME_EMIT.get(outcome, ("held", 2, False))
     detail = str(receipt.get("detail") or "no detail")
     _emit(pr_number, word, f"{outcome}: {detail}", strategy, err=err)
+    LAST_RECEIPT["observed_head"] = receipt.get("observed_head")
     if code == 1:
         _sync_graph_merge_status("failed", pr_number)
     return code
