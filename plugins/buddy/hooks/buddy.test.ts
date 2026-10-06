@@ -11,7 +11,7 @@ const OLD_CONFIG = JSON.stringify({
 
 function pane() {
   return {
-    plugin: 'fno',
+    plugin: 'buddy',
     component: 'Pane',
     surface: 'terminal',
     requestId: 'buddy',
@@ -22,7 +22,7 @@ function pane() {
 
 function band(maxRows: number) {
   return {
-    plugin: 'fno',
+    plugin: 'buddy',
     component: 'AbovePrompt',
     surface: 'terminal',
     viewport: { columns: 120, rows: 40 },
@@ -163,7 +163,7 @@ test('a fresh buddy hatches from the egg into the original card, and any key clo
   on('session.root', () => ({ value: '/work' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.command.run({ command: 'buddy', args: '' })
-  const row = { plugin: 'fno', component: 'Pane', requestId: 'buddy-card', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { title: 'Quip', isFocused: true, bodyColumns: 60, placement: 'above', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
+  const row = { plugin: 'buddy', component: 'Pane', requestId: 'buddy-card', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { title: 'Quip', isFocused: true, bodyColumns: 60, placement: 'above', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
 
   const egg = await $.ui.mount(row)
   expect(await egg.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeDefined()

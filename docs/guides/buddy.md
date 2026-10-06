@@ -21,8 +21,8 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 - **The sprite.** The buddy is one of 18 species. It has a rarity, eyes, and sometimes a hat. Five stats set its voice: debugging, patience, chaos, wisdom, and snark.
 - **Idle talk.** When nothing happens for 2 minutes, the buddy says something of its own. It is one model call, in its personality, about what the session is doing. The buddy has no canned lines.
-- **Observations.** Every observation the buddy makes goes to `~/.fno/state/buddy/observations.jsonl`, one JSON row each with the time, the name, the reason, and the line. Read it with `tail ~/.fno/state/buddy/observations.jsonl`.
 - **Reactions.** After a turn, one model call reads the last exchange and answers in the voice of the buddy. Ordinary turns wait 30 seconds between reactions, as the original did. A turn that says the buddy's name, fails tests, hits an error, or lands a diff over 80 lines gets a reaction at once. Petting and hatching get one too. The last three lines go along, so the buddy does not repeat itself.
+- **Observations.** Every observation the buddy makes goes to `~/.fno/state/buddy/observations.jsonl`, one JSON row each with the time, the name, the reason, and the line. Read it with `tail ~/.fno/state/buddy/observations.jsonl`.
 - **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. It says the news in its own voice with one model call. If that call fails, it says the plain fact.
 - **The fno CLI is optional.** Fleet news and fleet counts need the `fno` CLI. Without it, the buddy still talks about your own session.
 - **Fleet counts.** Beside its name, the buddy shows live workers, questions that wait for you, and your open PRs. One read every 5 minutes serves every session.
@@ -31,11 +31,11 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 The buddy has three places. It uses the first place that is available.
 
-1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words show to its left in a thought bubble: a rounded outline, up to 30 columns wide, with a trail of dots toward the buddy. If your rows are too wide, the buddy cuts the ends of the rows beside it. Below 60 columns it shows a one-line face. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
+1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words show to its left in a thought bubble: a rounded outline that starts 30 columns wide and grows up to 60 columns for a long line, with a trail of dots toward the buddy. While the bubble shows, it can cover the ends of your rows; they come back when it fades. If your rows are too wide to share even without a bubble, the buddy cuts the ends of the rows beside it. Below 60 columns it shows a one-line face. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
 2. **A narrow pane on the right.** Type `/buddy pane` to put the buddy here. The sprite stands at the bottom, and its words are above it. Claude Code shows this pane only in the fullscreen layout, at 110 columns or more. If you never typed `/buddy statusline`, the buddy opens this pane by itself at 144 columns or more.
 3. **One line above the prompt.** If the first two places are not available, the buddy shows a one-line face above the prompt.
 
-The length of your status line does not move the buddy. The buddy always aligns to the right edge of the terminal. If a row of your status line is too wide to share, the buddy moves down one row. If 6 rows cannot hold the buddy, it changes to the one-line face.
+The length of your status line does not move the buddy. The buddy always aligns to the right edge of the terminal. If a row of your status line is too wide to share, the buddy first moves down a row. If no row count up to 6 fits, it keeps the full sprite and cuts your rows. If your status line already uses all 6 rows, it changes to the one-line face.
 
 ### Your status line, and how to undo it
 
