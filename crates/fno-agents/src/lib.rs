@@ -61,6 +61,7 @@ pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;
 pub mod attach;
+pub(crate) mod attended;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;

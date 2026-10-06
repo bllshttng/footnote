@@ -276,6 +276,10 @@ The asymmetry matters (`gc.rs` `gc_decide`). A recorded status that is not `merg
 
 The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs` `DEFAULT_RETIRE_GRACE_SECS`, `gc.rs` `grace_gate`). The session is live in the only sense the law allows. Wait past the window. Since the 2026-09-25 unattended reaps nothing overrides recency inside the window - not a terminal harness state, not a dead pid. The sweeps retired two thread workers seconds after their transcripts moved. The terminal roster reading was wrong, and one worker lost its claim mid-node. When the writing stops, the row retires. A fresh timestamped entry has a writer seconds behind it.
 
+### attended
+
+The line reads `kept {id} (attended: typed user turn {age}s ago)`. The transcript holds a typed user turn inside the 15-minute window (`attended.rs` `WINDOW_SECS`). The classifier is the one `fno-agents intel` folds with, so keepalive pings, mail envelopes, and command machinery never count. The age instrument read the file quiet while a person was working in the session. The turn record is the witness that cannot miss. A done ledger never overrides an attended session, and the stop verb refuses it the same way. A row the age seam already reads fresh skips this read. A transcript quiet past the window costs one stat. Append-only JSONL cannot hide an in-window turn in an aged file. Wait for the typing to stop. The row retires on a later pass.
+
 ### live claim
 
 The line reads `kept {id} (live claim held: {detail})`, where detail is `{claim key} (holder {holder})`. A live or suspect work-claim names this session as its holder (`claims.rs` `list`, joined through the record's `session_id` stamp). The claim's holder process answered the pid probe. That is the strongest liveness fact the machine holds. The row keeps past quiet, whatever the work verdict says. The remedy for a stuck claim is `fno agents claim release`, never a reap.
@@ -355,6 +359,7 @@ Every top-level key of `fno agents reap --json`, one row each. The dry run rende
 | `kept_open_pr` | `kept {id} (open pr: {node} {detail})` | [open pr](#open-pr) |
 | `kept_planning_unclosed` | `kept {id} (planning assignment not finished by this session: {node})` | [planning assignment not finished by this session](#planning-assignment-not-finished-by-this-session) |
 | `kept_active` | `kept {id} (active: transcript written {age}s ago)` | [active](#active) |
+| `kept_attended` | `kept {id} (attended: typed user turn {age}s ago)` | [attended](#attended) |
 | `kept_live_claim` | `kept {id} (live claim held: {detail})` | [live claim](#live-claim) |
 | `kept_probe_unread` | `kept {id} (probe unread: {detail})` | [probe unread](#probe-unread) |
 | `kept_transcript_unresolved` | `kept {id} (transcript unresolved for {age}: absence is not quiet)` | [transcript unresolved](#transcript-unresolved) |
