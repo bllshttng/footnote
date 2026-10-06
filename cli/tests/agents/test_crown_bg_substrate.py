@@ -173,11 +173,11 @@ def test_promote_is_primary_and_crown_aliases_with_a_notice(
     monkeypatch.setattr(
         "sys.argv",
         ["fno", "agents", "spawn", "--name", "promote-alias", "-H", "claude",
-         "reign", "--substrate", "thread", "--crown", "alpha"],
+         "reign", "--substrate", "thread", "--crown", "alpha", "--hand-off"],
     )
     aliased = _spawn(
         "spawn", "--name", "promote-alias", "-H", "claude", "reign",
-        "--substrate", "thread", "--crown", "alpha",
+        "--substrate", "thread", "--crown", "alpha", "--hand-off",
     )
     assert aliased.exit_code == 0, aliased.output
     assert "--crown is now --promote" in aliased.output
