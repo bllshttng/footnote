@@ -1995,7 +1995,7 @@ pub(crate) fn tail_bytes(path: &std::path::Path, cap: u64) -> Vec<u8> {
         return Vec::new();
     }
     let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
+    if file.take(len - start).read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
     if start > 0 {

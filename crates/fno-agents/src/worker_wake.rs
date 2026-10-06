@@ -1,7 +1,5 @@
-//! Wake an ended Codex turn on an open claimed node, once per quiet episode.
+//! Wake an ended Codex turn on an open node, once per quiet episode.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,23 +33,17 @@ fn epoch(raw: &str) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 
+fn intentional_stop(text: &str) -> bool {
+    text.contains("<watching")
+        || text.contains("<help")
+        || text.contains("<promise>MISSION COMPLETE")
+}
+
 fn tail(path: &Path) -> Result<Tail, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let len = file.metadata().map_err(|e| e.to_string())?.len();
-    let offset = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| e.to_string())?;
-    let mut reader = BufReader::new(file.take(len - offset));
-    if offset > 0 {
-        let mut partial = Vec::new();
-        reader
-            .read_until(b'\n', &mut partial)
-            .map_err(|e| e.to_string())?;
-    }
+    let raw = crate::tail_text_strict(path, TAIL_BYTES).ok_or("invalid rollout encoding")?;
     let mut out = Tail::default();
-    for line in reader.lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let row: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    for line in raw.lines() {
+        let row: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
         if let Some(raw) = row.get("timestamp").and_then(Value::as_str) {
             out.last = epoch(raw);
         }
@@ -65,7 +57,7 @@ fn tail(path: &Path) -> Result<Tail, String> {
             (Some("event_msg"), Some("task_complete")) => {
                 out.ended = true;
                 if let Some(text) = payload["last_agent_message"].as_str() {
-                    out.parked = text.contains("<watching") || text.contains("<help");
+                    out.parked = intentional_stop(text);
                 }
             }
             (Some("event_msg"), Some("turn_aborted")) => out.ended = false,
@@ -84,7 +76,7 @@ fn tail(path: &Path) -> Result<Tail, String> {
                                 .collect::<String>()
                         })
                         .unwrap_or_default();
-                    out.parked = text.contains("<watching") || text.contains("<help");
+                    out.parked = intentional_stop(&text);
                 }
             }
             _ => {}
@@ -96,22 +88,47 @@ fn tail(path: &Path) -> Result<Tail, String> {
 struct Pass<'a> {
     rows: &'a [RegistryEntry],
     nodes: &'a [Value],
-    claims: &'a HashMap<String, Result<Option<String>, String>>,
     now: i64,
+    dry_run: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Claim {
+    Own,
+    Free,
+    Held,
+    Unreadable,
+}
+
+fn latest_worker(node: &Value) -> Option<&str> {
+    node["sessions"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|s| crate::graph_store::is_open_do_row(s))?["session_id"]
+        .as_str()
+}
+
+fn report_skip(dry_run: bool, row: &RegistryEntry, reason: &str) {
+    if dry_run {
+        println!("worker-wake {}: skip {reason}", row.name);
+    }
 }
 
 fn run_pass_with(
     home: &AgentsHome,
     pass: Pass<'_>,
     transcript: &dyn Fn(&RegistryEntry) -> Option<std::path::PathBuf>,
+    claim_for: &dyn Fn(&str, &str) -> Claim,
+    pr_for: &dyn Fn(&str, u64) -> Value,
     deliver: &dyn Fn(&str, &str) -> Result<(), String>,
     notify: &dyn Fn(&str, &str) -> bool,
 ) -> Result<u64, String> {
     let Pass {
         rows,
         nodes,
-        claims,
         now,
+        dry_run,
     } = pass;
     let evidence = crate::watch_expiry::read_evidence(home, now)?;
     let receipts = crate::event_store::journal_text_checked(
@@ -123,57 +140,105 @@ fn run_pass_with(
         if row.harness_name() != "codex"
             || row.origin.as_deref() != Some("spawn")
             || row.crown_level.is_some()
-            || !row.status.is_drive_eligible()
         {
             continue;
         }
-        if [
+        let disabled: Vec<String> = [
             ["recovery", "enabled"].as_slice(),
             ["autonomy", "enabled"].as_slice(),
         ]
         .iter()
-        .any(|keys| {
+        .filter(|keys| {
             crate::agents_config::config_lookup(Path::new(&row.cwd), keys).and_then(|v| v.as_bool())
                 == Some(false)
-        }) {
+        })
+        .map(|keys| keys.join("."))
+        .collect();
+        if !disabled.is_empty() && !dry_run {
             continue;
         }
-        let (Some(sid), Some(node)) = (row.harness_session_id.as_deref(), row.node.as_deref())
-        else {
+        let Some(sid) = row.harness_session_id.as_deref() else {
+            report_skip(dry_run, row, "identity_missing");
             continue;
         };
-        if !matches!(claims.get(sid), Some(Ok(Some(owned))) if owned == node)
-            || !nodes.iter().any(|n| {
-                n["id"] == node
-                    && matches!(
-                        crate::graph_get::entry_status(n),
-                        "in_progress" | "ready" | "next"
-                    )
-            })
-        {
+        let watches = crate::codex_watch::settle_watches(&evidence);
+        if let Some(w) = watches.iter().find(|w| {
+            (w.watch.session_id == sid || w.codex_thread_id.as_deref() == Some(sid))
+                && w.watch.expires_at_ms > now
+                && crate::watch_expiry::is_current_watch(&w.watch, &evidence)
+        }) {
+            report_skip(
+                dry_run,
+                row,
+                &format!("{}_watch node={}", w.watch.blocker, w.watch.node),
+            );
             continue;
         }
-        if crate::codex_watch::settle_watches(&evidence)
+        let candidates: Vec<&Value> = nodes
             .iter()
-            .any(|w| {
-                (w.watch.session_id == sid || w.codex_thread_id.as_deref() == Some(sid))
-                    && w.watch.expires_at_ms > now
-                    && crate::watch_expiry::is_current_watch(&w.watch, &evidence)
+            .filter(|n| {
+                matches!(
+                    crate::graph_get::entry_status(n),
+                    "in_progress" | "in_review" | "ready" | "next"
+                ) && row
+                    .node
+                    .as_deref()
+                    .map_or_else(|| latest_worker(n) == Some(sid), |node| n["id"] == node)
             })
-        {
+            .collect();
+        let [node_row] = candidates.as_slice() else {
+            report_skip(dry_run, row, "node_missing_terminal_or_ambiguous");
+            continue;
+        };
+        let Some(node) = node_row["id"].as_str() else {
+            continue;
+        };
+        if crate::graph_get::entry_status(node_row) == "in_review" {
+            if let Some(pr) = node_row["pr_number"].as_u64().filter(|pr| *pr > 0) {
+                let status = pr_for(&row.cwd, pr);
+                let reason = match (
+                    status["pr_state"].as_str(),
+                    status["verdict"].as_str(),
+                    status["settled"].as_bool(),
+                ) {
+                    (Some("OPEN"), Some("red"), Some(true)) => None,
+                    (Some("MERGED" | "CLOSED"), _, _) => Some("pr_terminal"),
+                    (Some("OPEN"), Some("green"), _) => Some("green_pr_or_grant_hold"),
+                    (Some("OPEN"), Some("pending"), _) => Some("ci_pending"),
+                    _ => Some("pr_status_unmeasured"),
+                };
+                if let Some(reason) = reason {
+                    report_skip(dry_run, row, &format!("{reason} pr={pr}"));
+                    continue;
+                }
+            }
+        }
+        match claim_for(node, sid) {
+            Claim::Own => {}
+            Claim::Free if latest_worker(node_row) == Some(sid) => {}
+            _ => {
+                report_skip(dry_run, row, "claim_held_unreadable_or_worker_superseded");
+                continue;
+            }
+        }
+        if !row.status.is_drive_eligible() {
+            report_skip(dry_run, row, "not_idle");
             continue;
         }
         let Some(path) = transcript(row) else {
+            report_skip(dry_run, row, "transcript_missing");
             continue;
         };
         let tail = match tail(&path) {
             Ok(tail) => tail,
             Err(error) => {
                 eprintln!("worker-wake: {}: rollout unreadable: {error}", row.name);
+                report_skip(dry_run, row, "transcript_unreadable");
                 continue;
             }
         };
         let Some(last) = tail.last else {
+            report_skip(dry_run, row, "timestamp_unmeasured");
             continue;
         };
         let threshold = crate::agents_config::config_lookup(
@@ -184,6 +249,17 @@ fn run_pass_with(
         .filter(|v| *v > 0)
         .unwrap_or(900);
         if !tail.ended || tail.parked || now.saturating_sub(last) < threshold.saturating_mul(1000) {
+            report_skip(
+                dry_run,
+                row,
+                if tail.parked {
+                    "declared_wait"
+                } else if !tail.ended {
+                    "turn_active"
+                } else {
+                    "not_overdue"
+                },
+            );
             continue;
         }
         if receipts
@@ -191,6 +267,17 @@ fn run_pass_with(
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .any(|r| r["data"]["session_id"] == sid && r["data"]["last_activity_ms"] == last)
         {
+            report_skip(dry_run, row, "already_woken");
+            continue;
+        }
+        if dry_run {
+            println!(
+                "worker-wake {}: wake node={node} quiet={}s via=codex_turn_start execution={} (dry-run)",
+                row.name,
+                (now - last) / 1000,
+                if disabled.is_empty() { "ready".to_string() } else { format!("held:{}=false", disabled.join(",")) }
+            );
+            acted += 1;
             continue;
         }
         let text = format!("Automatic worker wake: your turn ended on open node {node} and has been quiet for {}s. Continue the target from current evidence.", (now - last) / 1000);
@@ -216,17 +303,20 @@ fn run_pass_with(
     Ok(acted)
 }
 
-fn run_pass(home: &AgentsHome) -> Result<u64, String> {
+fn run_pass(home: &AgentsHome, dry_run: bool) -> Result<u64, String> {
     let rows = crate::state::load_registry(&home.registry_json()).map_err(|e| e.to_string())?;
     let nodes = crate::graph_store::read_rows_where_strict(
         &crate::gc_sweep::graph_path(home),
         &crate::backlog::RowQuery {
-            fields: Some(["id", "status"].map(str::to_string).to_vec()),
+            fields: Some(
+                ["id", "status", "sessions", "pr_number"]
+                    .map(str::to_string)
+                    .to_vec(),
+            ),
             ..Default::default()
         },
     )
     .map_err(|e| e.to_string())?;
-    let claims = crate::watch_expiry::current_node_claims(home)?;
     let transcripts = crate::context_run::SessionTranscripts::default();
     let now = chrono::Utc::now().timestamp_millis();
     run_pass_with(
@@ -234,8 +324,8 @@ fn run_pass(home: &AgentsHome) -> Result<u64, String> {
         Pass {
             rows: &rows.entries,
             nodes: &nodes,
-            claims: &claims,
             now,
+            dry_run,
         },
         &|row| {
             row.transcript_path
@@ -243,6 +333,24 @@ fn run_pass(home: &AgentsHome) -> Result<u64, String> {
                 .map(std::path::PathBuf::from)
                 .or_else(|| transcripts.find(row.harness_session_id.as_deref()?, "codex"))
         },
+        &|node, sid| {
+            let (state, record) = crate::claims::status(&format!("node:{node}"), None);
+            match state {
+                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect => {
+                    if record.is_some_and(|r| {
+                        r.session_id.as_deref() == Some(sid)
+                            || r.holder == format!("target-session:{sid}")
+                    }) {
+                        Claim::Own
+                    } else {
+                        Claim::Held
+                    }
+                }
+                crate::claims::ClaimState::Free | crate::claims::ClaimState::Stale => Claim::Free,
+                crate::claims::ClaimState::Corrupted => Claim::Unreadable,
+            }
+        },
+        &|cwd, pr| crate::pr_status::cache::cached_status(cwd, pr, false).1,
         &|sid, text| match crate::codex_inject::deliver_via_codex_daemon_sync(sid, text) {
             Ok(_) | Err(crate::codex_inject::ReviewStartError::Reason("turn-start-unacked")) => {
                 Ok(())
@@ -270,6 +378,23 @@ fn run_pass(home: &AgentsHome) -> Result<u64, String> {
     )
 }
 
+pub fn run_dry_run(args: &[String], home: &AgentsHome) -> i32 {
+    if args != ["--dry-run"] {
+        eprintln!("usage: fno-agents worker-wake --dry-run");
+        return 2;
+    }
+    match run_pass(home, true) {
+        Ok(eligible) => {
+            println!("worker-wake: eligible={eligible} dry-run=true");
+            0
+        }
+        Err(error) => {
+            eprintln!("worker-wake: {error}");
+            1
+        }
+    }
+}
+
 pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
     let mut last = arm.last_tick.lock().unwrap_or_else(|e| e.into_inner());
     if last.is_some_and(|tick| tick.elapsed() < INTERVAL)
@@ -285,7 +410,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
         );
-        let (acted, error) = match run_pass(&home) {
+        let (acted, error) = match run_pass(&home, false) {
             Ok(acted) => (acted, None),
             Err(error) => (0, Some(error)),
         };
@@ -305,6 +430,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::HashMap;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -363,10 +489,17 @@ mod tests {
                 Pass {
                     rows: std::slice::from_ref(&self.row),
                     nodes: &self.nodes,
-                    claims: &self.claims,
                     now: self.now,
+                    dry_run: false,
                 },
                 &|_| Some(self.path.clone()),
+                &|node, sid| match self.claims.get(sid) {
+                    Some(Ok(Some(owned))) if owned == node => Claim::Own,
+                    Some(Ok(Some(_))) => Claim::Held,
+                    Some(Err(_)) => Claim::Unreadable,
+                    _ => Claim::Free,
+                },
+                &|_, _| self.nodes[0]["pr_status"].clone(),
                 deliver,
                 notify,
             )
@@ -376,12 +509,22 @@ mod tests {
 
     #[test]
     fn ended_rollout_wakes_once_and_tells_its_lead_after_a_retry() {
-        let f = Fixture::new();
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut f = Fixture::new();
+        f.claims.clear();
+        f.nodes[0]["sessions"] = json!([{"phase":"execute", "session_id":"thread-a"}]);
+        f.row.node = None;
         f.write(&[
             json!({"type": "task_started"}),
             json!({"type": "task_complete"}),
         ]);
         let mut raw = std::fs::read_to_string(&f.path).unwrap();
+        raw = format!(
+            "{}\n{raw}",
+            json!({"type":"session_meta", "payload":{"text":"é".repeat(TAIL_BYTES as usize)}})
+        );
         raw.push_str("\n{\"type\":\"token_usage_record\"}");
         std::fs::write(&f.path, raw).unwrap();
         let sent = RefCell::new(Vec::new());
@@ -394,6 +537,24 @@ mod tests {
             told.borrow_mut().push((sid.to_string(), text.to_string()));
             true
         };
+        assert_eq!(
+            run_pass_with(
+                &f.home,
+                Pass {
+                    rows: std::slice::from_ref(&f.row),
+                    nodes: &f.nodes,
+                    now: f.now,
+                    dry_run: true,
+                },
+                &|_| Some(f.path.clone()),
+                &|_, _| Claim::Free,
+                &|_, _| panic!("no PR expected"),
+                &|_, _| panic!("dry run delivered"),
+                &|_, _| panic!("dry run mailed")
+            )
+            .unwrap(),
+            1
+        );
         assert_eq!(f.pass(&|_, _| Err("unavailable".into()), &notify), 0);
         assert_eq!(f.pass(&deliver, &notify), 1);
         assert_eq!(f.pass(&deliver, &notify), 0);
@@ -406,10 +567,19 @@ mod tests {
         let receipt: Value = serde_json::from_str(receipts.lines().next().unwrap()).unwrap();
         assert_eq!(receipt["data"]["via"], "codex_turn_start");
         assert_eq!(receipt["data"]["last_activity_ms"], f.now - 900_000);
+        let mut red = Fixture::new();
+        red.write(&[json!({"type":"task_complete"})]);
+        red.nodes[0]["status"] = json!("in_review");
+        red.nodes[0]["pr_number"] = json!(42);
+        red.nodes[0]["pr_status"] = json!({"pr_state":"OPEN", "verdict":"red", "settled":true});
+        assert_eq!(red.pass(&deliver, &notify), 1);
     }
 
     #[test]
     fn active_parked_unowned_terminal_and_unreadable_workers_stay_quiet() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for case in [
             "active",
             "recent",
@@ -420,6 +590,16 @@ mod tests {
             "operator",
             "busy",
             "malformed",
+            "disabled",
+            "ci_watch",
+            "held",
+            "unreadable_claim",
+            "reassigned",
+            "green_pr",
+            "pending_pr",
+            "terminal_pr",
+            "unmeasured_pr",
+            "complete",
         ] {
             let mut f = Fixture::new();
             f.write(&[json!({"type": "task_complete"})]);
@@ -428,11 +608,30 @@ mod tests {
                 "recent" => f.now -= 1,
                 "parked" => std::fs::write(&f.path, json!({"timestamp":"2026-10-06T10:00:00Z", "type":"response_item", "payload":{"type":"message", "role":"assistant", "phase":"final_answer", "content":[{"text":"<watching reason=\"ci\">"}]}}).to_string()).unwrap(),
                 "unowned" => f.claims.clear(),
+                "held" => { f.claims.insert("thread-a".into(), Ok(Some("other-node".into()))); }
+                "unreadable_claim" => { f.claims.insert("thread-a".into(), Err("corrupt claim".into())); }
+                "reassigned" => { f.claims.clear(); f.nodes[0]["sessions"] = json!([{"phase":"execute", "session_id":"other-worker"}]); }
+                "green_pr" | "pending_pr" | "terminal_pr" | "unmeasured_pr" => {
+                    f.nodes[0]["status"] = json!("in_review");
+                    f.nodes[0]["pr_number"] = json!(42);
+                    f.nodes[0]["pr_status"] = match case {
+                        "green_pr" => json!({"pr_state":"OPEN", "verdict":"green", "settled":true, "merge_authority":{"grant":false}}),
+                        "pending_pr" => json!({"pr_state":"OPEN", "verdict":"pending", "settled":false}),
+                        "terminal_pr" => json!({"pr_state":"MERGED", "verdict":"green", "settled":true}),
+                        _ => Value::Null,
+                    };
+                }
+                "complete" => f.write(&[json!({"type":"task_complete", "last_agent_message":"<promise>MISSION COMPLETE: shipped</promise>"})]),
                 "terminal" => f.nodes[0]["status"] = json!("done"),
                 "crown" => f.row.crown_level = Some(2),
                 "operator" => f.row.origin = Some("operator".into()),
                 "busy" => f.row.status = crate::AgentStatus::Busy,
                 "malformed" => std::fs::write(&f.path, "{broken").unwrap(),
+                "disabled" => std::fs::write(f._dir.path().join(".fno/config.toml"), "[recovery]\nenabled = false\n").unwrap(),
+                "ci_watch" => std::fs::write(crate::daemon::global_events_path(&f.home), json!({
+                    "ts":"2026-10-06T10:14:00Z", "type":crate::watch_expiry::WATCH_IDLE, "source":"test",
+                    "data":{"session_id":"manifest-a", "codex_thread_id":"thread-a", "harness":"codex", "node":"node-a", "blocker":"ci", "expires_at_ms":f.now + 60_000}
+                }).to_string()).unwrap(),
                 _ => unreachable!(),
             }
             assert_eq!(
