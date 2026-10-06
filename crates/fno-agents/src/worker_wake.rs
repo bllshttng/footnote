@@ -203,6 +203,15 @@ fn run_pass_with(
         let Some(node) = node_row["id"].as_str() else {
             continue;
         };
+        let Some(lead) = row
+            .spawned_by_session
+            .as_deref()
+            .or_else(|| node_row["spawned_by_session"].as_str())
+            .or_else(|| node_row["source_session_id"].as_str())
+        else {
+            report_skip(dry_run, row, "lead_unresolved");
+            continue;
+        };
         match claim_for(node, sid) {
             Claim::Own => {}
             Claim::Free if latest_worker(node_row) == Some(sid) => {}
@@ -306,7 +315,7 @@ fn run_pass_with(
             "session_id": sid, "node": node, "last_activity_ms": last, "via": "codex_turn_start"
         })).map_err(|e| e.to_string())?;
         acted += 1;
-        if let Some(lead) = row.spawned_by_session.as_deref() {
+        {
             let notice = format!(
                 "Worker wake: nudge sent to {} on {node} after {}s idle through codex turn/start.",
                 row.name,
@@ -326,9 +335,16 @@ fn run_pass(home: &AgentsHome, dry_run: bool) -> Result<u64, String> {
         &crate::gc_sweep::graph_path(home),
         &crate::backlog::RowQuery {
             fields: Some(
-                ["id", "status", "sessions", "pr_number"]
-                    .map(str::to_string)
-                    .to_vec(),
+                [
+                    "id",
+                    "status",
+                    "sessions",
+                    "pr_number",
+                    "spawned_by_session",
+                    "source_session_id",
+                ]
+                .map(str::to_string)
+                .to_vec(),
             ),
             ..Default::default()
         },
@@ -536,6 +552,8 @@ mod tests {
         f.claims.clear();
         f.nodes[0]["sessions"] = json!([{"phase":"execute", "session_id":"thread-a"}]);
         f.row.node = None;
+        f.row.spawned_by_session = None;
+        f.nodes[0]["source_session_id"] = json!("lead-a");
         f.write(&[
             json!({"type": "task_started"}),
             json!({"type": "task_complete"}),
@@ -620,6 +638,7 @@ mod tests {
             "terminal_pr",
             "unmeasured_pr",
             "complete",
+            "missing_lead",
         ] {
             let mut f = Fixture::new();
             f.write(&[json!({"type": "task_complete"})]);
@@ -628,6 +647,7 @@ mod tests {
                 "recent" => f.now -= 1,
                 "parked" => std::fs::write(&f.path, json!({"timestamp":"2026-10-06T10:00:00Z", "type":"response_item", "payload":{"type":"message", "role":"assistant", "phase":"final_answer", "content":[{"text":"<watching reason=\"ci\">"}]}}).to_string()).unwrap(),
                 "unowned" => f.claims.clear(),
+                "missing_lead" => f.row.spawned_by_session = None,
                 "held" => { f.claims.insert("thread-a".into(), Ok(Some("other-node".into()))); }
                 "unreadable_claim" => { f.claims.insert("thread-a".into(), Err("corrupt claim".into())); }
                 "reassigned" => { f.claims.clear(); f.nodes[0]["sessions"] = json!([{"phase":"execute", "session_id":"other-worker"}]); }
