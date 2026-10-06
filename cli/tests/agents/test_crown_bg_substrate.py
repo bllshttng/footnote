@@ -414,7 +414,8 @@ def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> Non
     assert result.exit_code == 0, result.output
     # Codex spells the plugin verb with $; a /fno:lead seed would hand the
     # king's first turn a command its harness cannot invoke.
-    assert seen["seed"].splitlines()[0] == ("$fno:lead epic-x" if harness == "codex" else "/fno:lead epic-x")
+    verb = {"codex": "$fno:lead", "pi": "/skill:lead"}.get(harness, "/fno:lead")
+    assert seen["seed"].splitlines()[0] == f"{verb} epic-x"
 
     row = _row("king-codex")
     assert row.crown_level == 2, "an epic is a Director"

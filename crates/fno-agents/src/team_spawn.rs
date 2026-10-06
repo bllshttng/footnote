@@ -298,7 +298,7 @@ mod tests {
             ("claude", "/fno:lead"),
             ("codex", "$fno:lead"),
             ("opencode", "/fno:lead"),
-            ("pi", "/fno:lead"),
+            ("pi", "/skill:lead"),
         ] {
             let ask = json!({"op": "seed", "message": "ship\nkeep bytes", "level": 2,
                 "scope": "epic-a", "harness": harness, "revive": false});
