@@ -2660,9 +2660,8 @@ impl View {
         // Resolve what the row needs while `display_rows()` holds the borrow, so
         // the section arm below is free to mutate `self`.
         let pick = match self.display_rows().get(i) {
-            // A card's detail and metrics lines are the agent row's own span:
-            // the menu opens from any line of the card, so a
-            // right-click or long-press on lines 2-3 is not a dead cell.
+            // A card's detail and metrics lines are the agent row's own
+            // span, so the menu opens from any line of the card.
             Some(DisplayRow::Agent(a) | DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a)) => {
                 let mut menu = build_row_menu(a, anchor);
                 // A pane-hosted row can relocate its live pane into another
@@ -3676,9 +3675,7 @@ impl View {
             DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
             DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
             DisplayRow::NewSquad => Some("newsquad".into()),
-            // Card lines carry their agent's identity, so a hold arms on
-            // any line of the card and re-checks against the agent, matching
-            // the span the tap path already resolves.
+            // Card lines carry their agent's identity, like the tap path.
             DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a) => {
                 Some(format!("agent:{}", a.name))
             }
@@ -3689,22 +3686,23 @@ impl View {
         }
     }
 
+    /// The density button is pinned chrome painted over row 0: a press
+    /// there answers the strip, never the row drawn underneath it.
+    fn press_on_density_button(&self, row: u16, col: u16) -> bool {
+        row == 0
+            && self
+                .density_button_range(self.panel_w() as usize)
+                .is_some_and(|range| range.contains(&(col as usize)))
+    }
+
     /// The sideline row a press at `(row, col)` should HOLD on, with the
     /// identity to re-check it by, for the rows `row_drag_source_at` declines.
     /// Inert rows qualify: a hold that opens no menu answers with a notice, and
     /// silence is the defect this fixes. A row with no stable identity does not,
     /// so its press keeps the pre-hold behavior rather than latching.
-    ///
-    /// The density button is the one positional exclusion, mirroring
-    /// `row_drag_source_at`'s own row-0 guard - it is pinned chrome painted OVER
-    /// an agent row, so holding it must not open that row's menu.
     fn press_hold_row_at(&self, row: u16, col: u16) -> Option<(usize, String)> {
-        if row == 0 {
-            if let Some(range) = self.density_button_range(self.panel_w() as usize) {
-                if range.contains(&(col as usize)) {
-                    return None;
-                }
-            }
+        if self.press_on_density_button(row, col) {
+            return None;
         }
         let i = self.sideline_row_at(row, col)?;
         Some((i, self.row_identity(i)?))
@@ -3714,16 +3712,8 @@ impl View {
     /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
     /// id; a row with neither (a dead external tombstone) is not draggable.
     fn row_drag_source_at(&self, row: u16, col: u16) -> Option<RowSource> {
-        // The density button is pinned chrome painted over row 0 (chrome_hit
-        // resolves it to CycleDensity before any row action). A press there must
-        // cycle density, not drag the agent row drawn underneath it - so it is
-        // never a drag source. Mirrors chrome_hit's own row-0 guard.
-        if row == 0 {
-            if let Some(range) = self.density_button_range(self.panel_w() as usize) {
-                if range.contains(&(col as usize)) {
-                    return None;
-                }
-            }
+        if self.press_on_density_button(row, col) {
+            return None;
         }
         let i = self.sideline_row_at(row, col)?;
         match self.display_rows().get(i)? {
