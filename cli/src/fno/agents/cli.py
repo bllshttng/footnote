@@ -1815,7 +1815,10 @@ def cmd_spawn(
         if harness != "claude":
             print(
                 f"{route_spelling} requires the claude harness; "
-                f"got harness {harness!r} substrate {substrate!r}.",
+                f"got harness {harness!r} substrate {substrate!r}. A non-claude "
+                "harness resolves its provider from its own config: pass that "
+                "harness's own model id via --model instead (opencode spells "
+                "it provider/model, e.g. zai-coding-plan/glm-5.3-flash).",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)

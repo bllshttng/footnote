@@ -394,7 +394,17 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
         }),
         "codex" => match mode {
             "full-auto" => Ok(vec!["--full-auto".into()]),
-            "yolo" => Ok(vec!["--dangerously-bypass-approvals-and-sandbox".into()]),
+            // bypassPermissions is fno's own builtin (SPAWN_PERMISSION_BUILTIN),
+            // not a foreign harness word: it is the standing answer for what an
+            // unattended worker may do, and codex's row carries the same bypass
+            // flag -Y rides. The pane lane carries it rather than silently
+            // launching the worker on a weaker, prompt-bound posture (the pane
+            // demote target sat on an approval prompt and never took its seed).
+            // The thread lane keeps refusing the word: there the daemon resolves
+            // its own posture, and resolve_thread_posture's vocabulary stands.
+            "yolo" | "bypassPermissions" => {
+                Ok(vec!["--dangerously-bypass-approvals-and-sandbox".into()])
+            }
             _ => match mode.split_once(':') {
                 Some((sandbox, approval)) if !sandbox.is_empty() && !approval.is_empty() => {
                     let mut tokens = vec![
@@ -534,6 +544,14 @@ mod mappable_tests {
             permission_pane_tokens("codex", "full-auto").unwrap(),
             vec!["--full-auto"]
         );
+        // fno's own builtin rides the same bypass flag -Y rides, so a pane
+        // demote cannot silently weaken the configured posture.
+        assert_eq!(
+            permission_pane_tokens("codex", "bypassPermissions").unwrap(),
+            vec!["--dangerously-bypass-approvals-and-sandbox"]
+        );
+        // The thread lane's vocabulary is codex's own and still refuses the
+        // builtin word there (resolve_thread_posture).
         assert_eq!(
             permission_pane_tokens("codex", "workspace-write:on-request").unwrap(),
             vec![
