@@ -1321,7 +1321,9 @@ pub(crate) fn filter_rows(
 /// unit test fails if any kind the projection emits lands there.
 pub(crate) fn area_of(kind: &str) -> &'static str {
     match kind {
-        "question_asked" | "question_closed" | "decision_recorded" => "mail",
+        "question_asked" | "question_closed" | "decision_recorded" | "sendmessage_fallback" => {
+            "mail"
+        }
         "node_created" | "node_started" | "node_ended" => "backlog",
         "node_shipped" | "pr_merged" => "ship",
         "session_spawned"

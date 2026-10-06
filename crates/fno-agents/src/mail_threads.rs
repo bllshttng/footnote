@@ -24,7 +24,7 @@ fn is_hold_sender(sender: &str) -> bool {
 }
 
 /// The registry's rows, tolerant: a missing or malformed file reads as none.
-fn registry_rows() -> Vec<Value> {
+pub(crate) fn registry_rows() -> Vec<Value> {
     let text = std::fs::read_to_string(AgentsHome::from_env().registry_json()).unwrap_or_default();
     serde_json::from_str::<Value>(&text)
         .ok()
@@ -34,7 +34,7 @@ fn registry_rows() -> Vec<Value> {
 
 /// The registry row that IS this address: session id first, then name and
 /// aliases (law d-e952ed19: a name is a label, the session id is the key).
-fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
+pub(crate) fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
     if key.is_empty() {
         return None;
     }
@@ -234,6 +234,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                 "to_key": to_key,
                 "to": to,
                 "summary": crate::mail_header::summary_of(&body),
+                "subject": v.get("subject").and_then(Value::as_str),
                 "body": body,
                 "expires": expires_at(&v),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
