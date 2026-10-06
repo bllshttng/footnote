@@ -620,6 +620,78 @@ pub fn keep_from(
     Ok(())
 }
 
+/// The auto-carry behind an `org promote` re-scope: move the record from the
+/// vacated scope to the landing scope when one is recorded there. No record
+/// at the old scope carries nothing (a first crown is not a drop); a
+/// same-scope re-grant moves nothing.
+pub fn carry_rescope(
+    store_path: &Path,
+    registry_path: &Path,
+    old_scope: &str,
+    new_scope: &str,
+) -> Result<bool, String> {
+    let old = crate::territory::canonical_scope(old_scope);
+    let new = crate::territory::canonical_scope(new_scope);
+    if old == new || !read(store_path)?.teams.contains_key(&old) {
+        return Ok(false);
+    }
+    keep_from(store_path, registry_path, old_scope, new_scope)?;
+    Ok(true)
+}
+
+/// Name an unnamed live team from the holder row's own name, so a crown
+/// granted to a named row never lands anonymous. A candidate that fails the
+/// people-name contract (a dispatch-minted name carries hex) or collides
+/// with a live name leaves the team unnamed for checkin to name once.
+/// Returns the display string when it named the team.
+pub fn carry_holder_name(
+    store_path: &Path,
+    registry_path: &Path,
+    scope: &str,
+    candidate: &str,
+) -> Result<Option<String>, String> {
+    let candidate = candidate.trim();
+    if !valid_name(candidate) {
+        return Ok(None);
+    }
+    let canon = crate::territory::canonical_scope(scope);
+    let live = live_index(registry_path)?;
+    let Some(team) = live.get(&canon) else {
+        return Ok(None);
+    };
+    if team.holder_session.is_none() {
+        // No session identity on the live row: the carry cannot prove the
+        // row it names is this team's holder, so checkin names it instead.
+        return Ok(None);
+    }
+    let named = update(store_path, |store| {
+        let names = live_names_in(store, &live);
+        if names.contains_key(&canon) {
+            return Ok(None);
+        }
+        check_duplicate_name(store, &names, &live, &canon, candidate)?;
+        store.teams.insert(
+            canon.clone(),
+            TeamNameRecord {
+                name: candidate.to_string(),
+                regnal: 1,
+                holder_session: team.holder_session.clone(),
+                nodes: Vec::new(),
+                updated_at: now_stamp(),
+                theme: None,
+                title: Some(title(team.level as u32, &canon, None)),
+                pending_succession: None,
+                lead: None,
+            },
+        );
+        Ok(Some(display(candidate, 1)))
+    })?;
+    if named.is_some() {
+        ensure_named_team(store_path, registry_path, &canon)?;
+    }
+    Ok(named)
+}
+
 /// A succession: regnal + 1, the heir unbound until its first beat binds it.
 /// `pending` records the succession so the reap sweep can revert it when the
 /// heir proves unable to bind; `None` (an old caller) keeps today's shape.
@@ -1458,6 +1530,60 @@ mod tests {
             assert!(dump["teams"]["fno"].get("theme").is_none());
             assert_eq!(dump["teams"]["fno"]["title"], json!("Head of fno"));
         }
+        fn an_org_promote_rescope_carries_the_record_and_the_carry_names_an_unnamed_team() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            write_registry(
+                tmp.path(),
+                json!([team_row("kestrel", "x-aaaa", 2, "sess-k")]),
+            );
+            let store = store_path(tmp.path());
+            let registry = registry_path(tmp.path());
+            name_team(&store, &registry, "x-aaaa", "kestrel").unwrap();
+            // The told-to re-scope: the recorded name moves old scope to new.
+            write_registry(
+                tmp.path(),
+                json!([team_row("kestrel", "x-bbbb", 2, "sess-k")]),
+            );
+            assert!(
+                crate::team_names::carry_rescope(&store, &registry, "x-aaaa", "x-bbbb").unwrap()
+            );
+            let dump = snapshot(&store).unwrap();
+            assert!(dump["teams"].get("x-aaaa").is_none());
+            assert_eq!(dump["teams"]["x-bbbb"]["name"], json!("kestrel"));
+            assert_eq!(dump["teams"]["x-bbbb"]["holder_session"], json!("sess-k"));
+            // A first crown (no record at the vacated scope) carries nothing,
+            // and a same-scope re-grant moves nothing.
+            assert!(!carry_rescope(&store, &registry, "x-zzzz", "x-cccc").unwrap());
+            assert!(!carry_rescope(&store, &registry, "x-bbbb", "x-bbbb").unwrap());
+            // The landing team is named, so the holder-name carry is a no-op.
+            assert_eq!(
+                carry_holder_name(&store, &registry, "x-bbbb", "kestrel").unwrap(),
+                None
+            );
+            // A fresh crown over a new scope with a people-shaped row name
+            // names the team from the row; a hex-shaped name stays unnamed.
+            write_registry(
+                tmp.path(),
+                json!([team_row("harriet", "x-dddd", 1, "sess-d")]),
+            );
+            assert_eq!(
+                carry_holder_name(&store, &registry, "x-dddd", "harriet").unwrap(),
+                Some("Harriet".to_string())
+            );
+            let dump = snapshot(&store).unwrap();
+            assert_eq!(dump["teams"]["x-dddd"]["name"], json!("harriet"));
+            assert_eq!(dump["teams"]["x-dddd"]["regnal"], json!(1));
+            write_registry(
+                tmp.path(),
+                json!([team_row("t-x-9g", "x-eeee", 1, "sess-e")]),
+            );
+            assert_eq!(
+                carry_holder_name(&store, &registry, "x-eeee", "t-x-9g").unwrap(),
+                None
+            );
+            assert!(snapshot(&store).unwrap()["teams"].get("x-eeee").is_none());
+        }
+        an_org_promote_rescope_carries_the_record_and_the_carry_names_an_unnamed_team();
         an_unnamed_live_team_cannot_complete_checkin();
         a_successor_checkin_carries_the_name_into_its_registry_label();
         a_duplicate_live_name_refuses_naming_and_names_the_holder();

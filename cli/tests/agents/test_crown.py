@@ -1122,12 +1122,31 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
     king_state.write_manifest(
         old_manifest, scope="beta", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     )
+    from fno.agents import spawn_overlay_client
+    real_call = spawn_overlay_client.spawn_overlay_call
+
+    captured = {}
+
+    def capture(payload, **kwargs):
+        if payload.get("kind") == "team-rescope":
+            captured.update(payload)
+            return {"carried": True, "named": "Kestrel", "reason": None}
+        return real_call(payload, **kwargs)
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", capture)
 
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 0, result.output
+    assert captured == {
+        "kind": "team-rescope",
+        "old_scope": "beta",
+        "new_scope": "alpha",
+        "candidate": "worker",
+    }
     assert json.loads(result.stdout)["vacated_scope"] == "beta"
     assert json.loads(result.stdout)["vacated_level"] == 1
+    assert json.loads(result.stdout)["team_name"] == "Kestrel"
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
         1,

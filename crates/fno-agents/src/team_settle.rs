@@ -67,29 +67,42 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         let projects = crate::org_board::project_map(&std::env::current_dir().unwrap_or_default());
         return resolve_with_projects(payload, &projects);
     }
-    let store = crate::paths::AgentsHome::from_env_opt().map(|h| h.team_names_json());
+    let home = crate::paths::AgentsHome::from_env_opt();
+    let store = home.as_ref().map(|h| h.team_names_json());
     let projects = crate::org_board::project_map(&std::env::current_dir().unwrap_or_default());
     let answer = resolve_with_projects(payload, &projects)?;
     // No declared home (a test) reads as no store, so the plan answer is
     // unchanged; production always declares one.
     if let Some(store) = store.as_ref() {
-        apply_name_effect(payload, &answer, store);
+        let registry = home.as_ref().map(|h| h.registry_json());
+        apply_name_effect(payload, &answer, store, registry.as_deref());
     }
     Ok(answer)
 }
 
 /// [`resolve`] with an explicit store path, so tests pass a tempdir store
-/// instead of setting the agents home env.
+/// instead of setting the agents home env. The registry sits beside it,
+/// the way the home lays the pair out.
 pub fn resolve_at(payload: &Value, store: &std::path::Path) -> Result<Value, String> {
     let projects = crate::org_board::project_map(&std::env::current_dir().unwrap_or_default());
     let answer = resolve_with_projects(payload, &projects)?;
-    apply_name_effect(payload, &answer, store);
+    apply_name_effect(
+        payload,
+        &answer,
+        store,
+        Some(&store.with_file_name("registry.json")),
+    );
     Ok(answer)
 }
 
 /// The registry commit is the authority: a store error prints one stderr
 /// line and never changes the answer.
-fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
+fn apply_name_effect(
+    payload: &Value,
+    answer: &Value,
+    store: &std::path::Path,
+    registry: Option<&std::path::Path>,
+) {
     if payload.get("plan").is_none() {
         return;
     }
@@ -109,7 +122,21 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
             }
             result
         }
-        Some("granted") => crate::team_names::forget(store, scope),
+        Some("granted") => {
+            let forgotten = crate::team_names::forget(store, scope);
+            let heir = payload
+                .get("heir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty());
+            match (forgotten, heir, registry) {
+                (Ok(()), Some(name), Some(reg)) => {
+                    // A fresh grant carries the crowned row's own name, so
+                    // the team never lands anonymous (x-f6de).
+                    crate::team_names::carry_holder_name(store, reg, scope, name).map(|_| ())
+                }
+                (result, _, _) => result,
+            }
+        }
         _ => Ok(()),
     };
     if let Err(e) = effect {
@@ -1120,6 +1147,39 @@ mod tests {
         let store = std::fs::read_to_string(team_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert!(doc["teams"].get("x-aaaa").is_none(), "{store}");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // A fresh grant carries the heir's own people-shaped row name: the
+        // stale record from the dead predecessor team is forgotten, then the
+        // new team takes the row's name bound to the live holder session. A
+        // hex-shaped heir name stays unnamed for checkin to name once.
+        let _reg = team_registry(
+            tmp.path(),
+            json!([{"name": "kestrel", "status": "live", "crown_scope": "x-aaaa",
+                    "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                    "harness_session_id": "sess-new",
+                    "created_at": "2026-10-04T00:00:00Z"}]),
+        );
+        named_record_fixture(tmp.path());
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-aaaa", "heir": "kestrel",
+                "plan": {
+                    "caller": {"kind": "human"},
+                    "holder_ids": [],
+                    "outcome": "granted", "vacate": [],
+                },
+                "rows": [],
+            }),
+            &team_store(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "granted");
+        let doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(team_store(tmp.path())).unwrap())
+                .unwrap();
+        assert_eq!(doc["teams"]["x-aaaa"]["name"], json!("kestrel"));
+        assert_eq!(doc["teams"]["x-aaaa"]["holder_session"], json!("sess-new"));
 
         let tmp = tempfile::TempDir::new().unwrap();
         // A file where the store's parent dir would be: the write fails.
