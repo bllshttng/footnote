@@ -686,7 +686,7 @@ fn atomic_write(path: &Path, data: &str, mode_0600: bool) -> std::io::Result<()>
 /// `source-path` second. A companion that disagrees with the legacy file reads
 /// as unknown provenance on the read side - never evidence; eligibility is
 /// always decided by live probes at resolve time.
-fn record_from_str(raw: &str, cache: &str, companion: &str) -> Result<(), String> {
+fn record_from_str(raw: &str, cache: &str, companion: &str) -> Result<serde_json::Value, String> {
     let mut answer: serde_json::Value =
         serde_json::from_str(raw.trim()).map_err(|e| format!("stdin is not valid JSON: {e}"))?;
     let path = answer
@@ -709,7 +709,14 @@ fn record_from_str(raw: &str, cache: &str, companion: &str) -> Result<(), String
         .map_err(|e| format!("companion write failed: {e}"))?;
     atomic_write(Path::new(cache), &format!("{path}\n"), false)
         .map_err(|e| format!("legacy source-path write failed: {e}"))?;
-    Ok(())
+    // A JSON receipt, not silence: `fno doctor update` parses every
+    // source-pin subcommand's stdout as an object (doctor_update.rs
+    // source_pin_call), so an empty record reply reads as a failed step.
+    Ok(serde_json::json!({
+        "recorded": true,
+        "cache": cache,
+        "companion": companion,
+    }))
 }
 
 /// `fno-agents source-pin`: hidden binary-direct verb for update/doctor.
@@ -762,7 +769,7 @@ pub fn run_source_pin(args: &[String]) -> i32 {
         },
         "record" => match (value_of(rest, "--cache"), value_of(rest, "--companion")) {
             (Ok(Some(c)), Ok(Some(m))) if !c.is_empty() && !m.is_empty() => match record(&c, &m) {
-                Ok(()) => 0,
+                Ok(receipt) => print_json(&receipt),
                 Err(e) => {
                     eprintln!("fno-agents source-pin: {e}");
                     1
@@ -851,7 +858,7 @@ fn print_json<T: serde::Serialize>(value: &T) -> i32 {
 }
 
 /// `source-pin record`: stdin wrapper around `record_from_str`.
-fn record(cache: &str, companion: &str) -> Result<(), String> {
+fn record(cache: &str, companion: &str) -> Result<serde_json::Value, String> {
     let mut raw = String::new();
     std::io::stdin()
         .read_to_string(&mut raw)
@@ -1057,7 +1064,13 @@ mod tests {
         let raw = serde_json::to_string(&a).unwrap();
         let cache = base.path().join("cache").join("source-path");
         let companion = base.path().join("cache").join("source-pin.json");
-        record_from_str(&raw, cache.to_str().unwrap(), companion.to_str().unwrap()).unwrap();
+        let receipt =
+            record_from_str(&raw, cache.to_str().unwrap(), companion.to_str().unwrap()).unwrap();
+        // doctor_update's source_pin_call parses stdout as a JSON object; the
+        // record receipt must satisfy that parse.
+        assert!(receipt.is_object());
+        assert_eq!(receipt["recorded"], json!(true));
+        assert_eq!(receipt["companion"], json!(companion.to_str().unwrap()));
         assert_eq!(fs::read_to_string(&cache).unwrap(), format!("{wt}\n"));
         let pin: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&companion).unwrap()).unwrap();

@@ -59,15 +59,17 @@ fork) is its own background task; include its actual harness task id \
 pr: pr is a real PR number or left out, never 0. The session idles until the watcher exits \
 instead of re-waking every tick.";
 
+/// The harnesses whose `<watching>` idle may park. One set, two readers: the
+/// lease gate and the daemon's settle arm, so a harness the lease admits is
+/// exactly the harness the settle arm wakes.
+pub(crate) const IDLE_HARNESSES: [&str; 6] = ["claude", "codex", "opencode", "pi", "agy", "gemini"];
+
 /// Whether a session's harness + substrate can park on a `<watching>` idle.
 /// The supported interactive harnesses can be resumed through the daemon's
 /// expiry arm. Loop-run children exit on allow, and unknown or unsupported
 /// harnesses stay on the blocking path rather than idling without a routed wake.
 pub(crate) fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
-    matches!(
-        author_harness,
-        Some("claude" | "codex" | "opencode" | "pi" | "agy" | "gemini")
-    ) && !is_loop_run_child
+    author_harness.is_some_and(|h| IDLE_HARNESSES.contains(&h)) && !is_loop_run_child
 }
 
 /// US6a: the codex watch registration address. `Some` only for a codex

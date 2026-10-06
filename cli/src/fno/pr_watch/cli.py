@@ -1217,14 +1217,14 @@ def tick() -> None:
 
             roots = _tick_roots()
             try:
-                # Durable grants, never the sweep's result. Its timeout and
-                # phase cap share one load-scaled window, leaving room for a
-                # merge attempt and at least a short sweep before the deadline.
+                # The read's bound travels to the Rust op as deadline_ms, so
+                # its bounded git reads answer inside it.
+                grant_timeout = min(grant_queue_timeout_s, max(1.0, slice_s - 10.0))
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
-                                "cwd": str(roots[0] if roots else Path.cwd())},
-                                timeout=min(grant_queue_timeout_s,
-                                            max(1.0, slice_s - 10.0)))
+                                "cwd": str(roots[0] if roots else Path.cwd()),
+                                "deadline_ms": int(grant_timeout * 1000)},
+                                timeout=grant_timeout)
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
                 queue = [
@@ -1299,7 +1299,9 @@ def tick() -> None:
                     woke_n = len(wake_summary.get("woke", []) or [])
                     evaluated = int(wake_summary.get("evaluated", 0) or 0)
                     truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
-                    if crowns == 0:
+                    if crowns == 0 and wake_summary.get("court_incomplete"):
+                        skip = "court_read_incomplete"
+                    elif crowns == 0:
                         skip = "no_crowned_target"
                     elif woke_n:
                         skip = None
