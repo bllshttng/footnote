@@ -1137,6 +1137,11 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                                 e.harness_session_id.as_deref() == Some(stopped_session.as_str())
                             }) {
                                 state::record_stop(entry, "terminal-sweep", Some(stopped_reason));
+                                // best-effort: a failed stamp costs a later
+                                // wake its name, never the stop.
+                                let sid = entry.harness_session_id.clone().unwrap_or_default();
+                                let n = entry.name.clone();
+                                crate::wake_name::record(&sweep_home, &sid, &n);
                             }
                         })
                         .await;
@@ -4691,11 +4696,17 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             }
         };
         let stop_name = name.clone();
+        let wake_home = ctx.home.clone();
         if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
             if let Some(entry) = registry.find_mut(&stop_name) {
                 entry.status = AgentStatus::Exited;
                 entry.exited_at = Some(now_rfc3339_like());
                 crate::state::record_stop(entry, "stop-verb", Some("codex-thread".into()));
+                // best-effort: a failed stamp costs a later wake its name,
+                // never the stop.
+                let sid = entry.harness_session_id.clone().unwrap_or_default();
+                let n = entry.name.clone();
+                crate::wake_name::record(&wake_home, &sid, &n);
             }
         })
         .await
@@ -4737,11 +4748,15 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             );
         }
         let stop_name = name.clone();
+        let wake_home = ctx.home.clone();
         if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
             if let Some(entry) = registry.find_mut(&stop_name) {
                 entry.status = AgentStatus::Exited;
                 entry.exited_at = Some(now_rfc3339_like());
                 crate::state::record_stop(entry, "stop-verb", Some("keeper-thread".into()));
+                let sid = entry.harness_session_id.clone().unwrap_or_default();
+                let n = entry.name.clone();
+                crate::wake_name::record(&wake_home, &sid, &n);
             }
         })
         .await
@@ -4792,10 +4807,16 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     // the status flip does not persist the registry diverges from reality
     // (silent-failure review). Mirrors handle_register_channel's house style.
     let stop_name = name.clone();
+    let wake_home = ctx.home.clone();
     if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if let Some(e) = r.find_mut(&stop_name) {
             e.status = AgentStatus::Exited;
             crate::state::record_stop(e, "stop-verb", None);
+            // best-effort: a failed stamp costs a later wake its name,
+            // never the stop.
+            let sid = e.harness_session_id.clone().unwrap_or_default();
+            let n = e.name.clone();
+            crate::wake_name::record(&wake_home, &sid, &n);
         }
     })
     .await
