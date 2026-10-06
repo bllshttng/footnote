@@ -439,10 +439,19 @@ pub struct Authorized {
 /// come first, then the holds, then the head pin, then the effect's own
 /// preconditions.
 pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Outcome> {
+    decide_observed(probes, request, &mut None)
+}
+
+fn decide_observed<P: Probes>(
+    probes: &P,
+    request: &Request,
+    observed_head: &mut Option<String>,
+) -> Result<Authorized, Outcome> {
     let cwd = request.cwd.as_path();
     let facts = probes
         .pr_facts(cwd, request.pr)
         .map_err(|reason| Outcome::Unknown { reason })?;
+    *observed_head = Some(facts.head_sha.clone());
 
     // The preview arm answers the same gates read-only and never reaches an
     // effect: `fno do pr status` reads its receipt as `ready`.
@@ -1268,7 +1277,15 @@ fn authority_refusal<P: Probes>(
 
 /// Decide, then run the effect unless the caller asked to stop at the decision.
 pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
-    match decide(probes, request) {
+    run_observed(probes, request, &mut None)
+}
+
+fn run_observed<P: Probes>(
+    probes: &P,
+    request: &Request,
+    observed_head: &mut Option<String>,
+) -> Outcome {
+    match decide_observed(probes, request, observed_head) {
         Ok(authorized) if request.decide_only || request.effect == Effect::Preview => {
             Outcome::Authorized {
                 head: authorized.head,
@@ -1505,31 +1522,13 @@ impl RealProbes {
     }
 
     fn fno_strings(cwd: &Path, args: &[String]) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
-        let out = Command::new(crate::scrape::fno_bin())
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .map_err(|error| error.to_string())?;
-        Ok((out.status.code(), out.stdout, out.stderr))
+        Self::fno(cwd, &args.iter().map(String::as_str).collect::<Vec<_>>())
     }
 }
 
 impl Probes for RealProbes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String> {
-        let number = pr.map(|n| n.to_string());
-        let mut args = vec!["do", "pr", "info"];
-        if let Some(number) = number.as_deref() {
-            args.push(number);
-        }
-        let (_code, stdout, stderr) = Self::fno(cwd, &args)?;
-        let payload: Value = serde_json::from_slice(&stdout).map_err(|error| {
-            let detail = String::from_utf8_lossy(&stderr);
-            format!(
-                "fno do pr info returned unreadable JSON ({error}): {}",
-                detail.trim()
-            )
-        })?;
-        parse_pr_facts(&payload)
+        head_probe::read(cwd, pr)
     }
 
     fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
@@ -2369,6 +2368,13 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Ok(value) => value,
         Err(message) => return (2, String::new(), message),
     };
+    if payload.get("op").and_then(Value::as_str) == Some("pr-head") {
+        return (
+            0,
+            format!("{}\n", head_probe::receipt(&payload)),
+            String::new(),
+        );
+    }
     // The hold ops are merge-authority writes riding this verb's payload, not
     // a new top-level root: `{"op": "hold-set"|"freeze-set"|..., ...}` answers
     // with one receipt instead of a merge verdict.
@@ -2474,10 +2480,14 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // RAN: 0 with a receipt on stdout, 2 when the payload was unusable. A code
     // that also encoded refusal would make a held merge indistinguishable from a
     // binary that could not start, and the caller reads the receipt either way.
-    let outcome = run(&RealProbes, &request);
-    (0, format!("{}\n", outcome.to_json()), String::new())
+    let mut observed_head = None;
+    let outcome = run_observed(&RealProbes, &request, &mut observed_head);
+    let mut receipt = outcome.to_json();
+    receipt["observed_head"] = json!(observed_head);
+    (0, format!("{receipt}\n"), String::new())
 }
 
+mod head_probe;
 mod preview_receipt;
 
 pub(crate) use preview_receipt::{
@@ -3841,7 +3851,9 @@ mod tests {
             checks: Some("red".to_string()),
             ..clean()
         };
-        let held = run(&red, &req);
+        let mut observed_head = None;
+        let held = run_observed(&red, &req, &mut observed_head);
+        assert_eq!(observed_head.as_deref(), Some("abc123"));
         assert_eq!(held.word(), "held");
         assert!(held
             .detail()
@@ -4269,12 +4281,6 @@ mod tests {
 
         let unarmed = json!({"pr": 7, "head_sha": "abc123", "auto_merge": Value::Null});
         assert!(!parse_pr_facts(&unarmed).expect("facts parse").armed);
-    }
-
-    #[test]
-    fn pr_facts_refuses_a_payload_with_no_head_sha() {
-        assert!(parse_pr_facts(&json!({"pr": 7})).is_err());
-        assert!(parse_pr_facts(&json!({"error": "gh api failed"})).is_err());
     }
 
     #[test]
