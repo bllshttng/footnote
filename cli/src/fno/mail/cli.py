@@ -4777,8 +4777,9 @@ def cmd_hold(
 @mail_app.command("hold-release", hidden=True)
 def cmd_hold_release(
     handle: str = typer.Option(..., "--handle", help="The held session's handle."),
-    poll_s: int = typer.Option(15, "--poll-s", hidden=True, help="Seconds between clock re-reads."),
-    now: bool = typer.Option(False, "--now", hidden=True, help="Release now, not on the clock."),
+    poll_s: int = typer.Option(
+        15, "--poll-s", hidden=True, help="Seconds between clock re-reads."
+    ),
 ) -> None:
     """Sleep until ``handle``'s hold expires, then release it.
 
@@ -4793,7 +4794,7 @@ def cmd_hold_release(
     from fno.mail import hold as hold_mod
 
     started = time.monotonic()
-    while not now:
+    while True:
         clock = hold_mod.read(handle)
         if clock is None or clock.until is None:
             return
