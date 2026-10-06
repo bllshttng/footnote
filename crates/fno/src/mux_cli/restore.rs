@@ -9,12 +9,28 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
     let mut dry_run = false;
     let mut json = false;
     let mut harness: Option<String> = None;
+    let mut member_session: Option<String> = None;
     let mut session: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.to_str() {
             Some("--dry-run") => dry_run = true,
             Some("--json") | Some("-J") => json = true,
+            Some("--member-session") => {
+                member_session = match it
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .filter(|v| !v.trim().is_empty())
+                {
+                    Some(v) => Some(v.to_string()),
+                    None => {
+                        eprintln!(
+                            "fno mux workspace restore: --member-session needs a full session id"
+                        );
+                        return EXIT_USAGE;
+                    }
+                };
+            }
             Some("--harness") => {
                 harness = Some(match it.next().and_then(|v| v.to_str()) {
                     Some(v) => v.to_string(),
@@ -56,9 +72,14 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
             return EXIT_ERROR;
         }
     };
+    if member_session.is_some() && read_wire_version(&sock).is_none_or(|version| version < 109) {
+        eprintln!("fno mux workspace restore: exact-session restore needs server protocol 109 or newer; no restore sent");
+        return EXIT_ERROR;
+    }
     let verb = ControlVerb::WorkspaceRestore {
         dry_run,
         harness: harness.clone(),
+        member_session: member_session.clone(),
     };
     match control_roundtrip(&sock, &session, verb) {
         Ok(ServerMsg::WorkspaceRestored { rows }) => {
@@ -79,6 +100,7 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
                     "session": session,
                     "dry_run": dry_run,
                     "harness": harness,
+                    "member_session": member_session,
                     "resumed": count("resumed"),
                     "focused": count("focused"),
                     "refused": count("refused"),
