@@ -1542,6 +1542,23 @@ def test_phase5_v3_round_trip_preserves_mcp_channel_id(tmp_path: Path, monkeypat
     assert loaded[0].mcp_channel_id == "ch-abc-123"
 
 
+def test_agent_entry_accepts_every_field_in_registry_schema() -> None:
+    """Every field the Rust writer declares in registry_schema.toml loads into AgentEntry."""
+    import dataclasses
+    import tomllib
+
+    import fno.agents
+    from fno.agents.registry import AgentEntry
+
+    schema = Path(fno.agents.__file__).parent / "registry_schema.toml"
+    declared = set(tomllib.loads(schema.read_text())["fields"])
+    # Read-time legacy keys: load_registry folds or drops these before building the entry.
+    legacy = {"claude_session_uuid", "claude_short_id", "codex_session_id",
+              "gemini_session_id", "legacy_provider", "session_id"}
+    missing = declared - legacy - {f.name for f in dataclasses.fields(AgentEntry)}
+    assert not missing, f"AgentEntry lacks registry_schema.toml fields: {sorted(missing)}"
+
+
 def test_phase5_v2_entries_synthesized_to_v3_at_read(tmp_path: Path, monkeypatch) -> None:
     """A v2 on-disk registry reads back with ``mcp_channel_id=None`` for every
     row without mutating the file on disk."""
