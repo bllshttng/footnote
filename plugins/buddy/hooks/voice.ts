@@ -126,18 +126,32 @@ export function cleanReaction(raw: string): string {
   return line.length > 120 ? line.slice(0, 117) + '...' : line
 }
 
-// Shown the moment a turn ends, before the model's line arrives.
-const QUICK: Record<StatName, string[]> = {
-  DEBUGGING: ['hm. let me squint at that.', 'reading the diff...', 'checking your work.'],
-  PATIENCE: ['nice and steady.', 'one thing at a time.', 'we got there.'],
-  CHAOS: ['OOH what broke', 'again! again!', 'that was loud.'],
-  WISDOM: ['hm. interesting choice.', 'noted for later.', 'that one will age.'],
-  SNARK: ['bold.', 'sure, that works. probably.', 'i saw that.'],
+// Idle chatter: one model call per buddy writes a batch in its own voice; the batch is kept and reused.
+export function idlePrompt(c: Companion): string {
+  return `Write 12 short things ${c.name} mutters to itself while the developer is quiet. Mix moods: bored, curious, smug, sleepy, nosy about the code. Never mention a diff, review, or checking work. One per line, lowercase, under 60 characters, no numbering, no quotes.`
 }
 
-export function quickLine(c: Companion, turn: number): string {
-  const lines = QUICK[peakStat(c)]
-  return lines[turn % lines.length]!
+export function cleanIdleLines(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map(l => l.replace(/^\s*(?:[-*\u2022]|\d+[.)])\s*/, '').replace(/^["']|["']$/g, '').trim().toLowerCase())
+    .filter(l => l.length >= 3 && l.length <= 80)
+    .slice(0, 16)
+}
+
+// Until the model's batch exists: a few canned lines per peak stat, never about reviewing work.
+const IDLE: Record<StatName, string[]> = {
+  DEBUGGING: ['*sniffs a stack trace*', 'something smells off-by-one.', 'i bet that regex has a secret.'],
+  PATIENCE: ['*settles in*', 'no rush.', 'i could nap here.'],
+  CHAOS: ['bored. break something?', '*knocks a semicolon off the desk*', 'what if we just deleted it'],
+  WISDOM: ['every todo is a promise.', 'the old code had reasons.', '*hums thoughtfully*'],
+  SNARK: ['still here, unfortunately.', 'riveting stuff.', '*yawns at your cursor*'],
+}
+
+export function idleLine(c: Companion, lines: string[] | undefined, last: string | null): string {
+  const pool = lines?.length ? lines : IDLE[peakStat(c)]
+  const choices = pool.length > 1 ? pool.filter(l => l !== last) : pool
+  return choices[Math.floor(Math.random() * choices.length)]!
 }
 
 export type FeedRow = {

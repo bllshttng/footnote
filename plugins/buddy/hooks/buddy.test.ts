@@ -106,7 +106,7 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   expect(fleetLine(undefined, undefined, undefined)).toBe('')
 })
 
-test('a finished turn shows a quick line, then the model reaction', async ($, on) => {
+test('a finished turn shows the model reaction, with no canned line first', async ($, on) => {
   const { clock } = boot(on)
   on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the parser', toolUses: [] }, { role: 'assistant', text: 'done', toolUses: [{ tool: 'Edit', input: {} }] }] }))
   on('model.complete', () => ({ value: { isAnswered: true, text: '"That null check does zero work."', usage: null } }))
@@ -125,8 +125,9 @@ test('a finished turn shows a quick line, then the model reaction', async ($, on
 test('a shipped node in the fleet feed becomes a line with no model call', async ($, on) => {
   const { clock } = boot(on)
   let modelCalls = 0
-  on('model.complete', () => {
-    modelCalls += 1
+  on('model.complete', (e: any) => {
+    // The once-per-buddy idle batch is its own call; the feed line must not add one.
+    if (!/mutters/.test(e.prompt)) modelCalls += 1
     return { value: { isAnswered: true, text: 'no', usage: null } }
   })
   const row = { ts: new Date(60_000).toISOString(), kind: 'node_shipped', node: 'parser-fix', ref: '42', title: 'PR 42' }

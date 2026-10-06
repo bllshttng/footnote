@@ -2,7 +2,7 @@ import type { EngineInterface, On } from 'claude-code'
 
 import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, embody, hatch, restore } from './companion'
 import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
-import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityPrompt, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
+import { type FeedRow, cleanIdleLines, cleanPersonality, cleanReaction, idleLine, idlePrompt, narrate, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
 const BUBBLE_MS = 30_000
@@ -27,7 +27,9 @@ const COMMANDS = ['buddy', 'bbb']
 let buddy: Companion | null = null
 let muted = false
 let tick = 0
-let turns = 0
+// The buddy's own idle chatter, written once per soul by the model and kept in the store.
+let idleLines: string[] | undefined
+let idleAsked = ''
 let bubble: { text: string; at: number } | null = null
 let pettedAt = -Infinity
 let drawnAt = -Infinity
@@ -119,6 +121,26 @@ async function fromFno($: EngineInterface): Promise<Soul | null> {
     // No fno store, or an unreadable one: hatch as usual.
   }
   return null
+}
+
+async function writeIdleLines($: EngineInterface): Promise<void> {
+  const c = buddy
+  if (!c || idleAsked === c.seed) return
+  idleAsked = c.seed
+  const saved = (await $.store.get('idle')) as { seed: string; lines: string[] } | undefined
+  if (saved?.seed === c.seed && saved.lines.length) {
+    idleLines = saved.lines
+    return
+  }
+  try {
+    const reply = await $.model.complete({ model: 'haiku', system: systemPrompt(c), prompt: idlePrompt(c), maxTokens: 300, timeoutMs: 20_000 })
+    const lines = reply.isAnswered ? cleanIdleLines(reply.text) : []
+    if (lines.length < 4 || buddy?.seed !== c.seed) return
+    idleLines = lines
+    await $.store.set('idle', { seed: c.seed, lines })
+  } catch {
+    // The canned lines keep it talking.
+  }
 }
 
 // A new buddy hatches with a placeholder; one model call then writes who it is, as the original did.
@@ -446,8 +468,8 @@ export function register(on: On) {
       if (!buddy || muted) return
       const at = await $.clock.now()
       if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS) {
-        turns += 1
-        say(quickLine(buddy, turns), at)
+        say(idleLine(buddy, idleLines, bubble?.text ?? null), at)
+        if (!idleLines) void writeIdleLines($)
       }
       if (tick % 4 === 0) {
         const was = wrapped
@@ -515,6 +537,7 @@ export function register(on: On) {
       const soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
+      idleLines = undefined
       say(`hi. i'm ${buddy.name}.`, now)
       void givePersonality($)
     }
@@ -529,9 +552,6 @@ export function register(on: On) {
   on('turn.complete', async ($, e, next) => {
     if (buddy && !muted && !e.agentId && !e.isAborted && e.durationMs >= MIN_TURN_MS) {
       const now = await $.clock.now()
-      turns += 1
-      say(quickLine(buddy, turns), now)
-      $.ui.invalidate('ui.render')
       if (now - reactedAt >= REACT_GAP_MS && now - drawnAt < SEEN_MS) {
         reactedAt = now
         // Not awaited: the next prompt must not wait on the buddy's model call.
