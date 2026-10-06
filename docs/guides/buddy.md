@@ -13,7 +13,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## Start
 
 1. Install the plugin: `/plugin install buddy@footnote`. The buddy hatches at the next session start.
-2. Type `/buddy` to see its card. The first time, you watch it hatch from an egg.
+2. Type `/buddy` to see its card. The first time, you watch it hatch from an egg. Press any key to close the card.
 3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
 4. If you want the buddy in a side pane, type `/buddy pane`.
 

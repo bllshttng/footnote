@@ -20,6 +20,9 @@ const SEEN_MS = 5_000
 // The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
 const FRAME_REFRESH_MS = 10_000
 const PANE_ID = 'buddy'
+// The /buddy card opens here, focused, so any key closes it like the original.
+const CARD_ID = 'buddy-card'
+let cardSnap: Shown | undefined
 const PANE_COLUMNS = 24
 const WRAPPER = 'statusline.py'
 // bbb: bring back buddy.
@@ -224,6 +227,58 @@ function cardTree(ui: any, c: Companion, said: string, r: Rerolls): any {
         ? [Box({ flexDirection: 'column', marginTop: 1, children: [Text({ dimColor: true, children: ['last said'] }), Box({ borderStyle: 'round', borderColor: 'inactive', paddingX: 1, children: [Text({ dimColor: true, italic: true, children: [said] })] })] })]
         : []),
       Box({ marginTop: 1, children: [Text({ dimColor: true, children: [`rerolls ${r.bank}/${REROLL_BANK}`] })] }),
+    ],
+  })
+}
+
+// The hatch while it plays, then the card; in the focused pane, with the original's footer and a key to close.
+function showTree(ui: any, snap: Shown, now: number, close: any): any {
+  if (snap.hatchAt === undefined) return close ? ui.Box({ flexDirection: 'column', children: [cardTree(ui, snap.c, snap.last, snap.r), ui.Box({ marginTop: 1, children: [close] })] }) : cardTree(ui, snap.c, snap.last, snap.r)
+  const tick = Math.floor((now - snap.hatchAt) / HATCH_FRAME_MS)
+  // The soul is ready once the model wrote its personality, or after 8 s without one.
+  const ready = (buddy?.seed === snap.c.seed && personalityDone) || now - snap.hatchAt > 8_000
+  if (snap.crackAt === undefined && ready && tick >= HATCH_MIN_ROUNDS * HATCH_WOBBLE) snap.crackAt = tick
+  const frame = snap.crackAt === undefined ? tick % HATCH_WOBBLE : Math.min(HATCH_WOBBLE + tick - snap.crackAt, HATCH_FRAMES.length)
+  if (frame >= HATCH_FRAMES.length) {
+    const c = buddy?.seed === snap.c.seed ? buddy : snap.c
+    const said = lastSaid || snap.last
+    const { Box, Text } = ui
+    return Box({
+      flexDirection: 'column',
+      children: [
+        cardTree(ui, c, said, snap.r),
+        Box({
+          flexDirection: 'column',
+          marginTop: 1,
+          children: [
+            Text({ dimColor: true, children: [`${c.name} is here · it'll chime in as you code`] }),
+            Text({ dimColor: true, children: ['each line is one small model call on your plan'] }),
+            Text({ dimColor: true, children: ['say its name to get its take · /buddy pet · /buddy off'] }),
+            ...(close ? [Box({ marginTop: 1, children: [close] })] : []),
+          ],
+        }),
+      ],
+    })
+  }
+  const f = HATCH_FRAMES[frame]!
+  const { Box, Text } = ui
+  return Box({
+    flexDirection: 'column',
+    alignItems: 'center',
+    borderStyle: 'round',
+    borderColor: RAINBOW[tick % RAINBOW.length],
+    paddingY: 1,
+    children: [
+      ...f.lines.map(l => Text({ children: [' '.repeat(1 + f.offset) + l + ' '.repeat(1 - f.offset)] })),
+      Box({
+        flexDirection: 'column',
+        alignItems: 'center',
+        marginTop: 1,
+        children: [
+          Text({ dimColor: true, children: ['hatching a coding buddy…'] }),
+          Text({ dimColor: true, children: ["it'll watch you work and occasionally have opinions"] }),
+        ],
+      }),
     ],
   })
 }
@@ -619,9 +674,19 @@ export function register(on: On) {
         await react($, 'hatch', await projectContext($))
       })().catch(() => {})
     }
-    pending = { c: buddy!, last: lastSaid, r, ...(fresh ? { hatchAt: now } : {}) }
-    $.ui.invalidate('ui.render')
-    return { text: (fresh ? HATCH_MARK : CARD_MARK) + card(buddy!, r) }
+    const snap: Shown = { c: buddy!, last: lastSaid, r, ...(fresh ? { hatchAt: now } : {}) }
+    try {
+      cardSnap = snap
+      await $.ui.open({ id: CARD_ID, title: buddy!.name, focus: true, closeOnEscape: true })
+      $.ui.invalidate('ui.render')
+      return { text: `${buddy!.name} the ${buddy!.species} · ${RARITY_STARS[buddy!.rarity]} ${buddy!.rarity}` }
+    } catch {
+      // No pane here (a narrow terminal, another app): the card draws in the output row instead.
+      cardSnap = undefined
+      pending = snap
+      $.ui.invalidate('ui.render')
+      return { text: (fresh ? HATCH_MARK : CARD_MARK) + card(buddy!, r) }
+    }
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -651,55 +716,19 @@ export function register(on: On) {
       pending = undefined
       shown.set(e.requestId, snap)
     }
-    const now = await $.clock.now()
+    return showTree($.ui.resolve(e), snap, await $.clock.now(), false)
+  })
+
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== CARD_ID || !cardSnap) return next(e)
     const ui = $.ui.resolve(e)
-    if (snap.hatchAt === undefined) return cardTree(ui, snap.c, snap.last, snap.r)
-    const tick = Math.floor((now - snap.hatchAt) / HATCH_FRAME_MS)
-    // The soul is ready once the model wrote its personality, or after 8 s without one.
-    const ready = (buddy?.seed === snap.c.seed && personalityDone) || now - snap.hatchAt > 8_000
-    if (snap.crackAt === undefined && ready && tick >= HATCH_MIN_ROUNDS * HATCH_WOBBLE) snap.crackAt = tick
-    const frame = snap.crackAt === undefined ? tick % HATCH_WOBBLE : Math.min(HATCH_WOBBLE + tick - snap.crackAt, HATCH_FRAMES.length)
-    if (frame >= HATCH_FRAMES.length) {
-      const c = buddy?.seed === snap.c.seed ? buddy : snap.c
-      const said = lastSaid || snap.last
-      const { Box, Text } = ui
-      return Box({
-        flexDirection: 'column',
-        children: [
-          cardTree(ui, c, said, snap.r),
-          Box({
-            flexDirection: 'column',
-            marginTop: 1,
-            children: [
-              Text({ dimColor: true, children: [`${c.name} is here · it'll chime in as you code`] }),
-              Text({ dimColor: true, children: ['each line is one small model call on your plan'] }),
-              Text({ dimColor: true, children: ['say its name to get its take · /buddy pet · /buddy off'] }),
-            ],
-          }),
-        ],
-      })
+    const shut = () => {
+      cardSnap = undefined
+      void $.ui.close({ id: CARD_ID }).catch(() => {})
     }
-    const f = HATCH_FRAMES[frame]!
-    const { Box, Text } = ui
-    return Box({
-      flexDirection: 'column',
-      alignItems: 'center',
-      borderStyle: 'round',
-      borderColor: RAINBOW[tick % RAINBOW.length],
-      paddingY: 1,
-      children: [
-        ...f.lines.map(l => Text({ children: [' '.repeat(1 + f.offset) + l + ' '.repeat(1 - f.offset)] })),
-        Box({
-          flexDirection: 'column',
-          alignItems: 'center',
-          marginTop: 1,
-          children: [
-            Text({ dimColor: true, children: ['hatching a coding buddy…'] }),
-            Text({ dimColor: true, children: ["it'll watch you work and occasionally have opinions"] }),
-          ],
-        }),
-      ],
-    })
+    // An empty field holds the focus: any typed key or Enter closes the card, and Esc does too.
+    const close = ui.Input({ key: 'close', placeholder: 'press any key', value: '', submitLabel: 'close', autoFocus: true, onInput: shut, onSubmit: shut })
+    return showTree(ui, cardSnap, await $.clock.now(), close)
   })
 
   // The fallback when the status line is not wrapped: a narrow dock on the right,

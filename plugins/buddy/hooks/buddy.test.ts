@@ -156,14 +156,14 @@ test('petting a short sprite puts the hearts above it, not over its head', async
   expect(await ui.find({ type: 'Text', text: '♥' })).toBeDefined()
 })
 
-test('a fresh buddy hatches from the egg into the original card', async ($, on) => {
+test('a fresh buddy hatches from the egg into the original card, and any key closes it', async ($, on) => {
   const { clock } = boot(on)
   on('model.complete', (_: any, e: any) => ({ value: { isAnswered: true, text: /personality/i.test(JSON.stringify(e)) ? 'A ghost who haunts flaky tests and gloats when they pass on retry.' : '*drifts in* hello.', usage: null } }))
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
   on('session.root', () => ({ value: '/work' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  const out = await $.command.run({ command: 'buddy', args: '' })
-  const row = { plugin: 'fno', component: 'CommandOutput', requestId: 'm1', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { command: 'buddy', text: out.text } } as const
+  await $.command.run({ command: 'buddy', args: '' })
+  const row = { plugin: 'fno', component: 'Pane', requestId: 'buddy-card', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { title: 'Quip', isFocused: true, bodyColumns: 60, placement: 'above', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
 
   const egg = await $.ui.mount(row)
   expect(await egg.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeDefined()
@@ -177,4 +177,9 @@ test('a fresh buddy hatches from the egg into the original card', async ($, on) 
   expect(await shown.find({ type: 'Text', text: /^★+ [A-Z]+$/ })).toBeDefined()
   expect(await shown.find({ type: 'Text', text: /is here · it'll chime in as you code$/ })).toBeDefined()
   expect(await shown.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeUndefined()
+  // Any key closes the card, as the original's press any key did.
+  await shown.input({ key: 'close', text: 'x', kind: 'change' })
+  await shown.unmount()
+  const gone = await $.ui.mount(row)
+  expect(await gone.find({ type: 'Text', text: /chime in as you code$/ })).toBeUndefined()
 })
