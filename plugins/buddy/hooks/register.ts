@@ -2,12 +2,13 @@ import type { EngineInterface, On } from 'claude-code'
 
 import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, embody, hatch, restore } from './companion'
 import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
-import { type FeedRow, cleanIdleLines, cleanPersonality, cleanReaction, idleLine, idlePrompt, narrate, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
+import { type FeedRow, cleanPersonality, cleanReaction, idlePrompt, newsFact, newsPrompt, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
 const BUBBLE_MS = 30_000
 // After this long with nothing said, the buddy says a canned line (no model call).
-const IDLE_TALK_MS = 45_000
+// Quiet this long, the buddy says something of its own: one model call, like a reaction.
+const IDLE_TALK_MS = 120_000
 const PET_MS = 2_500
 const MIN_TURN_MS = 5_000
 const REACT_GAP_MS = 10_000
@@ -27,9 +28,6 @@ const COMMANDS = ['buddy', 'bbb']
 let buddy: Companion | null = null
 let muted = false
 let tick = 0
-// The buddy's own idle chatter, written once per soul by the model and kept in the store.
-let idleLines: string[] | undefined
-let idleAsked = ''
 let bubble: { text: string; at: number } | null = null
 let pettedAt = -Infinity
 let drawnAt = -Infinity
@@ -121,26 +119,6 @@ async function fromFno($: EngineInterface): Promise<Soul | null> {
     // No fno store, or an unreadable one: hatch as usual.
   }
   return null
-}
-
-async function writeIdleLines($: EngineInterface): Promise<void> {
-  const c = buddy
-  if (!c || idleAsked === c.seed) return
-  idleAsked = c.seed
-  const saved = (await $.store.get('idle')) as { seed: string; lines: string[] } | undefined
-  if (saved?.seed === c.seed && saved.lines.length) {
-    idleLines = saved.lines
-    return
-  }
-  try {
-    const reply = await $.model.complete({ model: 'haiku', system: systemPrompt(c), prompt: idlePrompt(c), maxTokens: 300, timeoutMs: 20_000 })
-    const lines = reply.isAnswered ? cleanIdleLines(reply.text) : []
-    if (lines.length < 4 || buddy?.seed !== c.seed) return
-    idleLines = lines
-    await $.store.set('idle', { seed: c.seed, lines })
-  } catch {
-    // The canned lines keep it talking.
-  }
 }
 
 // A new buddy hatches with a placeholder; one model call then writes who it is, as the original did.
@@ -304,14 +282,14 @@ async function statuslineOff($: EngineInterface): Promise<{ ok: boolean; text: s
   return { ok: true, text }
 }
 
-async function react($: EngineInterface): Promise<void> {
+async function react($: EngineInterface, why: 'turn' | 'idle' = 'turn'): Promise<void> {
   if (!buddy) return
   const summary = summarizeTurn(await $.session.messages())
-  if (!summary.trim()) return
+  if (why === 'turn' && !summary.trim()) return
   const reply = await $.model.complete({
     model: 'haiku',
     system: systemPrompt(buddy),
-    prompt: reactionPrompt(summary),
+    prompt: why === 'idle' ? idlePrompt(summary) : reactionPrompt(summary),
     maxTokens: 80,
     timeoutMs: 20_000,
   })
@@ -357,9 +335,16 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
     const at = Math.floor(Date.parse(row.ts) / 1000)
     if (!(at >= feedSince)) continue
     feedSince = Math.max(feedSince, at + 1)
-    line = narrate(row) ?? line
+    line = newsFact(row) ?? line
   }
-  if (after.bank > before) line = `${line ? line + ' ' : ''}+1 reroll (${after.bank}/${REROLL_BANK}).`
+  const earned = after.bank > before ? `+1 reroll (${after.bank}/${REROLL_BANK})` : ''
+  if (line && buddy) {
+    const c = buddy
+    const reply = await $.model.complete({ model: 'haiku', system: systemPrompt(c), prompt: newsPrompt(line), maxTokens: 80, timeoutMs: 20_000 }).catch(() => null)
+    // Unvoiced, the fact still gets through: a question waiting on the user must not vanish.
+    line = (reply?.isAnswered && cleanReaction(reply.text)) || line
+  }
+  line = [line, earned].filter(Boolean).join(' ')
   if (line) {
     say(line, now)
     $.ui.invalidate('ui.render')
@@ -403,7 +388,7 @@ async function readFleet($: EngineInterface, now: number): Promise<void> {
 }
 
 function talking(now: number): string | null {
-  return bubble && now - bubble.at < BUBBLE_MS ? bubble.text : null
+  return bubble?.text && now - bubble.at < BUBBLE_MS ? bubble.text : null
 }
 
 function sprite(c: Companion, now: number): string[] {
@@ -468,8 +453,9 @@ export function register(on: On) {
       if (!buddy || muted) return
       const at = await $.clock.now()
       if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS) {
-        say(idleLine(buddy, idleLines, bubble?.text ?? null), at)
-        if (!idleLines) void writeIdleLines($)
+        // Stamp first so a slow call is not asked twice; the line shows when it arrives.
+        bubble = { text: '', at }
+        react($, 'idle').catch(() => {})
       }
       if (tick % 4 === 0) {
         const was = wrapped
@@ -537,7 +523,6 @@ export function register(on: On) {
       const soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
-      idleLines = undefined
       say(`hi. i'm ${buddy.name}.`, now)
       void givePersonality($)
     }

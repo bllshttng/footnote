@@ -20,9 +20,9 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## What you see
 
 - **The sprite.** The buddy is one of 18 species. It has a rarity, eyes, and sometimes a hat. Five stats set its voice: debugging, patience, chaos, wisdom, and snark.
-- **Idle chatter.** When nothing happens for 45 seconds, the buddy mutters to itself. One model call per buddy writes a batch of these lines in its own voice, and every session reuses that batch.
+- **Idle talk.** When nothing happens for 2 minutes, the buddy says something of its own. It is one model call, in its personality, about what the session is doing. The buddy has no canned lines.
 - **A model line.** When a turn of 5 seconds or more ends, one model call reads the last exchange and answers in the voice of the buddy. This call runs at most once each 10 seconds, and only while the buddy is on screen.
-- **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. These lines use no model call.
+- **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. It says the news in its own voice with one model call. If that call fails, it says the plain fact.
 - **The fno CLI is optional.** Fleet news and fleet counts need the `fno` CLI. Without it, the buddy still talks about your own session.
 - **Fleet counts.** Beside its name, the buddy shows live workers, questions that wait for you, and your open PRs. One read every 5 minutes serves every session.
 

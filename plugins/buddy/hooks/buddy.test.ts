@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { embody, restore, rollBones } from './companion'
 import { fleetLine, refill } from './register'
-import { narrate, summarizeTurn } from './voice'
+import { newsFact, summarizeTurn } from './voice'
 
 const OLD_CONFIG = JSON.stringify({
   oauthAccount: { accountUuid: 'u-1' },
@@ -122,14 +122,9 @@ test('a finished turn shows the model reaction, with no canned line first', asyn
   expect(await after.find({ type: 'Text', text: /Quip: that null check does zero work\.$/ })).toBeDefined()
 })
 
-test('a shipped node in the fleet feed becomes a line with no model call', async ($, on) => {
+test('a shipped node in the fleet feed is told in the buddy voice', async ($, on) => {
   const { clock } = boot(on)
-  let modelCalls = 0
-  on('model.complete', (e: any) => {
-    // The once-per-buddy idle batch is its own call; the feed line must not add one.
-    if (!/mutters/.test(e.prompt)) modelCalls += 1
-    return { value: { isAnswered: true, text: 'no', usage: null } }
-  })
+  on('model.complete', (e: any) => ({ value: { isAnswered: true, text: /parser-fix shipped PR 42/.test(e.prompt) ? 'parser-fix shipped pr 42. took long enough.' : 'hm.', usage: null } }))
   const row = { ts: new Date(60_000).toISOString(), kind: 'node_shipped', node: 'parser-fix', ref: '42', title: 'PR 42' }
   on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify([row]), stderr: '' } }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -140,9 +135,8 @@ test('a shipped node in the fleet feed becomes a line with no model call', async
   await ui.unmount()
 
   const after = await $.ui.mount(band(8))
-  expect(await after.find({ type: 'Text', text: /: psst\. parser-fix shipped pr 42\.$/ })).toBeDefined()
-  expect(modelCalls).toBe(0)
-  expect(narrate({ ts: '', kind: 'session_spawned' })).toBe(null)
+  expect(await after.find({ type: 'Text', text: /: parser-fix shipped pr 42\. took long enough\.$/ })).toBeDefined()
+  expect(newsFact({ ts: '', kind: 'session_spawned' })).toBe(null)
   // Rerolls: one a day, one per two ships counted once however many sessions read them, banked to three.
   expect(refill(undefined, 'd1').bank).toBe(1)
   expect(refill({ bank: 0, day: 'd1', ships: 0, shipAt: 0 }, 'd1', [5, 5, 9])).toEqual({ bank: 1, day: 'd1', ships: 0, shipAt: 9 })

@@ -126,32 +126,10 @@ export function cleanReaction(raw: string): string {
   return line.length > 120 ? line.slice(0, 117) + '...' : line
 }
 
-// Idle chatter: one model call per buddy writes a batch in its own voice; the batch is kept and reused.
-export function idlePrompt(c: Companion): string {
-  return `Write 12 short things ${c.name} mutters to itself while the developer is quiet. Mix moods: bored, curious, smug, sleepy, nosy about the code. Never mention a diff, review, or checking work. One per line, lowercase, under 60 characters, no numbering, no quotes.`
-}
-
-export function cleanIdleLines(raw: string): string[] {
-  return raw
-    .split('\n')
-    .map(l => l.replace(/^\s*(?:[-*\u2022]|\d+[.)])\s*/, '').replace(/^["']|["']$/g, '').trim().toLowerCase())
-    .filter(l => l.length >= 3 && l.length <= 80)
-    .slice(0, 16)
-}
-
-// Until the model's batch exists: a few canned lines per peak stat, never about reviewing work.
-const IDLE: Record<StatName, string[]> = {
-  DEBUGGING: ['*sniffs a stack trace*', 'something smells off-by-one.', 'i bet that regex has a secret.'],
-  PATIENCE: ['*settles in*', 'no rush.', 'i could nap here.'],
-  CHAOS: ['bored. break something?', '*knocks a semicolon off the desk*', 'what if we just deleted it'],
-  WISDOM: ['every todo is a promise.', 'the old code had reasons.', '*hums thoughtfully*'],
-  SNARK: ['still here, unfortunately.', 'riveting stuff.', '*yawns at your cursor*'],
-}
-
-export function idleLine(c: Companion, lines: string[] | undefined, last: string | null): string {
-  const pool = lines?.length ? lines : IDLE[peakStat(c)]
-  const choices = pool.length > 1 ? pool.filter(l => l !== last) : pool
-  return choices[Math.floor(Math.random() * choices.length)]!
+// Idle talk is written live, like a reaction: the buddy's own voice on whatever the session is doing.
+export function idlePrompt(summary: string): string {
+  const now = summary.trim() ? `The latest exchange:\n${summary}\n\n` : ''
+  return `${now}The developer has gone quiet for a while. Say one thing, in character: a thought about their work, a question, a mood, whatever you would really say. Under 120 chars, lowercase.`
 }
 
 export type FeedRow = {
@@ -163,16 +141,21 @@ export type FeedRow = {
 }
 
 // The fleet events worth a word, in the buddy's voice. Everything else is quiet.
-export function narrate(row: FeedRow): string | null {
+// The plain fact behind a fleet event; the buddy says it in its own voice.
+export function newsFact(row: FeedRow): string | null {
   const node = row.node ?? 'a node'
   switch (row.kind) {
     case 'node_shipped':
-      return `psst. ${node} shipped ${row.ref ? 'pr ' + row.ref : 'a pr'}.`
+      return `${node} shipped ${row.ref ? 'PR ' + row.ref : 'a PR'}`
     case 'node_ended':
-      return row.title === 'done' ? `${node} is done. one less thing.` : null
+      return row.title === 'done' ? `${node} is done` : null
     case 'question_asked':
-      return `${node} is waiting on you: ${(row.title ?? '').slice(0, 70).toLowerCase()}`
+      return `${node} is waiting on the developer: ${(row.title ?? '').slice(0, 70)}`
     default:
       return null
   }
+}
+
+export function newsPrompt(facts: string): string {
+  return `News from the developer's other agents: ${facts}. Tell the developer, in character. Keep the names and numbers exact. Under 120 chars, lowercase.`
 }
