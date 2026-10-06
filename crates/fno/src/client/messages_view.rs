@@ -127,7 +127,7 @@ pub(crate) struct MessagesBoard {
     pub(crate) list_tab: ListTab,
     pub(crate) filter: ListFilter,
     pub(crate) sort_mode: SortMode,
-    pending_message_id: Option<String>,
+    pub(crate) pending_message_id: Option<String>,
     selected_message_id: Option<String>,
     pub(crate) detail: Option<super::messages_detail::SessionDetail>,
     pub(super) reply: Option<super::messages_reply::ReplyState>,
