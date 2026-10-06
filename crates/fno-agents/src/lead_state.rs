@@ -570,7 +570,7 @@ pub fn set_manifest_fields(
     if !path.is_file() {
         return Err(format!(
             "no manifest at {}; declare a field only on a team you have armed with \
-             `fno agents lead init --scope`.",
+             `fno agents org init --scope`.",
             path.display()
         ));
     }

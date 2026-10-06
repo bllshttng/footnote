@@ -41,6 +41,7 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         KeySection::WorkspacesTabs,
         KeySection::Panes,
         KeySection::SidelineRows,
+        KeySection::Messages,
     ] {
         let mut section_rows: Vec<(PopupRow, Option<Event>)> = Vec::new();
         for kb in bindings.iter().filter(|kb| kb.section == section) {

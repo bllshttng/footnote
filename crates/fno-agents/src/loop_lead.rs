@@ -14,7 +14,7 @@
 //! hardcoded to `/target --resume` and `Unit.extra_env` was read by nothing,
 //! so the spawned session was a target resume that did not know it was a lead.
 //! The lifecycle those defects sat on is now real: manifests are per-scope at
-//! `<space>/leads/<scope>.md`, coronation arms them, `fno agents lead done`
+//! `<space>/leads/<scope>.md`, coronation arms them, `fno agents org done`
 //! expires them, and a leftover file is inert without a live registry team.
 //!
 //! The rebuild fixes the identity split at the source: the walk keys its unit
@@ -297,7 +297,7 @@ impl std::fmt::Display for ScopeDrainError {
         match self {
             ScopeDrainError::TimedOut { scope, bound } => write!(
                 f,
-                "lead drain for {scope} timed out after {}ms and was killed (drain floor {}ms; {}ms of harness margin left); wait for a quieter fire or rerun the drain",
+                "org drain for {scope} timed out after {}ms and was killed (drain floor {}ms; {}ms of harness margin left); wait for a quieter fire or rerun the drain",
                 bound.as_millis(),
                 crate::loopcheck::STOPGATE_DRAIN_FLOOR.as_millis(),
                 crate::loopcheck::stopgate_harness_margin_remaining_ms()
@@ -336,9 +336,9 @@ fn scope_undelivered_count_with_timeout(
 ) -> Result<i64, ScopeDrainError> {
     let out = crate::loopcheck::bounded_read(
         std::ffi::OsStr::new(fno_bin),
-        &["agents", "lead", "drain", scope],
+        &["agents", "org", "drain", scope],
         cwd,
-        "lead drain",
+        "org drain",
         timeout,
     )
     .map_err(|error| match error.timeout_bound() {
@@ -347,13 +347,13 @@ fn scope_undelivered_count_with_timeout(
             bound,
         },
         None => {
-            ScopeDrainError::Failed(format!("lead drain for {scope} failed: {}", error.render()))
+            ScopeDrainError::Failed(format!("org drain for {scope} failed: {}", error.render()))
         }
     })?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr_tail);
         return Err(ScopeDrainError::Failed(format!(
-            "lead drain for {scope} failed ({}): {}",
+            "org drain for {scope} failed ({}): {}",
             out.status,
             detail.trim().chars().take(200).collect::<String>()
         )));
@@ -362,7 +362,7 @@ fn scope_undelivered_count_with_timeout(
     let trimmed = stdout.trim();
     let payload: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
         ScopeDrainError::Failed(format!(
-            "lead drain for {scope} returned no JSON (exit {}): {}",
+            "org drain for {scope} returned no JSON (exit {}): {}",
             out.status,
             trimmed.chars().take(200).collect::<String>()
         ))
@@ -372,7 +372,7 @@ fn scope_undelivered_count_with_timeout(
         .and_then(|v| v.as_i64())
         .ok_or_else(|| {
             ScopeDrainError::Failed(format!(
-                "lead drain payload for {scope} carries no undelivered count"
+                "org drain payload for {scope} carries no undelivered count"
             ))
         })
 }
@@ -706,7 +706,7 @@ pub(crate) fn escalate_stalled(
         Command::new(fno_bin)
             .args([
                 "agents",
-                "lead",
+                "org",
                 "escalate",
                 "--stalled",
                 &ids.join(","),

@@ -141,7 +141,50 @@ pub(super) fn arbitrate_codex_continuation(
         return GoalArbitration::None;
     }
     let live = crate::lead_goal::read_codex_goal_for_stop(&fire.session_id);
+    // A resume can leave the bare word `resume` as the provider goal's
+    // objective; a crowned lead then spins on the refusal below instead of
+    // working (371 blocked lines over 2.5 days on one codex lead). Restore
+    // the expected objective through the provider goal set, read it back,
+    // and arbitrate on the re-read; the refusal names the failed repair
+    // only when the restore itself failed.
+    if matches!(&live, Ok(Some(goal)) if is_bare_resume_objective(&goal.objective)) {
+        let scope = first_raw_field(manifest, &["scope", "crown_scope"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !scope.is_empty() {
+            match std::env::current_dir()
+                .map_err(|e| format!("cwd unreadable: {e}"))
+                .and_then(|cwd| crate::lead_goal::ensure(&fire.session_id, &scope, &cwd))
+            {
+                Ok(_) => {
+                    return arbitrate_codex_continuation_from_reading(
+                        driver,
+                        fire,
+                        manifest,
+                        crate::lead_goal::read_codex_goal_for_stop(&fire.session_id),
+                    );
+                }
+                Err(reason) => {
+                    return match arbitrate_codex_continuation_from_reading(
+                        driver, fire, manifest, live,
+                    ) {
+                        GoalArbitration::Refusal(text) => GoalArbitration::Refusal(format!(
+                            "{text} (goal self-heal failed: {reason})"
+                        )),
+                        other => other,
+                    };
+                }
+            }
+        }
+    }
     arbitrate_codex_continuation_from_reading(driver, fire, manifest, live)
+}
+
+/// The objective a resume wrote over the crowned one: the bare word alone,
+/// no scope, no verb spelling.
+pub(super) fn is_bare_resume_objective(objective: &str) -> bool {
+    objective.trim() == "resume"
 }
 
 pub(super) fn arbitrate_codex_continuation_from_reading(

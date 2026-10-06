@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -174,42 +173,22 @@ from fno.paths import repo_identity as _repo_identity  # noqa: E402
 def journal_lines(path: Path, types: tuple[str, ...]) -> Iterator[str]:
     """The lines of ``path``'s journal for ``types``, across rotations.
 
-    Every writer commits to the store, so the committed rows are the order of
-    record: yield the store rows the filter matches in commit order, then the
-    live lines the store does not hold yet.
-    Any store failure yields the live file alone.
+    The native event read imports the live journal, then answers the store
+    rows in commit order. Without the binary the live file alone answers.
     """
+    from fno.events.store_client import native_rows
+
     live = path.resolve()
-    name = re.sub(r"\.\d+$", "", live.name)
-    live = live.with_name(name)
-    try:
-        live_lines = live.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-    except OSError:
-        live_lines = []
-    store = live.with_name(name.removesuffix(".jsonl") + ".db")
-    if store.is_file():
-        marks = ",".join("?" * len(types))
-        conn = None
-        try:
-            conn = sqlite3.connect(store.as_uri() + "?mode=ro", uri=True)
-            rows = conn.execute(
-                f"SELECT line FROM events WHERE type IN ({marks}, '') ORDER BY seq", types
-            ).fetchall()
-            held = {bytes(h) for (h,) in conn.execute("SELECT row_hash FROM events")}
-        except sqlite3.Error:
-            rows, held = [], set()
-        finally:
-            if conn is not None:
-                conn.close()
-        for (line,) in rows:
+    live = live.with_name(re.sub(r"\.\d+$", "", live.name))
+    rows = native_rows(live, types=list(types), include_rejected=True, legacy_fallback=True)
+    if rows is not None:
+        for line in rows:
             yield line + "\n"
-        import hashlib
-        for line in live_lines:
-            text = line.rstrip("\n").removesuffix("\r")
-            if hashlib.sha256(text.encode()).digest() not in held:
-                yield line
         return
-    yield from live_lines
+    try:
+        yield from live.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    except OSError:
+        return
 
 
 def _scan_coverage(

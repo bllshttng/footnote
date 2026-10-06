@@ -17,6 +17,8 @@
       "luna-x",
       "--effort",
       "medium",
+      "--permission-mode",
+      "bypassPermissions",
       "--name",
       "w5",
       "/fno:target x-3"
@@ -43,6 +45,11 @@
           "effort",
           "medium",
           "agents.profiles.target.lanes[0].effort"
+        ],
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous.permission_mode"
         ]
       ],
       "fingerprint": "3b0033a21094",
@@ -89,20 +96,13 @@
           "",
           "",
           "slot note agents.profiles.target.lanes[0] uncapped (no vendor declared)"
-        ],
-        [
-          "permission_mode",
-          "bypassPermissions",
-          "builtin.autonomous",
-          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
         ]
       ],
       "verb": "target"
     },
     "stderr": [
       "fno agents spawn: slot note agents.profiles.target.lanes[0] uncapped (no vendor declared)",
-      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored",
-      "fno agents spawn: applied slot=agents.profiles.target.lanes[0] agents.profiles.target.lanes[0] (routing), harness=codex (agents.profiles.target.lanes[0].provider), model=luna-x (agents.profiles.target.lanes[0].model), effort=medium (agents.profiles.target.lanes[0].effort)"
+      "fno agents spawn: applied slot=agents.profiles.target.lanes[0] agents.profiles.target.lanes[0] (routing), harness=codex (agents.profiles.target.lanes[0].provider), model=luna-x (agents.profiles.target.lanes[0].model), effort=medium (agents.profiles.target.lanes[0].effort), permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"
     ],
     "stdout": null
   },

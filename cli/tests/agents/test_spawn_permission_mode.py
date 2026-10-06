@@ -85,10 +85,13 @@ def test_mapping_fail_closed_on_unmappable(rust_door, provider, mode):
 
 @pytest.mark.dev_build
 def test_codex_refusal_names_the_overlay_key(rust_door):
-    """AC5-HP: a claude word refused for codex teaches the config key that
-    fixes it, so the operator reads the repair at spawn time."""
+    """fno's own builtin carries as codex's bypass flag; a genuinely foreign
+    word still refuses and names the config key that fixes it (AC5-HP)."""
+    assert permission_pane_tokens("codex", "bypassPermissions") == [
+        "--dangerously-bypass-approvals-and-sandbox"
+    ]
     with pytest.raises(DispatchAskError) as exc:
-        permission_pane_tokens("codex", "bypassPermissions")
+        permission_pane_tokens("codex", "acceptEdits")
     assert "agents.*.harness.codex.permission_mode" in str(exc.value)
 
 

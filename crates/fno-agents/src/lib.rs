@@ -61,6 +61,7 @@ pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;
 pub mod attach;
+pub(crate) mod attended;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
@@ -152,6 +153,7 @@ pub mod effort_surface;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
+pub mod eval_part4;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_qualification;
@@ -183,6 +185,7 @@ pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
 pub mod gh_cache;
+pub mod gh_incident;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -427,6 +430,7 @@ pub mod state_layout;
 pub mod state_layout_sqlite;
 pub mod state_path;
 pub mod state_root_drift;
+pub mod store_conn;
 pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
@@ -464,6 +468,7 @@ pub mod wait;
 pub mod wake_meter;
 pub mod watch_expiry;
 pub mod wave;
+pub mod worked_nodes;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1683,7 +1688,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "lead_armed",
     "lead_checkin",
     "lead_dispatch_exception",
-    // A team's term declared or extended (`fno agents lead term <spec>
+    // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
     // resolves it through this table exactly like the lead kinds above.
