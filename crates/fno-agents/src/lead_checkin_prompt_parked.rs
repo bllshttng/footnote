@@ -98,49 +98,6 @@ pub(crate) fn classify_pane(
     })
 }
 
-/// `fno mux pane ls --json` -> (pane_id, fno_id) per pane. `None` when the
-/// server is unreachable or the output does not parse - the caller reads that
-/// as "no panes", which is the truth for a dead server.
-fn pane_ls_joined(bin: &std::ffi::OsStr) -> Option<Vec<(u64, Option<String>)>> {
-    let out = std::process::Command::new(bin)
-        .args(["mux", "pane", "ls", "--json"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let panes: Vec<Value> = serde_json::from_slice(&out.stdout).ok()?;
-    Some(
-        panes
-            .iter()
-            .filter_map(|p| {
-                Some((
-                    p.get("pane_id")?.as_u64()?,
-                    p.get("fno_id")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from),
-                ))
-            })
-            .collect(),
-    )
-}
-
-/// `fno mux pane read <pane> --json` -> the pane's rendered grid text.
-/// `None` on any failure (dead pane, unreachable server) - a skipped pane,
-/// never a finding.
-fn pane_read(bin: &std::ffi::OsStr, pane: u64) -> Option<String> {
-    let out = std::process::Command::new(bin)
-        .args(["mux", "pane", "read", &pane.to_string(), "--json"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let reply: Value = serde_json::from_slice(&out.stdout).ok()?;
-    reply.get("text")?.as_str().map(String::from)
-}
-
 /// True when the registry row is past answering anything.
 fn row_terminal(status: &crate::AgentStatus) -> bool {
     matches!(
@@ -178,13 +135,13 @@ fn reading_with(
             by_fno.insert(id, (e.name.as_str(), e.harness_name()));
         }
     }
-    let Some(panes) = pane_ls_joined(bin) else {
+    let Some(panes) = crate::scrape::mux_pane_ls(bin, None) else {
         return Ok(json!({"server_reachable": false, "rows": []}));
     };
     let mut manifests: BTreeMap<String, Option<Manifest>> = BTreeMap::new();
     let mut rows = Vec::new();
-    for (pane_id, fno_id) in panes {
-        let Some(fno_id) = fno_id.as_deref() else {
+    for row in panes {
+        let Some(fno_id) = row.fno_id.as_deref() else {
             continue;
         };
         let Some((holder, harness)) = by_fno.get(fno_id) else {
@@ -207,10 +164,10 @@ fn reading_with(
         let Some(manifest) = manifest else {
             continue;
         };
-        let Some(text) = pane_read(bin, pane_id) else {
+        let Some(text) = crate::scrape::mux_pane_read(bin, None, row.pane_id) else {
             continue;
         };
-        if let Some(parked) = classify_pane(holder, harness, pane_id, manifest, &text) {
+        if let Some(parked) = classify_pane(holder, harness, row.pane_id, manifest, &text) {
             rows.push(parked);
         }
     }
