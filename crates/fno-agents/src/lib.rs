@@ -1684,7 +1684,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "lead_armed",
     "lead_checkin",
     "lead_dispatch_exception",
-    // A team's term declared or extended (`fno agents lead term <spec>
+    // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
     // resolves it through this table exactly like the lead kinds above.

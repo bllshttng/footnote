@@ -975,7 +975,7 @@ fn r_wake_meter(since: Option<&str>) -> Result<Value, String> {
 }
 
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
-    let (_, out, err) = fno_verb(&["agents", "lead", "drain", &ctx.scope])?;
+    let (_, out, err) = fno_verb(&["agents", "org", "drain", &ctx.scope])?;
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("drain payload did not parse: {e}: {}", err.trim()))?;
     Ok(payload.get("undelivered").cloned().unwrap_or(Value::Null))
@@ -2341,7 +2341,7 @@ fn frontmatter_scope(text: &str) -> Option<&str> {
     None
 }
 
-const FAQ_PROMPT: &str = "fno agents lead faq add --question \"...\" --answer \"...\" \
+const FAQ_PROMPT: &str = "fno agents org faq add --question \"...\" --answer \"...\" \
 --specimen \"<node or PR>, <date>\" --exit \"<the change that retires this>\"";
 
 /// The one `lead_checkin` writer. `source` is the emitting half (`loop` for
@@ -2404,7 +2404,7 @@ fn finish_checkin(
     }
     if emit_requested && !emitted {
         eprintln!(
-            "lead-checkin: beat ran but no lead_checkin row was journalled; fno agents lead history will not see it"
+            "lead-checkin: beat ran but no lead_checkin row was journalled; fno agents org history will not see it"
         );
         return 3;
     }
