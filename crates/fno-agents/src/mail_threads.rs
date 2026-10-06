@@ -543,7 +543,8 @@ fn journal_reply_at(
     parent: &str,
     body: &str,
 ) -> Result<String, String> {
-    let (chat, parent_row) = find_chat_for_message(&crate::chats::chats_dir(), parent)?;
+    let chats_dir = crate::chats::chats_dir();
+    let (chat, parent_row) = find_chat_for_message(&chats_dir, parent)?;
     let thread = parent_row
         .get("thread")
         .and_then(Value::as_str)
@@ -565,7 +566,7 @@ fn journal_reply_at(
         "word_count": body.split_whitespace().count(),
         "body": body,
     });
-    crate::announce::append_line(bus, &reply)?;
+    crate::announce::append_line(bus, &reply, &chats_dir)?;
     append_projected_reply(
         &chat,
         &reply,
