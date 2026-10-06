@@ -931,10 +931,8 @@ impl View {
                         // agents launched from arbitrary directories, minus
                         // the node-repeat noise (`cwd_base_repeats_node`).
                         // Squad members never read cwd here.
-                        if a.squad.is_none() {
-                            if let Some(base) =
-                                a.cwd_base.as_deref().filter(|b| !cwd_base_repeats_node(a))
-                            {
+                        if a.squad.is_none() && !cwd_base_repeats_node(a) {
+                            if let Some(base) = a.cwd_base.as_deref() {
                                 suffix.push_str(&format!(" ({base})"));
                             }
                         }
