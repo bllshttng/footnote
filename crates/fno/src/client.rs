@@ -738,7 +738,7 @@ struct RowDrag {
 }
 
 /// The last `Layout` as the client holds it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct LayoutView {
     squads: Vec<SquadMeta>,
     active_squad: u64,
@@ -7407,19 +7407,7 @@ async fn attach_and_run(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut view = View::new(
-        (rows, cols),
-        session,
-        LayoutView {
-            squads: Vec::new(),
-            active_squad: 0,
-            panes: Vec::new(),
-            focus: 0,
-            area: (0, 0),
-            agents: Vec::new(),
-            focus_node: None,
-        },
-    );
+    let mut view = View::new((rows, cols), session, LayoutView::default());
     org_board::restore(&mut view);
     messages_view::restore(&mut view);
     // Latch the focus-follows-mouse off-switch once; a direct

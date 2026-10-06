@@ -274,18 +274,9 @@ fn live_frame(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     // A sizing client reports the content area, as a real client does.
-    let dims = size.filter(|_| fit).map(|t| {
-        let empty = LayoutView {
-            squads: Vec::new(),
-            active_squad: 0,
-            panes: Vec::new(),
-            focus: 0,
-            area: (0, 0),
-            agents: Vec::new(),
-            focus_node: None,
-        };
-        View::new(t, server.into(), empty).content_dims()
-    });
+    let dims = size
+        .filter(|_| fit)
+        .map(|t| View::new(t, server.into(), LayoutView::default()).content_dims());
     let mut seen = runtime.block_on(observe(&socket, cwd.clone(), dims))?;
     if let Some(name) = squad {
         let target = seen
