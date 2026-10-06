@@ -523,6 +523,13 @@ pub fn queue_from_entries(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        // Past the op's wall deadline the queue drains without spending:
+        // every remaining candidate reads unknown (fail closed) and the
+        // receipt still answers inside the slice that paid for it.
+        if git_budget_s() == 0 {
+            *verdicts.entry(UNKNOWN).or_default() += 1;
+            continue;
+        }
         if !roots.contains_key(&cwd_key) {
             roots.insert(cwd_key.clone(), root_of(entry));
         }
@@ -629,23 +636,69 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     inner(pattern.as_bytes(), name.as_bytes())
 }
 
-/// The worktrees of `cwd` that exist on disk.
-fn worktree_paths(cwd: &Path) -> Vec<PathBuf> {
-    let Ok(listed) = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !listed.status.success() {
-        return Vec::new();
+/// The worktrees of `cwd` that exist on disk. `Err` when the read does not
+/// answer inside its budget (the op's deadline, else the per-call cap): a
+/// merge authority reader fails closed, never reads a dead git as "no
+/// worktrees bind".
+fn worktree_paths(cwd: &Path) -> Result<Vec<PathBuf>, String> {
+    let out = git_cmd(cwd, &["worktree", "list", "--porcelain"])
+        .ok_or_else(|| "git worktree list did not answer inside its budget".to_string())?;
+    if !out.status.success() {
+        return Ok(Vec::new());
     }
-    parse_worktree_list(&String::from_utf8_lossy(&listed.stdout))
+    Ok(parse_worktree_list(&String::from_utf8_lossy(&out.stdout))
         .into_iter()
         .filter(|e| Path::new(&e.path).is_dir())
         .map(|e| PathBuf::from(e.path))
-        .collect()
+        .collect())
+}
+
+/// One git subprocess read under the op's git budget. `None` covers spawn
+/// failure AND a child killed at the bound (signal death): a merge authority
+/// reader must never read its own kill as a normal git answer.
+fn git_cmd(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null());
+    let out = crate::bounded_cmd::output_with_timeout(cmd, git_budget_s())?;
+    (out.status.code().is_some()).then_some(out)
+}
+
+/// The per-call git budget: the op's remaining `deadline_ms` when the caller
+/// names one, else the per-call cap. Floor 0 past the deadline: the call is
+/// refused before it spends another second of the slice.
+fn git_budget_s() -> u64 {
+    GIT_DEADLINE.with(|d| {
+        let left = d
+            .borrow()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        match left {
+            Some(left) => left.as_secs().min(GRANT_GIT_READ_CAP_S),
+            None => GRANT_GIT_READ_CAP_S,
+        }
+    })
+}
+
+thread_local! {
+    /// One op-scoped wall deadline for the grant ops' git reads, set from the
+    /// caller's `deadline_ms` so the whole queue read answers inside the tick
+    /// slice that paid for it.
+    static GIT_DEADLINE: std::cell::RefCell<Option<std::time::Instant>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The per-call git budget when the caller names no deadline.
+const GRANT_GIT_READ_CAP_S: u64 = 30;
+
+/// Clears the op-scoped git deadline when the op returns, so a thread reused
+/// for the next op never inherits a stale deadline.
+struct GitDeadlineGuard;
+
+impl Drop for GitDeadlineGuard {
+    fn drop(&mut self) {
+        GIT_DEADLINE.with(|cell| *cell.borrow_mut() = None);
+    }
 }
 
 /// One worktree's bound target manifest, read through the canonical
@@ -719,9 +772,9 @@ pub(crate) fn read_bound_manifest(wt: &Path) -> BoundRead {
     }
     hits.sort();
     hits.dedup();
-    for path in hits.into_iter().rev() {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => return parse_bound_content(&content, &path, false),
+    if let Some(path) = hits.last() {
+        match std::fs::read_to_string(path) {
+            Ok(content) => return parse_bound_content(&content, path, false),
             Err(e) => {
                 return BoundRead::Unreadable(format!("{}: {e}", path.display()));
             }
@@ -745,17 +798,17 @@ fn parse_bound_content(content: &str, path: &Path, live: bool) -> BoundRead {
 }
 
 /// The manifest of the worktree on `branch`, for readers that bind by the
-/// PR's head ref. No matching worktree reads as `None` (legacy behavior).
+/// PR's head ref. No matching worktree reads as `None` (legacy behavior);
+/// a git read that does not answer inside its budget reads Unreadable, so
+/// the verdict fails closed instead of reading a dead git as "no binding".
 pub(crate) fn branch_bound_manifest(cwd: &Path, branch: &str) -> BoundRead {
     if branch.is_empty() {
         return BoundRead::None;
     }
-    let Ok(listed) = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-    else {
-        return BoundRead::None;
+    let Some(listed) = git_cmd(cwd, &["worktree", "list", "--porcelain"]) else {
+        return BoundRead::Unreadable(
+            "git worktree list did not answer inside its budget".to_string(),
+        );
     };
     if !listed.status.success() {
         return BoundRead::None;
@@ -780,7 +833,8 @@ pub(crate) fn bound_node_posture(
     let mut live_binds: Vec<BoundManifestRead> = Vec::new();
     let mut archived_binds: Vec<BoundManifestRead> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    for wt in worktree_paths(root) {
+    let worktrees = worktree_paths(root)?;
+    for wt in worktrees {
         match read_bound_manifest(&wt) {
             BoundRead::None => {}
             BoundRead::Unreadable(why) => unreadable.push(why),
@@ -1030,6 +1084,15 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
 /// answers with a JSON receipt; the verb's exit status answers only whether
 /// the op RAN.
 pub fn run_op(op: &str, payload: &Value) -> String {
+    // The caller's wall deadline for this op: the tick names how much of its
+    // slice the read may spend, so the bounded git reads answer inside it
+    // instead of overrunning the merge phase's load-scaled bound.
+    let deadline_ms = payload.get("deadline_ms").and_then(Value::as_u64);
+    GIT_DEADLINE.with(|cell| {
+        *cell.borrow_mut() =
+            deadline_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    });
+    let _guard = GitDeadlineGuard;
     match op {
         "grant-verdict" => {
             // A missing pr narrows to number 0, which no node carries, so the

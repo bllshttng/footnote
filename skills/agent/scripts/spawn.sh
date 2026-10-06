@@ -51,8 +51,8 @@ MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
 EFFORT=""              # reasoning effort forwarded as `spawn --effort`.
 PAYLOAD_MODE="build"   # build (node-id /target) | seed | handoff | passthrough
-SUBSTRATE=""           # ""|pane|thread|headless. bg is a deprecated
-                       # alias for thread; headless -> one-shot (reply receipt).
+SUBSTRATE=""           # ""|pane|thread|headless. The retired `bg` spelling
+                       # refuses (redirect to thread); headless -> one-shot.
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
 PERMISSION_MODE=""     # forwarded as --permission-mode to the spawn verb
 ROLE=""                # forwarded as --role to the spawn verb (model routing)
@@ -156,11 +156,10 @@ else
   VERB="spawn"
 fi
 
-# an explicit --substrate (thread|headless; bg alias) always selects
-# the spawn verb (never host). `headless` yields a one-shot reply receipt; `thread`
-# (and pane/default) yields the JSON short-id receipt. `bg` (and pane/
-# default) yield the JSON short-id receipt. REPLY drives the receipt-family
-# branch below.
+# an explicit --substrate (thread|headless) always selects
+# the spawn verb (never host). `headless` yields a one-shot reply receipt;
+# `thread` (and pane/default) yields the JSON short-id receipt. REPLY drives
+# the receipt-family branch below.
 REPLY=0
 if [[ -n "$SUBSTRATE" ]]; then
   VERB="spawn"
@@ -484,7 +483,7 @@ cmd+=(--name "$NAME")
 # spawn can turn infrastructure drift into a false failure with a live worker.
 THREAD_RECEIPT_FIELD=""
 case "$SUBSTRATE" in
-  thread|bg)
+  thread)
     THREAD_RECEIPT_FIELD="$(thread_receipt_field)" || fail "thread receipt capability lookup failed for harness '$PROVIDER'; no worker launched"
     case "$THREAD_RECEIPT_FIELD" in
       short_id|session_id) : ;;
@@ -692,7 +691,7 @@ else
     # trade one refusal for another. Other substrates keep the name: their
     # short_id is a name-slug, not session-shaped, so it gains nothing.
     hint_token="$NAME"
-    case "$SUBSTRATE" in thread|bg|headless) hint_token="$short_id" ;; esac
+    case "$SUBSTRATE" in thread|headless) hint_token="$short_id" ;; esac
     printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
       "$short_id" "$NAME" "$report_mode" "$wt_field" "$hint_token" "$NAME"
   fi

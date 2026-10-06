@@ -1462,13 +1462,16 @@ def test_legacy_think_spawn_substrate_remains_a_compatibility_fallback(
 def test_shared_dispatch_substrate_overrides_legacy_compatibility_key(
     monkeypatch, tmp_path
 ):
+    """The legacy [dispatch] key's retired bg value fails loud, redirect attached."""
+    from fno.agents.harness_map import DispatchResolveError
+
     _write_config(
         tmp_path,
         '[think_spawn]\nsubstrate = "headless"\n\n[dispatch]\nsubstrate = "bg"\n',
     )
-    cap = _capture_spawn_cmd(monkeypatch)
-    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
-    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "thread"
+    _capture_spawn_cmd(monkeypatch)
+    with pytest.raises(DispatchResolveError, match="retired"):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
 
 
 def test_a_garbage_dispatch_substrate_fails_loud(monkeypatch, tmp_path):
@@ -1622,11 +1625,13 @@ def test_the_non_bg_handle_is_the_agent_name_not_a_fabricated_id(
     assert handle == cap["cmd"][cap["cmd"].index("--name") + 1]
 
 
-def test_bg_still_REQUIRES_a_short_id_receipt(monkeypatch, tmp_path):
-    """Unchanged where the receipt contract holds - no blanket loosening."""
+def test_a_configured_bg_substrate_refuses_with_the_redirect(monkeypatch, tmp_path):
+    """The retired spelling refuses at the resolver, not at launch."""
+    from fno.agents.harness_map import DispatchResolveError
+
     _write_config(tmp_path, "[dispatch]\nsubstrate = \"bg\"\n")
     _capture_with_stdout(monkeypatch, "some banner with no receipt\n")
-    with pytest.raises(st.SpawnError):
+    with pytest.raises(DispatchResolveError, match="retired"):
         st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
 
 

@@ -129,5 +129,6 @@
       "/fno:target x-29"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

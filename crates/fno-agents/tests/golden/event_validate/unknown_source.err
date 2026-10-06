@@ -1,0 +1,1 @@
+unknown source: 'bogus' (allowed: ['active-backlog', 'agents', 'approvals', 'backlog', 'bash', 'cli', 'config', 'daemon', 'fno-loop', 'hook', 'legacy', 'loop', 'megatron', 'megawalk', 'migration', 'observer', 'pr-heal', 'pr-park', 'python', 'rust', 'skill_diff', 'subagent', 'target', 'test'] or patterns ['^(worker|stream-worker|footnote):.+$'])

@@ -376,14 +376,13 @@ fn ordinary_acquire(
 /// Click's layout for a BadParameter raised in the command body; the frozen
 /// goldens pin the exact lines.
 fn bad_parameter(flag: &str, msg: &str) -> i32 {
-    // typer 0.27's UsageError layout; the frozen goldens pin the lines. The
-    // flag name is dropped on the floor like typer does.
+    // The flag name is dropped on the floor like typer does.
     let _ = flag;
-    eprintln!("Usage: fno agents claim acquire [OPTIONS] [key]");
-    eprintln!("Try 'fno agents claim acquire --help' for help.");
-    eprintln!();
-    eprintln!("Error: Invalid value: {msg}");
-    2
+    super::usage_refusal(
+        "fno agents claim acquire [OPTIONS] [key]",
+        "fno agents claim acquire --help",
+        &format!("Error: Invalid value: {msg}"),
+    )
 }
 
 // -------------------------------------------------------------------------

@@ -211,12 +211,33 @@ pub(super) async fn mouse_pre_pass(
             continue;
         }
         if view.sideline_full && view.sideline_view == crate::view_store::SidelineView::Agents {
+            // The bell lives on the tab bar now (terminal row 0, far right),
+            // above the sideline's own rows: answer its seat before the
+            // full-surface delegation, which rejects row 0 outright.
+            if bell::button_at(view, rep.row, rep.col) {
+                if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+                    apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
+                }
+                continue;
+            }
             sideline::route_mouse(view, rep, sock_w).await?;
             continue;
         }
         // Full-screen board: the overlay owns every cell, so no press or
-        // wheel reaches the panes it covers. Keys stay with the board.
+        // wheel reaches the panes it covers. Keys stay with the board. A
+        // left press on a painted node id opens it (plan, else the node's
+        // link, else the details pane) - the sideline card tap's cascade.
+        // Under an overlay or a board popup the recorded spans describe
+        // cells something else now paints, so the tap resolves nothing.
         if view.backlog_board.is_some() && view.board_full {
+            if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
+                && view.active_overlay_layout().is_none()
+                && !view.backlog_board.as_ref().is_none_or(|b| b.popup_open())
+            {
+                if let Some(id) = node_link::span_at(rep.row, rep.col) {
+                    node_link::open(view, id).await;
+                }
+            }
             continue;
         }
         // The new-agent composer owns presses that land inside its dock
@@ -586,9 +607,7 @@ pub(super) async fn mouse_pre_pass(
             if rep.row == 0 {
                 // The strip row: only its words act (R15); the rest of the
                 // row is dead.
-                if bell::button_range(view, view.panel_w().saturating_sub(1) as usize)
-                    .contains(&(rep.col as usize))
-                {
+                if bell::button_range(view).contains(&(rep.col as usize)) {
                     apply_hit(view, ChromeHit::Bell(bell::Hit::Toggle), sock_w).await?;
                 }
                 for (start, w, v) in view.top_row_spans() {
@@ -625,6 +644,13 @@ pub(super) async fn mouse_pre_pass(
                     && !over_chrome_row
                 {
                     view.region_owner = RegionOwner::Feed;
+                    // The footer's `↑ N new` marker acts before row
+                    // resolution: a click there jumps home, it never opens a
+                    // row underneath (no new ChromeHit variant).
+                    if view.feed_new_marker_hit(rep.row, rep.col) {
+                        view.feed_home();
+                        continue;
+                    }
                     if let Some(hit) = view.chrome_hit_feed(rep.row, rep.col) {
                         apply_hit(view, hit, sock_w).await?;
                     }
@@ -633,7 +659,9 @@ pub(super) async fn mouse_pre_pass(
             }
             // The windowed board column is the board's surface: focus it and
             // resolve nothing else there - a stale agents row underneath must
-            // never act (no phantom drags, no phantom row actions).
+            // never act (no phantom drags, no phantom row actions). A press
+            // on a painted node id opens it, the sideline card tap's
+            // cascade; under a board popup the tap resolves nothing.
             if view.backlog_board.is_some()
                 && !view.board_full
                 && view.sideline_view == crate::view_store::SidelineView::Backlog
@@ -641,6 +669,11 @@ pub(super) async fn mouse_pre_pass(
                 && !(rep.row as usize == view.term.0 as usize - 1 && view.bottom_row_is_chrome())
             {
                 view.region_owner = RegionOwner::Board;
+                if !view.backlog_board.as_ref().is_none_or(|b| b.popup_open()) {
+                    if let Some(id) = node_link::span_at(rep.row, rep.col) {
+                        node_link::open(view, id).await;
+                    }
+                }
                 continue;
             }
             // (G2/G3) a tab cell and a sideline agent row are DRAG SOURCES.

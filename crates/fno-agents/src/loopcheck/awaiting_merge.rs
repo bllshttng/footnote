@@ -205,7 +205,29 @@ pub(super) fn ruling_hold(node_id: &str) -> Option<String> {
 }
 
 fn ruling_hold_at(node_id: &str, graph_path: &Path) -> Option<String> {
-    let entries = crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path)).ok()?;
+    let entries = crate::graph_store::read_rows_where(
+        graph_path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "slug",
+                    "parent",
+                    "contained_in",
+                    "plan_path",
+                    "cwd",
+                    "dispatch_hold",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .ok()?;
     let entry = crate::graph_get::find_entry(&entries, node_id)?.clone();
     let by_id: std::collections::BTreeMap<String, Value> = entries
         .iter()
@@ -383,7 +405,7 @@ mod tests {
         let events = dir.path().join("events.jsonl");
         let line = serde_json::json!({
             "ts": "2026-06-06T00:00:00Z", "type": "termination", "source": "hook",
-            "data": {"session_id": "sess-a", "reason": "DoneAwaitingMerge"}
+            "data": {"session_id": "sess-a", "reason": "DoneAwaitingMerge", "message": "awaiting merge"}
         })
         .to_string();
         crate::event_store::append_envelope(&events, &line, None).unwrap();

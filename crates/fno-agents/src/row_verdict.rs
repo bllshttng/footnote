@@ -19,6 +19,7 @@
 
 use crate::daemon::pid_is_gone;
 use crate::state::{InsideLegState, RegistryEntry};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RowVerdict {
@@ -68,6 +69,45 @@ pub(crate) fn fno_verdict(e: &RegistryEntry) -> RowVerdict {
     RowVerdict::Unknown(
         "no terminal status, no live inside-leg report, no recorded pid".to_string(),
     )
+}
+
+/// The crown-vacancy read: does this row's death vacate what it holds?
+/// Orphaned is the reversible resumable word (a quiet live lead settles
+/// Orphaned), so the word alone never vacates - only a Finished verdict
+/// does. A Live row holds what it carries, and an Unknown row holds too:
+/// an undecided reader never hands a crown away.
+pub(crate) fn finished(e: &RegistryEntry) -> bool {
+    matches!(fno_verdict(e), RowVerdict::Finished(_))
+}
+
+/// [`finished`] over a raw registry row rendered as JSON - the
+/// spawn-overlay payload shape, where rows arrive as Python `asdict`
+/// output and the crown-widen caller as a slim projection. Only the
+/// reversible word re-answers through the door; every other status keeps
+/// the legacy word list, so this read changes exactly one contract. A row
+/// whose door fields do not parse keeps the legacy answer too.
+pub(crate) fn finished_json(row: &Value) -> bool {
+    let word = row
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if word != "orphaned" {
+        return crate::announce::TERMINAL_STATUSES.contains(&word);
+    }
+    // Parse only the fields the door reads, never the whole row: a
+    // projected caller row carries no created_at to satisfy the struct.
+    let entry = serde_json::from_value::<RegistryEntry>(serde_json::json!({
+        "name": row.get("name").and_then(Value::as_str).unwrap_or_default(),
+        "cwd": row.get("cwd").and_then(Value::as_str).unwrap_or_default(),
+        "status": word,
+        "created_at": row.get("created_at").and_then(Value::as_str).unwrap_or_default(),
+        "pid": row.get("pid").cloned().unwrap_or(Value::Null),
+        "inside_leg": row.get("inside_leg").cloned().unwrap_or(Value::Null),
+    }));
+    match entry {
+        Ok(entry) => finished(&entry),
+        Err(_) => true,
+    }
 }
 
 /// Fold a vendor word into fno's verdict. A decided fno verdict always wins:
@@ -137,6 +177,19 @@ fn vendor_verdict(word: &str) -> Option<RowVerdict> {
     }
 }
 
+/// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
+/// so only a reaped pid is provably ESRCH. One shared test helper for
+/// every reader that needs a provably-dead pid.
+#[cfg(test)]
+pub(crate) fn reaped_pid() -> u32 {
+    let mut child = std::process::Command::new("/usr/bin/true")
+        .spawn()
+        .expect("spawn true");
+    let pid = child.id();
+    child.wait().expect("reap true");
+    pid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +254,7 @@ mod tests {
         assert!(matches!(fno_verdict(&e), RowVerdict::Unknown(_)));
 
         let mut gone = entry();
-        gone.pid = Some(spawn_and_reap_pid());
+        gone.pid = Some(reaped_pid());
         assert!(matches!(fno_verdict(&gone), RowVerdict::Finished(_)));
 
         let mut live = entry();
@@ -242,16 +295,39 @@ mod tests {
         assert!(drift(&decided, Some("working")).is_none());
         assert!(drift(&decided, None).is_none());
         assert!(drift(&unknown, Some("done")).is_none());
-    }
 
-    /// Spawn a child and WAIT it: an unreaped zombie still answers kill(2),
-    /// so only a reaped pid is provably ESRCH.
-    fn spawn_and_reap_pid() -> u32 {
-        let mut child = std::process::Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
-        let pid = child.id();
-        child.wait().expect("reap true");
-        pid
+        // The crown-vacancy read: the reversible word never vacates on the
+        // word alone. Orphaned with a live pid holds, Orphaned with a
+        // reaped pid vacates, and Orphaned with no evidence at all holds -
+        // an undecided reader never hands a crown away. The decided words
+        // keep the legacy list.
+        let mut quiet_live = entry();
+        quiet_live.status = crate::AgentStatus::Orphaned;
+        quiet_live.pid = Some(std::process::id());
+        assert!(!finished(&quiet_live));
+        assert!(!finished_json(
+            &serde_json::json!({"name": "lead", "status": "orphaned", "pid": std::process::id()})
+        ));
+
+        let mut quiet_dead = entry();
+        quiet_dead.status = crate::AgentStatus::Orphaned;
+        quiet_dead.pid = Some(reaped_pid());
+        assert!(finished(&quiet_dead));
+
+        let mut undecidable = entry();
+        undecidable.status = crate::AgentStatus::Orphaned;
+        assert!(!finished(&undecidable));
+        assert!(!finished_json(&serde_json::json!({
+            "name": "lead", "status": "orphaned",
+        })));
+
+        for word in ["exited", "failed", "permanent_dead"] {
+            assert!(finished_json(&serde_json::json!({
+                "name": "lead", "status": word,
+            })));
+        }
+        assert!(!finished_json(&serde_json::json!({
+            "name": "lead", "status": "busy",
+        })));
     }
 }

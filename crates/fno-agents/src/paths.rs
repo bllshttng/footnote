@@ -305,6 +305,12 @@ impl AgentsHome {
         self.root.join("fleet-stop.json")
     }
 
+    /// Durable incident-fix claims (`fleet-claims.d/`), one file per
+    /// incident, next to the breaker. See [`crate::incident_claim`].
+    pub fn fleet_claims_dir(&self) -> PathBuf {
+        self.root.join("fleet-claims.d")
+    }
+
     /// The running tests a `tests` hold ended, as legacy `(pid, birth)` pairs
     /// an OLDER build paused and its lift still resumes; new holds record
     /// nothing here. See [`crate::test_hold`].
@@ -528,12 +534,11 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
 /// subprocess on the mux attach path and, unlike this one, cannot see a repo
 /// whose git dir lives outside the checkout. Change one and check the other.
 pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(cwd)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .ok()?;
+        .args(["worktree", "list", "--porcelain"]);
+    let out = crate::bounded_cmd::output_with_timeout(cmd, 30)?;
     if !out.status.success() {
         return None;
     }

@@ -14,7 +14,7 @@ source "$HOOK_DIR/lib/agents-bin.sh"
 BIN="$(fno_agents_bin "$ROOT")"
 if [[ -z "$BIN" ]]; then
     # No fno-agents usually means a plugin-only install with no fno yet. The
-    # front-door hook is the one producer that starts the installer, so run it.
+    # front-door hook prints the install notice, so run it.
     if [[ "${1:-}" == "claude-session-start" || "${1:-}" == "codex-session-start" ]]; then
         bash "$HOOK_DIR/frontdoor-nudge-session-start.sh"
     fi

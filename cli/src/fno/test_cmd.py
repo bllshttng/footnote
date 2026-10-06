@@ -654,7 +654,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         "-m 'not slow_e2e' "
         "--ignore=tests/unit/test_ambient_canary.py",
     ),
-    ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
     ("frontend-craft gate harness", ".",
      "bash tests/lib/test_frontend_surface.sh\n"
@@ -716,6 +715,15 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # Pin the classic layout, the same spell smoke-setup uses.
     ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents",
      'CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build'),
+    # The hash gate needs the Rust front door, and a fresh CI runner has no
+    # global `fno` on PATH (see the fno-on-PATH family above): build both
+    # binaries with the classic layout smoke-setup pins, then invoke the front
+    # by path with the worker env-pinned (env outranks PATH in resolve_binary).
+    ("Build the fno front door (for the hash gate)", "crates/fno",
+     'CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build --quiet --bin fno'),
+    ("paths.sh hash gate", ".",
+     'FNO_AGENTS_WORKER="$PWD/crates/fno-agents/target/debug/fno-agents-worker" '
+     'crates/fno/target/debug/fno config paths verify scripts/lib/paths.sh'),
     # The debug binary is present here, so the @requires_rust parity suites run
     # instead of skipping. Stub the provider CLIs on PATH (test_rust_verb_parity
     # presence-checks them without faking); per-test fakes still win where a
@@ -1307,9 +1315,8 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
                 ("--retry-failed", opts["retry_failed"])) if on]
     if len(subsets) > 1:
         raise ValueError(f"smoke: {' and '.join(subsets)} are separate subset modes - pick one")
-    if opts["shard"] and (opts["changed"] or opts["retry_failed"]):
-        partial = "--changed" if opts["changed"] else "--retry-failed"
-        raise ValueError(f"smoke: {partial} and --shard are separate subset modes - pick one")
+    if opts["shard"] and opts["retry_failed"]:
+        raise ValueError("smoke: --retry-failed and --shard are separate subset modes - pick one")
     if (opts["base"] or opts["head"]) and not opts["changed"]:
         raise ValueError("smoke: --base/--head only apply to --changed")
     if opts["shard"]:
@@ -1757,7 +1764,9 @@ def _needs_rust_binary(root: Path, rel: str) -> bool:
     return any(marker in text for marker in _RUST_BIN_MARKERS)
 
 
-def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, str, str]]:
+def _changed_steps(
+    root: Path, selections: Sequence[dict], shard: str = "",
+) -> list[tuple[str, str, str]]:
     """Turn selections into runner steps, fastest-signal first.
 
     "Fastest-signal first" has one exception: the graph store's read path is
@@ -1768,8 +1777,23 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
     selected the build step that would have satisfied it. So when pytest AND
     the build are both mapped, the build goes first, exactly as the full
     smoke orders it.
+
+    ``shard`` (``I/N``, the full lane's contract) splits only the pytest file
+    list, round-robin by sorted-file index: leg k of N always runs the same
+    files, and the non-pytest steps run in every leg because each matrix leg
+    is its own fresh runner. Measured 2026-10-05: a 313-file packet on ONE
+    runner died 7 of 8 attempts at a fixed point ~1/3 into the suite (the
+    runner shuts down; every test to that point green), while the same head's
+    full lane passed the identical tests 13-ways sharded - volume on one
+    runner, not content, is what kills it.
     """
     pytest_targets = [s["target"] for s in selections if s["kind"] == "pytest"]
+    if shard:
+        index, total = _parse_smoke_shard(shard)
+        pytest_targets = [
+            target for position, target in enumerate(sorted(set(pytest_targets)))
+            if position % total == index - 1
+        ]
     shell_rels = sorted({s["target"] for s in selections if s["kind"] == "shell"})
     by_name = {name: (name, cwd, cmd) for name, cwd, cmd in _STRUCTURAL_STEPS}
     build_selected = (_RUST_BUILD_STEP in by_name) and (
@@ -1927,7 +1951,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         return CHANGED_RC_UNEVALUATED
 
     selections, unmapped = select_changed(root, paths)
-    steps = _changed_steps(root, selections)
+    steps = _changed_steps(root, selections, opts["shard"])
     select_s = time.monotonic() - t0
 
     estimate = _estimate_changed_minutes(root, selections)
@@ -1949,7 +1973,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         print(f"  unmapped {u}  (no rule; covered only by the full gate)", flush=True)
 
     receipt = {
-        "mode": "CHANGED SUBSET", "candidate": candidate,
+        "mode": "CHANGED SUBSET", "shard": opts["shard"], "candidate": candidate,
         "base": opts["base"] or resolved_base, "head": opts["head"] or candidate,
         "changed_paths": paths, "unmapped_paths": unmapped,
         "selections": selections, "selected_count": len(steps),

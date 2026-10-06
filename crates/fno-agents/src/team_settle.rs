@@ -9,10 +9,11 @@
 //! could check). An agent caller may only succeed itself: every live holder
 //! of the scope must already be that agent.
 //!
-//! Rows arrive as plain JSON here, not a typed registry row, so a row's
-//! status is matched by string against `announce::TERMINAL_STATUSES`
-//! (itself `registry.py::TERMINAL_STATUSES`), the same string-match
-//! reasoning `announce.rs` documents for its own terminal check.
+//! Rows arrive as plain JSON here, not a typed registry row. A row's
+//! terminal read answers through `row_verdict::finished_json`, the
+//! crown-vacancy door: the reversible word (Orphaned) re-answers on
+//! process evidence, and every other status keeps the legacy
+//! `announce::TERMINAL_STATUSES` word list.
 //!
 //! Occupancy is the exact-scope holders plus ladder-aware rivals: through
 //! `loop_lead::team_rivals`, a live team over overlapping territory
@@ -24,7 +25,6 @@
 //! name and harness session id together because registry names are reclaimable.
 //! Rows that both lack a session id still compare by name alone.
 
-use crate::announce::TERMINAL_STATUSES;
 use crate::loop_lead::{same_territory, scopes_overlap, team_rivals_pub};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -100,9 +100,38 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
     let effect = match outcome {
         Some("succeeded") => {
             let pending = succession_pending(payload);
-            crate::team_names::carry_succession(store, scope, pending)
+            let result = crate::team_names::carry_succession(store, scope, pending.clone());
+            if result.is_ok() {
+                if let Some(p) = pending.as_ref() {
+                    crate::succession_txn::announce(scope, p);
+                    crate::succession_txn::transferred(scope, p);
+                }
+            }
+            result
         }
-        Some("granted") => crate::team_names::forget(store, scope),
+        Some("granted") => {
+            let forgotten = crate::team_names::forget(store, scope);
+            let heir = payload
+                .get("heir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty());
+            // The heir's session rides `heir_identity` (dispatch plumbs the
+            // row's own id); the carry is registry-free, so the apply path
+            // never waits on the registry lock.
+            let session = payload
+                .get("heir_identity")
+                .and_then(|i| i.get("session_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match (forgotten, heir) {
+                (Ok(()), Some(name)) => {
+                    // A fresh grant carries the crowned row's own name, so
+                    // the team never lands anonymous.
+                    crate::team_names::carry_holder_name(store, session, 2, scope, name).map(|_| ())
+                }
+                (result, _) => result,
+            }
+        }
         _ => Ok(()),
     };
     if let Err(e) = effect {
@@ -127,10 +156,24 @@ fn succession_pending(payload: &Value) -> Option<crate::team_names::PendingSucce
         .next()?;
     Some(crate::team_names::PendingSuccession {
         heir_name: heir.to_string(),
+        heir_session: heir_session(heir),
         predecessor_name: name,
         predecessor_session: session,
         ts: crate::daemon::now_rfc3339_like(),
     })
+}
+
+/// The heir row's session id at settle time, so the succession revert's
+/// join keys on identity. A row not yet in the registry (a settle racing
+/// the spawn row's write, or a test with no declared home) carries no
+/// session; the revert then falls back to the name join as before.
+fn heir_session(heir: &str) -> Option<String> {
+    let home = crate::paths::AgentsHome::from_env_opt()?;
+    let registry = crate::state::try_load_registry(&home.registry_json()).ok()??;
+    match crate::lead_state::live_name_join(&registry.entries, heir) {
+        crate::lead_state::NameJoin::One(row) => row.harness_session_id.clone(),
+        _ => None,
+    }
 }
 
 fn resolve_with_projects(
@@ -157,13 +200,12 @@ fn occupancy(
     let mut rivals = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("");
         let row_scope = row.get("crown_scope").and_then(Value::as_str);
-        if row_scope == Some(scope) && TERMINAL_STATUSES.contains(&status) {
+        if row_scope == Some(scope) && crate::row_verdict::finished_json(row) {
             clear_terminal.push((index, name.to_string()));
             continue;
         }
-        if TERMINAL_STATUSES.contains(&status) || Some(name) == exclude_name {
+        if crate::row_verdict::finished_json(row) || Some(name) == exclude_name {
             continue;
         }
         if row_scope == Some(scope) {
@@ -285,7 +327,7 @@ fn plan_with_projects(
         let refusal = format!(
             "scope {scope:?} overlaps territory held by live row(s) {listed}. Two live \
              teams would rule the same members, so this spawn refuses before launch. \
-             --succeed hands down only an identical team, never part of a wider or \
+             --hand-off hands down only an identical team, never part of a wider or \
              overlapping one. Re-scope the holder (fno agents org promote {first} --scope \
              <other territory>), run fno agents reconcile if it looks dead, or fno \
              agents stop {first}, then retry."
@@ -336,14 +378,14 @@ fn plan_with_projects(
     let refusal = match &caller {
         Caller::Human => format!(
             "scope {scope:?} is held by live row(s) {holders:?}. This spawn would launch \
-             an heir with no team, so it refuses. Re-run with --succeed to transfer the \
+             an heir with no team, so it refuses. Re-run with --hand-off to transfer the \
              team to the new session, or choose a scope nobody holds."
         ),
         Caller::Agent(_) => format!(
             "scope {scope:?} is held by live row(s) {holders:?}, not by this session, so \
-             this session cannot hand it down. Only the holder (spawn --crown --succeed \
-             from its own session) or an attended shell (spawn --crown --succeed) can \
-             transfer it."
+             this session cannot hand it down. Only the holder (spawn --promote \
+             --hand-off from its own session) or an attended shell (spawn --promote \
+             --hand-off) can transfer it."
         ),
     };
 
@@ -472,8 +514,7 @@ fn apply_with_projects(
         rows.iter()
             .enumerate()
             .filter(|(_, row)| {
-                let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-                if TERMINAL_STATUSES.contains(&status) {
+                if crate::row_verdict::finished_json(row) {
                     return false;
                 }
                 if Some(row.get("name").and_then(Value::as_str).unwrap_or("")) == exclude_name {
@@ -611,6 +652,23 @@ mod tests {
         assert_eq!(out["clear_terminal"], json!(["dead-lead"]));
         assert_eq!(out["outcome"], "granted");
 
+        // The reversible word never hands a crown away: an Orphaned row
+        // with a live pid stays a holder, and the spawn declines naming it.
+        let quiet = json!({
+            "name": "quiet-lead", "crown_scope": "fno", "status": "orphaned",
+            "pid": std::process::id(),
+            "created_at": "2026-10-01T00:00:00Z",
+        });
+        let out = resolve(&json!({
+            "kind": "crown-settle", "scope": "fno", "succession": false,
+            "caller": {"kind": "human"},
+            "rows": [quiet],
+        }))
+        .unwrap();
+        assert_eq!(out["outcome"], "declined");
+        assert_eq!(out["holders"], json!(["quiet-lead"]));
+        assert!(out["refusal"].as_str().unwrap().contains("quiet-lead"));
+
         let out = resolve(&json!({
             "kind": "crown-settle", "scope": "fno", "succession": false,
             "caller": {"kind": "human"},
@@ -620,7 +678,7 @@ mod tests {
         assert_eq!(out["outcome"], "declined");
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("lead-a"));
-        assert!(refusal.contains("--succeed"));
+        assert!(refusal.contains("--hand-off"));
 
         // holders = ["lead-a", "lead-b"]; the caller matches one but not all,
         // so succession must fall through to the ordinary decline rather
@@ -637,7 +695,7 @@ mod tests {
         assert_eq!(out["vacate"], json!([]));
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("lead-a"));
-        assert!(refusal.contains("--succeed"));
+        assert!(refusal.contains("--hand-off"));
     }
 
     #[test]
@@ -709,7 +767,7 @@ mod tests {
         assert!(out["refusal"]
             .as_str()
             .unwrap()
-            .contains("--succeed hands down only an identical team"));
+            .contains("--hand-off hands down only an identical team"));
 
         let out = settle(
             json!({
@@ -937,6 +995,28 @@ mod tests {
 
     #[test]
     fn record_rows() {
+        // The transaction receipts land under a pinned nested home for the
+        // heir settle; the lock keeps the env mutation off parallel tests.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bus_home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(bus_home.path().join("home")).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", bus_home.path().join("home"));
+        // The fleet announce needs one live recipient in the home registry.
+        std::fs::write(
+            bus_home.path().join("home/registry.json"),
+            serde_json::to_string(&json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "agents": [{
+                    "name": "lead-heir", "status": "live", "cwd": "/repo", "log_path": "/repo/lead-heir.log",
+                    "harness": "claude", "harness_session_id": "sess-new",
+                    "created_at": "2026-10-04T00:00:00Z",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let _reg = team_registry(tmp.path(), agents_with_succession_rows());
         named_record_fixture(tmp.path());
@@ -988,6 +1068,36 @@ mod tests {
         assert_eq!(pending["predecessor_name"], json!("lead-old"));
         assert_eq!(pending["predecessor_session"], json!("sess-old"));
         assert!(pending["ts"].is_string());
+        // AC2-HP: exactly one announce row and one transfer receipt for the
+        // succeeded settle. The store commit is the write boundary: query
+        // the store; the raw journal bytes are only a fallback.
+        let journal = crate::paths::AgentsHome::from_env().events_jsonl();
+        let raw = match crate::event_store::query_events(&journal, &Default::default()) {
+            Ok(rows) => rows
+                .iter()
+                .map(|r| r.line.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(_) => std::fs::read_to_string(&journal).unwrap_or_default(),
+        };
+        assert_eq!(
+            raw.matches("team_succession_transferred").count(),
+            1,
+            "one transfer receipt: {raw}"
+        );
+        assert_eq!(
+            raw.matches("team_succession_announced").count(),
+            1,
+            "one announce receipt: {raw}"
+        );
+        let bus =
+            std::fs::read_to_string(bus_home.path().join("bus/messages.jsonl")).unwrap_or_default();
+        assert_eq!(
+            bus.matches("succession: x-aaaa").count(),
+            1,
+            "one fleet announcement: {bus}"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
         // Without the heir key (an old caller) today's shape holds: no
         // pending record is written.
         named_record_fixture(tmp.path());
@@ -1032,6 +1142,35 @@ mod tests {
         let store = std::fs::read_to_string(team_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert!(doc["teams"].get("x-aaaa").is_none(), "{store}");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // A fresh grant carries the heir's own people-shaped row name: the
+        // stale record from the dead predecessor team is forgotten, then the
+        // new team takes the row's name bound to the heir session the payload
+        // plumbs. No registry read anywhere: the carry keys on the payload's
+        // heir_identity.
+        named_record_fixture(tmp.path());
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-aaaa", "heir": "kestrel",
+                "heir_identity": {"harness": "claude", "session_id": "sess-new",
+                                   "cwd": "/repo"},
+                "plan": {
+                    "caller": {"kind": "human"},
+                    "holder_ids": [],
+                    "outcome": "granted", "vacate": [],
+                },
+                "rows": [],
+            }),
+            &team_store(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "granted");
+        let doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(team_store(tmp.path())).unwrap())
+                .unwrap();
+        assert_eq!(doc["teams"]["x-aaaa"]["name"], json!("kestrel"));
+        assert_eq!(doc["teams"]["x-aaaa"]["holder_session"], json!("sess-new"));
 
         let tmp = tempfile::TempDir::new().unwrap();
         // A file where the store's parent dir would be: the write fails.

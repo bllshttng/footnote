@@ -112,6 +112,32 @@ pub(super) fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> 
                     esc.push(b); // PageUp `ESC[5~` / PageDown `ESC[6~` pending
                     continue;
                 }
+                ([0x1b, b'['], b'H') => {
+                    // `ESC[H` is already final; it folds to the feed's
+                    // jump-to-top binding.
+                    out.push(ModalKey::Byte(b'g'));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'F') => {
+                    out.push(ModalKey::Byte(b'G'));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'['], b'1') | ([0x1b, b'['], b'4') => {
+                    esc.push(b); // Home `ESC[1~` / End `ESC[4~` pending
+                    continue;
+                }
+                ([0x1b, b'[', b'1'], b'~') => {
+                    out.push(ModalKey::Byte(b'g'));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'4'], b'~') => {
+                    out.push(ModalKey::Byte(b'G'));
+                    esc.clear();
+                    continue;
+                }
                 ([0x1b, b'[', b'5'], b'~') => {
                     out.push(ModalKey::PageUp);
                     esc.clear();

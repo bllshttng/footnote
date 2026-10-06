@@ -1,17 +1,11 @@
 //! Work-queue reader for the sideline backlog lane.
 //!
-//! Sibling of [`crate::agents_view`]: an off-loop interval task (in server.rs)
-//! parses `~/.fno/graph.json` and hands the core loop a board-ordered card set
-//! the sideline renders under the "Backlog" header. Same discipline as the
-//! registry reader - the core loop and the render path never touch the file;
-//! the mtime+len gate skips the 4M read until the graph actually changes (a
-//! claim/close mutation bumps mtime, so a card flips to in-flight for free).
+//! An off-loop task reads projected graph rows through the store keeper and
+//! hands the core loop board-ordered cards. The keeper's mutation counter
+//! gates reads; the core loop and render path never read the store.
 //!
-//! The graph is dual-language (Python `fno backlog` + the fno-agents daemon)
-//! and its FILE is the contract: parsed via `serde_json::Value` with tolerant
-//! field access rather than importing the graph crate - the mux needs four
-//! fields per node, not the whole model. A malformed document keeps the
-//! last-good cards (a torn concurrent write must not blank the lane).
+//! Tolerant JSON folds preserve legacy row behavior. Failed reads keep the
+//! last-good cards and eventually mark them stale.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -106,6 +100,14 @@ fn done_session_ids_in(entries: &[serde_json::Value]) -> HashSet<(String, String
     done
 }
 
+const DONE_SESSION_FIELDS: &[&str] = &[
+    "status",
+    "_status",
+    "merge_status",
+    "completed_at",
+    "sessions",
+];
+
 /// The live done set, read through the store keeper (`store_client::rows`),
 /// never the file: after the flip graph.json freezes, so a file read would
 /// assert a done set that stopped growing. The TOTAL fold, not the typed
@@ -114,7 +116,7 @@ fn done_session_ids_in(entries: &[serde_json::Value]) -> HashSet<(String, String
 /// positively - restore keeps every worker (today's behavior) when the
 /// instrument cannot read (fail open, AC2-EDGE).
 pub fn done_session_ids() -> HashSet<(String, String)> {
-    match crate::store_client::rows(&graph_path()) {
+    match crate::store_client::rows(&graph_path(), None, Some(DONE_SESSION_FIELDS)) {
         Ok(rows) => done_session_ids_in(&rows),
         Err(_) => HashSet::new(),
     }
@@ -731,6 +733,9 @@ pub fn derive_queue(
                     .get("plan_path")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                // The node tap's middle leg: no vault plan opens the stored
+                // GitHub-or-Linear link (the PR tap's URL, verbatim).
+                link: e.get("pr_url").and_then(|v| v.as_str()).map(str::to_string),
                 // Set below, once the board order is known.
                 head: false,
             },
@@ -1240,6 +1245,22 @@ mod tests {
         }
         assert!(!done.contains(&("codex".into(), "s4".into())));
         assert!(done.contains(&("agy".into(), "s5".into())));
+
+        let mut rows = serde_json::from_str::<serde_json::Value>(&doc).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for row in &mut rows {
+            row["details"] = serde_json::json!("unused prose");
+            row["progress_notes"] = serde_json::json!([{"text": "unused note"}]);
+            row.as_object_mut()
+                .unwrap()
+                .retain(|key, _| DONE_SESSION_FIELDS.contains(&key.as_str()));
+        }
+        assert_eq!(done_session_ids_in(&rows), done);
+        assert!(rows
+            .iter()
+            .all(|row| row.get("details").is_none() && row.get("progress_notes").is_none()));
 
         // AC2-EDGE: a torn document, a missing graph, a node without
         // sessions, a string session - all read as EMPTY, never as a partial
@@ -2176,6 +2197,35 @@ mod tests {
         assert_eq!(by_id("x-blk"), CardState::InFlight);
         assert_eq!(by_id("x-free"), CardState::Ready);
         assert_eq!(cards.len(), 3, "no phantom card for x-ghost");
+
+        let raw = graph(
+            r#"{"id":"x-epic","slug":"epic","type":"epic","status":"ready","priority":"p3","details":"unused prose"},
+               {"id":"x-done","status":"done","parent":"x-epic","completed_at":"2026-09-01","pr_number":42,"sessions":[{"phase":"ship","session_id":"closed-session"}],"progress_notes":[{"body":"unused note"}]},
+               {"id":"x-next","slug":"next","status":"ready","priority":"p1","blocked_by":["x-done"],"queued_at":"2026-09-02","plan_path":"/plans/next.md","pr_url":"https://github.com/acme/repo/pull/43"},
+               {"id":"x-review","status":"in_review","pr_number":43,"locked_by_harness_session":"review-session"},
+               {"id":"x-deferred","status":"deferred","pr_number":44,"sessions":[{"phase":"execute","session_id":"deferred-session"}]}"#,
+        );
+        let full = ReaderState::default()
+            .tick(Some((1, 0)), || Some(raw.clone()), None)
+            .unwrap();
+        assert_eq!(full.0.cards.len(), 2);
+        assert_eq!(full.0.cards[0].state, CardState::Ready);
+        assert_eq!(full.0.cards[0].lane.as_deref(), Some("Triage"));
+        assert_eq!(full.0.cards[1].lane.as_deref(), Some("In Progress"));
+        assert_eq!(full.1["x-done"], 42);
+        assert_eq!(full.2["x-done"], "closed-s");
+        assert_eq!(full.2["x-deferred"], "deferred");
+        let mut projected = serde_json::from_str::<serde_json::Value>(&raw).unwrap();
+        for row in projected["entries"].as_array_mut().unwrap() {
+            row.as_object_mut()
+                .unwrap()
+                .retain(|key, _| crate::board_reader::BOARD_FIELDS.contains(&key.as_str()));
+            assert!(row.get("details").is_none() && row.get("progress_notes").is_none());
+        }
+        let narrow = ReaderState::default()
+            .tick(Some((1, 0)), || Some(projected.to_string()), None)
+            .unwrap();
+        assert_eq!(narrow, full);
 
         // AC1-HP/AC1-EDGE: a claim appearing (and later releasing) flips the
         // card within a tick even though the graph stamp never moves.

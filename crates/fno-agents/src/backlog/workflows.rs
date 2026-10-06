@@ -375,6 +375,14 @@ pub(crate) fn apply_completion_fields(node: &mut Value, merge_status: bool) {
     if merge_status {
         obj.insert("merge_status".into(), Value::String("merged".into()));
     }
+    let session = crate::identity::ambient_agent_handle();
+    obj.insert(
+        "closed_by".into(),
+        json!({
+            "session": session,
+            "actor_kind": crate::decision_trace::actor_kind(session.as_deref(), "verb"),
+        }),
+    );
 }
 
 /// Undo a close (the _clear_completion_fields twin). `status` is the
@@ -389,6 +397,7 @@ fn clear_completion_fields(node: &mut Value, reason: &str, status: &str) {
     );
     obj.insert("reopened_reason".into(), Value::String(reason.into()));
     obj.remove("reopen_warning");
+    obj.insert("closed_by".into(), Value::Null);
     obj.insert("status".into(), Value::String(status.into()));
 }
 
@@ -1790,7 +1799,30 @@ pub fn run_queued(tail: &[String]) -> i32 {
         return 0;
     }
     let graph = settings::graph_path();
-    let Ok(rows) = graph_store::read_rows(&graph) else {
+    let Ok(rows) = crate::graph_store::read_rows_where(
+        &graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "title",
+                    "priority",
+                    "project",
+                    "cwd",
+                    "queued_at",
+                    "queued_reason",
+                    "status",
+                    "completed_at",
+                    "deferred_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) else {
         eprintln!("Error: the backlog graph could not be read");
         return 1;
     };
@@ -2700,6 +2732,11 @@ mod tests {
             .position(|e| text_at(e, "id") == Some("ab-bbbbbbbb"))
             .unwrap();
         apply_completion_fields(&mut rows[idx], false);
+        // The closer stamp: the row names who closed it, whatever the
+        // ambient identity resolved to (null session reads user).
+        let closer = &rows[idx]["closed_by"];
+        assert!(closer["session"].is_null() || closer["session"].is_string());
+        assert!(closer["actor_kind"].is_string());
         let closed = cascade_close_parents(&mut rows, "ab-bbbbbbbb");
         assert!(closed.contains(&"ab-ffffffff".to_string()), "{closed:?}");
         let epic = rows

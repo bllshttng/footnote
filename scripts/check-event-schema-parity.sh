@@ -348,6 +348,11 @@ collisions = python_types & rust_kinds
 # is owned by tick_ledger.rs; Rust daemon arms and the Python arms (until they
 # port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
+    # event_payload_too_large: the oversize meta-event both emitters write
+    # when a payload exceeds limits.max_data_bytes; every channel can
+    # overflow, so the kind carries every literal source and both halves
+    # own it by construction.
+    "event_payload_too_large",
     # graph_write_gate: the keeper emits the five-minute window rows (Rust)
     # and the single-row mutation path emits the per-write rows (Rust) with
     # the Python schema declaring both sources.
@@ -373,6 +378,19 @@ dual_owner_kinds = {
     # them in schema.yaml for the validator and `doctor event find`.
     "scratch_shape_observed",
     "scratch_shape_filed",
+    # Succession transaction: the Rust side is the one writer (team-settle
+    # announce/transfer, the heir beat's verify/release/retro, the reap
+    # rollback, all through succession_txn.rs); the Python side carries them
+    # in schema.yaml for the validator and `doctor event find`, the way the
+    # scratch pair above does.
+    "team_succession_announced",
+    "team_succession_announce_failed",
+    "team_succession_transferred",
+    "team_succession_verified",
+    "team_succession_released",
+    "team_succession_release_unproven",
+    "team_succession_retro_filed",
+    "team_succession_retro_unmeasured",
     # merge_cleanup_skipped: the merge mint (Python) is the only emitter; the
     # Rust known-kind table carries it so the daemon accepts the row, the way
     # the evals pair above does.
@@ -401,7 +419,7 @@ dual_owner_kinds = {
     # emit their own asks until they port.
     "operator_question",
     # decision_span: the Rust decision_trace emitters are the only writers
-    # (the mail-record leaf, the question intake, the decide door, the king
+    # (the mail-record leaf, the question intake, the decide door, the lead
     # stop check); the Python side carries it in schema.yaml for the
     # validator and `doctor event find`, the way pr_watch_unparked above does.
     "decision_span",
@@ -415,6 +433,22 @@ dual_owner_kinds = {
     # side carries it in schema.yaml for the validator and `doctor event
     # find`, the way pr_watch_unparked above does.
     "agent_revived",
+    # The unified-judge cutover declared the daemon-lifecycle pair on every
+    # channel that writes it: the Rust daemon journals births and deaths
+    # (source daemon) while the Python daemon-envelope helpers and the
+    # agents emitter write the same kinds from the resume and dispatch
+    # paths (sources python / agents). One wire shape, two runtimes.
+    "agent_spawned",
+    "agent_spawn_accepted",
+    "agent_spawn_failed",
+    "agent_stopped",
+    "agent_stop_error",
+    "agent_stop_refused",
+    "agent_crown_vacated",
+    "agent_ask_done",
+    "agent_inconsistent",
+    "reconcile_done",
+    "startup_reconcile_done",
 }
 collisions -= dual_owner_kinds
 if collisions:

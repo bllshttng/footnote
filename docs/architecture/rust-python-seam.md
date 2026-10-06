@@ -259,7 +259,7 @@ The counting rule, in words, so a reader can audit a row without reading the scr
 | 117 | pr_watch | 6345 | 9 | 191/1 | 0 | 26 |
 | 118 | dispatch_flags | 203 | 10 | 10/- | 0 | 7 |
 | 119 | inbox | 2950 | 10 | 24/- | 156599 | 19 |
-| 120 | king | 2302 | 10 | 143/1 | 1342 | 14 |
+| 120 | lead | 2302 | 10 | 143/1 | 1342 | 14 |
 | 121 | tombstones | 145 | 11 | 2/- | 0 | 10 |
 | 122 | _flag_aliases | 123 | 11 | 3/- | 0 | 9 |
 | 123 | decide | 3080 | 11 | 60/- | 3062 | 21 |

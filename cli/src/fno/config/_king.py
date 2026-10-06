@@ -45,9 +45,6 @@ class KingBlock(BaseModel):
     write_roots: list[str] = []
     checkin_interval: str = "55m"
     checkin_text: str = KING_CHECKIN_TEXT
-    # The verdict's compaction bound; default 3 because one crown
-    # produced two compaction-caused retractions in one evening.
-    compaction_ceiling: int = 3
 
     @field_validator("checkin_interval", mode="before")
     @classmethod

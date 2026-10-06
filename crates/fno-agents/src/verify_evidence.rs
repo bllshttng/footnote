@@ -1635,7 +1635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let events = dir.path().join("events.jsonl");
         let line = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "child_promise", "source": "hook",
+            "ts": "2026-09-17T12:00:00Z", "type": "child_promise", "source": "target",
             "data": {"session_id": "s1", "nonce": "n1"}
         })
         .to_string();

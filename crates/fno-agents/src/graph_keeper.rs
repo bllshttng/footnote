@@ -1314,6 +1314,13 @@ pub(crate) fn is_write_method(method: &str) -> bool {
     matches!(method, "commit" | "commit_rows" | "op" | "api")
 }
 
+pub(crate) fn api_is_read_op(op: &str) -> bool {
+    matches!(
+        op,
+        "node" | "nodes" | "rows" | "comments" | "version" | "search"
+    )
+}
+
 fn prune_write_ledger(
     ledger: &mut std::collections::VecDeque<WriteLedgerEntry>,
     now: std::time::Instant,
@@ -1506,11 +1513,6 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
     }
 }
 
-/// The default-entries read, returned with the byte-exact serialization the
-/// file leg produced, so the parity contract ("byte-for-byte on the
-/// serialized result") is checkable on the wire. `read` is the soft path
-/// (a corrupt read leaves a .bak behind, as read_graph did); `read_strict`
-/// diagnoses without writing.
 /// The one status read only the display surfaces carry: a live WORK claim
 /// reads its idea/ready node as in_progress while it holds; a
 /// blueprint-session claim leases the planning window only and never moves
@@ -1557,6 +1559,71 @@ fn overlay_work_claim_statuses(entries: &mut [Value]) {
     }
 }
 
+fn row_query(params: &Value) -> Result<crate::backlog::RowQuery, StoreError> {
+    Ok(crate::backlog::RowQuery {
+        filter: params
+            .get("filter")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| StoreError::Invalid(format!("bad filter: {error}")))?
+            .unwrap_or_default(),
+        fields: params
+            .get("fields")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| StoreError::Invalid(format!("bad fields: {error}")))?,
+        include_archived: params
+            .get("include_archived")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        with_blockers: true,
+    })
+}
+
+fn query_entries(
+    state: &StoreState,
+    query: &crate::backlog::RowQuery,
+    keep_malformed: bool,
+) -> Result<Vec<Value>, StoreError> {
+    graph_store::read_rows_where_strict(&state.graph, query)
+        .map(|mut rows| {
+            if !keep_malformed {
+                rows.retain(Value::is_object);
+            }
+            rows
+        })
+        .map_err(|error| {
+            StoreError::Unreadable(
+                crate::backlog::database_path(&state.graph)
+                    .display()
+                    .to_string(),
+                error.to_string(),
+            )
+        })
+}
+
+fn project_fields(rows: &mut [Value], fields: Option<&[String]>) {
+    if let Some(fields) = fields {
+        for row in rows {
+            if let Some(object) = row.as_object_mut() {
+                object.retain(|key, _| fields.contains(key));
+            }
+        }
+    }
+}
+
+fn reading_fields(query: &mut crate::backlog::RowQuery) {
+    if let Some(fields) = &mut query.fields {
+        if fields.iter().any(|field| field == "_reading") {
+            fields.extend(
+                ["details", "current_state", "plan_path", "progress_notes"].map(str::to_owned),
+            );
+        }
+    }
+}
+
 fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let strict = params
         .get("strict")
@@ -1566,32 +1633,34 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
         .get("keep_malformed")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // Entries only: the parity-era byte-serialization echoes rode every
-    // reply and tripled its size on a large graph; the differential stage
-    // that needed them is over (graph_store_parity.rs is characterization).
-    // Store rows use the cache; keep_malformed reads stay fresh
-    // (cached_entries), and strictness only changes error handling.
-    let entries = cached_entries(state, keep_malformed, strict)?;
-    // The cached rows are shared (Arc), so the reply carries a private copy:
-    // the marker is reply-only and must never reach a write snapshot.
-    let mut entries = (*entries).clone();
+    let mut query = row_query(params)?;
+    let fields = query.fields.clone();
+    reading_fields(&mut query);
+    let mut entries =
+        if params.get("filter").is_some() || fields.is_some() || !query.include_archived {
+            let _gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+            query_entries(state, &query, keep_malformed)?
+        } else {
+            (*cached_entries(state, keep_malformed, strict)?).clone()
+        };
     overlay_work_claim_statuses(&mut entries);
     crate::node_reading::attach_reading(&mut entries);
+    project_fields(&mut entries, fields.as_deref());
     Ok(json!({ "entries": entries }))
 }
 
-/// The by-id read: exact id-then-slug rows from the cache, in argument order,
-/// with the readiness overlay applied server-side (the overlay derives
-/// `blocked` from the blockers' rows, so it needs the whole list even when
-/// the reply carries one). Unmatched tokens are reported, never guessed;
-/// the client falls back to the full read on any miss it cannot use.
+/// Exact id-then-slug rows in argument order; hidden readiness support stays internal.
 fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let tokens: Vec<String> = match params.get("ids").and_then(Value::as_array) {
-        Some(a) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
+        Some(a) => {
+            a.iter()
+                .map(|token| {
+                    token.as_str().map(str::to_owned).ok_or_else(|| {
+                        StoreError::Invalid("read_ids ids must contain strings".into())
+                    })
+                })
+                .collect::<Result<_, _>>()?
+        }
         None => return Err(StoreError::Invalid("read_ids needs ids".into())),
     };
     if tokens.is_empty() {
@@ -1599,19 +1668,22 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             "read_ids needs a non-empty ids list".into(),
         ));
     }
-    let entries = cached_entries(state, false, false)?;
-    // The borrowed id index over the cached rows: matching and readiness
-    // read the same pre-overlay list the whole-list overlay always read,
-    // but only the matched rows are copied and overlaid.
-    let by_id = graph_store::index_by_id(&entries);
+    let _gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+    let query = crate::backlog::RowQuery {
+        filter: crate::backlog::api::NodeFilter {
+            id_in: Some(tokens.clone()),
+            ..Default::default()
+        },
+        with_blockers: true,
+        ..Default::default()
+    };
+    let entries = query_entries(state, &query, false)?;
     let mut out = Vec::with_capacity(tokens.len());
     let mut missing = Vec::new();
     for token in &tokens {
         match crate::graph_get::find_entry(&entries, token) {
             Some(entry) => {
-                let mut row = entry.clone();
-                graph_store::overlay_entry(&mut row, &by_id);
-                out.push(row);
+                out.push(entry.clone());
             }
             None => missing.push(token.clone()),
         }
@@ -1621,12 +1693,17 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
     Ok(json!({"entries": out, "missing": missing}))
 }
 
-/// The plan-rung inputs: id plus the two fields the Python rung table
-/// (`ladder.plan_rung`) reads on its side of the seam. The typed-op client
-/// derives the rung map from this light read instead of a full begin, which
-/// ships the whole graph for one derived value.
+/// The id/plan_path/cwd inputs for the client-side plan-rung table.
 fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
-    let entries = cached_entries(state, false, false)?;
+    let _gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+    let entries = query_entries(
+        state,
+        &crate::backlog::RowQuery {
+            fields: Some(["id", "plan_path", "cwd"].map(str::to_owned).to_vec()),
+            ..Default::default()
+        },
+        false,
+    )?;
     let refs: Vec<Value> = entries
         .iter()
         .filter(|e| graph_store::is_dict(e))
@@ -2640,7 +2717,7 @@ fn merge_observed_model(prior: Option<&Value>, fresh: Option<&Value>) -> Option<
 
 /// store.remove_open_session_record: the one compensating write against the
 /// append-only sessions list, gated on all four preconditions.
-fn session_remove_open(
+pub(crate) fn session_remove_open(
     entries: &mut Vec<Value>,
     node_id: &str,
     phase: &str,
@@ -3026,41 +3103,80 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     unreachable!("every loop arm returns")
 }
 
-/// The typed backlog API over the wire: one keeper op per
-/// `backlog::api` function, same name, same JSON fields. Queries hold the
-/// read gate; mutations hold the write gate (the gate serializes api
-/// traffic against the legacy ops on this keeper; the store's own file
-/// lock serializes across processes).
+/// Typed queries share the read gate; mutations take the write gate.
 fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let op = params
         .get("op")
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("api needs an op".into()))?;
     let store = crate::backlog::api::Store::new(&state.graph);
-    // The whole-graph reads ride the cache: one api_rows materialization
-    // per version, under the read gate. The api replies are built from the
-    // same cached rows, so api rows/node/nodes cost one export per version,
-    // not one per request.
     if matches!(op, "node" | "nodes" | "rows") {
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+        let mut query = row_query(params)?;
+        if op == "node" {
+            query.filter.id_in = Some(vec![param_str(params, "id")?.into()]);
+        }
+        if op == "nodes" {
+            query.include_archived = params
+                .get("include_archived")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        }
+        if op != "rows"
+            || params.get("filter").is_some()
+            || query.fields.is_some()
+            || !query.include_archived
+        {
+            if let Some(fields) = &mut query.fields {
+                fields.extend(
+                    [
+                        "id",
+                        "status",
+                        "slug",
+                        "title",
+                        "type",
+                        "priority",
+                        "project",
+                        "parent",
+                        "archived_at",
+                        "created_at",
+                        "locked_by",
+                        "locked_by_harness",
+                        "locked_by_harness_session",
+                        "locked_at",
+                    ]
+                    .map(str::to_owned),
+                );
+                if query.filter.label.is_some() {
+                    fields.push("tags".into());
+                }
+                if query.filter.session_id.is_some() {
+                    fields.push("sessions".into());
+                }
+            }
+            reading_fields(&mut query);
+            let ordinals = (op != "rows")
+                .then(|| crate::backlog::row_ordinals(&state.graph))
+                .transpose()
+                .map_err(StoreError::Sqlite)?;
+            return api_read_op(
+                &store,
+                op,
+                params,
+                &query_entries(state, &query, false)?,
+                ordinals.as_ref(),
+            );
+        }
         let rows: Arc<Vec<Value>> = match read_graph_gated(state, false)? {
             GraphRead::Cached(graph) => graph
                 .api_rows
-                .get_or_init(|| {
-                    // Shared with the entries, never a second Value tree:
-                    // materializing rows_in over the defaulted entries
-                    // measured 1191 MB idle on the sandbox keeper (two full
-                    // trees). Every row the store serves is already a
-                    // to_json product, so the round-trip is an identity.
-                    Arc::clone(&graph.entries)
-                })
+                .get_or_init(|| Arc::clone(&graph.entries))
                 .clone(),
             GraphRead::Fresh(entries, _) => entries,
         };
-        return api_read_op(&store, op, params, &rows);
+        return api_read_op(&store, op, params, &rows, None);
     }
-    const READ_OPS: &[&str] = &["comments", "version", "search"];
-    if READ_OPS.contains(&op) {
+    if api_is_read_op(op) {
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
         return api_op(&store, op, params);
     }
@@ -3073,15 +3189,28 @@ fn api_read_op(
     op: &str,
     params: &Value,
     rows: &[Value],
+    ordinals: Option<&std::collections::HashMap<String, i64>>,
 ) -> Result<Value, StoreError> {
     use crate::backlog::api;
-    let node_row = |node: &api::Node| node.to_json();
+    let fields = row_query(params)?.fields;
+    let project = |mut rows: Vec<Value>| {
+        if fields
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|field| field == "_reading"))
+        {
+            crate::node_reading::attach_reading(&mut rows);
+        }
+        project_fields(&mut rows, fields.as_deref());
+        rows
+    };
+    let no_ordinals = std::collections::HashMap::new();
+    let ordinals = ordinals.unwrap_or(&no_ordinals);
     match op {
         "node" => {
             let id = param_str(params, "id")?;
-            let found = api::node_in(rows, id);
+            let found = api::node_in_with_ordinals(rows, id, ordinals);
             Ok(json!({
-                "node": found.map(|n| n.to_json()),
+                "node": found.and_then(|node| project(vec![node.to_json()]).pop()),
                 "version": api::version(store)?,
             }))
         }
@@ -3095,9 +3224,9 @@ fn api_read_op(
                 .unwrap_or_default();
             let page: api::Page = serde_json::from_value(params.clone())
                 .map_err(|e| StoreError::Invalid(format!("bad page: {e}").into()))?;
-            let connection = api::nodes_in(rows, &filter, &page);
+            let connection = api::nodes_in_with_ordinals(rows, &filter, &page, ordinals);
             Ok(json!({
-                "nodes": connection.nodes.iter().map(node_row).collect::<Vec<_>>(),
+                "nodes": project(connection.nodes.iter().map(|node| node.to_json()).collect()),
                 "page_info": serde_json::to_value(&connection.page_info).unwrap_or(Value::Null),
                 "version": api::version(store)?,
             }))
@@ -3106,7 +3235,7 @@ fn api_read_op(
             let mut served = rows.to_vec();
             crate::node_reading::attach_reading(&mut served);
             Ok(json!({
-                "rows": served,
+                "rows": project(served),
                 "version": api::version(store)?,
             }))
         }
@@ -3902,7 +4031,7 @@ mod tests {
         let (_dir, graph) = reading_fixture();
         let store = crate::backlog::api::Store::new(&graph);
         let rows = crate::backlog::api::rows(&store).unwrap();
-        let reply = api_read_op(&store, "rows", &json!({}), &rows).unwrap();
+        let reply = api_read_op(&store, "rows", &json!({}), &rows, None).unwrap();
         let served = reply["rows"].as_array().unwrap();
         assert_eq!(
             served[0]
@@ -3978,12 +4107,11 @@ mod tests {
             entries[1]["plan_path"].is_null(),
             "a plan-less node ships a null plan_path, not guessed fields"
         );
-        // The cache leg: a second call parses nothing new.
         let _ = handle_plan_refs(&state).unwrap();
         assert_eq!(
             state.file_opens.load(Ordering::SeqCst),
-            1,
-            "plan_refs must ride the cache"
+            0,
+            "plan_refs must not fill the whole cache"
         );
     }
 
@@ -4028,12 +4156,11 @@ mod tests {
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
         assert_eq!(missing, vec!["x-nope".to_string()]);
-        // The cache leg: a second call parses nothing new.
         let _ = handle_read_ids(&state, &json!({"ids": ["x-hit"]})).unwrap();
         assert_eq!(
             state.file_opens.load(Ordering::SeqCst),
-            1,
-            "read_ids must ride the cache"
+            0,
+            "read_ids must not fill the whole cache"
         );
     }
 
@@ -4057,7 +4184,7 @@ mod tests {
             ]
         }));
         let ask = json!({
-            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
         });
         std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n")).unwrap();
@@ -4088,11 +4215,11 @@ mod tests {
             ]
         }));
         let ask = json!({
-            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "test",
             "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
         });
         let close = json!({
-            "ts": "2026-09-25T13:00:00Z", "type": "operator_question_closed", "source": "agent",
+            "ts": "2026-09-25T13:00:00Z", "type": "operator_question_closed", "source": "test",
             "data": {"question_id": "q-1"}
         });
         std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n{close}\n")).unwrap();
@@ -4172,9 +4299,7 @@ mod tests {
 
     #[test]
     fn sqlite_read_handlers_share_one_fill_between_writes() {
-        // AC4-HP: begin, plan_refs, ready and read_ids on a sqlite keeper,
-        // each run twice with no write between: file_opens stays 1 and the
-        // paired replies are equal.
+        // Whole reads cache; by-id and plan refs bypass that materialization.
         let (_dir, state) = sqlite_state(json!({
             "entries": [
                 {"id": "x-a", "slug": "node-a", "title": "a", "status": "ready",
@@ -4182,10 +4307,15 @@ mod tests {
                 {"id": "x-b", "slug": "node-b", "title": "b", "status": "idea"},
             ]
         }));
-        let begin1 = handle_begin(&state).unwrap();
         let refs1 = handle_plan_refs(&state).unwrap();
-        let ready1 = handle_ready(&state, &json!({"claimed": []})).unwrap();
         let ids1 = handle_read_ids(&state, &json!({"ids": ["x-a"]})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            0,
+            "narrow reads do not fill the whole cache"
+        );
+        let begin1 = handle_begin(&state).unwrap();
+        let ready1 = handle_ready(&state, &json!({"claimed": []})).unwrap();
         assert_eq!(
             state.file_opens.load(Ordering::SeqCst),
             1,
@@ -4253,6 +4383,18 @@ mod tests {
             let spliced = splice_reply(state, &bytes).expect("read/begin/rows must splice");
             assert_eq!(spliced.frame(), via_handle, "{payload} frame bytes");
         }
+        for method in ["read", "api"] {
+            let params = json!({"op":"rows", "filter":{"id_in":["x-1"]}, "fields":["id"]});
+            let bytes =
+                serde_json::to_vec(&json!({"id":7,"method":method,"params":params})).unwrap();
+            assert!(
+                splice_reply(state, &bytes).is_none(),
+                "narrow requests must reach the query handler"
+            );
+            let reply = handle_request(state, &bytes);
+            let key = if method == "read" { "entries" } else { "rows" };
+            assert_eq!(reply["result"][key], json!([{"id":"x-1"}]));
+        }
     }
 
     #[test]
@@ -4292,15 +4434,22 @@ mod tests {
         db.execute("DELETE FROM graph_meta WHERE key = 'version'", [])
             .unwrap();
         drop(db);
-        let payload =
-            serde_json::to_vec(&json!({"id": 3, "method": "read", "params": {}})).unwrap();
-        assert!(
-            splice_reply(&state, &payload).is_none(),
-            "an erroring read must not splice"
-        );
-        let reply = handle_request(&state, &payload);
-        assert_eq!(reply["ok"], json!(false));
-        assert_eq!(reply["error"]["kind"], json!("unreadable"));
+        for params in [
+            json!({}),
+            json!({"fields":["id"]}),
+            json!({"filter":{"state_type":"open"}}),
+        ] {
+            let payload =
+                serde_json::to_vec(&json!({"id":3,"method":"read_strict","params":params}))
+                    .unwrap();
+            assert!(
+                splice_reply(&state, &payload).is_none(),
+                "an erroring read must not splice"
+            );
+            let reply = handle_request(&state, &payload);
+            assert_eq!(reply["ok"], json!(false));
+            assert_eq!(reply["error"]["kind"], json!("unreadable"));
+        }
     }
 
     #[test]

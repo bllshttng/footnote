@@ -239,12 +239,46 @@ function makeHandler(io, dir) {
           return
         }
 
-        // 3. Run the full claude completion gate, bound to THIS session.
-        //    The gate refuses a session the registry does not bind to this
-        //    target (exit 0, decision "refuse"); the bridge then runs the
-        //    pre-manifest distress scan and sends nothing (AC1-ERR, AC2-ERR).
-        const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+        // 2.5. Event rules: the Stop-boundary rule table runs through the
+        // transport entry, before the gate, with the same Stop payload shape
+        // claude's stop hook evaluates in-process. A rules block IS the gate
+        // decision this turn: the one decision branch below relays it, and
+        // the gate call is skipped.
+        const lastText = items.filter(Boolean).at(-1) || ""
         try {
+          const rulesBin = process.env.FNO_AGENTS_BIN || "fno-agents"
+          const proc = Bun.spawn(
+            [rulesBin, "hook", "rules", "--event", "stop"],
+            { cwd: dir, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+          )
+          proc.stdin.write(
+            JSON.stringify({
+              session_id: sid,
+              last_assistant_message: lastText,
+              transcript_path: synth,
+              cwd: dir,
+            }),
+          )
+          proc.stdin.end()
+          const timer = setTimeout(() => proc.kill(), SUBPROC_TIMEOUT_MS)
+          const rulesOut = await new Response(proc.stdout).text()
+          await proc.exited
+          clearTimeout(timer)
+          const ruled = JSON.parse(rulesOut)
+          if (ruled && ruled.decision) {
+            decision = ruled
+          }
+        } catch (e) {
+          console.error(`[footnote] hook rules unavailable/failed: ${e}`)
+        }
+
+        // 3. Run the full claude completion gate, bound to THIS session,
+        //    unless the rules already decided this turn. The gate refuses a
+        //    session the registry does not bind to this target (exit 0,
+        //    decision "refuse"); the bridge then runs the pre-manifest
+        //    distress scan and sends nothing (AC1-ERR, AC2-ERR).
+        const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+        if (!decision) try {
           const out = await io.run(
             [
               bin,

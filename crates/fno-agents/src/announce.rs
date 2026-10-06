@@ -22,6 +22,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -192,15 +193,18 @@ impl BusLock {
             .write(true)
             .open(&lock_path)
             .map_err(|e| format!("bus lock open {}: {e}", lock_path.display()))?;
-        let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+        // The Python tests' tuning rides env now that the door owns the
+        // wait: a contended lock must time out inside the caller's own
+        // subprocess budget (FNO_BUS_LOCK_TIMEOUT_SECS).
+        let timeout = lock_timeout();
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(BusLock { _file: file }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
-                            "bus lock timeout after {:?} at {}",
-                            LOCK_TIMEOUT,
+                            "bus lock timeout after {timeout:?} at {}",
                             lock_path.display()
                         ));
                     }
@@ -212,15 +216,66 @@ impl BusLock {
     }
 }
 
-/// Append one line under the sidecar flock. Rotation stays with the Python
-/// appender. A bare `fno` sender refuses before the write, so a refused send
-/// leaves no bus row.
-// ponytail: Rust never rotates; the next Python append rotates an over-size
-// live segment.
+fn lock_timeout() -> Duration {
+    std::env::var("FNO_BUS_LOCK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(LOCK_TIMEOUT)
+}
+
+/// The bus log's size cap and segment count, the Python appender's env
+/// contract (`FNO_BUS_MAX_BYTES` / `FNO_BUS_RETAIN`).
+fn bus_max_bytes() -> u64 {
+    std::env::var("FNO_BUS_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5 * 1024 * 1024)
+}
+
+fn bus_retain() -> usize {
+    std::env::var("FNO_BUS_RETAIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(5)
+}
+
+/// Shift the rotated segments up one and start a fresh live log, the
+/// Python appender's `_rotate_locked` port. Every step is best-effort: a
+/// rotation failure must not lose the message, so the write follows anyway.
+fn rotate_bus_locked(live: &Path) {
+    let name = live
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let segment = |n: usize| live.with_file_name(format!("{name}.{n}"));
+    let retain = bus_retain();
+    let _ = std::fs::remove_file(segment(retain));
+    for n in (1..retain).rev() {
+        let _ = std::fs::rename(segment(n), segment(n + 1));
+    }
+    let _ = std::fs::rename(live, segment(1));
+}
+
+/// Append one line under the sidecar flock, with the Python appender's
+/// rotation and owner-only mode (the bus-append port, d-697ea9c4). A bare
+/// `fno` sender refuses before the write, so a refused send leaves no bus
+/// row.
 pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     if let Some(from) = obj.get("from").and_then(Value::as_str) {
         crate::system_sender::guard_sender(from)?;
     }
+    append_line_open(live, obj)
+}
+
+/// The append without the announce sender guard: the Python appender's
+/// parity surface, where the caller owns sender validation and a tested
+/// send from the bare fleet name lands as-is.
+pub(crate) fn append_line_open(live: &Path, obj: &Value) -> Result<(), String> {
     let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("");
     let has_delivery = obj
         .get("delivery")
@@ -236,9 +291,22 @@ pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
+    // A live log at or over the cap rotates before the write; a stat
+    // failure must not lose the message.
+    if let Ok(meta) = std::fs::metadata(live) {
+        if meta.len() >= bus_max_bytes() {
+            rotate_bus_locked(live);
+        }
+    }
+    // The log holds message bodies: owner-only on creation and on an
+    // existing segment, best-effort, like the Python appender's chmod.
+    if live.exists() {
+        let _ = std::fs::set_permissions(live, std::fs::Permissions::from_mode(0o600));
+    }
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(live)
         .map_err(|e| format!("bus open {}: {e}", live.display()))?;
     f.write_all(line.as_bytes())
@@ -588,6 +656,7 @@ fn send_announcement(
 /// test hold). Same line, rate limit and supersede as `announce send`.
 pub(crate) fn announce_all(from: &str, subject: &str, body: &str) -> Result<String, String> {
     let paths = AnnouncePaths::from_env_opt().ok_or("no agents home")?;
+    fence_test_bus(&paths.bus_live)?;
     let args = SendArgs {
         scope: "all".into(),
         subject: subject.into(),
@@ -601,6 +670,25 @@ pub(crate) fn announce_all(from: &str, subject: &str, body: &str) -> Result<Stri
     send_announcement(&args, body, &paths, None)
         .map(|receipt| receipt.id)
         .map_err(|(_, message)| message)
+}
+
+/// A test build must never mail the live fleet: the bus has to sit under the
+/// temp dir, which every pinned agents home in a test resolves to. An
+/// unpinned test that reaches this door hears the fence instead of writing
+/// the operator's `~/.fno/bus`. Production (the daemon, a lead session) is
+/// never a test build, so the fence is dead weight there.
+fn fence_test_bus(bus_live: &Path) -> Result<(), String> {
+    if !cfg!(test) {
+        return Ok(());
+    }
+    let temp = std::env::temp_dir();
+    if bus_live.ancestors().any(|a| a == temp) {
+        return Ok(());
+    }
+    Err(format!(
+        "announce fenced under test: {} is not under the temp dir; pin FNO_AGENTS_HOME to a temp home in the test",
+        bus_live.display()
+    ))
 }
 
 pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
@@ -777,9 +865,9 @@ fn standing_announcements(
 
 /// One announcement block: the delivered-mail header line, then the body.
 /// The sender reads through the system-sender table (`fleet-incident` ->
-/// `fno/fleet-incident`), the summary is the subject when it is header-safe
-/// (no backtick or separator could forge a header field), else the body
-/// summary.
+/// `fno/fleet-incident`); the third field is the row's subject when it is
+/// header-safe (no backtick or separator could forge a header field), else
+/// the body summary.
 fn render_block(m: &Value) -> String {
     let id = row_str(m, "id").unwrap_or("");
     let from = row_str(m, "from").unwrap_or("unknown");
@@ -787,15 +875,13 @@ fn render_block(m: &Value) -> String {
     let subject = meta.get("subject").and_then(Value::as_str).unwrap_or("");
     let body = row_str(m, "body").unwrap_or("");
     let sender = crate::system_sender::canonical(from);
-    let summary = match subject {
-        s if !s.is_empty() && !s.contains('`') && !s.contains(" · ") => s.to_string(),
-        _ => crate::mail_header::summary_of(body),
-    };
+    let safe = !subject.is_empty() && !subject.contains('`') && !subject.contains(" · ");
+    let third = crate::mail_header::header_subject(safe.then_some(subject), body);
     let header = crate::mail_header::render_header(
         crate::mail_header::HeaderForm::Mention,
         sender,
         id,
-        &summary,
+        &third,
     );
     format!("{header}\n{body}")
 }

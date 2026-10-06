@@ -21,6 +21,9 @@
 //!   rivalry through `loop_lead::team_rivals`.
 //! - kind `team-widen`: whether an agent can add an epic its own session
 //!   created to its own epic-set team (`team_widen::resolve`).
+//! - kind `team-rescope`: the crown re-scope's team-name effect
+//!   (`team_rescope::resolve`), the promote-side carry that keeps a lead's
+//!   recorded name across an `org promote` scope move.
 
 use crate::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
@@ -168,8 +171,9 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("crown-identity") => crate::team_identity::resolve(&payload),
         Some("crown-widen") => crate::team_widen::resolve(&payload),
         Some("court-rivals") => crate::org_rivals::resolve(&payload),
+        Some("team-rescope") => crate::team_rescope::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|crown-settle|crown-identity|crown-widen|court-rivals"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|compat|compose|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|team-settle|team-identity|team-widen|crown-settle|crown-identity|crown-widen|court-rivals|team-rescope"
         )),
     }
 }
@@ -1171,5 +1175,14 @@ mod tests {
         assert_eq!(out["added"], json!(["e-2"]));
         let error = resolve(json!({"kind": "crown-alias", "rows": []})).unwrap_err();
         assert!(error.contains("crown-widen"), "{error}");
+        // Routing: kind team-rescope reaches team_rescope::resolve. With no
+        // declared agents home the module's own no-home answer comes back;
+        // with one declared, the usage refusal names the kind. Either answer
+        // proves the kind is routed, so the probe is env-agnostic (CI
+        // declares a home; dev shells mostly do not).
+        match resolve(json!({"kind": "team-rescope"})) {
+            Ok(out) => assert_eq!(out["reason"], json!("no agents home declared")),
+            Err(err) => assert!(err.contains("team-rescope"), "{err}"),
+        }
     }
 }

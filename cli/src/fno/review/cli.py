@@ -278,12 +278,15 @@ def _attest_from_record(
     # The invocation join, the shell producer's preference order: the live
     # hold's metadata first, then the session sidecar, then UNJOINED.
     invocation_id = ""
+    hold_flags: list = []
     try:
         from fno.claims.core import claim_status
         from fno.pr._review_hold import review_hold_key
 
         status = claim_status(review_hold_key(branch)) or {}
-        invocation_id = str((status.get("metadata") or {}).get("invocation_id") or "")
+        metadata = status.get("metadata") or {}
+        invocation_id = str(metadata.get("invocation_id") or "")
+        hold_flags = [f for f in (metadata.get("flags") or []) if isinstance(f, str)]
     except Exception:  # noqa: BLE001 - claims-root resolution shells out and can fail
         invocation_id = ""
     if not invocation_id and harness_session_id:
@@ -352,6 +355,24 @@ def _attest_from_record(
 
     repo_root = resolve_repo_root()
     events_path = project_log("events.jsonl", project_root=repo_root)
+
+    # The --verify-fixes round stamp, the shell emitter's rule carried through
+    # this emit; the rule lives in the Rust binary, this is the wiring.
+    # Fail-open, and an explicit --review-round already on the record wins.
+    if "review_round" not in data and hold_flags:
+        from fno.rust_binary import call_binary_json
+
+        _err, row = call_binary_json(
+            "review-summary",
+            ["--declared-round", "--branch", str(data.get("branch") or branch),
+             "--head", head_sha, "--events", str(events_path),
+             "--flags", json.dumps(hold_flags)],
+        )
+        declared = row.get("declared_round") if isinstance(row, dict) else None
+        if isinstance(declared, int) and declared >= 0:
+            data["review_round"] = declared
+            record["review_round"] = declared
+
     try:
         event = _build("review_attestation", "target" if session_id else "test", data)
     except ValidationError as exc:
@@ -390,6 +411,7 @@ def _attest_from_record(
                 head=head_sha,
                 reviewer=data["reviewer"],
                 pr=None,
+                review_round=record.get("review_round"),
             )
         except Exception:  # noqa: BLE001 - the attestation is the gate evidence
             pass
@@ -567,12 +589,17 @@ def post_dispositions(
         None, "--pr-number", "--pr",
         help="The PR number; resolved from the current branch when omitted.",
     ),
+    review_round: Optional[int] = None,
 ) -> None:
     """Post ONE per-round disposition comment on the PR, over REST.
 
     The comment is the human-visible index of a round's outcomes: one line per
     finding, each naming its disposition or its absence. Idempotent at
     (pr, head) via the marker line; a round with no dispositions posts nothing.
+    ``review_round`` is the emit-side pass-through: the attest flow hands the
+    round its stamp derived, the shell producer rides FNO_REVIEW_ROUND (the
+    env door the flag-surface ratchet keeps open), so a --verify-fixes
+    verify's comment names the round it verified, never a fresh round 1.
     """
     try:
         payload = json.loads(findings_file.read_text(encoding="utf-8"))
@@ -648,7 +675,7 @@ def post_dispositions(
         typer.echo(f"post-dispositions: round comment for {head[:9]} already posted")
         return
 
-    round_no = int(record.get("review_round") or 1)
+    round_no = int(review_round or os.environ.get("FNO_REVIEW_ROUND", "").strip() or record.get("review_round") or 1)
     body = _render_round_comment(record, head, round_no, reviewer)
     write = run(
         [

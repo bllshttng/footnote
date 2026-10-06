@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 23
+map_version = 24
 
 [harness.claude]
 # THE DELIVERED-MAIL HEADER FORM. Every delivered mail opens with one
@@ -748,11 +748,18 @@ thread = "serve-external-directory"
 headless = "unmeasured"
 
 # The thread lane's carrier row (spawn flag passthrough; see claude's for the
-# vocabulary). opencode serve takes a model; every other flag demotes to the
-# pane until the serve lane maps it. Steering and readback are implemented by
-# the shared attach writer, and the journey names the evidence for this seat.
+# vocabulary). The serve lane maps two axes beside the model. Effort lands as
+# opencode's persisted model variant: dispatch_opencode_serve calls
+# apply_opencode_variant(selected_model, effort), writing
+# ~/.local/state/opencode/model.json (live row read 2026-10-05:
+# "zai-coding-plan/glm-5.3-flash": "high"). The state-root grant rides
+# FNO_WORKER_ADD_DIRS -> per-session external_directory rules, published for
+# every non-pane lane independently of the operator --add-dir axis, which
+# refuses on this lane (client.rs fail-closed matrix). Every other flag still
+# demotes to the pane. Steering and readback are implemented by the shared
+# attach writer, and the journey names the evidence for this seat.
 [harness.opencode.thread]
-carries = ["model"]
+carries = ["model", "effort"]
 passthrough = []
 
 [harness.opencode.permission_response.allow_once]
@@ -1953,3 +1960,49 @@ reason = "no session-state push for grok (no fno hook registration; the per-harn
 [harness.zcode.hooks.session_state]
 state = "missing"
 reason = "no session-state push for zcode (no fno hook registration; the per-harness report adapters land with the session-state push work)"
+
+# ── event_rules ────────────────────────────────────────────────────────────────
+# The Stop-boundary rule table (docs/architecture/event-rules.md). claude and
+# codex run it in-process inside fno-agents hook stop; the adapters whose Stop
+# cannot carry it call fno-agents hook rules --event stop beside their
+# loop-check call. A missing on a wired row fails the load.
+
+[harness.claude.hooks.event_rules]
+state = "supported"
+via = ["hooks/hooks.json", "hooks/target-stop-hook.sh", "crates/fno-agents/src/hook/stop.rs"]
+
+[harness.codex.hooks.event_rules]
+state = "supported"
+via = ["hooks/codex-hooks.json", "hooks/target-stop-hook.sh", "crates/fno-agents/src/hook/stop.rs"]
+
+[harness.agy.hooks.event_rules]
+state = "supported"
+via = ["hooks/footnote-agy-target-stop-hook.sh", "crates/fno-agents/src/event_rules.rs"]
+
+[harness.opencode.hooks.event_rules]
+state = "supported"
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "crates/fno-agents/src/event_rules.rs"]
+
+[harness.pi.hooks.event_rules]
+state = "supported"
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/event_rules.rs"]
+
+[harness.footnote.hooks.event_rules]
+state = "supported"
+via = ["crates/fno-agents/src/footnote_harness/hooks.rs", "crates/fno-agents/src/hook/stop.rs"]
+
+[harness.gemini.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for gemini (deprecated harness; no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"
+
+[harness.cursor-agent.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for cursor-agent (no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"
+
+[harness.grok.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for grok (no plugin hook file and no capability install lane; the grok install lane would flip this), so its Stop never reaches the rule engine"
+
+[harness.zcode.hooks.event_rules]
+state = "impossible"
+reason = "no fno hook registration for zcode (no plugin hook file and no capability install lane), so its Stop never reaches the rule engine"

@@ -123,6 +123,23 @@ pub fn run(args: &[String]) -> i32 {
         goal_payload,
     );
 
+    // Event rules run before the ownership evaluation: a session with no
+    // target or king manifest still owes its chat asks to the board
+    // (docs/architecture/event-rules.md). A notify leaves through the
+    // operator chokepoint; the first block or nudge speaks the same
+    // harness-shaped block the stop gate prints, and the stop returns.
+    let rule_fires = crate::event_rules::eval_stop(&cwd, &payload);
+    for notify in rule_fires.iter().filter_map(|f| f.notify.as_ref()) {
+        crate::operator_notice::notify_operator(&notify.0, &notify.1, notify.2.as_deref());
+    }
+    if let Some(reason) = rule_fires
+        .iter()
+        .find(|f| f.action == "block" || f.action == "nudge")
+        .map(|f| f.reason.clone())
+    {
+        return emit_block_for_harness(&reason);
+    }
+
     // ── Ownership (the salvaged stop-gate evaluation) ─────────────────────────
     match evaluate(&cwd, &fire) {
         Verdict::NoOwner => {
@@ -1292,16 +1309,6 @@ mod tests {
     }
 
     #[test]
-    fn uuid_suffix_takes_a_rollout_tail() {
-        let tid = "0198abcd-1234-5678-9abc-def012345678";
-        let rollout = format!("rollout-2026-09-15T101530-{tid}");
-        assert_eq!(uuid_suffix(&rollout).as_deref(), Some(tid));
-        assert_eq!(uuid_suffix(tid), None, "no separator prefix, no strip");
-        assert_eq!(uuid_suffix("session-xyz"), None);
-        assert_eq!(uuid_suffix(""), None);
-    }
-
-    #[test]
     fn first_raw_field_reads_first_line_and_skips_null() {
         let doc = "fno_id: a1\nsession_id: null\nfno_id: b2\nharness_session_id: \"h1\"\n";
         assert_eq!(
@@ -1584,6 +1591,15 @@ mod tests {
             arbitrate_codex_continuation_from_reading("lead", &fire, &stale_manifest, Ok(None)),
             GoalArbitration::None
         ));
+        // The self-heal trigger is the bare word alone: a scope-carrying
+        // or differently spelled objective is a real goal, never a resume's
+        // stub, so only the exact word arms the repair.
+        assert!(goal_arbitration::is_bare_resume_objective("resume"));
+        assert!(goal_arbitration::is_bare_resume_objective(" resume "));
+        assert!(!goal_arbitration::is_bare_resume_objective(
+            "$fno:lead scope-a"
+        ));
+        assert!(!goal_arbitration::is_bare_resume_objective(""));
     }
 
     #[test]

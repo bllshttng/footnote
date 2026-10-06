@@ -31,6 +31,56 @@ run_capture() {
   OUT="$("$@" 2>&1)"
   RC=$?
 }
+# run_capture_bounded MAX_SECONDS cmd...: run_capture with a wall-clock bound.
+# Homebrew's own fetches (update metadata, bottles) have no mid-transfer
+# deadline, so a stalled ghcr.io/PyPI read sat silent past the 1500s row
+# watchdog and scored rc=43 (2026-10-06, twice). A bound here turns that stall
+# into an honest rc=124 the row scores as a channel failure. Output tees to a
+# file either way so a miss message can name the phase brew died in.
+run_capture_bounded() {
+  local max="$1" pid waited=0 log="$BASE/capture-bounded.log"
+  shift
+  "$@" >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$max" ]; then
+      break
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null
+    RC=$?
+    OUT="$(cat "$log")"
+    return 0
+  fi
+  # The bound fired. TERM the job AND its live children: brew's auto-update
+  # phase runs git/curl beneath it, and a plain TERM to the wrapper can leave
+  # the tree running while wait returns. Grace-wait, then KILL, then reap;
+  # no step here can block past the grace bound.
+  echo "bound fired at ${waited}s on pid ${pid} ($(printf '%s' "$*" | head -1))"
+  pkill -TERM -P "$pid" 2>/dev/null
+  kill -TERM "$pid" 2>/dev/null
+  local grace=0
+  while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+    sleep 1
+    grace=$((grace + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "bound kill: pid ${pid} survived TERM, escalating to KILL"
+    pkill -KILL -P "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null
+  echo "bound kill done on pid ${pid}; last output: $(tail -3 "$log" | tr '\n' ' ')"
+  OUT="exceeded the ${max}s bound; last output: $(tail -3 "$log" | tr '\n' ' ')"
+  RC=124
+}
+# The bound helper self-checks its two modes once the scratch base exists: a
+# bounded command keeps its real rc, and an overrun is killed at the bound with
+# rc=124 (every row runs this, so a regression here fails loudly on the
+# runner, not silently someday).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -42,6 +92,10 @@ BASE="$(mktemp -d)"
 BASE="$(cd "$BASE" && pwd -P)"
 trap 'rm -rf "$BASE"' EXIT
 mkdir -p "$BASE/home" "$BASE/work"
+run_capture_bounded 5 /usr/bin/false
+[ "$RC" -eq 1 ] || { echo "bounded capture lost the real rc (got $RC, want 1)"; exit 1; }
+run_capture_bounded 1 sleep 9
+[ "$RC" -eq 124 ] || { echo "bounded capture did not fire at the bound (got $RC, want 124)"; exit 1; }
 
 RUNNER_NODE_BIN=""
 if command -v node >/dev/null 2>&1; then
@@ -298,7 +352,19 @@ row_claude_plugin_session() {
   }' "$tree/.claude-plugin/plugin.json" > "$tree/.claude-plugin/plugin.json.new"
   mv "$tree/.claude-plugin/plugin.json.new" "$tree/.claude-plugin/plugin.json"
   export CLAUDE_PLUGIN_DATA="$BASE/plugin-data"
-  bash "$tree/hooks/context-run.sh" claude-session-start >/dev/null 2>&1
+  # The session-start hook runs nothing: it prints the consent notice. This
+  # row is the consenting user: assert the notice (and that no installer
+  # started), then run the installer the way a consenting user does and score
+  # its captured output.
+  local notice="$BASE/notice.log"
+  bash "$tree/hooks/context-run.sh" claude-session-start >"$notice" 2>&1
+  if grep -q "Ask the user first" "$notice" && [ ! -e "$CLAUDE_PLUGIN_DATA/postinstall.log" ]; then
+    pass "notice" "session start printed the consent notice and started nothing"
+  else
+    miss "notice" "session start did not print the consent notice cleanly: $(head -3 "$notice")"
+  fi
+  mkdir -p "$CLAUDE_PLUGIN_DATA"
+  bash "$tree/.claude-plugin/postinstall.sh" >"$CLAUDE_PLUGIN_DATA/postinstall.log" 2>&1
   local py_bins="" d
   for d in "$HOME"/Library/Python/*/bin; do
     [ -d "$d" ] && py_bins="$py_bins $d"
@@ -342,7 +408,17 @@ row_codex_plugin_session() {
     miss "plugin-tree" "installed plugin tree has no hooks/context-run.sh"
     return 0
   fi
-  bash "$(dirname "$installed_hook")/context-run.sh" codex-session-start >/dev/null 2>&1
+  # Same consent shape as the claude row: assert the notice, then run the
+  # installer as the consenting user and score its captured output.
+  local notice="$BASE/notice-codex.log"
+  bash "$(dirname "$installed_hook")/context-run.sh" codex-session-start >"$notice" 2>&1
+  if grep -q "Ask the user first" "$notice" && [ ! -e "$HOME/.local/state/fno/plugin-install/postinstall.log" ]; then
+    pass "notice" "session start printed the consent notice and started nothing"
+  else
+    miss "notice" "session start did not print the consent notice cleanly: $(head -3 "$notice")"
+  fi
+  mkdir -p "$HOME/.local/state/fno/plugin-install"
+  bash "$tree/.claude-plugin/postinstall.sh" >"$HOME/.local/state/fno/plugin-install/postinstall.log" 2>&1
   local py_bins="" d
   for d in "$HOME"/Library/Python/*/bin; do
     [ -d "$d" ] && py_bins="$py_bins $d"
@@ -442,7 +518,11 @@ row_pypi_uv_pinned() {
 row_brew() {
   assert_clean_machine
   export PATH="/opt/homebrew/bin:$PATH"
-  run_capture brew install bllshttng/fno/fno
+  echo "row brew: install starting under the 900s bound"
+  # 900s: a cold brew install (auto-update + bottles + pip) fits well under
+  # it, and it stays 600s clear of the 1500s row watchdog, so a stalled fetch
+  # scores as an honest fail here instead of a row hang.
+  run_capture_bounded 900 brew install bllshttng/fno/fno
   if [ "$RC" -ne 0 ]; then
     miss "brew-install" "rc=$RC: $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
     return 0
@@ -511,6 +591,62 @@ row_skills_sh() {
   fi
 }
 
+row_fno_sh_nightly() {
+  # x-6f1d: an install run from inside a NIGHTLY tree must land the nightly
+  # wheel, not the stable PyPI package. Stamp a scratch tree with the dev
+  # spelling the nightly tag carries (read off the nightly release's wheel
+  # name), run scripts/install/fno.sh from inside it, and require that exact
+  # dev version back from the installed front door.
+  assert_clean_machine
+  local plat wheel_asset version
+  plat="$(bash -c "source '$REPO_ROOT/scripts/release/plugin-version.sh' && plugin_wheel_platform \"\$(uname -s)\" \"\$(uname -m)\"")"
+  if [ -z "$plat" ]; then
+    miss "platform" "no wheel platform pattern for $(uname -s)/$(uname -m)"
+    return 0
+  fi
+  wheel_asset="$(curl -fsSL "https://api.github.com/repos/bllshttng/footnote/releases/tags/nightly" \
+    | FNO_WHEEL_PLATFORM="$plat" python3 -c '
+import json, os, re, sys
+plat = os.environ["FNO_WHEEL_PLATFORM"]
+for a in json.load(sys.stdin).get("assets", []):
+    n = a.get("name", "")
+    if n.endswith(".whl") and re.search(plat, n):
+        print(n); break
+' 2>/dev/null)"
+  if [ -z "$wheel_asset" ]; then
+    miss "nightly" "no wheel for this platform on the nightly release (API read failed or unsupported platform)"
+    return 0
+  fi
+  version="$(printf '%s' "$wheel_asset" | sed -n -E 's/^fno-(.+)-py3-none-.*/\1/p')"
+  if [ -z "$version" ]; then
+    miss "nightly" "could not read the version off wheel name $wheel_asset"
+    return 0
+  fi
+  local tree="$BASE/nightly-tree"
+  copy_tree_to_scratch "$tree"
+  # PEP 440 -> the semver spelling the nightly stamp commits (release.yml).
+  local semver
+  semver="$(printf '%s' "$version" | sed -E 's/\.dev([0-9]+)$/-dev.\1/; s/rc([0-9]+)$/rc\1/')"
+  for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
+    awk -v v="$semver" '{
+      gsub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" v "\"")
+      print
+    }' "$tree/$manifest" > "$tree/$manifest.new" && mv "$tree/$manifest.new" "$tree/$manifest"
+  done
+  run_capture sh "$tree/scripts/install/fno.sh"
+  if [ "$RC" -ne 0 ]; then
+    miss "install" "fno.sh rc=$RC: $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
+    return 0
+  fi
+  shared_smoke "$HOME/.local/bin"
+  run_capture "$HOME/.local/bin/fno" --version
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "$version"; then
+    pass "nightly-version" "the nightly tree install reports the dev wheel's version ($version)"
+  else
+    miss "nightly-version" "expected $version from the nightly tree install, got rc=$RC: $(printf '%s' "$OUT" | tail -1)"
+  fi
+}
+
 row_clone_setup() {
   assert_clean_machine
   local clone="$BASE/clone"
@@ -540,6 +676,7 @@ run_row() {
     codex-plugin-session)  row_codex_plugin_session ;;
     fno-sh-served)         row_fno_sh_served ;;
     fno-sh-head)           row_fno_sh_head ;;
+    fno-sh-nightly)        row_fno_sh_nightly ;;
     fno-sh-fresh)          row_fno_sh_fresh ;;
     install-sh-alias)      row_install_sh_alias ;;
     pypi-uv)               row_pypi_uv ;;

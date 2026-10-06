@@ -339,8 +339,30 @@ fn phase_rows(home: &crate::paths::AgentsHome) -> Result<Vec<PhaseRow>, String> 
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let rows = crate::backlog::api::rows(&crate::backlog::api::Store::new(&path))
-        .map_err(|error| format!("{}: {}", path.display(), error.0))?;
+    let rows = crate::graph_store::read_rows_where(
+        &path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "session_id",
+                    "node",
+                    "phase",
+                    "harness",
+                    "started_at",
+                    "ended_at",
+                    "sessions",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .map_err(|error| format!("{}: {}", path.display(), error.0))?;
     let mut phases = Vec::new();
     for row in rows {
         for phase in ["think", "blueprint", "execute", "review", "ship"] {

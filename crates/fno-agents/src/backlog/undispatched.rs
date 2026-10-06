@@ -338,7 +338,48 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let graph = super::settings::graph_path();
-    let entries = match crate::graph_store::read_rows_strict(&graph) {
+    let entries = match crate::graph_store::read_rows_where_strict(
+        &graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                crate::graph_store::SLIM_FIELDS
+                    .iter()
+                    .copied()
+                    .chain([
+                        "size",
+                        "model",
+                        "dispatch_verb",
+                        "dispatch_brief",
+                        "mission_id",
+                        "mission_wave",
+                        "mission_slug",
+                        "mission_from_msg_id",
+                        "roadmap_id",
+                        "sessions",
+                        "additional_prs",
+                        "dispatch_hold",
+                        "contained_in",
+                        "queued_at",
+                        "queued_reason",
+                        "deferred_at",
+                        "superseded_by",
+                        "supersession",
+                        "encounters",
+                        "orphan_ok",
+                        "batch",
+                        "tags",
+                        "blocked_reason",
+                        "children_total",
+                        "children_done",
+                        "discovery",
+                    ])
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         Ok(rows) => rows,
         Err(error) => {
             eprintln!("Error: tracker unreadable: graph unreadable: {error}");

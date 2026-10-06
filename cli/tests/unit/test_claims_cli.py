@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
-from fno.claims.core import ClaimContended, ClaimValidationError, acquire_claim
+from fno.claims.core import acquire_claim
 from fno.claims.io import dedup_claims_roots
 
 from .test_claim_reap import _dead_pid  # noqa: F401
@@ -59,34 +59,6 @@ def test_acquire_conflict_exits_1(cwd_tmp):
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h2", "--pid", pid])
     assert result.exit_code == 1
     assert "held by" in result.output
-
-
-def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
-    """Same as acquire's: refresh_claim's contention-exhaustion ClaimContended
-    must be caught, not escape as an uncaught traceback."""
-    import fno.claims.core as claims_core
-
-    def _raise(*args, **kwargs):
-        raise ClaimContended("refresh_claim gave up after 5 contention retries on 'k'")
-
-    monkeypatch.setattr(claims_core, "refresh_claim", _raise)
-    result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
-    assert result.exit_code == 1
-    assert "contention error" in result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-
-
-def test_refresh_expired_claim_is_named_non_success(cwd_tmp, monkeypatch):
-    """Core's atomic expiry refusal must not render as a PID-liveness no-op."""
-    import fno.claims.core as claims_core
-
-    def _raise(*args, **kwargs):
-        raise ClaimValidationError("claim 'k' expired before refresh")
-
-    monkeypatch.setattr(claims_core, "refresh_claim", _raise)
-    result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
-    assert result.exit_code == 2
-    assert "expired before refresh" in result.output
 
 
 def test_reconcile_pr_reservation_mutex(cwd_tmp):
@@ -222,39 +194,16 @@ def test_release_no_claim_json_reports_released_false(cwd_tmp):
     assert parsed == {"key": "node:never-acquired", "released": False}
 
 
-def test_release_stamp_do_skipped_on_no_op_names_the_key(cwd_tmp):
-    """--stamp-do on a release that unlinked nothing must not write a do row
-    silently omitting one: the skip is named, and exit stays 0."""
-    result = runner.invoke(
-        cli, ["release", "node:never-acquired", "--holder", "h", "--stamp-do"]
-    )
-    assert result.exit_code == 0
-    assert "do stamp skipped" in result.output
-    assert "node:never-acquired" in result.output
-
-
 def test_release_stamp_do_no_op_on_non_node_key_is_silent(cwd_tmp):
-    """A do row was never in play for a non-node: key (the success branch at
-    line 536 only stamps node: keys), so the no-op skip message must not
-    fire either - it would falsely imply a do row existed for this key."""
+    """A do row was never in play for a non-node: key (only node: keys stamp),
+    so the no-op skip message must not fire either - it would falsely imply a
+    do row existed for this key. The node-keyed skip lines themselves are the
+    parity goldens' contract (claim_release_parity stamp_do_noop_release)."""
     result = runner.invoke(
         cli, ["release", "dispatch:never-acquired", "--holder", "h", "--stamp-do"]
     )
     assert result.exit_code == 0
     assert "do stamp skipped" not in result.output
-
-
-def test_release_rollback_do_skipped_on_no_op_names_the_key(cwd_tmp):
-    """The rollback_do sibling of the stamp_do no-op skip above: a release
-    that unlinked nothing must not silently drop the rollback message
-    either, the same false-positive-by-omission class the stamp_do skip
-    fixes."""
-    result = runner.invoke(
-        cli, ["release", "node:never-acquired", "--holder", "h", "--rollback-do"]
-    )
-    assert result.exit_code == 0
-    assert "do rollback skipped" in result.output
-    assert "node:never-acquired" in result.output
 
 
 def test_status_free(cwd_tmp):
@@ -529,6 +478,10 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     seed_graph(g, '{"entries": [{"id": "ab-dotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+    # The wave-2 leaf stamps inside the fno-agents binary, so the store is
+    # reached through the state dir, not the in-process graph_json patch (an
+    # env var crosses the subprocess boundary; a monkeypatch cannot).
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path))
 
     acquire_claim(key="node:ab-dotest", holder="target-session:s",
                   ttl_ms=3_600_000, root=home)

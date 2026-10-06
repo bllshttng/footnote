@@ -13,7 +13,19 @@ pub fn run_sessions_map(_home: &AgentsHome) -> i32 {
 
     // Graph rows first: the lower-precedence answer, and the pr_number
     // source a claim's node reuses.
-    if let Ok(rows) = crate::graph_store::read_rows(&crate::graph_get::default_graph_path()) {
+    if let Ok(rows) = crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "sessions", "pr_number"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         for row in &rows {
             let Some(node) = row.get("id").and_then(Value::as_str) else {
                 continue;

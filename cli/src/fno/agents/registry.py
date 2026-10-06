@@ -496,7 +496,7 @@ class AgentEntry:
     keeper_child_pid: Optional[int] = None
     # The substrate this row was spawned on (v23): "pane", "thread" or
     # "headless", stored under the public names the capability table keys on
-    # (never "bg", the deprecated alias for thread). Stamped once at birth by
+    # (never the retired "bg" spelling). Stamped once at birth by
     # the writer that resolved the lane. None on rows whose writer cannot know
     # (adopt, manifest synthesis) - ABSENCE MEANS UNKNOWN, never "pane",
     # because a silent default would tell restore to resurrect a session that
@@ -649,6 +649,9 @@ class AgentEntry:
     context_used_pct: Optional[int] = None
     context_used_tokens: Optional[int] = None
     context_window_tokens: Optional[int] = None
+    tool_calls: Optional[int] = None
+    tool_errors: Optional[int] = None
+    harness_args: list[str] = field(default_factory=list)
     context_measured_at: Optional[str] = None
     mail_unread: Optional[int] = None
     harness_title: Optional[str] = None

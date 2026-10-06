@@ -9,9 +9,21 @@
 //! Python leaf (`tests/claim_acquire_parity.rs`) are the contract.
 
 pub mod acquire;
+pub mod refresh;
+pub mod release;
 
 use serde_json::Value;
 use std::path::PathBuf;
+
+/// typer 0.27's UsageError layout, shared by the leaves whose goldens pin
+/// the exact lines.
+pub(crate) fn usage_refusal(usage: &str, help_hint: &str, detail: &str) -> i32 {
+    eprintln!("Usage: {usage}");
+    eprintln!("Try '{help_hint}' for help.");
+    eprintln!();
+    eprintln!("{detail}");
+    2
+}
 
 /// `--ttl` expression ("30m" / "1h" / "3600s" / "5000") into milliseconds.
 /// `Ok(None)` for the empty string (the caller decides the default); plain
@@ -142,16 +154,11 @@ fn owned_registry_effort(harness: &str, session_id: &str) -> Option<String> {
     None
 }
 
-/// Open the do lifecycle row at claim acquire (mirrors
-/// `_stamp_do_on_acquire`): best-effort, node-keyed, named skips on stderr,
-/// never fails the acquire.
-pub fn stamp_do_on_acquire(key: &str, claim: &crate::claims::ClaimRecord, holder: &str) {
-    let Some((_, node_id)) = key.split_once(':') else {
-        return;
-    };
-    if node_id.is_empty() {
-        return;
-    }
+/// The (harness, session_id) an execute provenance row is written under:
+/// the OWNED identity, ambient only as the fallback when the owned values
+/// are absent (mirrors `_owned_do_identity`; the acquire and release stamps
+/// must agree on the row key so release fills the row acquire opened).
+fn owned_do_identity(claim: &crate::claims::ClaimRecord, holder: &str) -> (String, String) {
     let ambient = crate::claims::resolve_identity();
     let harness = claim
         .harness
@@ -167,17 +174,48 @@ pub fn stamp_do_on_acquire(key: &str, claim: &crate::claims::ClaimRecord, holder
         .map(str::to_string)
         .or_else(|| ambient.0.filter(|s| !s.trim().is_empty()))
         .unwrap_or_default();
+    (harness, session_id)
+}
+
+/// The `(node_id, harness, session_id, started_at, effort)` naming the do row
+/// for this claim, or None after printing the named skip (mirrors
+/// `_do_row_coordinates`): every do-row writer addresses the SAME row, and
+/// `started_at` is the claim's own acquire time. `action` names the caller
+/// in the skip line.
+fn do_row_coordinates(
+    key: &str,
+    claim: &crate::claims::ClaimRecord,
+    holder: &str,
+    action: &str,
+) -> Option<(String, String, String, String, Option<String>)> {
+    let node_id = key.split_once(':').map(|(_, id)| id).unwrap_or("");
+    if node_id.is_empty() {
+        return None;
+    }
+    let (harness, session_id) = owned_do_identity(claim, holder);
     if harness.is_empty() || session_id.is_empty() {
         eprintln!(
-            "claim acquire: no owned identity for the execute provenance row of \
+            "claim {action}: no owned identity for the execute provenance row of \
              {node_id}; the row is skipped. Skipped."
         );
-        return;
+        return None;
     }
     let started = chrono::DateTime::from_timestamp_millis(claim.acquired_at)
         .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
         .unwrap_or_default();
     let effort = owned_registry_effort(&harness, &session_id);
+    Some((node_id.to_string(), harness, session_id, started, effort))
+}
+
+/// Open the do lifecycle row at claim acquire (mirrors
+/// `_stamp_do_on_acquire`): best-effort, node-keyed, named skips on stderr,
+/// never fails the acquire.
+pub fn stamp_do_on_acquire(key: &str, claim: &crate::claims::ClaimRecord, holder: &str) {
+    let Some((node_id, harness, session_id, started, effort)) =
+        do_row_coordinates(key, claim, holder, "acquire")
+    else {
+        return;
+    };
     let row = match crate::graph_keeper::session_row(
         "execute",
         &harness,
@@ -197,7 +235,7 @@ pub fn stamp_do_on_acquire(key: &str, claim: &crate::claims::ClaimRecord, holder
     let found = std::cell::Cell::new(false);
     let graph = crate::backlog::settings::graph_path();
     let ok = crate::backlog::mutate_single_row(&graph, "session_append", |rows| {
-        let (f, _added) = crate::graph_keeper::session_append(rows, node_id, row.clone())
+        let (f, _added) = crate::graph_keeper::session_append(rows, &node_id, row.clone())
             .map_err(|e| e.to_string())?;
         found.set(f);
         Ok(f)
@@ -211,6 +249,97 @@ pub fn stamp_do_on_acquire(key: &str, claim: &crate::claims::ClaimRecord, holder
             "claim acquire: execute provenance open skipped for {node_id} \
              (node not in graph); the row was not written. Skipped."
         );
+    }
+}
+
+/// Close the do lifecycle row the acquire stamp opened: fills `ended_at`
+/// (mirrors `_stamp_do_on_release`). Best-effort: a graph failure or missing
+/// identity is a named stderr skip and never fails the release.
+pub fn stamp_do_on_release(key: &str, claim: &crate::claims::ClaimRecord, holder: &str) {
+    let Some((node_id, harness, session_id, started, effort)) =
+        do_row_coordinates(key, claim, holder, "release")
+    else {
+        return;
+    };
+    let ended = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let row = match crate::graph_keeper::session_row(
+        "execute",
+        &harness,
+        &session_id,
+        effort.as_deref(),
+        Some(&started),
+        Some(&ended),
+        None,
+        None,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("claim release: execute provenance stamp skipped for {node_id}: {e}");
+            return;
+        }
+    };
+    let found = std::cell::Cell::new(false);
+    let graph = crate::backlog::settings::graph_path();
+    let ok = crate::backlog::mutate_single_row(&graph, "session_append", |rows| {
+        let (f, _added) = crate::graph_keeper::session_append(rows, &node_id, row.clone())
+            .map_err(|e| e.to_string())?;
+        found.set(f);
+        Ok(f)
+    });
+    if let Err(e) = ok {
+        eprintln!("claim release: execute provenance stamp skipped for {node_id}: {e}");
+        return;
+    }
+    if !found.get() {
+        eprintln!(
+            "claim release: execute provenance stamp skipped for {node_id} \
+             (node not in graph); the row was not written. Skipped."
+        );
+    }
+}
+
+/// Drop the open do row this claim's acquire opened, for a releaser whose
+/// post-acquire validation refused it (mirrors `_rollback_do_on_release`).
+/// The graph primitive only removes an OPEN row whose started_at equals this
+/// claim's acquire time; best-effort and named on skip.
+pub fn rollback_do_on_release(key: &str, claim: &crate::claims::ClaimRecord, holder: &str) {
+    let Some((node_id, harness, session_id, started, _effort)) =
+        do_row_coordinates(key, claim, holder, "release --rollback-do")
+    else {
+        return;
+    };
+    let outcome = std::cell::Cell::new((false, false));
+    let graph = crate::backlog::settings::graph_path();
+    let ok = crate::backlog::mutate_single_row(&graph, "session_remove_open", |rows| {
+        let (f, removed) = crate::graph_keeper::session_remove_open(
+            rows,
+            &node_id,
+            "execute",
+            &harness,
+            &session_id,
+            &started,
+        )
+        .map_err(|e| e.to_string())?;
+        outcome.set((f, removed));
+        Ok(f || removed)
+    });
+    match ok {
+        Err(e) => {
+            eprintln!("claim release: execute provenance rollback skipped for {node_id}: {e}");
+        }
+        _ if !outcome.get().0 => {
+            eprintln!(
+                "claim release: execute provenance rollback skipped for {node_id} \
+                 (node not in graph); nothing was removed. Skipped."
+            );
+        }
+        _ if !outcome.get().1 => {
+            eprintln!(
+                "claim release: no open execute row to roll back for {node_id} \
+                 (none was opened, or the row is already closed)."
+            );
+        }
+        _ => {}
     }
 }
 

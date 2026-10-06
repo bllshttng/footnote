@@ -597,6 +597,28 @@ pub fn reentry_mechanism_decide(ask: &Value) -> Value {
     }
 }
 
+/// The `wake_name` field's answer: the name a wake fork spawns under, read
+/// from the registry beside the reentry plan (same field-on-a-verb shape).
+/// An unreadable registry degrades to the alias, the answer a never-named
+/// uuid earns: a wake must never block mail on registry state.
+pub fn wake_name_decide(ask: &Value) -> Value {
+    let session_id = ask.get("session_id").and_then(Value::as_str).unwrap_or("");
+    if session_id.trim().is_empty() {
+        return serde_json::json!({ "refused": "session_id is required" });
+    }
+    let alias = format!("wake-{}", crate::identity::canonical_handle(session_id));
+    let home = crate::paths::AgentsHome::from_env();
+    let registry_path = home.registry_json();
+    let name = crate::state::load_registry(&registry_path)
+        .ok()
+        .map(|registry| crate::reentry::wake_spawn_name(&registry, &registry_path, session_id))
+        // An unreadable registry degrades through the tombstone before the
+        // alias: a stamped name is the better answer at every rung.
+        .or_else(|| crate::wake_name::lookup_beside(&registry_path, session_id))
+        .unwrap_or(alias);
+    serde_json::json!({ "name": name })
+}
+
 /// The verb entry: JSON payload on stdin, decision JSON on stdout (the
 /// spawn-overlay shape). Exit 0 even for a "no axes" answer; exit 2 only for
 /// transport-level faults (unreadable payload), which the caller reports as
@@ -701,6 +723,13 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         println!("{}", reentry_mechanism_decide(ask));
         return 0;
     }
+    // A `wake_name` field asks which name a wake fork spawns under: the
+    // session's last recorded registry name, else the wake- alias (same
+    // field-on-a-verb shape).
+    if let Some(ask) = parsed.get("wake_name") {
+        println!("{}", wake_name_decide(ask));
+        return 0;
+    }
     // A `reap_receipt` field asks the receipt builder for the Python
     // registry choke point's removal receipt (same field-on-a-verb shape).
     if let Some(ask) = parsed.get("reap_receipt") {
@@ -788,6 +817,35 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     }
     println!("{}", decide(&parsed));
     0
+}
+
+/// One crown flag the client parses into spawn params: typed here
+/// so a crowned codex thread row is crowned AT MINT - the seed turn
+/// enqueues inside the lane and must never submit to an uncrowned row.
+/// The level bound is the type the registry row stores (a u32 0..=2);
+/// territory and succession policy live at the Python seam.
+pub fn insert_crown_flag(
+    flag: &str,
+    args: &mut impl Iterator<Item = String>,
+    params: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    match flag {
+        "--crown" => {
+            let raw = args.next().ok_or("--crown needs a value")?;
+            let level = raw
+                .parse::<u32>()
+                .ok()
+                .filter(|l| *l <= 2)
+                .ok_or("--crown takes an integer level 0-2")?;
+            params.insert("crown_level".into(), Value::from(level));
+        }
+        "--crown-scope" => {
+            let scope = args.next().ok_or("--crown-scope needs a value")?;
+            params.insert("crown_scope".into(), Value::from(scope));
+        }
+        other => return Err(format!("unknown crown flag: {other}")),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

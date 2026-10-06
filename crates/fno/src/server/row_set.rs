@@ -9,8 +9,132 @@ use crate::proto::{AgentRow, AgentRowReceipt};
 
 use super::*;
 
+/// One row's tool-activity ring: the server samples the registry row's
+/// cumulative `(calls, errors)` pair on a 5s gate as fresh row sets arrive,
+/// pushing each closed interval's delta. The client only draws.
+#[derive(Default)]
+pub(super) struct ActivityRing {
+    /// The last sample's instant; `None` until the first due tick.
+    last: Option<std::time::Instant>,
+    /// The cumulative pair the last pushed cell covered. A not-yet-due tick
+    /// does not touch it, so the next due sample counts the whole gap as
+    /// one interval.
+    pushed: (u64, u64),
+    cells: std::collections::VecDeque<(u8, u8)>,
+}
+
+/// The ring cap and the sample gate: 8 intervals, at most one per 5s.
+pub(super) const ACTIVITY_CELLS: usize = 8;
+const ACTIVITY_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const ACTIVITY_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The row identity a ring rides: the claude transcript uuid where one
+/// exists, else the harness session id, else the label - the same key the
+/// tail pass and the truth probe join on.
+/// The ring store, a static beside the fold idiom (`model_price::FOLDS`):
+/// keyed by row identity, sampled through interior mutability so the read
+/// path can sample without a `&mut Core`. Rows the batches stop naming
+/// prune after ten idle minutes.
+static RINGS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ActivityRing>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn rings() -> std::sync::MutexGuard<'static, HashMap<String, ActivityRing>> {
+    RINGS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Sample the served row set against the static: one cell per row per
+/// [`ACTIVITY_EVERY`].
+pub(crate) fn sample_activity(rows: &[RegistryAgent]) {
+    sample_rings(&mut rings(), rows, std::time::Instant::now());
+}
+
+fn activity_key(a: &RegistryAgent) -> String {
+    a.claude_session_uuid
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| a.harness_session_id.clone())
+        .unwrap_or_else(|| a.name.clone())
+}
+
+/// The ring sampler, free so the gate math is testable without a `Core`:
+/// at most one cell per row per [`ACTIVITY_EVERY`]; a row the batch stops
+/// naming keeps its ring, and rings with no sample in ten minutes drop.
+pub(crate) fn sample_rings(
+    rings: &mut HashMap<String, ActivityRing>,
+    rows: &[RegistryAgent],
+    now: std::time::Instant,
+) {
+    rings.retain(|_, ring| {
+        ring.last
+            .is_none_or(|t| now.duration_since(t) < ACTIVITY_IDLE)
+    });
+    for a in rows {
+        let Some((calls, errors)) = a.tool_counts else {
+            continue;
+        };
+        let ring = rings.entry(activity_key(a)).or_default();
+        if ring
+            .last
+            .is_some_and(|t| now.duration_since(t) < ACTIVITY_EVERY)
+        {
+            continue;
+        }
+        ring.last = Some(now);
+        let cell = (
+            calls.saturating_sub(ring.pushed.0).min(u8::MAX as u64) as u8,
+            errors.saturating_sub(ring.pushed.1).min(u8::MAX as u64) as u8,
+        );
+        ring.pushed = (calls, errors);
+        ring.cells.push_back(cell);
+        while ring.cells.len() > ACTIVITY_CELLS {
+            ring.cells.pop_front();
+        }
+    }
+}
+
+/// Whether two cwd paths are checkouts of the SAME project:
+/// equal leaves, equal parents (sibling fno worktrees,
+/// `<base>/<repo>/<name>`), or one path's parent carries the other's leaf
+/// (canonical `<...>/footnote` beside worktree `<...>/footnote/wt-a`).
+/// The leaf-vs-leaf compare read every worktree as foreign and stamped
+/// `(footnote)` on cards (the operator's 2026-10-04 report). Two unparseable
+/// paths (empty cwds) read same-project: neither can show a paren anyway.
+pub(super) fn same_project(a: &str, b: &str) -> bool {
+    fn leaf(p: &str) -> Option<&str> {
+        let p = p.trim_end_matches('/');
+        if p.is_empty() {
+            None
+        } else {
+            p.rsplit('/').next()
+        }
+    }
+    fn parent(p: &str) -> Option<&str> {
+        let p = p.trim_end_matches('/');
+        p.rsplit_once('/')
+            .map(|(h, _)| h.trim_end_matches('/'))
+            .filter(|h| !h.is_empty())
+    }
+    let (la, lb) = (leaf(a), leaf(b));
+    la == lb && la.is_some()
+        || parent(a).and_then(leaf) == lb && lb.is_some()
+        || la == parent(b).and_then(leaf) && la.is_some()
+        || parent(a) == parent(b) && parent(a).is_some()
+}
+
 impl Core {
+    /// The served interval row for one agent: `None` when the row carries no
+    /// counts (no readable transcript), an empty ring reads as waiting.
+    pub(crate) fn activity_of(&self, a: &RegistryAgent) -> Option<Vec<(u8, u8)>> {
+        rings()
+            .get(&activity_key(a))
+            .map(|r| r.cells.iter().copied().collect())
+    }
+
     pub(crate) fn agent_rows(&self) -> Vec<AgentRow> {
+        sample_activity(&self.agents);
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
         // double-render as watch-only). Indexed like `self.agents`.
@@ -43,6 +167,22 @@ impl Core {
                     .map(|d| (holder.as_str(), d.clone()))
             })
             .collect();
+        // A squad-matched row's cwd_base is its FOREIGN-cwd
+        // signal, so a row working in another checkout of its own squad's
+        // project (a worktree beside the canonical, or a sibling worktree)
+        // carries none - leaf-vs-leaf stamped `(footnote)` on every card.
+        // Squad-less rows keep the plain basename for the elsewhere paren.
+        let squad_cwd_of = |squad_id: Option<u64>| -> Option<String> {
+            squad_id
+                .and_then(|id| self.session.squads.iter().find(|s| s.id == id))
+                .map(|s| s.canonical_cwd().to_string())
+        };
+        let foreign_cwd_base = |cwd: &str, squad_cwd: Option<&str>| -> Option<String> {
+            match squad_cwd {
+                Some(sc) if !sc.is_empty() && !same_project(cwd, sc) => cwd_basename(cwd),
+                _ => cwd_basename(cwd),
+            }
+        };
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
         //    bare shell pane a first-class row.
@@ -106,6 +246,7 @@ impl Core {
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
                                 dnd: a.dnd,
+                                held_conversation: a.held_conversation,
                                 unmeasured,
                                 liveness_measured_at: a.liveness_measured_at,
                                 context_used_pct: a.context_used_pct,
@@ -128,7 +269,7 @@ impl Core {
                                 seen: self.seen.contains(&pid),
                                 // (US3) cwd basename on every row so the
                                 // sideline can flag a foreign-cwd join.
-                                cwd_base: cwd_basename(&a.cwd),
+                                cwd_base: foreign_cwd_base(&a.cwd, Some(squad.canonical_cwd())),
                                 tombstone: false,
                                 subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                                 // Structural roster-dir tag wins (Locked
@@ -153,6 +294,7 @@ impl Core {
                                 compaction_count: self
                                     .truth_reading(a)
                                     .and_then(|t| t.compaction_count),
+                                activity: self.activity_of(a),
                                 resumable: false,
                                 no_pane_reason: None,
                                 // A registry-hosted pane's badge is its primary
@@ -199,6 +341,7 @@ impl Core {
                                 exited: pane_dead
                                     || e.is_some_and(|entry| entry.refused_worker.is_some()),
                                 dnd: false,
+                                held_conversation: false,
                                 unmeasured: false,
                                 liveness_measured_at: None,
                                 context_used_pct: None,
@@ -207,6 +350,7 @@ impl Core {
                                 session_cost_cents: None,
                                 session_tokens: None,
                                 compaction_count: None,
+                                activity: None,
                                 started_at: None,
                                 mail_unread: None,
                                 node: None,
@@ -216,7 +360,10 @@ impl Core {
                                 external: false,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
-                                cwd_base: cwd_basename(e.map(|e| e.cwd.as_str()).unwrap_or("")),
+                                cwd_base: foreign_cwd_base(
+                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                    Some(squad.canonical_cwd()),
+                                ),
                                 tombstone: false,
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
@@ -306,6 +453,7 @@ impl Core {
                             true
                         },
                         dnd: a.dnd,
+                        held_conversation: a.held_conversation,
                         unmeasured: false,
                         liveness_measured_at: None,
                         context_used_pct: a.context_used_pct,
@@ -324,7 +472,7 @@ impl Core {
                         external: a.external,
                         tab: None,
                         seen: self.seen.contains(pane),
-                        cwd_base: cwd_basename(&a.cwd),
+                        cwd_base: foreign_cwd_base(&a.cwd, squad_cwd_of(squad).as_deref()),
                         tombstone: false,
                         subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                         account: a.account.clone(),
@@ -342,6 +490,7 @@ impl Core {
                         session_cost_cents: self.truth_cost(a).0,
                         session_tokens: self.truth_cost(a).1,
                         compaction_count: self.truth_reading(a).and_then(|t| t.compaction_count),
+                        activity: self.activity_of(a),
                         resumable,
                         no_pane_reason: if detached_live {
                             Some(AgentNoPaneReason::LivePaneless)
@@ -367,7 +516,7 @@ impl Core {
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (AC2-UI), a squad-matched row for the foreign-cwd
                     // exception subline.
-                    let cwd_base = cwd_basename(&a.cwd);
+                    let cwd_base = foreign_cwd_base(&a.cwd, squad_cwd_of(squad).as_deref());
                     out.push(AgentRow {
                         harness: a.harness.clone(),
                         model: a.model.clone(),
@@ -388,6 +537,7 @@ impl Core {
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
                         dnd: a.dnd,
+                        held_conversation: a.held_conversation,
                         unmeasured: a.liveness == agents_view::Liveness::Unmeasured,
                         liveness_measured_at: a.liveness_measured_at,
                         context_used_pct: a.context_used_pct,
@@ -428,6 +578,7 @@ impl Core {
                         session_cost_cents: self.truth_cost(a).0,
                         session_tokens: self.truth_cost(a).1,
                         compaction_count: self.truth_reading(a).and_then(|t| t.compaction_count),
+                        activity: self.activity_of(a),
                         resumable: self.row_resumable_in_session(a),
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
@@ -550,6 +701,7 @@ impl Core {
                 reason,
                 exited,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 liveness_measured_at: None,
                 context_used_pct: None,
@@ -558,6 +710,7 @@ impl Core {
                 session_cost_cents: None,
                 session_tokens: None,
                 compaction_count: None,
+                activity: None,
                 started_at: None,
                 mail_unread: None,
                 node: None,

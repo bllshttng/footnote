@@ -40,6 +40,12 @@ mod watch_projection;
 #[path = "lead_checkin_posture.rs"]
 mod posture;
 
+#[path = "lead_checkin_peer_blocked.rs"]
+mod peer_blocked;
+
+#[path = "lead_checkin_prompt_parked.rs"]
+mod prompt_parked;
+
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
@@ -186,8 +192,11 @@ pub(crate) fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
 /// placeholder beat. Takes the directory and scope rather than `Ctx` so the
 /// stop gate's stale-doc resolver calls the same one.
 pub(crate) fn team_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathBuf, String> {
-    let key = format!("team-{}", sanitize_scope_key(scope));
-    if key == "team-" {
+    // The FILENAME key keeps the crown- spelling: the docs on disk and both
+    // writers (the retired Python verb, the native handoff verb) mint
+    // crown-, so a reader keying team- would find nothing, ever.
+    let key = format!("crown-{}", sanitize_scope_key(scope));
+    if key == "crown-" {
         return Err("empty scope names no canon doc".into());
     }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -216,11 +225,17 @@ pub(crate) fn team_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathB
 
 pub(crate) fn sanitize_scope_key(scope: &str) -> String {
     let mut out = String::new();
+    let mut in_run = false;
     for ch in scope.trim().chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
             out.push(ch);
-        } else {
+            in_run = false;
+        } else if !in_run {
+            // One dash per unsafe RUN, the Python writer's
+            // re.sub(r"[^A-Za-z0-9._-]+", "-") shape, so reader keys match
+            // the docs the verb wrote.
             out.push('-');
+            in_run = true;
         }
     }
     out.trim_matches('-').to_string()
@@ -733,7 +748,7 @@ fn r_team() -> Result<Value, String> {
                     let reading = match registry_read
                         .as_ref()
                         .ok()
-                        .map(|r| crate::lead_state::terminal_name_join(&r.entries, &s.row))
+                        .map(|r| crate::team_split::terminal_join(&r.entries, s))
                     {
                         Some(crate::lead_state::NameJoin::One(e)) => {
                             crate::team_split::dead_call(e, boot)
@@ -966,7 +981,7 @@ fn r_wake_meter(since: Option<&str>) -> Result<Value, String> {
 }
 
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
-    let (_, out, err) = fno_verb(&["agents", "lead", "drain", &ctx.scope])?;
+    let (_, out, err) = fno_verb(&["agents", "org", "drain", &ctx.scope])?;
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("drain payload did not parse: {e}: {}", err.trim()))?;
     Ok(payload.get("undelivered").cloned().unwrap_or(Value::Null))
@@ -1179,6 +1194,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("blocked_child", r_blocked_child(&beat.board));
     take("org", r_org(&beat.folded));
     take("territory", r_territory(ctx));
+    take("peer_blocked", peer_blocked::reading());
     take("state_root_drift", r_state_root_drift());
     take("capacity", r_capacity());
     take(
@@ -1231,6 +1247,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             .and_then(|session| crate::mail_hold::self_status(&session))
     });
     take("parked", r_parked());
+    take("prompt_parked", prompt_parked::reading());
     readings
 }
 
@@ -1375,6 +1392,16 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             cp.value.get("attention").cloned().unwrap_or(json!([])),
         );
     }
+    if let Some(pb) = get("peer_blocked").filter(|r| r.ok) {
+        data.insert("peer_blocked_rows".into(), pb.value.clone());
+    }
+    if let Some(pp) = get("prompt_parked").filter(|r| r.ok) {
+        data.insert("prompt_parked".into(), pp.value.clone());
+        data.insert(
+            "prompt_parked_rows".into(),
+            pp.value.get("rows").cloned().unwrap_or(json!([])),
+        );
+    }
     if let Some(hold) = get("self_hold").filter(|r| r.ok) {
         data.insert("self_hold".into(), hold.value.clone());
     }
@@ -1503,17 +1530,11 @@ fn derive_change(
                 .collect()
         })
         .unwrap_or_default();
+    attention.extend(peer_blocked::attention(data));
+    attention.extend(prompt_parked::attention(data));
     let self_hold = data.get("self_hold");
-    if self_hold
-        .and_then(|hold| hold.get("clock_live"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || self_hold
-            .and_then(|hold| hold.get("delivery_policy"))
-            .and_then(Value::as_str)
-            == Some("bus-only")
-    {
-        attention.push("DND on".into());
+    if let Some(label) = crate::hold_label::hold_attention(self_hold.unwrap_or(&Value::Null)) {
+        attention.push(label);
     }
     let stale_skills: Vec<&str> = data
         .get("skill_drift_stale")
@@ -1526,12 +1547,12 @@ fn derive_change(
             stale_skills.join(", ")
         ));
     }
-    if data
-        .get("refusal_rate_rising")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        attention.push("refusal rate rising two consecutive beats".into());
+    if data.get("refusal_rate_rising").and_then(Value::as_bool) == Some(true) {
+        let name = data.get("harness").and_then(Value::as_str);
+        attention.push(format!(
+            "refusal rate rising two consecutive beats: handoff point ({})",
+            name.unwrap_or("unknown")
+        ));
     }
     if data
         .get("wake_over")
@@ -1659,6 +1680,15 @@ fn render_lines_with(
 ) -> Vec<String> {
     let by_name = |name: &str| readings.iter().find(|r| r.name == name);
     let failed = |name: &str| readings.iter().find(|r| r.name == name && !r.ok);
+    // The one READER FAILED push every render block shares: true when the
+    // reading answered, false after pushing the failure line itself.
+    let ok = |name: &str, lines: &mut Vec<String>| match failed(name) {
+        Some(r) => {
+            lines.push(format!("READER FAILED {name}: {}", r.error));
+            false
+        }
+        None => true,
+    };
     let mut lines: Vec<String> = Vec::new();
 
     if let Some(r) = by_name("machine") {
@@ -1992,6 +2022,8 @@ fn render_lines_with(
         }
     }
     lines.extend(posture::lines(readings));
+    lines.extend(peer_blocked::lines(readings));
+    lines.extend(prompt_parked::lines(readings));
 
     match failed("refusal_rate") {
         Some(r) => lines.push(format!("READER FAILED refusal_rate: {}", r.error)),
@@ -2106,41 +2138,33 @@ fn render_lines_with(
         }
     }
 
-    match failed("drain") {
-        Some(r) => lines.push(format!("READER FAILED drain: {}", r.error)),
-        None => lines.push(format!(
+    if ok("drain", &mut lines) {
+        lines.push(format!(
             "drain: undelivered {}",
             dash(data.get("undelivered"))
-        )),
+        ));
     }
-    match failed("main_ci") {
-        Some(r) => lines.push(format!("READER FAILED main_ci: {}", r.error)),
-        None => {
-            lines.push(format!(
-                "main ci: {}",
-                crate::main_ci::main_ci_render(data.get("main_ci"))
-            ));
-            for line in crate::main_ci::main_ci_stale_lines(data.get("main_ci"), chrono::Utc::now())
-            {
-                lines.push(line);
-            }
+    if ok("main_ci", &mut lines) {
+        lines.push(format!(
+            "main ci: {}",
+            crate::main_ci::main_ci_render(data.get("main_ci"))
+        ));
+        for line in crate::main_ci::main_ci_stale_lines(data.get("main_ci"), chrono::Utc::now()) {
+            lines.push(line);
         }
     }
-    match failed("control_plane") {
-        Some(r) => lines.push(format!("READER FAILED control_plane: {}", r.error)),
-        None => {
-            let attention: Vec<&str> = data
-                .get("control_plane_attention")
-                .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-            if attention.is_empty() {
-                lines.push("control plane: ok".into());
-            } else {
-                lines.push("control plane:".into());
-                for entry in attention {
-                    lines.push(format!("  {entry}"));
-                }
+    if ok("control_plane", &mut lines) {
+        let attention: Vec<&str> = data
+            .get("control_plane_attention")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        if attention.is_empty() {
+            lines.push("control plane: ok".into());
+        } else {
+            lines.push("control plane:".into());
+            for entry in attention {
+                lines.push(format!("  {entry}"));
             }
         }
     }
@@ -2165,71 +2189,65 @@ fn render_lines_with(
                 .and_then(Value::as_str)
                 .unwrap_or("none");
             lines.push(format!("self_hold: {clock}; delivery_policy {policy}"));
-            if clock_live || policy == "bus-only" {
-                lines.push("attention: DND on".into());
+            if let Some(label) = crate::hold_label::hold_attention(hold) {
+                lines.push(format!("attention: {label}"));
             }
         }
     }
-    match failed("state_root_drift") {
-        Some(r) => lines.push(format!("READER FAILED state_root_drift: {}", r.error)),
-        None => {
-            let drift = by_name("state_root_drift")
-                .map(|r| &r.value)
-                .unwrap_or(&Value::Null);
-            let count = drift
-                .get("undocumented")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if count == 0 {
-                lines.push("state_root_drift: clean".into());
-            } else {
-                let entries: Vec<String> = drift
-                    .get("entries")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .take(5)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let more = if count > 5 { ", ..." } else { "" };
-                lines.push(format!(
-                    "state_root_drift: {count} undocumented top-level entries: {}{more}",
-                    entries.join(", ")
-                ));
-            }
-        }
-    }
-    match failed("parked") {
-        Some(r) => lines.push(format!("READER FAILED parked: {}", r.error)),
-        None => {
-            let rows = by_name("parked")
-                .and_then(|r| r.value.get("rows"))
-                .and_then(|o| o.as_array())
-                .cloned()
+    if ok("state_root_drift", &mut lines) {
+        let drift = by_name("state_root_drift")
+            .map(|r| &r.value)
+            .unwrap_or(&Value::Null);
+        let count = drift
+            .get("undocumented")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if count == 0 {
+            lines.push("state_root_drift: clean".into());
+        } else {
+            let entries: Vec<String> = drift
+                .get("entries")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .take(5)
+                        .collect()
+                })
                 .unwrap_or_default();
-            if rows.is_empty() {
-                lines.push("parked: none".into());
-            } else {
-                lines.push("parked:".into());
-                for row in rows {
-                    let key = row.get("key").and_then(Value::as_str).unwrap_or("?");
-                    let node = row.get("node").and_then(Value::as_str).unwrap_or("-");
-                    let detail = row
-                        .get("reason_detail")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    let age = row.get("age_hours").and_then(Value::as_i64).unwrap_or(-1);
-                    let age_s = if age < 0 {
-                        "?".to_string()
-                    } else {
-                        format!("{age}h")
-                    };
-                    lines.push(format!(
-                        "  {key} {detail} ({age_s}, node {node}); remedy: fno-agents pr-park unpark {key}"
-                    ));
-                }
+            let more = if count > 5 { ", ..." } else { "" };
+            lines.push(format!(
+                "state_root_drift: {count} undocumented top-level entries: {}{more}",
+                entries.join(", ")
+            ));
+        }
+    }
+    if ok("parked", &mut lines) {
+        let rows = by_name("parked")
+            .and_then(|r| r.value.get("rows"))
+            .and_then(|o| o.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if rows.is_empty() {
+            lines.push("parked: none".into());
+        } else {
+            lines.push("parked:".into());
+            for row in rows {
+                let key = row.get("key").and_then(Value::as_str).unwrap_or("?");
+                let node = row.get("node").and_then(Value::as_str).unwrap_or("-");
+                let detail = row
+                    .get("reason_detail")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let age = row.get("age_hours").and_then(Value::as_i64).unwrap_or(-1);
+                let age_s = if age < 0 {
+                    "?".to_string()
+                } else {
+                    format!("{age}h")
+                };
+                lines.push(format!(
+                    "  {key} {detail} ({age_s}, node {node}); remedy: fno-agents pr-park unpark {key}"
+                ));
             }
         }
     }
@@ -2340,7 +2358,7 @@ fn frontmatter_scope(text: &str) -> Option<&str> {
     None
 }
 
-const FAQ_PROMPT: &str = "fno agents lead faq add --question \"...\" --answer \"...\" \
+const FAQ_PROMPT: &str = "fno agents org faq add --question \"...\" --answer \"...\" \
 --specimen \"<node or PR>, <date>\" --exit \"<the change that retires this>\"";
 
 /// The one `lead_checkin` writer. `source` is the emitting half (`loop` for
@@ -2403,7 +2421,7 @@ fn finish_checkin(
     }
     if emit_requested && !emitted {
         eprintln!(
-            "lead-checkin: beat ran but no lead_checkin row was journalled; fno agents lead history will not see it"
+            "lead-checkin: beat ran but no lead_checkin row was journalled; fno agents org history will not see it"
         );
         return 3;
     }
@@ -2673,6 +2691,7 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     };
     let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
+    data.insert("harness".into(), json!(crate::claims::resolve_identity().1));
     if let Some(holder) = holder.as_deref() {
         data.insert("holder_session".into(), json!(holder));
     }
@@ -2694,6 +2713,8 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
     }
     let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
+    // A worker ENTERING a prompt announces to the bell once; a failed announce never fails the beat.
+    prompt_parked::announce_entries(&data, previous_data);
     // The lineup's remaining reads: the registry for a seated row's
     // harness/model and the manifest for the recorded queue. The graph read
     // already happened before the --queue write. A failed read is a named
@@ -2791,13 +2812,15 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
                 })
         })
         .unwrap_or_default();
-    if let Err(e) = crate::team_names::bind_and_refresh(
+    match crate::team_names::bind_and_refresh(
         &crate::paths::AgentsHome::from_env().team_names_json(),
         &crate::paths::AgentsHome::from_env().registry_json(),
         &ctx.scope,
         owned_ids,
     ) {
-        lines.push(format!("team name: {e}"));
+        Err(e) => lines.push(format!("team name: {e}")),
+        Ok(Some(pending)) => crate::succession_txn::verified(&ctx.scope, &ctx.cwd, &pending),
+        Ok(None) => {}
     }
     if model_change.as_deref().map(|t| !t.trim().is_empty()) == Some(true) {
         lines.push(format!("diff: {derived}"));
@@ -2821,6 +2844,11 @@ pub fn run_lead_checkin(args: &[String]) -> i32 {
             .unwrap_or(true);
     if faq_needed {
         lines.push(FAQ_PROMPT.into());
+    }
+    // The predecessor's open reforms ride every beat until filled: the
+    // heir's first beat names each unfilled part4 so it gets done.
+    for path in crate::eval_part4::unfilled_part4s(&ctx.cwd) {
+        lines.push(format!("unfilled part4: {}", path.display()));
     }
 
     let emitted = if ctx.emit {
@@ -3021,6 +3049,22 @@ mod tests {
         assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
+        assert_eq!(sanitize_scope_key("a, b"), "a-b");
+    }
+
+    #[test]
+    fn team_handoff_doc_reads_the_crown_keyed_writer() {
+        // The persisted FILENAME key is crown- (both writers mint it); the
+        // crown->team rename must never split the reader from the docs.
+        let base = std::env::temp_dir().join(format!("fno-checkin-dockey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("handoffs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("20261001-crown-fno-x-aaaa.md");
+        std::fs::write(&doc, "x").unwrap();
+        let got = team_handoff_doc(&dir, "fno-x-aaaa").unwrap();
+        assert_eq!(got, doc);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A repo fixture whose escalations dir resolves deterministically through
@@ -4764,6 +4808,7 @@ mod tests {
             }],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-dead".into(),
+                session: None,
                 scope: "shared".into(),
                 stored_status: "orphaned".into(),
             }],
@@ -4801,6 +4846,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-fno-g6".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],
@@ -4825,6 +4871,7 @@ mod tests {
             double_ruled: vec![],
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-gone".into(),
+                session: None,
                 scope: "fno".into(),
                 stored_status: "exited".into(),
             }],

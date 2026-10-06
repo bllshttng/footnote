@@ -847,6 +847,30 @@ pub fn resolve_reentry(
     Ok(plan)
 }
 
+/// The wake fork's spawn name: the session's LAST recorded registry name for
+/// this uuid, whatever the row's status or harness - a reaped, orphaned or
+/// non-claude row revives under the name the board and mail already know.
+/// A stopped row whose retirement dropped it answers from the wake-name
+/// tombstone. The `wake-<handle>` alias is only for a uuid that
+/// never named a row. The name is the worker-to-node join, so the rule must
+/// not gate it on status.
+pub fn wake_spawn_name(registry: &Registry, registry_path: &Path, session_id: &str) -> String {
+    named_row(registry, session_id)
+        .or_else(|| crate::wake_name::lookup_beside(registry_path, session_id))
+        .unwrap_or_else(|| format!("wake-{}", crate::identity::canonical_handle(session_id)))
+}
+
+/// The last registry row this uuid named, newest first. The single read the
+/// wake name answers from; the tombstone fallback lives on the caller.
+fn named_row(registry: &Registry, session_id: &str) -> Option<String> {
+    registry
+        .entries
+        .iter()
+        .rev()
+        .find(|e| e.harness_session_id.as_deref() == Some(session_id) && !e.name.is_empty())
+        .map(|e| e.name.clone())
+}
+
 /// The `holder <session-id>...` action: recognized when the first arg is the
 /// word, at least one id follows, and every id is a lowercase UUID. The shape
 /// check keeps the word off the agent-name path: `reentry-plan holder` alone
@@ -1868,6 +1892,53 @@ mod tests {
             ]
         );
         assert_eq!(plan.argv[7], "9a1b2c3d-eeee-ffff-0000-111122223333");
+
+        // The revival NAME is the row's own, whatever its status or harness:
+        // an orphaned claude row and a codex row both wake under the name the
+        // board and mail already know; only a uuid that never named a row
+        // falls back to the wake- alias.
+        let mut orphaned = row("t-claude-glm");
+        orphaned.status = crate::AgentStatus::Orphaned;
+        orphaned.harness_session_id = Some("9df7d6a9-dee8-4823-9c49-ce174840e15d".into());
+        let mut codex = row("t-codex-worker");
+        codex.harness = Some("codex".into());
+        codex.status = crate::AgentStatus::Exited;
+        codex.harness_session_id = Some("aaaabbbb-cccc-dddd-eeee-ffff00001111".into());
+        let named = reg(vec![orphaned, codex]);
+        let reg_path = std::path::Path::new("/nonexistent/fno/wake-test/registry.json");
+        assert_eq!(
+            wake_spawn_name(&named, reg_path, "9df7d6a9-dee8-4823-9c49-ce174840e15d"),
+            "t-claude-glm"
+        );
+        assert_eq!(
+            wake_spawn_name(&named, reg_path, "aaaabbbb-cccc-dddd-eeee-ffff00001111"),
+            "t-codex-worker"
+        );
+        assert_eq!(
+            wake_spawn_name(&named, reg_path, "00000000-0000-0000-0000-000000000000"),
+            "wake-00000000"
+        );
+    }
+
+    /// The row is gone (stopped, then the retirement sweep dropped
+    /// it), but the stop stamped the wake-name tombstone, so the wake still
+    /// revives under the name the board and mail already know.
+    #[test]
+    fn wake_after_stop_keeps_the_tombstoned_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg_path = dir.path().join("registry.json");
+        crate::wake_name::record_at(
+            &dir.path().join("wake_names.json"),
+            "cccdddd-0000-0000-0000-000000000001",
+            "t-x8ad3-glm",
+            1,
+        )
+        .unwrap();
+        let named = reg(vec![]);
+        assert_eq!(
+            wake_spawn_name(&named, &reg_path, "cccdddd-0000-0000-0000-000000000001"),
+            "t-x8ad3-glm"
+        );
     }
 
     #[test]

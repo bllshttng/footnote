@@ -55,6 +55,11 @@ pub(crate) fn open(view: &mut View, key: String) {
         };
         super::feed_detail::info_row("fno id", g("fno_id"), &mut rows);
         super::feed_detail::info_row("session id", g("session_id"), &mut rows);
+        super::feed_detail::info_row(
+            "short id",
+            g("session_id").and_then(|id| id.get(..8).map(str::to_string)),
+            &mut rows,
+        );
         super::feed_detail::info_row("harness", g("harness"), &mut rows);
         super::feed_detail::info_row("effort", g("effort"), &mut rows);
         super::feed_detail::info_row("node", g("node"), &mut rows);

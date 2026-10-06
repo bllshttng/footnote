@@ -1,0 +1,1 @@
+unknown decision_span data.span_kind: 'vibe' (allowed: ['ask', 'route', 'correction', 'block', 'nudge', 'notify', 'merge_landed', 'merge_armed', 'merge_requested', 'merged_outside_fno'])

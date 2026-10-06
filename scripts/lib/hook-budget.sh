@@ -61,7 +61,15 @@ hook_cores() {
 
 # The seconds an optional hook may keep its turn waiting. Never zero: the
 # busy tier is the floor, because the reads must run (see the contract above).
+# FNO_HOOK_BUDGET_SECS pins both tiers outright: a test harness runs nudge
+# LOGIC on a shared runner whose load is a property of the shard, not the
+# code, so the harness pins a generous budget instead of leaving assertion
+# outcomes to the co-tenants. Unset in production, where the tiers rule.
 hook_budget_secs() {
+    case "${FNO_HOOK_BUDGET_SECS:-}" in
+        '' | *[!0-9]*) ;;                       # unset or junk: the tiers rule
+        *) printf '%s' "$FNO_HOOK_BUDGET_SECS"; return 0 ;;
+    esac
     local load
     load=$(hook_load1)
     case "$load" in

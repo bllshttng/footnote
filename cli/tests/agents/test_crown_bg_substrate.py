@@ -119,7 +119,7 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",
-        "--substrate", "bg", "--cwd", str(bg_home), "--crown", "epic-x", "--succeed",
+        "--substrate", "thread", "--cwd", str(bg_home), "--crown", "epic-x", "--succeed",
     )
     assert result.exit_code == 0, result.output
 
@@ -142,7 +142,7 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     """No parent session env == a human's own shell, same rule as the pane path."""
     result = _spawn(
         "spawn", "--name", "king-bg-human", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "alpha",
+        "--substrate", "thread", "--crown", "alpha",
     )
     assert result.exit_code == 0, result.output
     assert _row("king-bg-human").crown_grantor == "human"
@@ -150,12 +150,47 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     assert "king loop disabled" in result.output
 
 
+def test_promote_is_primary_and_crown_aliases_with_a_notice(
+    bg_home, monkeypatch
+) -> None:
+    """`--promote` is the taught spelling and lands the same registry fields;
+    `--crown` still answers for one release and prints the replacement. The
+    notice reads the process argv, so the test pins the argv it asserts. The
+    alias leg rides the headless refusal: the fake claude mints one short id,
+    so a second live row would collide in the registry."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fno", "agents", "spawn", "--name", "promote-primary", "-H", "claude",
+         "reign", "--substrate", "thread", "--promote", "alpha"],
+    )
+    result = _spawn(
+        "spawn", "--name", "promote-primary", "-H", "claude", "reign",
+        "--substrate", "thread", "--promote", "alpha",
+    )
+    assert result.exit_code == 0, result.output
+    assert "is now" not in result.output
+    assert _row("promote-primary").crown_level == 1
+    assert _row("promote-primary").crown_scope == "alpha"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fno", "agents", "spawn", "--crown", "alpha",
+         "--substrate", "headless", "hi"],
+    )
+    aliased = _spawn(
+        "spawn", "--crown", "alpha", "--substrate", "headless", "hi",
+    )
+    assert aliased.exit_code == 2, aliased.output
+    assert "--crown is now --promote" in aliased.output
+    assert "--promote needs a session that outlives the grant" in aliased.output
+
+
 def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> None:
     """The stamp is opt-in: an ordinary bg spawn is not accidentally crowned."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
 
     result = _spawn(
-        "spawn", "--name", "plain-bg", "-H", "claude", "work", "--substrate", "bg"
+        "spawn", "--name", "plain-bg", "-H", "claude", "work", "--substrate", "thread"
     )
     assert result.exit_code == 0, result.output
 
@@ -189,14 +224,14 @@ def test_bg_spawn_refuses_a_duplicate_crown_before_launch(bg_home, monkeypatch) 
 
     result = _spawn(
         "spawn", "--name", "pretender", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-x",
+        "--substrate", "thread", "--crown", "epic-x",
     )
     assert result.exit_code == 2
 
     assert not [e for e in load_registry() if e.name == "pretender"], (
         "a refused crown must launch nothing"
     )
-    assert "--succeed" in result.output
+    assert "--hand-off" in result.output
 
 
 def test_bg_spawn_refuses_a_crown_over_one_member_of_a_live_set(bg_home, monkeypatch) -> None:
@@ -222,7 +257,7 @@ def test_bg_spawn_refuses_a_crown_over_one_member_of_a_live_set(bg_home, monkeyp
 
     result = _spawn(
         "spawn", "--name", "pretender", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-x",
+        "--substrate", "thread", "--crown", "epic-x",
     )
     assert result.exit_code == 2
 
@@ -255,7 +290,7 @@ def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatc
 
     result = _spawn(
         "spawn", "--name", "successor", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-y",
+        "--substrate", "thread", "--crown", "epic-y",
     )
     assert result.exit_code == 0, result.output
     assert _row("successor").crown_level == 2
@@ -298,7 +333,7 @@ def test_refusal_does_not_claim_bg_is_unsupported(bg_home) -> None:
         "-p", "--crown", "epic-z",
     )
     assert "not yet supported" not in result.output
-    assert "--substrate pane" in result.output and "--substrate bg" in result.output
+    assert "--substrate pane" in result.output and "--substrate thread" in result.output
 
 
 # --- in-process callers get the same guards ----------------------------------
@@ -537,7 +572,7 @@ def test_dispatch_spawn_pane_refuses_a_duplicate_crown_before_launch(
             crown_scope="epic-x",
         )
     assert exc.value.exit_code == 2
-    assert "--succeed" in str(exc.value)
+    assert "--hand-off" in str(exc.value)
 
 
 def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:
@@ -568,7 +603,7 @@ def test_both_crown_spellings_stay_on_the_python_path(flag: str) -> None:
         _is_pane_substrate_spawn,
     )
 
-    args = ["spawn", "w", "--substrate", "bg", flag, "etl", flag, "web"]
+    args = ["spawn", "w", "--substrate", "thread", flag, "etl", flag, "web"]
     assert _is_crown_bearing_spawn("spawn", args) is True
     assert _is_pane_substrate_spawn("spawn", args) is False
 

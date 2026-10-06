@@ -738,7 +738,7 @@ struct RowDrag {
 }
 
 /// The last `Layout` as the client holds it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct LayoutView {
     squads: Vec<SquadMeta>,
     active_squad: u64,
@@ -770,7 +770,7 @@ fn is_blocked_row(a: &AgentRow) -> bool {
 
 /// Everything the client renders from. Pure state - `compose` turns it into
 /// one full-terminal `Frame` the row-diffing `Compositor` draws.
-struct View {
+pub(crate) struct View {
     term: (u16, u16), // full terminal (rows, cols)
     /// The session name, for the status row. Fixed for the connection's life
     /// (sessions cannot rename), so the row can never go stale.
@@ -877,14 +877,6 @@ struct View {
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
-    /// The [`View::selector`] was armed by a pointer resting in the
-    /// panel, not by an explicit `prefix+w`. Pointer-in-panel arms the selector
-    /// so `x`/`X`/`r`/`space` act on the pointed-at row (one regime, closes the
-    /// old PTY leak where a bare `x` fell through to the focused pane). A
-    /// hover-arm is motion-fresh: only the action-verb set acts on it, and the
-    /// first key OUTSIDE that set disarms and forwards, so a pointer parked over
-    /// the sideline never swallows typing into the focused pane (AC2-EDGE).
-    sel_hover_armed: bool,
     /// First-visible [`View::display_rows`] index in the sideline:
     /// follow-the-cursor scroll offset so rows below the fold render and take
     /// the mouse. 0 (top-anchored) whenever the catalog fits the height. The
@@ -948,11 +940,12 @@ struct View {
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
     questions_fold: Option<crate::needs_overlay::QuestionsFold>,
+    /// The question pages index, read in-process: the bell's fast seed.
+    questions_index: Option<crate::needs_overlay::QuestionsFold>,
     questions_degraded: bool,
     questions_degraded_reason: Option<String>,
-    /// The full question view's list/detail split.
+    /// The opened question's page view.
     question_detail: Option<questions::Detail>,
-    questions_split: u8,
     question_esc: Vec<u8>,
     /// Latest questions fold and its single-flight refresh while visible.
     questions_kick_at: Option<Instant>,
@@ -1020,6 +1013,9 @@ struct View {
     /// `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
+    /// `config.mux.card_graph`: what the card's graph slot plots. Latched
+    /// once at startup from the same ladder `hover_focus` reads.
+    card_graph: crate::client::card_line::CardGraph,
     /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `footnote-superscript` is
@@ -1340,7 +1336,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // reuses join_fold_row's join keys for its deep link.
 mod bell;
 mod feed_detail;
-mod feed_view;
+pub(crate) mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;
@@ -1965,7 +1961,6 @@ impl View {
             idle_expanded: HashSet::new(),
             selector: None,
             sel_esc: Vec::new(),
-            sel_hover_armed: false,
             sideline_state: std::cell::Cell::new(TableState::new()),
             answers: None,
             ans_esc: Vec::new(),
@@ -1986,11 +1981,11 @@ impl View {
             mine_action: None,
             mine_acting: false,
             questions_fold: None,
+            questions_index: None,
             questions_degraded: false,
             questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
-            questions_split: view_store::load_questions_split(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -2020,6 +2015,7 @@ impl View {
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
+            card_graph: crate::client::card_line::CardGraph::Activity,
             theme: Theme::default_theme(),
             user_themes: Vec::new(),
             pending_ground: None,
@@ -2288,9 +2284,9 @@ impl View {
     /// either one failing degrades the whole lane - a bare "half of what
     /// should be here loaded" is not worth rendering as a clean "as of now".
     fn needs_footer(&self) -> NeedsFooter {
-        if self.needs_degraded || self.questions_degraded {
+        if self.needs_degraded || (self.questions_degraded && self.questions_index.is_none()) {
             NeedsFooter::Degraded
-        } else if self.needs_fold.is_none() || self.questions_fold.is_none() {
+        } else if self.needs_fold.is_none() || self.questions_merged().is_none() {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
@@ -2458,7 +2454,6 @@ impl View {
     /// reachable by mouse-clicking a card while prefix+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
         self.selector = None;
-        self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
         self.search = None;
@@ -3681,6 +3676,7 @@ impl View {
             DisplayRow::Blank
             | DisplayRow::CardDetail(..)
             | DisplayRow::CardMetrics(..)
+            | DisplayRow::CardRule
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -3986,18 +3982,47 @@ impl View {
         })
     }
 
-    /// The column range of the footer's `☰ menu` button (US4), shared by
-    /// the renderer and the hit-test so a click lands where it draws. `None` when
-    /// the panel is too narrow to add the button beside the `+ new workspace`
-    /// affordance, or a recruit-mark tally is competing for the row.
-    fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+    /// The footer's two labels with their live key hints, and the menu
+    /// button's column range - one fn so the paint and the hit-test cannot
+    /// diverge. The hinted forms (`+ new workspace (N)`, `menu (M)`) resolve
+    /// through the live chord table (`key_for`), so a rebind relabels the
+    /// row; when the row cannot fit the hints, the bare forms keep the
+    /// button's seat (the density-button rule: the hint drops, the affordance
+    /// stays). A `None` range means no button at all: the panel is too
+    /// narrow, or a recruit-mark tally is competing for the row.
+    fn footer_labels(&self, panel_w: usize) -> (String, String, Option<std::ops::Range<usize>>) {
         // last column is the divider
         let tw = panel_w.saturating_sub(1);
-        // Display columns, not char count: the menu trigram (U+2630) is two display columns, so a
-        // char-count range under-reserves by one and the button crosses the
-        // divider into the pane.
-        let mw = FOOTER_MENU.chars().map(glyph_cols).sum::<usize>();
-        (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
+        let hint = |action: &str, bare: &str| match crate::keys::key_for(action) {
+            Some(k) => format!("{bare} ({k})"),
+            None => bare.to_string(),
+        };
+        let new_hinted = hint("new-workspace", FOOTER_NEW_LABEL);
+        let menu_hinted = hint("sideline-menu", FOOTER_MENU);
+        for (new_label, menu) in [
+            (&new_hinted, &menu_hinted),
+            (&FOOTER_NEW_LABEL.to_string(), &FOOTER_MENU.to_string()),
+        ] {
+            // Display columns, not char count: the menu trigram (U+2630) is
+            // two display columns, so a char-count range under-reserves by
+            // one and the button crosses the divider into the pane.
+            let mw = menu.chars().map(glyph_cols).sum::<usize>();
+            if self.marks.is_empty() && tw >= new_label.len() + 2 + mw {
+                return (new_label.clone(), menu.clone(), Some((tw - mw)..tw));
+            }
+        }
+        let bare_new = if self.marks.is_empty() {
+            FOOTER_NEW_LABEL.to_string()
+        } else {
+            format!("{FOOTER_NEW_LABEL}   {} marked \u{b7}R", self.marks.len())
+        };
+        (bare_new, FOOTER_MENU.to_string(), None)
+    }
+
+    /// The column range of the footer's `menu` button, shared by the
+    /// renderer and the hit-test so a click lands where it draws.
+    fn footer_menu_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
+        self.footer_labels(panel_w).2
     }
 
     /// The column range of the density button on the sideline's top
@@ -4010,28 +4035,17 @@ impl View {
     /// button and keeps the gesture.
     fn density_button_range(&self, panel_w: usize) -> Option<std::ops::Range<usize>> {
         let tw = panel_w.saturating_sub(1); // last column is the divider
-        let bell = bell::button_range(self, tw);
-        let end = if bell.is_empty() {
-            tw
-        } else {
-            bell.start.saturating_sub(1)
-        };
-        let start = end.checked_sub(DENSITY_BTN_W)?;
-        (tw >= DENSITY_BTN_W + 6 && start >= bell::top_row_words_end(self)).then_some(start..end)
+        let start = tw.checked_sub(DENSITY_BTN_W)?;
+        (tw >= DENSITY_BTN_W + 6).then_some(start..tw)
     }
 
-    /// What acting on sideline display row `i` does - the single resolver both
-    /// a mouse click ([`View::chrome_hit`]) and the prefix+w selector's Enter
-    /// route through, so the two inputs can never diverge. `None` only
-    /// for an out-of-range index or an inert [`DisplayRow::Header`].
+    /// What acting on display row `i` does - the one resolver a click and
+    /// the selector's Enter share. `None` for out-of-range or an inert row.
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
         match self.painted_rows().get(i)? {
             DisplayRow::Sel(row) => match row.tab {
-                // Acting on the already-active squad row was a silent no-op
-                // (SelectSquad to the squad you're on); it now toggles the
-                // caret locally instead. Inactive rows keep
-                // SelectSquad - auto-expand in set_layout completes the
-                // gesture when the resulting layout push lands.
+                // The already-active squad row toggles the caret locally;
+                // inactive rows SelectSquad (auto-expand completes the gesture).
                 None if row.squad == self.layout.active_squad => {
                     Some(ChromeHit::CycleSection(squad_key(&self.layout, row.squad)?))
                 }
@@ -4039,10 +4053,8 @@ impl View {
                 Some(t) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad)?;
                     let tid = squad.tabs.get(t)?.id;
-                    // SelectTab already resolves the squad server-side (find_tab
-                    // -> set_view), so one command switches squad+tab in a single
-                    // layout push - sending SelectSquad first would flicker
-                    // through the squad's previously-active tab (gemini review).
+                    // SelectTab resolves squad+tab server-side in one push;
+                    // SelectSquad first would flicker through the old tab.
                     Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)]))
                 }
             },
@@ -4051,22 +4063,21 @@ impl View {
             // shared with the navigator's goto so a click and a keyboard jump
             // never diverge on what an agent's action is.
             DisplayRow::Agent(a) => Some(agent_hit(a, self.layout.active_squad)),
-            // A `~` section header cycles its own view state, exactly
-            // like a squad name row. It stays `row_is_inert` so the selector
-            // cursor still skips it (the "never rests on a label"
-            // invariant): this makes it CLICKABLE, not selectable.
+            // A `~` header cycles its own view state, exactly like a squad
+            // name row: inert to the selector, clickable.
             DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
-            // The idle fold row toggles its squad's idle expansion -
-            // the idle sibling of a header's CycleSection. Actionable, so it is
-            // NOT inert: both a click and a selector Enter route here.
+            // The idle fold toggles its squad's idle expansion: actionable
+            // (click and Enter), so not inert.
             DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
-            // A card's lower half acts on the card: the exact hit of the
-            // Agent row painted above it. Inert for the selector, clickable
-            // here - the same split a Header has.
+            // A card's lower half acts on the Agent row above it: the same
+            // inert-to-selector, clickable split a Header has.
             DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
             DisplayRow::CardMetrics(..) => self.row_action(i.checked_sub(2)?),
-            // Inert rows (spacer, table column header) resolve to no action.
-            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+            // Inert rows resolve to no action.
+            DisplayRow::Blank
+            | DisplayRow::CardRule
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
             // The `+` footer opens the name-input overlay.
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
@@ -4266,33 +4277,13 @@ impl View {
     /// `now` records the landing instant for that timer's deadline.
     fn on_hover(&mut self, row: u16, col: u16, now: Instant) {
         // Highlight is highlight-only and always on (never switches the view);
-        // a cell off the sideline text column clears it.
+        // a cell off the sideline text column clears it. Hover moves NEITHER
+        // the selector NOR the scroll: the bottom-anchored footer row must
+        // stay put under the pointer, and only a click or a key selects
+        // (operator, 2026-10-05 - the old hover-arm scrolled the list the
+        // moment the pointer rested on the footer, so the row jumped away
+        // from the click).
         self.hover_row = self.sideline_row_at(row, col);
-
-        // Pointer-in-panel ARMS the selector to the hovered actionable
-        // row - one regime, so x/X/r/space act on the row under the pointer and
-        // a bare verb no longer leaks into the focused pane. Only touch a free or
-        // already-hover-armed selector; an explicit prefix+w selector keeps
-        // keyboard control. Off an actionable row (a spacer, header label, or the
-        // pane), a hover-arm disarms, so a pointer parked off the rows never holds
-        // the keys. `selector_anchor(i) == Some(i)` is true only when i itself is
-        // an actionable (non-inert) row.
-        if self.selector.is_none() || self.sel_hover_armed {
-            match self
-                .hover_row
-                .filter(|&i| self.selector_anchor(i) == Some(i))
-            {
-                Some(i) => {
-                    self.selector = Some(i);
-                    self.sel_hover_armed = true;
-                }
-                None if self.sel_hover_armed => {
-                    self.selector = None;
-                    self.sel_hover_armed = false;
-                }
-                None => {}
-            }
-        }
 
         // Accent whatever grabbable chrome sits under the pointer (independent
         // of the focus-follow off-switch below).
@@ -4310,8 +4301,8 @@ impl View {
 
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
-        // steals focus - only moving over pane content does.
-        if !self.hover_focus {
+        // steals focus, and a focused feed or board never loses it.
+        if !self.hover_focus || self.input_owner() != region_focus::RegionOwner::Pane {
             self.hover_pending = None;
             return;
         }
@@ -4667,41 +4658,6 @@ impl View {
 
     /// A squad's view state by id (test convenience: the production paths all
     /// hold the `&Squad` and key by name directly).
-    #[cfg(test)]
-    fn squad_view(&self, id: u64) -> SectionView {
-        match squad_key(&self.layout, id) {
-            Some(key) => self.section_view(&key),
-            None => SectionView::Collapsed,
-        }
-    }
-
-    /// Cycle a squad's section by id (test convenience for [`Self::cycle_section`]).
-    #[cfg(test)]
-    fn cycle_squad(&mut self, id: u64) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.cycle_section(key);
-        }
-    }
-
-    /// Force a squad's view state by id WITHOUT persisting - tests set up
-    /// state, they do not simulate an operator gesture.
-    #[cfg(test)]
-    fn set_squad_view(&mut self, id: u64, view: SectionView) {
-        if let Some(key) = squad_key(&self.layout, id) {
-            self.section_view.insert(key, view);
-        }
-    }
-
-    /// Force the pull-section open so a test that exercises orphan
-    /// (`~ elsewhere`) rows renders them past their new
-    /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
-    /// about orphan rows should not silently lose them.
-    #[cfg(test)]
-    fn expand_pull_sections(&mut self) {
-        self.section_view
-            .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    }
-
     /// Agents matched to no live squad - the `~ elsewhere` section's membership.
     /// One predicate so `display_rows` and the dead-row fold never diverge.
     fn orphans(&self) -> Vec<&AgentRow> {
@@ -4875,10 +4831,14 @@ impl View {
     }
 
     /// Follow-the-cursor sideline scroll: move the TableState's offset the
-    /// least it takes to keep the selector (or hover) row on screen, then
-    /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
+    /// least it takes to keep the selector row on screen, then clamp into
+    /// `[0, rows - visible]` so a shrunk catalog never scrolls past the
     /// last row. Everything-fits (or an empty window) resets the offset to 0, so
     /// the common case renders byte-identically to a non-scrolling sideline.
+    /// The hover highlight never drives this: a pointer resting on the
+    /// pinned footer (whose hit resolves to the scrolled-away `NewSquad`
+    /// index) would otherwise scroll the list and move the row out from
+    /// under the click.
     fn clamp_sideline_scroll(&mut self) {
         let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
@@ -4887,7 +4847,7 @@ impl View {
             self.set_sideline_offset(0);
             return;
         }
-        if let Some(cur) = self.selector.or(self.hover_row) {
+        if let Some(cur) = self.selector {
             if cur < off {
                 self.set_sideline_offset(cur);
             } else if cur >= off + visible {
@@ -4933,17 +4893,10 @@ impl View {
         self.set_sideline_offset(off.min(total - visible));
     }
 
-    /// Wheel-scroll the sideline list by one row. With an EXPLICIT selector open
-    /// it walks the cursor (reusing the j/k path so the highlight and offset stay
+    /// Wheel-scroll the sideline list by one row. With the selector open it
+    /// walks the cursor (reusing the j/k path so the highlight and offset stay
     /// coherent); otherwise it nudges the scroll offset directly, bounded to the
     /// catalog. A sideline that already fits its height is a no-op.
-    ///
-    /// A HOVER-armed selector is a transient pointer-follow, not a modal
-    /// cursor, so the wheel must scroll the list rather than walk it - otherwise
-    /// the wheel moves the selector away from the pointer, leaving `hover_row` and
-    /// `selector` on two different rows (codex P2). Scrolling shifts the rows out
-    /// from under the pointer, so the arm is disarmed here; the next pointer Move
-    /// re-hit-tests and re-arms.
     fn scroll_sideline(&mut self, down: bool) {
         let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
@@ -4951,7 +4904,7 @@ impl View {
             return;
         }
         match self.selector {
-            Some(cur) if !self.sel_hover_armed => {
+            Some(cur) => {
                 self.selector = Some(if down {
                     self.selector_down(cur)
                 } else {
@@ -4959,11 +4912,7 @@ impl View {
                 });
                 self.clamp_sideline_scroll();
             }
-            _ => {
-                if self.sel_hover_armed {
-                    self.selector = None;
-                    self.sel_hover_armed = false;
-                }
+            None => {
                 let off = self.sideline_offset();
                 self.set_sideline_offset(if down {
                     (off + 1).min(total - visible)
@@ -4987,6 +4936,7 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
+        backlog_style::node_spans_begin();
 
         let agents_full =
             self.sideline_full && self.sideline_view == crate::view_store::SidelineView::Agents;
@@ -5215,7 +5165,7 @@ impl View {
             // The board's whole surface - docked column, drill-down,
             // pickers, centered or full-screen overlay - paints from its
             // own module (the file-budget gate keeps client.rs shrinking).
-            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
+            self.draw_board(&mut cells, rows, cols);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -5242,11 +5192,7 @@ impl View {
         } else if self.org_board.is_some() && self.board_full {
             org_board::paint(self, &mut cells, rows, cols, cols, rows);
         } else if self.messages_board.is_some() {
-            // Messages is a full-surface view: the strip row is the
-            // sideline's, so the board paints from row 1.
-            self.paint_top_row(&mut cells, cols, cols);
-            messages_view::paint(self, &mut cells, rows, cols, cols, rows);
-            messages_reply::paint(self, &mut cells, rows, cols);
+            messages_view::paint_full(self, &mut cells, rows, cols);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -5265,8 +5211,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
-            && self.backlog_board.is_none()
-            && !(self.org_board.is_some()
+            && !((self.backlog_board.is_some() || self.org_board.is_some())
                 && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
             && self.messages_board.is_none()
         {
@@ -5299,6 +5244,7 @@ impl View {
             }
         }
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
+        backlog_style::node_spans_end();
         Frame {
             rows: rows as u16,
             cols: cols as u16,
@@ -5660,7 +5606,11 @@ impl View {
     /// only mouse route to a new tab. Below overflow this returns
     /// [`tab_bar_spans`] unchanged.
     fn tab_bar_window(&self) -> Vec<TabSpan> {
-        let width = (self.term.1 as usize).saturating_sub(self.panel_w() as usize);
+        // The bell's rightmost seat (plus one gap) is reserved before spans
+        // condense, so the `+` affordance never paints or clicks under it.
+        let width = (self.term.1 as usize)
+            .saturating_sub(self.panel_w() as usize)
+            .saturating_sub(bell::button_range(self).len() + 1);
         let span_w = |s: &TabSpan| tab_text_cols(&s.text);
         let full = self.tab_bar_spans();
         if full.iter().map(span_w).sum::<usize>() <= width {
@@ -5828,6 +5778,8 @@ impl View {
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
         // event handler already sounded); painted by row_stamp.
         paint_notice_overlay(cells, cols, self.notice_overlay(cols));
+        // The bell keeps the bar's rightmost seat; painted after the notice.
+        bell::paint_button(self, cells, cols);
     }
 
     /// The hosting-tab context for an agent row, resolved inside-out (
@@ -6200,6 +6152,8 @@ enum DisplayRow<'a> {
     Blank,
     CardDetail(&'a AgentRow),
     CardMetrics(&'a AgentRow),
+    /// The dashed rule between adjacent cards; inert (one display row).
+    CardRule,
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6307,18 +6261,6 @@ fn view_caret(v: SectionView) -> char {
     }
 }
 
-/// The action-verb keys a HOVER-ARMED selector captures on the
-/// pointed-at row: remove/stop (`x`), bulk reap (`X`), rename (`r`), peek
-/// (space), recruit-mark (tab). Everything else - navigation, and any typing -
-/// disarms the hover-arm and forwards to the focused pane, so a parked pointer
-/// never swallows shell input (AC2-EDGE). Enter is deliberately absent: a lone
-/// Enter is far likelier to be shell input than an attach gesture. Verbs that
-/// mutate are already confirm-gated at the row, so a stray leading verb at most
-/// opens a dismissable prompt.
-fn is_sideline_verb(b: u8) -> bool {
-    matches!(b, b'x' | b'X' | b'r' | b' ' | b'\t')
-}
-
 fn row_is_inert(drow: &DisplayRow) -> bool {
     matches!(
         drow,
@@ -6326,6 +6268,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
             | DisplayRow::Blank
             | DisplayRow::CardDetail(..)
             | DisplayRow::CardMetrics(..)
+            | DisplayRow::CardRule
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
@@ -7441,24 +7384,13 @@ async fn attach_and_run(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut view = View::new(
-        (rows, cols),
-        session,
-        LayoutView {
-            squads: Vec::new(),
-            active_squad: 0,
-            panes: Vec::new(),
-            focus: 0,
-            area: (0, 0),
-            agents: Vec::new(),
-            focus_node: None,
-        },
-    );
+    let mut view = View::new((rows, cols), session, LayoutView::default());
     org_board::restore(&mut view);
     messages_view::restore(&mut view);
     // Latch the focus-follows-mouse off-switch once; a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    view.card_graph = crate::digest_overlay::card_graph(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
     view.org = crate::org_overlay::Panel::with_detail(
         crate::digest_overlay::load_readout_detailed(Path::new(&cwd)),
@@ -7655,11 +7587,8 @@ async fn attach_and_run(
     // other.
     let (question_act_tx, mut question_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
-    // The bell's question list uses the same questions projection as the
-    // detail view; reads stay off the UI loop and apply the latest fold.
-    let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
-        Result<crate::needs_overlay::QuestionsFold, String>,
-    >();
+    let (questions_tx, mut questions_rx) = questions::fold_channel();
+    let (questions_index_tx, mut questions_index_rx) = questions::index_channel();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -7803,11 +7732,8 @@ async fn attach_and_run(
                 let _ = tx.send(result);
             });
         }
-        // task 2.3: kick a queued question answer off the UI loop.
-        // `question_acting` is set by the stdin handler at enqueue time,
-        // same discipline as the MINE mutation above.
-        // Refresh the questions projection while the sidebar is shown.
-        questions::maybe_kick(&mut view, &questions_tx);
+        // task 2.3: kick a queued answer; refresh the projection and index.
+        questions::maybe_kick(&mut view, &questions_tx, &questions_index_tx);
         questions::kick_action(&mut view, &question_act_tx);
         if view.yard_want && !view.yard_inflight {
             view.yard_want = false;
@@ -8445,8 +8371,13 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some(fold) = questions_index_rx.recv() => {
+                view.apply_questions_index(fold);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(fold) = questions_rx.recv() => {
-                // The questions fold landed: apply and repaint.
                 view.apply_questions_fold(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -8877,7 +8808,7 @@ async fn attach_and_run(
     }
 }
 
-enum StdinFlow {
+pub(crate) enum StdinFlow {
     Continue,
     Detach,
 }
@@ -9100,10 +9031,6 @@ async fn dispatch_event(
                     .agent_row_index_for_pane(view.layout.focus)
                     .unwrap_or(0);
                 view.selector = view.selector_anchor(seed);
-                // An explicit open is a full modal, never a motion-fresh
-                // hover-arm - clear any stale hover flag so j/k and typing are
-                // owned by the selector, not disarmed on the first non-verb key.
-                view.sel_hover_armed = false;
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
                 // not hide row 0. Then re-follow the SEEDED cursor -
@@ -9172,6 +9099,7 @@ async fn dispatch_event(
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.org.toggle(),
         Event::ToggleBell => bell::toggle(view),
+        Event::OpenMessages => messages_view::open_from_chord(view),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
@@ -9271,6 +9199,15 @@ async fn dispatch_event(
         }
         Event::OpenSweepThreads => {
             execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
+        Event::OpenSidelineMenu => {
+            // The footer `menu` button's popup, on the keyboard.
+            view.open_sideline_menu(Anchor::Center);
+        }
+        Event::OpenCreate => {
+            // The `+ new workspace` footer's name-input overlay, on the
+            // keyboard.
+            view.open_create();
         }
         Event::BlockJump(dir) => {
             write_msg(
@@ -10885,6 +10822,7 @@ mod org_block;
 mod glyph_legend;
 
 mod card_line;
+pub(crate) use card_line::CardGraph;
 
 #[path = "client/confirm_anchor.rs"]
 mod confirm_anchor;

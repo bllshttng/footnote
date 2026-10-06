@@ -15,6 +15,8 @@
       "spawn",
       "--harness",
       "codex",
+      "--permission-mode",
+      "bypassPermissions",
       "--name",
       "w6",
       "-m",
@@ -33,6 +35,11 @@
           "harness",
           "codex",
           "routing.models.pin-x"
+        ],
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous.permission_mode"
         ]
       ],
       "fingerprint": "cf12555d74fb",
@@ -73,19 +80,11 @@
         }
       },
       "seed": "/fno:target x-4",
-      "suppressed": [
-        [
-          "permission_mode",
-          "bypassPermissions",
-          "builtin.autonomous",
-          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
-        ]
-      ],
+      "suppressed": [],
       "verb": "target"
     },
     "stderr": [
-      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored",
-      "fno agents spawn: applied slot=operator-pin-override row=pin-x harness=codex (the typed model's declared row names its harness) (routing), harness=codex (routing.models.pin-x)"
+      "fno agents spawn: applied slot=operator-pin-override row=pin-x harness=codex (the typed model's declared row names its harness) (routing), harness=codex (routing.models.pin-x), permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"
     ],
     "stdout": null
   },
@@ -124,5 +123,6 @@
       "/fno:target x-4"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

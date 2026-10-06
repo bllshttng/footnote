@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterator, Mapping, Optional, Tuple
@@ -981,3 +982,15 @@ def run_base_check(base: str = BASE_DEFAULT, *, cwd: Optional[str] = None) -> in
     if msg:
         sys.stderr.write(msg.rstrip("\n") + "\n")
     return code
+
+
+def check_duplicate_pr(cwd: str, base: str, title: str) -> str:
+    """The pr-create guard's refusal text, or '' when the create proceeds."""
+    from fno.rust_binary import resolve_binary
+    try:
+        cmd = [str(resolve_binary() or "fno-agents"), "pr-create",
+               "--check-only", "--title", title, "--base", base, "--cwd", cwd]
+        result = run(cmd, timeout=180)
+    except (ToolMissing, subprocess.TimeoutExpired):
+        return ""
+    return result.stderr.strip() if result.returncode == 3 else ""

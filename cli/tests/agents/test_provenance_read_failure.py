@@ -25,6 +25,7 @@ def _make_load_graph_fail(monkeypatch):
     def _boom(*_a, **_k):
         raise OSError("graph read failed")  # any read failure
 
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda *a, **k: None)
     monkeypatch.setattr("fno.graph.load.load_graph", _boom)
 
 

@@ -246,10 +246,11 @@ impl Writer {
         let data = &rec["data"];
         let row = json!({
             "ts": rec["ts"],
-            "type": format!("footnote.{}", rec["type"].as_str().unwrap_or("")),
+            "type": "footnote_index_record",
             "source": format!("footnote:{}", self.session_id),
             "data": {
                 "session_id": self.session_id,
+                "record_type": rec["type"].as_str().unwrap_or(""),
                 "seq": rec["seq"],
                 "record_id": rec["id"],
                 "turn": data.get("turn").cloned().unwrap_or(Value::Null),

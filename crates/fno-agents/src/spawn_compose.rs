@@ -42,6 +42,10 @@ pub struct Inputs {
     /// The resolved node id (flag/env/seed) and its graph row.
     pub node: Option<String>,
     pub node_row: Option<Value>,
+    /// Print the routing provenance line (`applied axis=value (source) ...`).
+    /// Default false: a spawn prints what the user acts on; the provenance
+    /// rides `--verbose`.
+    pub verbose: bool,
 }
 
 /// Production read side: config subtrees, the node and its row, the ambient
@@ -98,6 +102,7 @@ pub fn gather(ask: &Value, cwd: &Path) -> Inputs {
         profiles: cfg(&["agents", "profiles"]),
         roster: crate::provider::footnote_verbs().into_iter().collect(),
         scan,
+        verbose: ask.get("verbose").and_then(Value::as_bool).unwrap_or(false),
     }
 }
 
@@ -132,9 +137,19 @@ fn resolve_node_id(
 /// The grid row Python's `_grid_node` read: the node's entry in the graph
 /// store, advisory only.
 fn graph_row_for(node_id: &str) -> Option<Value> {
-    let rows = crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).ok()?;
-    rows.into_iter()
-        .find(|row| row.get("id").and_then(Value::as_str) == Some(node_id))
+    let rows = crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![node_id.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    crate::graph_get::find_entry(&rows, node_id).cloned()
 }
 
 /// The first verb-shaped token anywhere in the seed, sigil and namespace
@@ -873,6 +888,7 @@ fn argv_has_team(argv: &[String]) -> bool {
         .skip(1)
         .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
         .any(|t| {
+            // retired-ok: the daemon accepts the retired alias for one release
             t == "--crown"
                 || t.starts_with("--crown=")
                 || t == "-k"
@@ -1490,7 +1506,7 @@ fn apply_axes_answer(seam: &mut Seam, answer: &Value) {
 /// Assembly: the applied line, the head inject, the bundle tail, the vendor
 /// check over the FINAL argv, and the journal row.
 fn assemble(stage: &mut Stage, seam: &mut Seam) {
-    if !seam.applied.is_empty() {
+    if !seam.applied.is_empty() && stage.inputs.verbose {
         let parts: Vec<String> = seam
             .applied
             .iter()
@@ -1798,6 +1814,7 @@ mod tests {
             facts: serde_json::json!({"role_resolves": null}),
             node: None,
             node_row: None,
+            verbose: false,
         };
         let answer = compose(&inputs);
         drop(guard);
@@ -1842,6 +1859,7 @@ mod tests {
             facts: serde_json::json!({"role_resolves": false}),
             node: None,
             node_row: None,
+            verbose: false,
         };
         let answer = compose(&inputs);
         drop(guard);

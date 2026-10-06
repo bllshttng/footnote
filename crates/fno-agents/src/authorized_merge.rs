@@ -524,6 +524,16 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         return Err(Outcome::Held { reason: blocked });
     }
 
+    // The user's look: the same gate the preview carries, held so the user
+    // answering the page clears it on the next read.
+    if let Some(blocker) =
+        crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number, &facts.head_sha)
+    {
+        return Err(Outcome::Held {
+            reason: blocker.detail,
+        });
+    }
+
     // The pin. An unreadable covered head refuses instead of falling back to an
     // unpinned effect: an unpinned arm lets a racing push land an unreviewed
     // head through GitHub's queue, which is the failure this owner exists for.
@@ -876,6 +886,16 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     };
     if let Some(reason) = review_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("review_in_flight", reason));
+    }
+
+    // (4b) the user's look: a PR touching the configured paint surface holds
+    // until an answered question page names it or a crown decision row
+    // attests the user's chat approval of this head. Held, not refused: the
+    // user answering the page clears it on the next read.
+    if let Some(blocker) =
+        crate::merge_gates::visual_approval_blocker(probes, cwd, facts.number, &facts.head_sha)
+    {
+        blockers.push(blocker);
     }
 
     // (5) the pin.
@@ -1256,6 +1276,7 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         }
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
+            crate::merge_provenance::record_outcome(request, &authorized.facts, &outcome);
             // Only a Merge hands the slot back. Every terminal effect() outcome of a Merge
             // - landed, durably Failed, HeadChanged, or Unknown - releases it
             // here rather than starving the queue for the rest of the lease.
@@ -1603,54 +1624,9 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci base compare unreadable: {error}"))
             }
         };
-        let base_tip = match endpoint(
-            format!("repos/{{owner}}/{{repo}}/commits/{}", facts.base_ref),
-            ".commit.committer.date",
-        ) {
-            Ok((true, output)) => output.trim().to_string(),
-            Ok((false, output)) => {
-                return ProbeOutcome::Inconclusive(format!(
-                    "ci base tip unreadable: {}",
-                    first_line(&output)
-                ))
-            }
-            Err(error) => {
-                return ProbeOutcome::Inconclusive(format!("ci base tip unreadable: {error}"))
-            }
-        };
-        let runs = match endpoint(
-            format!(
-                "repos/{{owner}}/{{repo}}/actions/runs?event=pull_request&head_sha={}&per_page=100",
-                facts.head_sha
-            ),
-            ".workflow_runs[] | [.name, .created_at] | @tsv",
-        ) {
-            Ok((true, output)) => {
-                let mut runs = Vec::new();
-                for line in output.lines().filter(|line| !line.trim().is_empty()) {
-                    let Some((name, created_at)) = line.split_once('\t') else {
-                        return ProbeOutcome::Inconclusive(format!(
-                            "ci runs unreadable: expected workflow and created_at, got {}",
-                            first_line(line)
-                        ));
-                    };
-                    runs.push((name.to_string(), created_at.to_string()));
-                }
-                runs
-            }
-            Ok((false, output)) => {
-                return ProbeOutcome::Inconclusive(format!(
-                    "ci runs unreadable: {}",
-                    first_line(&output)
-                ))
-            }
-            Err(error) => {
-                return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
-            }
-        };
         // No disjoint-files waiver: two PRs that share no file still break
         // main together when one's test reads what the other moved.
-        ci_base_verdict(compare, &base_tip, &runs)
+        ci_base_verdict(compare)
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
@@ -2278,73 +2254,18 @@ pub fn classify_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> Probe
     })
 }
 
-fn valid_github_timestamp(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 20
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes[19] == b'Z'
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
-        })
-}
-
-fn oldest_current_run(runs: &[(String, String)]) -> Option<(String, String)> {
-    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
-    for (name, created_at) in runs {
-        if let Some((_, newest)) = newest_by_workflow
-            .iter_mut()
-            .find(|(known, _)| known == name)
-        {
-            if created_at > newest {
-                *newest = created_at.clone();
-            }
-        } else {
-            newest_by_workflow.push((name.clone(), created_at.clone()));
-        }
-    }
-    newest_by_workflow
-        .into_iter()
-        .min_by(|(_, left), (_, right)| left.cmp(right))
-}
-
-/// Did the green runs test a merge ref that already held the base tip?
-pub fn ci_base_verdict(
-    behind_by: u64,
-    base_tip_at: &str,
-    runs: &[(String, String)],
-) -> ProbeOutcome {
+/// Did the CI at this head test a tree that already held the base tip? Only
+/// the ancestry answers that. The run-timestamp heuristic this replaces
+/// cleared a head whose runs started after the base tip moved, but a run at a
+/// head that lacks the tip still never tested the merge - the back-to-back
+/// merge race that went red on main three times in two days (2026-10-04/05).
+pub fn ci_base_verdict(behind_by: u64) -> ProbeOutcome {
     if behind_by == 0 {
         return ProbeOutcome::Clear;
     }
-    if runs.is_empty() {
-        return ProbeOutcome::Refused(format!(
-            "ci_base_stale: no pull_request run at the head proves its CI base; PR is {behind_by} behind"
-        ));
-    }
-    if !valid_github_timestamp(base_tip_at)
-        || runs
-            .iter()
-            .any(|(_, created_at)| !valid_github_timestamp(created_at))
-    {
-        return ProbeOutcome::Inconclusive(
-            "ci base freshness unreadable: timestamp is not YYYY-MM-DDTHH:MM:SSZ".to_string(),
-        );
-    }
-
-    let Some((name, created_at)) = oldest_current_run(runs) else {
-        return ProbeOutcome::Clear;
-    };
-    if created_at.as_str() >= base_tip_at {
-        ProbeOutcome::Clear
-    } else {
-        ProbeOutcome::Refused(format!(
-            "ci_base_stale: the oldest current run ({name}, created {created_at}) predates base tip {base_tip_at}; PR is {behind_by} behind"
-        ))
-    }
+    ProbeOutcome::Refused(format!(
+        "ci_base_stale: PR is {behind_by} behind its base; no run at this head tested the merged tree"
+    ))
 }
 
 /// The head sha from the latest covered `review_coverage` event that matches the
@@ -2544,166 +2465,11 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     (0, format!("{}\n", outcome.to_json()), String::new())
 }
 
-/// The preview receipt for one request, in process. The status composer and
-/// the verb share this one arm, so a status read pays no subprocess to its
-/// own owner, and both surfaces can never render two different ready
-/// verdicts.
-pub(crate) fn preview_receipt(request: &Request) -> Value {
-    let cwd = request.cwd.as_path();
-    // Supplied facts win (preview-only): the status read's own projection
-    // parses in process, and a payload too old to carry the fields falls back
-    // to the guarded spawn so the walk never rides half a fact.
-    let facts = request
-        .supplied_facts
-        .as_ref()
-        .and_then(|p| facts_from_pulls(p, request.pr).ok());
-    match match facts {
-        Some(facts) => Ok(facts),
-        None => RealProbes.pr_facts(cwd, request.pr),
-    } {
-        Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
-        Ok(facts) => match preview_walk(&RealProbes, request, &facts) {
-            PreviewVerdict::Go { waiver } => {
-                let mut receipt = serde_json::json!({
-                    "outcome": "authorized",
-                    "head": facts.head_sha,
-                    "blockers": [],
-                });
-                if let Some(note) = waiver {
-                    receipt["coverage_waiver"] = Value::String(note);
-                }
-                receipt
-            }
-            PreviewVerdict::Blocked(rows) => serde_json::json!({
-                "outcome": "held",
-                "head": facts.head_sha,
-                "blockers": rows
-                    .iter()
-                    .map(|b| serde_json::json!({
-                        "code": b.code,
-                        "class": match b.class {
-                            BlockerClass::Held => "held",
-                            BlockerClass::Refused => "refused",
-                            BlockerClass::Unknown => "unknown",
-                        },
-                        "detail": b.detail,
-                    }))
-                    .collect::<Vec<_>>(),
-            }),
-        },
-    }
-}
+mod preview_receipt;
 
-/// The preview receipt for a raw payload: parse, then the same in-process
-/// receipt the verb answers. An unusable payload reads `unknown` with the
-/// parse error named, never a guessed verdict.
-pub(crate) fn preview_receipt_payload(payload: &Value) -> Value {
-    match parse_request(payload) {
-        Ok(request) => preview_receipt(&request),
-        Err(message) => serde_json::json!({ "outcome": "unknown", "detail": message }),
-    }
-}
-
-fn read_payload(args: &[String]) -> Result<Value, String> {
-    let text = match args.first() {
-        // An inline JSON payload is the thin-forwarder form: a CLI verb with
-        // no temp file. A path that names a payload file still works.
-        Some(path) if path.trim_start().starts_with('{') => path.clone(),
-        Some(path) => std::fs::read_to_string(path)
-            .map_err(|e| format!("authorized-merge: cannot read payload {path}: {e}\n"))?,
-        None => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
-                .map_err(|e| format!("authorized-merge: stdin read failed: {e}\n"))?;
-            buf
-        }
-    };
-    serde_json::from_str(&text).map_err(|e| format!("authorized-merge: bad payload: {e}\n"))
-}
-
-fn parse_request(payload: &Value) -> Result<Request, String> {
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .ok_or_else(|| "payload needs a cwd".to_string())?;
-    let effect = payload
-        .get("effect")
-        .and_then(Value::as_str)
-        .and_then(Effect::parse)
-        .ok_or_else(|| "payload needs effect merge|arm|preview".to_string())?;
-    Ok(Request {
-        cwd,
-        pr: payload.get("pr").and_then(Value::as_u64),
-        effect,
-        approved: payload.get("approved").and_then(Value::as_bool),
-        auto_merge_source: payload
-            .get("auto_merge_source")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        // Preview defaults its CI gate ON: the question is "may this head
-        // merge NOW", and a merge ask carries its own posture. A payload can
-        // still pass require_checks: false to ask the gates without CI.
-        require_checks: payload
-            .get("require_checks")
-            .and_then(Value::as_bool)
-            .unwrap_or(effect == Effect::Preview),
-        accept_flake: payload
-            .get("accept_flake")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        covered_head: payload
-            .get("covered_head")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        decide_only: payload
-            .get("decide_only")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        authority: payload
-            .get("authority")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        supplied_verdict: payload
-            .get("verdict")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        supplied_counts: payload.get("counts").cloned(),
-        supplied_rerun_recovered: payload.get("rerun_recovered").and_then(Value::as_bool),
-        supplied_optional_unresolved: payload.get("optional_reviews_unresolved").map(|v| {
-            if let Some(n) = v.as_i64() {
-                Some(n)
-            } else {
-                None
-            }
-        }),
-        supplied_github_blockers: payload
-            .get("github_blockers")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            }),
-        // Present-but-null is a probed CLEAR, so a held answer must stay a
-        // string and an unprobed or malformed ask omits the key entirely.
-        supplied_dispatch_hold: payload.get("dispatch_hold_reason").map(|v| match v {
-            Value::String(reason) => Some(reason.to_owned()),
-            Value::Null => None,
-            other => Some(other.to_string()),
-        }),
-        // Same tri-state as the dispatch-hold answer above.
-        supplied_review_hold: payload.get("review_hold_reason").map(|v| match v {
-            Value::String(reason) => Some(reason.to_owned()),
-            Value::Null => None,
-            other => Some(other.to_string()),
-        }),
-        supplied_facts: payload.get("facts").filter(|v| v.is_object()).cloned(),
-    })
-}
+pub(crate) use preview_receipt::{
+    parse_request, preview_receipt, preview_receipt_payload, read_payload,
+};
 
 #[cfg(test)]
 mod tests {
@@ -3543,50 +3309,14 @@ mod tests {
 
     #[test]
     fn ci_base_verdict_reads_each_branch() {
-        let runs = (0..8)
-            .map(|i| (format!("workflow-{i}"), "2026-09-16T09:17:32Z".to_string()))
-            .collect::<Vec<_>>();
-        let outcome = ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs);
+        // Ancestry is the whole verdict now: behind_by 0 clears, anything
+        // behind refuses, because no run at a head that lacks the base tip
+        // can have tested the merged tree.
+        assert_eq!(ci_base_verdict(0), ProbeOutcome::Clear);
+        let outcome = ci_base_verdict(3);
         assert!(
             matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
         );
-        let runs = vec![
-            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-        ];
-        assert_eq!(
-            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
-            ProbeOutcome::Clear
-        );
-        let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
-        assert_eq!(
-            ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
-            ProbeOutcome::Clear
-        );
-        assert!(matches!(
-            ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
-            ProbeOutcome::Refused(reason) if reason.contains("no pull_request run")
-        ));
-        let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
-        assert!(matches!(
-            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
-            ProbeOutcome::Inconclusive(_)
-        ));
-    }
-
-    #[test]
-    fn oldest_current_run_reads_each_branch() {
-        let runs = vec![
-            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
-            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
-            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
-        ];
-        assert_eq!(
-            oldest_current_run(&runs),
-            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
-        );
-        assert_eq!(oldest_current_run(&[]), None);
     }
 
     #[test]
@@ -3961,6 +3691,7 @@ mod tests {
     #[test]
     fn an_arm_receipt_names_the_head_and_is_never_merged() {
         // AC2-EDGE. A queue entry is not a landed merge.
+        let journal = crate::merge_provenance::TestJournal::opt_in();
         let fake = clean();
         let outcome = run(&fake, &request(Effect::Arm));
         assert_eq!(
@@ -3975,10 +3706,24 @@ mod tests {
         assert!(calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
         assert!(calls[0].contains(&"abc123".to_string()));
+        // An arm records merge_armed, never a landed merge.
+        let journal_rows = journal.rows();
+        let armed: Vec<_> = journal_rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_armed")
+            .collect();
+        assert_eq!(armed.len(), 1, "{journal_rows:?}");
+        assert_eq!(armed[0]["data"]["pr"], 7);
+        let landed: Vec<_> = journal_rows
+            .iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_landed")
+            .collect();
+        assert!(landed.is_empty(), "{journal_rows:?}");
     }
 
     #[test]
     fn an_immediate_merge_never_passes_auto() {
+        let journal = crate::merge_provenance::TestJournal::opt_in();
         let fake = clean();
         let outcome = run(&fake, &request(Effect::Merge));
         assert_eq!(
@@ -3993,6 +3738,18 @@ mod tests {
         let calls = fake.gh_calls.borrow();
         assert!(!calls[0].contains(&"--auto".to_string()));
         assert!(calls[0].contains(&"--match-head-commit".to_string()));
+        // The owner's record: one merge_landed span for the run, naming the
+        // verb lane and the merged PR.
+        let spans: Vec<_> = journal
+            .rows()
+            .into_iter()
+            .filter(|r| r["data"]["span_kind"] == "merge_landed")
+            .collect();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["data"]["path"], "pr_merge");
+        assert_eq!(spans[0]["data"]["pr"], 7);
+        assert_eq!(spans[0]["data"]["repo"], "o/r");
+        assert_eq!(spans[0]["data"]["head"], "abc123");
     }
 
     #[test]
@@ -4958,13 +4715,189 @@ mod tests {
         // head. A store-only covered row still answers.
         let _ = head;
         let line = serde_json::json!({
-            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "review",
-            "data": {"head_sha": "aaaaaaaaaa", "coverage": "covered", "reviewed_count": 2}
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "target",
+            "data": {"pr": 124, "verdicts": [], "head_sha": "aaaaaaaaaa", "coverage": "covered", "reviewed_count": 2}
         })
         .to_string();
         let events = crate::paths::events_path(cwd);
         crate::event_store::append_envelope(&events, &line, None).unwrap();
         let covered = covered_head_from_event(cwd);
         assert_eq!(covered.as_deref(), Some("aaaaaaaaaa"), "{covered:?}");
+    }
+    #[test]
+    fn a_paint_pr_holds_until_an_answered_page_names_it() {
+        let tmp = std::env::temp_dir().join(format!("xc129-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".fno")).unwrap();
+        // questions_dir falls back to the space dir, and the hermetic guard
+        // refuses a HOME-derived one under test; point it at a tempdir.
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                    None => std::env::remove_var("FNO_SPACES_DIR"),
+                }
+            }
+        }
+        let spaces = std::env::temp_dir().join(format!("xc129-spaces-{}", std::process::id()));
+        std::fs::create_dir_all(&spaces).unwrap();
+        let _env_lock = crate::pr_status::cache_env_lock();
+        let _env = {
+            let prior = std::env::var_os("FNO_SPACES_DIR");
+            std::env::set_var("FNO_SPACES_DIR", &spaces);
+            RestoreEnv(prior)
+        };
+        std::fs::write(
+            tmp.join(".fno/config.toml"),
+            "merge.visual_paint_paths = [\"crates/fno/src/client/**\"]\n",
+        )
+        .unwrap();
+        let mut fake = clean();
+        fake.gh_output = "crates/fno/src/client/theme.rs\nREADME.md\n".to_string();
+        let head: String = "a".repeat(40);
+        let held =
+            crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).expect("held");
+        assert_eq!(held.code, "visual_approval");
+        assert!(
+            held.detail.contains("crates/fno/src/client/theme.rs"),
+            "{}",
+            held.detail
+        );
+        // An OPEN page naming the PR never clears the hold.
+        let qdir = crate::escalation::questions_dir(&tmp);
+        std::fs::create_dir_all(&qdir).unwrap();
+        let page = qdir.join("q-xc129test.md");
+        std::fs::write(
+            &page,
+            "---\nquestion_id: q-xc129\nstatus: open\ntitle: May PR 7 merge?\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // The page answers, the hold clears.
+        std::fs::write(
+            &page,
+            "---\nquestion_id: q-xc129\nstatus: answered\ntitle: May PR 7 merge?\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_none());
+        // The page archives into done/; the approval must not lapse.
+        let donedir = qdir.join("done");
+        std::fs::create_dir_all(&donedir).unwrap();
+        std::fs::rename(&page, donedir.join("q-xc129test.md")).unwrap();
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_none());
+        // No paint paths in any candidate config: the gate is disarmed and
+        // spends no gh read.
+        let bare = std::env::temp_dir().join(format!("xc129-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).unwrap();
+        let mut off = clean();
+        off.gh_output = "crates/fno/src/client/theme.rs\n".to_string();
+        assert!(crate::merge_gates::visual_approval_blocker(&off, &bare, 7, &head).is_none());
+        assert!(off.gh_calls.borrow().is_empty());
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::remove_dir_all(&bare).ok();
+    }
+
+    #[test]
+    fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
+        let tmp = std::env::temp_dir().join(format!("xc39f-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".fno")).unwrap();
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                    None => std::env::remove_var("FNO_SPACES_DIR"),
+                }
+            }
+        }
+        let spaces = std::env::temp_dir().join(format!("xc39f-spaces-{}", std::process::id()));
+        std::fs::create_dir_all(&spaces).unwrap();
+        let _env_lock = crate::pr_status::cache_env_lock();
+        let _env = {
+            let prior = std::env::var_os("FNO_SPACES_DIR");
+            std::env::set_var("FNO_SPACES_DIR", &spaces);
+            RestoreEnv(prior)
+        };
+        std::fs::write(
+            tmp.join(".fno/config.toml"),
+            "merge.visual_paint_paths = [\"crates/fno/src/client/**\"]\n",
+        )
+        .unwrap();
+        let head: String = "a".repeat(40);
+        let pushed: String = "b".repeat(40);
+        let row = |decision: &str, rationale: &str, authority: &str, lifecycle: &str| {
+            format!(
+                r#"{{"decisions":[{{"decision_id":"d-xc39f","authority_source":"{authority}","lifecycle":"{lifecycle}","decision":"{decision}","rationale":"{rationale}"}}]}}"#
+            )
+        };
+        let mut fake = clean();
+        fake.gh_output = "crates/fno/src/client/theme.rs\n".to_string();
+        // The lead's transcription, head-scoped: clears.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "superuser in chat: approved",
+                "crown",
+                "unscoped",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_none());
+        // A head push invalidates the approval: held again.
+        assert!(
+            crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &pushed).is_some(),
+            "an approval recorded for head a..a must not clear head b..b"
+        );
+        // No chat attestation in the rationale: held.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "lead judges it good",
+                "crown",
+                "unscoped",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // The row's authority is not crown: held.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "user in chat: approved",
+                "agent",
+                "unscoped",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // A retracted approval never clears: held.
+        fake.decisions_stdout = Some(
+            row(
+                "Approved: PR 7 at <head> as built",
+                "user in chat: approved",
+                "crown",
+                "retracted",
+            )
+            .replace("<head>", &head)
+            .into_bytes(),
+        );
+        assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
+        // The gate is closed again with the empty index the Fake serves by
+        // default; the head-scoped grant text stays out of a held detail.
+        fake.decisions_stdout = None;
+        let held =
+            crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).expect("held");
+        assert!(
+            held.detail.contains("crown-recorded decision"),
+            "{}",
+            held.detail
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

@@ -33,9 +33,9 @@ When every id succeeds, clear exits 0. An unknown id exits 4, a different-answer
 
 ## Authority lanes
 
-Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and role authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
 
-`--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a king ruling inside its own crown scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Kings wrote them because no correct value existed. The scope belongs on the crown row, so the value carries no suffix.
+`--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a lead ruling inside its own role scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Leads wrote them because no correct value existed. The scope belongs on the role row, so the value carries no suffix.
 
 The closed set is NOT in `schema.yaml`. The index already holds those invented spellings. A schema enum makes `fno backlog decide-reindex` reject them, which drops recall for real rulings.
 
@@ -107,7 +107,7 @@ A failed PROJECTION does not fail the command at all. Both durable stores alread
 
 Agents answer by default (ruling of 2026-09-14): an agent session records coordination decisions with `fno backlog decide`. Only the `operator` authority refuses an agent session there, because the superuser lane is not an agent's to claim. An agent that rules out another node's work records the verdict where that node's readers already look.
 
-The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A crown can clear only a question it asked itself, with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
+The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A role can clear only a question it asked itself, with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
 
 The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
 
@@ -148,6 +148,24 @@ A decision with no subject at all is reachable only through `fno backlog decisio
 `--supersedes <decision-id>` overturns an earlier ruling. The older row stays and is marked `[superseded by ...]`, because a reader of an overturned decision must be able to tell it is not current.
 
 The graph projection stamps that mark at write time under the lock. The index is an append-only history from the reader's perspective, so the reader derives `superseded_by` from the rows it scanned.
+
+## Traced decisions
+
+Every cross-rung ask is one traced decision. The ask, the lead's route (answer-self versus escalate, with the class), the question, the answer, and the correction all link by id. One hop is one `decision_span` row in the project journal. Hops that already have a natural id (the question row, the decision row) carry the same `trace` envelope instead of a second row. The envelope is `{trace_id, span_id, parent_span_id?, actor_session?, actor_kind, comms, recipient_session?, recipient_kind?}`. When the session holds a live role, `actor_kind` is `lead`, and any other resolved session is `worker`. An attended terminal with no session identity is `user`, and daemon or scheduler work is `sweep`. The class enum is `public-surface`, `irreversible`, `money-security`, `law-change`, `gate-override`, `none`. The spans:
+
+| Span | Row | Emitted by |
+|---|---|---|
+| ask | `decision_span` span_kind=ask | `fno-agents mail-record` at the mail send chokepoint, when the body opens `Approval:` |
+| route | `decision_span` route=self or escalate, with the class | `mail-record --reply-to` (self), or the question intake on `answers_ask:` (escalate), or `fno inbox decide --answers-ask` (self) |
+| question | `operator_question` + trace | the question intake; span_id = question_id, parent = the route span |
+| answer | `operator_decision` + trace | `fno inbox outstanding clear` or the decide door; span_id = decision_id, parent = the question or route span |
+| correction | `decision_span` span_kind=correction + `operator_decision.overturns` | `fno inbox decide --overturns <span-or-decision-id> --authority operator` |
+
+One query reads the whole decision path for a node (read-only, immutable open, so a query never competes with a writer):
+
+    sqlite3 "file:<events.db>?mode=ro&immutable=1" "select ts,type,json_extract(data,'$.trace.span_id'),json_extract(data,'$.trace.parent_span_id') from events where json_extract(data,'$.trace.trace_id')='<node>' order by ts"
+
+The route span and the question row come back in parent order. The schema entry (`decision_span`) and the Python `validate` gate the enums. The Stop-boundary rule table ([event-rules](event-rules.md)) acts on these rows.
 
 ## Backfill
 

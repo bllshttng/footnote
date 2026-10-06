@@ -23,8 +23,28 @@ pub struct ScopeSplit {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StaleCrown {
     pub row: String,
+    /// The row's session id, so a reading joins on identity; `None` on a
+    /// legacy split read keeps the name join.
+    pub session: Option<String>,
     pub scope: String,
     pub stored_status: String,
+}
+
+/// The stale row's registry read, id-first: a split read after the id
+/// change joins through `StaleCrown::session`; a legacy reading (no
+/// session recorded) falls back to the name join.
+pub(crate) fn terminal_join<'a>(
+    rows: &'a [crate::state::RegistryEntry],
+    stale: &StaleCrown,
+) -> crate::lead_state::NameJoin<'a> {
+    match stale.session.as_deref() {
+        Some(session) => crate::agent_ref::resolve(
+            rows,
+            crate::agent_ref::Key::Id(session),
+            crate::lead_state::is_terminal,
+        ),
+        None => crate::lead_state::terminal_name_join(rows, &stale.row),
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -66,6 +86,7 @@ pub(crate) fn read_team_splits(rows: &[RegistryEntry]) -> TeamSplits {
                 .unwrap_or_default();
             stale.push(StaleCrown {
                 row: row.name.clone(),
+                session: row.harness_session_id.clone(),
                 scope: key,
                 stored_status,
             });
@@ -189,16 +210,27 @@ mod tests {
 
     #[test]
     fn a_terminal_row_is_stale_never_double_ruled() {
-        let rows = [
-            row("lead-live", Some("shared"), AgentStatus::Live),
-            row("lead-dead", Some("shared"), AgentStatus::Orphaned),
-        ];
+        // A decided-dead Orphaned row (reaped pid) stays stale; an
+        // undecided one (no pid evidence) holds live, so it double-rules
+        // beside a live holder - never read stale on the word alone.
+        let mut dead = row("lead-dead", Some("shared"), AgentStatus::Orphaned);
+        dead.pid = Some(crate::row_verdict::reaped_pid());
+        let rows = [row("lead-live", Some("shared"), AgentStatus::Live), dead];
         let out = read_team_splits(&rows);
         assert!(out.double_ruled.is_empty());
         assert_eq!(out.stale.len(), 1);
         assert_eq!(out.stale[0].row, "lead-dead");
         assert_eq!(out.stale[0].scope, "shared");
         assert_eq!(out.stale[0].stored_status, "orphaned");
+
+        let undecided = row("lead-old", Some("shared"), AgentStatus::Orphaned);
+        let rows = [
+            row("lead-live", Some("shared"), AgentStatus::Live),
+            undecided,
+        ];
+        let out = read_team_splits(&rows);
+        assert_eq!(out.double_ruled.len(), 1);
+        assert!(out.stale.is_empty());
     }
 
     #[test]

@@ -68,7 +68,7 @@ Footnote reads no `~/.codex/config.toml` and writes none. The one key that sets 
 
 No default widens any existing posture. A configured `bypassPermissions` (a claude-only token) refused by name on a codex lane rather than degrading open to an unnamed posture. The machine-wide alternative - `sandbox_mode = "danger-full-access"` in `~/.codex/config.toml` - stays an open operator decision this project does not make for them.
 
-The one exception is the crown. A crowned codex spawn is a lead, and a lead must write the state root (`~/.fno`) to spawn, claim and journal. When nothing full-access is already named, the crown widens the default to `yolo` (rung `builtin.crown`). A crown spawn that names a bounded mode (`--permission-mode workspace-write:never`) refuses before launch instead of seating a lead that cannot govern. `-Y`/`--yolo` rides through unchanged. Workers keep the bounded default.
+The one exception is the role. A titled codex spawn is a lead, and a lead must write the state root (`~/.fno`) to spawn, claim and journal. When nothing full-access is already named, the role widens the default to `yolo` (rung `builtin.crown`). A role spawn that names a bounded mode (`--permission-mode workspace-write:never`) refuses before launch instead of seating a lead that cannot govern. `-Y`/`--yolo` rides through unchanged. Workers keep the bounded default.
 
 ## Native subagent inheritance
 

@@ -4,8 +4,9 @@
 //! helpers stay in `law_match`; this module reaches them through
 //! `crate::law_match`.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
+use crate::decision_trace::{actor_kind_from_authority, emit_span_to, new_span_id, Trace};
 use crate::law_match::{
     all_decision_rows, attended_terminal, evidence_repo_root, is_retraction_row, mint_decision_id,
     now_iso, project_events_journal, text_cap, WAIVER_SUBJECT_PREFIX,
@@ -116,6 +117,9 @@ pub(crate) struct DecideDoor {
     rationale: Option<String>,
     options: Vec<String>,
     supersedes: Option<String>,
+    answers_ask: Option<String>,
+    class: Option<String>,
+    overturns: Option<String>,
     decided_by: Option<String>,
     authority: Option<String>,
     graduation: Option<String>,
@@ -124,7 +128,7 @@ pub(crate) struct DecideDoor {
     origin: Option<String>,
 }
 
-const DECIDE_USAGE: &str = "usage: fno inbox decide <subject> <decision> [--question-id q] [--rationale s] [--option s]... [--supersedes d-x] [--decided-by name] [--authority operator|crown|agent|beastmode] [--graduation k] [--graduation-ref r] [--read cmd]... [--origin o]";
+const DECIDE_USAGE: &str = "usage: fno inbox decide <subject> <decision> [--question-id q] [--rationale s] [--option s]... [--supersedes d-x] [--answers-ask s] [--class c] [--overturns s-or-d] [--decided-by name] [--authority operator|crown|agent|beastmode] [--graduation k] [--graduation-ref r] [--read cmd]... [--origin o]";
 
 pub(crate) fn parse_decide_door(args: &[String]) -> Result<DecideDoor, String> {
     let mut door = DecideDoor {
@@ -134,6 +138,9 @@ pub(crate) fn parse_decide_door(args: &[String]) -> Result<DecideDoor, String> {
         rationale: None,
         options: Vec::new(),
         supersedes: None,
+        answers_ask: None,
+        class: None,
+        overturns: None,
         decided_by: None,
         authority: None,
         graduation: None,
@@ -186,6 +193,9 @@ The alias will be removed in a future release."
             "--rationale" => door.rationale = Some(take(&mut i)?),
             "--option" => door.options.push(take(&mut i)?),
             "--supersedes" => door.supersedes = Some(take(&mut i)?),
+            "--answers-ask" => door.answers_ask = Some(take(&mut i)?),
+            "--class" => door.class = Some(take(&mut i)?),
+            "--overturns" => door.overturns = Some(take(&mut i)?),
             "--decided-by" => door.decided_by = Some(take(&mut i)?),
             "--authority" => door.authority = Some(take(&mut i)?),
             "--graduation" => door.graduation = Some(take(&mut i)?),
@@ -552,7 +562,7 @@ pub fn run_decide_door(args: &[String]) -> i32 {
 /// in the Python order. Exit contract: 0 recorded, 1 failed write or a
 /// supersession target the index cannot recover, 2 a bad flag value, 3
 /// refused.
-pub(crate) fn decide_door_write(door: DecideDoor, id: DecideIdentity) -> i32 {
+pub(crate) fn decide_door_write(mut door: DecideDoor, id: DecideIdentity) -> i32 {
     // Positional subject and decision are required to record.
     let (subject, decision) = match (&door.subject, &door.decision) {
         (Some(s), Some(d)) if !s.trim().is_empty() && !d.trim().is_empty() => {
@@ -585,8 +595,24 @@ for a king ruling inside its own scope; omit the flag to resolve it from this se
             return 2;
         }
     };
+    // A class must name a routable hop; the six values are the schema's.
+    if let Some(c) = door
+        .class
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        if !crate::decision_trace::DECISION_CLASSES.contains(&c) {
+            eprintln!(
+                "decide: --class '{c}' is not one of {}. Nothing was recorded.",
+                crate::decision_trace::DECISION_CLASSES.join(", ")
+            );
+            return 2;
+        }
+    }
     // The origin floor binds before the provenance resolution, so the event
     // records the gated value (the same order Python applies).
+    let caller_session = id.agent();
     let origin = enforce_origin_floor(door.origin.as_deref(), id);
     let provenance = match resolve_decider_lanes(
         id,
@@ -633,6 +659,24 @@ for a king ruling inside its own scope; omit the flag to resolve it from this se
         || subject.starts_with(&format!("{WAIVER_SUBJECT_PREFIX}:"));
     if waiver_hit && provenance.authority_source.as_deref() != Some("operator") {
         return decide_waiver_refusal(&subject);
+    }
+    // The correction lane: overturning is the user lane. The gate reads the
+    // RESOLVED authority, the same reading the waiver gate takes.
+    let overturns = door
+        .overturns
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    if overturns.is_some() && provenance.authority_source.as_deref() != Some("operator") {
+        eprintln!("decide: --overturns requires --authority operator. Nothing was recorded.");
+        return 2;
+    }
+    // --overturns extends --supersedes when the target has a decision id; the
+    // recoverability gate below covers the derived link the same way.
+    if let (None, Some(t)) = (&door.supersedes, overturns) {
+        if t.starts_with("d-") {
+            door.supersedes = Some(t.to_string());
+        }
     }
     // Supersession: an unknown target refuses before any write (a transposed
     // id must not read as a silent no-op), and the lane guards mirror the
@@ -687,7 +731,6 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     // Mint and envelope. A key appears only when its value is set; the text
     // caps mirror the Python builder (2000 chars).
     let decision_id = mint_decision_id();
-    let ts = now_iso();
     let mut data = json!({
         "decision_id": decision_id,
         "decision": text_cap(&decision, 2000),
@@ -732,16 +775,109 @@ decision index. Run `fno backlog decide-reindex` before retrying."
     if let Some(sup) = &door.supersedes {
         data["supersedes"] = json!(sup);
     }
+    if let Some(t) = overturns {
+        data["overturns"] = json!(t);
+    }
+    // The self route span rides ahead of the row: the row's parent names it.
+    let journal = project_events_journal();
+    let mut route_span_id: Option<String> = None;
+    let mut pending_route: Option<(Trace, Map<String, Value>)> = None;
+    if let Some(ask_ref) = door
+        .answers_ask
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        // A span id parents verbatim; any other reference names the ask's
+        // bus message, whose endpoints re-derive the ask span. Unresolvable,
+        // the route still rides, only parentless.
+        let ask = crate::decision_trace::resolve_ask_span(&journal, ask_ref);
+        if ask.is_none() {
+            eprintln!(
+                "decide: answers-ask '{ask_ref}' names no ask span; the route records unparented"
+            );
+        }
+        let trace = Trace {
+            trace_id: subject.clone(),
+            span_id: new_span_id(),
+            parent_span_id: ask,
+            actor_session: caller_session.clone(),
+            actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
+            comms: "mail",
+            recipient_session: None,
+            recipient_kind: None,
+        };
+        let mut attrs = Map::new();
+        attrs.insert("route".to_string(), json!("self"));
+        if let Some(c) = door
+            .class
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            attrs.insert("class".to_string(), json!(c));
+        }
+        // The span rides ahead of the row (emitted below, before the row's
+        // ts mints), so the row's parent is only set when the span landed.
+        pending_route = Some((trace, attrs));
+    }
+    // The correction span: parented at the overturned span; the row's trace
+    // names the same parent. Captured here, emitted after the row lands.
+    let pending_correction = overturns.as_ref().map(|t| Trace {
+        trace_id: subject.clone(),
+        span_id: new_span_id(),
+        parent_span_id: Some(t.to_string()),
+        actor_session: caller_session.clone(),
+        actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
+        comms: "mail",
+        recipient_session: None,
+        recipient_kind: None,
+    });
+    // The route rides ahead of the row: the trace query reads in ts order and
+    // a parent must not postdate its child. A failed route emit leaves the
+    // row parentless rather than dangling; a failed row write below leaves
+    // the route orphaned, reported on stderr.
+    if let Some((trace, attrs)) = pending_route.take() {
+        match emit_span_to(&journal, "route", &trace, &attrs) {
+            Ok(()) => route_span_id = Some(trace.span_id.clone()),
+            Err(e) => eprintln!("decide: route span skipped: {e}"),
+        }
+    }
+    // The decision IS the span when it answers or overturns: the row carries
+    // the trace envelope, span_id = decision_id, parented at the hop it
+    // answers or overturns.
+    if door.answers_ask.is_some() || overturns.is_some() {
+        data["trace"] = serde_json::to_value(&Trace {
+            trace_id: subject.clone(),
+            span_id: decision_id.clone(),
+            parent_span_id: route_span_id.or_else(|| overturns.map(str::to_string)),
+            actor_session: caller_session.clone(),
+            actor_kind: actor_kind_from_authority(provenance.authority_source.as_deref()),
+            comms: "mail",
+            recipient_session: None,
+            recipient_kind: None,
+        })
+        .unwrap_or_default();
+    }
     if let Some(rows) = &read_rows {
         data["reads"] = json!(rows);
     }
+    // Minted after the route span: the row is the child, and its ts must not
+    // precede the parent the trace names.
+    let ts = now_iso();
     let envelope = json!({"ts": ts, "type": "operator_decision", "source": "target", "data": data});
     // Durability first: the project journal. A failed write here records
     // nothing anywhere (the Python generic handler's exit 1).
-    let journal = project_events_journal();
     if let Err(e) = crate::event_store::append_envelope(&journal, &envelope.to_string(), None) {
         eprintln!("decide: failed to record: {e}");
         return 1;
+    }
+    // The row is durable: now the correction hop it parents (the route rode
+    // ahead of the row above).
+    if let Some(trace) = pending_correction {
+        if let Err(e) = emit_span_to(&journal, "correction", &trace, &Map::new()) {
+            eprintln!("decide: correction span skipped: {e}");
+        }
     }
     // Recall second: the machine-wide decision index. The event id names the
     // recovery, because re-running would mint a second id for one ruling.
@@ -1090,9 +1226,47 @@ mod tests {
         );
         assert_eq!(code, 0);
         let (rows, _) = all_decision_rows().expect("reads");
+        let first = rows.last().expect("a row landed");
+        assert_eq!(first["expiry_ref"]["kind"], json!("node"));
+        assert_eq!(first["expiry_ref"]["node_id"], json!("x-node1"));
+        // AC8: answering the ask in place rides a route span; the row's
+        // trace parent names that span.
+        let code = decide_door_write(
+            decide_argv(&[
+                "x-node1",
+                "Answer the ask in place",
+                "--answers-ask",
+                "s-1",
+                "--class",
+                "none",
+            ]),
+            DecideIdentity::Forced(Some("cl-test2")),
+        );
+        assert_eq!(code, 0);
+        // The route span lands and the row's trace parent names it.
+        let journal = project_events_journal();
+        let spans = crate::event_store::query_events(
+            &journal,
+            &crate::event_store::EventQuery::of_types(&["decision_span"]),
+        )
+        .unwrap_or_default();
+        assert_eq!(spans.len(), 1, "one route span");
+        let route = serde_json::from_str::<serde_json::Value>(&spans[0].line).unwrap();
+        assert_eq!(route["data"]["span_kind"], "route");
+        assert_eq!(route["data"]["route"], "self");
+        assert_eq!(route["data"]["class"], "none");
+        let parent = route["data"]["trace"]["span_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (rows, _) = all_decision_rows().expect("reads");
         let row = rows.last().expect("a row landed");
-        assert_eq!(row["expiry_ref"]["kind"], json!("node"));
-        assert_eq!(row["expiry_ref"]["node_id"], json!("x-node1"));
+        assert_eq!(row["trace"]["parent_span_id"], json!(parent));
+        // The route rides ahead of the row: ts order folds the parent first.
+        assert!(
+            route["ts"].as_str().unwrap() <= row["ts"].as_str().unwrap(),
+            "route precedes the row in ts order"
+        );
     }
 
     #[test]
@@ -1104,6 +1278,15 @@ mod tests {
             DecideIdentity::Forced(None),
         );
         assert_eq!(code, 1);
+        // AC9: an overturn by a non-operator lane refuses with exit 2 and
+        // records nothing (the row set stays empty).
+        let code = decide_door_write(
+            decide_argv(&["x-n1", "no", "--overturns", "s-9"]),
+            DecideIdentity::Forced(None),
+        );
+        assert_eq!(code, 2);
+        let (rows, _) = all_decision_rows().unwrap_or((Vec::new(), 0));
+        assert!(rows.is_empty(), "nothing recorded");
     }
 
     #[test]

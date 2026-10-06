@@ -67,8 +67,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/king-delegation-guard.sh",
-            "statusMessage": "checking crown delegation"
+            "command": "bash ${PLUGIN_ROOT}/hooks/lead-delegation-guard.sh",
+            "statusMessage": "checking role delegation"
           }
         ]
       },
@@ -158,6 +158,17 @@
             "command": "bash ${PLUGIN_ROOT}/hooks/edit-integrity.sh",
             "statusMessage": "checking the edited file",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/refusal-streak-record.sh",
+            "statusMessage": "recording the refusal streak",
+            "timeout": 4
           }
         ]
       },

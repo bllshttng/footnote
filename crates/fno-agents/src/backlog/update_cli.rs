@@ -1933,8 +1933,18 @@ fn abs_expand(value: &str) -> String {
 /// an error, never a success.
 fn confirm_readback(graph: &Path, args: &UpdateArgs, node_id: &str) -> Result<Value, Refusal> {
     let _ = args;
-    let rows =
-        graph_store::read_rows(graph).map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
+    let rows = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![node_id.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
     // LIVE rows only: the archived case lands its write and then fails
     // exactly here, the captured contract.
     let live: Vec<&Value> = rows
@@ -1983,8 +1993,18 @@ fn linked_plan_size(args: &UpdateArgs) -> Option<String> {
 /// node names that holder and reads live or suspect; a release refuses when
 /// it leaves the node wedged in_progress.
 fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(), Refusal> {
-    let rows =
-        graph_store::read_rows(graph).map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
+    let rows = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![node_id.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
     let stored: Option<&Value> = rows
         .iter()
         .filter(|r| r.get("archived_at").is_none())

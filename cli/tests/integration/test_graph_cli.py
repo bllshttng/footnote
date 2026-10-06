@@ -1421,6 +1421,24 @@ def test_note_whose_read_failed_refuses_cleanly(tmp_graph, monkeypatch):
     assert not node.get("progress_notes")
 
 
+def test_note_replace_refusal_suggested_command_runs(tmp_graph):
+    """--replace is retired with a refusal that names its real command,
+    and that command runs on this surface. Nothing is written."""
+    node_id = _note_node()
+
+    r = _invoke("backlog", "note", node_id, "clobber", "--replace")
+
+    assert r.exit_code == 3, r.output
+    assert "retired" in r.stderr, r.stderr
+    assert f"fno backlog note comment {node_id} --list" in r.stderr, r.stderr
+
+    feed = _invoke("backlog", "note", "comment", node_id, "--list")
+
+    assert feed.exit_code == 0, feed.output
+    node = json.loads(_native_get(node_id))
+    assert not node.get("progress_notes"), "the retired flag wrote nothing"
+
+
 def test_quiet_still_refuses_a_contradicted_citation(tmp_graph, monkeypatch):
     """AC21-EDGE: a silent annotation is still a fact on the node."""
     node_id = _note_node()

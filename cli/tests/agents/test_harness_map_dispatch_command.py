@@ -173,18 +173,25 @@ def test_opencode_bg_resolves_on_the_spawn_claim_not_the_pane_bit():
     assert capabilities("opencode")["autonomous_pane"] is False
     out = resolve_dispatch(
         harness="opencode",
-        substrate="bg",
+        substrate="thread",
         node_id="x-abcd",
         trigger="autonomous",
     )
     assert out["substrate"] == "thread"
+    with pytest.raises(DispatchResolveError, match="retired"):
+        resolve_dispatch(
+            harness="opencode",
+            substrate="bg",
+            node_id="x-abcd",
+            trigger="autonomous",
+        )
 
 
-def test_codex_thread_capability_allows_bg_alias():
-    """Codex's live six-step journey earns the deprecated bg alias."""
+def test_codex_thread_capability_allows_the_thread_lane():
+    """Codex's live six-step journey earns the thread lane."""
     out = resolve_dispatch(
         harness="codex",
-        substrate="bg",
+        substrate="thread",
         node_id="x-abcd",
         trigger="autonomous",
     )

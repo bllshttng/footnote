@@ -4915,8 +4915,7 @@ pub(crate) fn control_roundtrip(
 /// The child hits its own bound first now and says which hop was slow.
 const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Gate and envelope `bytes` for `session:pane` by shelling to the Python
-/// renderer (`fno agents mail pane-prepare`), the SOLE `<fno_mail>` renderer.
+/// Gate and envelope `bytes` for `session:pane` by shelling to the Python renderer (`fno agents mail pane-prepare`).
 ///
 /// Fails closed on every arm: a missing renderer, a non-zero exit (the pane is
 /// showing an option prompt, hosts no registered agent, or the body cannot be
@@ -4962,6 +4961,7 @@ fn prepare_pane_bytes(
         // frame on exactly those installs, and every non-raw send refused as
         // "frame unreadable".
         .env("FNO_BIN", &exe)
+        .env("FNO_MAIL_FENCE", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

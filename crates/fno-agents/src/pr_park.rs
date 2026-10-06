@@ -69,6 +69,22 @@ impl Paths {
     /// `state_dir` key diverges from [`Paths::from_home`], so a test env or
     /// default install resolves exactly where the watcher already writes.
     pub fn resolve(cwd: &Path) -> Paths {
+        // The FNO_STATE_DIR carrier outranks config and HOME, the way
+        // Python's paths.state_dir reads it: a sealed or test-isolated root
+        // must move every state file together, not leave the watcher and the
+        // parked read on the configured root while events land elsewhere.
+        if let Some(raw) = std::env::var_os("FNO_STATE_DIR").filter(|v| !v.is_empty()) {
+            let text = raw.to_string_lossy().to_string();
+            let root = match text.strip_prefix("~/") {
+                Some(rest) => match std::env::var_os("HOME") {
+                    Some(home) => PathBuf::from(home).join(rest),
+                    None => return Paths::from_home(),
+                },
+                None if Path::new(&text).is_absolute() => PathBuf::from(&text),
+                None => cwd.join(&text),
+            };
+            return Paths::for_root(root);
+        }
         let configured = crate::agents_config::config_lookup(cwd, &["state_dir"])
             .and_then(|v| v.as_str().map(str::to_string));
         match configured {
@@ -124,7 +140,28 @@ impl Ctx {
 
 fn graph_rows(cwd: &Path) -> Vec<Value> {
     let graph_path = graph_json_path(cwd);
-    crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path)).unwrap_or_default()
+    crate::graph_store::read_rows_where(
+        &graph_path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "status",
+                    "pr_number",
+                    "pr_url",
+                    "additional_prs",
+                    "cwd",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .unwrap_or_default()
 }
 
 /// One parked row as listed.

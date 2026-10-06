@@ -94,11 +94,10 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
         "--pane",
         "--node", "--node-reason", "--slug", "--plan", "--name", "--recorded-provider",
-        # --route/--account/--crown were absent, so their VALUES read as
-        # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
-        # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
-        # (test_spawn_value_flags_cover_every_value_option pins the two together).
-        "--route", "--account", "--crown", "-k", "--dispatch-account",
+        # --route/--account/--crown were absent, so their VALUES read as positionals:
+        # a nameless `spawn --route zai,glm-5.2` registered an agent named "zai,glm-5.2".
+        # Kept in lockstep with cmd_spawn (test_spawn_value_flags_cover_every_value_option).
+        "--route", "--account", "--promote", "--crown", "-k", "--dispatch-account",
         # --at's value (current|<pane>) must not read as a positional.
         "--at",
         # --portal's index is a value, never a prompt word.
@@ -371,16 +370,16 @@ def _head_flag_value(head: Sequence[str], flags: Tuple[str, ...]) -> Optional[st
 
 
 def _node_slug_from_graph(node: str) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort graph read of a node's canonical id and slug.
+    """Return ``(canonical_id, slug)`` from an exact id or slug lookup.
 
-    Returns ``(node_id, slug)``; a slug input normalizes to the id, like
-    ``resolve_provenance``. Raises whatever the graph read raises - the CALLER
-    decides the fallback, because a spawn must never die on a naming lookup.
+    Native read failures fall back to the graph; the caller owns naming fallback.
     """
     from fno.graph.load import load_graph
+    from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
-    for rec in load_graph():
-        if rec.get("id") == node or rec.get("slug") == node:
+    fast = read_nodes_by_ids(GRAPH_JSON, [node])
+    for rec in fast["entries"] if fast is not None else load_graph():
+        if not rec.get("archived_at") and (rec.get("id") == node or rec.get("slug") == node):
             return rec.get("id") or node, rec.get("slug") or None
     return node, None
 
@@ -452,7 +451,7 @@ def normalize_spawn_args(
        ``--substrate <token>`` (unless an explicit substrate is present -> exit 2).
     2. ``-r`` is the short flag for ``--resume``; its value may be a full uuid or
        an 8-hex short-id (resolved to the uuid; unresolvable/malformed -> exit 2).
-       ``--resume`` with no substrate defaults the substrate to ``bg``.
+       ``--resume`` with no substrate defaults the substrate to ``thread``.
     3. The single positional is the MESSAGE; the name rides ``--name`` and is
        minted (``adjective-noun``) when omitted. A second positional -> exit 2.
 
@@ -552,15 +551,10 @@ def normalize_spawn_args(
         elif not (flag == "--resume" and raw_value == resolved):
             toks[i] = "--resume"
             toks[value_at] = resolved
-        # `--resume` is bg-only: default the substrate when none was pinned.
-        # Print the implied choice so the routing decision is never silent
-        # (blueprint Silent-Failure-Hunter / Locked Decision 4). The flag pair
-        # splices BEFORE any bare `--` fence: appended past it, click
-        # reads it as passthrough positionals and the implied lane is lost.
+        # `--resume` implies thread; the splice lands BEFORE any `--` fence, never past it.
         if _has_explicit_substrate(toks) is None:
             cut = _fence if _fence is not None else len(toks)
-            toks = toks[:cut] + ["--substrate", "bg"] + toks[cut:]
-            print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
+            toks = toks[:cut] + ["--substrate", "thread"] + toks[cut:]
 
     # A thread lane carries only what its contract row maps: a spawn pinning
     # thread/bg with an unmapped fenced token demotes to the pane here, on
@@ -927,6 +921,7 @@ def compose_spawn_argv(
         "permission_builtin": SPAWN_PERMISSION_BUILTIN if apply_permission_builtin else None,
         "scan": scan,
         "facts": facts,
+        "verbose": "--verbose" in out[1 : next((i for i, t in enumerate(out) if t in ("--", "--argv")), len(out))],
     }
     try:
         from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
@@ -1039,16 +1034,13 @@ def resolve_spawn_gates(substrate, monitor, *, once, harness):
     """
     if substrate not in ("pane", "thread", "bg", "headless"):
         print(
-            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
+            f"--substrate must be one of: pane, thread, headless (got {substrate})",
             file=sys.stderr,
         )
         raise SystemExit(2)
     if substrate == "bg":
-        print(
-            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
-            "the alias will be removed after one release",
-            file=sys.stderr,
-        )
+        print("substrate 'bg' was retired; use --substrate thread", file=sys.stderr)
+        raise SystemExit(2)
     if substrate == "thread":
         substrate = "bg"
     if monitor is not None and monitor != "happy":
@@ -1068,5 +1060,4 @@ def resolve_spawn_gates(substrate, monitor, *, once, harness):
         )
         raise SystemExit(2)
     return substrate
-
 

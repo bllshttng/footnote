@@ -747,7 +747,19 @@ pub(crate) fn graph_maps() -> (
     HashMap<String, String>,
     Option<String>,
 ) {
-    match crate::graph_store::read_rows(&crate::graph_get::default_graph_path()) {
+    match crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "status", "merge_status"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         Ok(rows) => {
             let mut merged = HashMap::new();
             let mut statuses = HashMap::new();

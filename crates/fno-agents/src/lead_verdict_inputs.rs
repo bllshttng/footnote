@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 const DEFAULT_CHECKIN_SECS: i64 = 3300;
 /// The window is three check-in intervals (Python `verdict_counts`).
 const WINDOW_INTERVALS: i64 = 3;
-/// The default compaction ceiling (`config.lead.compaction_ceiling`).
+/// The default compaction ceiling for a harness with no override.
 pub(crate) const DEFAULT_COMPACTION_CEILING: i64 = 3;
+/// Codex compacts about four times as often per hour (the 2026-10-03 lead
+/// comparison), so its built-in handoff point sits four claude ceilings out.
+const DEFAULT_COMPACTION_CEILING_CODEX: i64 = 12;
 
 /// A sortable instant: the `Z` and `+00:00` UTC spellings must compare equal,
 /// so a Z-suffixed manifest date and a +00:00 graph date cannot misorder at
@@ -257,31 +260,50 @@ pub(crate) fn checkin_interval_secs(cwd: &Path) -> i64 {
     }
 }
 
-/// `lead.checkin_interval` and `lead.compaction_ceiling` through the layered
-/// config lookup, with Python's defaults. A non-integer or negative ceiling
-/// is a named refusal, never zero. Zero itself is a legitimate ceiling: it
-/// declares that no compaction is ever acceptable.
-fn read_config(cwd: &Path) -> Result<(i64, i64), String> {
-    let interval = checkin_interval_secs(cwd);
-    let ceiling = match crate::agents_config::config_lookup(cwd, &["lead", "compaction_ceiling"]) {
-        Some(v) => match v.as_integer() {
-            Some(n) if n >= 0 => n,
-            Some(_) => {
-                return Err(
-                    "config lead.compaction_ceiling must be a non-negative integer".to_string(),
-                );
-            }
-            None => {
-                return Err("config lead.compaction_ceiling must be an integer".to_string());
-            }
-        },
-        None => DEFAULT_COMPACTION_CEILING,
-    };
-    Ok((interval, ceiling))
+/// The built-in handoff point for a harness with no config override.
+pub(crate) fn default_ceiling(harness: &str) -> i64 {
+    if harness == "codex" {
+        DEFAULT_COMPACTION_CEILING_CODEX
+    } else {
+        DEFAULT_COMPACTION_CEILING
+    }
 }
 
-pub(crate) fn compaction_ceiling(cwd: &Path) -> Result<i64, String> {
-    read_config(cwd).map(|(_, ceiling)| ceiling)
+/// The lead's handoff point for one harness: `lead.handoff.<harness>.
+/// compaction_ceiling`, then the global `lead.compaction_ceiling`, then the
+/// built-in default. A non-integer or negative value is a named refusal
+/// naming the full key, never zero. Zero itself is a legitimate ceiling: it
+/// declares that no compaction is ever acceptable.
+pub(crate) fn compaction_ceiling_for(cwd: &Path, harness: &str) -> Result<i64, String> {
+    let specific = format!("lead.handoff.{harness}.compaction_ceiling");
+    for (keys, name) in [
+        (
+            vec!["lead", "handoff", harness, "compaction_ceiling"],
+            specific,
+        ),
+        (
+            vec!["lead", "compaction_ceiling"],
+            "lead.compaction_ceiling".to_string(),
+        ),
+    ] {
+        let Some(v) = crate::agents_config::config_lookup(cwd, &keys) else {
+            continue;
+        };
+        return match v.as_integer() {
+            Some(n) if n >= 0 => Ok(n),
+            Some(_) => Err(format!("config {name} must be a non-negative integer")),
+            None => Err(format!("config {name} must be an integer")),
+        };
+    }
+    Ok(default_ceiling(harness))
+}
+
+/// `lead.checkin_interval` and the per-harness handoff point through the
+/// layered config lookup, with the defaults above.
+fn read_config(cwd: &Path, harness: &str) -> Result<(i64, i64), String> {
+    let interval = checkin_interval_secs(cwd);
+    let ceiling = compaction_ceiling_for(cwd, harness)?;
+    Ok((interval, ceiling))
 }
 
 /// The one entry point. `now` is injectable so tests pin the window; `cwd`
@@ -300,13 +322,14 @@ pub(crate) fn resolve_verdict_inputs(
     let scope = resolve_scope(explicit_scope, registry_path)?;
     let scope = canonical_members_with_aliases(&scope, cwd);
     let manifest_path = resolve_manifest(cwd, &scope, explicit_manifest)?;
-    let (interval, ceiling) = read_config(cwd)?;
 
     let content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("{}: unreadable manifest: {e}", manifest_path.display()))?;
     let manifest = crate::loopcheck::parse_lead_manifest(&content)
         .ok_or_else(|| "lead manifest has no frontmatter".to_string())?;
-    let harness = crate::loopcheck::scan_manifest_field(&content, "harness").unwrap_or_default();
+    let harness = crate::loopcheck::scan_manifest_field(&content, "harness")
+        .unwrap_or_else(|| "claude".into());
+    let (interval, ceiling) = read_config(cwd, &harness)?;
     let teamed_at = manifest.created_at.clone().ok_or_else(|| {
         format!(
             "{}: no created_at; no measurable split.",
@@ -358,8 +381,30 @@ pub(crate) fn resolve_verdict_inputs(
     let window_start = (current - chrono::Duration::seconds(window_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
 
-    let entries = crate::graph_store::read_rows(&crate::org_board::scope::graph_json_path(cwd))
-        .map_err(|e| format!("scope {scope} graph unreadable: {e}"))?;
+    let entries = crate::graph_store::read_rows_where(
+        &crate::org_board::scope::graph_json_path(cwd),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "deferred_kind",
+                    "superseded_by",
+                    "completed_at",
+                    "id",
+                    "type",
+                    "parent",
+                    "project",
+                    "status",
+                    "created_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("scope {scope} graph unreadable: {e}"))?;
     let projects: Result<HashMap<String, String>, String> =
         crate::org_board::scope::project_map(cwd);
     let ids = crate::territory::compile_scope_ids(&scope, &entries, &projects)
@@ -845,6 +890,37 @@ mod tests {
         )
         .expect("a zero ceiling is declared, not refused");
         assert_eq!(inputs.compaction_ceiling, 0);
+        // AC1-HP: the per-harness override wins; other harnesses keep the
+        // global, and a harness with no config anywhere reads its default.
+        fs::write(
+            dir.join(".fno/config.toml"),
+            format!(
+                "[paths]\ngraph_json = {:?}\n[[work.workspaces.t.projects]]\nname = \"fno\"\n[lead]\ncompaction_ceiling = 0\n[lead.handoff.codex]\ncompaction_ceiling = 12\n",
+                dir.join("home/graph.json").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            compaction_ceiling_for(&dir, "codex").unwrap(),
+            12,
+            "the per-harness override wins over the global"
+        );
+        assert_eq!(
+            compaction_ceiling_for(&dir, "claude").unwrap(),
+            0,
+            "another harness keeps the global override"
+        );
+        std::env::remove_var("FNO_CONFIG");
+        assert_eq!(
+            default_ceiling("codex"),
+            12,
+            "the codex default sits four claude ceilings out"
+        );
+        assert_eq!(
+            default_ceiling("agy"),
+            3,
+            "an unmeasured harness reads the claude default"
+        );
     }
 
     #[test]
@@ -970,6 +1046,26 @@ mod tests {
         )
         .expect_err("a non-integer ceiling is a named refusal");
         assert!(err.contains("compaction_ceiling"), "{err}");
+        // AC1-ERR: a bad per-harness value names the full per-harness key.
+        // The helper manifest carries no harness field, so the effective
+        // harness reads claude and the claude key is the one read.
+        fs::write(
+            dir.join(".fno/config.toml"),
+            "[[work.workspaces.t.projects]]\nname = \"x-root\"\n[lead.handoff.claude]\ncompaction_ceiling = \"x\"\n",
+        )
+        .unwrap();
+        let err = resolve_verdict_inputs(
+            &dir,
+            Some("x-root"),
+            Some(&manifest),
+            &dir.join("registry.json"),
+            pinned_now,
+        )
+        .expect_err("a bad per-harness value names the full key");
+        assert!(
+            err.contains("lead.handoff.claude.compaction_ceiling"),
+            "{err}"
+        );
     }
 
     #[test]

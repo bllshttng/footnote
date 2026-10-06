@@ -639,7 +639,12 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
                 continue;
             }
             if let Some(m) = msg.get("modelID").and_then(Value::as_str) {
-                model = Some(m.to_string());
+                // opencode's --model names `provider/model`; the store splits
+                // the two, so a bare modelID never matches the request.
+                model = Some(match msg.get("providerID").and_then(Value::as_str) {
+                    Some(p) => format!("{p}/{m}"),
+                    None => m.to_string(),
+                });
             }
             let Some(tokens) = msg.get("tokens") else {
                 continue;
@@ -648,6 +653,8 @@ fn observe_opencode(dbs: &[PathBuf], workdir: &str, started: f64, now: f64) -> O
             let (Some(input), Some(output)) = (num("input"), num("output")) else {
                 continue;
             };
+            // Reasoning is billed as output, and opencode counts it apart.
+            let output = output + num("reasoning").unwrap_or(0);
             let cache = tokens.get("cache");
             let cache_read = cache
                 .and_then(|c| c.get("read"))
@@ -851,9 +858,23 @@ pub fn observe(payload: &Value) -> Value {
             fields["observed_harness"] = json!(o.harness);
             fields["observed_model"] = o.model.clone().map(Value::String).unwrap_or(Value::Null);
             fields["observed_session_id"] = json!(o.session_id);
-            let substituted = (!requested_harness.is_empty() && o.harness != requested_harness)
-                || (!requested_model.is_empty()
-                    && o.model.as_deref() != Some(requested_model.as_str()));
+            // A transcript stores the bare model, never the `[1m]` context
+            // suffix the lane asked with, so the model sides compare by family.
+            // opencode reports `provider/model`; a lane that named the bare
+            // model compares against the bare model.
+            let model_differs = !requested_model.is_empty()
+                && o.model.as_deref().is_none_or(|observed| {
+                    let observed = match observed.rsplit_once('/') {
+                        Some((_, bare)) if !requested_model.contains('/') => bare,
+                        _ => observed,
+                    };
+                    crate::state::model_substitution(
+                        Some(requested_model.as_str()),
+                        Some(&json!(observed)),
+                    ) == "substituted"
+                });
+            let substituted =
+                (!requested_harness.is_empty() && o.harness != requested_harness) || model_differs;
             fields["substituted"] = json!(substituted);
             fields["lane_status"] = json!(if substituted { "substituted" } else { "ok" });
             if let Some(u) = o.usage {

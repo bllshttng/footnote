@@ -164,7 +164,7 @@ transcript marker, then runs
 carries claim heartbeat/context monitoring, compact handoff hooks, subagent
 guards, and the PreToolUse state/git protection guards.
 
-Codex provider goals are a separate controller surface. The provider goal receipt proves the objective and continuation owner; the Footnote `Stop` receipt separately proves that the loop hook can drive the next turn. Treat the verified provider goal as primary continuation state, but never infer Stop from it. A readable quiet state parks by pausing the goal and preserving its objective; it does not clear the goal or create a replacement session. Codex returns the thread id, objective, and status; Footnote derives the continuation owner from the exact crown scope or target session in its controller receipt.
+Codex provider goals are a separate controller surface. The provider goal receipt proves the objective and continuation owner; the Footnote `Stop` receipt separately proves that the loop hook can drive the next turn. Treat the verified provider goal as primary continuation state, but never infer Stop from it. A readable quiet state parks by pausing the goal and preserving its objective; it does not clear the goal or create a replacement session. Codex returns the thread id, objective, and status; Footnote derives the continuation owner from the exact role scope or target session in its controller receipt.
 
 Continuation proof has five separate receipts: packaged capability, machine
 plugin installation, exact-session lifecycle readiness, the correlated Stop
@@ -216,8 +216,8 @@ receipt; it never fills those fields from expected constants. The verifier
 accepts only the current receipt schema and rejects older synthetic receipts.
 
 ```bash
-python3 scripts/diagnostics/codex-reign-continuation-smoke.py --run
-python3 scripts/diagnostics/codex-reign-continuation-smoke.py \
+python3 scripts/diagnostics/codex-lead-continuation-smoke.py --run
+python3 scripts/diagnostics/codex-lead-continuation-smoke.py \
   --verify-latest --max-age-hours 24
 ```
 

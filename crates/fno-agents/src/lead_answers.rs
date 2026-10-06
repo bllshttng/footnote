@@ -33,15 +33,29 @@ pub(crate) fn scope_node_ids(
     level: Option<i64>,
 ) -> Result<BTreeSet<String>, String> {
     let level = level.ok_or("team level unresolved")?;
-    let entries = crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph.to_path_buf()))
-        .map_err(|e| format!("graph unreadable: {}", e.0))?;
+    let entries = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "type", "parent", "project"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .map_err(|e| format!("graph unreadable: {}", e.0))?;
     let projects = crate::org_board::project_map(cwd);
     crate::org_fold::compile_forced(scope, &entries, &projects, level)
 }
 
 /// Every readable question page in one directory, `(stem, text)`, conflict
-/// markers excluded: the shape both question folds read.
-fn read_question_pages(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+/// markers excluded: the shape both question folds read. `pub(crate)` so the
+/// merge gates read the same pages the lead check-in reads.
+pub(crate) fn read_question_pages(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("questions folder {} unreadable: {e}", dir.display()))?;
     let mut pages: Vec<(String, String)> = Vec::new();

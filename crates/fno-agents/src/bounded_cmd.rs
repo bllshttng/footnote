@@ -91,6 +91,33 @@ pub(crate) fn output_with_timeout_result(
 /// The Option form: every failure - a missing binary, a wait error, a
 /// panicked reader - reads the same `None`, which the existing callers
 /// already treat as "no receipt".
+/// The load-scaled wall budget for one subprocess read: `floor_s` on an
+/// idle machine, doubling per 2 jobs per core of load, capped at `cap_s`.
+/// A fork-starved machine needs minutes of wall clock for the same
+/// subprocess chain; a fixed floor there SIGKILLs every read.
+pub(crate) fn load_scaled_budget_s(floor_s: u64, cap_s: u64) -> u64 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as f64)
+        .unwrap_or(1.0);
+    load_scaled_budget_for_s(
+        crate::machine_sample::load_average().map(|(one, _, _)| one / cores),
+        floor_s,
+        cap_s,
+    )
+}
+
+/// The pure shape, load handed in so a test drives it.
+pub(crate) fn load_scaled_budget_for_s(
+    load_per_core: Option<f64>,
+    floor_s: u64,
+    cap_s: u64,
+) -> u64 {
+    match load_per_core {
+        Some(load) => ((floor_s as f64 * (load / 2.0).max(1.0)) as u64).clamp(floor_s, cap_s),
+        None => floor_s,
+    }
+}
+
 pub(crate) fn output_with_timeout(
     cmd: std::process::Command,
     secs: u64,

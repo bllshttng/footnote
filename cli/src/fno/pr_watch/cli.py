@@ -1217,14 +1217,14 @@ def tick() -> None:
 
             roots = _tick_roots()
             try:
-                # Durable grants, never the sweep's result. Its timeout and
-                # phase cap share one load-scaled window, leaving room for a
-                # merge attempt and at least a short sweep before the deadline.
+                # The read's bound travels to the Rust op as deadline_ms, so
+                # its bounded git reads answer inside it.
+                grant_timeout = min(grant_queue_timeout_s, max(1.0, slice_s - 10.0))
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
-                                "cwd": str(roots[0] if roots else Path.cwd())},
-                                timeout=min(grant_queue_timeout_s,
-                                            max(1.0, slice_s - 10.0)))
+                                "cwd": str(roots[0] if roots else Path.cwd()),
+                                "deadline_ms": int(grant_timeout * 1000)},
+                                timeout=grant_timeout)
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
                 queue = [
@@ -1299,7 +1299,9 @@ def tick() -> None:
                     woke_n = len(wake_summary.get("woke", []) or [])
                     evaluated = int(wake_summary.get("evaluated", 0) or 0)
                     truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
-                    if crowns == 0:
+                    if crowns == 0 and wake_summary.get("court_incomplete"):
+                        skip = "court_read_incomplete"
+                    elif crowns == 0:
                         skip = "no_crowned_target"
                     elif woke_n:
                         skip = None
@@ -1632,7 +1634,7 @@ def heal() -> None:
     # bouncing again re-arms the healthy-pending grace over the same fault
     # and hides it for another 2x interval.
     try:
-        report = m.liveness_report_live()
+        report = _liveness_via_binary()
     except Exception:  # noqa: BLE001 - a probe that cannot read never blocks a cure
         report = {}
     if report.get("bounce_pending") is True:
@@ -1720,6 +1722,31 @@ def uninstall() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _liveness_via_binary() -> dict:
+    """The one liveness probe the remaining Python consumers share: the Rust
+    verb's ``--json`` object. Any failure reads as an empty report, so a
+    probe that cannot run never blocks a cure."""
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return {}
+    try:
+        proc = subprocess.run(
+            [str(binary), "pr-watch", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        report = json.loads(proc.stdout)
+    except Exception:  # noqa: BLE001 - a probe that cannot read never blocks a cure
+        return {}
+    return report if isinstance(report, dict) else {}
+
+
 @cli.command()
 def status(
     json_out: bool = typer.Option(
@@ -1729,9 +1756,23 @@ def status(
     ),
 ) -> None:
     """Report watcher status: loaded, last tick time, open-PR count, parked PRs."""
-    from fno.pr_watch import _install as m
+    import subprocess
 
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno do pr watch status: the fno-agents binary was not found. "
+            "It ships in the `pip install fno` wheel and with the plugin; "
+            "reinstall fno or run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    argv = [str(binary), "pr-watch", "status"]
     if json_out:
-        typer.echo(json.dumps(m.liveness_report_live()))
-        return
-    m.status(launch_agents_dir=_LAUNCH_AGENTS_DIR)
+        argv.append("--json")
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))

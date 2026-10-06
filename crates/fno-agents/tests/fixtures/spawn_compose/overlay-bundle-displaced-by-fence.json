@@ -115,5 +115,6 @@
       "owned-by-child"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

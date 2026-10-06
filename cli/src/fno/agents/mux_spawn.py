@@ -1533,9 +1533,11 @@ def resolve_provenance(
     if slug is None or plan is None or not has_node_id_prefix(node):
         try:
             from fno.graph.load import load_graph
+            from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
-            for rec in load_graph():
-                if rec.get("id") == node or rec.get("slug") == node:
+            fast = read_nodes_by_ids(GRAPH_JSON, [node])
+            for rec in fast["entries"] if fast is not None else load_graph():
+                if not rec.get("archived_at") and (rec.get("id") == node or rec.get("slug") == node):
                     node = rec.get("id") or node  # normalize a slug input to id
                     if slug is None:
                         slug = rec.get("slug") or ""
@@ -1985,7 +1987,7 @@ def _reconcile_unanswered_run(
     if not candidates:
         raise DispatchAskError(
             f"no pane was created; the mux never answered and no pane in "
-            f"{session!r} matches this spawn. Retry, or use --substrate bg.",
+            f"{session!r} matches this spawn. Retry, or use --substrate thread.",
             exit_code=1,
         )
     if len(candidates) > 1:
@@ -3350,7 +3352,7 @@ def dispatch_spawn_pane(
             crown_scope or "", caller_row, succession,
         )
         if crown_refusal is not None:
-            raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
+            raise DispatchAskError(f"--promote: {crown_refusal}", exit_code=2)
 
     conflict = pane_placement_conflict(
         pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,
@@ -4610,7 +4612,7 @@ def dispatch_spawn_pane(
             )
             if crown_declined and _declined_scope:
                 print(
-                    f"spawn: crown declined (scope {_declined_scope!r} already held "
+                    f"spawn: role declined (scope {_declined_scope!r} already held "
                     "by a live row); spawned uncrowned. The worker launched without a crown.",
                     file=sys.stderr,
                 )
@@ -4713,7 +4715,7 @@ def dispatch_spawn_pane(
                 f"The registry row is `failed` (not live) and {where}. "
                 "Read that output for the cause, then retry - the row is kept as "
                 "evidence but it is terminal, so a respawn under the same name "
-                "reclaims it rather than colliding. Or spawn with --substrate bg.",
+                "reclaims it rather than colliding. Or spawn with --substrate thread.",
                 exit_code=13,
             )
 

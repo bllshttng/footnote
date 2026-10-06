@@ -182,38 +182,6 @@ class TestEmitEventAnchoredPath:
         ev = lines[0]
         assert ev["type"] == "pr_watch_tick"
 
-    def test_emit_event_same_path_as_the_liveness_watermark(self, tmp_path, monkeypatch):
-        """_emit_event default path must be the SAME path the liveness
-        watermark reads from.
-
-        status's watermark scan defaults to state_dir()/events.jsonl.
-        The daemon's _emit_event must write to the same location.
-        """
-        fake_home = tmp_path / "home"
-        fake_home.mkdir()
-        (fake_home / ".fno").mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        try:
-            from fno.config import load_settings
-        except Exception:
-            pass
-
-        from fno.pr_watch.cli import _emit_event
-        _emit_event(
-            "pr_watch_tick",
-            {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
-             "dropped_count": 0, "dropped": {}},
-        )
-
-        # Now verify the watermark scan (with no explicit path) finds that event
-        from fno.pr_watch._install import _tick_watermarks
-        ts = _tick_watermarks(None)["last_tick"]  # None = default state_dir() path
-        assert ts is not None, (
-            "the watermark scan could not find the event written by _emit_event; "
-            "they must resolve to the same path"
-        )
-
-
 # ---------------------------------------------------------------------------
 # Fix #1b — plist WorkingDirectory = $HOME
 # ---------------------------------------------------------------------------

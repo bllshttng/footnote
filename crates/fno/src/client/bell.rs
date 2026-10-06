@@ -16,6 +16,7 @@ pub(crate) struct Panel {
     selected: usize,
     esc: Vec<u8>,
     unread: bool,
+    tab: Tab,
 }
 
 #[derive(Clone)]
@@ -33,6 +34,31 @@ pub(super) enum Hit {
     Focus,
     Clear,
     Question(String),
+    Tab(Tab),
+}
+
+/// The strip and its order (the 2026-10-05 tabs ruling): System holds
+/// machine and fleet alerts so they leave Announcements; All merges the
+/// three, newest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tab {
+    All,
+    Questions,
+    Announcements,
+    System,
+}
+
+const TABS: [Tab; 4] = [Tab::All, Tab::Questions, Tab::Announcements, Tab::System];
+
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Tab::All => "All",
+            Tab::Questions => "Questions",
+            Tab::Announcements => "Announcements",
+            Tab::System => "System",
+        }
+    }
 }
 
 impl Panel {
@@ -47,13 +73,17 @@ impl Panel {
             selected: 0,
             esc: Vec::new(),
             unread: false,
+            tab: Tab::All,
         }
     }
 }
 
 pub(crate) type Tx = tokio::sync::mpsc::UnboundedSender<(u64, Result<Value, String>)>;
 
-pub(crate) fn open(view: &mut View) {
+/// Open the panel and hand back the generation a later
+/// [`apply`] must carry: the snapshot seam pairs this with one synchronous
+/// gather where the live loop would kick one.
+pub(crate) fn open(view: &mut View) -> u64 {
     let generation = view.bell.generation.wrapping_add(1);
     view.bell.open = true;
     view.bell.generation = generation;
@@ -65,6 +95,7 @@ pub(crate) fn open(view: &mut View) {
     }
     view.feed = None;
     view.region_owner = super::region_focus::RegionOwner::Pane;
+    generation
 }
 
 pub(crate) fn close(view: &mut View) {
@@ -82,8 +113,15 @@ pub(crate) fn toggle(view: &mut View) {
     }
 }
 
+/// The bell's glyph: a single-column Nerd Font bell (the operator's
+/// 2026-10-04 ask). A TUI cannot detect font coverage, so a terminal without
+/// the font shows tofu - the fallback (`\u{2407}`, the ASCII bell control
+/// picture) is a one-line const swap, and the live screenshot step is what
+/// catches it.
+const BELL_GLYPH: char = '\u{f0f3}';
+
 pub(crate) fn button_label(view: &View) -> String {
-    let mut label = String::from("🔔");
+    let mut label = String::from(BELL_GLYPH);
     let count = ready_count(view);
     if count > 0 {
         let digits = count.to_string();
@@ -109,34 +147,21 @@ pub(crate) fn button_label(view: &View) -> String {
     label
 }
 
-pub(crate) fn button_range(view: &View, text_w: usize) -> std::ops::Range<usize> {
+/// The bell's seat: the far right of the mux top bar (terminal row 0), so it
+/// shows whether or not the sideline is open. Full-terminal columns; a
+/// transient notice paints under it, never over.
+pub(crate) fn button_range(view: &View) -> std::ops::Range<usize> {
     let width = unicode_width::UnicodeWidthStr::width(button_label(view).as_str());
-    let words_end = top_row_words_end(view);
-    let start = text_w.saturating_sub(width);
-    if start < words_end {
-        text_w..text_w
-    } else {
-        start..text_w
-    }
-}
-
-pub(super) fn top_row_words_end(view: &View) -> usize {
-    view.top_row_spans()
-        .iter()
-        .map(|(start, span, _)| *start + *span)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(2)
+    let cols = view.term.1 as usize;
+    cols.saturating_sub(width)..cols
 }
 
 pub(super) fn button_at(view: &View, row: u16, col: u16) -> bool {
-    let top = view.sideline_top();
-    let text_w = view.sideline_paint_w().saturating_sub(1);
-    row as usize + 1 == top && button_range(view, text_w).contains(&(col as usize))
+    row == 0 && button_range(view).contains(&(col as usize))
 }
 
-pub(crate) fn paint_button(view: &View, cells: &mut [Cell], text_w: usize, cols: usize) {
-    let range = button_range(view, text_w);
+pub(crate) fn paint_button(view: &View, cells: &mut [Cell], cols: usize) {
+    let range = button_range(view);
     paint(
         cells,
         cols,
@@ -203,90 +228,279 @@ fn mark_seen(projection: &Value) {
 }
 
 fn rows(view: &View) -> Vec<Row> {
+    match view.bell.tab {
+        Tab::Questions => question_rows(view),
+        Tab::Announcements => announcement_rows(view, false),
+        Tab::System => announcement_rows(view, true),
+        Tab::All => all_rows(view),
+    }
+}
+
+/// The Questions tab: the cached fold, open questions, then answered with
+/// the clear row. A failed read keeps the last good fold and says so; it
+/// never blanks the board to 0.
+fn question_rows(view: &View) -> Vec<Row> {
     let mut out = Vec::new();
-    let mut open: Vec<_> = view
-        .questions_fold
-        .as_ref()
-        .into_iter()
-        .flat_map(|fold| fold.items.iter())
-        .filter(|q| q.state == "open" && !q.settled)
-        .collect();
-    open.sort_by_key(|q| !q.ready);
-    let settled: Vec<_> = view
-        .questions_fold
-        .as_ref()
-        .into_iter()
-        .flat_map(|fold| fold.items.iter())
-        .filter(|q| q.settled)
-        .collect();
-    out.push(Row::Header(format!("Questions ({})", open.len())));
-    if view.questions_degraded {
+    let merged = view.questions_merged();
+    if view.questions_degraded && view.questions_index.is_none() {
         out.push(Row::Info(format!(
-            "questions unavailable: {}",
+            "stale: {} \u{b7} showing the last read",
             view.questions_degraded_reason
                 .as_deref()
                 .unwrap_or("read failed")
         )));
     } else if view.questions_fold.is_none() {
         out.push(Row::Info("loading questions...".into()));
-    } else if open.is_empty() {
-        out.push(Row::Info("no open questions".into()));
+        out.push(Row::Info(
+            "\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}"
+                .into(),
+        ));
     }
-    for q in open {
+    if view.questions_inflight && view.questions_fold.is_some() {
+        out.push(Row::Info("refreshing...".into()));
+    }
+    let mut open: Vec<_> = merged
+        .as_ref()
+        .into_iter()
+        .flat_map(|fold| fold.items.iter())
+        .filter(|q| q.state == "open" && !q.settled)
+        .collect();
+    open.sort_by_key(|q| !q.ready);
+    for q in open.iter() {
         out.push(Row::Question(q.id.clone()));
     }
+    if merged.is_some() && open.is_empty() {
+        out.push(Row::Info("no open questions".into()));
+    }
+    let settled: Vec<_> = merged
+        .as_ref()
+        .into_iter()
+        .flat_map(|fold| fold.items.iter())
+        .filter(|q| q.settled)
+        .collect();
     if !settled.is_empty() {
         out.push(Row::Header(format!("Answered ({})", settled.len())));
-        for q in &settled {
+        for q in settled.iter() {
             out.push(Row::Question(q.id.clone()));
         }
         out.push(Row::Clear(settled.len()));
     }
-    let announcements = view
+    out
+}
+
+/// One row per subject, newest first, expired rows hidden. The subject is
+/// the summary with its digits collapsed, so progress updates of one story
+/// ("busy for 40 minutes", "busy for 71 minutes") hold one row.
+fn announcement_rows(view: &View, system: bool) -> Vec<Row> {
+    let mut out = Vec::new();
+    let Some(items) = view
         .bell
         .projection
         .as_ref()
         .and_then(|p| p.get("announcements"))
-        .and_then(Value::as_array);
-    let count = announcements.map_or(0, Vec::len);
-    out.push(Row::Header(format!("Announcements ({count})")));
-    if let Some(items) = announcements {
-        let mut ordered: Vec<&Value> = items.iter().collect();
-        ordered.sort_by(|a, b| timestamp_of(b).cmp(&timestamp_of(a)));
-        for item in ordered {
-            let sender = item.get("from").and_then(Value::as_str).unwrap_or("system");
-            let summary = item.get("summary").and_then(Value::as_str).unwrap_or("");
-            let badge = if item.get("system").and_then(Value::as_bool) == Some(true) {
-                "⚙ "
-            } else {
-                ""
-            };
-            out.push(Row::Announcement(format!("{badge}{sender}: {summary}")));
-            if let Some(body) = item
-                .get("body")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                let width = PANEL_W.min(view.term.1 as usize).saturating_sub(4).max(1);
-                out.extend(
-                    wrap_body(body, width)
-                        .into_iter()
-                        .map(|line| Row::Info(format!("  {line}"))),
-                );
-            }
-            if let Some(expires) = item.get("expires").and_then(Value::as_str) {
-                out.push(Row::Info(format!("  expires {expires}")));
-            }
-        }
+        .and_then(Value::as_array)
+    else {
         if let Some(error) = view.bell.error.as_ref() {
-            out.push(Row::Info(format!("stale: {error}")));
+            out.push(Row::Info(format!("unavailable: {error}")));
+        } else {
+            out.push(Row::Info("loading announcements...".into()));
+            out.push(Row::Info(
+                "\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}\u{2582}"
+                    .into(),
+            ));
         }
-    } else if let Some(error) = view.bell.error.as_ref() {
-        out.push(Row::Info(format!("unavailable: {error}")));
-    } else {
-        out.push(Row::Info("loading announcements...".into()));
+        return out;
+    };
+    let rows = deduped(
+        items
+            .iter()
+            .filter(|item| standing(item))
+            .filter(|item| item.get("system").and_then(Value::as_bool) == Some(system))
+            .collect::<Vec<_>>(),
+    );
+    if rows.is_empty() {
+        out.push(Row::Info("nothing here".into()));
+    }
+    for item in rows {
+        push_announcement(view, &mut out, item);
+    }
+    if let Some(error) = view.bell.error.as_ref() {
+        out.push(Row::Info(format!("stale: {error}")));
     }
     out
+}
+
+/// The All tab: open questions and deduped announcements in one stream,
+/// newest first (the tabs ruling).
+fn all_rows(view: &View) -> Vec<Row> {
+    let mut out = Vec::new();
+    if view.questions_degraded && view.questions_index.is_none() {
+        out.push(Row::Info(format!(
+            "stale: {} \u{b7} showing the last read",
+            view.questions_degraded_reason
+                .as_deref()
+                .unwrap_or("read failed")
+        )));
+    } else if view.questions_merged().is_none() {
+        out.push(Row::Info("loading questions...".into()));
+    }
+    let mut stream: Vec<(i64, Vec<Row>)> = Vec::new();
+    for q in view
+        .questions_merged()
+        .as_ref()
+        .into_iter()
+        .flat_map(|fold| fold.items.iter())
+        .filter(|q| q.state == "open" && !q.settled)
+    {
+        let ts = timestamp_key(&q.created_at).unwrap_or(0);
+        stream.push((ts, vec![Row::Question(q.id.clone())]));
+    }
+    if let Some(items) = view
+        .bell
+        .projection
+        .as_ref()
+        .and_then(|p| p.get("announcements"))
+        .and_then(Value::as_array)
+    {
+        for item in deduped(
+            items
+                .iter()
+                .filter(|item| standing(item))
+                .collect::<Vec<_>>(),
+        ) {
+            let ts = timestamp_of(item).unwrap_or(0);
+            let mut group = Vec::new();
+            push_announcement(view, &mut group, item);
+            stream.push((ts, group));
+        }
+    }
+    stream.sort_by(|a, b| b.0.cmp(&a.0));
+    if stream.is_empty()
+        && !(view.questions_degraded && view.questions_index.is_none())
+        && view.questions_merged().is_some()
+    {
+        out.push(Row::Info("nothing here".into()));
+    }
+    for (_, group) in stream {
+        out.extend(group);
+    }
+    out
+}
+
+fn push_announcement(view: &View, out: &mut Vec<Row>, item: &Value) {
+    let sender = item.get("from").and_then(Value::as_str).unwrap_or("system");
+    let summary = item.get("summary").and_then(Value::as_str).unwrap_or("");
+    let badge = if item.get("system").and_then(Value::as_bool) == Some(true) {
+        "\u{2699} "
+    } else {
+        ""
+    };
+    out.push(Row::Announcement(format!("{badge}{sender}: {summary}")));
+    if let Some(body) = item
+        .get("body")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        let width = PANEL_W.min(view.term.1 as usize).saturating_sub(4).max(1);
+        out.extend(
+            wrap_body(body, width)
+                .into_iter()
+                .map(|line| Row::Info(format!("  {line}"))),
+        );
+    }
+    if let Some(expires) = item.get("expires").and_then(Value::as_str) {
+        out.push(Row::Info(format!("  expires {expires}")));
+    }
+}
+
+/// A row stands until its `expires`; the projection's own check rides a
+/// cached read, so the panel re-reads the clock and hides the dead rows.
+fn standing(item: &Value) -> bool {
+    match item
+        .get("expires")
+        .and_then(Value::as_str)
+        .and_then(timestamp_key)
+    {
+        Some(expires) => expires > chrono::Utc::now().timestamp_millis(),
+        None => true,
+    }
+}
+
+fn subject_of(item: &Value) -> String {
+    item.get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .collect()
+}
+
+fn deduped<'a>(items: Vec<&'a Value>) -> Vec<&'a Value> {
+    let mut newest: Vec<(String, &'a Value)> = Vec::new();
+    for item in items {
+        let subject = subject_of(item);
+        match newest.iter_mut().find(|(s, _)| *s == subject) {
+            Some((_, row)) if timestamp_of(*row) >= timestamp_of(item) => {}
+            Some(slot) => slot.1 = item,
+            None => newest.push((subject, item)),
+        }
+    }
+    newest.into_iter().map(|(_, row)| row).collect()
+}
+
+/// The strip's counts, in TABS order. An unread board reads as an ellipsis,
+/// never 0.
+fn tab_counts(view: &View) -> [String; 4] {
+    let unread = "…".to_string();
+    let open = view.questions_merged().map(|fold| {
+        fold.items
+            .iter()
+            .filter(|q| q.state == "open" && !q.settled)
+            .count()
+    });
+    let Some((ann, sys)) = split_announcements(view) else {
+        return [unread.clone(), unread.clone(), unread.clone(), unread];
+    };
+    let q = open.map_or(unread.clone(), |n| n.to_string());
+    let total = open.unwrap_or(0) + ann + sys;
+    [total.to_string(), q, ann.to_string(), sys.to_string()]
+}
+
+fn split_announcements(view: &View) -> Option<(usize, usize)> {
+    let items = view
+        .bell
+        .projection
+        .as_ref()
+        .and_then(|p| p.get("announcements"))
+        .and_then(Value::as_array)?;
+    let mut ann = 0;
+    let mut sys = 0;
+    for item in deduped(items.iter().filter(|item| standing(item)).collect()) {
+        if item.get("system").and_then(Value::as_bool) == Some(true) {
+            sys += 1;
+        } else {
+            ann += 1;
+        }
+    }
+    Some((ann, sys))
+}
+
+/// Each tab's columns on row 0, for the click mapper. The spans derive from
+/// the same labels the draw paints (pass the one `tab_counts` read), so the
+/// two never drift.
+fn tab_spans(view: &View, counts: &[String; 4]) -> Vec<(Tab, std::ops::Range<usize>)> {
+    let width = PANEL_W.min(view.term.1 as usize);
+    let x0 = view.term.1 as usize - width;
+    let mut col = x0 + 4;
+    TABS.iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            let label = format!("{} {}", tab.label(), counts[i]);
+            let span = col..col + label.chars().count();
+            col = span.end + 1;
+            (*tab, span)
+        })
+        .collect()
 }
 
 pub(super) fn hit(view: &View, row: u16, col: u16) -> Option<ChromeHit> {
@@ -299,7 +513,20 @@ pub(super) fn hit(view: &View, row: u16, col: u16) -> Option<ChromeHit> {
     if (col as usize) < x0 || row as usize >= view.term.0 as usize {
         return None;
     }
-    if row == 0 || row as usize == view.term.0.saturating_sub(1) as usize {
+    if row == 0 {
+        let col = col as usize;
+        let counts = tab_counts(view);
+        return Some(ChromeHit::Bell(
+            match tab_spans(view, &counts)
+                .into_iter()
+                .find(|(_, span)| span.contains(&col))
+            {
+                Some((tab, _)) => Hit::Tab(tab),
+                None => Hit::Focus,
+            },
+        ));
+    }
+    if row as usize == view.term.0.saturating_sub(1) as usize {
         return Some(ChromeHit::Bell(Hit::Focus));
     }
     if col as usize == x0 {
@@ -322,6 +549,10 @@ pub(crate) fn apply_hit(view: &mut View, hit: Hit) {
     }
     match hit {
         Hit::Toggle => toggle(view),
+        Hit::Tab(tab) => {
+            view.bell.tab = tab;
+            view.bell.selected = 0;
+        }
         Hit::Focus => {}
         Hit::Clear if !view.question_acting => {
             view.question_clear_settled = true;
@@ -399,6 +630,15 @@ pub(crate) fn keys(view: &mut View, bytes: &[u8]) {
                 close(view);
                 return;
             }
+            b'\t' => {
+                let i = TABS.iter().position(|t| *t == view.bell.tab).unwrap_or(0);
+                view.bell.tab = TABS[(i + 1) % TABS.len()];
+                view.bell.selected = 0;
+            }
+            b'1'..=b'4' => {
+                view.bell.tab = TABS[(byte - b'1') as usize];
+                view.bell.selected = 0;
+            }
             b'j' => {
                 let len = rows(view).len();
                 view.bell.selected = (view.bell.selected + 1).min(len.saturating_sub(1));
@@ -470,11 +710,30 @@ pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) 
                 cols,
                 r,
                 x0 + 2,
-                width.saturating_sub(2),
-                "🔔 Questions and Announcements",
+                2,
+                &BELL_GLYPH.to_string(),
                 view.theme.brand,
                 true,
             );
+            let counts = tab_counts(view);
+            for (tab, span) in tab_spans(view, &counts) {
+                let i = TABS.iter().position(|t| t == &tab).unwrap_or(0);
+                let (fg, bold) = if view.bell.tab == tab {
+                    (view.theme.brand, true)
+                } else {
+                    (crate::theme::dim_fg(&view.theme), false)
+                };
+                paint(
+                    cells,
+                    cols,
+                    r,
+                    span.start,
+                    span.len(),
+                    &format!("{} {}", tab.label(), counts[i]),
+                    fg,
+                    bold,
+                );
+            }
         } else if r == rows_n - 1 {
             paint(
                 cells,
@@ -482,7 +741,7 @@ pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) 
                 r,
                 x0 + 2,
                 width.saturating_sub(2),
-                "j/k move · Enter open · c clear · q close",
+                "1-4/Tab tab · j/k move · Enter open · c clear · q close",
                 Color::Default,
                 false,
             );
@@ -496,7 +755,7 @@ pub(crate) fn draw(view: &View, cells: &mut [Cell], rows_n: usize, cols: usize) 
                 ),
                 Row::Clear(n) => (format!("Clear all {n} answered"), view.theme.brand, true),
                 Row::Announcement(s) => (format!("• {s}"), Color::Default, false),
-                Row::Info(s) => (s.clone(), Color::Indexed(8), false),
+                Row::Info(s) => (s.clone(), crate::theme::dim_fg(&view.theme), false),
             };
             paint(
                 cells,
@@ -559,7 +818,7 @@ fn paint(
 }
 
 pub(crate) fn ready_count(view: &View) -> usize {
-    view.questions_fold
+    view.questions_merged()
         .as_ref()
         .map(|fold| {
             fold.items
@@ -595,4 +854,152 @@ fn timestamp_key(ts: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|date| date.timestamp_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::view_with_agents;
+    use super::*;
+
+    fn view_with_announcements(items: Vec<Value>) -> View {
+        let mut v = view_with_agents(vec![]);
+        v.term = (24, 100);
+        v.bell.projection = Some(serde_json::json!({ "announcements": items }));
+        v
+    }
+
+    fn ann(ts: &str, summary: &str, system: bool, expires: &str) -> Value {
+        serde_json::json!({
+            "ts": ts,
+            "from": "fno/fleet-incident",
+            "summary": summary,
+            "body": "",
+            "expires": expires,
+            "system": system,
+        })
+    }
+
+    fn announcement_texts(view: &View) -> Vec<String> {
+        rows(view)
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Announcement(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tabs_dedup_and_split_rows() {
+        let far = "2027-01-01T00:00:00Z";
+        let v = view_with_announcements(vec![
+            ann("2026-10-05T11:00:00Z", "busy for 40 minutes", true, far),
+            ann("2026-10-05T12:00:00Z", "busy for 71 minutes", true, far),
+            ann(
+                "2026-10-05T10:00:00Z",
+                "a dead story",
+                true,
+                "2020-01-01T00:00:00Z",
+            ),
+            ann("2026-10-05T09:00:00Z", "an agent notice", false, far),
+        ]);
+        // All: every deduped announcement, newest first. The expired row
+        // and the deduped twin never render.
+        let texts = announcement_texts(&v);
+        assert_eq!(texts.len(), 2, "dedupe + expiry: {texts:?}");
+        assert!(texts[0].contains("busy for 71"), "newest first: {texts:?}");
+        assert!(
+            texts.iter().all(|t| !t.contains("for 40")),
+            "one row per subject"
+        );
+        assert!(
+            texts.iter().all(|t| !t.contains("dead")),
+            "expired rows hide"
+        );
+
+        // System: machine and fleet alerts only, still deduped.
+        let mut system = view_with_announcements(vec![
+            ann("2026-10-05T11:00:00Z", "busy for 40 minutes", true, far),
+            ann("2026-10-05T12:00:00Z", "busy for 71 minutes", true, far),
+            ann("2026-10-05T09:00:00Z", "an agent notice", false, far),
+        ]);
+        system.bell.tab = Tab::System;
+        let texts = announcement_texts(&system);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("busy for 71"));
+
+        // Announcements: the non-system rows.
+        system.bell.tab = Tab::Announcements;
+        let texts = announcement_texts(&system);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("an agent notice"));
+
+        // Counts: the unread question board reads as an ellipsis, never 0.
+        assert_eq!(
+            tab_counts(&system),
+            [
+                "2".to_string(),
+                "\u{2026}".to_string(),
+                "1".to_string(),
+                "1".to_string()
+            ]
+        );
+
+        // The strip spans land where the draw paints the labels.
+        let spans = tab_spans(&system, &tab_counts(&system));
+        assert_eq!(spans.len(), 4);
+        assert!(spans[0].1.start >= 4, "the glyph keeps its seat");
+        assert_eq!(spans[0].0, Tab::All);
+        assert_eq!(spans[3].0, Tab::System);
+
+        // Keys switch panels: 1-4 jump, Tab cycles and wraps.
+        let mut v = view_with_announcements(vec![]);
+        keys(&mut v, b"3");
+        assert_eq!(v.bell.tab, Tab::Announcements);
+        keys(&mut v, b"\t");
+        assert_eq!(v.bell.tab, Tab::System);
+        keys(&mut v, b"\t");
+        assert_eq!(v.bell.tab, Tab::All, "Tab wraps");
+        keys(&mut v, b"2");
+        assert_eq!(v.bell.tab, Tab::Questions);
+        keys(&mut v, b"1");
+        assert_eq!(v.bell.tab, Tab::All);
+    }
+
+    #[test]
+    fn stale_banner_yields_to_the_index() {
+        let mut v = view_with_agents(vec![]);
+        v.term = (24, 100);
+        v.questions_index = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![crate::needs_overlay::QuestionItem {
+                id: "q-1".into(),
+                title: "from the index".into(),
+                state: "open".into(),
+                ready: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![crate::needs_overlay::QuestionItem {
+                id: "q-1".into(),
+                title: "from the projection".into(),
+                state: "open".into(),
+                ready: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        v.questions_degraded = true;
+        v.questions_degraded_reason = Some("timed out".into());
+        v.bell.tab = Tab::Questions;
+        let stale = |view: &View| {
+            rows(view)
+                .iter()
+                .any(|r| matches!(r, Row::Info(s) if s.starts_with("stale:")))
+        };
+        assert!(!stale(&v), "the index backs the list; no stale banner");
+        v.questions_index = None;
+        assert!(stale(&v), "no index: the banner says so");
+    }
 }

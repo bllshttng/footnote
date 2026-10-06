@@ -27,7 +27,6 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -70,6 +69,11 @@ pub const GATE_EVENT_TYPES: &[&str] = &["review_attestation", "review_coverage"]
 /// Retention floor for `ephemeral` rows (`schema.yaml`:
 /// `retention.minimum_ephemeral_ttl_hours`).
 pub const MINIMUM_EPHEMERAL_TTL_HOURS: i64 = 672;
+
+/// Marks a judged refusal inside `append_envelope`'s error string. The
+/// door strips it and answers exit 3, the class Python maps to
+/// `ValidationError`; every other error stays a store fault on exit 1.
+pub const VALIDATE_PREFIX: &str = "event-judged: ";
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
@@ -337,70 +341,19 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
     })
 }
 
-/// Open (creating if needed) the store with the backlog shadow's pragmas:
-/// WAL so concurrent history readers never block the ingest writer, FULL so
-/// an acknowledged ingest survives a crash. The schema is ensured (v2
-/// created, or v1 migrated) before the connection is handed out.
+/// Open (creating if needed) the store through the store seam, with its
+/// schema ensured (v2 created, or v1 migrated) before the connection is
+/// handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
-    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
-    let mut conn = Connection::open(store).map_err(|e| format!("{}: {e}", store.display()))?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
-    configure_store_connection(&conn, store)?;
+    let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
     observation::ensure_observation_tables(&conn)?;
     Ok(conn)
 }
 
-fn configure_store_connection(conn: &Connection, store: &Path) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let configured = (|| -> rusqlite::Result<()> {
-            let journal_mode: String =
-                conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-            if !journal_mode.eq_ignore_ascii_case("wal") {
-                conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-            }
-            let synchronous: i64 = conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
-            if synchronous != 2 {
-                conn.execute_batch("PRAGMA synchronous=FULL;")?;
-            }
-            Ok(())
-        })();
-        match configured {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if matches!(
-                    error.sqlite_error_code(),
-                    Some(
-                        rusqlite::ffi::ErrorCode::DatabaseBusy
-                            | rusqlite::ffi::ErrorCode::DatabaseLocked
-                    )
-                ) && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(format!("{}: {error}", store.display())),
-        }
-    }
-}
-
 /// Read-only handle for history readers; a failure names the store path.
 pub fn open_read(store: &Path) -> Result<Connection, String> {
-    // A writer that exec-replaced itself or died leaves a hot -wal; a
-    // READ_ONLY open cannot run the WAL recovery reading it needs, and the
-    // durable rows behind it would read as an empty store. Retry
-    // read-write, which recovers the log on open, before reporting the
-    // read-only error.
-    let conn = match Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    {
-        Ok(conn) => conn,
-        Err(ro_error) => {
-            Connection::open(store).map_err(|_| format!("{}: {ro_error}", store.display()))?
-        }
-    };
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+    let conn = crate::store_conn::open_read(store)?;
     refuse_newer_schema(&conn, store)?;
     Ok(conn)
 }
@@ -432,6 +385,7 @@ const EVENTS_V2_COLUMNS: &str = "(\
         pr_number INTEGER, \
         head_sha TEXT, \
         repo TEXT, \
+        caused_by TEXT, \
         reject_reason TEXT, \
         line TEXT NOT NULL\
     )";
@@ -458,6 +412,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     let current = refuse_newer_schema(conn, store)?;
     let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
+        migrate_caused_by(conn)?;
         return stamp_coverage_epoch(conn, store);
     }
     let has_events: bool = conn
@@ -504,7 +459,30 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     }
     tx.commit()
         .map_err(|e| format!("{}: migration: {e}", store.display()))?;
+    migrate_caused_by(conn)?;
     stamp_coverage_epoch(conn, store)
+}
+
+/// The caused_by column on a store created before it existed. The ALTER is
+/// PRAGMA-guarded and idempotent; two first opens can race it and the loser
+/// tolerates the winner's duplicate-column answer.
+fn migrate_caused_by(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'caused_by'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has > 0 {
+        return Ok(());
+    }
+    if let Err(e) = conn.execute_batch("ALTER TABLE events ADD COLUMN caused_by TEXT") {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Stamp [`COVERAGE_EPOCH_KEY`] with the first-open moment of this build,
@@ -633,8 +611,9 @@ fn insert_v2_row(tx: &Transaction, table: &str, row: &RowInput) -> Result<usize,
         &format!(
             "INSERT OR IGNORE INTO {table}
              (event_id, row_hash, ts_ms, type, source, scope, retention_class,
-              session_id, node_id, pr_number, head_sha, repo, reject_reason, line)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+              session_id, node_id, pr_number, head_sha, repo, caused_by,
+              reject_reason, line)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
         ),
         params![
             row.event_id,
@@ -649,6 +628,7 @@ fn insert_v2_row(tx: &Transaction, table: &str, row: &RowInput) -> Result<usize,
             id.pr_number,
             id.head_sha,
             id.repo,
+            id.caused_by,
             row.reject_reason,
             row.line,
         ],
@@ -665,6 +645,9 @@ pub struct EventIdentity {
     pub pr_number: Option<i64>,
     pub head_sha: Option<String>,
     pub repo: Option<String>,
+    /// The causing event's id, when the envelope names one
+    /// (`data.caused_by`).
+    pub caused_by: Option<String>,
 }
 
 pub fn extract_identity(line: &str) -> EventIdentity {
@@ -693,6 +676,7 @@ pub fn extract_identity(line: &str) -> EventIdentity {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
     });
+    id.caused_by = get_str(&["caused_by"]);
     id
 }
 
@@ -1000,6 +984,15 @@ pub fn append_envelope(
     let obj = value
         .as_object()
         .ok_or_else(|| format!("{}: envelope is not a JSON object", store.display()))?;
+    // The judge owns the schema now: one line, the same diagnostic the
+    // Python judge printed. Storage-level checks (ts keying, scope
+    // canonicality) run after it and keep their own wording. The prefix
+    // marks the refusal so the door answers exit 3: a judged refusal is a
+    // different failure class than a store fault, and Python raises
+    // ValidationError only for the former.
+    if let Err(msg) = validate::validate_envelope(obj) {
+        return Err(format!("{VALIDATE_PREFIX}{msg}"));
+    }
     let ty = obj
         .get("type")
         .and_then(|t| t.as_str())
@@ -1121,8 +1114,9 @@ pub fn append_envelope(
         .execute(
             "INSERT OR IGNORE INTO events
                  (event_id, row_hash, ts_ms, type, source, scope, retention_class,
-                  session_id, node_id, pr_number, head_sha, repo, reject_reason, line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13)",
+                  session_id, node_id, pr_number, head_sha, repo, caused_by,
+                  reject_reason, line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14)",
             params![
                 event_id,
                 row_hash,
@@ -1138,6 +1132,7 @@ pub fn append_envelope(
                 id.pr_number,
                 id.head_sha,
                 id.repo,
+                id.caused_by,
                 line,
             ],
         )
@@ -1771,22 +1766,57 @@ pub fn export_jsonl(journal: &Path, out: &Path) -> Result<u64, String> {
     Ok(count)
 }
 
-/// Prune expired `ephemeral` rows immediately (the `gc` verb's primitive),
-/// bypassing the daily gate. Returns the deleted count. `durable`, `gate`,
-/// rejected, and migration rows never leave.
-pub fn prune_ephemeral_now(journal: &Path, now_ms: i64) -> Result<u64, String> {
-    let conn = open_store(&store_path(journal))?;
-    let cutoff = now_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
-    let n = conn
-        .execute(
-            "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
-            params![cutoff],
+/// What one gc pass over the store saw: every row, the rejected ones, and the
+/// expired `ephemeral` rows it deleted (or, on a dry run, would delete).
+#[derive(Debug, Default, Serialize)]
+pub struct GcReceipt {
+    pub scanned: i64,
+    pub malformed: i64,
+    pub expired: i64,
+}
+
+/// The `gc` verb's primitive: delete `ephemeral` rows older than `cutoff_ms`,
+/// bypassing the daily gate. `durable`, `gate`, rejected and migration rows
+/// never leave. A journal with no store reads as an empty receipt, and the
+/// store is not created.
+pub fn gc_ephemeral(journal: &Path, cutoff_ms: i64, dry_run: bool) -> Result<GcReceipt, String> {
+    let store = store_path(journal);
+    if !store.exists() {
+        return Ok(GcReceipt::default());
+    }
+    let conn = open_store(&store)?;
+    let named = |e: rusqlite::Error| format!("{}: {e}", store.display());
+    let (scanned, malformed) = conn
+        .query_row(
+            "SELECT count(*), coalesce(sum(reject_reason IS NOT NULL), 0) FROM events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|e| e.to_string())?;
-    Ok(n as u64)
+        .map_err(named)?;
+    let expired = if dry_run {
+        conn.query_row(
+            "SELECT count(*) FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
+            params![cutoff_ms],
+            |r| r.get(0),
+        )
+        .map_err(named)?
+    } else {
+        conn.execute(
+            "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
+            params![cutoff_ms],
+        )
+        .map_err(named)? as i64
+    };
+    Ok(GcReceipt {
+        scanned,
+        malformed,
+        expired,
+    })
 }
 
 mod observation;
+
+pub mod validate;
 
 #[cfg(test)]
 mod tests;

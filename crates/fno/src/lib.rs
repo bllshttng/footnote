@@ -56,6 +56,7 @@ pub mod pane_argv;
 pub mod pane_border;
 pub mod pane_cwd;
 mod pane_send_audit;
+pub mod paths_route;
 pub mod popup;
 pub mod process_admission;
 pub mod product_boundary;
@@ -86,6 +87,7 @@ pub mod squad_cascade;
 pub mod squad_store;
 pub mod state_layout;
 pub mod store_client;
+pub mod store_conn;
 pub mod templates;
 #[cfg(test)]
 mod test_keeper_cleanup;

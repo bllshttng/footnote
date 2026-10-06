@@ -51,6 +51,7 @@ pub mod additional_prs;
 pub(crate) mod adopt_carry;
 pub(crate) mod adopt_identity;
 mod agent_lock;
+pub mod agent_ref;
 pub mod agents_config;
 pub(crate) mod agents_event;
 pub mod agy_ask;
@@ -60,6 +61,7 @@ pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;
 pub mod attach;
+pub(crate) mod attended;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
@@ -107,6 +109,7 @@ pub mod claude_transcript_paths;
 pub mod claude_vault;
 pub mod cli_args;
 pub mod client;
+pub mod client_render;
 pub mod client_verbs;
 pub mod codex_ask;
 pub mod codex_daemon_readiness;
@@ -150,10 +153,12 @@ pub mod effort_surface;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
+pub mod eval_part4;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_qualification;
 pub mod evals_trend;
+pub mod event_rules;
 pub mod event_store;
 pub mod events;
 pub mod events_limits;
@@ -180,6 +185,7 @@ pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
 pub mod gh_cache;
+pub mod gh_incident;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -195,9 +201,11 @@ pub mod harness_roster;
 pub mod harness_verbs;
 pub mod heal;
 pub mod heal_pid;
+pub mod hold_label;
 pub mod honesty_sweep;
 pub mod hook;
 pub mod identity;
+pub mod incident_claim;
 pub mod install_verify;
 pub mod intel;
 pub mod intel_html;
@@ -228,6 +236,7 @@ pub mod lead_state;
 pub mod lead_term;
 pub mod lead_termination;
 pub mod lead_verdict_inputs;
+pub mod lead_wake;
 pub mod ledger_axes;
 pub(crate) mod ledger_workers;
 mod lifecycle_child;
@@ -263,6 +272,7 @@ pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;
 pub mod merge_posture;
+pub mod merge_provenance;
 pub mod merge_reap;
 #[cfg(test)]
 #[path = "mint_guard_tests.rs"]
@@ -298,6 +308,7 @@ pub mod pane_rebind;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
+pub mod paths_cli;
 pub mod pending_session_row;
 pub mod phase_close;
 pub mod pi;
@@ -307,6 +318,7 @@ pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
 pub mod pr_body_check;
+pub mod pr_create;
 pub mod pr_draft_ready;
 pub mod pr_list;
 pub mod pr_nudge;
@@ -315,6 +327,7 @@ pub mod pr_push;
 pub mod pr_rebase;
 pub mod pr_status;
 pub mod pr_status_facts;
+pub mod pr_watch;
 pub mod pr_worktree;
 pub mod process_owner;
 pub mod protocol;
@@ -418,12 +431,14 @@ pub mod state_layout;
 pub mod state_layout_sqlite;
 pub mod state_path;
 pub mod state_root_drift;
+pub mod store_conn;
 pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
 pub mod subagent_hold;
 pub mod subprocess_ask;
 pub mod subscribe;
+pub mod succession_txn;
 pub mod supervisor;
 pub mod surface_check;
 pub mod sync_canonical;
@@ -433,6 +448,7 @@ pub mod team_alarm;
 pub mod team_identity;
 pub mod team_names;
 pub mod team_reap;
+pub mod team_rescope;
 pub mod team_settle;
 pub mod team_split;
 pub mod team_widen;
@@ -443,6 +459,7 @@ pub mod test_delta;
 pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod tool_activity;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
@@ -452,8 +469,10 @@ pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
+pub mod wake_name;
 pub mod watch_expiry;
 pub mod wave;
+pub mod worked_nodes;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1673,7 +1692,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "lead_armed",
     "lead_checkin",
     "lead_dispatch_exception",
-    // A team's term declared or extended (`fno agents lead term <spec>
+    // The lead-wake arm's receipt: one row per daemon wake episode, the
+    // dedupe memory the arm folds before it wakes again (lead_wake.rs).
+    "lead_wake",
+    // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
     // resolves it through this table exactly like the lead kinds above.
@@ -1688,6 +1710,18 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // session after an heir died unbound past the window (team_reap.rs;
     // the daemon retire arm and `fno agents reap`).
     "team_succession_reverted",
+    // The succession transaction (succession_txn.rs): announce (plus its
+    // failed row), transfer, verify, release (plus the unproven row), and
+    // the retro receipt (plus its unmeasured row). All share one
+    // succession_id.
+    "team_succession_announced",
+    "team_succession_announce_failed",
+    "team_succession_transferred",
+    "team_succession_verified",
+    "team_succession_released",
+    "team_succession_release_unproven",
+    "team_succession_retro_filed",
+    "team_succession_retro_unmeasured",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
@@ -1844,8 +1878,8 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "rust", "skill_diff", "subagent", "target", "test"] },
-                        { "pattern": "^(worker|stream-worker):.+$" }
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "legacy", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "rust", "skill_diff", "subagent", "target", "test"] },
+                        { "pattern": "^(worker|stream-worker|footnote):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"
                 },

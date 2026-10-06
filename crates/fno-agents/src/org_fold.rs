@@ -647,9 +647,48 @@ pub fn org_fold(
     registry_path: &std::path::Path,
     teams: &[Value],
 ) -> Result<Value, String> {
-    let entries: Vec<Value> =
-        crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path))
-            .map_err(|e| format!("graph unreadable: {}", e.0))?;
+    let entries: Vec<Value> = crate::graph_store::read_rows_where(
+        graph_path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "deferred_kind",
+                    "id",
+                    "type",
+                    "parent",
+                    "project",
+                    "status",
+                    "cwd",
+                    "slug",
+                    "pr_number",
+                    "sessions",
+                    "session_id",
+                    "cost_sessions",
+                    "locked_by_harness_session",
+                    "created_at",
+                    "blocked_by",
+                    "blocked_reason",
+                    "title",
+                    "completed_at",
+                    "superseded_by",
+                    "deferred_at",
+                    "plan_path",
+                    "dispatch_hold",
+                    "contained_in",
+                    "encounters",
+                    "tags",
+                    "difficulty",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .map_err(|e| format!("graph unreadable: {}", e.0))?;
     let projects = crate::org_board::project_map(cwd);
     let now_secs = (crate::claims::now_ms() / 1000).max(0) as u64;
     // One owner read for the whole answer: the registry's live teams, never

@@ -49,7 +49,30 @@ pub fn run_pr_list(args: &[String]) -> i32 {
     let graph = || {
         let path = crate::org_board::scope::graph_json_path(&cwd);
         let store = crate::backlog::api::Store::new(&path);
-        crate::backlog::api::rows(&store).map_err(|e| e.0)
+        crate::graph_store::read_rows_where(
+            &store.graph,
+            &crate::backlog::RowQuery {
+                fields: Some(
+                    [
+                        "id",
+                        "slug",
+                        "status",
+                        "completed_at",
+                        "superseded_by",
+                        "pr_number",
+                        "pr_url",
+                        "additional_prs",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ),
+                with_blockers: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+        .map_err(|e| e.0)
     };
     let out = list(args, &cwd, None, &gh, &graph);
     println!("{}", out.stdout);
@@ -231,7 +254,7 @@ fn bind(rows: &mut [Value], graph: GraphRead) {
     }
 }
 
-fn origin_slug(cwd: &Path, git_ceiling: Option<&Path>) -> Result<String, String> {
+pub(crate) fn origin_slug(cwd: &Path, git_ceiling: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(["remote", "get-url", "origin"]).current_dir(cwd);
     if let Some(ceiling) = git_ceiling {

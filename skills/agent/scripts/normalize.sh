@@ -63,8 +63,8 @@ EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
 ALLOW_MERGE=""
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
-SUBSTRATE=""       # ""|pane|thread|headless; `bg` is a deprecated
-                   # alias for `thread`. Empty = the default `pane` (owned-PTY).
+SUBSTRATE=""       # ""|pane|thread|headless. The retired `bg` spelling
+                   # refuses. Empty = the default `pane` (owned-PTY).
 YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
 PROJECT=""         # cross-project target: a registry project name/short_name to
@@ -88,11 +88,8 @@ set_substrate() {
   local _substrate="$1"
   case "$_substrate" in
     pane|thread|headless) SUBSTRATE="$_substrate" ;;
-    bg)
-      SUBSTRATE="thread"
-      printf "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release\n" >&2
-      ;;
-    *) emit_error "invalid substrate '$_substrate'; valid: pane, thread, bg, headless" ;;
+    bg) emit_error "substrate 'bg' was retired; use 'thread'" ;;
+    *) emit_error "invalid substrate '$_substrate'; valid: pane, thread, headless" ;;
   esac
 }
 
@@ -241,7 +238,8 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
       yolo|auto)           YOLO=1; _end=$_i ;;
       merge)               ALLOW_MERGE=1; _end=$_i ;;
       interactive|drive)   [[ "$MODE" == "exec" ]] && MODE="interactive"; _end=$_i ;;
-      bg|headless)         [[ -z "$SUBSTRATE" ]] && set_substrate "$_lt"; _end=$_i ;;
+      bg)                  [[ -z "$SUBSTRATE" ]] && set_substrate "thread"; _end=$_i ;;
+      headless)            [[ -z "$SUBSTRATE" ]] && set_substrate "$_lt"; _end=$_i ;;
       as)                  emit_error "'as' is a name keyword with no name after it; write 'as <name>' or drop it" ;;
       model)               emit_error "'model' is a keyword with no name after it; write 'model <name>' or drop it" ;;
       effort)              emit_error "'effort' is a keyword with no value after it; write 'effort <value>' or drop it" ;;
@@ -283,7 +281,9 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
     bg|headless)
       _rest="${msg#"${msg%%[[:space:]]*}"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
       if [[ "$_rest" == /* ]]; then
-        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_first_lc}'. (A leading '${_first_lc}' would otherwise bury the '${_rest%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
+        _hint="$_first_lc"
+        [[ "$_first_lc" == bg ]] && _hint="thread"  # bg is retired; the redirect teaches the survivor
+        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_hint}'. (A leading '${_first_lc}' would otherwise bury the '${_rest%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
       fi
       ;;
     substrate)
@@ -895,7 +895,7 @@ case "$payload_mode" in
     # harness-level gate is a deferred follow-up). NO /target, NO no-merge token.
     message="You are continuing work handed off from another session. Read the handoff document at ${msg} in full - it is your plan, state, and context. Continue the work it describes from where it left off. Do NOT re-derive a plan or re-run discovery; the document already contains the plan.
 
-GUARDRAIL: Do not autonomously perform outward-facing or irreversible actions (sending emails or messages, deploying, merging, publishing, deleting external resources, contacting third parties). When the work calls for one, first check fno inbox decisions <topic> with no lane or state filter (both hide real rulings: a king ruling records under coord, an older operator ruling under unattributed) and, when the topic is a node, fno backlog get <node>; a king's ruling on the node governs with no decision record, and an empty result means nothing answered the query, not that no rule exists. When no ruling answers, STOP, do not perform it, and surface it with <help reason=\"outward-action\" evidence=\"...\"> for explicit human confirmation; resume only when a human sends approval. Internal/local work (reading and editing files, running tests, committing to a branch, opening a pull request for review) proceeds normally.
+GUARDRAIL: Do not autonomously perform outward-facing or irreversible actions (sending emails or messages, deploying, merging, publishing, deleting external resources, contacting third parties). When the work calls for one, first check fno inbox decisions <topic> with no lane or state filter (both hide real rulings: a lead ruling records under coord, an older operator ruling under unattributed) and, when the topic is a node, fno backlog get <node>; a lead's ruling on the node governs with no decision record, and an empty result means nothing answered the query, not that no rule exists. When no ruling answers, STOP, do not perform it, and surface it with <help reason=\"outward-action\" evidence=\"...\"> for explicit human confirmation; resume only when a human sends approval. Internal/local work (reading and editing files, running tests, committing to a branch, opening a pull request for review) proceeds normally.
 
 If the work includes code changes, land them as a pull request for review; do not merge."
     ;;
@@ -970,7 +970,6 @@ printf 'effort=%s\n' "$EFFORT"
 printf 'mode=%s\n' "$MODE"
 # the spawn substrate (empty=pane default). The SKILL forwards a
 # non-empty value to `spawn.sh --substrate`; thread -> persistent thread,
-# bg -> deprecated alias for thread,
 # headless -> one-shot (claude -p / codex --exec / agy -p).
 printf 'substrate=%s\n' "$SUBSTRATE"
 printf 'yolo=%s\n' "$YOLO"

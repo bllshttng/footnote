@@ -287,7 +287,7 @@ config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
-delivery	KEEP	delivery	7	single-leaf group
+delivery evaluate	KEEP	delivery evaluate	7	single-leaf group
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1
 do loops pause-all	T1	do loops pause-all	1
@@ -450,11 +450,8 @@ notify	KEEP	notify	18	single-leaf group
 observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4
 observer judge	T1	observer judge	0	
-paths emit-shell	T1	paths emit-shell	6
 paths handoff	T1	paths handoff	9
-paths shell-stub	T1	paths shell-stub	20
-paths verify	T1	paths verify	7
-phase	KEEP	phase	16	single-leaf group
+phase kill-check	KEEP	phase kill-check	16	single-leaf group
 plan brief	T1	plan brief	4
 plan fidelity	T1	plan fidelity	5
 plan folder-audit	T1	plan folder-audit	0
@@ -479,6 +476,8 @@ pr bind-created	T1	pr bind-created	0
 pr closure-trailer	T1	pr closure-trailer	0
 pr coverage-check	T1	pr coverage-check	1
 pr coverage-waive	T1	pr coverage-waive	8
+pr create	T1	pr create	3
+do pr create	T1	do pr create	3
 pr coverage-publish	T1	pr coverage-publish	0
 pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
@@ -545,7 +544,7 @@ state init	T1	state init	3
 state set	T1	state set	20
 state show	T1	state show	7
 status	KEEP	status	22	single-leaf group
-status-fanout	KEEP	status-fanout	4	single-leaf group
+status-fanout tick	KEEP	status-fanout tick	4	single-leaf group
 stub-manifest reconcile-finalize	T1	stub-manifest reconcile-finalize	1
 stub-manifest reconcile-validate	T1	stub-manifest reconcile-validate	2
 stub-manifest write	T1	stub-manifest write	2
@@ -586,6 +585,20 @@ agents feed	T1	agents feed	13
 agents harness probe	T1	agents harness probe	0
 agents king shape	T1	agents king shape	5
 agents king term	T1	agents king term	7
+agents org cancel	T1	agents org cancel	6	
+agents org checkin	T1	agents org checkin	14	
+agents org done	T1	agents org done	10	
+agents org drain	T1	agents org drain	2	
+agents org escalate	T1	agents org escalate	2	
+agents org faq add	T1	agents org faq add	4	
+agents org faq list	T1	agents org faq list	0	
+agents org history	T1	agents org history	8	
+agents org init	T1	agents org init	6	
+agents org ledger	T1	agents org ledger	0	
+agents org manifest-path	T1	agents org manifest-path	0	
+agents org shape	T1	agents org shape	6	
+agents org term	T1	agents org term	6	
+agents org verdict	T1	agents org verdict	3	
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
 backlog version	T1	backlog version	19	
@@ -593,3 +606,9 @@ agents prove-it-verdicts	T1	agents prove-it-verdicts	1
 agents honesty-sweep	T1	agents honesty-sweep	0
 doctor intel	T1	doctor intel	0
 agents select-read	T1	agents select-read	1	
+agents court-fold	T1	agents court-fold	0	
+agents court-orphans	T1	agents court-orphans	0	
+agents king-checkin	T1	agents king-checkin	0	
+agents king-history	T1	agents king-history	0	
+agents reign-ledger	T1	agents reign-ledger	0	
+agents worked-nodes	T1	agents worked-nodes	0	

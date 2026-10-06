@@ -181,6 +181,11 @@ def clean_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
         + " -c 'from fno.cli import app; app()' \"$@\"\n"
     )
     launcher.chmod(0o755)
+    # The init flow calls the bare `fno-agents` from PATH (the mint and the
+    # readback verbs); the shim dir answers it with the same dev build the
+    # front door is pinned to.
+    agents_link = shim / "fno-agents"
+    agents_link.symlink_to(native)
     monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
 
     def _git(*args: str) -> None:

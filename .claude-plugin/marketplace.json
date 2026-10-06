@@ -37,7 +37,7 @@
         "source": "git-subdir",
         "url": "bllshttng/footnote",
         "path": "plugins/buddy",
-        "ref": "stable"
+        "ref": "main"
       },
       "description": "Bring back buddy: a terminal companion beside your status line. /buddy or /bbb.",
       "category": "fun",

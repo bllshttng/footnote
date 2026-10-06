@@ -574,6 +574,207 @@ fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
     base.intersection(&pr).map(|p| (*p).to_string()).collect()
 }
 
+/// The visual-approval gate: a PR whose changed files touch a configured
+/// paint path holds until an ANSWERED question page names the PR, or a
+/// crown-recorded decision row transcribes the user's chat approval of this
+/// exact head. The user's look is the only clear, mechanizing the prose
+/// rulings this gate replaces (rebrand and splash PRs merged with no user
+/// look). `merge.visual_paint_paths` lists the lines the gate watches; empty
+/// (the default everywhere) disarms it.
+pub(crate) fn visual_approval_blocker<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    pr: u64,
+    head: &str,
+) -> Option<Blocker> {
+    let paint_paths = crate::agents_config::visual_paint_paths(cwd);
+    if paint_paths.is_empty() {
+        return None;
+    }
+    let Some(files) = pr_file_paths(probes, cwd, pr) else {
+        // The files list is this gate's one instrument; an unreadable list
+        // must not release a paint PR, so it reads unknown (never a verdict),
+        // the same class the pin uses for an unreadable covered head.
+        return Some(Blocker::unknown(
+            "visual_paint_paths_unknown",
+            format!(
+                "PR {pr}: the changed-file list was unreadable, so the visual-approval gate cannot answer"
+            ),
+        ));
+    };
+    let touched: Vec<&str> = files
+        .iter()
+        .filter(|f| path_matches_paint(f, &paint_paths))
+        .map(String::as_str)
+        .collect();
+    if touched.is_empty() {
+        return None;
+    }
+    if answered_question_names_pr(cwd, pr) || crown_chat_clears_pr(probes, cwd, pr, head) {
+        return None;
+    }
+    Some(Blocker::held(
+        "visual_approval",
+        format!(
+            "PR {pr} touches the paint surface the config lists ({}); the user's look is \
+             the only clear: an answered question page naming the PR, or a crown-recorded \
+             decision whose rationale attests the chat and whose text names the PR and \
+             its head sha (`fno backlog decide <node> 'Approved: PR {pr} at {head}' \
+             --authority crown --rationale 'user in chat: <the user's words>'`). Ask via \
+             `fno inbox outstanding ask`, then the user answers the page or the lead \
+             records the chat approval.",
+            touched.join(", ")
+        ),
+    ))
+}
+
+/// Does one changed file match the paint-path list? Two pattern shapes: a
+/// `dir/**` subtree and a bare file name (any directory). `ponytail:` no glob
+/// engine; a mid-pattern `**` or `*` wildcard is added when a config needs it.
+fn path_matches_paint(path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| {
+        let p = p.trim();
+        if let Some(prefix) = p.strip_suffix("/**") {
+            let prefix = prefix.trim_end_matches('/');
+            return path.starts_with(prefix)
+                && (path.len() == prefix.len() || path[prefix.len()..].starts_with('/'));
+        }
+        if !p.contains('/') {
+            return path.rsplit('/').next() == Some(p);
+        }
+        path == p
+    })
+}
+
+/// True when any ANSWERED question page in this project's questions directory
+/// names the PR: the pages the lead check-in reads, parsed the same way.
+fn answered_question_names_pr(cwd: &Path, pr: u64) -> bool {
+    let dir = crate::escalation::questions_dir(cwd);
+    // Answered pages are archived into done/ after the fact; an approval
+    // must not lapse because its page moved there.
+    let mut dirs = vec![dir.clone()];
+    dirs.push(dir.join("done"));
+    dirs.iter().any(|d| {
+        crate::lead_answers::read_question_pages(d).is_ok_and(|pages| {
+            pages.iter().any(|(_stem, text)| {
+                crate::attention_file::parse_page(text)
+                    .map(|(front, _)| front.status == "answered")
+                    .unwrap_or(false)
+                    && page_names_pr(text, pr)
+            })
+        })
+    })
+}
+
+/// The page text names the PR: a word-start `pr` (any case), an optional
+/// `#`/`-`/`/`/`:`/space separator run, then the PR number, not followed by
+/// another digit. Prose like "the PR is 3058" or "PRs 3058" never matches.
+fn page_names_pr(text: &str, pr: u64) -> bool {
+    let needle = pr.to_string();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i + 2 <= bytes.len() {
+        let is_pr =
+            bytes[i].to_ascii_lowercase() == b'p' && bytes[i + 1].to_ascii_lowercase() == b'r';
+        if !is_pr {
+            i += 1;
+            continue;
+        }
+        let word_start = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+        i += 1;
+        if !word_start {
+            continue;
+        }
+        let mut j = i + 1; // first byte after "pr"
+                           // One separator run, spaces and symbols in any order, so "PR #3036"
+                           // and "pr - 3036" read like "PR 3036".
+        while matches!(
+            bytes.get(j),
+            Some(b'#') | Some(b'-') | Some(b'/') | Some(b':') | Some(b' ')
+        ) {
+            j += 1;
+        }
+        let rest = &text[j.min(text.len())..];
+        if rest.starts_with(&needle)
+            && !rest[needle.len()..]
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The row text the PR/head match reads: decision plus rationale, the two
+/// free-text fields a recording carries.
+fn row_text(row: &Value) -> String {
+    format!(
+        "{}\n{}",
+        row.get("decision").and_then(Value::as_str).unwrap_or(""),
+        row.get("rationale").and_then(Value::as_str).unwrap_or("")
+    )
+}
+
+/// The rationale attests the approval came from the user's own chat words.
+/// `superuser in chat` contains `user in chat`, so one casefold covers both
+/// spellings the leads already record.
+fn row_is_chat_attested(row: &Value) -> bool {
+    row.get("rationale")
+        .and_then(Value::as_str)
+        .is_some_and(|r| r.to_lowercase().contains("user in chat"))
+}
+
+/// True when a live crown decision row transcribes the user's chat approval
+/// of this PR at this head: authority `crown` (the decide door scopes who may
+/// mint one), a chat-attested rationale, and text naming both the PR and the
+/// exact head sha the user looked at. Head-scoped like the operator head
+/// grant: a push invalidates the approval. An unreadable index never clears.
+fn crown_chat_clears_pr<P: Probes>(probes: &P, cwd: &Path, pr: u64, head: &str) -> bool {
+    if head.is_empty() {
+        return false;
+    }
+    let args: Vec<String> = [
+        "backlog",
+        "decisions",
+        "--lane",
+        "unattributed",
+        "--state",
+        "all",
+        "--limit",
+        "200",
+        "--json",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let Some((Some(0), out, _)) = probes.fno_shell(cwd, &args).ok() else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&out) else {
+        return false;
+    };
+    payload
+        .get("decisions")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("authority_source").and_then(Value::as_str) == Some("crown")
+                    && matches!(
+                        row.get("lifecycle").and_then(Value::as_str),
+                        Some("live") | Some("unscoped")
+                    )
+                    && row_is_chat_attested(row)
+                    && {
+                        let text = row_text(row);
+                        text.contains(head) && page_names_pr(&text, pr)
+                    }
+            })
+        })
+}
+
 /// The `owner/name` pair a remote url names, normalized across the ssh
 /// (`git@host:owner/repo.git`), https (`https://host/owner/repo.git`), and
 /// trailing-slash spellings, so the ledger scoping test reads the same
@@ -687,5 +888,30 @@ mod tests {
             Some("o/r".to_string())
         );
         assert_eq!(repo_slug_from_origin("o"), None);
+    }
+    #[test]
+    fn a_paint_pattern_matches_its_subtree_and_a_bare_name_anywhere() {
+        let patterns = vec![
+            "crates/fno/src/client/**".to_string(),
+            "theme.rs".to_string(),
+            "docs/brand.md".to_string(),
+        ];
+        let m = |p: &str| path_matches_paint(p, &patterns);
+        assert!(m("crates/fno/src/client/pane_paint.rs"));
+        assert!(!m("crates/fno/src/client.rs"));
+        assert!(m("crates/fno/src/theme.rs"));
+        assert!(m("theme.rs"));
+        assert!(m("docs/brand.md"));
+        assert!(!m("docs/brand.md.bak"));
+    }
+    #[test]
+    fn a_page_names_the_pr_only_at_a_word_start_with_the_number() {
+        assert!(page_names_pr("May PR 3036 merge?", 3036));
+        assert!(page_names_pr("pr-3036 ships the splash", 3036));
+        assert!(page_names_pr("(PR #3036)", 3036));
+        assert!(!page_names_pr("PRs 3036 land", 3036));
+        assert!(!page_names_pr("the PR is 3036", 3036));
+        assert!(!page_names_pr("PR 30365", 3036));
+        assert!(!page_names_pr("plain 3036", 3036));
     }
 }

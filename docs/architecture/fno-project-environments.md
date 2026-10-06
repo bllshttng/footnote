@@ -63,7 +63,7 @@ So an isolated environment is isolated about data and not about identity. A sess
 
 Three failures on one machine in one day, all on the layer-2 vector:
 
-- Claude sessions carried a real `CODEX_SESSION_ID` that nothing in the fleet had spawned. One of them was refused a crown grant because of it.
+- Claude sessions carried a real `CODEX_SESSION_ID` that nothing in the fleet had spawned. One of them was refused a role grant because of it.
 - A claim recorded a pid belonging to a desktop app's own codex process. That pid stayed alive, so the claim read `state=live` for eleven hours past its expiry. It fenced every merge in the meantime.
 - A model override was inherited from a long-lived daemon. A session then ran on a model nobody had selected for it.
 
@@ -71,7 +71,7 @@ None of these is exotic. Each is an environment variable outliving the process t
 
 The remedy for layer 2 is provenance, not isolation. `resolve_owned_identity` (`cli/src/fno/harness_identity.py`) proves ownership from the process tree instead of picking by precedence order. When it cannot prove one, it refuses rather than guessing. Durable stamp sites reach it through `resolve_self_identity` (`cli/src/fno/claims/self_identity.py`). That function supplies the process-tree prover and nothing else. The registry collider stays at the one init-time verb that owns a registry row. Hoisting it into the shared resolver broke that: a session then refused its own row whenever the walk failed.
 
-The discriminator is the raw primitive's own docstring. If the resolved harness or session id ends up WRITTEN to a durable record, it is a stamp and uses the owned path. Those records: a claim, a mail record, an event, an agent-state row, a registry row, a crown grant, a decision record, a graph session record. A caller that only reads to display or branch keeps the precedence primitive.
+The discriminator is the raw primitive's own docstring. If the resolved harness or session id ends up WRITTEN to a durable record, it is a stamp and uses the owned path. Those records: a claim, a mail record, an event, an agent-state row, a registry row, a role grant, a decision record, a graph session record. A caller that only reads to display or branch keeps the precedence primitive.
 
 That rule was documented long before anything enforced it, which is how the caller set drifted from two obeying it to dozens not. `scripts/ci/check-identity-stamp-sites.sh` is the enforcement. Every remaining precedence-primitive caller is listed in a baseline with the reason it is read-only. A new one fails CI until someone makes that call and writes it down.
 

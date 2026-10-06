@@ -693,7 +693,7 @@ def test_changed_estimate_line_is_printed_for_the_sizer_to_read(tmp_path: Path) 
     _write(tmp_path / "cli/src/fno/widget.py", "x = 2\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "head"], check=True)
-    opts = {"changed": True, "base": base, "head": "HEAD", "list": True}
+    opts = {"changed": True, "base": base, "head": "HEAD", "list": True, "shard": ""}
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = tc._run_changed(tmp_path, opts, {})
@@ -740,17 +740,41 @@ def test_empty_flag_values_are_refused(tmp_path: Path) -> None:
     assert opts["changed"] and opts["base"] == "HEAD~1" and opts["head"] == "HEAD"
 
 
-def test_smoke_shard_argument_allows_selector_and_rejects_partial_modes() -> None:
-    from fno.test_cmd import _parse_smoke_args
+def test_changed_shard_slices_pytest_files_round_robin(tmp_path: Path) -> None:
+    """The changed packet accepts --shard and leg k of N runs the same files
+    every time: round-robin over the sorted selected list, one contract with
+    the full lane's --shard. Non-pytest steps run in every leg because each
+    matrix leg is a fresh runner. Measured 2026-10-05: the whole packet on
+    one runner died 7 of 8 attempts at a fixed suite point; the full lane's
+    sharding survived, so volume on one runner is what kills it."""
+    from fno.test_cmd import _changed_steps, _parse_smoke_args
 
-    opts = _parse_smoke_args(["--only", "Pytest*", "--shard", "2/4"])
-    assert opts["shard"] == "2/4"
-    for argv in (
-        ["--changed", "--shard", "1/4"],
-        ["--retry-failed", "--shard", "1/4"],
-    ):
-        with pytest.raises(ValueError, match="separate subset modes"):
-            _parse_smoke_args(argv)
+    # The selector mode and the shard mode compose; --retry-failed stays
+    # exclusive with --shard.
+    assert _parse_smoke_args(["--only", "Pytest*", "--shard", "2/4"])["shard"] == "2/4"
+    changed = _parse_smoke_args(["--changed", "--base", "HEAD~1", "--head", "HEAD",
+                                 "--shard", "1/4"])
+    assert changed["changed"] and changed["shard"] == "1/4"
+    with pytest.raises(ValueError, match="separate subset modes"):
+        _parse_smoke_args(["--retry-failed", "--shard", "1/4"])
+
+    files = [f"cli/tests/unit/test_z{x}.py" for x in range(5)]
+    selections = [{"kind": "pytest", "target": f} for f in files]
+    selections.append({"kind": "step", "target": "Skill bundles freshness check"})
+
+    legs = []
+    for leg in (1, 2, 3):
+        steps = _changed_steps(tmp_path, selections, f"{leg}/3")
+        pytest_steps = [s for s in steps if s[0].startswith("Pytest (changed subset")]
+        assert len(pytest_steps) == 1, steps
+        assert "Skill bundles freshness check" in [s[0] for s in steps]
+        cmd = pytest_steps[0][2]
+        legs.append([t for t in cmd.split() if t.endswith(".py")])
+
+    flat = sorted(t for leg in legs for t in leg)
+    assert flat == sorted(files), (flat, files)
+    assert legs[0] == [files[0], files[3]]
+    assert not (set(legs[0]) & set(legs[1])) and not (set(legs[0]) & set(legs[2]))
 
 
 def test_smoke_shard_partitions_steps_and_scopes_pytest_env(

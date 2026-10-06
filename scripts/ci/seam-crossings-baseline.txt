@@ -15,7 +15,7 @@ crossing	crates/fno-agents/src/bin/client.rs	let out = std::process::Command::ne
 crossing	crates/fno-agents/src/bin/client.rs	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	return match Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/blueprint_judge.rs	let out = Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/blueprint_judge.rs	let mut child = Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon.rs	let mut child = match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/daemon/fleet_arms.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
@@ -35,6 +35,7 @@ crossing	crates/fno-agents/src/gate_probes.rs	let _ = Command::new(crate::scrape
 crossing	crates/fno-agents/src/gc.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/lead_checkin.rs	let mut argv = vec![fno_bin()];
+crossing	crates/fno-agents/src/lead_checkin_prompt_parked.rs	reading_with(&reg, &crate::scrape::fno_bin(), Some(&home.manifests_dir()))
 crossing	crates/fno-agents/src/lifecycle_child.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	return Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	let out = Command::new(crate::scrape::fno_bin())

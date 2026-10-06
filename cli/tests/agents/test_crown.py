@@ -523,9 +523,9 @@ def test_whoami_renders_a_crown_line() -> None:
     row = AgentEntry(
         name="king-epic", cwd="/w", log_path="", harness="claude",
         short_id="deadbeef", crown_level=1, crown_scope="epic-x",
-        crown_grantor="human",
+        crown_grantor="human", harness_session_id="s-king",
     )
-    result = resolve_self(env={"FNO_AGENT_SELF": "king-epic"}, registry=[row])
+    result = resolve_self(env={"FNO_AGENT_SESSION": "s-king"}, registry=[row])
     assert result.crown == "L1 epic-x (by human)"
     assert "crown:       L1 epic-x (by human)" in render_human(result)
 
@@ -534,8 +534,11 @@ def test_whoami_no_crown_line_for_uncrowned() -> None:
     from fno.agents.registry import AgentEntry
     from fno.agents.whoami import render_human, resolve_self
 
-    row = AgentEntry(name="worker", cwd="/w", log_path="", harness="claude", short_id="abc")
-    result = resolve_self(env={"FNO_AGENT_SELF": "worker"}, registry=[row])
+    row = AgentEntry(
+        name="worker", cwd="/w", log_path="", harness="claude", short_id="abc",
+        harness_session_id="s-worker",
+    )
+    result = resolve_self(env={"FNO_AGENT_SESSION": "s-worker"}, registry=[row])
     assert result.crown is None
     assert "crown:" not in render_human(result)
 
@@ -637,6 +640,9 @@ def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
     if binary is None:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    # The binary-side kinds that read the agents home (team-rescope) must
+    # never resolve the ambient fleet store from a test.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / ".agents-home"))
     _seed(monkeypatch, tmp_path, [replace(row, cwd=str(tmp_path)) for row in rows])
     for name in AMBIENT_IDENTITY_ENV:
         monkeypatch.delenv(name, raising=False)
@@ -676,10 +682,12 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
     import fno.agents.crown as crown_mod
 
     # The receipt's delivery line is asserted by its own tests below; pin it
-    # here so this exact-dict assertion stays about the crown fields.
+    # here so this exact-dict assertion stays about the crown fields. The
+    # team-name carry line is the same shape of advisory receipt data.
     monkeypatch.setattr(
         crown_mod, "_send_reign_verb", lambda address, verb: "msg-t delivered (hosted)"
     )
+    monkeypatch.setattr(crown_mod, "_carry_team_name", lambda *args: "carried")
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 0, result.output
@@ -693,6 +701,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "stranded_subordinates": [],
         "missions_armed": [],
         "king_loop_armed": True,
+        "team_name": "carried",
         "reign_delivery": "msg-t delivered (hosted)",
     }
     row = load_registry()[0]
@@ -1119,12 +1128,33 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
     king_state.write_manifest(
         old_manifest, scope="beta", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     )
+    from fno.agents import spawn_overlay_client
+    real_call = spawn_overlay_client.spawn_overlay_call
+
+    captured = {}
+
+    def capture(payload, **kwargs):
+        if payload.get("kind") == "team-rescope":
+            captured.update(payload)
+            return {"carried": True, "named": "Kestrel", "reason": None}
+        return real_call(payload, **kwargs)
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", capture)
 
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 0, result.output
+    assert captured == {
+        "kind": "team-rescope",
+        "old_scope": "beta",
+        "new_scope": "alpha",
+        "candidate": "worker",
+        "holder_session": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "level": 1,
+    }
     assert json.loads(result.stdout)["vacated_scope"] == "beta"
     assert json.loads(result.stdout)["vacated_level"] == 1
+    assert json.loads(result.stdout)["team_name"] == "Kestrel"
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
         1,
@@ -2107,7 +2137,7 @@ def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     assert result.exit_code == 2
     out = result.output.lower()
     assert "your own scope" in out
-    assert "fno agents spawn --crown" in out
+    assert "fno agents spawn --promote" in out
     # The remedies that contradict the refusal must not appear: every one of
     # them tells the caller to act on its own live row.
     assert "already held" not in out
@@ -2188,6 +2218,7 @@ def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
     assert "re-scope" in result.output.lower()
     assert "--level" not in result.output
     assert "--succeed" not in result.output
+    assert "--hand-off" not in result.output
 
 
 def test_in_place_crown_emits_one_success_event_only_after_commit(
@@ -2406,7 +2437,7 @@ def test_spawn_crown_refuses_before_launch_when_scope_already_occupied(
     # caller is an attended human (no agent identity), so it is authorized to
     # attempt the grant; the pre-launch check still refuses because the
     # incumbent holds the scope and no --succeed named the transfer.
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_crowned(
             monkeypatch, tmp_path,
             grantor_env=None,

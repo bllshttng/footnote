@@ -19,8 +19,14 @@ mod recovery;
 /// forwarding to Python, whose front door resolves the journals and calls
 /// back in with one `--events` per store. `audit`/`gc` join when their
 /// Python output contracts are ported (reader cutover wave).
-pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] =
-    &["emit-envelope", "export", "import", "rows", "recover"];
+pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &[
+    "emit-envelope",
+    "export",
+    "import",
+    "rows",
+    "prune",
+    "recover",
+];
 
 /// Classify `fno doctor event <sub> ...` for the front door: `Some(rest)`
 /// runs natively, `None` forwards to the Python CLI.
@@ -54,11 +60,12 @@ pub fn run(args: &[OsString]) -> i32 {
         "export" => run_export(rest),
         "import" => run_import(rest),
         "rows" => run_rows(rest),
+        "prune" => run_prune(rest),
         "find" => run_find(rest),
         "recover" => recovery::run(rest),
         _ => {
             eprintln!(
-                "error: expected a subcommand (emit-envelope | export | import | rows | find)"
+                "error: expected a subcommand (emit-envelope | export | import | rows | prune | find)"
             );
             2
         }
@@ -69,6 +76,8 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
     let mut journal: Option<PathBuf> = None;
     let mut file: Option<PathBuf> = None;
     let mut requested_id: Option<String> = None;
+    let mut validate_only = false;
+    let mut expect_type: Option<String> = None;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         let tok = match tok.to_str() {
@@ -79,8 +88,48 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
             "--events" => journal = it.next().map(PathBuf::from),
             "--id" => requested_id = it.next().map(|v| v.to_string_lossy().into_owned()),
             "--file" => file = it.next().map(PathBuf::from),
+            "--validate-only" => validate_only = true,
+            "--expect-type" => expect_type = it.next().map(|v| v.to_string_lossy().into_owned()),
             _ => {}
         }
+    }
+    // Validate-only mode judges the envelope and writes nothing; --events is
+    // accepted but not needed (the judge is compiled in, not store-backed).
+    if validate_only {
+        let mut envelope = String::new();
+        let read_result = match &file {
+            Some(path) => {
+                std::fs::File::open(path).and_then(|mut f| f.read_to_string(&mut envelope))
+            }
+            None => std::io::stdin().read_to_string(&mut envelope),
+        };
+        if let Err(e) = read_result {
+            eprintln!("error: could not read the envelope: {e}");
+            return 2;
+        }
+        if let Some(expected) = expect_type.as_deref() {
+            let actual = serde_json::from_str::<serde_json::Value>(envelope.trim())
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from));
+            if actual.as_deref() != Some(expected) {
+                eprintln!(
+                    "type hint does not match payload type: {}",
+                    actual.unwrap_or_else(|| "None".to_string())
+                );
+                return 1;
+            }
+        }
+        return match crate::event_store::validate::judge_line(envelope.trim()) {
+            crate::event_store::validate::Verdict::Valid => 0,
+            crate::event_store::validate::Verdict::Invalid(msg) => {
+                eprintln!("{msg}");
+                1
+            }
+            crate::event_store::validate::Verdict::Substrate(msg) => {
+                eprintln!("{msg}");
+                2
+            }
+        };
     }
     let Some(journal) = journal else {
         eprintln!("error: --events <events.jsonl> is required (it names the sibling store)");
@@ -115,8 +164,13 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            1
+            if let Some(msg) = e.strip_prefix(crate::event_store::VALIDATE_PREFIX) {
+                eprintln!("error: {msg}");
+                3
+            } else {
+                eprintln!("error: {e}");
+                1
+            }
         }
     }
 }
@@ -130,6 +184,7 @@ fn run_rows(args: &[OsString]) -> i32 {
     let mut include_rejected = false;
     let mut store_path_only = false;
     let mut legacy_fallback = false;
+    let mut no_import = false;
     let mut mode = None;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
@@ -149,6 +204,8 @@ fn run_rows(args: &[OsString]) -> i32 {
             // Pre-store journals have no store to query: answer the raw
             // bytes so the caller carries no legacy reader of its own.
             "--legacy-fallback" => legacy_fallback = true,
+            // Exact store contents: no import, so no retention prune either.
+            "--no-import" => no_import = true,
             "--query-json" => mode = Some("query"),
             "--status-stream" => mode = Some("status"),
             "--answered-questions" => mode = Some("answered"),
@@ -216,7 +273,13 @@ fn run_rows(args: &[OsString]) -> i32 {
         );
         return 0;
     }
-    let _ = crate::event_store::import_all(&journal);
+    if no_import && !crate::event_store::store_path(&journal).exists() {
+        println!("[]");
+        return 0;
+    }
+    if !no_import {
+        let _ = crate::event_store::import_all(&journal);
+    }
     let query = crate::event_store::EventQuery {
         types,
         include_rejected,
@@ -228,6 +291,40 @@ fn run_rows(args: &[OsString]) -> i32 {
             println!(
                 "{}",
                 serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into())
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// Delete expired `ephemeral` rows older than `--cutoff-ms` and print the
+/// receipt as JSON. `--dry-run` counts them and deletes nothing.
+fn run_prune(args: &[OsString]) -> i32 {
+    let mut journal: Option<PathBuf> = None;
+    let mut cutoff_ms: Option<i64> = None;
+    let mut dry_run = false;
+    let mut it = args.iter();
+    while let Some(tok) = it.next() {
+        match tok.to_str() {
+            Some("--events") => journal = it.next().map(PathBuf::from),
+            Some("--cutoff-ms") => cutoff_ms = it.next().and_then(|v| v.to_str()?.parse().ok()),
+            Some("--dry-run") => dry_run = true,
+            _ => {}
+        }
+    }
+    let (Some(journal), Some(cutoff_ms)) = (journal, cutoff_ms) else {
+        eprintln!("error: --events and an integer --cutoff-ms are required");
+        return 2;
+    };
+    match crate::event_store::gc_ephemeral(&journal, cutoff_ms, dry_run) {
+        Ok(receipt) => {
+            println!(
+                "{}",
+                serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".into())
             );
             0
         }
@@ -1288,8 +1385,8 @@ mod tests {
         let src = stamp.join("questions.jsonl");
         append_envelope(&q, &close, Some("old-answer")).unwrap();
         append_envelope(&src, &ask, Some("missing-ask")).unwrap();
-        let control=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"status_control","source":"test","data":{"n":1}}).to_string();
-        let historical=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"status_control","source":"test","data":{"n":0}}).to_string();
+        let control=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"loop_tick","source":"test","data":{"name":"control-one"}}).to_string();
+        let historical=serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"loop_tick","source":"test","data":{"name":"missing-event"}}).to_string();
         let events = root.join("db/events.jsonl");
         append_envelope(&events, &control, Some("control-one")).unwrap();
         append_envelope(
@@ -1298,7 +1395,7 @@ mod tests {
             Some("missing-event"),
         )
         .unwrap();
-        append_envelope(&stamp.join("decisions.jsonl"),&serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_decision","source":"test","data":{"answer":"historical"}}).to_string(),Some("missing-decision")).unwrap();
+        append_envelope(&stamp.join("decisions.jsonl"),&serde_json::json!({"ts":"2026-09-30T00:00:00Z","type":"operator_decision","source":"test","data":{"decision_id":"d1","decision":"approve","answer":"historical"}}).to_string(),Some("missing-decision")).unwrap();
         let before = recovery::audit(&root).unwrap();
         assert!(before.errors.is_empty(), "{:?}", before.errors);
         assert_eq!(before.missing_by_family["questions"], 1);
@@ -1382,7 +1479,7 @@ mod tests {
             1,
             "historical equal-timestamp rows never enter occurrence counting"
         );
-        assert_eq!(status[0][0]["data"]["n"], 1);
+        assert_eq!(status[0][0]["data"]["name"], "control-one");
         let new_close = close.replace("\"old\"", "\"new\"");
         append_envelope(&q, &new_close, Some("new-answer")).unwrap();
         let answers = read_projection(&q, "answered", &serde_json::json!({})).unwrap();

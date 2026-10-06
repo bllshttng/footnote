@@ -109,7 +109,6 @@ module = [
     "fno.config.*",
     "fno.config_io",
     "fno.setup.migrate_paths",
-    "fno.setup.emit_shell",
 ]
 disallow_any_generics = true
 disallow_subclassing_any = true

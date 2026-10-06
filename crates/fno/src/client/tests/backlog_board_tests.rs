@@ -772,14 +772,14 @@ fn chord_rows() {
 
 // The composed frame paints the backlog inside the sideline column: the
 // filter bar, the board pane and the detail pane are the column's
-// content, region-framed, with the card rows visible.
+// content, title rows carrying the focus mark instead of frames.
 #[tokio::test]
 async fn compose_rows() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
     v.sideline_view = crate::view_store::SidelineView::Backlog;
     let text = crate::vt::frame_text(&v.compose());
-    assert!(text.contains("filters"), "filter bar frame: {text}");
+    assert!(text.contains("Search:"), "filter bar: {text}");
     assert!(text.contains("In Progress"), "column header: {text}");
     assert!(text.contains("mux card"), "card row: {text}");
 
@@ -789,32 +789,187 @@ async fn compose_rows() {
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ filters")),
+        text.lines().any(|l| l.starts_with("Search:")),
         "filter bar at column 0: {text}"
     );
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ backlog")),
-        "board pane at column 0: {text}"
+        text.lines().any(|l| l.starts_with("backlog \u{b7} kanban")),
+        "board title at column 0: {text}"
     );
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ details")),
-        "detail pane paints: {text}"
+        text.lines().any(|l| l.contains("details \u{b7} x-")),
+        "detail title paints: {text}"
     );
     assert!(
-        !text.contains("e/p/s/S edit") && text.contains("c comment (detail)"),
-        "hint carries the comment key and no edit keys: {text}"
+        !text.contains('\u{256d}'),
+        "no box-drawing frame glyph anywhere: {text}"
+    );
+    assert!(
+        !text.contains("e/p/s/S edit") && text.contains("c cols"),
+        "hint carries the column key and no edit keys: {text}"
     );
     // One esc chip on the full board (the filter bar's, top right); a tap
     // returns it to the docked column, and a tap on the column's chip,
-    // keyboard elsewhere, closes the column.
-    assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
+    // keyboard elsewhere, closes the column. The chip rides no frame now,
+    // so the tap goes through the real press path at the recorded span.
+    let chip = tap_recorded_chip(&mut v).await;
+    assert_eq!(chip, 1, "one chip on the full board");
     assert!(
         !v.board_full && v.backlog_board.is_some(),
         "full returns to docked"
     );
     v.region_owner = crate::client::region_focus::RegionOwner::Pane;
-    assert_eq!(crate::client::esc_close::tap_chip(&mut v).await, 1);
+    let chip = tap_recorded_chip(&mut v).await;
+    assert_eq!(chip, 1, "one chip on the docked column");
     assert!(v.backlog_board.is_none(), "the docked column closes");
+
+    // A press on a painted node id opens the node the sideline card tap's
+    // way: full-screen and docked, the span the paint recorded drills into
+    // the details pane (the fixture cards carry no plan and no link). The
+    // shape gate needs a real-shaped id, so the mux card renames to one.
+    let mut inp = board_inputs();
+    inp.order[1] = "x-24c8".into();
+    if let Some(r) = inp.rows.get_mut(1) {
+        r["id"] = json!("x-24c8");
+    }
+    let mut v = key_view(board_with(inp));
+    v.experimental_backlog = true;
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
+    v.board_full = true;
+    v.compose();
+    let s = painted_id("x-24c8");
+    let (off_row, off_col) = (s.row, s.col - 1);
+    press_span(&mut v, s.row, s.col).await;
+    let d = v
+        .backlog_board
+        .as_ref()
+        .expect("board stays open")
+        .detail
+        .as_ref()
+        .expect("the tap drills in");
+    assert_eq!(d.node_id, "x-24c8");
+    assert!(
+        !backlog_style::painted_spans()
+            .iter()
+            .any(|sp| { sp.row == off_row && off_col >= sp.col && off_col < sp.col + sp.len }),
+        "the glyph column records no span"
+    );
+
+    v.board_full = false;
+    v.backlog_board.as_mut().expect("board open").detail = None;
+    v.compose();
+    let s = painted_id("x-24c8");
+    press_span(&mut v, s.row, s.col).await;
+    let d = v
+        .backlog_board
+        .as_ref()
+        .expect("board stays open")
+        .detail
+        .as_ref()
+        .expect("the docked tap drills in");
+    assert_eq!(d.node_id, "x-24c8");
+
+    // The cascade's middle leg: no plan in the vault opens the link the
+    // node stores, through the PR tap's opener. The fixture link names no
+    // openable scheme, so the attempt lands as the refusal notice - and
+    // the details pane never opens over it.
+    v.backlog_board.as_mut().expect("board open").detail = None;
+    v.backlog = vec![crate::proto::BacklogCard {
+        id: "x-24c8".into(),
+        slug: "mux-card".into(),
+        priority: "p2".into(),
+        state: crate::proto::CardState::Ready,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+        link: Some("linear:x-24c8".into()),
+    }];
+    crate::client::node_link::open(&mut v, "x-24c8".into()).await;
+    let notice = v
+        .notice
+        .as_ref()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    assert!(
+        notice.contains("refused to open linear:x-24c8"),
+        "the link leg runs the PR opener: {notice}"
+    );
+    assert!(
+        v.backlog_board
+            .as_ref()
+            .expect("board open")
+            .detail
+            .is_none(),
+        "the link outranks the details pane"
+    );
+}
+
+/// Press the topmost recorded esc chip through the real mouse path: the
+/// press lands on the recorded span, `chip_at` routes it as Esc.
+async fn tap_recorded_chip(v: &mut View) -> usize {
+    v.compose();
+    let chips: Vec<crate::chrome::CloseSpan> = v
+        .close_chips
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|s| s.len == 3)
+        .collect();
+    let Some(s) = chips.last() else {
+        return 0;
+    };
+    let (row, col) = (s.row as u16, s.col as u16 + 1);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let mut scanner = crate::keys::Scanner::default();
+    for kind in [
+        crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        crate::proto::MouseKind::Release(crate::proto::MouseButton::Left),
+    ] {
+        let rep = crate::mouse::MouseReport {
+            kind,
+            row,
+            col,
+            shift: false,
+        };
+        crate::client::region_focus::mouse_pre_pass(v, &mut scanner, vec![rep], &mut sock)
+            .await
+            .unwrap();
+    }
+    chips.len()
+}
+
+/// The recorded span of one painted node id.
+fn painted_id(id: &str) -> backlog_style::NodeSpan {
+    backlog_style::painted_spans()
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .expect("card id painted")
+}
+
+/// One left press through the real mouse path at painted screen coords.
+async fn press_span(v: &mut View, row: usize, col: usize) {
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let mut scanner = crate::keys::Scanner::default();
+    crate::client::region_focus::mouse_pre_pass(
+        v,
+        &mut scanner,
+        vec![crate::mouse::MouseReport {
+            kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+            row: row as u16,
+            col: col as u16,
+            shift: false,
+        }],
+        &mut sock,
+    )
+    .await
+    .unwrap();
 }
 
 // Full screen paints the filter bar, the board pane and the two-row hint;
@@ -955,9 +1110,8 @@ fn board_cells_rows() {
     let frame = view.compose();
     let text = crate::vt::frame_text(&frame);
     assert!(
-        text.lines()
-            .any(|l| l.starts_with("\u{256d}\u{2500} backlog")),
-        "board box at column 0: {text}"
+        text.lines().any(|l| l.starts_with("backlog \u{b7} kanban")),
+        "board title at column 0: {text}"
     );
     assert!(text.contains("In Progress"), "{text}");
 }
@@ -1304,7 +1458,7 @@ fn memo_rebuilds_only_when_the_key_moves() {
         };
     let build = |builds: &std::cell::Cell<usize>| {
         builds.set(builds.get() + 1);
-        (Vec::new(), Vec::new(), None)
+        (Vec::new(), None)
     };
     let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
     let _ = b.board_body_cached(body_key(0, 0), || build(&builds));
@@ -1337,4 +1491,82 @@ fn paint_stats_flush_reports_count_avg_max() {
     assert!(line.contains("avg 2.0ms"), "{line}");
     assert!(line.contains("max 2.5ms"), "{line}");
     assert_eq!(s.count, 0, "take resets the window");
+}
+
+/// The board remembers its state. Set a filter, a search text, the
+/// list view and a selection, close, reopen: the fresh board holds the same
+/// query, and its first gather parks the cursor back on the saved card.
+#[test]
+fn board_remembers_filters_search_view_and_selection_across_reopen() {
+    let prefs = tempfile::tempdir().expect("tempdir");
+    crate::view_store::set_test_path(prefs.path());
+    // Session one: filter to priority p2, search "mux", list view, one
+    // lane, cursor on x-2.
+    let mut b = board_with(board_inputs());
+    b.query.sets.insert("priority", vec!["p2".into()]);
+    b.query.q = Some("mux".into());
+    b.query.view = backlog_model::View::List;
+    b.query.lanes = backlog_model::LanesBy::None;
+    rederive(&mut b);
+    focus_card(&mut b, Some("x-2"));
+    assert_eq!(cursor_card_id(&b).as_deref(), Some("x-2"), "fixture cursor");
+    save_board_prefs(&mut b);
+    drop(b);
+    // Close, reopen through the real open path: the query comes back, the
+    // saved card rides along as the pending focus.
+    let mut v = key_view(board_with(board_inputs()));
+    v.backlog_board = None;
+    backlog_board_open_fresh(&mut v);
+    {
+        let b = v.backlog_board.as_ref().expect("reopen opens the board");
+        assert_eq!(
+            b.query.sets.get("priority").map(Vec::as_slice),
+            Some(&["p2".to_string()][..])
+        );
+        assert_eq!(b.query.q.as_deref(), Some("mux"));
+        assert_eq!(b.query.view, backlog_model::View::List);
+        assert_eq!(b.query.lanes, backlog_model::LanesBy::None);
+        assert_eq!(b.pending_focus.as_deref(), Some("x-2"));
+    }
+    // The first gather parks the cursor on the saved card (x-2 is the one
+    // card the restored filter set keeps).
+    let gen = v.backlog_board.as_ref().expect("open").gen;
+    apply_fold(
+        &mut v,
+        gen,
+        BoardMsg::Gathered {
+            inputs: board_inputs(),
+        },
+    );
+    let b = v.backlog_board.as_ref().expect("gather keeps the board");
+    assert_eq!(
+        cursor_card_id(b).as_deref(),
+        Some("x-2"),
+        "selection restored"
+    );
+}
+
+/// `x` (reset filters) returns the query to `any` and the store's
+/// memory to the defaults, so the next open starts clean too.
+#[test]
+fn reset_filters_returns_every_filter_to_any_and_clears_the_memory() {
+    let prefs = tempfile::tempdir().expect("tempdir");
+    crate::view_store::set_test_path(prefs.path());
+    let mut v = key_view(board_with(board_inputs()));
+    {
+        let b = v.backlog_board.as_mut().expect("fixture board");
+        b.query.sets.insert("status", vec!["ready".into()]);
+        b.query.q = Some("mux".into());
+        save_board_prefs(b);
+    }
+    reset_filters(&mut v);
+    let b = v.backlog_board.as_ref().expect("reset keeps the board");
+    assert!(b.query.sets.is_empty());
+    assert_eq!(b.query.q, None);
+    assert_eq!(b.query.view, backlog_model::View::Kanban);
+    assert_eq!(b.query.lanes, backlog_model::LanesBy::Project);
+    assert_eq!(b.pending_focus, None);
+    let remembered = crate::view_store::load_board_query().expect("reset saves the defaults");
+    assert_eq!(remembered.sets.len(), 0);
+    assert_eq!(remembered.q, None);
 }

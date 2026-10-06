@@ -13,6 +13,8 @@
       "spawn",
       "--harness",
       "codex",
+      "--permission-mode",
+      "bypassPermissions",
       "--name",
       "w1",
       "/fno:target x-1"
@@ -24,6 +26,11 @@
           "harness",
           "codex",
           "agents.profiles.target.provider"
+        ],
+        [
+          "permission_mode",
+          "bypassPermissions",
+          "builtin.autonomous.permission_mode"
         ]
       ],
       "fingerprint": "",
@@ -64,19 +71,11 @@
         }
       },
       "seed": "/fno:target x-1",
-      "suppressed": [
-        [
-          "permission_mode",
-          "bypassPermissions",
-          "builtin.autonomous",
-          "codex cannot map permission mode 'bypassPermissions' on substrate 'pane'"
-        ]
-      ],
+      "suppressed": [],
       "verb": "target"
     },
     "stderr": [
-      "fno agents spawn: permission-mode skipped (codex cannot map permission mode 'bypassPermissions' on substrate 'pane'); builtin.autonomous.permission_mode = 'bypassPermissions' ignored",
-      "fno agents spawn: applied harness=codex (agents.profiles.target.provider)"
+      "fno agents spawn: applied harness=codex (agents.profiles.target.provider), permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"
     ],
     "stdout": null
   },
@@ -113,5 +112,6 @@
       "/fno:target x-1"
     ],
     "tab_flag_present": false
-  }
+  },
+  "verbose": true
 }

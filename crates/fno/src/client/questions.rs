@@ -5,20 +5,7 @@
 //! A child module of `client`, so `View`'s private fields stay local.
 
 use super::*;
-
-/// Questions shown in the full view: open first, then answered and settled.
-fn detail_items(
-    fold: &crate::needs_overlay::QuestionsFold,
-) -> Vec<crate::needs_overlay::QuestionItem> {
-    let mut items: Vec<_> = fold
-        .items
-        .iter()
-        .filter(|q| (q.state == "open" && !q.settled) || q.state == "answered" || q.settled)
-        .cloned()
-        .collect();
-    items.sort_by_key(|q| (q.state != "open" || q.settled, !q.ready));
-    items
-}
+use std::sync::atomic::Ordering;
 
 fn age_short(created_at: &str, now: u64) -> String {
     let Ok(t) = chrono::DateTime::parse_from_rfc3339(created_at) else {
@@ -33,15 +20,14 @@ fn age_short(created_at: &str, now: u64) -> String {
 }
 
 pub(super) struct Detail {
-    pub(super) items: Vec<crate::needs_overlay::QuestionItem>,
-    pub(super) idx: usize,
+    /// The opened question; the bell panel tabs are the board, so the old
+    /// list pane is gone and a view holds exactly the row it opened on.
+    pub(super) item: crate::needs_overlay::QuestionItem,
     pub(super) sel: Option<u32>,
     pub(super) notes: Option<String>,
     pub(super) free: Option<String>,
     pub(super) notice: Option<String>,
-    /// false = the list pane holds focus, true = the question page does.
-    pub(super) focus: bool,
-    /// The page line the detail pane windows to when it holds focus.
+    /// The page line the pane windows to.
     pub(super) scroll: usize,
     /// `a` picked "agents decide": Enter hands the question to the team.
     pub(super) delegate: bool,
@@ -50,26 +36,15 @@ pub(super) struct Detail {
 }
 
 impl Detail {
-    /// Open on the question with `id` (the page holds focus), else on the list.
-    pub(super) fn open(
-        fold: &crate::needs_overlay::QuestionsFold,
-        id: Option<&str>,
-    ) -> Option<Detail> {
-        let items = detail_items(fold);
-        if items.is_empty() {
-            return None;
-        }
-        let idx = id
-            .and_then(|id| items.iter().position(|q| q.id == id))
-            .unwrap_or(0);
+    /// Open on the question with `id`; None when the fold does not hold it.
+    pub(super) fn open(fold: &crate::needs_overlay::QuestionsFold, id: &str) -> Option<Detail> {
+        let item = fold.items.iter().find(|q| q.id == id).cloned()?;
         Some(Detail {
-            items,
-            idx,
+            item,
             sel: None,
             notes: None,
             free: None,
             notice: None,
-            focus: id.is_some(),
             scroll: 0,
             delegate: false,
             archive_armed: false,
@@ -77,19 +52,7 @@ impl Detail {
     }
 
     pub(super) fn item(&self) -> &crate::needs_overlay::QuestionItem {
-        &self.items[self.idx]
-    }
-
-    /// Move the list cursor; the pick and the page reset with it.
-    fn advance(&mut self, delta: isize) {
-        let n = self.items.len();
-        self.idx = (self.idx as isize + delta).rem_euclid(n as isize) as usize;
-        self.sel = None;
-        self.notes = None;
-        self.free = None;
-        self.notice = None;
-        self.scroll = 0;
-        self.delegate = false;
+        &self.item
     }
 }
 
@@ -229,49 +192,21 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
     s
 }
 
-/// A list title's role by state, the sideline block's rule in theme tokens:
-/// open and ready reads bright, open and not ready plain, answered muted.
-fn title_role(q: &crate::needs_overlay::QuestionItem) -> backlog_style::BRole {
-    match (q.state == "open" && !q.settled, q.ready) {
-        (true, true) => backlog_style::BRole::Head,
-        (true, false) => backlog_style::BRole::Body,
-        (false, _) => backlog_style::BRole::Meta,
-    }
-}
-
 /// The question page's rendered lines at the detail pane's width.
 fn page_lines(d: &Detail, w: usize, now: u64) -> Vec<backlog_style::BLine> {
     super::node_detail::backlog_md::md_lines(&question_page(d.item(), d, now), w)
 }
 
-/// The list pane's width at a terminal size and split percent: side by
-/// side it takes `split` percent, stacked it spans the terminal. The draw
-/// and the scroll clamp share it, so the window never follows past a line
-/// the pane hides.
-fn list_width(rows: usize, cols: usize, split: u8) -> (usize, bool) {
-    let hint_h = if rows >= 8 { 2 } else { 0 };
-    let panes_h = rows.saturating_sub(hint_h);
-    let side_by_side = cols >= 100 && panes_h >= 10;
-    if side_by_side {
-        (cols * split as usize / 100, true)
-    } else {
-        (cols, false)
-    }
+/// The page's wrapped width: the framed pane's inner width at any terminal.
+fn page_width(cols: usize) -> usize {
+    cols.saturating_sub(chrome::Chrome::FRAME_COLS).max(10)
 }
 
-/// The detail pane's body width at a terminal size and split.
-fn page_width(rows: usize, cols: usize, split: u8) -> usize {
-    let pane_w = match list_width(rows, cols, split) {
-        (list_w, true) => cols.saturating_sub(list_w),
-        (_, false) => cols,
-    };
-    pane_w.saturating_sub(2).max(10)
-}
-
-/// Draw the full questions view over the content viewport: the framed list
-/// pane left, the framed question page right (stacked when narrow), the key
-/// hint below, and the notes input floating over it all. Returns false when
-/// no view is open, so the draw chain's `else if` arm is one call.
+/// Draw the question page over the content viewport: one framed pane, the
+/// key hint below, and the notes input floating over it all. The bell panel
+/// tabs are the board (the 2026-10-05 ruling), so the old list pane is
+/// gone. Returns false when no view is open, so the draw chain's `else if`
+/// arm is one call.
 pub(super) fn draw_detail(
     view: &View,
     cells: &mut [Cell],
@@ -285,103 +220,25 @@ pub(super) fn draw_detail(
     let now = crate::digest_overlay::now_secs();
     let hint_h = if rows >= 8 { 2 } else { 0 };
     let panes_h = rows.saturating_sub(hint_h);
-    let split = view.questions_split;
-    let (list_w, side_by_side) = list_width(rows, cols, split);
-    // The list pane: one bold title row plus one dim meta row per question.
-    let mut list_lines: Vec<backlog_style::BLine> = Vec::new();
-    let mut cursor_line: Option<usize> = None;
-    for (i, q) in d.items.iter().enumerate() {
-        let title = if q.title.is_empty() {
-            "(no title)"
-        } else {
-            &q.title
-        };
-        let mark = if i == d.idx { "\u{25b8}" } else { " " };
-        let done = q.state != "open" || q.settled;
-        let mut title_line = backlog_style::BLine::of(&[
-            backlog_style::BSeg {
-                text: format!("{mark} "),
-                role: backlog_style::BRole::Body,
-            },
-            backlog_style::BSeg {
-                text: title.to_string(),
-                role: title_role(q),
-            },
-        ]);
-        title_line.band = i == d.idx;
-        list_lines.push(title_line);
-        let target = q.blocks.first().map(String::as_str).unwrap_or("none");
-        let node = q.node.as_deref().unwrap_or(target);
-        let asker = q.asker.as_ref().map(|a| a.handle.as_str()).unwrap_or("?");
-        let mut meta = format!(
-            "  {asker} \u{2192} {node} {} {age}",
-            if q.settled { "answered" } else { &q.state },
-            age = age_short(&q.created_at, now)
-        );
-        if !q.ready && !done {
-            meta.push_str(" \u{b7} not ready");
-        }
-        list_lines.push(backlog_style::BLine::meta(meta));
-        if i == d.idx {
-            cursor_line = Some(list_lines.len() - 2);
-        }
-    }
-    if list_lines.is_empty() {
-        list_lines.push(backlog_style::BLine::meta("no questions in the fold"));
-    }
-    // One esc chip for the view, on the pane at its top-right corner: the
-    // page side by side, the list when stacked.
-    let mut list_chrome = chrome::Chrome::new("questions", crate::popup::Anchor::Center).flat();
-    if side_by_side {
-        list_chrome = list_chrome.without_close();
-    }
-    let list_body: Vec<chrome::BodyLine> = list_lines
-        .iter()
-        .map(|l| backlog_style::to_body_line(&l.clone().pad_to(list_w.saturating_sub(2))))
-        .collect();
-    let (list_rect, detail_rect) = if side_by_side {
-        ((0, 0, panes_h, list_w), (0, list_w, panes_h, cols - list_w))
-    } else {
-        let half = panes_h / 2;
-        ((0, 0, half, cols), (half, 0, panes_h - half, cols))
-    };
-    let inner_list_w = list_rect.3.saturating_sub(chrome::Chrome::FRAME_COLS);
-    let _ = inner_list_w;
-    super::backlog_board::backlog_panes::framed_region(
-        cells,
-        rows,
-        cols,
-        list_rect,
-        &list_chrome,
-        &list_body,
-        cursor_line,
-        cursor_line,
-        &view.theme,
-    );
-    // The detail pane: the cursor question's page, wrapped to the pane the
-    // layout actually gave it (the full width when the panes stack).
-    let page = page_lines(d, page_width(rows, cols, split), now);
+    let page = page_lines(d, page_width(cols), now);
     let page_follow = Some(d.scroll.min(page.len().saturating_sub(1)));
-    let mut detail_chrome = chrome::Chrome::new(
+    let chrome = chrome::Chrome::new(
         format!("question \u{b7} {}", d.item().id),
         crate::popup::Anchor::Center,
     )
     .flat();
-    if !side_by_side {
-        detail_chrome = detail_chrome.without_close();
-    }
-    let detail_body: Vec<chrome::BodyLine> = page
+    let body: Vec<chrome::BodyLine> = page
         .iter()
-        .map(|l| backlog_style::to_body_line(&l.clone().pad_to(detail_rect.3.saturating_sub(2))))
+        .map(|l| backlog_style::to_body_line(&l.clone().pad_to(cols.saturating_sub(2))))
         .collect();
     super::backlog_board::backlog_panes::framed_region(
         cells,
         rows,
         cols,
-        detail_rect,
-        &detail_chrome,
-        &detail_body,
-        if d.focus { page_follow } else { None },
+        (0, 0, panes_h, cols),
+        &chrome,
+        &body,
+        page_follow,
         None,
         &view.theme,
     );
@@ -395,18 +252,18 @@ pub(super) fn draw_detail(
         } else {
             "notes \u{b7} Enter saves \u{b7} Esc cancels"
         }
-    } else if d.focus {
-        if d.item().options.is_empty() {
-            "Enter answer \u{b7} j/k scroll \u{b7} n notes \u{b7} Tab list \u{b7} Esc close"
-        } else {
-            "1-9 option \u{b7} 0 none \u{b7} a agents decide \u{b7} j/k select \u{b7} Enter sends \u{b7} n notes \u{b7} ^d/^u scroll \u{b7} x archive \u{b7} X archive all \u{b7} </> split \u{b7} Tab list \u{b7} Esc close"
-        }
+    } else if d.item().options.is_empty() {
+        "Enter answer \u{b7} j/k scroll \u{b7} n notes \u{b7} Esc close"
     } else {
-        "j/k move \u{b7} Enter opens \u{b7} Tab page \u{b7} n notes \u{b7} 0 none of these \u{b7} x archive \u{b7} X archive all \u{b7} </> split \u{b7} Esc close"
+        "1-9 option \u{b7} 0 none \u{b7} a agents decide \u{b7} j/k select \u{b7} Enter sends \u{b7} n notes \u{b7} ^d/^u scroll \u{b7} x archive \u{b7} X archive all \u{b7} Esc close"
     };
     if hint_h > 0 {
-        let [a, b] = super::backlog_board::backlog_panes::hint_rows(hint, cols);
-        let hint_lines = [backlog_style::BLine::meta(a), backlog_style::BLine::meta(b)];
+        let wrapped = super::backlog_board::backlog_panes::hint_rows(hint, cols);
+        let hint_lines: Vec<backlog_style::BLine> = wrapped
+            .into_iter()
+            .take(2)
+            .map(backlog_style::BLine::meta)
+            .collect();
         backlog_style::paint_panel(
             cells,
             rows,
@@ -516,14 +373,52 @@ fn draw_notes_box(
     }
 }
 
+pub(super) type FoldMsg = Result<crate::needs_overlay::QuestionsFold, String>;
+
+/// The projection leg's channel: the newest fold wins.
+pub(super) fn fold_channel() -> (
+    tokio::sync::mpsc::UnboundedSender<FoldMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<FoldMsg>,
+) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
+/// The index leg's channel: lands first, seeds the bell's list.
+pub(super) fn index_channel() -> (
+    tokio::sync::mpsc::UnboundedSender<crate::needs_overlay::QuestionsFold>,
+    tokio::sync::mpsc::UnboundedReceiver<crate::needs_overlay::QuestionsFold>,
+) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
 /// Refresh the shared questions projection while the sidebar is visible.
-/// The read runs off the UI loop; the fold rides `tx`
-/// back to the run loop.
+/// The read runs off the UI loop; the index fold rides `index_tx` back the
+/// moment it lands, the projection rides `tx` when the subprocess answers.
 pub(super) fn maybe_kick(
     view: &mut View,
     tx: &tokio::sync::mpsc::UnboundedSender<Result<crate::needs_overlay::QuestionsFold, String>>,
+    index_tx: &tokio::sync::mpsc::UnboundedSender<crate::needs_overlay::QuestionsFold>,
 ) {
-    if view.panel_w() == 0 || view.questions_inflight {
+    if view.panel_w() == 0 {
+        return;
+    }
+    // The index flies on its own flight and clock: a projection wedged at
+    // its 30s bound must not starve the ms-fast list refresh.
+    let now_ms = crate::digest_overlay::now_secs() * 1000;
+    if now_ms.saturating_sub(INDEX_KICKED_AT_MS.load(Ordering::Relaxed)) >= 10_000
+        && !INDEX_INFLIGHT.swap(true, Ordering::SeqCst)
+    {
+        INDEX_KICKED_AT_MS.store(now_ms, Ordering::Relaxed);
+        let index_tx = index_tx.clone();
+        tokio::spawn(async move {
+            if let Some(fold) = questions_index_now().await {
+                let _ = index_tx.send(fold);
+            }
+            INDEX_INFLIGHT.store(false, Ordering::SeqCst);
+        });
+    }
+    // The projection keeps the View single-flight: one subprocess at a time.
+    if view.questions_inflight {
         return;
     }
     let due = view
@@ -539,6 +434,123 @@ pub(super) fn maybe_kick(
         let fold = crate::needs_overlay::questions_now().await;
         let _ = tx.send(fold);
     });
+}
+
+/// The index leg's own single-flight and cadence clock, module-local so the
+/// View carries no second kick state.
+static INDEX_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static INDEX_KICKED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The question pages index, resolved through `state path questions` and
+/// parsed in-process: the fast leg that lets the bell paint the board
+/// without waiting on the projection subprocess. Best-effort - any failure
+/// reads as None and the projection stays the only source.
+pub(super) async fn questions_index_now() -> Option<crate::needs_overlay::QuestionsFold> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin())
+            .args(["state", "path", "questions"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let text = std::fs::read_to_string(dir.join("questions.md")).ok()?;
+    parse_questions_index(&text)
+}
+
+/// Parse the attention arm's generated index (`## Open (n)` then `## Done`,
+/// one `- [[stem|title]] \u{b7} kind \u{b7} trail` row per question) into the fold
+/// shape every questions reader already consumes. Ids come from the stem's
+/// `q-<8 hex>`; a stem that names no such id drops (the healthy projection
+/// still covers it).
+fn parse_questions_index(text: &str) -> Option<crate::needs_overlay::QuestionsFold> {
+    let mut items: Vec<crate::needs_overlay::QuestionItem> = Vec::new();
+    let mut done = false;
+    let mut any = false;
+    for line in text.lines() {
+        if line.starts_with("## ") {
+            done = line.contains("Done");
+            continue;
+        }
+        let Some(row) = line.strip_prefix("- [[") else {
+            continue;
+        };
+        let Some((wiki, _trail)) = row.split_once("]]") else {
+            continue;
+        };
+        let Some((stem, title)) = wiki.split_once('|') else {
+            continue;
+        };
+        let Some(id) = stem_id(stem) else {
+            continue;
+        };
+        let (state, settled) = if done {
+            ("answered", true)
+        } else {
+            ("open", false)
+        };
+        let kind = row
+            .split('\u{b7}')
+            .nth(1)
+            .map(str::trim)
+            .unwrap_or("question");
+        let kind = if kind == "pin" { "pin" } else { "question" };
+        let created_at = stem_date(stem);
+        items.push(crate::needs_overlay::QuestionItem {
+            id: id.into(),
+            kind: kind.into(),
+            title: title.trim().into(),
+            state: state.into(),
+            ready: true,
+            missing: vec![],
+            created_at: created_at.into(),
+            options: vec![],
+            settled,
+            ..Default::default()
+        });
+        any = true;
+    }
+    if !any {
+        return None;
+    }
+    Some(crate::needs_overlay::QuestionsFold {
+        items,
+        ..Default::default()
+    })
+}
+
+/// The stem's question id: the `q` segment followed by an 8-hex segment.
+fn stem_id(stem: &str) -> Option<String> {
+    let segments: Vec<&str> = stem.split('-').collect();
+    let i = segments.iter().position(|s| *s == "q")?;
+    let hex = segments.get(i + 1)?;
+    if hex.len() == 8 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(format!("q-{hex}"))
+    } else {
+        None
+    }
+}
+
+/// Day precision from the stem's `YYYYMMDD` prefix; empty when absent.
+fn stem_date(stem: &str) -> String {
+    let Some(head) = stem.get(..8) else {
+        return String::new();
+    };
+    if head.chars().all(|c| c.is_ascii_digit()) {
+        let (y, rest) = head.split_at(4);
+        let (m, d) = rest.split_at(2);
+        format!("{y}-{m}-{d}T00:00:00Z")
+    } else {
+        String::new()
+    }
 }
 
 /// Kick a queued answer or archive off the UI loop; the result rides `tx`
@@ -574,6 +586,16 @@ pub(super) async fn detail_keys(
     bytes: &[u8],
     _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
+    let open_ids: Vec<String> = view
+        .questions_merged()
+        .map(|fold| {
+            fold.items
+                .iter()
+                .filter(|q| q.state == "open")
+                .map(|q| q.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let Some(d) = view.question_detail.as_mut() else {
         return Ok(StdinFlow::Continue);
     };
@@ -622,11 +644,7 @@ pub(super) async fn detail_keys(
                         .into_iter()
                         .collect()
                 } else {
-                    d.items
-                        .iter()
-                        .filter(|q| q.state == "open")
-                        .map(|q| q.id.clone())
-                        .collect()
+                    open_ids.clone()
                 };
                 if ids.is_empty() {
                     d.notice = Some("no open question to archive".into());
@@ -650,18 +668,14 @@ pub(super) async fn detail_keys(
                 } else {
                     d.delegate = true;
                     d.sel = None;
-                    d.focus = true;
                 }
             }
             b'j' => {
-                if !d.focus {
-                    d.advance(1);
-                } else if d.item().options.is_empty() {
-                    // No options to select: the fold's arrow twin scrolls.
-                    let (rows, cols) = view.term;
+                if d.item().options.is_empty() {
+                    // No options to select: j scrolls the page.
                     let lines = page_lines(
                         d,
-                        page_width(rows as usize, cols as usize, view.questions_split),
+                        page_width(view.term.1 as usize),
                         crate::digest_overlay::now_secs(),
                     )
                     .len();
@@ -671,9 +685,7 @@ pub(super) async fn detail_keys(
                 }
             }
             b'k' => {
-                if !d.focus {
-                    d.advance(-1);
-                } else if d.item().options.is_empty() {
+                if d.item().options.is_empty() {
                     d.scroll = d.scroll.saturating_sub(1);
                 } else {
                     select_neighbor(d, -1);
@@ -682,10 +694,9 @@ pub(super) async fn detail_keys(
             // Ctrl+d / Ctrl+u: half a page down/up. The scroll gesture for
             // option questions, where j/k are the selection.
             0x04 | 0x15 => {
-                let (rows, cols) = view.term;
                 let lines = page_lines(
                     d,
-                    page_width(rows as usize, cols as usize, view.questions_split),
+                    page_width(view.term.1 as usize),
                     crate::digest_overlay::now_secs(),
                 )
                 .len();
@@ -696,17 +707,6 @@ pub(super) async fn detail_keys(
                     d.scroll.saturating_sub(step)
                 };
             }
-            b'\t' => d.focus = !d.focus,
-            b'<' | b'>' => {
-                let split = &mut view.questions_split;
-                *split = if k == b'>' {
-                    split.saturating_add(5)
-                } else {
-                    split.saturating_sub(5)
-                }
-                .clamp(20, 80);
-                crate::view_store::save_questions_split(*split);
-            }
             b'0'..=b'9' => {
                 let n = (k - b'0') as u32;
                 let opts = &d.item().options;
@@ -714,29 +714,22 @@ pub(super) async fn detail_keys(
                 if valid {
                     d.sel = Some(n);
                     d.delegate = false;
-                    d.focus = true;
                 }
             }
             b'n' => {
                 let saved = d.notes.take().unwrap_or_default();
                 d.free = Some(saved);
             }
-            b'\r' | b'\n' => {
-                if !d.focus {
-                    d.focus = true;
-                } else {
-                    match submit(d) {
-                        Submit::Queued((id, pick)) => {
-                            if !view.question_acting {
-                                view.question_action = Some((id, pick));
-                                view.question_acting = true;
-                            }
-                        }
-                        Submit::Notice(msg) => d.notice = Some(msg.to_string()),
-                        Submit::OpenFree => d.free = Some(String::new()),
+            b'\r' | b'\n' => match submit(d) {
+                Submit::Queued((id, pick)) => {
+                    if !view.question_acting {
+                        view.question_action = Some((id, pick));
+                        view.question_acting = true;
                     }
                 }
-            }
+                Submit::Notice(msg) => d.notice = Some(msg.to_string()),
+                Submit::OpenFree => d.free = Some(String::new()),
+            },
             0x1b => {
                 view.question_detail = None;
                 view.question_esc.clear();
@@ -821,15 +814,9 @@ impl View {
     /// focus).
     pub(super) fn open_detail_on(&mut self, id: &str) {
         let empty = crate::needs_overlay::QuestionsFold::default();
-        let fold = self.questions_fold.as_ref().unwrap_or(&empty);
-        self.question_detail = Detail::open(fold, Some(id));
-    }
-
-    #[cfg(test)]
-    pub(super) fn open_questions_list(&mut self) {
-        let empty = crate::needs_overlay::QuestionsFold::default();
-        let fold = self.questions_fold.as_ref().unwrap_or(&empty);
-        self.question_detail = Detail::open(fold, None);
+        let merged = self.questions_merged();
+        let fold = merged.as_ref().unwrap_or(&empty);
+        self.question_detail = Detail::open(fold, id);
     }
 
     pub(super) fn list_selector(&self) -> Option<usize> {
@@ -850,11 +837,50 @@ impl View {
                 self.questions_fold = Some(f);
             }
             Err(reason) => {
-                self.questions_fold = Some(crate::needs_overlay::QuestionsFold::default());
+                // The last good fold stays: an unread board never renders 0,
+                // and a timed-out read never blanks the cached one.
                 self.questions_degraded = true;
                 self.questions_degraded_reason = Some(reason);
             }
         }
+        bell::clamp_selection(self);
+    }
+
+    /// The bell's visible question fold: the index seeds the list, the full
+    /// projection enriches it when healthy. A degraded projection yields to
+    /// the index on every id both hold, so a timed-out read never outvotes
+    /// the fresh list; ids only one side holds append.
+    pub(super) fn questions_merged(&self) -> Option<crate::needs_overlay::QuestionsFold> {
+        let index = self.questions_index.as_ref();
+        let fold = self.questions_fold.as_ref();
+        let items = match (index, fold) {
+            (None, None) => return None,
+            (Some(index), None) => index.items.clone(),
+            (None, Some(fold)) => fold.items.clone(),
+            (Some(index), Some(fold)) => {
+                let healthy = !self.questions_degraded;
+                let primary = if healthy { fold } else { index };
+                let secondary = if healthy { index } else { fold };
+                let mut items: Vec<_> = primary.items.clone();
+                let held: std::collections::HashSet<&str> =
+                    primary.items.iter().map(|q| q.id.as_str()).collect();
+                for q in &secondary.items {
+                    if !held.contains(q.id.as_str()) {
+                        items.push(q.clone());
+                    }
+                }
+                items
+            }
+        };
+        Some(crate::needs_overlay::QuestionsFold {
+            items,
+            ..Default::default()
+        })
+    }
+    /// Apply the index fold: the fast seed the bell renders before the
+    /// projection answers.
+    pub(super) fn apply_questions_index(&mut self, fold: crate::needs_overlay::QuestionsFold) {
+        self.questions_index = Some(fold);
         bell::clamp_selection(self);
     }
 
@@ -930,7 +956,7 @@ mod tests {
         q.reversible = Some("costly".into());
         q.cost_if_wrong = Some("the allowance drops".into());
         q.meanwhile = Some("stops".into());
-        let d = Detail::open(&fold_with(vec![q.clone()]), Some("q-1")).unwrap();
+        let d = Detail::open(&fold_with(vec![q.clone()]), "q-1").unwrap();
         let page = question_page(&q, &d, 0);
         for want in [
             "title for q-1",
@@ -958,38 +984,18 @@ mod tests {
         let mut q = item("q-2", true);
         q.blocked_because = None;
         q.unknowns = None;
-        let d = Detail::open(&fold_with(vec![q.clone()]), Some("q-2")).unwrap();
+        let d = Detail::open(&fold_with(vec![q.clone()]), "q-2").unwrap();
         let page = question_page(&q, &d, 0);
         assert!(page.contains("NOT RECORDED"));
 
         let q = item("q-1", true);
-        let mut d = Detail::open(&fold_with(vec![q.clone()]), Some("q-1")).unwrap();
+        let mut d = Detail::open(&fold_with(vec![q.clone()]), "q-1").unwrap();
         d.sel = Some(2);
         let page = question_page(&q, &d, 0);
         assert!(page.contains("2. wide  [selected]"));
         d.sel = Some(0);
         let page = question_page(&q, &d, 0);
         assert!(page.contains("0. none of these  [selected]"));
-    }
-
-    #[test]
-    fn detail_nav_rows() {
-        let items = vec![item("q-a", true), item("q-b", true), item("q-c", true)];
-        let mut d = Detail::open(&fold_with(items.clone()), None).unwrap();
-        assert_eq!(d.item().id, "q-a");
-        d.advance(1);
-        assert_eq!(d.item().id, "q-b");
-        d.sel = Some(2);
-        d.advance(-1);
-        assert_eq!(d.item().id, "q-a");
-        assert_eq!(d.sel, None, "the pick resets on advance");
-
-        let items = vec![item("q-a", true), item("q-b", true)];
-        let d = Detail::open(&fold_with(items), Some("q-b")).unwrap();
-        assert_eq!(d.item().id, "q-b");
-        assert!(d.focus, "a row click opens with the page focused");
-        let d = Detail::open(&fold_with(vec![item("q-a", true)]), None).unwrap();
-        assert!(!d.focus, "the list gesture opens on the list");
     }
 
     #[tokio::test]
@@ -1152,25 +1158,25 @@ mod tests {
             item("q-c", false),
             done,
         ]));
-        v.open_questions_list();
+        v.open_detail_on("q-a");
         detail_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
         assert!(v.question_archive.is_none(), "one X archives nothing");
         assert_eq!(
             v.question_detail.as_ref().unwrap().notice.as_deref(),
             Some("press X again to archive 3 open questions")
         );
-        detail_keys(&mut v, b"jX", &mut Vec::new()).await.unwrap();
+        detail_keys(&mut v, b"kX", &mut Vec::new()).await.unwrap();
         assert!(v.question_archive.is_none(), "a key between disarms");
         detail_keys(&mut v, b"X", &mut Vec::new()).await.unwrap();
         assert_eq!(
             v.question_archive,
             Some(vec!["q-a".into(), "q-b".into(), "q-c".into()])
         );
-        // x archives the cursor question alone.
+        // x archives the opened question alone.
         v.question_archive = None;
         v.question_acting = false;
         detail_keys(&mut v, b"x", &mut Vec::new()).await.unwrap();
-        assert_eq!(v.question_archive, Some(vec!["q-b".into()]));
+        assert_eq!(v.question_archive, Some(vec!["q-a".into()]));
     }
 
     #[tokio::test]
@@ -1210,23 +1216,9 @@ mod tests {
         detail_keys(&mut v, b"\x15", &mut Vec::new()).await.unwrap();
         assert_eq!(v.question_detail.as_ref().unwrap().scroll, 0);
 
-        let items = vec![item("q-a", true), item("q-b", true)];
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(items));
-        v.open_detail_on("q-a");
-        detail_keys(&mut v, b"\t", &mut Vec::new()).await.unwrap();
-        assert!(!v.question_detail.as_ref().unwrap().focus);
-        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
-        assert_eq!(v.question_detail.as_ref().unwrap().item().id, "q-b");
-        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
-        assert!(
-            v.question_detail.as_ref().unwrap().focus,
-            "Enter drills into the page"
-        );
-
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-a", true)]));
-        v.open_questions_list();
+        v.open_detail_on("q-a");
         detail_keys(&mut v, b"\x1b", &mut Vec::new()).await.unwrap();
         // The lone Esc rides the carry until the next chunk proves it bare.
         detail_keys(&mut v, b"", &mut Vec::new()).await.unwrap();
@@ -1234,47 +1226,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_width_follows_the_layout_the_draw_uses() {
-        // Stacked: the page wraps at the full terminal width.
-        assert_eq!(page_width(40, 80, 45), 78);
-        // Side-by-side: the detail pane's own inner width.
-        assert_eq!(page_width(40, 100, 45), 100 - 45 - 2);
-        // Tiny terminal: the width floors at ten.
-        assert_eq!(page_width(6, 8, 45), 10);
-
-        // > twice widens the list to 55 percent, saved, and the draw splits
-        // where page_width says.
-        let dir = std::env::temp_dir().join(format!("fno-q-split-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::view_store::set_test_path(&dir);
-        let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
-        v.open_detail_on("q-1");
-        detail_keys(&mut v, b">>", &mut Vec::new()).await.unwrap();
-        assert_eq!(v.questions_split, 55);
-        assert_eq!(crate::view_store::load_questions_split(), 55);
-        let (rows, cols) = (30usize, 120usize);
-        assert_eq!(page_width(rows, cols, 55), 120 - 66 - 2);
-        let mut cells = vec![Cell::default(); rows * cols];
-        draw_detail(&v, &mut cells, (rows, cols), (0, 0), (rows, cols));
-        // The detail frame's left corner sits where the list pane ends.
-        assert_eq!(cells[66].c, '\u{256d}', "the detail pane starts at col 66");
-        crate::view_store::clear_test_path();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
     async fn draw_detail_rows() {
-        let mut answered = item("q-d", true);
-        answered.state = "answered".into();
         let mut v = view_with_agents(vec![]);
-        v.questions_fold = Some(fold_with(vec![
-            item("q-a", true),
-            item("q-b", true),
-            item("q-c", false),
-            answered,
-        ]));
+        v.questions_fold = Some(fold_with(vec![item("q-a", true)]));
         v.open_detail_on("q-a");
         let (rows, cols) = (30usize, 120usize);
         v.term = (rows as u16, cols as u16);
@@ -1286,24 +1240,10 @@ mod tests {
             (0, 0),
             (rows, cols)
         ));
-        // Row 1 is the banded cursor; q-b, q-c, q-d titles sit at rows 3, 5, 7,
-        // each starting at the first `t` past the frame's pad and the mark.
-        let title = |r: usize| {
-            let row = &cells[r * cols..(r + 1) * cols];
-            *row.iter().find(|c| c.c == 't').expect("a title on the row")
-        };
-        assert_eq!(title(3).fg, Color::Default);
-        assert_ne!(title(3).flags & cell_flags::BOLD, 0, "ready reads bright");
-        assert_eq!(title(5).fg, Color::Default);
-        assert_eq!(
-            title(5).flags & cell_flags::BOLD,
-            0,
-            "not ready reads plain"
-        );
-        assert_eq!(title(7).fg, Color::Indexed(8), "answered reads muted");
-        for r in [3, 5, 7] {
-            assert_ne!(title(r).fg, Color::Indexed(3), "no olive title");
-        }
+        // The page owns the full width: the opened question's title renders
+        // on the page, no list pane beside it.
+        let row1: String = cells[cols..2 * cols].iter().map(|c| c.c).collect();
+        assert!(row1.contains("title for q-a"), "the page renders: {row1}");
 
         let mut v = view_with_agents(vec![]);
         v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
@@ -1346,14 +1286,68 @@ mod tests {
         assert!(notice.0.contains("failed to close q-1: locked"));
 
         let mut v = view_with_agents(vec![]);
+        v.apply_questions_fold(Ok(fold_with(vec![item("q-a", true)])));
         v.apply_questions_fold(Err("events.jsonl: permission denied".into()));
         assert!(v.questions_degraded);
         assert_eq!(
             v.questions_degraded_reason.as_deref(),
             Some("events.jsonl: permission denied")
         );
+        assert_eq!(
+            v.questions_merged().unwrap().items.len(),
+            1,
+            "a failed read keeps the last good fold, never a 0 board"
+        );
         v.apply_questions_fold(Ok(fold_with(vec![item("q-a", true)])));
         assert!(!v.questions_degraded);
         assert_eq!(v.questions_degraded_reason, None);
+    }
+
+    #[test]
+    fn questions_index_and_merge_rows() {
+        let text = "---\nfno_generated: questions-index\n---\n\n## Open (2)\n\n- [[20261005-q-aaaaaaaa-pin-kind-q-aaaa|pin title]] \u{b7} pin \u{b7} quill\n- [[20261005-q-bbbbbbbb-the-other-one-x-aaaa|other title]] \u{b7} question \u{b7} blocks x-aaaa \u{b7}\n\n## Done\n\n- [[q-cccccccc|closed title]] \u{b7} closed 2026-10-05 \u{b7} node-closed\n- [[ask-deadbeef|an ask]] \u{b7} answered 2026-10-04 \u{b7} PR\n";
+        let fold = parse_questions_index(text).unwrap();
+        assert_eq!(fold.items.len(), 3, "ask- pages stay out of the fold");
+        let pin = &fold.items[0];
+        assert_eq!(pin.id, "q-aaaaaaaa");
+        assert_eq!(pin.kind, "pin");
+        assert_eq!(pin.state, "open");
+        assert!(!pin.settled);
+        assert_eq!(pin.created_at, "2026-10-05T00:00:00Z");
+        let done = &fold.items[2];
+        assert!(done.settled);
+        assert_eq!(done.state, "answered");
+
+        // A healthy projection wins shared ids and keeps its richer item;
+        // ids only one side holds survive either way.
+        let mut v = view_with_agents(vec![]);
+        v.apply_questions_index(fold);
+        let mut rich = item("q-aaaaaaaa", true);
+        rich.title = "rich".into();
+        v.apply_questions_fold(Ok(fold_with(vec![rich, item("q-ffff0000", true)])));
+        let merged = v.questions_merged().unwrap();
+        let by_id = |id: &str| {
+            merged
+                .items
+                .iter()
+                .find(|q| q.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"))
+                .clone()
+        };
+        assert_eq!(by_id("q-aaaaaaaa").title, "rich", "projection enriches");
+        assert_eq!(
+            by_id("q-bbbbbbbb").title,
+            "other title",
+            "index-only ids survive"
+        );
+        assert!(!by_id("q-ffff0000").settled, "projection-only ids survive");
+
+        // A degraded projection yields to the index on shared ids: the
+        // timed-out read never outvotes the fresh list.
+        v.questions_degraded = true;
+        v.questions_degraded_reason = Some("timed out after 30000ms".into());
+        let merged = v.questions_merged().unwrap();
+        let pin = merged.items.iter().find(|q| q.id == "q-aaaaaaaa").unwrap();
+        assert_eq!(pin.title, "pin title", "the index wins when degraded");
     }
 }

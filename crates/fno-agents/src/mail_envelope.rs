@@ -7,24 +7,19 @@ fn live_entry_for_address<'a>(
     address: Option<&str>,
 ) -> Option<&'a crate::state::RegistryEntry> {
     let address = address.filter(|s| !s.is_empty())?;
-    let mut matches = registry.entries.iter().filter(|entry| {
+    let keep = |entry: &crate::state::RegistryEntry| {
         !matches!(
             entry.status,
             crate::AgentStatus::Exited
                 | crate::AgentStatus::Orphaned
                 | crate::AgentStatus::Failed
                 | crate::AgentStatus::PermanentDead
-        ) && (entry.harness_session_id.as_deref() == Some(address)
-            || entry.related_session_id.as_deref() == Some(address)
-            || entry.name == address
-            || entry.short_id == address
-            || entry.aliases.iter().any(|alias| alias == address))
-    });
-    let row = matches.next()?;
-    if matches.next().is_some() {
-        return None;
+        )
+    };
+    match crate::agent_ref::resolve_address(&registry.entries, address, keep) {
+        crate::agent_ref::Join::One(row) => Some(row),
+        crate::agent_ref::Join::Ambiguous | crate::agent_ref::Join::None => None,
     }
-    Some(row)
 }
 
 fn team_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
@@ -103,6 +98,31 @@ fn validate_sender(sender: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The pane lane asks for a fenced delivery (`FNO_MAIL_FENCE=1` on the
+/// pane-prepare child, or the payload's `fence` field): the body rides
+/// inside a backtick fence, so a pasted body cannot pose as the pane's own
+/// framing. Hook and mail lanes set neither and render unchanged.
+fn fence_requested(input: &Value) -> bool {
+    std::env::var("FNO_MAIL_FENCE").as_deref() == Ok("1")
+        || input.get("fence").and_then(Value::as_bool) == Some(true)
+}
+
+/// The fence for `body`: a backtick run one longer than the longest run the
+/// body holds, minimum three, so no body line can close it.
+fn fence_for(body: &str) -> String {
+    let mut longest = 3usize;
+    let mut run = 0usize;
+    for ch in body.chars() {
+        if ch == '`' {
+            run += 1;
+            longest = longest.max(run + 1);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest)
 }
 
 fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
@@ -238,19 +258,29 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             validate_attr(name, value)?;
         }
     }
-    // The one delivered shape from here on: the header line, then the whole
-    // body. The sender is the fleet name, the id is required (the shape's
-    // join key), and both are guarded so neither can forge a second field.
-    let summary = crate::mail_header::summary_of(wrapping.unwrap_or(""));
+    // The one delivered shape from here on: the header line, then the body.
+    // The sender is the fleet name, the id is required (the shape's join
+    // key), and both are guarded so neither can forge a second field.
     let msg_id = attr(input, "id").ok_or("mail envelope: an id is required to render a header")?;
     let sender = header_sender(from_row, from_name, from);
     crate::system_sender::guard_sender(sender)?;
     validate_sender(sender)?;
     validate_attr("msg id", msg_id)?;
+    // The subject rides the payload; a backtick, a separator or a newline
+    // would forge a header field, so the render refuses one.
+    let subject = attr(input, "subject");
+    if let Some(s) = subject {
+        if s.contains('`') || s.contains(" · ") || s.contains('\n') {
+            return Err(
+                "mail envelope: subject must not hold a backtick, a separator or a newline"
+                    .to_string(),
+            );
+        }
+    }
     // The header form: an explicit payload `form` wins (tests, callers with
     // their own knowledge); otherwise the RECIPIENT harness's contract row
-    // rules (`mail_header_at` - the composer check's verdict as data),
-    // defaulting to the mention form.
+    // rules (`mail_header_at` - the composer check's payload's verdict as
+    // data), defaulting to the mention form.
     let form = if attr(input, "form").is_some() {
         form_of(input)
     } else {
@@ -262,9 +292,18 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             _ => crate::mail_header::HeaderForm::Mention,
         }
     };
-    let header = crate::mail_header::render_header(form, sender, msg_id, &summary);
+    let body_text = wrapping.as_deref().unwrap_or("");
+    let third = crate::mail_header::header_subject(subject, body_text);
+    let header = crate::mail_header::render_header(form, sender, msg_id, &third);
+    let delivered = crate::mail_header::delivered_body(subject, body_text);
     Ok(match wrapping {
-        Some(body) => format!("{header}\n{body}"),
+        Some(_) if fence_requested(input) => {
+            let fence = fence_for(&delivered);
+            // The open fence carries the fno-pane marker so a reader can
+            // strip exactly this fence and never a body's own code fence.
+            format!("{header}\n{fence}fno-pane\n{delivered}\n{fence}")
+        }
+        Some(_) => format!("{header}\n{delivered}"),
         None => header,
     })
 }
@@ -403,7 +442,51 @@ mod tests {
         .unwrap();
         assert_eq!(
             rendered,
-            "`@folio \u{b7} msg-1 \u{b7} Fix the gate.`\nFix the gate. Then ship."
+            "`@folio \u{b7} msg-1 \u{b7} Fix the gate.`\nThen ship."
+        );
+        // No subject: the third field is the body's first sentence, and the
+        // delivered body drops that sentence, so it shows once (AC10-HP).
+        let body_once = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate. Details follow.",
+                "from":"folio-short", "id":"fmail-0123456789ab"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            body_once,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\nDetails follow."
+        );
+        // A first sentence longer than the summary cut stays whole: the
+        // header shows only its first 12 words, and dropping the sentence
+        // would silently lose the words past the cut (AC10).
+        let long = render_at(
+            &json!({
+                "mode":"wrap",
+                "body":"one two three four five six seven eight nine ten eleven twelve thirteen. Rest here.",
+                "from":"folio-short", "id":"fmail-0123456789ab"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            long,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} one two three four five six seven eight nine ten eleven twelve`\none two three four five six seven eight nine ten eleven twelve thirteen. Rest here."
+        );
+        // A given subject rides the header and the body follows whole
+        // (AC11-HP).
+        let subject = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate. Details follow.",
+                "from":"folio-short", "id":"fmail-0123456789ab", "subject":"gate fix"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            subject,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} gate fix`\nFix the gate. Details follow."
         );
         let plain = render_at(
             &json!({
@@ -422,6 +505,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
+        // The pane lane's fenced delivery (payload `fence`, or FNO_MAIL_FENCE=1
+        // on the pane-prepare child): the body rides a backtick run one longer
+        // than any run it holds; the header line stays readable.
+        let fenced = render_at(
+            &json!({
+                "mode":"wrap", "body":"hi ```x``` there",
+                "from":"folio-short", "id":"msg-4", "fence":true
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            fenced,
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\n````fno-pane\nhi ```x``` there\n````",
+        );
+        // The fence clears: a run one longer than anything the body holds.
+        assert_eq!(fence_for("hi ```x``` there"), "````");
+        assert_eq!(fence_for("plain body"), "```");
+        assert_eq!(fence_for("a ``b`` c `````"), "``````");
+        // Without the request the render is byte-identical to the header
+        // lane's: hook and mail lanes never fence.
+        let plain = render_at(
+            &json!({
+                "mode":"wrap", "body":"hi ```x``` there",
+                "from":"folio-short", "id":"msg-4"
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            plain,
+            "`@folio \u{b7} msg-4 \u{b7} hi '''x''' there`\nhi ```x``` there",
+        );
+        // The Messages tab reads the fenced pane delivery as its plain body.
+        assert_eq!(
+            crate::mail_header::display_body(&fenced),
+            "hi ```x``` there",
+        );
+        // A body's own fenced code block keeps its fences: no marker, no strip.
+        let plain_code = "```rust\nfn main() {}\n```";
+        assert_eq!(crate::mail_header::display_body(plain_code), plain_code);
+        // A sender row RENAMED after the envelope was written still renders
+        // its CURRENT name: the header resolves the stored session id.
+        let renamed_path = tmp.path().join("renamed-registry.json");
+        std::fs::write(
+            &renamed_path,
+            serde_json::json!({"schema_version": 11, "agents": [
+                {"name":"renamed-folio", "short_id":"folio-short", "status":"live",
+                 "harness":"claude", "cwd":"/repo",
+                 "harness_session_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                 "created_at":"2026-09-23T20:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let renamed = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
+                "from_session":"7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                "harness":"claude", "to":"x", "id":"msg-9"
+            }),
+            &renamed_path,
+        )
+        .unwrap();
+        assert!(renamed.contains("@renamed-folio"), "{renamed}");
     }
 
     #[test]

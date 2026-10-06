@@ -106,7 +106,7 @@ Seat and honesty are different answers. `thread_seatable` measured True on 2026-
 
 ## Converting a pane
 
-A session that STARTED on a pane reaches the thread lane with one verb: `fno agents resume <name> --substrate thread`. It keeps its session id, its transcript, its node, its claims and its crown. `--dry-run` prints the plan and changes nothing. `--allow-new-id` is the disclosed, authorized path for a harness that mints a new id anyway. A crowned row refuses that flag. Moving a crown to a new id is succession, not conversion.
+A session that STARTED on a pane reaches the thread lane with one verb: `fno agents resume <name> --substrate thread`. It keeps its session id, its transcript, its node, its claims and its role. `--dry-run` prints the plan and changes nothing. `--allow-new-id` is the disclosed, authorized path for a harness that mints a new id anyway. A titled row refuses that flag. Moving a role to a new id is succession, not conversion.
 
 Which mechanism a harness uses is declared, not derived. It lives in `[harness.<name>.conversion]` in `crates/fno-agents/src/harness_capabilities.toml`, and the classifier branches on the strategy alone. A derivation gets opencode wrong: `thread_lane` answers `attach` for it, so opencode goes down claude's path and forks the session the operator asked to keep.
 

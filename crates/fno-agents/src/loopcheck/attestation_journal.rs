@@ -270,7 +270,7 @@ mod tests {
     /// copies in any surviving project log.
     fn global_attest_line(ts: &str, head: &str, branch: &str, repo: &str) -> String {
         format!(
-                "{{\"ts\":\"{ts}\",\"type\":\"review_attestation\",\"source\":\"subagent\",\"data\":{{\"reviewer\":\"code-review\",\"head_sha\":\"{head}\",\"verdict\":\"pass\",\"branch\":\"{branch}\",\"attester_session_id\":\"fork-session\",\"repo\":\"{repo}\"}}}}"
+                "{{\"ts\":\"{ts}\",\"type\":\"review_attestation\",\"source\":\"subagent\",\"data\":{{\"reviewer\":\"code-review\",\"head_sha\":\"{head}\",\"verdict\":\"pass\",\"session_id\":\"fork-session\",\"branch\":\"{branch}\",\"attester_session_id\":\"fork-session\",\"repo\":\"{repo}\"}}}}"
             )
     }
 

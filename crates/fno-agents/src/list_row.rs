@@ -16,7 +16,24 @@ pub fn node_primary_prs<'a>(
     if wanted.is_empty() {
         return Some(HashMap::new());
     }
-    let rows = crate::graph_store::read_rows(graph).ok()?;
+    let rows = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(wanted.iter().map(|id| (*id).to_string()).collect()),
+                ..Default::default()
+            },
+            fields: Some(
+                ["id", "pr_number", "pr_url", "additional_prs"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .ok()?;
     Some(
         rows.iter()
             .filter_map(|row| {
@@ -151,11 +168,14 @@ mod tests {
         let graph = dir.path().join("graph.json");
         let rows = [
             json!({"id": "x-1", "title": "a", "status": "ready", "pr_number": 2136}),
-            json!({"id": "x-2", "title": "b", "status": "ready"}),
+            json!({"id": "x-2", "title": "b", "completed_at": "2026-01-01T00:00:00Z",
+                "additional_prs": [{"number": 2137}]}),
+            json!({"id": "unrequested", "title": "other", "pr_number": 9999}),
         ];
         crate::graph_store::seed_rows(&graph, &rows).expect("seed sqlite graph");
         let map = node_primary_prs(&graph, ["x-1", "x-2"]).expect("graph reads");
         assert_eq!(map.get("x-1"), Some(&Some(2136)));
-        assert_eq!(map.get("x-2"), Some(&None));
+        assert_eq!(map.get("x-2"), Some(&Some(2137)));
+        assert!(!map.contains_key("unrequested"));
     }
 }

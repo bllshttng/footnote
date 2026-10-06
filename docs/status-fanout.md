@@ -70,7 +70,7 @@ template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
 enabled = true
 ```
 
-The arm notices ride this sink too. `arm_watch`, the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. `arm_watch` names arms broken past `[notify] arm_failing_after_s`, plus hung verbs, dead flight holders, and crowned scopes that hold ready work with no live holder. Each notice line is the row's own status line. It names the cause and ends with `heal=auto` or `heal=operator`. A known verb comes before the owner as `repair: <verb>`. An arm that waits on a red arm reads `UPSTREAM` with `cause=upstream_down`. Before it pages, the tick runs the `heal=auto` repairs (switch: `recovery.self_heal.enabled`, default `true`), so a notice names only what is still red. The cause table is in [control-plane-loop](architecture/control-plane-loop.md#cause-repair-and-owner).
+The arm notices ride this sink too. `arm_watch`, the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. `arm_watch` names arms broken past `[notify] arm_failing_after_s`, plus hung verbs, dead flight holders, and titled scopes that hold ready work with no live holder. Each notice line is the row's own status line. It names the cause and ends with `heal=auto` or `heal=operator`. A known verb comes before the owner as `repair: <verb>`. An arm that waits on a red arm reads `UPSTREAM` with `cause=upstream_down`. Before it pages, the tick runs the `heal=auto` repairs (switch: `recovery.self_heal.enabled`, default `true`), so a notice names only what is still red. The cause table is in [control-plane-loop](architecture/control-plane-loop.md#cause-repair-and-owner).
 
 In the Rust callers `--pointer` leads the argv: `fno inbox notify --pointer P TITLE BODY`. The Python group callback refuses an option after its positionals, so the trailing form exits 2 and writes no row. `arm_watch` counts a notice sent only on exit 0. A notice that died at the gate leaves the dedupe token unwritten, so the next tick retries.
 
@@ -88,6 +88,6 @@ One macOS recipe that works end to end:
 
 A notice is a pointer, never a second inbox. `data.pointer` names the verb that shows the durable state (`fno inbox outstanding`, `fno inbox board`). `data.body` carries counts, never queue rows. With no sink configured, nothing leaves the host.
 
-Badge notices. A blocked badge (a permission prompt or an idle wait) rides this lane, so it reaches the phone. A done badge is a turn end. With `mux.notify_on_done` on, it fires a local toast only and writes no `operator_notice` row. A crowned king's done sends nothing. `scripts/probes/phone-notice-noise-probe.sh` counts the notices in a window.
+Badge notices. A blocked badge (a permission prompt or an idle wait) rides this lane, so it reaches the phone. A done badge is a turn end. With `mux.notify_on_done` on, it fires a local toast only and writes no `operator_notice` row. A titled lead's done sends nothing. `scripts/probes/phone-notice-noise-probe.sh` counts the notices in a window.
 
-Automatic sampling of the king board, the court and main CI is a planned follow-up; today the notice fires from the existing `notify` callers.
+Automatic sampling of the lead board, the org and main CI is a planned follow-up; today the notice fires from the existing `notify` callers.

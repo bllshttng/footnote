@@ -527,6 +527,10 @@ def ship_batch(
                 reason=base_msg or "stale base: refused to open batch PR",
                 members=members,
             )
+        from fno.pr._preflight import check_duplicate_pr
+        if dup := check_duplicate_pr(worktree, f"origin/{base}", pr_title):
+            _abandon_and_requeue(domain, members, root)
+            return ShipResult("abandoned", domain, reason=dup, members=members)
         # Push the batch branch first. `fno agents workspace worktree ensure` creates only a LOCAL
         # branch and the batched worker commits locally, so `gh pr create --head`
         # (which does NOT push) would fail on an unpublished branch and abandon

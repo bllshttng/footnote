@@ -1,8 +1,11 @@
-"""CLI surface for path introspection: fno config paths emit-shell / fno config paths verify."""
-from __future__ import annotations
+"""CLI surface for path introspection: fno config paths (forwarder leaf).
 
-from pathlib import Path
-from typing import Optional
+All four verbs - emit-shell, shell-stub, verify and handoff - answer natively
+(crates/fno-agents/src/paths_cli.rs); this front keeps a forwarding leaf for
+handoff so `fno-py` and the test harnesses that wrap it reach the native lane
+through the one Rust classify.
+"""
+from __future__ import annotations
 
 import typer
 
@@ -13,175 +16,22 @@ app = typer.Typer(
 )
 
 
-@app.command(name="emit-shell")
-def emit_shell(
-    output: Optional[Path] = typer.Option(
-        None,
-        "--output",
-        help=(
-            "Destination file path. Defaults to scripts/lib/paths.sh "
-            "relative to the repo root."
-        ),
-    ),
-) -> None:
-    """Generate scripts/lib/paths.sh from the Pydantic schema.
+def _forward_native(verb: str, ctx: typer.Context) -> None:
+    """Exec the Rust front with the same argv, propagating its exit code.
 
-    The generated file is byte-deterministic for identical schema inputs.
-    Use --output to redirect to a custom path (useful for tests).
+    The Rust front owns the classify (crates/fno/src/paths_route.rs) and the
+    worker_binary resolution; this front never re-states the native verb list.
     """
-    from fno.paths import resolve_repo_root
-    from fno.setup.emit_shell import emit_paths_sh
-    from fno.state.io import atomic_write
+    from fno.cli import _run_rust_front
 
-    if output is None:
-        repo_root = resolve_repo_root()
-        output = repo_root / "scripts" / "lib" / "paths.sh"
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    content = emit_paths_sh(use_defaults=True)
-    atomic_write(output, content)
-    typer.echo(f"wrote {len(content.encode('utf-8'))} bytes to {output}")
+    _run_rust_front(["config", "paths", verb, *ctx.args])
 
 
-@app.command(name="shell-stub")
-def shell_stub() -> None:
-    """Generate a fresh paths.sh from current settings and print its path.
-
-    Bash callers use: source "$(fno config paths shell-stub)".
-
-    Each invocation regenerates a temp file from the current settings.yaml so
-    shell hooks always reflect the user's current config rather than the
-    checked-in static snapshot.  The checked-in scripts/lib/paths.sh remains
-    available as a fallback for callers where fno is not on PATH.
-    """
-    import tempfile
-    from fno.setup.emit_shell import emit_paths_sh
-
-    content = emit_paths_sh(use_defaults=False)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".sh",
-        prefix="fno-paths-",
-        delete=False,
-        encoding="utf-8",
-    ) as f:
-        f.write(content)
-        print(f.name)
-
-
-@app.command(name="verify")
-def verify_cmd(
-    paths_sh: Optional[Path] = typer.Argument(
-        None,
-        help=(
-            "Path to scripts/lib/paths.sh. "
-            "Defaults to scripts/lib/paths.sh relative to the repo root."
-        ),
-    ),
-) -> None:
-    """Verify that scripts/lib/paths.sh matches the schema-derived hash.
-
-    Exits 0 if in sync, non-zero with a diff and regen command if not.
-    """
-    from fno.paths import resolve_repo_root
-    from fno.paths_verify import verify
-
-    if paths_sh is None:
-        repo_root = resolve_repo_root()
-        paths_sh = repo_root / "scripts" / "lib" / "paths.sh"
-
-    if not paths_sh.exists():
-        typer.echo(
-            f"error: {paths_sh} does not exist. "
-            "Generate it with: uv run fno-py paths emit-shell",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    ok, derived, checked = verify(paths_sh)
-
-    if ok:
-        typer.echo(f"paths.sh is in sync with schema (hash: {derived[:12]}...)")
-    else:
-        typer.echo(
-            f"--- expected (from schema)\n"
-            f"+++ checked-in\n"
-            f"schema hash:  {derived}\n"
-            f"file hash:    {checked}\n"
-            f"\nHashes differ. Regenerate with:\n"
-            f"  cd cli && uv run fno-py paths emit-shell",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-
-@app.command(name="handoff")
-def handoff(
-    session_id: Optional[str] = typer.Option(
-        None,
-        "--session-id",
-        help=(
-            "Session id (full uuid or 8-hex short id). Names the canon "
-            "handoff doc unless --slug overrides."
-        ),
-    ),
-    slug: str = typer.Option(
-        "",
-        "--slug",
-        help="Human-readable slug; overrides the session-derived short id in the filename.",
-    ),
-    scope: Optional[str] = typer.Option(
-        None,
-        "--scope",
-        help=(
-            "Crown scope: name the doc after the crown, not a session. Prints "
-            "the newest existing handoff for that scope when one exists, so a "
-            "successor session resolves its predecessor's doc; today's name "
-            "when none does. Mutually exclusive with --session-id/--slug."
-        ),
-    ),
-    name_only: bool = typer.Option(
-        False, "--name-only", help="Print just the rendered filename, no directory."
-    ),
-) -> None:
-    """Print the save path for a session's canon handoff doc.
-
-    Backed by ``paths.handoffs_dir()``. The filename key is the session's mail
-    handle (``canonical_handle``, the last-8 of the session id) unless --slug
-    or --scope overrides. The PreCompact canon-doc hook and any session writing
-    a handoff doc shell this instead of composing a path, so the configured
-    location is the one door. A crowned session passes --scope: a crown
-    outlives its sessions, so its rolling doc keys on the scope.
-    """
-    import datetime as _dt
-    import re
-
-    from fno.harness_identity import canonical_handle
-    from fno.paths import handoffs_dir
-
-    if scope:
-        if session_id or slug:
-            raise typer.BadParameter("--scope cannot be combined with --session-id/--slug")
-        key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
-        if key == "crown-":
-            raise typer.BadParameter("a crown scope is required (--scope)")
-        directory = handoffs_dir()
-
-        def _mtime(path: Path) -> float:
-            # A concurrent refresh can unlink between glob and stat; a vanished
-            # candidate sorts oldest and the writer recreates the file anyway.
-            try:
-                return path.stat().st_mtime
-            except OSError:
-                return 0.0
-
-        existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
-        filename = existing[-1].name if existing else f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
-        typer.echo(filename if name_only else str(directory / filename))
-        return
-    if not session_id:
-        raise typer.BadParameter("a session id is required (--session-id), or a crown scope (--scope)")
-    key = slug or canonical_handle(session_id)
-    filename = f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
-    typer.echo(filename if name_only else str(handoffs_dir() / filename))
+@app.command(
+    "handoff",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    hidden=True,
+)
+def handoff(ctx: typer.Context) -> None:
+    """Forward to the native handoff verb (crates/fno-agents paths_cli.rs)."""
+    _forward_native("handoff", ctx)

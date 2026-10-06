@@ -34,7 +34,7 @@ One divergence between the runtimes is known and narrowed. When the instrument i
 
 The gates and every readout read one decider, so the numbers a refusal prints are the numbers it decided on. An unreadable instrument refuses rather than admits. The sensor blinds under exactly the load it exists to measure, and an unreadable process table is itself a symptom. An attribution gap never reads as headroom. It widens the interval instead. A probe that missed its budget names the probe and the budget. An answered failure carries footprint's own error text.
 
-This is a human-, CI- or king-invoked reading, not a daemon or poller. A watcher adds the cost being measured.
+This is a human-, CI- or lead-invoked reading, not a daemon or poller. A watcher adds the cost being measured.
 
 Mux admission is a separate native pre-spawn instrument. Every Rust child launch except the bootstrap path acquires a per-user machine-global lock. Bootstrap deliberately skips the census, because bootstrap is what recovers a broken gate. It takes a process snapshot without starting an observer. The permit remains alive through the child-creation syscall. The census attributes descendants of active `fno` binaries or the current cargo-test binary and counts the OS process rows it can read. A row the reader cannot name is not counted. On macOS `proc_name` answers nothing for a defunct pid, so a zombie is not counted there. An ancestry cycle or unreadable required row returns unavailable. The mux root process is not a worker slot.
 

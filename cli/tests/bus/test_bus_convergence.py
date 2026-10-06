@@ -63,11 +63,11 @@ def test_ac1_err_contended_bus_lock_times_out_without_record_or_render(
     holder = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(holder, fcntl.LOCK_EX)
     script = """
+import os
 from fno.bus import log as bus_log
 from fno.inbox.store import Kind, write_new_thread
 
-bus_log._LOCK_TIMEOUT_SECONDS = 0.05
-bus_log._LOCK_POLL_SECONDS = 0.005
+os.environ["FNO_BUS_LOCK_TIMEOUT_SECS"] = "0.05"
 try:
     write_new_thread("alice", "bob", Kind.SEND.value, "must not disappear")
 except Exception as exc:

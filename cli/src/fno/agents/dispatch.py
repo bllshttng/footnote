@@ -1853,7 +1853,7 @@ def _claude_create_path(
             )
         if crown_declined:
             print(
-                f"spawn: crown declined (scope {crown_scope!r} already held by a "
+                f"spawn: role declined (scope {crown_scope!r} already held by a "
                 "live row); spawned uncrowned. The worker launched without a crown.",
                 file=sys.stderr,
             )
@@ -2450,13 +2450,13 @@ def dispatch_spawn(
     if crown_level is not None:
         if once or headless:
             raise DispatchAskError(
-                "--crown needs a session that outlives the grant; a one-shot "
+                "--promote needs a session that outlives the grant; a one-shot "
                 "exits after one answer. Use the pane or bg substrate.",
                 exit_code=2,
             )
         if harness not in ("claude", "codex"):
             raise DispatchAskError(
-                f"--crown on the bg substrate has no carrier on the {harness!r} "
+                f"--promote on the thread substrate has no carrier on the {harness!r} "
                 f"thread row yet. Use --substrate pane, which maps every harness.",
                 exit_code=2,
             )
@@ -2640,7 +2640,7 @@ def dispatch_spawn(
                     exclude_name=name if revive else None,
                 )
                 if crown_refusal is not None:
-                    raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
+                    raise DispatchAskError(f"--promote: {crown_refusal}", exit_code=2)
 
             # a revive must come back on the route the row was born with
             # unless this invocation resolved one of its own; raises exit 2 when
@@ -2920,7 +2920,7 @@ def dispatch_spawn(
                         raise DispatchAskError(
                             "opencode one-shot spawns run through the Rust "
                             "runtime's headless lane; the Python path carries "
-                            "--substrate bg only",
+                            "--substrate thread only",
                             exit_code=2,
                         )
                     if resume_session_id:
@@ -2930,12 +2930,8 @@ def dispatch_spawn(
                             exit_code=2,
                         )
                     short_id = _opencode_serve_spawn(
-                        name=name,
-                        message=message,
-                        cwd=cwd,
-                        from_name=from_name,
-                        model=model,
-                        node=node,
+                        name=name, message=message, cwd=cwd,
+                        from_name=from_name, model=model, node=node, effort=effort,
                     )
                     _emit_ev(
                         "agent_ask_done",
@@ -6505,7 +6501,7 @@ def wake_and_deliver(
     except (RegistryVersionError, ValueError):
         return False, "registry-incomplete"
 
-    spawn_name = fork_lineage.wake_spawn_name(entry, session_uuid)
+    spawn_name = fork_lineage.wake_spawn_name(session_uuid)
     route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
     from fno.agents.launch_provenance import launch_account_for_session

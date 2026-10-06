@@ -320,12 +320,16 @@ pub fn run(payload: &Value, config_cwd: &Path, now_unix: u64) -> SettleOutcome {
     let graph = |pr: i64| -> Result<Vec<Value>, String> {
         crate::graph_store::read_pr_rows(&graph_path, Some(pr)).map_err(|e| e.to_string())
     };
+    // The same load-scaled shape the org read uses: a starved machine's
+    // status read dies at a fixed 30s bound every beat, and the pass mails
+    // nothing while the arm reads error.
+    let status_budget_s = crate::bounded_cmd::load_scaled_budget_s(STATUS_READ_BUDGET_S, 150);
     let mut status = |cwd: &Path, pr: i64| -> Result<Value, String> {
         let pr_arg = pr.to_string();
         let out = crate::provider_cap_verbs::run_fno_output(
             &["do", "pr", "status", pr_arg.as_str()],
             Some(cwd),
-            std::time::Duration::from_secs(STATUS_READ_BUDGET_S),
+            std::time::Duration::from_secs(status_budget_s),
         )
         .ok_or_else(|| "the status read failed or timed out".to_string())?;
         serde_json::from_str(&out).map_err(|e| format!("the status payload did not parse: {e}"))

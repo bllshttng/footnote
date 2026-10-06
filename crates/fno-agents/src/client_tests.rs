@@ -3,6 +3,7 @@
 
 use super::*;
 use fno_agents::client::{RestartError, RestartOutcome};
+use fno_agents::client_render::format_age_secs;
 use fno_agents::restart_run::rm_after_drift_repair;
 use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
 use std::path::Path;
@@ -1069,7 +1070,7 @@ fn spawn_flag_rows() {
             "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
-            "bg".to_string(),
+            "thread".to_string(),
             "--permission-mode".to_string(),
             "acceptEdits".to_string(),
         ],
@@ -1189,7 +1190,7 @@ fn parse_rows() {
         "--harness".to_string(),
         "claude".to_string(),
         "--substrate".to_string(),
-        "bg".to_string(),
+        "thread".to_string(),
         "--force".to_string(),
         "--no-wait".to_string(),
     ];
@@ -1461,9 +1462,9 @@ fn substrate_rows() {
     assert_eq!(params["substrate"], "pane");
     assert_eq!(params["host_mode"], "interactive");
 
-    // thread (with deprecated bg alias) + headless are client-side lanes:
-    // no host_mode, no mint.
-    for sub in ["thread", "bg", "headless"] {
+    // thread + headless are client-side lanes: no host_mode, no mint. The
+    // retired bg spelling refuses with the redirect (substrate_rows covers it).
+    for sub in ["thread", "headless"] {
         let args = vec![
             "wk".to_string(),
             "--harness".to_string(),
@@ -1472,11 +1473,25 @@ fn substrate_rows() {
             sub.to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
-        let expected = if sub == "bg" { "thread" } else { sub };
-        assert_eq!(params["substrate"], expected);
+        assert_eq!(params["substrate"], sub);
         assert!(params.get("host_mode").is_none(), "{sub}: no host_mode");
         assert!(params.get("session_id").is_none(), "{sub}: no mint");
     }
+    let err = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--harness".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "bg".to_string(),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("substrate 'bg' was retired"),
+        "the retired spelling redirects to thread: {err}"
+    );
 }
 
 #[test]
@@ -1497,7 +1512,7 @@ fn substrate_flag_rows() {
         "--harness".to_string(),
         "claude".to_string(),
         "--substrate".to_string(),
-        "bg".to_string(),
+        "thread".to_string(),
         "--once".to_string(),
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
@@ -1529,7 +1544,7 @@ fn substrate_flag_rows() {
         "--harness".to_string(),
         "claude".to_string(),
         "--substrate".to_string(),
-        "bg".to_string(),
+        "thread".to_string(),
         "--headless".to_string(),
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
@@ -1663,7 +1678,7 @@ fn harness_flag_rows() {
             "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
-            "bg".to_string(),
+            "thread".to_string(),
             flag.to_string(),
             "opus".to_string(),
         ];
@@ -1674,6 +1689,37 @@ fn harness_flag_rows() {
             "{flag} sets model"
         );
     }
+
+    // x-c5db: the crown halves the Python seam passes for a crowned codex
+    // thread spawn parse into params in both spellings, and a level outside
+    // the ladder refuses before any request is built.
+    let (_m, space) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--crown".to_string(),
+            "2".to_string(),
+            "--crown-scope".to_string(),
+            "x-aaaa".to_string(),
+        ],
+    )
+    .expect("--crown must parse");
+    assert_eq!(space["crown_level"], 2);
+    assert_eq!(space["crown_scope"], "x-aaaa");
+    let (_m2, equals) = build_request(
+        "spawn",
+        &[
+            "wk".to_string(),
+            "--crown=1".to_string(),
+            "--crown-scope=x-bbbb".to_string(),
+        ],
+    )
+    .expect("the crown equals forms must parse");
+    assert_eq!(equals["crown_level"], 1);
+    assert_eq!(equals["crown_scope"], "x-bbbb");
+    let err = build_request("spawn", &["wk".to_string(), "--crown=7".to_string()])
+        .expect_err("a level outside the ladder refuses");
+    assert!(err.contains("level 0-2"), "got: {err}");
 }
 
 #[test]

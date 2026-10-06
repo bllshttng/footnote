@@ -368,7 +368,12 @@ fn default_true() -> bool {
 /// v103 removes `PanePlacement.human`: default admission leaves an opt-in machine gate
 /// for agent spawn; serde remains compatible with old and new placements. Floor stays 58.
 /// v104 adds `AgentRow.compaction_count`; v105 adds addressed pane input receipts; floor stays 58.
-pub const PROTO_VERSION: u32 = 105;
+/// v106: `AgentRow.held_conversation` (serde default), the machine-armed hold
+/// mark behind the sideline's `[HELD]` badge; floor stays 58.
+/// v107: `AgentRow.activity`, the sideline ramp's served intervals; floor stays 58.
+/// v107 adds `BacklogCard.link` (serde default), the node's stored GitHub-or-Linear
+/// URL the node tap opens when no plan lives in the vault; floor stays 58.
+pub const PROTO_VERSION: u32 = 108;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1031,6 +1036,13 @@ pub struct AgentRow {
     /// Missing on an older wire defaults false and false stays off the wire.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dnd: bool,
+    /// (v106) The hold is machine-armed: a live conversation clock
+    /// in the mail-hold sidecar backs this row's bus-only stamp, so the
+    /// sideline renders `[HELD]`, never the `[DND]` a lead reads as its own
+    /// deliberate hold. Additive like `dnd`: an older wire defaults false,
+    /// which degrades to the old label, never a wrong one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_conversation: bool,
     /// (v47) True only when `exited` is a terminal registry status
     /// with NO positive corroboration (no confirmed-dead pid, no confirmed-
     /// gone pane) -- `agents_view::Liveness::Unmeasured`. `exited` keeps its
@@ -1073,6 +1085,15 @@ pub struct AgentRow {
     /// fabricated zero. `#[serde(default)]` keeps a v102 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_count: Option<u64>,
+    /// (v105) The last 8 tool-activity intervals for this row, oldest
+    /// first: `(calls, failed)` pairs the server core samples from the
+    /// registry row's cumulative counts on a 5s gate. The client only
+    /// draws: heights scale to the card's own max, and a cell whose failed
+    /// share is high wears the theme's error color. `None` = the row
+    /// carries no readable transcript (never a fabricated flat line);
+    /// empty = no interval has closed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Vec<(u8, u8)>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1377,6 +1398,12 @@ pub struct BacklogCard {
     /// but an unranked board head is not a promise about the next dispatch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head: bool,
+    /// (v107) The link stored on the node (`pr_url`, a GitHub or Linear URL),
+    /// published for the node tap's middle leg: no plan in the vault opens
+    /// this instead of dead-ending at the details pane. `None` when the node
+    /// stores no link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 /// The queue state a card renders as. Classified from `status` alone
@@ -3672,6 +3699,7 @@ mod tests {
                         reason: Some("permission prompt".into()),
                         exited: false,
                         dnd: false,
+                        held_conversation: false,
                         unmeasured: false,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
@@ -3730,6 +3758,7 @@ mod tests {
                         reason: None,
                         exited: true,
                         dnd: false,
+                        held_conversation: false,
                         unmeasured: false,
                         answerable: None,
                         attach_id: None,
@@ -3770,6 +3799,7 @@ mod tests {
                         lane: Some("in-progress".into()),
                         plan_path: None,
                         head: false,
+                        link: None,
                     },
                     BacklogCard {
                         id: "ab-53c0".into(),
@@ -3783,6 +3813,7 @@ mod tests {
                         lane: None,
                         plan_path: None,
                         head: true,
+                        link: None,
                     },
                 ],
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
@@ -3952,7 +3983,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 105);
+        assert_eq!(PROTO_VERSION, 108);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -3986,6 +4017,23 @@ mod tests {
         assert!(
             !serde_json::to_string(&row).unwrap().contains("dnd"),
             "legacy false DND stays absent from the wire"
+        );
+        // The machine-armed mark rides the wire the same way -
+        // additive, true survives, false stays absent.
+        let held_wire = r#"{"squad":null,"name":"held","pane_id":null,
+                          "badge":"working","reason":null,"exited":false,
+                          "dnd":true,"held_conversation":true}"#;
+        let held_row: AgentRow = serde_json::from_str(held_wire).unwrap();
+        let encoded = serde_json::to_string(&held_row).unwrap();
+        assert!(
+            encoded.contains(r#""held_conversation":true"#),
+            "the machine-armed mark survives the wire: {encoded}"
+        );
+        assert!(
+            !serde_json::to_string(&dnd_row)
+                .unwrap()
+                .contains("held_conversation"),
+            "false stays absent from the wire"
         );
         // A teamed row round-trips losslessly.
         let mut teamed = row.clone();

@@ -43,6 +43,14 @@ pub struct Theme {
     /// makes a waiting worker look like a chosen one. Every theme pairs its
     /// brand with a needs-you from its own palette.
     pub needs_you: Color,
+    /// The activity ramp's three-step failure color: a cell's failed share
+    /// picks ok (no failures), warn (under half), or error (half or more).
+    /// `Indexed` under `terminal` (the emulator's palette owns contrast
+    /// there); every named theme picks palette-family values that clear
+    /// 4.5:1 against its own base - pinned by the contrast test below.
+    pub ok: Color,
+    pub warn: Color,
+    pub error: Color,
     pub sel: Color,
     pub dim: Color,
     pub chip: Color,
@@ -314,6 +322,31 @@ pub fn band_style(t: &Theme) -> (Color, Color, u8) {
     }
 }
 
+/// The chosen sideline card's fill: the theme accent across all 3 lines with
+/// the base tone as text - the same leg-swap the `[no]` stamp uses - so the
+/// selection reads as one unmistakable accent block on a dark and a light
+/// terminal. The operator's 2026-10-04 sideline ruling supersedes the
+/// surface-band selection for the card layout; the list layout keeps
+/// [`band_style`].
+pub fn chosen_card_style(t: &Theme) -> (Color, Color, u8) {
+    if t.inherit {
+        (Color::Indexed(0), Color::Indexed(3), 0)
+    } else {
+        (t.base, t.brand, 0)
+    }
+}
+
+/// The muted text tone for plain rows: the theme's tested dim under a named
+/// theme, the palette's own gray under the inherit theme (byte-identity with
+/// the pre-theme render).
+pub fn dim_fg(t: &Theme) -> Color {
+    if t.inherit {
+        Color::Indexed(8)
+    } else {
+        t.dim
+    }
+}
+
 fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",
@@ -330,6 +363,9 @@ fn theme_terminal() -> Theme {
         // roles keep the byte-identical pre-theme render.
         brand: Color::Indexed(3),
         needs_you: Color::Indexed(3),
+        ok: Color::Indexed(2),
+        warn: Color::Indexed(3),
+        error: Color::Indexed(1),
         sel: Color::Default,
         dim: Color::Default,
         chip: Color::Default,
@@ -349,6 +385,9 @@ pub(crate) fn theme_footnote_superscript() -> Theme {
         title: rgb(0xe8, 0xe8, 0xe8),  // text
         brand: rgb(0xe8, 0xe8, 0xe8),  // text
         needs_you: rgb(0xc5, 0xb7, 0x84), // needs-you yellow
+        ok: rgb(0x9c, 0xc4, 0x9c),     // palette green
+        warn: rgb(0xc5, 0xb7, 0x84),   // palette yellow
+        error: rgb(0xe1, 0xa6, 0xa3),  // palette red
         sel: rgb(0x2b, 0x2b, 0x2b),    // surface0
         dim: rgb(0xb4, 0xb4, 0xb4),    // subtext0
         chip: rgb(0xe1, 0xa6, 0xa3),   // red accent
@@ -369,11 +408,15 @@ pub(crate) fn theme_footnote_paper() -> Theme {
         title: rgb(0x14, 0x14, 0x14),  // text
         brand: rgb(0x14, 0x14, 0x14),  // ink
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
-        sel: rgb(0xd7, 0xd7, 0xd7),    // surface0
-        dim: rgb(0x40, 0x40, 0x40),    // subtext0 (505050 read too light)
-        chip: rgb(0x96, 0x53, 0x51),   // red accent
-        stamp: rgb(0x14, 0x14, 0x14),  // ink stamp label
-        base: rgb(0xf7, 0xf7, 0xf7),   // base: the theme ground
+        ok: rgb(0x46, 0x77, 0x48),     // palette green
+        warn: rgb(0x79, 0x68, 0x23),   // palette yellow
+        error: rgb(0x8f, 0x4d, 0x4b),  // the palette red darkened one step: the
+        // palette red itself lands 4.15:1 on paper
+        sel: rgb(0xd7, 0xd7, 0xd7),   // surface0
+        dim: rgb(0x40, 0x40, 0x40),   // subtext0 (505050 read too light)
+        chip: rgb(0x96, 0x53, 0x51),  // red accent
+        stamp: rgb(0x14, 0x14, 0x14), // ink stamp label
+        base: rgb(0xf7, 0xf7, 0xf7),  // base: the theme ground
     }
 }
 
@@ -386,6 +429,9 @@ fn theme_catppuccin() -> Theme {
         title: rgb(0x89, 0xb4, 0xfa),     // blue
         brand: rgb(0x89, 0xb4, 0xfa),     // blue - its signature primary, not orange
         needs_you: rgb(0xf9, 0xe2, 0xaf), // yellow
+        ok: rgb(0xa6, 0xe3, 0xa1),        // green
+        warn: rgb(0xf9, 0xe2, 0xaf),      // yellow
+        error: rgb(0xf3, 0x8b, 0xa8),     // red
         sel: rgb(0x31, 0x32, 0x44),       // surface0
         dim: rgb(0xa6, 0xad, 0xc8),       // subtext0
         chip: rgb(0xf3, 0x8b, 0xa8),      // red
@@ -403,6 +449,9 @@ fn theme_tokyo_night() -> Theme {
         title: rgb(0x7a, 0xa2, 0xf7),     // blue
         brand: rgb(0x7a, 0xa2, 0xf7),     // blue - its signature primary, not orange
         needs_you: rgb(0xe0, 0xaf, 0x68), // yellow
+        ok: rgb(0x9e, 0xce, 0x6a),        // green
+        warn: rgb(0xe0, 0xaf, 0x68),      // yellow
+        error: rgb(0xf7, 0x76, 0x8e),     // red
         sel: rgb(0x33, 0x3a, 0x54),       // bg_dark-ish selection
         dim: rgb(0x96, 0x9d, 0xc4),       // fg_gutter
         chip: rgb(0xf7, 0x76, 0x8e),      // red
@@ -420,11 +469,15 @@ fn theme_gruvbox() -> Theme {
         title: rgb(0x83, 0xa5, 0x98),  // blue
         brand: rgb(0x8e, 0xc0, 0x7c),  // aqua - its signature accent, not orange
         needs_you: rgb(0xfa, 0xbd, 0x2f), // yellow
-        sel: rgb(0x3c, 0x38, 0x36),    // bg1
-        dim: rgb(0xa8, 0x99, 0x84),    // fg4
-        chip: rgb(0xfb, 0x49, 0x34),   // red
-        stamp: rgb(0xeb, 0xdb, 0xb2),  // fg1
-        base: rgb(0x28, 0x28, 0x28),   // base
+        ok: rgb(0xb8, 0xbb, 0x26),     // green
+        warn: rgb(0xfa, 0xbd, 0x2f),   // yellow
+        error: rgb(0xfc, 0x5f, 0x45),  // the gruvbox red lightened one step:
+        // the raw red lands 4.3:1 on its base
+        sel: rgb(0x3c, 0x38, 0x36),   // bg1
+        dim: rgb(0xa8, 0x99, 0x84),   // fg4
+        chip: rgb(0xfb, 0x49, 0x34),  // red
+        stamp: rgb(0xeb, 0xdb, 0xb2), // fg1
+        base: rgb(0x28, 0x28, 0x28),  // base
     }
 }
 
@@ -644,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn every_named_theme_pairs_a_distinct_brand_and_needs_you() {
+    fn every_named_theme_keeps_roles_distinct_and_activity_legible() {
         // Attention and selection are different states, so no theme
         // may paint them the same color. `terminal` is the one exemption: it
         // paints no color of its own and both roles ride the emulator's
@@ -658,6 +711,36 @@ mod tests {
                 t.brand, t.needs_you,
                 "{n} must not paint selection and attention alike"
             );
+            // The activity ramp's ok/warn/error cells must stay legible on
+            // the card ground: WCAG AA text contrast, 4.5:1. `terminal` is
+            // exempt - it paints no color of its own.
+            fn lum(c: Color) -> Option<f64> {
+                match c {
+                    Color::Rgb(r, g, b) => {
+                        let ch = |v: u8| {
+                            let s = f64::from(v) / 255.0;
+                            if s <= 0.03928 {
+                                s / 12.92
+                            } else {
+                                ((s + 0.055) / 1.055).powf(2.4)
+                            }
+                        };
+                        Some(0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b))
+                    }
+                    _ => None,
+                }
+            }
+            let Some(base) = lum(t.base) else {
+                panic!("{n}: the card ground must be a concrete color");
+            };
+            for (role, c) in [("ok", t.ok), ("warn", t.warn), ("error", t.error)] {
+                let Some(fg) = lum(c) else {
+                    panic!("{n}: {role} must be a concrete color");
+                };
+                let (hi, lo) = if fg > base { (fg, base) } else { (base, fg) };
+                let ratio = (hi + 0.05) / (lo + 0.05);
+                assert!(ratio >= 4.5, "{n} {role} {c:?} on {base:?}: {ratio:.2}");
+            }
         }
     }
 

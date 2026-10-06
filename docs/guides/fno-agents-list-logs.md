@@ -91,7 +91,7 @@ Returns a canonical object suitable for scripts:
       "liveness_origin_basis": null,
       "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl",
       "mux": null,
-      "crown": null,
+      "role": null,
       "crown_level": null,
       "crown_scope": null,
       "crown_grantor": null,

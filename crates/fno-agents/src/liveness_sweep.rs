@@ -61,8 +61,15 @@ impl BgRoster {
     pub(crate) fn serve_listing(&self, entries: &[RegistryEntry], changes: &mut [ReconcileChange]) {
         let readable = self.listing.is_known() && self.listing.warning_text().is_empty();
         for change in changes.iter_mut() {
-            let Some(e) = entries.iter().find(|e| e.name == change.name) else {
-                continue;
+            // The listing's row name is an edge input: one live match
+            // answers, a second match (or none) skips the row.
+            let e = match crate::agent_ref::resolve(
+                entries,
+                crate::agent_ref::Key::Name(&change.name),
+                |_| true,
+            ) {
+                crate::agent_ref::Join::One(e) => e,
+                _ => continue,
             };
             if e.harness_name() != "claude"
                 || !e.is_one_shot_ask()
@@ -335,7 +342,7 @@ where
         // `probe` is skipped entirely here, so no provider reachability call can
         // decide an ask row's status. An already-terminal ask is left untouched.
         // [plan, Locked Decision #1]
-        // A `claude --substrate bg` thread lands in this same bucket (claude
+        // A `claude --substrate thread` lands in this same bucket (claude
         // harness, no footnote pid, no mux) and yet it IS a running process --
         // claude's own daemon owns it and lists it in `roster.json`. Reaping it
         // unprobed made `wait --state done` answer "done (via exit)" seconds
@@ -942,7 +949,7 @@ mod tests {
         e
     }
 
-    /// A claude `--substrate bg` thread row: harness claude, a recorded job
+    /// A claude `--substrate thread` row: harness claude, a recorded job
     /// short id, no pid, no pane - the exact `is_one_shot_ask` shape.
     fn bg_thread(name: &str) -> RegistryEntry {
         let mut e = state::RegistryEntry::default();

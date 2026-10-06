@@ -1,0 +1,12 @@
+id: replay-x-5978
+tier: capability
+repo_fixture: c4840341d151a6524deded3e9c8e54675e6c306a
+prompt: |
+  The provider-cap tracker cannot find some live workers' transcripts, so a capped worker is never counted or brought back
+
+  Observed 2026-09-22 09:40Z by the x-a792 crown. A GLM 5-hour cap (429, reset 09:41:13Z) stopped every zai worker at about 08:15Z. fno-agents provider-cap status listed 12 zai rows capped=true, but work-6d96 and work-b110 read capped=false tail_unknown=transcript-not-found. Both were live claude threads sitting on the same 429 (fno agents peek work-6d96 shows it). Every openai luna row and two anthropic rows also read transcript-not-found. So the cap snapshot undercounts, and any recovery keyed on capped=true skips these sessions. The roster read status refused for all four of the crown's workers, and no readout the crown watches raised the stall for 80 minutes. Fix: resolve each row's transcript the way fno agents peek does, which found it. Test: a planted thread row whose transcript lives where peek finds it reads capped=true from a planted 429 tail.
+grade:
+  - kind: exit
+    command: "git checkout c5cb8e1a397a7aff9aa1390b44bd3dea94570b7f -- cli/tests/agents/test_transcript_paths.py crates/fno-agents/tests/provider_cap_transcript_bridge.rs && (cd cli && uv run pytest tests/agents/test_transcript_paths.py -q) && (cd crates/fno-agents && cargo test --test provider_cap_transcript_bridge)"
+timeout_minutes: 45
+tags: [harness-fit]

@@ -228,13 +228,14 @@ def test_audit_writer_commits_beside_the_canonical_target(tmp_path, monkeypatch)
 
     _verify._append_event_lenient(
         str(worktree),
-        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "source": "hook", "data": {}},
+        {"ts": "2026-08-11T00:00:00Z", "type": "transcript_audit_failed",
+         "source": "hook", "data": {"gate": "auto_merge_outcome", "reason": "probe"}},
         "probe",
     )
 
     from tests._event_rows import event_rows
 
-    assert [e["type"] for e in event_rows(worktree)] == ["probe"]
+    assert [e["type"] for e in event_rows(worktree)] == ["transcript_audit_failed"]
 
 
 def test_audit_writer_survives_a_symlinked_leaf(tmp_path, monkeypatch):
@@ -245,13 +246,14 @@ def test_audit_writer_survives_a_symlinked_leaf(tmp_path, monkeypatch):
 
     _verify._append_event_lenient(
         str(local),
-        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "source": "hook", "data": {}},
+        {"ts": "2026-08-11T00:00:00Z", "type": "transcript_audit_failed",
+         "source": "hook", "data": {"gate": "auto_merge_outcome", "reason": "probe"}},
         "probe",
     )
 
     from tests._event_rows import event_rows
 
-    assert [e["type"] for e in event_rows(local)] == ["probe"]
+    assert [e["type"] for e in event_rows(local)] == ["transcript_audit_failed"]
 
 
 def test_draft_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):

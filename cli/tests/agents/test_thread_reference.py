@@ -13,8 +13,8 @@ def _graph_with_target_node(monkeypatch):
     """Verb resolution loads the node record; default it to a planless low
     node so the probe resolves the target verb."""
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: [{"id": "x-bdb9", "difficulty": "low"}],
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{"id": "x-bdb9", "difficulty": "low"}], "missing": []},
     )
 
 

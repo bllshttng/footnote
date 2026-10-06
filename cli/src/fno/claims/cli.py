@@ -31,14 +31,7 @@ from . import io as _claims_io
 from . import roster as _roster
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
-    ClaimContended,
-    ClaimCorrupted,
-    ClaimGoneAway,
-    ClaimValidationError,
-    ClaimVerdictError,
-    ClaimVerdictUnavailable,
     ClaimState,
-    HolderMismatch,
 )
 from fno.tombstones import tombstone_group_cls
 
@@ -310,131 +303,68 @@ def release(
     the default releases a claim we hold, ``--lane <id>`` releases a lane slot,
     and ``--force`` drops a claim regardless of owner.
     """
-    # A flag that belongs to another mode is REFUSED, never ignored. Silently
-    # dropping `--stamp-do` on the force path (or `--reason` on the plain one)
-    # loses exactly the provenance the flag was passed to record, and the caller
-    # gets exit 0 saying it worked.
+    return _forward_release(
+        key, holder, lane, force, reason, strict, stamp_do, rollback_do, json_output
+    )
+
+
+def _forward_release(
+    key, holder, lane, force, reason, strict, stamp_do, rollback_do, json_output
+) -> None:
+    """Forward to the bundled fno-agents binary, binary-direct.
+
+    The wave-2 port moved the leaf's logic (the mode-validation matrix, the
+    do-row close/rollback, lane and force release, output and exit codes)
+    into `crates/fno-agents/src/claim_cli/release.rs`; Python owns transport
+    only, per the dual-implementation protocol.
+    """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    argv = []
+    if key is not None:
+        argv.append(key)
+    if holder:
+        argv.extend(("--holder", holder))
     if lane is not None:
-        if key is not None or force or holder or strict or stamp_do or rollback_do or reason:
-            typer.echo(
-                "validation error: --lane takes only the lane id (no KEY, and "
-                "none of --force/--holder/--strict/--reason/--stamp-do/"
-                "--rollback-do): a lane slot has no owner and no do window",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        _release_lane(lane=lane, json_output=json_output)
-        return
-    if key is None:
-        typer.echo("validation error: KEY is required (or use --lane <id>)", err=True)
-        raise typer.Exit(code=2)
-    if reason and not force:
-        typer.echo(
-            "validation error: --reason records the --force override and has no "
-            "effect on an ordinary release",
-            err=True,
-        )
-        raise typer.Exit(code=2)
+        argv.extend(("--lane", lane))
     if force:
-        if strict or stamp_do or rollback_do:
-            typer.echo(
-                "validation error: --force is the administrative drop and takes "
-                "none of --strict/--stamp-do/--rollback-do (there is no owner to "
-                "check and no do window to stamp)",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        if holder:
-            typer.echo(
-                "validation error: --force drops the claim regardless of owner, "
-                "so --holder is meaningless with it",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        if not reason:
-            typer.echo(
-                "validation error: --force requires --reason (the override is "
-                "recorded in the audit trail)",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        _force_release(key=key, reason=reason, json_output=json_output)
-        return
-    if not holder:
-        typer.echo("validation error: --holder is required (or use --force)", err=True)
-        raise typer.Exit(code=2)
-    if stamp_do and rollback_do:
+        argv.append("--force")
+    if reason:
+        argv.extend(("--reason", reason))
+    if strict:
+        argv.append("--strict")
+    if stamp_do:
+        argv.append("--stamp-do")
+    if rollback_do:
+        argv.append("--rollback-do")
+    if json_output:
+        argv.append("--json")
+    binary = resolve_binary()
+    if binary is None:
         typer.echo(
-            "validation error: --stamp-do and --rollback-do are mutually "
-            "exclusive (one records a finished do window, the other removes a "
-            "row for work that never ran)",
+            "fno agents claim release: the fno-agents binary was not found. "
+            "It ships in the `pip install fno` wheel and with the plugin; "
+            "reinstall fno or run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN to its path.",
             err=True,
         )
-        raise typer.Exit(code=2)
-    try:
-        released = _claims_core.release_claim(
-            key=key, holder=holder, strict=strict, root=_node_aware_root(key)
-        )
-    except HolderMismatch as exc:
-        typer.echo(f"holder mismatch: {exc}", err=True)
-        raise typer.Exit(code=4)
-    except ClaimContended as exc:
-        # A losing racer in a two-process release: the recovery-dir mutex
-        # timed out. A clean named exit, not a traceback - and never the
-        # exit 0 that would read as a release that did not happen.
-        typer.echo(f"claim contended: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
-    except (ClaimCorrupted, ClaimGoneAway) as exc:
-        typer.echo(f"transient error: {exc}", err=True)
-        raise typer.Exit(code=3)
-
-    # execute provenance: the third choke point (ship=pr_number, blueprint=plan_path,
-    # do=claim release). started_at from the claim's own acquire time, ended_at
-    # at the release instant - a true per-session hold window, not the
-    # stamp-fire time. The --stamp-do gate means only a session releasing its
-    # own claim (the finished-terminal path) records it.
-    if released is not None and key.startswith("node:"):
-        if stamp_do:
-            _stamp_do_on_release(key, released, holder)
-        elif rollback_do:
-            _rollback_do_on_release(key, released, holder)
-    elif released is None and key.startswith("node:"):
-        # release_claim's own docstring names four ways it returns None (the
-        # file is already gone, the holder does not match, the file is
-        # corrupted, the recovery mutex timed out) - in all four nothing was
-        # unlinked, so the do row this call would have touched stays as it
-        # was. Named here rather than silent, for both flags: a do row was
-        # never in play for any key type outside node: (the success branch
-        # above shares the same gate).
-        if stamp_do:
-            typer.echo(
-                f"do stamp skipped for {key}: release was a no-op "
-                "(nothing was unlinked, so no do row was closed)",
-                err=True,
-            )
-        elif rollback_do:
-            typer.echo(
-                f"do rollback skipped for {key}: release was a no-op "
-                "(nothing was unlinked, so no do row was dropped)",
-                err=True,
-            )
-
-    # released is None means nothing was unlinked - a false "released: true"
-    # here is the receipt that let the missing do-row close go unnoticed.
-    # None covers four causes (already gone, holder mismatch, corrupted
-    # file, recovery-mutex timeout) that this return value cannot tell
-    # apart, so the message names the fact (nothing was unlinked) rather
-    # than guessing a cause - "was not held by {holder}" was wrong for
-    # three of the four.
-    if json_output:
-        typer.echo(json.dumps({"key": key, "released": released is not None}))
-    elif released is None:
-        typer.echo(f"no-op: {key} was not released (nothing was unlinked)")
-    else:
-        typer.echo(f"released: {key}")
+        raise typer.Exit(code=127)
+    # Captured and re-emitted through typer: the leaf's output IS the
+    # operator surface, and a CliRunner-hosted caller (the tests) must see it.
+    result = subprocess.run(
+        [str(binary), "claim", "release", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        typer.echo(result.stdout.rstrip("\n"))
+    if result.stderr:
+        typer.echo(result.stderr.rstrip("\n"), err=True)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
@@ -458,6 +388,7 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
     if not session_id:
         session_id = (ident.session_id or "").strip()
     return harness, session_id, _owned_registry_effort(harness, session_id)
+
 
 
 def _do_row_coordinates(key: str, claim, holder: str, action: str):
@@ -552,99 +483,6 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
         )
 
 
-def _stamp_do_on_release(key: str, claim, holder: str) -> None:
-    """Close the do lifecycle row for the session that just released a node
-    claim: fills ended_at (started_at already set at acquire). Best-effort: a
-    graph failure or missing identity is a named stderr skip and never fails
-    the release. Uses the same owned identity as the acquire stamp
-    (``_owned_do_identity``) so it fills the row acquire opened rather than
-    opening a second one when ambient and owned diverge."""
-    from datetime import datetime, timezone
-
-    from fno.graph.store import append_session_record
-    from fno.paths import graph_json
-
-    coords = _do_row_coordinates(key, claim, holder, "release")
-    if coords is None:
-        return
-    node_id, harness, session_id, started, effort = coords
-    ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        found, _added = append_session_record(
-            graph_json(), node_id, phase="execute",
-            harness=harness, session_id=session_id,
-            started_at=started, ended_at=ended, effort=effort,
-        )
-    except (Exception, SystemExit) as exc:
-        typer.echo(
-            f"claim release: execute provenance stamp skipped for {node_id}: {exc}",
-            err=True,
-        )
-        return
-    # append_session_record returns (found=False, added=False) without raising
-    # when the node id is absent from the graph (a superseded node whose claim
-    # file lingers). The named-skip contract requires an explicit stderr line
-    # so the operator knows provenance was lost, not silently dropped.
-    if not found:
-        typer.echo(
-            f"claim release: execute provenance stamp skipped for {node_id} "
-            f"(node not in graph); the row was not written. Skipped.",
-            err=True,
-        )
-
-
-def _rollback_do_on_release(key: str, claim, holder: str) -> None:
-    """Drop the open do row this claim's acquire opened, for a worker whose
-    post-acquire validation refused it.
-
-    Acquiring is not doing. ``fno do target init`` takes the claim purely as a
-    serialization point and only then re-runs its containment gate; a worker
-    refused there releases without ``--stamp-do`` because it must not proceed -
-    but the acquire stamp had already opened its row, leaving the node reading
-    as permanently in progress for work nobody performed.
-
-    The removal is guarded in the graph primitive, not here: only an OPEN row
-    (no ended_at) whose started_at equals this claim's acquire time is dropped,
-    so a real earlier window under the same identity survives. Best-effort and
-    named on skip, matching the two stamps - a rollback failure must not turn a
-    refusal into a crash."""
-    from fno.graph.store import remove_open_session_record
-    from fno.paths import graph_json
-
-    coords = _do_row_coordinates(key, claim, holder, "release --rollback-do")
-    if coords is None:
-        return
-    node_id, harness, session_id, started, _effort = coords
-    try:
-        found, removed = remove_open_session_record(
-            graph_json(), node_id, phase="execute",
-            harness=harness, session_id=session_id,
-            started_at=started,
-        )
-    except (Exception, SystemExit) as exc:
-        typer.echo(
-            f"claim release: execute provenance rollback skipped for {node_id}: {exc}",
-            err=True,
-        )
-        return
-    if not found:
-        typer.echo(
-            f"claim release: execute provenance rollback skipped for {node_id} "
-            f"(node not in graph); nothing was removed. Skipped.",
-            err=True,
-        )
-    elif not removed:
-        # Not an error: the acquire stamp itself may have been skipped (no owned
-        # identity, node absent at the time), or the row is a closed window this
-        # rollback must not touch. Say which outcome happened rather than let
-        # silence read as "the open row was removed".
-        typer.echo(
-            f"claim release: no open execute row to roll back for {node_id} "
-            f"(none was opened, or the row is already closed).",
-            err=True,
-        )
-
-
 @cli.command()
 def refresh(
     key: str = typer.Argument(...),
@@ -653,40 +491,46 @@ def refresh(
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
-    try:
-        result = _claims_core.refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
-    except HolderMismatch as exc:
-        typer.echo(f"holder mismatch: {exc}", err=True)
-        raise typer.Exit(code=4)
-    except ClaimGoneAway as exc:
-        typer.echo(f"claim missing: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
-    except ClaimCorrupted as exc:
-        typer.echo(f"corrupted claim: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
-        typer.echo(f"native verdict unavailable: {exc}", err=True)
-        raise typer.Exit(code=3)
-    except ClaimContended as exc:
-        # refresh_claim's own contention-retry-exhaustion guard; same exit
-        # code as acquire's, both mean "transient, caller should retry".
-        typer.echo(f"contention error: {exc}", err=True)
-        raise typer.Exit(code=1)
+    return _forward_refresh(key, holder, ttl, json_output)
 
-    if result is None:
-        if json_output:
-            typer.echo(json.dumps({"key": key, "refreshed": False, "reason": "pid_liveness"}))
-        else:
-            typer.echo(f"no-op for PID-liveness claim: {key}")
-        return
 
+def _forward_refresh(
+    key, holder, ttl, json_output,
+) -> None:
+    """Forward to the bundled fno-agents binary, binary-direct. The wave-3
+    port put the leaf's logic in crates/fno-agents/src/claim_cli/refresh.rs
+    (Python owns transport only, per the dual-implementation protocol)."""
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    argv = [key, "--holder", holder]
+    if ttl:
+        argv.extend(("--ttl", ttl))
     if json_output:
-        typer.echo(json.dumps(result.to_yaml_dict()))
-    else:
-        typer.echo(f"refreshed: {key} (new expires_at={result.expires_at})")
+        argv.append("--json")
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno agents claim refresh: the fno-agents binary was not found "
+            "(reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN).",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    # Captured and re-emitted through typer (a CliRunner caller must see it).
+    result = subprocess.run(
+        [str(binary), "claim", "refresh", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        typer.echo(result.stdout.rstrip("\n"))
+    if result.stderr:
+        typer.echo(result.stderr.rstrip("\n"), err=True)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 #: States in which nobody holds the key, so a reader is about to conclude the
@@ -1785,78 +1629,6 @@ def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> 
     if result.returncode != 0:
         typer.echo((result.stderr or f"lane cap full (max_lanes={max_lanes})").strip(), err=True)
         raise typer.Exit(code=result.returncode or 1)
-
-
-def _release_lane(*, lane: str, json_output: bool) -> None:
-    """The former `claim lane-release`. Silent success if the lane holds none."""
-    import subprocess
-
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo("Error: no fno-agents binary", err=True)
-        raise typer.Exit(code=1)
-    argv = [str(binary), "claim", "lane-release", "--lane", lane]
-    if json_output:
-        argv.append("--json")
-    result = subprocess.run(argv, capture_output=True, text=True)
-    if result.returncode != 0:
-        typer.echo((result.stderr or "lane release failed").strip(), err=True)
-        raise typer.Exit(code=result.returncode or 1)
-    if result.stdout.strip():
-        typer.echo(result.stdout.strip())
-
-
-def _force_release(*, key: str, reason: str, json_output: bool) -> None:
-    """Archived to .expired/; nothing at the resolved path REFUSES (exit 1),
-    naming the path read and any other default root that holds the file
-    (the specimen released nothing while printing success)."""
-    try:
-        outcome = _claims_core.force_release_claim(
-            key=key, reason=reason, root=_node_aware_root(key)
-        )
-    except ClaimValidationError as exc:
-        typer.echo(f"validation error: {exc}", err=True)
-        raise typer.Exit(code=2)
-
-    receipt = {"key": key, "reason": reason, "path": str(outcome.path)}
-    if outcome.archived:
-        if json_output:
-            typer.echo(json.dumps({**receipt, "archived": True, "force_released": True}))
-        else:
-            typer.echo(f"force-released: {key} (archived {outcome.path})")
-        return
-
-    encoded = _claims_io.encode_key(key)
-    others = [
-        (raw, cdir / f"{encoded}.lock")
-        for raw, cdir in _claims_io.dedup_claims_roots(
-            [_claims_io.global_claims_root(), None]
-        )
-        if (cdir / f"{encoded}.lock") != outcome.path
-        and (cdir / f"{encoded}.lock").exists()
-    ]
-    if json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    **receipt,
-                    "archived": False,
-                    "force_released": False,
-                    "other_roots": [
-                        {"path": str(path), "root": "default" if raw is None else str(raw)}
-                        for raw, path in others
-                    ],
-                }
-            )
-        )
-    else:
-        typer.echo(f"nothing released: no claim file at {outcome.path}")
-        for raw, path in others:
-            reach = "the default root (omit --root)" if raw is None else f"--root {raw}"
-            typer.echo(f"a claim file for this key exists at {path} ({reach})")
-    raise typer.Exit(code=1)
 
 
 __all__ = ["cli"]

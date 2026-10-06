@@ -601,7 +601,7 @@ fn a_team_finding_alone_still_sends() {
                     kind: "empty_team",
                     key: "team_empty:x-1@1788520000".to_string(),
                     line: "no lead on scope x-1: empty 47m against a 30m grace; respawn: \
-                           fno agents spawn --team x-1 --succeed"
+                           fno agents spawn --promote x-1 --hand-off"
                         .to_string(),
                     root: None,
                     holder: None,

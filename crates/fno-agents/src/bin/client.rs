@@ -13,6 +13,7 @@ use fno_agents::client::resolve_daemon_bin;
 use fno_agents::client::{
     call, call_if_running, check_daemon_drift, drift_from_status, ClientError,
 };
+use fno_agents::client_render::{render_checked, truncate_cell, LAST_MESSAGE_WIDTH};
 use fno_agents::drift::{drift_warning, DriftState};
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
@@ -268,13 +269,30 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-attempt") {
         std::process::exit(fno_agents::eval_attempt::run_evals_attempt(&args[1..]));
     }
-    // `pr-park`: the park-record owner behind `fno do pr watch`; dispatches
-    // here like evals-arm because the shrink law bars a new `run` arm.
+    // `pr-park` and `pr-watch`: the two verb families behind `fno do pr
+    // watch`; both dispatch here like evals-arm because the shrink law bars
+    // a new `run` arm. Their module docs carry the per-verb contract.
     if args.first().map(String::as_str) == Some("pr-park") {
         std::process::exit(fno_agents::pr_park::run(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("pr-watch") {
+        std::process::exit(fno_agents::pr_watch::run(&args[1..]));
+    }
     let code = rt.block_on(run(args));
     std::process::exit(code);
+}
+
+/// Per-column widths in chars, not bytes: the `{:<width$}` pad counts chars,
+/// so a byte width on non-ASCII text (a CJK cwd, an emoji message) pads past
+/// the intended column and shoves the rest of the row wide.
+fn display_widths<const N: usize>(headers: [&str; N], display: &[[String; N]]) -> [usize; N] {
+    let mut widths = headers.map(str::len);
+    for row in display {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    widths
 }
 
 async fn run(args: Vec<String>) -> i32 {
@@ -303,17 +321,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `mail-inject` is the one-shot LIVE-DELIVERY verb `fno agents mail send` calls to
-    // inject a turn into a live `claude --bg` session over the daemon control.sock
-    // (node). Binary-direct (Python `_deliver_live` subprocess), NOT a
-    // routable `fno agents` verb -- matched with `matches!` (like `version`) so the
-    // parity guard (test_rust_client_verbs_match_client_rs) does not see it and it
-    // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. Connects to an existing
-    // daemon; never lazy-starts one.
+    // inject a turn into a live `claude --bg` session over the daemon control.sock.
+    // Binary-direct (Python `_deliver_live` subprocess), NOT a routable `fno agents`
+    // verb -- matched with `matches!` (like `version`) so the parity guard does not
+    // see it. Connects to an existing daemon; never lazy-starts one.
     if matches!(verb, "mail-inject") {
-        // The control drain rides this action as a mode flag (law d-fe66560a
-        // allows no new client action): the PreToolUse hook calls it
-        // binary-direct at every tool boundary, and a frozen worker's freeze
-        // mail must land even when the daemon is the thing wedged.
+        // The control drain rides this action as a mode flag: the PreToolUse
+        // hook calls it binary-direct at every tool boundary, so a frozen
+        // worker's freeze mail lands even when the daemon is the thing wedged.
         if args.iter().skip(1).any(|a| a == "--control-drain") {
             let rest: Vec<String> = args[1..]
                 .iter()
@@ -323,6 +338,12 @@ async fn run(args: Vec<String>) -> i32 {
             return fno_agents::mail_control_drain::run(&rest);
         }
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
+    }
+
+    // `mail-record` is binary-direct like `mail-inject`: the origin-record
+    // leaf `fno agents mail send/reply` calls; unregistered (shrink-only list).
+    if matches!(verb, "mail-record") {
+        return fno_agents::decision_trace::run_mail_record(&args[1..]);
     }
 
     if matches!(verb, "mail-envelope") {
@@ -729,6 +750,10 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `authorized-merge`: the one merge/arm authorization (see
     // authorized_merge.rs doc). One payload in, one receipt out, one verdict.
+    if verb == "worked-nodes" {
+        return fno_agents::worked_nodes::run_worked_nodes(&args[1..]);
+    }
+
     if verb == "authorized-merge" {
         return fno_agents::authorized_merge::run_authorized_merge(&args[1..]);
     }
@@ -835,7 +860,7 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `lead-state`/`lead-shape`: the lead reader and the shape rewrite (see
     // lead_state.rs doc). Direct dispatch, daemon-free reads; the Python
-    // `fno agents lead shape` shell and escalate's client invoke the binary
+    // `fno agents org shape` shell and escalate's client invoke the binary
     // directly rather than routing through the agents verb set.
     if matches!(verb, "lead-state" | "reign-state") {
         return fno_agents::lead_state::run_lead_state(&args[1..]);
@@ -869,7 +894,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `lead-history`: the team-scope lead_checkin readback for
-    // `fno agents lead history`. Daemon-free read, `==` dispatch like
+    // `fno agents org history`. Daemon-free read, `==` dispatch like
     // org-fold: Python resolves the caller's team scope and pins the
     // journal path (identity and paths are Python-owned), the native side
     // owns the scan so the file-budget Python-tree ratchet holds.
@@ -884,7 +909,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `lead-checkin`: one verb runs the lead check-in body for
-    // `fno agents lead checkin`. Daemon-free beat like lead-history: Python
+    // `fno agents org checkin`. Daemon-free beat like lead-history: Python
     // resolves the caller's team scope and Python-owned paths, the native
     // side gathers, prints, diffs and journals the row, reusing the org-fold
     // fold and the lead-history scan in process.
@@ -899,7 +924,7 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "evals-macro" {
         return fno_agents::evals_macro::run_evals_macro(&args[1..]);
     }
-    // `lead-rundown`: the lead ledger page for `fno agents lead ledger`.
+    // `lead-rundown`: the lead ledger page for `fno agents king ledger`.
     // Same split as lead-history: Python resolves the org and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
     // in the org JSON, so the page cannot disagree with the org.
@@ -1079,6 +1104,10 @@ async fn run(args: Vec<String>) -> i32 {
     // `pr-body-check`: the repo's body guards, run before `gh pr create`.
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
+    }
+    // `pr-create`: the duplicate-guarded create (see pr_create.rs doc).
+    if matches!(verb, "pr-create") {
+        return fno_agents::pr_create::run_pr_create_verb(&args[1..]);
     }
     // `pr-closure-parse` / `pr-closure-render`: the one parser/renderer for
     // the PR-body closure line; the Python readers forward here (JSON payload
@@ -2386,7 +2415,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             "use --substrate pane"
         };
         eprintln!(
-            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
+            "--permission-mode is not supported for harness {} on --substrate thread/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
             py_repr(provider),
         );
         return Some(2);
@@ -2545,8 +2574,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ) {
             Ok(g) => Some(g),
             Err(refusal) => {
-                if let Some(receipt) = &refusal.receipt {
-                    println!("{receipt}");
+                // One line by default; the receipt rides --json.
+                if params.get("json_out").and_then(Value::as_bool) == Some(true) {
+                    if let Some(receipt) = &refusal.receipt {
+                        println!("{receipt}");
+                    }
                 }
                 return Some(refusal.exit_code);
             }
@@ -3372,7 +3404,7 @@ fn run_reap(rest: &[String]) -> i32 {
     let mux = if no_mux {
         fno_agents::reap_render::MuxSweep::Skipped
     } else {
-        fno_agents::gc::mux_tab_sweep(dry_run, true)
+        fno_agents::gc::mux_tab_sweep(None, &cwd, dry_run, true)
     };
     print!(
         "{}",
@@ -3676,6 +3708,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--deny-tools",
         "--account",
         "--harness-arg",
+        "--crown",
+        "--crown-scope",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3839,11 +3873,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("progress".into(), str_arg(&mut it, "--progress")?);
             }
             "--json" | "-J" => {
-                // Task 3.1: --json is a client-side rendering flag. We recognize it
-                // here so it is not rejected as "unknown flag". It is NOT forwarded
-                // to the daemon as a param. The caller captures it separately.
-                // -J is the global-register short for --json.
+                // Client-side rendering flag; never forwarded to the daemon.
+                // On spawn the gate refusal's receipt prints only with it.
+                if verb == "spawn" {
+                    params.insert("json_out".into(), Value::Bool(true));
+                }
             }
+            "--verbose" => {}
             "--all" | "-A" => {
                 params.insert("all".into(), Value::Bool(true));
             }
@@ -3949,6 +3985,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     list.push(v);
                 }
             }
+            // The crown halves the Python seam carries for a crowned codex
+            // thread spawn; the typed parse lives in spawn_axes.
+            "--crown" | "--crown-scope" => {
+                fno_agents::spawn_axes::insert_crown_flag(&a, &mut it, &mut params)?;
+            }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn
                 // arm is not blocked by an unknown-flag error; the four-lane
@@ -3992,14 +4033,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                         params.insert("substrate".into(), v);
                     }
                     Some("bg") => {
-                        eprintln!(
-                            "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                        return Err(
+                            "substrate 'bg' was retired; use --substrate thread".to_string()
                         );
-                        params.insert("substrate".into(), Value::String("thread".into()));
                     }
                     other => {
                         return Err(format!(
-                            "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {})",
+                            "--substrate must be one of: pane, thread, headless (got {})",
                             other.unwrap_or("")
                         ));
                     }
@@ -4137,13 +4177,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if sx == "pane" || sx == "thread" || sx == "headless" {
                 params.insert("substrate".into(), Value::String(sx.clone()));
             } else if sx == "bg" {
-                eprintln!(
-                    "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
-                );
-                params.insert("substrate".into(), Value::String("thread".into()));
+                return Err("substrate 'bg' was retired; use --substrate thread".to_string());
             } else {
                 return Err(format!(
-                    "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {sx})"
+                    "--substrate must be one of: pane, thread, headless (got {sx})"
                 ));
             }
         }
@@ -4680,52 +4717,6 @@ fn retain_discovered_by_progress(rows: &mut Vec<Value>, progress_filter: Option<
 /// the elapsed seconds -- `3s`, `4m`, `18h`, `2d` (plan, AC2-EDGE).
 /// Negative input (a row reconciled in the "future" via clock skew) clamps to
 /// `0s` rather than rendering a misleading negative age.
-fn format_age_secs(secs: i64) -> String {
-    let s = secs.max(0);
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m", s / 60)
-    } else if s < 86400 {
-        format!("{}h", s / 3600)
-    } else {
-        format!("{}d", s / 86400)
-    }
-}
-
-/// Render `last_reconciled_at` (raw RFC3339, or None) as the CHECKED cell:
-/// `never` when never probed, the compact age otherwise, or `?` when the stored
-/// timestamp cannot be parsed (explicit, never blank -- Silent-Failure check).
-fn render_checked(last_reconciled_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
-    match last_reconciled_at {
-        None => "never".to_string(),
-        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
-            Ok(then) => format_age_secs((now - then.with_timezone(&chrono::Utc)).num_seconds()),
-            Err(_) => "?".to_string(),
-        },
-    }
-}
-
-/// Display cap for the LAST MESSAGE cell, kept in step with Python's
-/// `_LAST_MESSAGE_WIDTH` in cli/src/fno/agents/format.py (the two tables are
-/// functional parallels, not byte-exact, but the cap is the one value worth
-/// holding together).
-const LAST_MESSAGE_WIDTH: usize = 40;
-
-/// Right-aligned ellipsis truncation, chars not bytes (mirrors Python's
-/// `_truncate`), so a long transcript line cannot own the table.
-fn truncate_cell(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
-        s.to_string()
-    } else if width <= 1 {
-        s.chars().take(width).collect()
-    } else {
-        let mut t: String = s.chars().take(width - 1).collect();
-        t.push('…');
-        t
-    }
-}
-
 /// Render agents list as a human-readable table: ROW NAME SESSION HARNESS
 /// MODEL EFFORT PR AGE LAST MESSAGE STATUS. MODEL and PR name the basis they
 /// were read from, so an absent value never reads as unset. AGE is the age of
@@ -4802,15 +4793,7 @@ fn render_list_table(
         })
         .collect();
 
-    let mut widths = headers.map(str::len);
-    for row in &display {
-        for (i, cell) in row.iter().enumerate() {
-            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
-            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
-            // past the intended column and shoves the rest of the row wide.
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
+    let widths = display_widths(headers, &display);
 
     let mut lines = Vec::new();
     // The instrument's receipt, in the artifact itself: a total
@@ -4869,21 +4852,7 @@ fn render_discovered_section(discovered: &[Value]) -> String {
         })
         .collect();
 
-    let mut widths = [
-        headers[0].len(),
-        headers[1].len(),
-        headers[2].len(),
-        headers[3].len(),
-        headers[4].len(),
-    ];
-    for row in &display {
-        for (i, cell) in row.iter().enumerate() {
-            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
-            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
-            // past the intended column and shoves the rest of the row wide.
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
+    let widths = display_widths(headers, &display);
 
     let mut lines = Vec::new();
     lines.push(String::new()); // blank separator line

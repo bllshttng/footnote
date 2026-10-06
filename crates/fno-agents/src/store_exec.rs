@@ -247,6 +247,60 @@ fn fno_home_escape(graph: &Path, fno_home: Option<OsString>) -> Option<String> {
     ))
 }
 
+/// Opt-in request log for sizing a shared store. With this env var set to a
+/// file path, each request appends one JSON line; unset, the lane pays nothing.
+pub const REQUEST_LOG_ENV: &str = "FNO_STORE_EXEC_LOG";
+
+/// One request log row: the method (with the op name for `op`/`api`), read or
+/// write, outcome, rows in the reply, reply bytes, and serve time. `rows` is
+/// the result's `entries` array when it has one (so a by-id read never counts
+/// its `missing` tokens), else the sum of its top-level arrays.
+fn request_log_row(payload: &[u8], reply: &Value, reply_bytes: usize, wall: Duration) -> Value {
+    let req: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
+    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = req.get("params");
+    let op = params
+        .and_then(|p| p.get("name").or_else(|| p.get("op")))
+        .and_then(Value::as_str);
+    let rows: usize = match reply.get("result") {
+        Some(Value::Array(a)) => a.len(),
+        Some(Value::Object(o)) => match o.get("entries").and_then(Value::as_array) {
+            Some(entries) => entries.len(),
+            None => o.values().filter_map(Value::as_array).map(Vec::len).sum(),
+        },
+        _ => 0,
+    };
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    json!({
+        "ts_ms": ts_ms,
+        "method": method,
+        "op": op,
+        "kind": if crate::graph_keeper::is_write_method(method)
+            && !(method == "api" && op.is_some_and(crate::graph_keeper::api_is_read_op)) { "write" } else { "read" },
+        "ok": reply.get("ok").and_then(Value::as_bool) == Some(true),
+        "rows": rows,
+        "reply_bytes": reply_bytes,
+        "wall_us": wall.as_micros().min(u64::MAX as u128) as u64,
+    })
+}
+
+/// Append one row as a single write. A failed append is dropped: the log
+/// measures the lane and must never fail a request.
+fn append_request_log(path: &Path, row: &Value) {
+    use std::io::Write as _;
+    let line = format!("{row}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// `--store-exec` lifecycle: read ONE request JSON (the same
 /// `{"id","method","params"}` envelope the framed clients send) from stdin,
 /// serve it through `handle_request` on a fresh state, print the reply
@@ -260,9 +314,15 @@ pub fn run_exec(cfg: ExecConfig) -> Result<(), String> {
     std::io::stdin()
         .read_to_end(&mut payload)
         .map_err(|e| format!("cannot read request from stdin: {e}"))?;
+    let started = std::time::Instant::now();
     let reply = exec_reply(&cfg, &payload);
     let ok = reply.get("ok").and_then(Value::as_bool) == Some(true);
-    println!("{reply}");
+    let text = reply.to_string();
+    if let Some(log) = std::env::var_os(REQUEST_LOG_ENV).filter(|v| !v.is_empty()) {
+        let row = request_log_row(&payload, &reply, text.len(), started.elapsed());
+        append_request_log(Path::new(&log), &row);
+    }
+    println!("{text}");
     if ok {
         Ok(())
     } else {

@@ -335,6 +335,7 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -555,6 +556,7 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -579,102 +581,6 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         pane_activity: None,
         ..Default::default()
     }
-}
-
-#[test]
-fn sideline_lane_color_and_deviation_token_render_on_the_row() {
-    // x-1b35 AC3: the lane renders as zero-width color on the agent row
-    // (here through the built-in codex table entry), the model-deviation
-    // token appends ` glm` on a claude row OFF its default lane, and the
-    // retired `@<account>` text prefix is gone from the composition.
-    let mut view = two_pane_view();
-    let mut codex_row = focus_agent(21);
-    codex_row.harness = Some("codex".into());
-    let mut glm_row = focus_agent(22);
-    glm_row.harness = Some("claude".into());
-    glm_row.model = Some("glm-5.3-flash[1m]".into());
-    glm_row.account = Some("makers".into());
-    view.layout.agents.push(codex_row);
-    view.layout.agents.push(glm_row);
-    // The deviation token rides the name cell; give the columns room for it.
-    view.sideline_width = 100;
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let panel_w = view.panel_w() as usize;
-    let name_x = view.worker_column_rects((panel_w - 1) as u16)[1].x as usize;
-    let line = |row: usize| -> (String, Color) {
-        let start = row * cols;
-        let end = start + panel_w.min(cols);
-        let text: String = frame.cells[start..end].iter().map(|c| c.c).collect();
-        // A name cell, not the row lead: the focused row's band and the
-        // selector own the first columns.
-        let fg = frame.cells[start + name_x].fg;
-        (text, fg)
-    };
-    // Row 2 (1 + the strip row): the codex row - the lane color now rides
-    // the status cell only (the operator's color ruling), so the NAME cell
-    // reads default. No account prefix.
-    let (text, fg) = line(2);
-    assert_eq!(
-        fg,
-        Color::Default,
-        "the name cell carries no lane color anymore"
-    );
-    assert!(
-        !text.contains('@'),
-        "the @account prefix is retired: `{text}`"
-    );
-    // Row 3 (2 + the strip row): the claude/glm row - the deviation token
-    // is the textual channel; claude itself carries no builtin color, so fg
-    // stays default and the token does the naming.
-    let (text, fg) = line(3);
-    assert!(
-        text.contains(" glm"),
-        "the deviation token renders: `{text}`"
-    );
-    assert!(!text.contains("@makers"), "no @account prefix: `{text}`");
-    assert_eq!(fg, Color::Default, "claude carries no builtin lane color");
-}
-
-#[test]
-fn sideline_marks_active_squad_and_focused_agent_row() {
-    // x-4374 / AC2-HP: the active squad header accents its caret, and the
-    // agent row whose pane holds focus wears the full-width INVERSE band
-    // (replacing the near-invisible one-cell gutter x-5a52 painted). Both
-    // stand regardless of the selector (parked elsewhere) or hover.
-    let mut view = two_pane_view(); // active_squad = 1, focus = pane 11
-    view.layout.agents.push(focus_agent(11));
-    view.selector = Some(3); // squad 2's header, not row 0 or 1
-    view.hover_row = None;
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let panel_w = view.panel_w() as usize;
-
-    // Display row 0 -> outer row 1 (the strip owns outer row 0): the active
-    // squad header caret is amber.
-    let caret = frame.cells[cols];
-    assert_eq!(caret.c, '▾', "active expanded squad shows the caret");
-    assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
-
-    // Display row 1 -> outer row 2: the focused agent row is a full-width
-    // surface band (accent text on the deep index, never a full accent
-    // fill), and the `▎` gutter glyph is gone.
-    let lead = frame.cells[2 * cols]; // outer row 2, col 0
-    assert_ne!(
-        lead.c, '▎',
-        "the ▎ gutter is retired; the band is the signal"
-    );
-    assert_eq!(
-        lead.bg,
-        Color::Indexed(0),
-        "the focused row carries the standing surface band"
-    );
-    // The band fills the panel width (a right-edge text cell is still banded).
-    assert_eq!(
-        frame.cells[2 * cols + panel_w - 2].bg,
-        Color::Indexed(0),
-        "the focus band fills the panel width"
-    );
 }
 
 #[test]
@@ -704,10 +610,8 @@ fn xf331_rows() {
     );
     assert_eq!(cell.fg, LATTICE_ACCENT, "still the accent colour");
 
-    // x-f331 (codex P2): a hover-armed selector is a pointer-follow, so a
-    // wheel event scrolls the list and disarms - it must NOT walk the selector
-    // away from the pointer (which would strand hover_row and selector on two
-    // different rows and misdirect the next x/r/space).
+    // Hovering the PINNED footer used to scroll the list: its hit resolves
+    // to the scrolled-away NewSquad index (operator, 2026-10-05).
     let mut view = two_pane_view();
     for p in 100..140u64 {
         view.layout.agents.push(AgentRow {
@@ -726,21 +630,40 @@ fn xf331_rows() {
         view.display_rows().len() > view.sideline_visible_rows(),
         "sanity: the sideline exceeds the viewport so scroll is live"
     );
-    view.selector = Some(1);
-    view.sel_hover_armed = true;
-    view.hover_row = Some(1);
+    let top = view.sideline_top();
+    let list_rows = (view.term.0 as usize) - 1 - view.org_block_rows();
+    let pinned_row = (top + list_rows - 2) as u16;
+    let footer = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::NewSquad))
+        .unwrap();
+    assert_eq!(
+        view.sideline_row_at(pinned_row, 5),
+        Some(footer),
+        "the pinned position hit-tests to the footer row"
+    );
+    view.set_sideline_offset(3);
     let before = view.sideline_offset();
-    view.scroll_sideline(true);
-    assert!(!view.sel_hover_armed, "the wheel disarms the hover-arm");
-    assert_eq!(
-        view.selector, None,
-        "the wheel does not walk a hover-armed selector"
+    view.on_hover(pinned_row, 5, Instant::now());
+    assert_eq!(view.selector, None, "hover never selects");
+    assert_eq!(view.sideline_offset(), before, "hover never scrolls");
+    assert_eq!(view.hover_row, Some(footer), "the highlight still tracks");
+
+    // A click at the pinned row is the footer's row - the same resolver
+    // hover answers - so the covered row beneath it never wins.
+    let hit = view.chrome_hit(pinned_row, 2);
+    assert!(
+        matches!(hit, Some(ChromeHit::OpenCreate)),
+        "a click on the pinned footer opens create, got {hit:?}"
     );
-    assert_eq!(
-        view.sideline_offset(),
-        before + 1,
-        "the wheel scrolls the list instead of moving the cursor"
-    );
+    if let Some(range) = view.footer_menu_range(view.panel_w() as usize) {
+        let hit = view.chrome_hit(pinned_row, range.start as u16);
+        assert!(
+            matches!(hit, Some(ChromeHit::OpenSidelineMenu { .. })),
+            "a click in the footer's menu range opens the menu, got {hit:?}"
+        );
+    }
 }
 
 #[test]
@@ -1762,13 +1685,14 @@ fn link_hover_rows() {
 
     // A modal opened by KEYBOARD emits no pointer event, so the event-side
     // clear never runs; the compose-side suppression is what keeps the
-    // underline from painting beneath or around it. Control: the same
-    // accepted span paints the moment the modal closes.
+    // underline from painting beneath or around it.
     let mut view = two_pane_view();
     view.link_hover.accepted = Some((10, vec![(0, 0)]));
     view.keys_modal = Some(build_keys_modal());
     let ul = cell_flags::UNDERLINE;
-    let lit = |f: &Frame| f.cells.iter().any(|c| c.flags & ul == ul);
+    // Row 0 is the strip, whose active tab wears an underline by design.
+    let cols = view.term.1 as usize;
+    let lit = |f: &Frame| f.cells[cols..].iter().any(|c| c.flags & ul == ul);
     assert!(!lit(&view.compose()), "no underline beneath an open modal");
     view.keys_modal = None;
     assert!(
@@ -1784,10 +1708,9 @@ fn link_hover_rows() {
     view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
     let lit = view.compose();
     let ul = cell_flags::UNDERLINE;
-    // Pane 10's content origin sits at (row 2, col 29): the frame ring
-    // insets the content one cell.
+    // Pane 10's origin sits at (row 2, col 29); row 0 (the strip's tab underline) is excluded.
     let underlined = |f: &Frame| -> Vec<(usize, usize)> {
-        (0..f.rows as usize)
+        (1..f.rows as usize)
             .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
             .filter(|&(r, c)| f.cells[r * f.cols as usize + c].flags & ul == ul)
             .collect()
@@ -1795,7 +1718,7 @@ fn link_hover_rows() {
     assert_eq!(
         underlined(&lit),
         vec![(2, 28 + 4), (3, 28 + 5)],
-        "exactly the two accepted cells, at the pane's screen position"
+        "exactly the two accepted cells"
     );
     assert!(
         underlined(&clean).is_empty(),
@@ -1877,67 +1800,45 @@ fn hover_focus_rows() {
 }
 
 #[test]
-fn hover_arm_rows() {
-    // (x-f331 US1, was hover_highlights_sideline_row_without_switching_squad):
-    // hovering an ACTIONABLE sideline row now ARMS the selector to it (one
-    // regime, so x/X/r act on the pointed-at row), the highlight is still set,
-    // and the active squad/tab never change. A spacer or the pane disarms.
-    // Rows (two_pane_view): idx 0 footnote header (actionable), idx 1 Blank
-    // spacer (inert), idx 2 notes header (actionable). Display row i paints
-    // at terminal row i + 1 (the strip owns terminal row 0).
+fn hover_highlight_rows() {
+    // Hover is highlight-only (operator, 2026-10-05): the pointer never
+    // moves the selector, and only a click or a key selects. Rows: 0 header
+    // (actionable), 1 spacer (inert), 2 header; row i paints at i + 1.
     let mut view = two_pane_view();
     let before = view.layout.active_squad;
 
     view.on_hover(1, 5, Instant::now()); // terminal row 1 = footnote squad header
     assert_eq!(view.hover_row, Some(0));
-    assert_eq!(view.selector, Some(0), "hover arms the selector to the row");
-    assert!(
-        view.sel_hover_armed,
-        "the arm is motion-fresh (hover-armed)"
-    );
+    assert_eq!(view.selector, None, "hover never selects");
     assert_eq!(
         view.layout.active_squad, before,
         "hover never switches squad"
     );
 
-    // Hover onto the inert spacer: highlight tracks the cell, but nothing
-    // actionable is there, so the hover-arm disarms rather than pointing the
-    // verbs at a spacer.
     view.on_hover(2, 5, Instant::now());
-    assert_eq!(view.hover_row, Some(1));
-    assert_eq!(view.selector, None, "an inert row disarms the hover-arm");
-    assert!(!view.sel_hover_armed);
-
-    // Re-arm on a fresh actionable row (pointer motion re-arms).
-    view.on_hover(3, 5, Instant::now());
-    assert_eq!(view.selector, Some(2), "motion re-arms to the new row");
-    assert!(view.sel_hover_armed);
+    assert_eq!(
+        view.hover_row,
+        Some(1),
+        "the highlight tracks inert rows too"
+    );
 
     view.on_hover(5, 40, Instant::now()); // onto pane content
     assert_eq!(view.hover_row, None, "off the panel clears the highlight");
-    assert_eq!(view.selector, None, "off the panel disarms the selector");
-    assert!(!view.sel_hover_armed);
+    assert_eq!(view.selector, None, "hover never opened a selector");
 
-    // (x-f331) An explicit prefix+w selector (sel_hover_armed=false) keeps
-    // keyboard control: a stray hover does not demote it to a motion-fresh arm
-    // that j/k would disarm.
+    // An explicit selector: hover neither moves it nor clears it.
     let mut view = two_pane_view();
-    view.selector = Some(2); // opened explicitly, not hover-armed
-    view.sel_hover_armed = false;
+    view.selector = Some(2);
     view.on_hover(1, 5, Instant::now()); // hover a different actionable row
     assert_eq!(
         view.selector,
         Some(2),
         "explicit selector is not moved by hover"
     );
-    assert!(!view.sel_hover_armed, "explicit selector stays fully modal");
 
-    // change #3 AC3-FR: a layout push that drops the hovered row must not
-    // leave the highlight on a now-out-of-range index.
+    // A layout push that drops the hovered row clears the stale index:
+    // display_rows is [squad, tab, tab, + new workspace] (len 4) here.
     let mut view = two_pane_view();
-    // With one squad (auto-expanded: 2 tab rows), display_rows is
-    // [squad, tab, tab, + new workspace] (len 4), so a hover on index 4
-    // is now stale and must be cleared by the push.
     view.hover_row = Some(4);
     view.set_layout(LayoutView {
         squads: vec![meta(1, "footnote", 2, 1)], // second squad dropped
@@ -1990,8 +1891,7 @@ fn open_create_is_modal_over_keyboard_overlays() {
 fn chrome_hit_rows() {
     let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
                                 // (x-cd67 US1) The strip is scoped to the content area (origin
-                                // panel_w=28); the pinned Ｆ[no] mark leads it, so
-                                // " footnote "=36..45, " 1 "=46..48, the padded "[ 2 ]"=49..53,
+                                // panel_w=28): " footnote "=36..45, " 1 "=46..48, "[ 2 ]"=49..53,
                                 // " + "=54..56.
     assert_eq!(cmds(view.chrome_hit(0, 47)), vec![Command::SelectTab(0)]);
     assert_eq!(cmds(view.chrome_hit(0, 50)), vec![Command::SelectTab(1)]);
@@ -1999,10 +1899,11 @@ fn chrome_hit_rows() {
     // The squad-name label is inert.
     assert!(view.chrome_hit(0, 41).is_none());
 
-    // Rows (x-cd67 US1; the strip owns terminal row 0 since R15): the strip
-    // word at row 0, then [squad 1 (terminal 1), Blank (2), squad 2 (3)].
+    // Rows (x-cd67 US1): the words right-align now, so the word column reads from the shared span table.
     let view = two_pane_view();
-    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
+    let word_start = view.top_row_spans()[0].0;
+    let word_hit = view.chrome_hit(0, word_start as u16);
+    assert!(matches!(word_hit, Some(ChromeHit::TopRow(_))));
     assert_eq!(cmds(view.chrome_hit(3, 4)), vec![Command::SelectSquad(2)]);
     // The Blank spacer row is inert.
     assert!(view.chrome_hit(2, 4).is_none());
@@ -2120,10 +2021,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     assert_eq!(panel_w, 28);
     let frame = view.compose();
     let cols = frame.cols as usize;
-    // Row 0 in the sideline columns is the strip: the lead pad, then the
-    // Agents word. The squad-1 caret moved to row 1.
-    assert_eq!(frame.cells[0].c, ' ', "row 0 col 0 pads the strip");
-    assert_eq!(frame.cells[2].c, 'A', "row 0 col 2 starts the Agents word");
+    // Row 0 in the sideline columns is the strip: the words right-align now,
+    // so the Agents word reads at its span.
+    let agents_start = view.top_row_spans()[0].0;
+    assert_eq!(
+        frame.cells[agents_start].c, 'A',
+        "row 0 starts the Agents word at its span"
+    );
     assert_eq!(frame.cells[cols].c, '▾', "row 1 col 0 is the squad-1 caret");
     // The divider column runs full height, including row 0.
     assert_eq!(frame.cells[panel_w - 1].c, '│', "divider at row 0");
@@ -2137,16 +2041,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     );
     // A row-0 click on the Agents word switches views; the squad-header
     // click moved to row 1.
-    assert!(matches!(view.chrome_hit(0, 2), Some(ChromeHit::TopRow(_))));
+    let hit = view.chrome_hit(0, agents_start as u16);
+    assert!(matches!(hit, Some(ChromeHit::TopRow(_))));
     assert!(matches!(
         view.chrome_hit(1, 2),
         Some(ChromeHit::CycleSection(SectionKey::Squad(_)))
     ));
 }
-
-// A left click on an inactive sideline squad row switches to it; the
-// already-active squad row toggles its caret locally instead of the old
-// silent SelectSquad no-op (x-2f99, AC3-HP/AC4-HP).
 
 // ---- x-2f99: active-squad visibility ----
 
@@ -2268,6 +2169,7 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -2420,6 +2322,7 @@ fn pull_rows() {
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -2868,6 +2771,7 @@ fn view_with_dead_interleaved() -> View {
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -3039,6 +2943,7 @@ fn caret_rows() {
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -3116,6 +3021,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -3712,6 +3618,7 @@ fn row_menu_rows() {
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: attach.map(Into::into),
@@ -4559,6 +4466,7 @@ async fn row_menu_disambiguates_same_named_agents() {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -6205,6 +6113,7 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -6980,6 +6889,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 reason: Some("perm prompt".into()),
                 exited: false,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -7022,6 +6932,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 reason: None,
                 exited: true,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -7064,6 +6975,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 reason: None,
                 exited: false,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -7143,24 +7055,6 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
 }
 
 #[test]
-fn client_agent_row_renders_dnd_as_presence_not_liveness() {
-    let held: AgentRow = serde_json::from_str(
-        r#"{"squad":1,"name":"dnd","pane_id":10,
-                "badge":"working","reason":null,"exited":false,"dnd":true}"#,
-    )
-    .unwrap();
-    let mut view = two_pane_view();
-    view.sideline_width = 60;
-    view.layout.agents = vec![held];
-    let text = frame_text(&view.compose());
-    let row = text.lines().find(|line| line.contains("dnd")).unwrap();
-    assert!(
-        row.contains("[DND]") && row.contains("Work"),
-        "DND rides the identity without replacing liveness: {row:?}"
-    );
-}
-
-#[test]
 fn band_rows() {
     // x-6851 US2 (AC2-HP): the fold counts each state, drops zeros, and
     // orders most-severe-first (▲ ✓ ● ○ ✗).
@@ -7197,6 +7091,7 @@ fn band_rows() {
             reason: None,
             exited,
             dnd: false,
+            held_conversation: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -7604,6 +7499,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 reason: None,
                 exited: true,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -7646,6 +7542,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 reason: None,
                 exited: false,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: Some("ab12cd34".into()),
@@ -7688,6 +7585,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 reason: None,
                 exited: false,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -7733,6 +7631,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 reason: None,
                 exited: false,
                 dnd: false,
+                held_conversation: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: Some("ff99ff99".into()),
@@ -8217,6 +8116,7 @@ fn unified_rows_view() -> View {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: attach_id.map(Into::into),
@@ -8605,6 +8505,7 @@ fn peek_rows() {
         reason: Some("waiting on a menu".into()),
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
         attach_id: None,
@@ -9064,6 +8965,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         reason: None,
         exited: true,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: Some("deadbeef".into()),
@@ -9127,6 +9029,7 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         reason: None,
         exited,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -9859,6 +9762,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             reason: None,
             exited: false,
             dnd: false,
+            held_conversation: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -9901,6 +9805,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             reason: None,
             exited: false,
             dnd: false,
+            held_conversation: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("deadbee1".into()),
@@ -9982,6 +9887,7 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -10145,6 +10051,7 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -10590,6 +10497,7 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: None,
         attach_id: None,
@@ -10807,6 +10715,7 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
         reason: None,
         exited: false,
         dnd: false,
+        held_conversation: false,
         unmeasured: false,
         answerable: ans,
         attach_id: None,
@@ -11274,6 +11183,7 @@ fn attention_rows() {
                 last_activity_age_s: r["last_activity_age_s"].as_u64(),
                 exited: r["exited"].as_bool().unwrap_or(false),
                 dnd: false,
+                held_conversation: false,
                 unmeasured: r["unmeasured"].as_bool().unwrap_or(false),
                 liveness_measured_at: None,
                 harness_title: None,
@@ -12797,55 +12707,59 @@ async fn jump_to_a_number_that_names_no_tab_sets_a_notice_and_sends_nothing() {
 }
 
 #[tokio::test]
-async fn xf331_hover_armed_x_acts_on_the_row_not_the_pane() {
-    // x-f331 AC1-HP: with the pointer over a squad header, x opens the
-    // close-workspace confirm on THAT row and no `x` leaks to the focused
-    // pane's PTY (the old bare-key leak this node closes).
+async fn sideline_menu_and_new_workspace_chords() {
+    // The footer's affordances ship bound in the modal's table and open.
+    let rows = crate::keys::key_bindings();
+    let menu = rows
+        .iter()
+        .find(|kb| kb.action == "sideline-menu")
+        .expect("bound");
+    assert_eq!(menu.key, b'P');
+    assert!(matches!(menu.event, crate::keys::Event::OpenSidelineMenu));
+    let new_ws = rows
+        .iter()
+        .find(|kb| kb.action == "new-workspace")
+        .expect("bound");
+    assert_eq!(new_ws.key, b'N');
+    assert!(matches!(new_ws.event, crate::keys::Event::OpenCreate));
+
     let mut v = two_pane_view();
-    let mut scanner = Scanner::default();
-    let mut carry = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
-    v.on_hover(1, 5, Instant::now()); // hover-arm the footnote squad header
-    assert_eq!(v.selector, Some(0));
-    assert!(v.sel_hover_armed);
-    handle_stdin(&mut v, &mut scanner, &mut carry, b"x", &mut buf)
+    dispatch_event(&mut v, Event::OpenCreate, &mut buf)
         .await
         .unwrap();
     assert!(
-        matches!(
-            v.confirm.as_ref().map(|c| &c.action),
-            Some(ConfirmKind::RemoveSquad { .. })
-        ),
-        "x on the hovered squad header opens the close-workspace confirm"
+        v.create.is_some(),
+        "the chord opens the new-workspace overlay"
     );
-    assert!(buf.is_empty(), "no x reaches the focused pane's PTY");
-    let anchor = v.confirm_anchor_row(v.term.0 as usize, v.confirm.as_ref().unwrap());
-    assert_eq!(anchor, 0, "the confirm anchors at the hovered squad's row");
+    dispatch_event(&mut v, Event::OpenSidelineMenu, &mut buf)
+        .await
+        .unwrap();
+    assert!(v.aux.is_some(), "the chord opens the sideline menu");
 }
 
 #[tokio::test]
-async fn xf331_hover_armed_non_verb_key_disarms_and_forwards() {
-    // x-f331 AC2-EDGE: a pointer parked over the sideline hover-arms the
-    // selector, but the first NON-verb key disarms the arm and forwards to the
-    // focused pane - typing into the shell is never swallowed.
+async fn xf331_pointer_over_sideline_keeps_keys_on_the_pane() {
+    // Hover is highlight-only: a pointer parked over the sideline selects
+    // nothing, so every bare key forwards to the focused pane untouched.
     let mut v = two_pane_view();
     let mut scanner = Scanner::default();
     let mut carry = Vec::new();
-    let mut buf: Vec<u8> = Vec::new();
-    v.on_hover(1, 5, Instant::now()); // hover-arm the header row
-    assert_eq!(v.selector, Some(0));
-    assert!(v.sel_hover_armed);
-    handle_stdin(&mut v, &mut scanner, &mut carry, b"l", &mut buf)
-        .await
-        .unwrap();
-    assert_eq!(v.selector, None, "a non-verb key disarms the hover-arm");
-    assert!(!v.sel_hover_armed);
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Input(bytes) => {
-            assert_eq!(bytes, b"l", "the key forwards to the focused pane")
+    v.on_hover(1, 5, Instant::now()); // park the pointer on the squad header
+    assert_eq!(v.selector, None, "hover never selects");
+    for b in [b"x", b"l"] {
+        let mut buf: Vec<u8> = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b, &mut buf)
+            .await
+            .unwrap();
+        assert!(v.confirm.is_none(), "no verb fired off a hover");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Input(bytes) => {
+                assert_eq!(bytes, *b, "the key forwards to the focused pane")
+            }
+            other => panic!("a parked pointer must not swallow keys, got {other:?}"),
         }
-        other => panic!("a non-verb key should forward to the pane, got {other:?}"),
     }
 }
 

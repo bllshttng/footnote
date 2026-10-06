@@ -12,7 +12,7 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 ## Missing `fno` CLI
 
-Right after `/plugin install` the CLI installer can still run in the background. Read the last line of `${CLAUDE_PLUGIN_DATA:-$HOME/.local/state/fno/plugin-install}/postinstall.log`. `installer exit 0` means done. An absent or non-zero exit line means still installing or failed. When `fno` stays absent after a done log, run `bash "${CLAUDE_PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"` (the locked trigger) or `/fno:setup`, and tell the user which state you found.
+Nothing installs `fno` unasked: the session-start hook only prints the install plan. If `fno` is absent, tell the user it installs uv from astral.sh (edits the shell profile) then `fno` from PyPI, and ask. On a yes run `bash "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/postinstall.sh"`. Output ending `installer exit 0` means done. A non-zero exit line means failed. With `uv` present the run touches only the fno tool. While `fno` is absent its verbs fail: say what is blocked and stop cleanly.
 
 ## Relay compression contract
 
@@ -48,7 +48,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 |-------------|--------------|
 | `fno doctor event emit\|audit` | events.jsonl writes + audit. |
 | `fno doctor intel` | The provenance fold: who typed, per session. `/fno:intel` is the report skill. |
-| `fno backlog ...` | graph store mutations: intake, update, done, defer, supersede, find, get. |
+| `fno backlog ...` | graph store mutations: intake, update, done, defer, supersede, find, get. `note` APPENDS a comment to the node thread (older comments stay, read with `note comment <id> --list`). |
 | `fno do pr status <n>` | Merge-readiness verdict: `ready` + `optional_reviews_unresolved` + `review_activity`, plus the `merge_authority` and `merge_execution` projections (the recorded dispatch grant, claim liveness, and whether a live watcher would execute it). A review RUNNING now blocks `ready` (`review_in_flight`, `worktree_dirty`): coverage only knows what verdicts EXIST, and CI green reliably arrives before the review of that same head finishes. |
 | `fno do pr merge\|verify\|rebase\|heal` | PR ops with canonical guards. `heal` applies the mechanical fix for a red check; dry run unless `--apply`. [pr-heal](../../docs/architecture/pr-heal.md) |
 | `fno do plan stamp\|graduate` | Plan frontmatter stamping at ship time. |
@@ -80,7 +80,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Citizens vs limbs.** `fno agents spawn` makes an addressable, durable roster citizen. A native subagent is a one-shot, observable-only limb. Spawn work that must outlive you, hold a claim, or receive mail. Use a limb for a result consumed next turn. [Details](docs/architecture/coordination.md).
 
-**Mail is user-shaped.** A worker whose own invocation is refused has one fallback: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. The valid test is a transcript scan with no user-shaped prompt before the call: `scripts/diagnostics/autonomy-probe-audit.py`. No live king means [advisory self-review](docs/architecture/review-lanes.md).
+**Mail is user-shaped.** A worker whose own invocation is refused has one fallback: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. The valid test is a transcript scan with no user-shaped prompt before the call: `scripts/diagnostics/autonomy-probe-audit.py`. No live lead means [advisory self-review](docs/architecture/review-lanes.md).
 
 **Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno backlog carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno backlog retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 

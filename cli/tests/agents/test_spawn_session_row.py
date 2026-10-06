@@ -45,10 +45,10 @@ def _readable_node_row(monkeypatch):
     re-stub with a medium row so the derived verb agrees with their seed)."""
     row = {"id": NODE, "slug": "sess", "dispatch_verb": "/target", "difficulty": "low"}
 
-    def _load_graph():
-        return [dict(row)]
+    def _load_graph(path, tokens):
+        return {"entries": [dict(row)], "missing": []}
 
-    monkeypatch.setattr("fno.graph.load.load_graph", _load_graph)
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _load_graph)
     yield row
 
 
@@ -149,7 +149,7 @@ def resolvable_uuid(monkeypatch):
 
 @pytest.mark.dev_build
 def test_spawn_with_node_and_review_verb_is_refused(
-    workdir_claude, native_backlog_door, monkeypatch
+    workdir_claude, native_backlog_door, monkeypatch, capfd
 ) -> None:
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
@@ -159,14 +159,14 @@ def test_spawn_with_node_and_review_verb_is_refused(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "thread",
             "--effort", "xhigh",
             "--node", NODE, "/code-review this diff",
         ],
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
-    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert "review_session" in capfd.readouterr().err
     assert load_registry() == []
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
@@ -179,7 +179,7 @@ def test_spawn_with_node_and_review_verb_is_refused(
     [("review", "/fno:triage deep"), ("do", "/code-review this diff")],
 )
 def test_spawn_review_label_or_seed_is_refused(
-    workdir_claude, native_backlog_door, monkeypatch, phase, seed
+    workdir_claude, native_backlog_door, monkeypatch, capfd, phase, seed
 ) -> None:
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
@@ -189,13 +189,13 @@ def test_spawn_review_label_or_seed_is_refused(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "review-probe", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "review-probe", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "--session-phase", phase, seed,
         ],
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
-    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert "review_session" in capfd.readouterr().err
     assert load_registry() == []
     assert _node_rows() == []
     for key in (f"node:{NODE}", f"dispatch:{NODE}"):
@@ -213,7 +213,7 @@ def test_spawn_with_prose_and_node_composes_a_labeled_seed(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "review this diff",
         ],
         catch_exceptions=False,
@@ -236,7 +236,7 @@ def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> 
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "row-retry", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "row-retry", "-H", "claude", "--substrate", "thread",
          "--node", NODE,
          f"/fno:think {NODE} please"],
         catch_exceptions=False,
@@ -265,7 +265,7 @@ def test_spawn_without_uuid_parks_the_row(workdir_claude) -> None:
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "nouuid-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "nouuid-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:think this diff",
         ],
         catch_exceptions=False,
@@ -301,7 +301,7 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "prose-worker", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "prose-worker", "-H", "claude", "--substrate", "thread",
          f"look at {NODE} and report"],
         catch_exceptions=False,
     )
@@ -311,19 +311,20 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
 
 
 def test_spawn_prompt_two_ids_cannot_bypass_review_session(
-    workdir_claude, resolvable_uuid
+    workdir_claude, resolvable_uuid, capfd
 ) -> None:
     """Two node ids do not turn an external prompt into a local review session."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "thread",
          f"/review {NODE} then x-4ab2"],
         catch_exceptions=False,
     )
     assert result.exit_code == 89, result.output
-    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    # The transport's verdict line bypasses CliRunner's stream swap; read the fd.
+    assert "review_session" in capfd.readouterr().err
     assert _node_rows() == []
 
 
@@ -337,7 +338,7 @@ def test_spawn_target_family_stamps_do(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume",
         ],
         catch_exceptions=False,
@@ -363,7 +364,7 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "triage-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "triage-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:triage deep",
         ],
         catch_exceptions=False,
@@ -384,10 +385,10 @@ def _blueprint_row(monkeypatch) -> None:
     earns it under the lean floor), matching the blueprint seed this types."""
     row = {"id": NODE, "slug": "sess", "dispatch_verb": "", "difficulty": "high"}
 
-    def _load_graph():
-        return [dict(row)]
+    def _load_graph(path, tokens):
+        return {"entries": [dict(row)], "missing": []}
 
-    monkeypatch.setattr("fno.graph.load.load_graph", _load_graph)
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _load_graph)
 
 
 def test_spawn_bare_blueprint_spelling_stamps_blueprint(
@@ -402,7 +403,7 @@ def test_spawn_bare_blueprint_spelling_stamps_blueprint(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "bp-bare-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "bp-bare-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/blueprint x-4ab1",
         ],
         catch_exceptions=False,
@@ -424,7 +425,7 @@ def test_spawn_explicit_phase_rescues_unmapped_verb(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "triage-labeled", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "triage-labeled", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "--session-phase", "think", "/fno:triage deep",
         ],
         catch_exceptions=False,
@@ -443,7 +444,7 @@ def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "think-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "think-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:think deep",
         ],
         catch_exceptions=False,
@@ -464,7 +465,7 @@ def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid, 
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "bp-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "bp-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:blueprint x-5baf",
         ],
         catch_exceptions=False,
@@ -487,7 +488,7 @@ def test_spawn_codex_blueprint_spelling_stamps_blueprint(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "bp-codex-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "bp-codex-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "$fno:blueprint the plan doc",
         ],
         catch_exceptions=False,
@@ -506,7 +507,7 @@ def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "adhoc-worker", "-H", "claude", "--substrate", "bg",
+        ["spawn", "--name", "adhoc-worker", "-H", "claude", "--substrate", "thread",
          "just a prose prompt"],
         catch_exceptions=False,
     )
@@ -525,7 +526,7 @@ def test_spawn_bad_session_phase_refuses_before_spawn(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "badphase-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "badphase-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "--session-phase", "verif", "review this",
         ],
     )
@@ -663,7 +664,7 @@ def test_spawn_do_row_records_refusal_without_config(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume",
         ],
         catch_exceptions=False,
@@ -696,7 +697,7 @@ def test_spawn_do_row_records_config_grant(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume",
         ],
         catch_exceptions=False,
@@ -728,7 +729,7 @@ def test_spawn_no_merge_flag_outranks_config_grant(
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:target resume --no-merge",
         ],
         catch_exceptions=False,
@@ -746,7 +747,7 @@ def test_spawn_think_row_carries_no_grant(workdir_claude, resolvable_uuid) -> No
     result = CliRunner().invoke(
         agents_app,
         [
-            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "thread",
             "--node", NODE, "/fno:think this diff",
         ],
         catch_exceptions=False,

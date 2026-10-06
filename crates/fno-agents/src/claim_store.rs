@@ -70,14 +70,7 @@ fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
 }
 
 fn open_paths(path: PathBuf, directory: PathBuf) -> Result<Connection, String> {
-    crate::live_store_fence::refuse_worktree_build_on_operator_store(&path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
-    connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-        .map_err(|error| error.to_string())?;
+    let mut connection = crate::store_conn::open_write(&path)?;
     connection
         .execute_batch(DDL)
         .map_err(|error| error.to_string())?;
@@ -673,7 +666,7 @@ pub fn force_release(
         return Err("reason must be non-empty for force-release".to_string());
     }
     let path = claims::claim_path(key, root)?;
-    let archive = || {
+    let archive = || -> Result<Value, String> {
         if !path.exists() {
             return Ok(json!({
                 "key": key,
@@ -681,11 +674,10 @@ pub fn force_release(
                 "archived": false,
                 "force_released": false,
                 "previous_holder": Value::Null,
+                "previous_pid": Value::Null,
             }));
         }
-        let previous_holder = claims::read_claim_file(&path)
-            .ok()
-            .map(|record| record.holder);
+        let previous = claims::read_claim_file(&path).ok();
         let destination = archive_path(&path)?;
         std::fs::rename(&path, &destination).map_err(|error| error.to_string())?;
         Ok(json!({
@@ -693,18 +685,43 @@ pub fn force_release(
             "path": path.clone(),
             "archived": true,
             "force_released": true,
-            "previous_holder": previous_holder,
+            "previous_holder": previous.as_ref().map(|r| r.holder.clone()),
+            "previous_pid": previous.as_ref().and_then(|r| r.pid),
         }))
     };
     // `--holding-recovery-lock` mirrors Python `force_release_claim`'s
     // `holding_recovery_lock`: the CALLER holds the per-key recovery mutex
     // (the dispatch-guard reclaim re-verified inside it) and this archive must
     // run under that same hold, not dead-wait on a lock its own caller owns.
-    if holding_recovery_lock {
-        archive()
+    // Otherwise the wait is bounded like every verb's and a timeout is never
+    // a refusal: the administrative override proceeds UNLOCKED (the
+    // `--force` always-available contract, core._legacy_force_release_claim) -
+    // racy only past the wait under sustained contention, never refused.
+    let payload = if holding_recovery_lock {
+        archive()?
     } else {
-        claims::with_recovery_lock(&path, archive)
+        let lock = claims::recovery_lock_path(&path);
+        match claims::acquire_dir_mutex(&lock, claims::RECOVERY_LOCK_MAX_WAIT, true) {
+            Some(token) => {
+                let out = archive();
+                claims::release_dir_mutex(&lock, &token);
+                out?
+            }
+            None => archive()?,
+        }
+    };
+    // The override is provenance: who ran it and why, for archived and
+    // missing claims alike (emit_claim_force_overridden).
+    let mut data = serde_json::Map::new();
+    data.insert("key".into(), json!(key));
+    data.insert("override_reason".into(), json!(reason));
+    for field in ["previous_holder", "previous_pid"] {
+        if let Some(value) = payload.get(field).filter(|v| !v.is_null()) {
+            data.insert(field.into(), value.clone());
+        }
     }
+    claims::emit_audit_event(None, "claim_force_overridden", data);
+    Ok(payload)
 }
 
 #[cfg(test)]

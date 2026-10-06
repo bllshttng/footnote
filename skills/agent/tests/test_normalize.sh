@@ -158,8 +158,8 @@ check_contains 'AC1-EDGE merge stays in message' "$(field "$out" message)" 'merg
 
 # --- x-61df: thread / pane substrate grammar ---------------------------------
 out="$(run 'build the thing bg')"
-check_eq   'x-61df bg alias substrate'  "$(field "$out" substrate)" 'thread'
-check_contains 'x-2c27 bg task trimmed' "$(field "$out" message)"  'build the thing'
+check_eq   'retired bg word builds on thread' "$(field "$out" substrate)" 'thread'
+check_eq   'retired bg keeps the task text' "$(field "$out" message)" 'build the thing'
 out="$(run 'fix it headless codex')"
 check_eq   'x-2c27 headless substrate' "$(field "$out" substrate)" 'headless'
 check_eq   'x-2c27 headless+codex provider' "$(field "$out" provider)" 'codex'
@@ -176,11 +176,9 @@ check_eq   'x-61df substrate thread task' "$(field "$out" message)" 'fix the thi
 out="$(run_nofno 'fix the thing substrate pane')"
 check_eq   'x-61df substrate pane' "$(field "$out" substrate)" 'pane'
 check_eq   'x-61df substrate pane task' "$(field "$out" message)" 'fix the thing'
-_alias_err="$(mktemp)"
-out="$(run_nofno 'fix the thing substrate bg' 2>"$_alias_err")"
-check_eq       'x-61df substrate bg alias' "$(field "$out" substrate)" 'thread'
-check_contains 'x-61df substrate bg warning' "$(cat "$_alias_err")" "bg' is deprecated; use 'thread' instead"
-rm -f "$_alias_err"
+out="$(run_nofno 'fix the thing substrate bg')"
+check_eq       'retired substrate bg refuses' "$(field "$out" status)" 'error'
+check_contains 'retired substrate bg names the replacement' "$(field "$out" error)" "substrate 'bg' was retired; use 'thread'"
 out="$(run_nofno 'fix the deadlock in the worker thread')"
 check_eq       'x-61df trailing thread stays task' "$(field "$out" substrate)" ''
 check_contains 'x-61df trailing thread message' "$(field "$out" message)" 'worker thread'
@@ -200,7 +198,7 @@ check_contains 'x-61df missing substrate value keeps command visible' "$(field "
 check_eq       'x-61df missing substrate value no message' "$(field "$out" message)" ''
 out="$(run_nofno 'fix the thing substrate nonsense')"
 check_eq       'x-61df bad substrate refuses' "$(field "$out" status)" 'error'
-check_contains 'x-61df bad substrate names values' "$(field "$out" error)" 'pane, thread, bg, headless'
+check_contains 'x-61df bad substrate names values' "$(field "$out" error)" 'pane, thread, headless'
 
 # --- x-ffc3: a LEADING posture word + /command is refused, not buried in a seed -
 # Posture words (bg|headless) are TRAILING only. A leading one whose remainder is
@@ -211,7 +209,7 @@ check_contains 'x-61df bad substrate names values' "$(field "$out" error)" 'pane
 # prose beginning with the word still seeds (codex PR #106 P2).
 out="$(run 'bg /goal x-ead3 residual')"
 check_eq       'x-ffc3 leading bg+/ -> error'     "$(field "$out" status)"  'error'
-check_contains 'x-ffc3 leading bg cites trailing form' "$(field "$out" error)" '/goal x-ead3 residual bg'
+check_contains 'x-ffc3 leading bg cites trailing form' "$(field "$out" error)" '/goal x-ead3 residual thread'
 # Refusal emits no message= line at all, so nothing is /target-wrapped or launched.
 check_eq       'x-ffc3 leading bg emits no message wrap' "$(field "$out" message)" ''
 out="$(run 'headless /target billing migration')"
@@ -219,7 +217,7 @@ check_eq       'x-ffc3 leading headless+/ -> error' "$(field "$out" status)" 'er
 # Case-insensitive, matching the trailing parser's tr-lowercasing (mobile caps).
 out="$(run 'BG /goal x-ead3 residual')"
 check_eq       'x-ffc3 leading BG (caps) -> error' "$(field "$out" status)" 'error'
-check_contains 'x-ffc3 leading BG hint uses lowercase bg' "$(field "$out" error)" 'residual bg'
+check_contains 'x-ffc3 leading BG hint teaches thread' "$(field "$out" error)" 'residual thread'
 # codex PR #106 P2: a leading posture word in genuine FEATURE prose (no /command
 # remainder) is NOT refused - it builds, as it did before the guard.
 out="$(run 'headless browser screenshots')"

@@ -1139,7 +1139,32 @@ pub fn run_lead_ledger(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let entries: Vec<Value> = match crate::graph_store::read_rows(&graph_path) {
+    let entries: Vec<Value> = match crate::graph_store::read_rows_where(
+        &graph_path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "slug",
+                    "title",
+                    "type",
+                    "status",
+                    "priority",
+                    "parent",
+                    "project",
+                    "completed_at",
+                    "sessions",
+                    "pr_number",
+                    "pr_url",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("fno-agents lead-rundown: graph unreadable: {e}");
@@ -1520,6 +1545,7 @@ mod tests {
             double_ruled: Vec::new(),
             stale: vec![crate::team_split::StaleCrown {
                 row: "lead-dead".into(),
+                session: None,
                 scope: "shared".into(),
                 stored_status: "orphaned".into(),
             }],

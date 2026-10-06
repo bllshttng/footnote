@@ -389,23 +389,7 @@ bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
   [--permission-mode "$permission_mode"] [--role "$role"] [--timeout "$timeout"] [--fresh] [--here]
 ```
 
-Pass `--self "$self_holder"` only for a confirmed self-handoff (your
-`target_claim_holder` matched the live `.holder` in the collision pre-check); it
-makes the atomic re-check emit a `self-handoff` receipt that routes you to the
-sanctioned handoff, instead of a confusing foreign `already-running`. It neither
-spawns nor releases the claim. Pass
-`--model "$model"` only when normalize emitted a non-empty `model`
-(spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider
-default). Pass `--effort "$effort"` only when normalize emitted a non-empty
-`effort`; `spawn.sh` forwards it to the fail-closed CLI mapper. Pass
-`--permission-mode "$permission_mode"` / `--role "$role"` / `--timeout
-"$timeout"` only when normalize emitted a non-empty value; pass `--fresh` only
-when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno
-agents spawn`, which validates values fail-closed). Pass `--yolo` only when
-normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
-only when normalize emitted a non-empty `substrate` (`thread` -> a persistent
-thread; the deprecated `bg` alias canonicalizes to `thread`; `headless` -> a
-one-shot `claude -p` / `codex --exec` / `agy -p`);
+Pass `--self "$self_holder"` only for a confirmed self-handoff (your `target_claim_holder` matched the live `.holder` in the collision pre-check); it makes the atomic re-check emit a `self-handoff` receipt that routes you to the sanctioned handoff, instead of a confusing foreign `already-running`. It neither spawns nor releases the claim. Pass `--model "$model"` only when normalize emitted a non-empty `model` (spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider default). Pass `--effort "$effort"` only when normalize emitted a non-empty `effort`; `spawn.sh` forwards it to the fail-closed CLI mapper. Pass `--permission-mode "$permission_mode"` / `--role "$role"` / `--timeout "$timeout"` only when normalize emitted a non-empty value; pass `--fresh` only when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno agents spawn`, which validates values fail-closed). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"` only when normalize emitted a non-empty `substrate` (`thread` -> a persistent thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
 
 An empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam. A spawn with no placement flag opens no view. A default never creates one. When the work needs a screen, the mux thread door tunes one.
 Pass `--node` whenever `node` is non-empty. The spawn derives the verb from the node, so a build message need not name one; a typed `/fno:target` or `/fno:blueprint` that disagrees with the node's verb is refused. Choose the `--cwd` source in this priority order, so launch cwd
@@ -416,34 +400,9 @@ follows the work-map root:
 2. else the node's `_resolved_cwd` (from `fno backlog get "$node"`);
 3. else the caller's `cwd`.
 
-**Auto-worktree.** When the payload writes code and the resolved
-`--cwd` is a repo's MAIN checkout, `spawn.sh` deterministically creates a
-worktree on a fresh feature branch and launches the worker THERE - born
-isolated, location verdict `ok` from line one, no reliance on the worker
-self-creating a worktree. It forwards the payload's harness to `fno agents workspace worktree
-ensure`, so the location is whatever the per-project policy resolves to (a
-claude payload lands harness-native under `<repo>/.claude/worktrees/`); never
-assume a fixed base. "Writes code" is keyed off `payload_mode`,
-not the message text: a node `build` dispatch (claude `/target <id>`, opencode
-`/fno:target <id>`, or codex `$fno:target <id>`) and an explicit claude
-`/target`|`/execute`|`/fix` passthrough all isolate; a `seed`/`handoff` and a non-code
-claude slash command (`/think` writes a design doc) stay in repo root. An already-isolated
-worktree cwd is not re-isolated; any creation error fails safe to repo root. This
-is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt
-- its `cwd="<worktree>"` field on the launched line surfaces the real launch dir.
+**Auto-worktree.** When the payload writes code and the resolved `--cwd` is a repo's MAIN checkout, `spawn.sh` deterministically creates a worktree on a fresh feature branch and launches the worker THERE - born isolated, location verdict `ok` from line one, no reliance on the worker self-creating a worktree. It forwards the payload's harness to `fno agents workspace worktree ensure`, so the location is whatever the per-project policy resolves to (a claude payload lands harness-native under `<repo>/.claude/worktrees/`); never assume a fixed base. "Writes code" is keyed off `payload_mode`, not the message text: a node `build` dispatch (claude `/target <id>`, opencode `/fno:target <id>`, or codex `$fno:target <id>`) and an explicit claude `/target`|`/execute`|`/fix` passthrough all isolate; a `seed`/`handoff` and a non-code claude slash command (`/think` writes a design doc) stay in repo root. An already-isolated worktree cwd is not re-isolated; any creation error fails safe to repo root. This is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt - its `cwd="<worktree>"` field on the launched line surfaces the real launch dir.
 
-**Delegation for a self-isolating payload.** One case skips the
-pre-creation above: a **claude** `/target` carrying a **resolved node**. That
-worker isolates itself at cold-start - `fno do target start <node>` runs `fno
-worktree ensure` and then the harness `EnterWorktree` tool - so `spawn.sh`
-launches it at the repo ROOT and lets it own the worktree. Doing both would be
-worse: `EnterWorktree` moves the session's cwd but leaves its PROJECT at the
-launch dir, and claude keys `~/.claude/projects/` off that launch dir with no
-rename hook, so pre-creating binds the project to the worktree and mints a
-throwaway project dir per spawn that is orphaned when the worktree is reaped.
-Isolation itself is unchanged - still a worktree off `origin/main`, and both
-paths run the same `fno agents workspace worktree ensure`, so the per-project `worktree` policy
-is honored either way. Only the timing, the owner, and the branch name move.
+**Delegation for a self-isolating payload.** One case skips the pre-creation above: a **claude** `/target` carrying a **resolved node**. That worker isolates itself at cold-start - `fno do target start <node>` runs `fno worktree ensure` and then the harness `EnterWorktree` tool - so `spawn.sh` launches it at the repo ROOT and lets it own the worktree. Doing both would be worse: `EnterWorktree` moves the session's cwd but leaves its PROJECT at the launch dir, and claude keys `~/.claude/projects/` off that launch dir with no rename hook, so pre-creating binds the project to the worktree and mints a throwaway project dir per spawn that is orphaned when the worktree is reaped. Isolation itself is unchanged - still a worktree off `origin/main`, and both paths run the same `fno agents workspace worktree ensure`, so the per-project `worktree` policy is honored either way. Only the timing, the owner, and the branch name move.
 
 Three conditions, all load-bearing. **claude**, because `EnterWorktree` is a
 Claude Code harness tool and a codex/opencode `/fno:target` worker cannot move
@@ -557,20 +516,9 @@ safe (the registry same-name guard catches it).
 
 ## `handoff <doc>` - continue a doc without re-deriving
 
-`handoff` exists because `build` (`/target`) is the wrong frame for a handoff. A
-`/target` worker re-derives think->plan->do and loops until a PR is green - but a
-handoff document already IS the plan, and a handoff is often multi-thread,
-mostly-non-code continuation work that never produces a single green PR. So
-`handoff` spawns a **plain autonomous worker** on Claude, Codex, or Gemini (no
-`/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and
-continue from where it left off. The default substrate is the owned-PTY `pane`;
-append `substrate thread` to select a persistent thread, or `substrate headless`
-for a one-shot. The deprecated bare alias `bg` canonicalizes to `thread`. The
-worker starts autonomously and can later be driven through the provider's
-supported tools. Work that is really a feature build belongs in a node id
-or an explicit `/target`, not `handoff`.
+`handoff` exists because `build` (`/target`) is the wrong frame for a handoff. A `/target` worker re-derives think->plan->do and loops until a PR is green - but a handoff document already IS the plan, and a handoff is often multi-thread, mostly-non-code continuation work that never produces a single green PR. So `handoff` spawns a **plain autonomous worker** on Claude, Codex, or Gemini (no `/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and continue from where it left off. The default substrate is the owned-PTY `pane`; append `substrate thread` to select a persistent thread, or `substrate headless` for a one-shot. The retired `bg` spelling refuses with a redirect to `thread`. The worker starts autonomously and can later be driven through the provider's supported tools. Work that is really a feature build belongs in a node id or an explicit `/target`, not `handoff`.
 
-It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno inbox decisions <topic>` with no lane or state filter (both hide real rulings: a king ruling records under coord, an older operator ruling under unattributed) and, when the topic is a node, `fno backlog get <node>`; a king's ruling on the node governs with no decision record at all. An empty result means nothing answered the query, not that no rule exists; it surfaces `<help reason="outward-action" evidence="...">` for human confirmation rather than proceed on a prior instruction.
+It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno inbox decisions <topic>` with no lane or state filter (both hide real rulings: a lead ruling records under coord, an older operator ruling under unattributed) and, when the topic is a node, `fno backlog get <node>`; a lead's ruling on the node governs with no decision record at all. An empty result means nothing answered the query, not that no rule exists; it surfaces `<help reason="outward-action" evidence="...">` for human confirmation rather than proceed on a prior instruction.
 
 When the instruction arrives over `fno agents mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from a superuser typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the superuser granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
 
@@ -589,11 +537,7 @@ outward actions.
    that is the continuation seed (path + "do not re-derive" + GUARDRAIL +
    PR-for-review). On `status=error` (empty path or explicit unsupported
    provider), STOP and report the `error=` line.
-2. **VALIDATE the doc path (best-effort).** If the path is **absolute** and does
-   not exist, STOP and report the real missing path - never boot a worker pointed
-   at nothing (AC5-ERR). If it is **relative**, you cannot reliably check it here
-   (the worker's cwd may differ); proceed but note in REPORT that it must resolve
-   at the worker's cwd, and prefer an absolute path.
+2. **VALIDATE the doc path (best-effort).** If the path is **absolute** and does not exist, STOP and report the real missing path - never boot a worker pointed at nothing (AC5-ERR). If it is **relative**, you cannot reliably check it here (the worker's cwd may differ); proceed but note in REPORT that it must resolve at the worker's cwd, and prefer an absolute path.
 3. **SPAWN.** Run the genuine autonomous wire with the seed verbatim:
 
    ```bash
@@ -602,19 +546,7 @@ outward actions.
      [--substrate "$substrate"] [--model "$model"] [--yolo]
    ```
 
-4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does
-   (`result=launched ... mode=spawn` -> quote the real `short_id` and always give
-   `fno agents logs <name>` plus `grid`/`drive` for the default pane;
-   `result=pending` -> the pane exists and runs but has no bound identity yet,
-   so relay the pane ref and `fno mux attach`, never a session handle;
-   `result=failed` -> FAILED with the real reason, no fabricated short-id). A
-   pane receipt carries `mux_session:pane_id` and is observed with `fno mux
-   attach`; a thread receipt carries the session-shaped `short_id` and is
-   observed with `fno agents logs <short_id>`. A Codex thread worker owns no
-   process of its own: it shares the app-server daemon, so liveness, reap, and
-   deduplication must not key it on a process id. Note it is an autonomously
-   seeded, drivable continuation worker, not a
-   refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
+4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does  (`result=launched ... mode=spawn` -> quote the real `short_id` and always give  `fno agents logs <name>` plus `grid`/`drive` for the default pane;  `result=pending` -> the pane exists and runs but has no bound identity yet,  so relay the pane ref and `fno mux attach`, never a session handle;  `result=failed` -> FAILED with the real reason, no fabricated short-id). A  pane receipt carries `mux_session:pane_id` and is observed with `fno mux  attach`; a thread receipt carries the session-shaped `short_id` and is  observed with `fno agents logs <short_id>`. A Codex thread worker owns no  process of its own: it shares the app-server daemon, so liveness, reap, and  deduplication must not key it on a process id. Note it is an autonomously  seeded, drivable continuation worker, not a  refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
 
 ---
 
@@ -631,10 +563,7 @@ outward actions.
 
 ## `ask <name> "<question>"` - synchronous reply from a live worker
 
-The request-reply lane: deliver a message into an EXISTING worker's session,
-wait for its reply, and relay it. This is `fno agents ask` (distributed as the
-`ln` short-command) - NOT the retired one-shot ask, which spun up a throwaway
-worker (that shape is `spawn "<question>" headless`).
+The request-reply lane: deliver a message into an EXISTING worker's session, wait for its reply, and relay it. This is `fno agents ask` (distributed as the `ln` short-command) - NOT the retired one-shot ask, which spun up a throwaway worker (that shape is `spawn "<question>" headless`).
 
 **ask vs send in one line:** `ask` blocks and returns the ANSWER; `send`
 returns a delivery RECEIPT and the answer arrives later as its own mail. Use

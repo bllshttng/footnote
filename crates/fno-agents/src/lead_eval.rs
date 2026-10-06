@@ -771,7 +771,7 @@ pub fn run(args: &[String]) -> i32 {
     };
     let home = AgentsHome::from_env();
     let report =
-        match crate::lead_history::scan_scopes(&[home.events_jsonl()], parsed.team.as_deref()) {
+        match crate::lead_history::scan_scopes(&checkin_journals(&home), parsed.team.as_deref()) {
             Ok(report) => report,
             Err(error) => {
                 eprintln!("fno-agents intel --windows: {error}");
@@ -817,7 +817,7 @@ pub fn run(args: &[String]) -> i32 {
             eprintln!("fno-agents intel --windows: transcript has no first cwd row");
             return 3;
         };
-        let ceiling = match crate::lead_verdict_inputs::compaction_ceiling(&cwd) {
+        let ceiling = match crate::lead_verdict_inputs::compaction_ceiling_for(&cwd, harness) {
             Ok(ceiling) => ceiling,
             Err(error) => {
                 eprintln!("fno-agents intel --windows: {error}");
@@ -1217,9 +1217,29 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
     });
 }
 
+/// Every journal a lead check-in can sit in: the agents home journal, the
+/// global journal, and the space journal of every repo root the registry
+/// has ever rostered (one canonical repo mints one space journal, so
+/// worktree leads need no extra row). The arm runs without a cwd, so the
+/// roster's cwd set stands in for the per-process list Python's
+/// event_journals() resolves. A journal that does not exist is skipped: a
+/// read must not mint a store in a space that never wrote one.
+pub(crate) fn checkin_journals(home: &AgentsHome) -> Vec<PathBuf> {
+    let mut journals = vec![home.events_jsonl(), crate::daemon::global_events_path(home)];
+    if let Ok(registry) = crate::state::load_registry(&home.registry_json()) {
+        for entry in &registry.entries {
+            let journal = crate::paths::space_dir(Path::new(&entry.cwd)).join("events.jsonl");
+            if journal.exists() && !journals.contains(&journal) {
+                journals.push(journal);
+            }
+        }
+    }
+    journals
+}
+
 fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     let now = chrono::Utc::now();
-    let rows = match crate::lead_history::scan_scopes(&[home.events_jsonl()], None) {
+    let rows = match crate::lead_history::scan_scopes(&checkin_journals(home), None) {
         Ok(report) => report
             .get("events")
             .and_then(Value::as_array)
@@ -1260,63 +1280,95 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
     if let Some(error) = eval_lookup_error.into_inner() {
         return (0, Some("eval_lookup_failed".into()), error);
     }
-    let Some(session) = due.first() else {
+    if due.is_empty() {
         return (0, Some("not_due".into()), "none due".into());
-    };
-    let Some((_harness, transcript)) = lead_transcript(session) else {
-        return (0, Some("no_eval_root".into()), "eval root not found".into());
-    };
-    let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
-        return (
-            0,
-            Some("transcript_cwd_missing".into()),
-            "transcript has no first cwd row".into(),
-        );
-    };
-    let session_checkins = checkins
-        .iter()
-        .filter(|row| checkin_holder(row) == Some(session))
-        .cloned()
-        .collect::<Vec<_>>();
-    let root = match default_eval_dir_for(session, &session_checkins, &cwd) {
-        Ok(root) => root,
-        Err(error) => return (0, Some("plans_directory_missing".into()), error),
-    };
-    let result = std::process::Command::new(
-        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno-agents")),
-    )
-    .args([
-        "intel",
-        "--session",
-        session,
-        "--windows",
-        "--write",
-        root.to_string_lossy().as_ref(),
-    ])
-    .stdin(std::process::Stdio::null())
-    .output();
-    match result {
-        Ok(output) if output.status.success() => (1, None, format!("wrote {}", root.display())),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let reason = stderr
-                .lines()
-                .next_back()
-                .unwrap_or("fold failed")
-                .to_string();
-            if let Err(error) = write_fold_failed_index(session, &transcript, &root, &reason) {
-                return (0, Some("failed_index_write".into()), error);
+    }
+    // Every due lead per tick: the read now spans every journal, so a
+    // freshly-armed arm can owe many ended leads at once, and one per
+    // tick would backfill for hours. One bad transcript skips that
+    // session, never the rest.
+    let mut wrote = 0u64;
+    let mut last_failure: Option<(String, String)> = None;
+    for session in &due {
+        let Some((_harness, transcript)) = lead_transcript(session) else {
+            last_failure = Some((
+                "no_eval_root".into(),
+                format!("eval root not found for {session}"),
+            ));
+            continue;
+        };
+        let Some(cwd) = crate::provenance::first_cwd_row(&transcript).map(PathBuf::from) else {
+            last_failure = Some((
+                "transcript_cwd_missing".into(),
+                format!("transcript has no first cwd row for {session}"),
+            ));
+            continue;
+        };
+        let session_checkins = checkins
+            .iter()
+            .filter(|row| checkin_holder(row) == Some(session))
+            .cloned()
+            .collect::<Vec<_>>();
+        let root = match default_eval_dir_for(session, &session_checkins, &cwd) {
+            Ok(root) => root,
+            Err(error) => {
+                last_failure = Some(("plans_directory_missing".into(), error));
+                continue;
             }
-            (0, Some("child_failed".into()), reason)
-        }
-        Err(error) => {
-            let reason = error.to_string();
-            if let Err(write_error) = write_fold_failed_index(session, &transcript, &root, &reason)
-            {
-                return (0, Some("failed_index_write".into()), write_error);
+        };
+        let result = std::process::Command::new(
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno-agents")),
+        )
+        .args([
+            "intel",
+            "--session",
+            session,
+            "--windows",
+            "--write",
+            root.to_string_lossy().as_ref(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .output();
+        match result {
+            Ok(output) if output.status.success() => wrote += 1,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr
+                    .lines()
+                    .next_back()
+                    .unwrap_or("fold failed")
+                    .to_string();
+                if let Err(error) = write_fold_failed_index(session, &transcript, &root, &reason) {
+                    last_failure = Some(("failed_index_write".into(), error));
+                    continue;
+                }
+                last_failure = Some(("child_failed".into(), reason));
             }
-            (0, Some("spawn_failed".into()), reason)
+            Err(error) => {
+                let reason = error.to_string();
+                if let Err(write_error) =
+                    write_fold_failed_index(session, &transcript, &root, &reason)
+                {
+                    last_failure = Some(("failed_index_write".into(), write_error));
+                    continue;
+                }
+                last_failure = Some(("spawn_failed".into(), reason));
+            }
         }
+    }
+    if wrote > 0 {
+        let detail = match &last_failure {
+            Some((reason, detail)) => format!(
+                "wrote {wrote} of {} due; last failure {reason}: {detail}",
+                due.len()
+            ),
+            None => format!("wrote {wrote} evals"),
+        };
+        (wrote, None, detail)
+    } else {
+        let (reason, detail) =
+            last_failure.unwrap_or_else(|| ("not_due".into(), "none due".into()));
+        (0, Some(reason), detail)
     }
 }
 
@@ -1604,5 +1656,190 @@ mod tests {
         assert_eq!(fold.typed_turns.len(), 1);
         assert_eq!(w2.activity.tokens.output, 200);
         assert_eq!(w2.activity.tokens.cache_read, 2000);
+    }
+
+    /// Pins every state root the arm's resolvers touch so the fixture stays
+    /// hermetic, under the shared env lock the crate's env-pinned tests hold.
+    struct ArmPinGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ArmPinGuard {
+        fn new(base: &Path) -> Self {
+            let keys = [
+                "FNO_AGENTS_HOME",
+                "FNO_SPACES_DIR",
+                "FNO_CLAUDE_PROJECTS_DIR",
+                "FNO_CONFIG",
+                "FNO_STATE_DIR",
+            ];
+            let saved = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+            std::env::set_var("FNO_AGENTS_HOME", base.join("agents"));
+            std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
+            std::env::set_var("FNO_CLAUDE_PROJECTS_DIR", base.join("projects"));
+            std::env::set_var("FNO_CONFIG", base.join("config.toml"));
+            std::env::set_var("FNO_STATE_DIR", base.join("state"));
+            std::fs::create_dir_all(base.join("agents")).unwrap();
+            std::fs::write(base.join("config.toml"), "").unwrap();
+            Self { saved }
+        }
+    }
+
+    impl Drop for ArmPinGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(old) => std::env::set_var(key, old),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checkin_journals_cover_roster_roots_once_and_skip_missing() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = tempfile::tempdir().unwrap();
+        let _pins = ArmPinGuard::new(base.path());
+        let repo = base.path().join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        let home = AgentsHome::from_env();
+        let journal = crate::paths::space_dir(&repo).join("events.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        std::fs::write(&journal, "").unwrap();
+        crate::state::update_registry(&home.registry_json(), |reg| {
+            // Two roster rows of one canonical root collapse to one journal.
+            for (n, sid) in [
+                ("lead-one", "aaaa1111-2222-4333-8444-555566667777"),
+                ("lead-two", "bbbb2222-3333-4444-8555-666677778888"),
+            ] {
+                reg.entries.push(crate::state::RegistryEntry {
+                    name: n.into(),
+                    cwd: repo.display().to_string(),
+                    harness: Some("claude".into()),
+                    harness_session_id: Some(sid.into()),
+                    ..Default::default()
+                });
+            }
+        })
+        .unwrap();
+        let journals = checkin_journals(&home);
+        assert_eq!(journals.len(), 3, "{journals:?}");
+        assert_eq!(journals[0], home.events_jsonl());
+        assert_eq!(journals[1], crate::daemon::global_events_path(&home));
+        assert_eq!(journals[2], journal);
+        std::fs::remove_file(&journal).unwrap();
+        assert!(!checkin_journals(&home).contains(&journal));
+    }
+
+    #[test]
+    fn seeded_ended_lead_writes_part1_through_the_full_read() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = tempfile::tempdir().unwrap();
+        let _pins = ArmPinGuard::new(base.path());
+        let repo = base.path().join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        let home = AgentsHome::from_env();
+        crate::state::update_registry(&home.registry_json(), |reg| {
+            reg.entries.push(crate::state::RegistryEntry {
+                name: "lead-one".into(),
+                cwd: repo.display().to_string(),
+                // crown_scope stays unset, so the live-session filter
+                // still excludes the row: the seeded holder is ended.
+                harness: Some("claude".into()),
+                harness_session_id: Some("99998888-7777-4666-8555-444433332222".into()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+
+        // One ended lead: a check-in 31 minutes old in the repo's space
+        // journal, the row shape the writer emits.
+        let session = "1234567a-9bcd-4eef-8a12-3456789abcde";
+        let journal = crate::paths::space_dir(&repo).join("events.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let ts = (chrono::Utc::now() - chrono::Duration::minutes(31))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let row = json!({
+            "ts": ts,
+            "type": "lead_checkin",
+            "source": "loop",
+            "data": {"scope": "fno", "change": "ended", "holder_session": session},
+        });
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&journal)
+            .unwrap()
+            .write_all(format!("{row}\n").as_bytes())
+            .unwrap();
+
+        // A claude transcript whose first row carries the repo cwd.
+        let projects = base.path().join("projects").join("proj-dir");
+        std::fs::create_dir_all(&projects).unwrap();
+        let transcript = projects.join(format!("{session}.jsonl"));
+        let transcript_row = json!({
+            "type": "user",
+            "timestamp": ts,
+            "cwd": repo.display().to_string(),
+            "message": {"role": "user", "content": [{"type": "text", "text": "lead beat"}]},
+        });
+        std::fs::write(&transcript, format!("{transcript_row}\n")).unwrap();
+
+        // The arm's own chain: journals, scan, due list, eval root.
+        let journals = checkin_journals(&home);
+        assert!(
+            journals.contains(&journal),
+            "rostered space journal missing from {journals:?}"
+        );
+        let report = crate::lead_history::scan_scopes(&journals, None).unwrap();
+        let checkins: Vec<Value> = report["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .filter(|row| {
+                row.get("type").and_then(Value::as_str) == Some(crate::lead_history::LEAD_CHECKIN)
+            })
+            .collect();
+        assert_eq!(
+            checkins.len(),
+            1,
+            "the seeded row must scan back through the store"
+        );
+        let live: BTreeSet<String> = BTreeSet::new();
+        let due = due_sessions(
+            &checkins,
+            &live,
+            |s| session_has_eval(s).unwrap_or(true),
+            chrono::Utc::now(),
+        );
+        assert_eq!(due, vec![session.to_string()]);
+        assert!(!session_has_eval(session).unwrap());
+
+        let cwd = PathBuf::from(crate::provenance::first_cwd_row(&transcript).unwrap());
+        let root = default_eval_dir_for(session, &checkins, &cwd).unwrap();
+
+        // The write the arm's child performs, in-process: current_exe()
+        // under cargo test is the libtest harness, so only the spawn
+        // transport stays untested.
+        let args: Vec<String> = ["--session", session, "--windows", "--write"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(std::iter::once(root.display().to_string()))
+            .collect();
+        assert_eq!(run(&args), 0);
+        assert!(
+            root.join("part1-metrics.md").exists(),
+            "eval part1 must appear"
+        );
+        assert!(
+            session_has_eval(session).unwrap(),
+            "the written eval must satisfy the dedup read"
+        );
     }
 }

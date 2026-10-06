@@ -308,6 +308,8 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
         "",
         "",
         "",
+        "",
+        None,
     );
     // node_ended rows carry no PR reference; the graph entry does. Join the
     // completion card to its PR through the entry the feed already walked.
@@ -574,7 +576,20 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     };
     let decisions_path = state_dir.join("decisions.jsonl");
     let decisions_raw = crate::event_store::journal_text(&decisions_path, &[]);
-    let graph_entries = crate::graph_store::read_rows(&graph_path(home)).unwrap_or_default();
+    let graph_entries = crate::graph_store::read_rows_where(
+        &graph_path(home),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "pr_number"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
     let mut journals: Vec<(String, String)> = Vec::new();
     let mut journal_states: Vec<(String, String)> = Vec::new();
     for path in &event_paths {
