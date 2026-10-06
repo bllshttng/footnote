@@ -84,9 +84,10 @@ def test_thread_uncarried_reads_the_thread_rows() -> None:
     # claude thread carries every axis and every fenced token.
     assert thread_uncarried("claude", {"agent": "a", "effort": "high"}, ["--anything"]) is None
 
-    # opencode thread carries model only.
-    assert thread_uncarried("opencode", {"model": "m"}, None) is None
-    assert thread_uncarried("opencode", {"effort": "high"}, None) == "--effort"
+    # opencode thread carries model and effort (the serve lane applies effort
+    # as opencode's persisted model variant); every other axis demotes.
+    assert thread_uncarried("opencode", {"model": "m", "effort": "high"}, None) is None
+    assert thread_uncarried("opencode", {"permission_mode": "auto"}, None) == "--permission-mode"
     assert thread_uncarried("opencode", {}, ["--foo"]) == "--foo"
 
 
