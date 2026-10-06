@@ -822,7 +822,12 @@ def _codex_create_path(
 
 
 # Moved to fno.agents.spawn_lineage (file budget); re-exported here.
-from fno.agents.spawn_lineage import _capture_parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
+from fno.agents.spawn_lineage import (
+    _capture_parent_edge,
+    _fill_parent_edge_from_lineage,
+    _report_unlinked_parent,
+    build_spawn_provenance,
+)  # noqa: E402
 
 
 def _reign_typed_message(
@@ -1694,17 +1699,9 @@ def _claude_create_path(
 
     # Best-effort ambient capture; never raises. The
     # spawn_trigger was already popped before bg_create above.
-    spawned_by_session, spawned_by_harness, spawned_by_cwd = parent_edge or _capture_parent_edge()
-    if not spawned_by_session and lineage_row is not None:
-        # A relaunch continues the SOURCE row's lineage: its original
-        # spawner keeps seeing it in the orphan check. Ambient capture already
-        # had its chance; the source record only fills a miss.
-        inherited = tuple(
-            getattr(lineage_row, f"spawned_by_{k}", None)
-            for k in ("session", "harness", "cwd")
-        )
-        if inherited[0]:
-            spawned_by_session, spawned_by_harness, spawned_by_cwd = inherited
+    spawned_by_session, spawned_by_harness, spawned_by_cwd = _fill_parent_edge_from_lineage(
+        parent_edge or _capture_parent_edge(), lineage_row
+    )
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the

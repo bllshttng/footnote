@@ -87,6 +87,24 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     return reason
 
 
+def _fill_parent_edge_from_lineage(
+    captured: tuple[Optional[str], Optional[str], Optional[str]],
+    lineage_row: object | None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """A relaunch continues the SOURCE row's lineage: its original spawner
+    keeps seeing it in the orphan check. Ambient capture already had its
+    chance; the source record only fills a miss."""
+    if captured[0] or lineage_row is None:
+        return captured
+    inherited = tuple(
+        getattr(lineage_row, f"spawned_by_{k}", None)
+        for k in ("session", "harness", "cwd")
+    )
+    if inherited[0]:
+        return inherited
+    return captured
+
+
 def build_spawn_provenance(
     *,
     explicit_origin: Optional[dict] = None,
