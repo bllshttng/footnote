@@ -188,6 +188,37 @@ def test_the_timer_exits_quietly_when_the_hold_was_lifted_by_hand(state):
     )
 
 
+def test_now_releases_immediately_and_delivers_what_the_hold_kept(state):
+    """`--now` skips the clock wait: the release verb's detached delivery leg.
+
+    The sideline menu's Release hold lifts the stamp and the clock in the
+    Rust verb, then spawns this leg - and the row can still carry a live
+    clock under another of its addresses. The leg must release NOW, not
+    wait the clock out; that is the whole point of the menu entry.
+    """
+    env, home = state
+    hold_dir = home / ".fno" / "mail-hold"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    _send_to_held_session("menu release report", ts="2026-08-20T10:00:00Z")
+    # A live clock the default timer would sleep out.
+    _arm_clock(hold_dir, seconds_out=600)
+
+    proc = subprocess.run(
+        _FNO_ARGV
+        + ["agents", "mail", "hold-release", "--handle", HANDLE, "--now"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["held_count"] == 1, "the leg delivers what the hold kept"
+    assert result["outcome"] in ("delivered", "inject-missed")
+    assert not (hold_dir / f"{HANDLE}.json").exists()
+
+
 def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
     """The timer re-reads its clock on every wake, so a prompt pushes it out.
 

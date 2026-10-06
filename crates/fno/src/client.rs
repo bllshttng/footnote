@@ -1632,6 +1632,8 @@ enum MenuAction {
     /// active tab, `None` opens a standalone new-portal seat. Chooser-only:
     /// built by `open_chooser::build_open_chooser`, never the row menu.
     PortalAt(Option<Dir>),
+    /// Release the row's mail hold; built only on a row wearing a hold mark.
+    ReleaseHold,
 }
 
 impl MenuAction {
@@ -1679,20 +1681,6 @@ impl MenuAction {
 enum MoveSrc {
     Tab(TabId),
     Pane(u64),
-}
-
-/// An entry whose action has an IN-MENU accelerator: the hint is the
-/// live glyph from the menu scope (`keys::menu_key_for`), never a prefix chord
-/// - the open menu does not run prefix chords, so advertising one describes an
-/// input path the reader is not on. An unscoped id resolves to nothing, which
-/// is the honest hint (LD9 / AC8).
-fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
-    PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: crate::keys::menu_key_for(id).unwrap_or_default(),
-        enabled: true,
-    }
 }
 
 /// (US4/US5) The sideline MENU popup and the minimal settings modal share
