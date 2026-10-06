@@ -567,6 +567,8 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
   await $.fs.write(`${buddyDir()}/frames/${sessionId}.json`, `{"at":${now},${frame.slice(1)}`)
 }
 
+const BUBBLE_COLUMNS = 34
+
 export function register(on: On) {
   on('session.start', async ($, e, next) => {
     const now = await $.clock.now()
@@ -787,6 +789,22 @@ export function register(on: On) {
     drawnAt = now
     const { Box, Text } = $.ui.resolve(e)
     const words = talking(now)
+    const art = sprite(buddy, now)
+    // Desktop has room above the input: the full buddy stands at the right edge, its bubble to its left.
+    if (e.surface === 'desktop' && (e.props.maxRows ?? 0) > art.length) {
+      const color = RARITY_THEME[buddy.rarity]
+      const ours = Box({
+        flexDirection: 'row',
+        justifyContent: 'flex-end',
+        alignItems: 'flex-end',
+        children: [
+          ...(words ? [Box({ borderStyle: 'round', width: BUBBLE_COLUMNS, children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: [' ◦ · '] })] : []),
+          Box({ flexDirection: 'column', alignItems: 'center', children: [...art.map(line => Text({ color, children: [line] })), Text({ bold: true, children: [buddy.name] })] }),
+        ],
+      })
+      const theirs = await next(e)
+      return theirs ? Box({ flexDirection: 'column', children: [ours, theirs] }) : ours
+    }
     const face = (now - pettedAt < PET_MS ? '♥ ' : '') + renderFace(buddy)
     const ours = Text({ children: [Text({ color: RARITY_THEME[buddy.rarity], children: [`${face} ${buddy.name}`] }), ...(words ? [`: ${words}`] : [])] })
     const theirs = await next(e)

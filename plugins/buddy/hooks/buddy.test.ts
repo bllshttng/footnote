@@ -199,4 +199,9 @@ test('on Desktop the buddy shows above the prompt even when it wraps the termina
   await terminal.unmount()
   const desktop = await $.ui.mount({ ...band(3), surface: 'desktop' })
   expect(await desktop.find({ type: 'Text', text: /Quip/ })).toBeDefined()
+  await desktop.unmount()
+  // With room above the input, Desktop shows the full sprite and the name below it, not the one-line face.
+  const roomy = await $.ui.mount({ ...band(10), surface: 'desktop' })
+  expect(await roomy.find({ type: 'Text', text: 'Quip' })).toBeDefined()
+  expect(await roomy.find({ type: 'Text', text: /: / })).toBeUndefined()
 })
