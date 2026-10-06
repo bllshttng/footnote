@@ -2651,23 +2651,26 @@ mod tests {
         // Locked 3 / parity: the which-key modal renders `key_bindings()`;
         // `chord()` dispatches through the same table. Assert they cannot diverge:
         // every table row's key resolves (via the real chord path) to exactly the
-        // event the row advertises, and every key is listed once.
+        // event the row advertises, and every key is listed once. Both sides
+        // resolve the DEFAULT map: `keymap()` reads the process global, and a
+        // parallel test's install/reinstall would rebind rows under this one.
+        let map = resolve_keymap(None, &[]).0;
         let mut seen = std::collections::HashSet::new();
-        for kb in key_bindings() {
+        for kb in bindings_for(&map) {
             assert!(
                 seen.insert(kb.key),
                 "duplicate key {:?} in key_bindings()",
                 kb.key as char
             );
             assert_eq!(
-                chord(kb.key),
+                chord_for(&map, kb.key),
                 kb.event,
                 "chord({:?}) diverged from its key_bindings() row",
                 kb.key as char
             );
             // The digit range and the prefix are structural specials, never rows.
             assert!(
-                !(b'1'..=b'9').contains(&kb.key) && kb.key != prefix(),
+                !(b'1'..=b'9').contains(&kb.key) && kb.key != map.prefix,
                 "structural special {:?} must not appear in key_bindings()",
                 kb.key as char
             );
