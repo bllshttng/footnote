@@ -84,6 +84,12 @@ pub(crate) fn chats_dir() -> PathBuf {
             return crate::backlog::settings::expand_home(trimmed);
         }
     }
+    // A declared agents home rules the store the same way it rules the bus:
+    // a test that pins FNO_AGENTS_HOME gets its chats beside its bus, never
+    // the operator's ~/.fno/chats.
+    if let Some(dot_fno) = declared_dot_fno() {
+        return dot_fno.join("chats");
+    }
     let mut dir = crate::backlog::settings::state_dir().unwrap_or_else(default_dot_fno);
     dir.push("chats");
     dir
@@ -92,10 +98,21 @@ pub(crate) fn chats_dir() -> PathBuf {
 /// The derived index. Always under the state dir, never under the (possibly
 /// synced) chats dir.
 pub(crate) fn index_path() -> PathBuf {
+    if let Some(dot_fno) = declared_dot_fno() {
+        return dot_fno.join("db").join("chats.db");
+    }
     let mut dir = crate::backlog::settings::state_dir().unwrap_or_else(default_dot_fno);
     dir.push("db");
     dir.push("chats.db");
     dir
+}
+
+/// `<FNO_AGENTS_HOME>/..` when a home is declared; `None` keeps the
+/// `state_dir()` ladder (and the undeclared test process honest).
+fn declared_dot_fno() -> Option<PathBuf> {
+    let home = crate::paths::AgentsHome::from_env_opt()?;
+    let dot_fno = home.root().parent().unwrap_or_else(|| home.root());
+    Some(dot_fno.to_path_buf())
 }
 
 fn default_dot_fno() -> PathBuf {
@@ -1553,7 +1570,7 @@ pub fn run_chats(args: &[String]) -> i32 {
                 .get(1)
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(bus_append_live_path);
-            match crate::announce::append_line_open(&live, &line) {
+            match crate::announce::append_line_open(&live, &line, &dir) {
                 Ok(()) => {
                     println!("{{\"appended\":true}}");
                     0
@@ -1855,6 +1872,33 @@ mod tests {
             "v": 1, "id": id, "ts": "2026-10-01T19:00:00Z", "thread": id,
             "from": from, "to": to, "kind": kind, "body": "hello",
         })
+    }
+
+    #[test]
+    fn chats_dir_honors_a_declared_agents_home() {
+        // The store follows the declared home (FNO_AGENTS_HOME), the same
+        // pin the bus follows, so a pinned test's mirror never lands in the
+        // operator's ~/.fno/chats.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home_pin = temp_root("home-pin").join("agents");
+        std::fs::create_dir_all(&home_pin).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &home_pin);
+        assert_eq!(
+            chats_dir(),
+            home_pin.parent().unwrap().join("chats"),
+            "chats follow the declared home, not the state_dir ladder"
+        );
+        assert_eq!(
+            index_path(),
+            home_pin.parent().unwrap().join("db").join("chats.db"),
+            "the index follows the declared home too"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert_ne!(
+            chats_dir(),
+            home_pin.parent().unwrap().join("chats"),
+            "without the pin the ladder returns (never the pinned dir)"
+        );
     }
 
     #[test]
