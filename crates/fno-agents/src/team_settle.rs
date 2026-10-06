@@ -131,7 +131,7 @@ fn apply_name_effect(
             match (forgotten, heir, registry) {
                 (Ok(()), Some(name), Some(reg)) => {
                     // A fresh grant carries the crowned row's own name, so
-                    // the team never lands anonymous (x-f6de).
+                    // the team never lands anonymous.
                     crate::team_names::carry_holder_name(store, reg, scope, name).map(|_| ())
                 }
                 (result, _, _) => result,

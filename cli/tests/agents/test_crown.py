@@ -640,6 +640,9 @@ def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
     if binary is None:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    # The binary-side kinds that read the agents home (team-rescope) must
+    # never resolve the ambient fleet store from a test.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / ".agents-home"))
     _seed(monkeypatch, tmp_path, [replace(row, cwd=str(tmp_path)) for row in rows])
     for name in AMBIENT_IDENTITY_ENV:
         monkeypatch.delenv(name, raising=False)
