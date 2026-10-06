@@ -500,7 +500,6 @@ def run_king_wake(
     ask_fn: Optional[Callable] = None,
     seconds_left_fn: Optional[Callable[[], Optional[float]]] = None,
     on_step: Optional[Callable[[str], None]] = None,
-    court_wait_s: Optional[float] = None,
 ) -> dict[str, Any]:
     """One pass over every crowned scope; never raises into the tick. Returns
     the summary the tick echoes: scopes considered, wakes, refusals, plus
@@ -597,17 +596,12 @@ def run_king_wake(
         return summary
 
 
-    # The court read's cap: the truth-read bound when the caller names
-    # nothing. Even unloaded, gather_court is a Python + subprocess chain
-    # that misses a 10s bound, so the read answered 0 crowns and the tick
-    # read healthy; under load it needs more, and the cap still fits the
-    # phase's 75s slice.
-    if court_wait_s is None:
-        try:
-            load = os.getloadavg()[0] / (os.cpu_count() or 1)
-            court_wait_s = min(45.0, _KING_TRUTH_WAIT_S * max(1.0, load / 2.0))
-        except (AttributeError, OSError):
-            court_wait_s = _KING_TRUTH_WAIT_S
+    # gather_court misses the 10s truth bound even unloaded; scale by load.
+    try:
+        load = os.getloadavg()[0] / (os.cpu_count() or 1)
+        court_wait_s = min(45.0, _KING_TRUTH_WAIT_S * max(1.0, load / 2.0))
+    except (AttributeError, OSError):
+        court_wait_s = _KING_TRUTH_WAIT_S
     outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn, cap=court_wait_s)
     targets, note = outcome or ([], "court read did not complete in its slice bound")
     summary: dict[str, Any] = {

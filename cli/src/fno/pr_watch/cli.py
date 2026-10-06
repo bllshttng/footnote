@@ -1217,13 +1217,9 @@ def tick() -> None:
 
             roots = _tick_roots()
             try:
-                # Durable grants, never the sweep's result. Its timeout and
-                # phase cap share one load-scaled window, leaving room for a
-                # merge attempt and a short sweep before the deadline. The
-                # bound travels to the Rust op as deadline_ms, so its bounded
-                # git reads answer inside it.
-                grant_timeout = min(grant_queue_timeout_s,
-                                    max(1.0, slice_s - 10.0))
+                # The read's bound travels to the Rust op as deadline_ms, so
+                # its bounded git reads answer inside it.
+                grant_timeout = min(grant_queue_timeout_s, max(1.0, slice_s - 10.0))
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd()),
