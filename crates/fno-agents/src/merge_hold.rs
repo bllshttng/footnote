@@ -44,24 +44,17 @@ pub fn run(op: &str, payload: &Value) -> String {
         &graph,
         &crate::backlog::RowQuery {
             fields: Some(
-                [
-                    "id",
-                    "slug",
-                    "parent",
-                    "contained_in",
-                    "plan_path",
-                    "cwd",
-                    "dispatch_hold",
-                    "pr_number",
-                    "status",
-                    "completed_at",
-                    "superseded_by",
-                    "deferred_at",
-                    "title",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+                crate::graph_store::SLIM_FIELDS
+                    .iter()
+                    .copied()
+                    .chain([
+                        "contained_in",
+                        "dispatch_hold",
+                        "superseded_by",
+                        "deferred_at",
+                    ])
+                    .map(str::to_string)
+                    .collect(),
             ),
             with_blockers: true,
             ..Default::default()
