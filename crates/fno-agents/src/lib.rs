@@ -459,6 +459,7 @@ pub mod test_delta;
 pub mod test_hold;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod tool_activity;
 pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;

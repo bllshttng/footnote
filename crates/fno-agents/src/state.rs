@@ -825,6 +825,15 @@ pub struct RegistryEntry {
     pub context_used_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u64>,
+    /// Cumulative tool-call counts the sideline activity ramp reads: every
+    /// tool call the session transcript records, and how many results read
+    /// as failures. Written only by the incremental tail scan (`scan_pass`
+    /// in `tool_activity`); the byte offset lives in the daemon's fold, not
+    /// here, so a daemon restart re-reads its transcripts once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_errors: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measured_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

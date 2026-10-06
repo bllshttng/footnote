@@ -2751,6 +2751,8 @@ fn registry_schema_fields() {
         context_used_pct: Some(1),
         context_used_tokens: Some(1),
         context_window_tokens: Some(1),
+        tool_calls: Some(1),
+        tool_errors: Some(1),
         context_measured_at: Some("value".into()),
         mail_unread: Some(1),
         harness_title: Some("value".into()),

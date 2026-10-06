@@ -265,4 +265,53 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         crate::squad_store::MemberLiveness::Unknown,
         "an unresolved read keeps the daemon fail-safe"
     );
+    // The activity ring rides the same fold: a counted row enters a ring,
+    // one cell per 5s gate, and the served row carries the intervals; a row
+    // with no counts never enters one.
+    let mut counted = RegistryAgent::default();
+    counted.name = "act".into();
+    counted.harness_session_id = Some("sess-act".into());
+    counted.tool_counts = Some((10, 2));
+    let uncounted = RegistryAgent::default();
+    let t = std::time::Instant::now();
+    let rows = vec![counted.clone(), uncounted.clone()];
+    crate::server::row_set::sample_rings(&mut *crate::server::row_set::rings(), &rows, t);
+    crate::server::row_set::sample_rings(
+        &mut *crate::server::row_set::rings(),
+        &rows,
+        t + std::time::Duration::from_secs(1),
+    );
+    assert_eq!(
+        core.activity_of(&counted).as_deref(),
+        Some(&[(10u8, 2u8)][..]),
+        "the first sample lands and the 1s re-sample is gated out"
+    );
+    crate::server::row_set::sample_rings(
+        &mut *crate::server::row_set::rings(),
+        &rows,
+        t + std::time::Duration::from_secs(6),
+    );
+    assert_eq!(
+        core.activity_of(&counted).as_deref(),
+        Some(&[(10u8, 2u8), (0u8, 0u8)][..]),
+        "unchanged counts read an idle interval"
+    );
+    // Samples past the gate with growing counts: the ninth cell pushes the
+    // oldest out, and eight remain.
+    for k in 3..=9 {
+        let mut grown = counted.clone();
+        grown.tool_counts = Some((10 + k, 2 + k));
+        let rows = vec![grown, RegistryAgent::default()];
+        crate::server::row_set::sample_rings(
+            &mut *crate::server::row_set::rings(),
+            &rows,
+            t + std::time::Duration::from_secs(k * 6),
+        );
+    }
+    assert_eq!(
+        core.activity_of(&counted).as_deref().map(<[(u8, u8)]>::len),
+        Some(8),
+        "the ring caps at eight"
+    );
+    assert!(core.activity_of(&uncounted).is_none());
 }

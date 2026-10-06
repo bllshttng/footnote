@@ -3708,10 +3708,9 @@ class MuxBlock(BaseModel):
     # attach (and the Rust reader parses it as u64, silently rejecting negatives
     # to the default), so pin the floor at 1 minute here.
     attach_digest_threshold_min: int = Field(default=10, ge=1)
-    # Focus-follows-mouse over coding panes: hovering a pane makes it the
-    # keyboard focus after a short settle. Read straight from settings.yaml by the
-    # interactive Rust client (same split-brain as attach_digest); modeled here so
-    # the off-switch is discoverable via `fno config get/set`.
+    # Focus-follows-mouse over coding panes: a hover makes the pane the keyboard
+    # focus after a short settle; read by the Rust client like `hover_focus`'s
+    # off-switch door, `fno config get/set`.
     hover_focus: bool = True
     # Show the mux status row; the Rust client reads it from config.toml, like `hover_focus`.
     status_row: bool = True
@@ -3728,6 +3727,8 @@ class MuxBlock(BaseModel):
     theme: Optional[str] = None
     # While a theme is active, paint the terminal's own palette from it (OSC 11/10/4); restore on exit.
     paint_background: bool = True
+    # The card's graph slot: activity ramp (default) or the context fill bar.
+    card_graph: Literal["activity", "context"] = "activity"
 
     @field_validator("shell_integration", mode="before")
     @classmethod

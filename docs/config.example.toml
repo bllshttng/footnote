@@ -697,6 +697,8 @@ load_readout = "simple"
 # theme = <unset>   # optional; no default
 # While a footnote theme is active, paint the terminal's own background, foreground and 16-color palette from the theme (OSC 11/10/4) and restore them on exit (default on).
 paint_background = true
+# What the sideline card's graph slot plots: activity (default) draws the tool-activity ramp colored ok/warn/error per interval, context draws the context percent's fill bar, steady for the whole session. Latched at mux client start.
+card_graph = "activity"
 
 [mux.restore]
 # Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).

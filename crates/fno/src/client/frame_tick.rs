@@ -58,7 +58,7 @@ impl View {
                 .skip(self.sideline_offset())
                 .take(self.sideline_visible_rows())
                 .any(|r| {
-                    matches!(r, DisplayRow::CardMetrics(a) if card_line::has_loading(a, crate::digest_overlay::now_secs()))
+                    matches!(r, DisplayRow::CardMetrics(a) if card_line::has_loading(a, self.card_graph, crate::digest_overlay::now_secs()))
                 })
     }
 }
