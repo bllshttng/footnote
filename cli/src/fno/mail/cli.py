@@ -3439,14 +3439,6 @@ def cmd_send(
         None, "--style-exception",
         help="Bypass the style check for this body with a stated reason.",
     ),
-    subject: str | None = typer.Option(
-        None, "--subject",
-        help=(
-            "One-line subject; renders as the delivered header's third field "
-            "and on the bus row, the Messages tab and the feed. Without it the "
-            "header shows the body's first sentence."
-        ),
-    ),
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
@@ -3456,6 +3448,13 @@ def cmd_send(
     Address it by the ADDRESS column of ``fno agents list`` - the NAME
     column is a spawn label, not a mailbox. A stranded send:
     ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
+
+    The subject flag lives on the Rust front: ``fno agents mail send ...
+    --subject "<one line>"`` is peeled there, validated, and handed over as
+    ``FNO_MAIL_SUBJECT``, which this verb reads. Direct wheel callers set
+    the env themselves. The subject renders as the delivered header's third
+    field and on the bus row, the Messages tab and the feed; without it the
+    header shows the body's first sentence.
 
     Stdout: one JSON receipt line, ``{msg_id, subject, to, status}``, where
     ``status`` carries the verdict (``delivered (hosted)``,
@@ -3473,18 +3472,19 @@ def cmd_send(
 
     refuse_retired_provider(_provider_tombstone)
 
-    # A subject is one header line on every reader surface; the renderer
-    # refuses backticks, separators and newlines, and the length cap here
-    # keeps a pasted file from riding every recipient's header.
-    if subject is not None:
-        subject = subject.strip() or None
-        if subject is not None and len(subject) > 200:
-            print(
-                f"error: --subject is {len(subject)} characters (cap 200); "
-                "put the detail in the body",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
+    # The subject arrives via FNO_MAIL_SUBJECT (the Rust front peels the
+    # --subject argv there). One header line on every reader surface; the
+    # renderer refuses backticks, separators and newlines, and this cap
+    # keeps a pasted file from riding every recipient's header on the
+    # direct-wheel path the front's 80-character validation misses.
+    subject = (os.environ.get("FNO_MAIL_SUBJECT") or "").strip() or None
+    if subject is not None and len(subject) > 200:
+        print(
+            f"error: FNO_MAIL_SUBJECT is {len(subject)} characters (cap 200); "
+            "put the detail in the body",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
 
     # --body/--body-file bind in EVERY mode, not only --kind. One resolution
     # here; each mode below falls back to its own positional slots.
@@ -3641,8 +3641,8 @@ def cmd_send(
             raise typer.Exit(code=2)
         if subject is not None:
             print(
-                "error: --raw strips the envelope, so --subject has nothing to "
-                "ride; drop one of the two",
+                "error: --raw strips the envelope, so a subject (FNO_MAIL_SUBJECT) "
+                "has nothing to ride; drop one of the two",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)

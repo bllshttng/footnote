@@ -1,9 +1,10 @@
-"""mail send --subject and the JSON receipt.
+"""mail send's subject and the JSON receipt.
 
 The send receipt is one JSON line {msg_id, subject, to, status} on every
-lane; --subject rides the wire envelope (the delivered header's third
-field), the durable bus row, and the receipt. The team shim relays
---subject/--expires/--urgent as flag+value pairs.
+lane. The subject flag lives on the Rust front, which peels it off the
+argv and hands it over as FNO_MAIL_SUBJECT; this verb reads that env, and
+the subject rides the wire envelope (the delivered header's third field),
+the durable bus row, and the receipt.
 """
 
 from __future__ import annotations
@@ -49,15 +50,16 @@ def _invoke(isolated, runner: CliRunner, *args: str):
     return runner.invoke(mail_app, ["send", *args])
 
 
-def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner) -> None:
+def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner, monkeypatch) -> None:
     from fno.bus.log import iter_messages
     from fno.inbox.store import read_unread_threads
 
+    monkeypatch.setenv("FNO_MAIL_SUBJECT", "schema freeze Friday")
     result = _invoke(
         isolated,
         runner,
         "--to-project", "acme-docs", "--kind", "heads-up",
-        "--from-name", "acme-web", "--subject", "schema freeze Friday",
+        "--from-name", "acme-web",
         "locked schema change, impact is a migration",
     )
     assert result.exit_code == 0, result.output
@@ -72,7 +74,8 @@ def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner) -> N
     threads = read_unread_threads("acme-docs")
     assert len(threads) == 1
 
-    # No --subject: the receipt's subject reads null.
+    # No env, no subject: the receipt's subject reads null.
+    monkeypatch.delenv("FNO_MAIL_SUBJECT")
     plain = _invoke(
         isolated,
         runner,
@@ -83,9 +86,10 @@ def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner) -> N
     assert json.loads(plain.output.strip().splitlines()[0])["subject"] is None
 
     # --raw strips the envelope, so a subject has nothing to ride.
-    refused = _invoke(isolated, runner, "peer", "hi", "--raw", "--subject", "s")
+    monkeypatch.setenv("FNO_MAIL_SUBJECT", "s")
+    refused = _invoke(isolated, runner, "peer", "hi", "--raw")
     assert refused.exit_code == 2, refused.output
-    assert "--subject" in refused.output
+    assert "FNO_MAIL_SUBJECT" in refused.output
 
     # The bus row serializes with the subject and parses it back; a row from
     # before the field existed parses None and re-serializes without it.
