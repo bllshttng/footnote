@@ -205,6 +205,10 @@ _ENVIRONMENT: tuple[str, ...] = (
     "XDG_STATE_HOME",  # pinned into the sandbox below
     "XDG_CACHE_HOME",  # a cache, preserved at its real value
     "CARGO_HOME",  # ditto
+    # Ditto: the darwin pin in _CACHE_DEFAULTS resolves sccache at its
+    # sandbox default, so a test child's server never shares the operator's
+    # developer cache.
+    "SCCACHE_DIR",
     "UV_CACHE_DIR",  # ditto: resolved at its real value by the cache pins
     # The venv path an uv sync would write. A developer's value would
     # redirect a test's install into their own checkout; the spawn-door

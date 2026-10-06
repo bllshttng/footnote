@@ -165,6 +165,16 @@ esac
 
 if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}"
+    # The fleet cache lives under the build-dir base so one reclaim lane owns
+    # the whole tree. The rc export and fill_sccache_env set it first; this
+    # default only covers shells that predate them.
+    if [[ -z "${SCCACHE_DIR:-}" ]]; then
+        base="${FNO_CARGO_TARGETS_BASE:-$STATE_DIR/cargo-build}"
+        case "$base" in
+            "~"*) base="$HOME${base:1}" ;;
+        esac
+        export SCCACHE_DIR="$base/sccache"
+    fi
     # sccache hashes every CARGO_* var but rustc never reads these three,
     # and fno doctor test sets a new build dir per run, which would split
     # the cache key per worktree.
