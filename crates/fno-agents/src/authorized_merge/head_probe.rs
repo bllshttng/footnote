@@ -45,24 +45,20 @@ pub(super) fn receipt(payload: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn stalled_head_read_is_bounded_and_malformed_heads_are_refused() {
         assert!(parse_pr_facts(&json!({"pr": 7})).is_err());
         assert!(parse_pr_facts(&json!({"error": "gh api failed"})).is_err());
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("fno");
-        std::fs::write(&bin, "#!/bin/sh\n[ \"$*\" = 'do pr info 7' ] || exit 1\nprintf '%s' '{\"pr\":7,\"head_sha\":\"old-head\"}'\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = crate::write_exec_stub(dir.path(), "fno", "#!/bin/sh\n[ \"$*\" = 'do pr info 7' ] || exit 1\nprintf '%s' '{\"pr\":7,\"head_sha\":\"old-head\"}'\n");
         assert_eq!(
             read_with(bin.as_os_str(), dir.path(), Some(7), Duration::from_secs(2))
                 .unwrap()
                 .head_sha,
             "old-head"
         );
-        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = crate::write_exec_stub(dir.path(), "fno", "#!/bin/sh\n/bin/sleep 30\n");
         let start = std::time::Instant::now();
         let error = read_with(
             bin.as_os_str(),
