@@ -702,10 +702,9 @@ fn dry_run_argv(contract: &HarnessContract, harness: &str) -> Result<Vec<String>
 }
 
 /// The wait-for-CI journey's per-harness answer, read from the watch lease's
-/// own rule: only a claude session may park and wake on a watcher. The same
-/// reader admits a harness the lease permits (the journey's control) and
-/// reads every other harness absent with the refusal quoted - the refusal is
-/// code that already runs, not a table word.
+/// own rule: a harness the lease admits may park, and the daemon's settle and
+/// expiry arms wake it. Every other harness reads absent with the refusal
+/// quoted - the refusal is code that already runs, not a table word.
 pub fn wait_for_ci_cell(harness: &str) -> (&'static str, String) {
     let author = if harness.is_empty() {
         None

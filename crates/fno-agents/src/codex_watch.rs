@@ -3,8 +3,9 @@
 //! registers the watch (the idle event IS the registration), and this arm
 //! polls the PR cheaply - the coalescing status cache, no model turns - and
 //! wakes the owning session on CI settle through that harness's own lane:
-//! codex keeps the `turn/start` socket inject (the x-184a waker), every other
-//! harness rides the mail lane whose durable queue is the routability floor.
+//! codex keeps the `turn/start` socket inject the codex waker introduced,
+//! every other harness rides the mail lane whose durable queue is the
+//! routability floor.
 //! Leads and workers are the same consumer: the eligibility rule is claim
 //! ownership, never role. Inject failure retries next tick; the claim-lease
 //! expiry respawns the node as the terminal backstop. The declared-timeout
@@ -21,8 +22,8 @@
 //! - every other blocker: no early wake; the expiry arm owns the timeout
 //!   wake (already harness-neutral).
 //!
-//! The file keeps its x-184a `codex_watch` name; the arm it houses is the
-//! settle arm for every parkable harness.
+//! The file keeps the `codex_watch` name it was born with; the arm it houses
+//! is the settle arm for every parkable harness.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -323,15 +324,15 @@ fn millis_now() -> i64 {
 
 /// The settle delivery through one session's harness lane. Codex keeps the
 /// turn/start socket inject; every other harness rides the mail lane (live
-/// inject first, durable queue as the floor). A durable queue is terminal:
-/// the message lands at the session's next turn, and a receipt here keeps
-/// the retry from double-sending.
+/// inject first, the durable queue carried home by the resume fallback).
+/// Any accepted outcome means the message reaches the session, and the
+/// receipt keeps the retry from double-sending.
 fn deliver_settle(watch: &SettleWatch, text: &str) -> Delivered {
     if watch.harness == "codex" {
-        let thread = watch
-            .codex_thread_id
-            .as_deref()
-            .unwrap_or(&watch.watch.session_id);
+        let thread = match watch.codex_thread_id.as_deref() {
+            Some(thread) => thread,
+            None => return Err("codex watch lost its thread id".into()),
+        };
         return match crate::codex_inject::deliver_via_codex_daemon_sync(thread, text) {
             Ok(()) => Ok(("codex_daemon", true)),
             // The wire send succeeded and only the response was lost, so
@@ -353,7 +354,6 @@ fn deliver_settle(watch: &SettleWatch, text: &str) -> Delivered {
     );
     match (delivered, via) {
         (true, via) => Ok((via, true)),
-        (false, "durable") => Ok(("durable", false)),
         (false, via) => Err(format!("mail lane refused the settle wake via {via}")),
     }
 }
