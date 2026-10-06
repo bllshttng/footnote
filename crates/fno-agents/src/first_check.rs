@@ -161,6 +161,10 @@ fn transfer_birth_claim(row: &RegistryEntry, born_at: i64) -> Result<(), String>
         |sid| format!("target-session:{sid}"),
     );
     let opts = AcquireOpts {
+        metadata: Some(serde_json::Map::from_iter([(
+            "worktree".into(),
+            row.cwd.clone().into(),
+        )])),
         pid: row.pid,
         pid_unavailable: sid.is_none()
             || row.pid.is_none()
@@ -237,10 +241,27 @@ pub(crate) fn take_parent_claim(
     else {
         return Ok(None);
     };
+    if holder
+        .strip_prefix("spawn-handover:")
+        .is_some_and(|name| !name.is_empty())
+        && lead_can_delegate(existing, Some(&sid), Some(&harness))
+    {
+        let mut parent_opts = opts.clone();
+        parent_opts.identity = Some((sid, harness));
+        return transfer(
+            &claims::claim_path(key, opts.root.as_deref())?,
+            parent,
+            holder,
+            &parent_opts,
+            None,
+        );
+    }
     if holder != format!("target-session:{sid}") {
         return Ok(None);
     }
-    let home = AgentsHome::from_env();
+    let Some(home) = AgentsHome::from_env_opt() else {
+        return Ok(None);
+    };
     let registry = state::load_registry(&home.registry_json()).map_err(|e| e.to_string())?;
     let Some(row) = registry.find_by_session(&harness, &sid) else {
         return Ok(None);
@@ -260,6 +281,31 @@ pub(crate) fn take_parent_claim(
         &child_opts,
         None,
     )
+}
+
+pub(crate) fn lead_can_delegate(
+    record: &ClaimRecord,
+    session: Option<&str>,
+    harness: Option<&str>,
+) -> bool {
+    let (Some(session), Some(harness)) = (session, harness) else {
+        return false;
+    };
+    if !record.key.starts_with("node:")
+        || record.session_id.as_deref() != Some(session)
+        || record.holder.starts_with("spawn-handover:")
+    {
+        return false;
+    }
+    let Some(home) = AgentsHome::from_env_opt() else {
+        return false;
+    };
+    let Ok(registry) = state::load_registry(&home.registry_json()) else {
+        return false;
+    };
+    registry
+        .find_by_session(harness, session)
+        .is_some_and(|row| row.crown_level.is_some() && row.status.is_drive_eligible())
 }
 
 pub(crate) fn run_pass(
@@ -357,16 +403,22 @@ pub(crate) fn run_pass(
             Ok(())
         })();
         if let Err(error) = result {
-            first_error.get_or_insert(error);
+            first_error.get_or_insert_with(|| format!("{}: {error}", path.display()));
         }
     }
     first_error.map_or(Ok(()), Err)
 }
 
 fn transcript(row: &RegistryEntry) -> Option<std::path::PathBuf> {
-    row.harness_session_id.as_ref().and_then(|sid| {
-        crate::context_run::SessionTranscripts::default().find(sid, row.harness_name())
-    })
+    row.transcript_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            row.harness_session_id.as_ref().and_then(|sid| {
+                crate::context_run::SessionTranscripts::default().find(sid, row.harness_name())
+            })
+        })
+        .or_else(|| row.log_path.as_ref().map(std::path::PathBuf::from))
 }
 
 fn transcript_activity(path: &Path, offset: u64) -> bool {
@@ -500,6 +552,27 @@ mod tests {
             claims::AcquireOutcome::Acquired(_)
         ));
         state::update_registry(&home.registry_json(), |r| r.entries.push(row.clone())).unwrap();
+        let mut lead = RegistryEntry::new(Some(parent.into()), Lineage::unproven("operator lead"));
+        lead.name = "lead".into();
+        lead.harness = Some("claude".into());
+        lead.status = crate::AgentStatus::Busy;
+        lead.crown_level = Some(1);
+        lead.crown_scope = Some("first-check-node".into());
+        state::update_registry(&home.registry_json(), |r| r.entries.push(lead)).unwrap();
+        assert!(
+            matches!(
+                claims::acquire(key, "spawn-handover:worker", opts.clone()),
+                claims::AcquireOutcome::Acquired(_)
+            ),
+            "the spawning lead can delegate its own claim before launch"
+        );
+        assert!(
+            matches!(
+                claims::acquire(key, "spawn-handover:another-worker", opts.clone()),
+                claims::AcquireOutcome::HeldByOther { .. }
+            ),
+            "a pending launch cannot be delegated twice"
+        );
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         emitter.emit("agent_spawned", &json!({"name": row.name, "spawned_by_session": parent, "harness_session_id": child, "cwd": row.cwd})).unwrap();
         let (_, claim) = claims::status(key, None);
