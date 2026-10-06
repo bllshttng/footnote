@@ -272,20 +272,40 @@ def _make_codex_bind_probe(
     return _probe
 
 
-def stamp_late_bind(name, session_id, child_pid, mux, registry_path=None) -> bool:
+def codex_backfill_stamp_applies(
+    row, name, session_id, child_pid, pid_start_time, mux
+) -> bool:
+    """The compare-and-set guards reconcile's backfill and the spawn-time
+    late-bind stamp share: only this pane's codex row, id-less and
+    non-terminal. The caller owns the duplicate-id check.
+    """
+    return (
+        row.name == name
+        and row.harness == "codex"
+        and row.pid == child_pid
+        and row.pid_start_time == pid_start_time
+        and row.mux == mux
+        and not row.harness_session_id
+        and row.status not in TERMINAL_STATUSES
+    )
+
+
+def stamp_late_bind(
+    name, session_id, child_pid, pid_start_time, mux, registry_path=None
+) -> bool:
     """Stamp a post-window codex bind onto the pane's id-less row; True on success.
 
-    Compare-and-set as reconcile's backfill: only this pane's codex row, id-less
-    and non-terminal, never an id another row holds. A raced miss leaves the row
-    `spawning` for the next reconcile to heal.
+    Compare-and-set as reconcile's backfill (same guard helper); never an id
+    another row holds. A raced miss leaves the row `spawning` for the next
+    reconcile to heal.
     """
     def apply(rows):
         dup = any(r.name != name and r.harness_session_id == session_id for r in rows)
         return [
             replace(r, harness_session_id=session_id, status="live")
-            if (not dup and r.name == name and r.harness == "codex"
-                and r.pid == child_pid and r.mux == mux and not r.harness_session_id
-                and r.status not in TERMINAL_STATUSES)
+            if (not dup and codex_backfill_stamp_applies(
+                r, name, session_id, child_pid, pid_start_time, mux
+            ))
             else r
             for r in rows
         ]

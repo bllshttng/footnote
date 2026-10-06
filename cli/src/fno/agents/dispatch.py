@@ -3965,6 +3965,7 @@ def reconcile_agents(
     # the false-orphan storm is the worst kind of silent failure — it
     # rewrites the registry on insufficient evidence).
     from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.codex_pane import codex_backfill_stamp_applies
 
     # Tri-state per-codex-side capability: True (readable + present),
     # False (file missing — fresh install), None (file present but
@@ -4592,17 +4593,11 @@ def reconcile_agents(
                         and other.harness_session_id == hsid
                         for other in current_entries
                     )
-                    # ONE guard, branch inside. These were two near-identical eight
-                    # conjunct conditions differing only in `duplicate`; a term added
-                    # to one and not the other would silently drop the update and
-                    # report it as a race.
-                    if (
-                        e.harness == "codex"
-                        and e.pid == expected_pid
-                        and e.pid_start_time == expected_start
-                        and e.mux == probed_mux
-                        and not e.harness_session_id
-                        and e.status not in _TERMINAL_AGENT_STATUSES
+                    # ONE guard, branch inside; the conjuncts are the shared
+                    # codex_pane.codex_backfill_stamp_applies helper the spawn-time
+                    # late-bind stamp uses, so the two stampers cannot drift.
+                    if codex_backfill_stamp_applies(
+                        e, e.name, hsid, expected_pid, expected_start, probed_mux
                     ):
                         if duplicate:
                             updates["status"] = "spawning"
