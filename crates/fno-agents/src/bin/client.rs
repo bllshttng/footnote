@@ -856,7 +856,7 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `lead-state`/`lead-shape`: the lead reader and the shape rewrite (see
     // lead_state.rs doc). Direct dispatch, daemon-free reads; the Python
-    // `fno agents lead shape` shell and escalate's client invoke the binary
+    // `fno agents org shape` shell and escalate's client invoke the binary
     // directly rather than routing through the agents verb set.
     if matches!(verb, "lead-state" | "reign-state") {
         return fno_agents::lead_state::run_lead_state(&args[1..]);
@@ -890,7 +890,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `lead-history`: the team-scope lead_checkin readback for
-    // `fno agents lead history`. Daemon-free read, `==` dispatch like
+    // `fno agents org history`. Daemon-free read, `==` dispatch like
     // org-fold: Python resolves the caller's team scope and pins the
     // journal path (identity and paths are Python-owned), the native side
     // owns the scan so the file-budget Python-tree ratchet holds.
@@ -905,7 +905,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `lead-checkin`: one verb runs the lead check-in body for
-    // `fno agents lead checkin`. Daemon-free beat like lead-history: Python
+    // `fno agents org checkin`. Daemon-free beat like lead-history: Python
     // resolves the caller's team scope and Python-owned paths, the native
     // side gathers, prints, diffs and journals the row, reusing the org-fold
     // fold and the lead-history scan in process.
@@ -920,7 +920,7 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "evals-macro" {
         return fno_agents::evals_macro::run_evals_macro(&args[1..]);
     }
-    // `lead-rundown`: the lead ledger page for `fno agents lead ledger`.
+    // `lead-rundown`: the lead ledger page for `fno agents king ledger`.
     // Same split as lead-history: Python resolves the org and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
     // in the org JSON, so the page cannot disagree with the org.

@@ -3,7 +3,7 @@
 #
 # Table test for the release version math: sync-version.sh's pre-release
 # shapes and release-version.sh's channel/tag rules (nightly dev stamp,
-# weekly-cadence rc patch bumps, stable promoting the newest candidate).
+# daily-cadence rcN bumps, stable promoting the newest candidate).
 # Both run against a throwaway skeleton under mktemp -d; the real checkout
 # is only read. Needs git on PATH.
 set -uo pipefail
@@ -153,17 +153,23 @@ check_rc "stable with no v*rc* tag exits 1" "$rc" "1"
 grep -q "cut an rc first" "$work/e"
 check "stable refusal names the missing candidate" $?
 
-# Weekly-cadence rc math: a fresh candidate base, never rc2..rcN on one base.
-# The newest candidate's base is past src, so the patch bumps (0.4.1rc1).
+# Daily-cadence rc math: candidates bump rcN on one base; the base only
+# moves when main's src passes it.
 git -C "$rv" tag v0.4.0rc1
 run "$work/o" "$work/e" rver rc 0.4.0 20260925
 rc=$?
 check_rc "rc exits 0" "$rc" "0"
-grep -q '^version=0.4.1rc1$' "$work/o" && grep -q '^tag=v0.4.1rc1$' "$work/o"
-check "rc after v0.4.0rc1 prints version=0.4.1rc1 and tag=v0.4.1rc1" $?
+grep -q '^version=0.4.0rc2$' "$work/o" && grep -q '^tag=v0.4.0rc2$' "$work/o"
+check "rc after v0.4.0rc1 prints version=0.4.0rc2 and tag=v0.4.0rc2" $?
 
-# A released v<src> refuses nightly only. rc keeps cutting: the patch bump
-# puts every weekly candidate past the released base.
+# rcN sorts numerically: rc10 ranks past rc9, so the next bump is rc11.
+git -C "$rv" tag v0.4.0rc9
+git -C "$rv" tag v0.4.0rc10
+run "$work/o" "$work/e" rver rc 0.4.0 20260925
+grep -q '^tag=v0.4.0rc11$' "$work/o"
+check "rc after v0.4.0rc10 prints v0.4.0rc11" $?
+
+# A released v<src> refuses nightly only; rcN keeps cutting past it.
 git -C "$rv" tag v0.4.0
 run "$work/o" "$work/e" rver nightly 0.4.0 20260925
 rc=$?
@@ -173,21 +179,21 @@ check "refusal names the sync-version bump" $?
 run "$work/o" "$work/e" rver rc 0.4.0 20260925
 rc=$?
 check_rc "rc at a released v0.4.0 exits 0" "$rc" "0"
-grep -q '^tag=v0.4.1rc1$' "$work/o"
-check "rc still prints v0.4.1rc1 past the released base" $?
+grep -q '^tag=v0.4.0rc11$' "$work/o"
+check "rc still prints v0.4.0rc11 past the released base" $?
 
 # Stable promotes the newest candidate; its base is released -> idempotent 3.
 run "$work/o" "$work/e" rver stable 0.4.0 20260925
 rc=$?
 check_rc "stable with a released base exits 3 (idempotent no-op)" "$rc" "3"
 
-# Weekly monotonic: the newest candidate base (0.4.1) drives the next bump.
+# Daily monotonic: the newest candidate (0.4.1rc1) drives the next rcN.
 git -C "$rv" tag v0.4.1rc1
 run "$work/o" "$work/e" rver rc 0.4.0 20260925
 rc=$?
-check_rc "weekly rc exits 0" "$rc" "0"
-grep -q '^version=0.4.2rc1$' "$work/o" && grep -q '^tag=v0.4.2rc1$' "$work/o"
-check "weekly rc after v0.4.1rc1 prints v0.4.2rc1" $?
+check_rc "daily rc exits 0" "$rc" "0"
+grep -q '^version=0.4.1rc2$' "$work/o" && grep -q '^tag=v0.4.1rc2$' "$work/o"
+check "daily rc after v0.4.1rc1 prints v0.4.1rc2" $?
 
 # Main synced past the candidates: src wins again.
 run "$work/o" "$work/e" rver rc 0.4.5 20260925
@@ -196,15 +202,9 @@ check_rc "rc with src past the newest candidate exits 0" "$rc" "0"
 grep -q '^version=0.4.5rc1$' "$work/o"
 check "rc with src 0.4.5 prints v0.4.5rc1" $?
 
-# Stable derives from the newest candidate, not src: v0.4.1rc1 promotes as
-# v0.4.1 even though src says 0.4.0 (the old math refused here forever).
-run "$work/o" "$work/e" rver stable 0.4.0 20260925
-rc=$?
-check_rc "stable promote of v0.4.1rc1 exits 0" "$rc" "0"
-grep -q '^version=0.4.1$' "$work/o" && grep -q '^tag=v0.4.1$' "$work/o"
-check "stable promote prints version=0.4.1 and tag=v0.4.1" $?
-
-# The newest candidate wins by version, not src.
+# Stable derives from the newest candidate, not src, and rcN tags promote
+# by base: v0.6.0rc1 wins over every 0.4.x candidate even though src says
+# 0.4.0 (the old math refused here forever).
 git -C "$rv" tag v0.6.0rc1
 run "$work/o" "$work/e" rver stable 0.4.0 20260925
 rc=$?

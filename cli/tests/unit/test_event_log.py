@@ -302,7 +302,7 @@ def test_newer_store_schema_is_refused(tmp_path: Path, operation: str) -> None:
         "CREATE TABLE events (line TEXT, type TEXT, session_id TEXT, ts_ms INTEGER, "
         "reject_reason TEXT, retention_class TEXT)"
     )
-    conn.execute(f"PRAGMA user_version = {store_client.STORE_SCHEMA_VERSION + 1}")
+    conn.execute("PRAGMA user_version = 99")
     conn.commit()
     conn.close()
 

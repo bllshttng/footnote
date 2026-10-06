@@ -70,14 +70,7 @@ fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
 }
 
 fn open_paths(path: PathBuf, directory: PathBuf) -> Result<Connection, String> {
-    crate::live_store_fence::refuse_worktree_build_on_operator_store(&path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
-    connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-        .map_err(|error| error.to_string())?;
+    let mut connection = crate::store_conn::open_write(&path)?;
     connection
         .execute_batch(DDL)
         .map_err(|error| error.to_string())?;

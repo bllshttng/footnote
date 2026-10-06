@@ -93,6 +93,42 @@ pub(crate) fn without_coverage_statuses(rollup: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Conclusions that prove a check genuinely failed: the settled fail states
+/// minus the take-aways. A CANCELLED row classifies fail upstream but never
+/// settled, so the infra-kill shape needs its own list here.
+const REAL_FAIL_STATES: [&str; 5] = [
+    "FAILURE",
+    "TIMED_OUT",
+    "STARTUP_FAILURE",
+    "ACTION_REQUIRED",
+    "ERROR",
+];
+
+/// True when every non-green row is a CANCELLED take-away: no real failure,
+/// nothing still running. That is the infra-kill signature - a platform that
+/// takes runners away reds nothing and finishes nothing - and the gate that
+/// decides the payload carries GitHub's incident word. Empty rollups and
+/// in-progress rows read false: the shape must be settled-and-taken-away.
+pub(crate) fn cancelled_only(rollup: &[Value]) -> bool {
+    let deduped = crate::check_supersession::latest_per_name(&Value::Array(rollup.to_vec()));
+    let deduped = deduped.as_array().cloned().unwrap_or_default();
+    let mut cancelled = 0;
+    for check in &deduped {
+        let raw = alt_conclusion(check);
+        if raw == "CANCELLED" {
+            cancelled += 1;
+            continue;
+        }
+        if !has_settled_marker(check) {
+            return false;
+        }
+        if REAL_FAIL_STATES.contains(&raw.as_str()) {
+            return false;
+        }
+    }
+    cancelled > 0
+}
+
 /// The pure verdict: (word, exit code, counts). Empty rollup reads unknown
 /// and so does an all-StatusContext one - zero real check-runs never reads
 /// green (docs/architecture/pr-status-verdict.md).
@@ -1063,6 +1099,23 @@ pub(crate) fn status_payload<P: GhProbe>(
         }]);
     }
 
+    // The infra-kill receipt: only a cancelled-only take-away spends the
+    // status-page read, and an unreachable page leaves the field out.
+    let platform_incident = if !is_terminal {
+        let rollup = pr_json
+            .get("statusCheckRollup")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if cancelled_only(&without_coverage_statuses(&rollup)) {
+            seams::platform_incident()
+        } else {
+            Value::Null
+        }
+    } else {
+        Value::Null
+    };
+
     let inputs = compose::ComposeInputs {
         pr: pr.to_string(),
         pr_json,
@@ -1082,6 +1135,7 @@ pub(crate) fn status_payload<P: GhProbe>(
         },
         failures,
         review_lane: lane,
+        platform_incident,
     };
     compose::compose_payload(&inputs)
 }

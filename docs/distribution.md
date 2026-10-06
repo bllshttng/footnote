@@ -123,17 +123,19 @@ support.)
 
 ## Release channels (the runbook)
 
-Three channels ship through `release.yml`. The nightly is automatic. An rc or a stable release costs exactly one approval click in the `release` environment. The publish secrets live there: `PYPI_API_TOKEN`, `CARGO_REGISTRY_TOKEN`, and `HOMEBREW_TAP_TOKEN`. Autonomy ends at the click.
+Three channels ship through `release.yml`. The nightly is automatic, and each green nightly also opens the day's rc candidate. An rc or a stable release costs exactly one approval click in the `release` environment. The publish secrets live there: `PYPI_API_TOKEN`, `CARGO_REGISTRY_TOKEN`, and `HOMEBREW_TAP_TOKEN`. Autonomy ends at the click.
 
 ### Nightly (automatic)
 
 - The schedule fires daily. To run it now: `gh workflow run release.yml -f channel=nightly`. The workflow picks the newest default-branch commit whose `rust-ci` push run is green. Its newest ancestor `cli-ci` push run must also be green. The run then replaces the rolling GitHub pre-release named `nightly`. Version: `0.4.0.devYYYYMMDD`. No `v*` tag and no commit on main.
+- Each scheduled nightly publish also dispatches the day's rc candidate at the same commit (below). A day where the nightly skips (nothing new since the last nightly) opens no candidate.
 - Install: `FNO_INSTALL_WHEEL=<wheel asset url> sh fno.sh`. The release notes print the per-platform lines. Tomorrow's nightly replaces it. An install run from inside a nightly tree reads the tree's channel and installs the same wheel unprompted. Run standalone, `fno.sh` stays stable-channel.
 
-### Release candidate (one click)
+### Release candidate (one click a day)
 
-1. Promote: `gh workflow run release.yml -f channel=rc`. Add `-f sha=<commit>` to promote a specific commit instead of the nightly tag.
-2. The run builds, then parks on the `release` approval. Judge it before you click: main green, no open p0, a few days of your own use of the nightly. One click, and the approved job uploads `0.4.0rcN` to PyPI and creates the `v0.4.0rcN` tag and pre-release. crates.io is stable-only. A plain `pip install` skips rc versions. `FNO_VERSION=0.4.0rcN sh fno.sh` pins one.
+1. The candidate opens itself. The nightly publish dispatches `channel=rc` at the same green commit. That run builds and parks on the `release` approval. To open one by hand, run `gh workflow run release.yml -f channel=rc` for the newest green main commit. Add `-f sha=<commit>` for a specific one.
+2. Judge it before you click: main green, no open p0, a day of your own use of the nightly. One click, and the approved job uploads `0.4.0rcN` to PyPI and creates the `v0.4.0rcN` tag and pre-release. Candidates on the same base bump `rcN` (`0.4.0rc1`, `0.4.0rc2`, ...). After a stable promotion syncs main past the base, the next candidate opens on the new base. crates.io is stable-only. A plain `pip install` skips rc versions. `FNO_VERSION=0.4.0rcN sh fno.sh` pins one.
+3. When a candidate sits unclicked for more than a day, the workflow opens one reminder issue naming the waiting run. It closes itself once a candidate ships. A waiting candidate never stacks: the next candidate parks and the stale pending run is cancelled. The click always holds the newest commit.
 
 ### Stable (one click)
 
