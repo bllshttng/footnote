@@ -80,31 +80,30 @@ pub struct Routed {
 mod tests {
     use super::*;
 
+    /// One table over the classifier: fno's pseudo schemes route before the
+    /// web fallback, a malformed pseudo URI never reads as a file (it dies in
+    /// `is_openable` as a web URL), and plain URLs route web.
     #[test]
-    fn pseudo_schemes_route_before_the_web_fallback() {
-        assert_eq!(
-            route("fno-message:fmail-0123456789ab"),
-            Route::Message("fmail-0123456789ab".into())
-        );
-        assert_eq!(
-            route("fno-sender:fmail-0123456789ab"),
-            Route::Sender("fmail-0123456789ab".into())
-        );
-        assert_eq!(
-            route("fno-file:/tmp/notes.md:42"),
-            Route::File(PathBuf::from("/tmp/notes.md"), Some(42))
-        );
-    }
-
-    #[test]
-    fn malformed_pseudo_schemes_fall_through_to_web() {
-        assert_eq!(route("fno-file:relative/path.md"), Route::Web);
-        assert_eq!(route("fno-file:/has space.md"), Route::Web);
-        assert_eq!(route("fno-file:"), Route::Web);
-    }
-
-    #[test]
-    fn plain_urls_route_web() {
-        assert_eq!(route("https://example.com/a"), Route::Web);
+    fn route_classification_table() {
+        for (url, want) in [
+            (
+                "fno-message:fmail-0123456789ab",
+                Route::Message("fmail-0123456789ab".into()),
+            ),
+            (
+                "fno-sender:fmail-0123456789ab",
+                Route::Sender("fmail-0123456789ab".into()),
+            ),
+            (
+                "fno-file:/tmp/notes.md:42",
+                Route::File(PathBuf::from("/tmp/notes.md"), Some(42)),
+            ),
+            ("fno-file:relative/path.md", Route::Web),
+            ("fno-file:/has space.md", Route::Web),
+            ("fno-file:", Route::Web),
+            ("https://example.com/a", Route::Web),
+        ] {
+            assert_eq!(route(url), want, "{url}");
+        }
     }
 }

@@ -961,14 +961,12 @@ mod path_tests {
     use super::*;
 
     /// A candidate resolves iff a listed ABSOLUTE path equals the probe's
-    /// input. Tests list what "exists" and feed candidates accordingly.
+    /// input, normalized like canonicalize (no symlinks here).
     fn fake_probe(entries: &[&str]) -> impl Fn(&Path) -> Option<PathBuf> {
         let owned: Vec<String> = entries.iter().map(|s| s.to_string()).collect();
         move |p: &Path| {
-            // Lexically normalize like canonicalize does (no symlinks here):
-            // resolve `.` and `..`, drop empty segments, keep a leading `/`.
-            let mut parts: Vec<&str> = Vec::new();
             let lossy = p.to_string_lossy().to_string();
+            let mut parts: Vec<&str> = Vec::new();
             for seg in lossy.split('/') {
                 match seg {
                     "" | "." => {}
@@ -986,84 +984,66 @@ mod path_tests {
         }
     }
 
-    fn hits(text: &str, cwd: &Path, probe: impl Fn(&Path) -> Option<PathBuf>) -> Vec<String> {
+    fn hits(text: &str, cwd: &Path, probe: &impl Fn(&Path) -> Option<PathBuf>) -> Vec<String> {
         find_paths_with(text, cwd, Some(Path::new("/Users/jn")), probe)
             .into_iter()
             .map(|l| l.uri)
             .collect()
     }
 
+    /// One table over the detection seam. Each row is an independent
+    /// contract: cwd resolution with the line tail kept, prose rejection
+    /// (no separator, probe miss), the ./ join with its comma given back,
+    /// tilde against HOME, absolute pass-through, and the punct tail.
     #[test]
-    fn finds_a_relative_path_that_exists() {
-        let probe = fake_probe(&["/w/crates/fno/src/link.rs"]);
-        assert_eq!(
-            hits(
+    fn path_detection_table() {
+        let probe = fake_probe(&[
+            "/w/crates/fno/src/link.rs",
+            "/w/README.md",
+            "/Users/jn/code/AGENTS.md",
+            "/w/a/b.md",
+        ]);
+        let cases: Vec<(&str, &str, Option<&str>)> = vec![
+            (
                 "see crates/fno/src/link.rs:42 there",
-                Path::new("/w"),
-                probe
+                "/w",
+                Some("fno-file:/w/crates/fno/src/link.rs:42"),
             ),
-            vec!["fno-file:/w/crates/fno/src/link.rs:42"]
-        );
-    }
-
-    #[test]
-    fn prose_never_resolves() {
-        // No separator: "foo.md" is a word, not a path.
-        assert!(hits("see foo.md and bar", Path::new("/w"), fake_probe(&[])).is_empty());
-        // A separator but no file on disk.
-        assert!(hits("see docs/missing.md here", Path::new("/w"), fake_probe(&[])).is_empty());
-        // Wrapping comma given back; ./README.md joins the cwd.
-        assert_eq!(
-            hits(
+            ("see foo.md and bar", "/w", None),
+            ("see docs/missing.md here", "/w", None),
+            (
                 "read ./README.md, then go",
-                Path::new("/w"),
-                fake_probe(&["/w/README.md"])
+                "/w",
+                Some("fno-file:/w/README.md"),
             ),
-            vec!["fno-file:/w/README.md"]
-        );
-    }
-
-    #[test]
-    fn tilde_expands_against_home() {
-        let probe = fake_probe(&["/Users/jn/code/AGENTS.md"]);
-        assert_eq!(
-            hits("check ~/code/AGENTS.md out", Path::new("/w"), probe),
-            vec!["fno-file:/Users/jn/code/AGENTS.md"]
-        );
-    }
-
-    #[test]
-    fn absolute_path_resolves_as_itself() {
-        let probe = fake_probe(&["/w/README.md"]);
-        assert_eq!(
-            hits("at /w/README.md end", Path::new("/w"), probe),
-            vec!["fno-file:/w/README.md"]
-        );
-    }
-
-    #[test]
-    fn trailing_punctuation_is_given_back() {
-        // Sentence punctuation and a wrapping closer never enter the span;
-        // the line tail survives a trailing period.
-        let probe = fake_probe(&["/w/a/b.md"]);
-        assert_eq!(
-            hits("open a/b.md:7, please", Path::new("/w"), probe),
-            vec!["fno-file:/w/a/b.md:7"]
-        );
-    }
-
-    #[test]
-    fn is_file_uri_gates_junk() {
-        assert!(is_file_uri("fno-file:/abs/ok.md"));
-        assert!(is_file_uri("fno-file:/abs/ok.md:7"));
-        assert!(!is_file_uri("fno-file:relative.md"));
-        assert!(!is_file_uri("fno-file:/has space.md"));
-        assert!(!is_file_uri("fno-file:"));
-        assert!(!is_file_uri("https://example.com"));
-    }
-
-    #[test]
-    fn file_uri_parts_round_trips_line_and_path() {
+            (
+                "check ~/code/AGENTS.md out",
+                "/w",
+                Some("fno-file:/Users/jn/code/AGENTS.md"),
+            ),
+            ("at /w/README.md end", "/w", Some("fno-file:/w/README.md")),
+            ("open a/b.md:7, please", "/w", Some("fno-file:/w/a/b.md:7")),
+        ];
+        for (text, cwd, want) in cases {
+            assert_eq!(
+                hits(text, Path::new(cwd), &probe),
+                want.map(|s| vec![s.to_string()]).unwrap_or_default(),
+                "{text}"
+            );
+        }
+        // The URI gate is the pane-sourced trust boundary: absolute, no
+        // whitespace. The parser round trips path + line, including a literal
+        // colon-path whose digit tail is not the line.
+        for (uri, ok) in [
+            ("fno-file:/abs/ok.md", true),
+            ("fno-file:/abs/ok.md:7", true),
+            ("fno-file:relative.md", false),
+            ("fno-file:/has space.md", false),
+            ("fno-file:", false),
+            ("https://example.com", false),
+        ] {
+            assert_eq!(is_file_uri(uri), ok, "{uri}");
+        }
         let (p, l) = file_uri_parts("fno-file:/w/a.md:42").expect("parses");
         assert_eq!(p, PathBuf::from("/w/a.md"));
         assert_eq!(l, Some(42));
@@ -1071,7 +1051,6 @@ mod path_tests {
             file_uri_parts("fno-file:/w/a.md"),
             Some((PathBuf::from("/w/a.md"), None))
         );
-        // A literal colon-path keeps its non-digit tail as path.
         assert_eq!(
             file_uri_parts("fno-file:/w/a.md:9:9"),
             Some((PathBuf::from("/w/a.md:9"), Some(9)))

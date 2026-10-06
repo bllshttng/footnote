@@ -2013,7 +2013,7 @@ mod tests {
     }
 
     #[test]
-    fn path_span_in_a_pane_line() {
+    fn path_span_resolves_only_existing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("slash.md");
         std::fs::write(&file, b"hi").expect("write");
@@ -2026,17 +2026,14 @@ mod tests {
             .expect("absolute path resolves");
         assert_eq!(span.uri, format!("fno-file:{}", canon.display()));
         assert!(!span.cells.is_empty());
-        // A relative candidate with a separator resolves against the pane cwd.
+        // A relative candidate with a separator resolves against the pane cwd;
+        // a separator with no file behind it resolves no span at all.
         let mut pane = Pane::new(4, 60);
         pane.feed(b"see ./slash.md hard");
         let span = pane
             .link_span(0, 5, cwd.as_str())
             .expect("relative path resolves");
         assert_eq!(span.uri, format!("fno-file:{}", canon.display()));
-    }
-
-    #[test]
-    fn missing_path_resolves_no_span() {
         let mut pane = Pane::new(4, 60);
         pane.feed(b"see docs/gone.md hard");
         assert!(pane.link_span(0, 6, "/nonexistent").is_none());
