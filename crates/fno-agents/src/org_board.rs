@@ -3472,7 +3472,11 @@ mod tests {
 
         let start = std::time::Instant::now();
         let payload = read_board(&BoardOpts {
-            budget_ms: 2_000,
+            // The budget must survive the pre-truth sources on a loaded
+            // runner (measured: 2,000ms expired before the batch spawned and
+            // the queues read spent, never timed out), so the batch is the
+            // thing the budget kills, at its deadline-derived bound.
+            budget_ms: 8_000,
             cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
@@ -3507,8 +3511,8 @@ mod tests {
         // reserve, and the holder must read unmeasured by the receipt word,
         // never no-evidence.
         assert!(
-            elapsed < std::time::Duration::from_millis(2_750),
-            "board took {elapsed:?} against a 2,000ms budget with a 30s truth stub"
+            elapsed < std::time::Duration::from_millis(8_750),
+            "board took {elapsed:?} against an 8,000ms budget with a 30s truth stub"
         );
         let err = payload["sources"]["holder_activity"]["error"]
             .as_str()
