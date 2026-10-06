@@ -70,7 +70,7 @@ Inspect tables with `SELECT * FROM <table> NOT INDEXED` to distinguish damaged i
 
 Readers refuse corruption. They never repair, replace, or silently rebuild a live store. A copy proof does not authorize installation of a repaired store or deployment of a worktree build.
 
-Writers and importers run `quick_check(1)` before schema, WAL, or event writes. A failed check refuses the write and appends a pin to the existing questions journal beside the store family. The check scans the store on every write open. Both native crates bundle SQLite 3.53.2 through rusqlite 0.40.2. SQLite documents the [WAL-reset race and its fix](https://sqlite.org/wal.html#walreset) in 3.51.3 and later. A vulnerable engine and WAL mode establish exposure; they do not prove the historical race occurred.
+Writers and importers run `quick_check(1)` before schema, WAL, or event writes. A failed check refuses the write and appends a pin to the existing questions journal beside the store family. The check scans the store on every write open. Both native crates bundle SQLite 3.53.2 through rusqlite 0.40.2. SQLite documents the [WAL-reset race and its fix](https://sqlite.org/wal.html#walreset) in 3.51.3 and later. A vulnerable engine and WAL mode establish exposure. They do not prove the historical race occurred.
 
 Use the native copy verb on a quiescent offline database with its matching `-wal` sibling. The output directory must not exist. Both paths must stay outside the operator state root.
 
