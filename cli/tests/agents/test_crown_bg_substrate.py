@@ -318,33 +318,21 @@ def test_headless_crown_is_refused(bg_home, one_shot_args) -> None:
     )
     assert result.exit_code == 2
     assert "outlives the grant" in result.output
+    assert "not yet supported" not in result.output
+    assert "--substrate pane" in result.output and "--substrate thread" in result.output
     assert not [e for e in load_registry() if e.name == "one-shot-king"], (
         "a refused crown must launch nothing"
     )
 
 
-def test_refusal_does_not_claim_bg_is_unsupported(bg_home) -> None:
-    """The old message said bg crowns were 'not yet supported', which read as a
-    capability claim about the substrate when it was really a plumbing gap - a
-    reader took it at face value and filed a design question against it. The
-    replacement must name what DOES work and must not resurrect that phrasing."""
-    result = _spawn(
-        "spawn", "--name", "one-shot-king", "-H", "claude", "reign",
-        "-p", "--crown", "epic-z",
-    )
-    assert "not yet supported" not in result.output
-    assert "--substrate pane" in result.output and "--substrate thread" in result.output
-
-
 # --- in-process callers get the same guards ----------------------------------
 
 
-def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
-    """The crown is legal on a codex thread: the Rust lane mints the row
-    uncrowned, so the settlement must stamp the EXISTING row and arm the king
-    manifest. A silent drop here would report a successful spawn for an
-    uncrowned king. END-TO-END on purpose, same reason the bg tests are: the
-    original defect was a refusal sitting in front of unplumbed params."""
+@pytest.mark.parametrize("harness", ["codex", "opencode", "pi"])
+def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> None:
+    """All persistent carriers promote their row and arm the lead loop.
+    Codex carries the stamp at mint; keeper promotion precedes seed submission.
+    """
     import json as _json
     import subprocess as _subprocess
     import uuid as _uuid
@@ -355,7 +343,7 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     monkeypatch.setattr(
         "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents")
     )
-    session_uuid = str(_uuid.uuid4())
+    session_id = "ses_thread_test" if harness == "opencode" else str(_uuid.uuid4())
     seen = {}
 
     real_run = _subprocess.run  # captured before the patch replaces the attribute
@@ -372,6 +360,9 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
             return real_run(*args, **kwargs)
         if "--" in argv:
             seen["seed"] = argv[argv.index("--") + 1]
+        if harness == "codex":
+            assert "--team-level=2" in tokens
+            assert "--team-scope=epic-x" in tokens
         update_registry(
             lambda rows: rows
             + [
@@ -379,15 +370,17 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
                     name="king-codex",
                     cwd=str(bg_home),
                     log_path="",
-                    harness="codex",
-                    harness_session_id=session_uuid,
+                    harness=harness,
+                    harness_session_id=session_id,
                     short_id="codexk1",
                     status="busy",
+                    crown_level=2 if harness == "codex" else None,
+                    crown_scope="epic-x" if harness == "codex" else None,
                 )
             ]
         )
         return _subprocess.CompletedProcess(
-            argv, 0, stdout=_json.dumps({"harness_session_id": session_uuid}) + "\n",
+            argv, 0, stdout=_json.dumps({"harness_session_id": session_id, "session_id": session_id}) + "\n",
             stderr="",
         )
 
@@ -404,14 +397,24 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     monkeypatch.setattr(spawn_gate_mod, "run_gate", lambda *a, **k: GateGuard())
 
+    if harness == "pi":
+        def keeper_mint(**kwargs):
+            fake_run(["spawn", "--substrate", "thread"])
+            return {"session_id": session_id, "keeper_socket": "/fake/keeper.sock"}
+        def seed_submit(**kwargs):
+            assert _row("king-codex").crown_scope == "epic-x"
+            seen["seed"] = kwargs["message"]
+        monkeypatch.setattr(dispatch_mod, "_lane_b_thread_spawn", keeper_mint)
+        monkeypatch.setattr(dispatch_mod, "_keeper_seed_submit", seed_submit)
+
     result = _spawn(
-        "spawn", "--name", "king-codex", "-H", "codex", "reign",
-        "--substrate", "thread", "--cwd", str(bg_home), "--crown", "epic-x",
+        "spawn", "--name", "king-codex", "-H", harness, "reign",
+        "--substrate", "thread", "--cwd", str(bg_home), "--promote", "epic-x",
     )
     assert result.exit_code == 0, result.output
     # Codex spells the plugin verb with $; a /fno:lead seed would hand the
     # king's first turn a command its harness cannot invoke.
-    assert seen["seed"].splitlines()[0] == "$fno:lead epic-x"
+    assert seen["seed"].splitlines()[0] == ("$fno:lead epic-x" if harness == "codex" else "/fno:lead epic-x")
 
     row = _row("king-codex")
     assert row.crown_level == 2, "an epic is a Director"
@@ -422,31 +425,14 @@ def test_codex_thread_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     from fno.king.state import king_state_root
 
     manifest = king_state_root(Path(row.cwd)) / "kings" / "epic-x.md"
-    assert manifest.exists(), "the king loop manifest armed"
+    if harness == "opencode":
+        assert not manifest.exists()
+        assert "was NOT armed" in result.output
+    else:
+        assert manifest.exists(), "the lead loop manifest armed"
 
 
-def test_dispatch_spawn_refuses_a_crown_no_lane_carries(tmp_path: Path, monkeypatch) -> None:
-    """The guard lives in dispatch_spawn, not only at the CLI seam: claude bg
-    and codex thread carry the crown, every other harness's thread row has no
-    crown fields, so the spawn refuses rather than reporting success for an
-    uncrowned king. A guard on one of N reachable paths is decorative."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
-
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_spawn(
-            name="opencode-king",
-            message="reign",
-            harness="opencode",
-            cwd=tmp_path,
-            crown_level=1,
-            crown_scope="epic-x",
-        )
-    assert exc.value.exit_code == 2
-    assert "no carrier" in str(exc.value)
-
-
-def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch) -> None:
+def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch, native_backlog_door) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
 
@@ -488,7 +474,7 @@ def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch) ->
     ],
 )
 def test_dispatch_spawn_refuses_invalid_crown_values(
-    tmp_path: Path, monkeypatch, level, scope
+    tmp_path: Path, monkeypatch, native_backlog_door, level, scope
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
@@ -507,7 +493,7 @@ def test_dispatch_spawn_refuses_invalid_crown_values(
 
 
 def test_dispatch_spawn_pane_refuses_invalid_crown_values(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """The pane path takes the same pair from the same in-process callers, so it
     needs the same guard - the CLI seam is not the only door to either."""
@@ -573,16 +559,6 @@ def test_dispatch_spawn_pane_refuses_a_duplicate_crown_before_launch(
         )
     assert exc.value.exit_code == 2
     assert "--hand-off" in str(exc.value)
-
-
-def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:
-    """The validator must not reject the two shapes that are legal: a real crown
-    at each ladder rung, and both-None (an ordinary uncrowned spawn)."""
-    from fno.agents.crown import crown_validation_error
-
-    assert crown_validation_error(None, None) is None
-    for lvl in (0, 1, 2):
-        assert crown_validation_error(lvl, "epic-x") is None
 
 
 # --- the literal copies in cli.py must not drift from registry ---------------

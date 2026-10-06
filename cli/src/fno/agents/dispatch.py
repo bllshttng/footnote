@@ -1557,9 +1557,10 @@ def _claude_create_path(
 
     # A crowned spawn TYPES the reign verb as the payload's first line, so the
     # king's first turn is the skill itself, not a hand-improvised ritual.
-    from fno.agents.crown_thread import reign_typed_message
+    from fno.agents.team_thread import lead_typed_message
 
-    message, reign_typed = reign_typed_message(message, crown_level, crown_scope, revive)
+    message, reign_typed = (lead_typed_message(message, crown_level, crown_scope, revive)
+                            if crown_level is not None else (message, False))
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -2435,11 +2436,9 @@ def dispatch_spawn(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
-    # Crown eligibility, checked HERE rather than only at the CLI seam: only
-    # the lanes below that name a crown carrier stamp the fields; every other
-    # route would drop the crown while reporting success. Fail closed before
-    # anything is created, so a refusal launches nothing.
-    crown_problem = crown_validation_error(crown_level, crown_scope)
+    # In-process callers bypass the CLI parser. Validate requested stamps
+    # before any carrier launches; an ordinary worker has no stamp to validate.
+    crown_problem = crown_validation_error(crown_level, crown_scope) if crown_level is not None or crown_scope is not None else None
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
     # Bound for every path, not just the crowned one: the create call below
@@ -2452,12 +2451,6 @@ def dispatch_spawn(
             raise DispatchAskError(
                 "--promote needs a session that outlives the grant; a one-shot "
                 "exits after one answer. Use the pane or bg substrate.",
-                exit_code=2,
-            )
-        if harness not in ("claude", "codex"):
-            raise DispatchAskError(
-                f"--promote on the thread substrate has no carrier on the {harness!r} "
-                f"thread row yet. Use --substrate pane, which maps every harness.",
                 exit_code=2,
             )
 
@@ -2498,6 +2491,15 @@ def dispatch_spawn(
             exit_code=2,
         )
 
+    from fno.agents.team_thread import plan_thread_promotion, settle_thread_promotion
+
+    promotion = None
+    if crown_level is not None and harness != "claude":
+        promotion = plan_thread_promotion(
+            message, crown_level, crown_scope, succession, harness, parent_edge,
+            revive=bool(resume_session_id))
+        message = promotion["message"]
+
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
     # The spawn front door already demoted every flag the thread lane cannot
@@ -2511,16 +2513,6 @@ def dispatch_spawn(
                 "silently spawning a fresh session.",
                 exit_code=2,
             )
-        ask: Optional[dict] = None
-        if crown_level is not None:
-            from fno.agents.crown_thread import plan_codex_thread_crown
-
-            # Plan before launch (fail closed) and type the reign verb; the
-            # settle runs over the lane's row once the receipt names it.
-            ask = plan_codex_thread_crown(
-                message, crown_level, crown_scope, succession, harness, parent_edge
-            )
-            message = ask["message"]
         session_id = _codex_thread_spawn(
             name=name,
             message=message,
@@ -2535,11 +2527,10 @@ def dispatch_spawn(
             passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
+            team_level=crown_level, team_scope=crown_scope,
         )
-        if ask is not None:
-            from fno.agents.crown_thread import settle_codex_thread_crown
-
-            settle_codex_thread_crown(ask, name=name, cwd=cwd, session_id=session_id)
+        if promotion is not None:
+            settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=session_id)
         _emit_ev(
             "agent_ask_done",
             stage="dispatch",
@@ -2573,6 +2564,7 @@ def dispatch_spawn(
             "deny_tools": deny_tools, "permission_mode": permission_mode,
             "resume_session_id": resume_session_id,
             "passthrough": list(passthrough) if passthrough else None,
+            "promotion": promotion,
         },
         lock_timeout=lock_timeout,
     )
@@ -2629,7 +2621,7 @@ def dispatch_spawn(
                     exit_code=2,
                 )
 
-            if crown_level is not None:
+            if crown_level is not None and harness == "claude":
                 # Refuses BEFORE launch - nothing exists as a result of an
                 # authority error. caller_row is read once and its name
                 # threaded to the write as crown_caller_name, so the receipt
@@ -2933,6 +2925,8 @@ def dispatch_spawn(
                         name=name, message=message, cwd=cwd,
                         from_name=from_name, model=model, node=node, effort=effort,
                     )
+                    if promotion is not None:
+                        settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=short_id)
                     _emit_ev(
                         "agent_ask_done",
                         stage="dispatch",

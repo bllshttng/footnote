@@ -146,6 +146,8 @@ def _codex_thread_spawn(
     passthrough: Optional[list[str]] = None,
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
+    team_level: Optional[int] = None,
+    team_scope: Optional[str] = None,
 ) -> str:
     """Delegate a Codex thread spawn to the Rust daemon lane.
 
@@ -185,6 +187,8 @@ def _codex_thread_spawn(
         "--cwd",
         str(cwd),
     ]
+    if team_level is not None:
+        argv += [f"--team-level={team_level}", f"--team-scope={team_scope}"]
     if from_name:
         argv += [f"--from-name={from_name}"]
     if model:

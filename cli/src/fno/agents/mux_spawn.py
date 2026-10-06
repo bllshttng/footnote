@@ -3338,7 +3338,7 @@ def dispatch_spawn_pane(
     # in-process caller hands (level, scope) straight to this signature, and a
     # value that skipped validation is written to the SHARED registry. Fail
     # closed before the pane exists, so a refusal leaves no worker behind.
-    crown_problem = crown_validation_error(crown_level, crown_scope)
+    crown_problem = crown_validation_error(crown_level, crown_scope) if crown_level is not None or crown_scope is not None else None
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
     crown_plan: Optional[dict] = None

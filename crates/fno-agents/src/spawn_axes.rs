@@ -830,17 +830,17 @@ pub fn insert_crown_flag(
     params: &mut serde_json::Map<String, Value>,
 ) -> Result<(), String> {
     match flag {
-        "--crown" => {
-            let raw = args.next().ok_or("--crown needs a value")?;
+        "--crown" | "--team-level" => {
+            let raw = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
             let level = raw
                 .parse::<u32>()
                 .ok()
                 .filter(|l| *l <= 2)
-                .ok_or("--crown takes an integer level 0-2")?;
+                .ok_or_else(|| format!("{flag} takes an integer level 0-2"))?;
             params.insert("crown_level".into(), Value::from(level));
         }
-        "--crown-scope" => {
-            let scope = args.next().ok_or("--crown-scope needs a value")?;
+        "--crown-scope" | "--team-scope" => {
+            let scope = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
             params.insert("crown_scope".into(), Value::from(scope));
         }
         other => return Err(format!("unknown crown flag: {other}")),
