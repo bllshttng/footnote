@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn wakes_one_minute_past_the_beat_and_names_the_rungs() {
+    fn plan_wakes_reads_the_line_rungs_and_dedupe() {
         let teams = vec![
             team("fno", 1, "vellum", "s-head"),
             team("x-aaa", 2, "candor", "s-l2a"),
@@ -438,10 +438,12 @@ mod tests {
             vec!["candor", "finch"],
             "both project L2s are one rung down"
         );
+        plan_wakes_sections_two();
     }
 
-    #[test]
-    fn skips_no_baseline_recent_wake_and_fresh_leads() {
+    // The fold side of the same planning contract: no baseline is skipped,
+    // a lead woken inside one beat waits, and a fresh lead never plans.
+    fn plan_wakes_sections_two() {
         let teams = vec![
             team("fno", 1, "vellum", "s-head"),
             team("x-aaa", 2, "candor", "s-l2a"),
