@@ -585,6 +585,20 @@ agents feed	T1	agents feed	13
 agents harness probe	T1	agents harness probe	0
 agents king shape	T1	agents king shape	5
 agents king term	T1	agents king term	7
+agents org cancel	T1	agents org cancel	6	
+agents org checkin	T1	agents org checkin	14	
+agents org done	T1	agents org done	10	
+agents org drain	T1	agents org drain	2	
+agents org escalate	T1	agents org escalate	2	
+agents org faq add	T1	agents org faq add	4	
+agents org faq list	T1	agents org faq list	0	
+agents org history	T1	agents org history	8	
+agents org init	T1	agents org init	6	
+agents org ledger	T1	agents org ledger	0	
+agents org manifest-path	T1	agents org manifest-path	0	
+agents org shape	T1	agents org shape	6	
+agents org term	T1	agents org term	6	
+agents org verdict	T1	agents org verdict	3	
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
 backlog version	T1	backlog version	19	

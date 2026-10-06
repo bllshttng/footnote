@@ -661,9 +661,7 @@ fn transcript_tokens(sid: &str, harness: &str) -> Option<Value> {
 /// reads as null, never an error exit: this modal informs, it never blocks.
 fn ledger_cost(sid: &str) -> Option<f64> {
     let db = crate::state_layout::place(&crate::backlog::settings::state_dir()?, "graph.db");
-    let conn =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
+    let conn = crate::store_conn::open_read(&db).ok()?;
     conn.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
     conn.query_row(
         "SELECT COALESCE(SUM(cost_usd), 0.0) FROM node_costs WHERE session_id = ?1",

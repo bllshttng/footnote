@@ -293,7 +293,9 @@ def test_map_covers_current_surface_once():
     # The duplicate-guard create allocates `pr create` plus its `do pr
     # create` spelling, the thin forwarder beside pr push/rebase/heal
     # (hidden, per the forwarder convention): 596 -> 598.
-    assert len(mapped) == 598, (
+    # The org alias mount allocates the king app's fourteen leaves under the
+    # canonical spelling both fronts accept: 598 -> 612.
+    assert len(mapped) == 612, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

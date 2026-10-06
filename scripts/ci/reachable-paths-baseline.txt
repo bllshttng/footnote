@@ -228,7 +228,6 @@ A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/s
 A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crates/fno-agents/src/provider.rs	# CLASSIFY protocol|msg-twin|data
 A	schema_version=2 requires pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	scripts/ci/check-oos-tracked.sh	py=cli/src/fno/plan/fidelity.py;rs=crates/fno-agents/src/pr_body_check.rs	# CLASSIFY protocol|msg-twin|data
-A	select line from events order by seq	py=cli/src/fno/events/store_client.py;rs=crates/fno-agents/src/event_store.rs|crates/fno/src/event_store.rs	# CLASSIFY protocol|msg-twin|data
 A	select seq, payload from outbox order by seq	py=cli/src/fno/approvals/store.py;rs=crates/fno-agents/src/effect_gate.rs	# CLASSIFY protocol|msg-twin|data
 A	selector_entries_scanned	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/next.rs	# CLASSIFY protocol|msg-twin|data
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data

@@ -71,3 +71,7 @@ fno mux block annotate|fno mux block annotate still shells note --blocking (inte
 # teach them.
 --crown|--promote <scope>, the titled-role grant|the people-word rename
 --succeed|--hand-off, the succession transfer|the people-word rename
+
+# The crown-role group is org on both fronts; the pre-rename spelling is what
+# the beat callers kept emitting after the rename, one refused reader per beat.
+fno agents lead|fno agents org (the canonical group on both fronts)|the lead-to-org rename
