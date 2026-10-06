@@ -55,7 +55,16 @@ pub(crate) fn read_closed_rung_facts(
 
 pub(crate) fn statuses_of(store: &crate::backlog::api::Store) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if let Ok(rows) = crate::backlog::api::rows(store) {
+    if let Ok(rows) = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            fields: Some(["id", "status"].into_iter().map(str::to_string).collect()),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    {
         for row in rows {
             if let (Some(id), Some(status)) = (
                 row.get("id").and_then(serde_json::Value::as_str),

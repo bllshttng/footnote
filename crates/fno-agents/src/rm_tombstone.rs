@@ -30,6 +30,32 @@ pub(crate) fn path(home: &AgentsHome) -> PathBuf {
     home.root().join(FILENAME)
 }
 
+/// One flock-protected JSON-array sidecar write: read (or seed an empty
+/// array), hand the rows to `f`, then atomic-rename so a concurrent reader
+/// never sees a torn write. The shared write protocol behind this file's
+/// tombstone and the wake-name tombstone beside it.
+pub(crate) fn update_json_array(
+    file: &Path,
+    f: impl FnOnce(Vec<Value>) -> Vec<Value>,
+) -> Result<(), String> {
+    let _lock = crate::state::acquire_exclusive(&crate::state::lock_path(file))
+        .map_err(|e| e.to_string())?;
+    let mut entries: Vec<Value> = match std::fs::read_to_string(file) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| Vec::new()),
+        Err(_) => Vec::new(),
+    };
+    entries = f(entries);
+    // Atomic rename so the Python reader never sees a torn write; the pid
+    // suffix keeps a crashed writer's leftover from colliding with this one.
+    let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(
+        &tmp,
+        serde_json::to_string(&entries).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, file).map_err(|e| e.to_string())
+}
+
 /// Stamp one removed session. Best-effort: the caller decides whether a
 /// failure is an event or a refusal; rm never refuses a completed removal
 /// because the tombstone write failed.
@@ -67,39 +93,23 @@ pub(crate) fn record_at(
     if session_id.trim().is_empty() {
         return Ok(());
     }
-    let file = path(home);
-    // One flock over the whole read-modify-write: two concurrent rms must
-    // not lose each other's stamp, and the stable sidecar keeps the rename
-    // from invalidating the lock (the registry writer's own pattern).
-    let _lock = crate::state::acquire_exclusive(&crate::state::lock_path(&file))
-        .map_err(|e| e.to_string())?;
-    let mut entries: Vec<Value> = match std::fs::read_to_string(&file) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| Vec::new()),
-        Err(_) => Vec::new(),
-    };
-    entries.retain(|row| {
-        row.get("removed_at")
-            .and_then(Value::as_i64)
-            .is_some_and(|at| now.saturating_sub(at) <= GRACE_SECS)
-    });
-    entries.push(json!({
-        "harness": harness,
-        "session_id": session_id,
-        "short": short,
-        "name": name,
-        "cwd": cwd,
-        "host_mode": host_mode,
-        "removed_at": now,
-    }));
-    // Atomic rename so the Python reader never sees a torn write; the pid
-    // suffix keeps a crashed writer's leftover from colliding with this one.
-    let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(
-        &tmp,
-        serde_json::to_string(&entries).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+    update_json_array(&path(home), |mut entries| {
+        entries.retain(|row| {
+            row.get("removed_at")
+                .and_then(Value::as_i64)
+                .is_some_and(|at| now.saturating_sub(at) <= GRACE_SECS)
+        });
+        entries.push(json!({
+            "harness": harness,
+            "session_id": session_id,
+            "short": short,
+            "name": name,
+            "cwd": cwd,
+            "host_mode": host_mode,
+            "removed_at": now,
+        }));
+        entries
+    })
 }
 
 /// A removed session a stop resolved from the tombstone: every field the

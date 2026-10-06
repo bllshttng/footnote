@@ -47,7 +47,7 @@ def _stub_pane_path(monkeypatch, *, rec=None, brief=("the brief", "explicit")):
 
     node_id = (rec or {}).get("id")
     if rec is not None:
-        monkeypatch.setattr("fno.graph.load.load_graph", lambda: [rec])
+        monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [rec], "missing": []})
     if brief is not None:
         monkeypatch.setattr(
             "fno.provenance.autobrief.resolve_dispatch_brief", lambda n: brief
@@ -118,8 +118,8 @@ def test_typed_message_without_a_node_is_never_consulted(monkeypatch, runner):
         rec=dict(_ENCODED),
     )
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda: (_ for _ in ()).throw(AssertionError("node must not be read")),
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: (_ for _ in ()).throw(AssertionError("node must not be read")),
     )
     result = _invoke(runner, "--session-phase", "do", "say hi directly", "--here", "--substrate", "pane")
     assert result.exit_code == 0, result.output
@@ -214,7 +214,7 @@ def test_ensure_refusal_holds_the_node(monkeypatch, runner):
 
 def test_typed_here_skips_the_ensure(monkeypatch, runner, loop_admission_ready):
     """AC1-EDGE (--here): the caller opted in; the ensure is never consulted."""
-    received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
+    _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
     def boom(verb, payload, unavailable_cls, **kw):
         if verb == "launch-workdir":
@@ -263,7 +263,7 @@ def _row(**fields):
 
 
 def _stub_row(monkeypatch, row):
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [row] if row else [])
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row] if row else [], "missing": []})
 
 
 def _stub_verb(monkeypatch, answer=None, *, unavailable=None):
@@ -329,10 +329,10 @@ def test_seam_skips_without_an_explicit_node_flag(monkeypatch):
     derive call); a prose seed reads none, so the argv is untouched."""
     monkeypatch.setenv("FNO_NODE", "x-1")
 
-    def boom_graph():
+    def boom_graph(*args):
         raise AssertionError("graph must not be read")
 
-    monkeypatch.setattr("fno.graph.load.load_graph", boom_graph)
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", boom_graph)
     seen = _stub_verb(monkeypatch, {"action": "pass", "derive_reason": "prose seed names no verb"})
     from fno.agents.rust_runtime import _node_seed_at_seam
 
@@ -557,7 +557,7 @@ def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
     passes through unchanged (agreement, so no compose rewrite)."""
     from fno.agents import mux_spawn, spawn_gate
 
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [_target_row])
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [_target_row], "missing": []})
 
     class _Gate:
         def release(self) -> None:

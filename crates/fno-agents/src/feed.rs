@@ -1655,7 +1655,39 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         } else if !crate::backlog::database_path(&path).exists() {
             (Vec::new(), Some("graph store skipped (absent)".to_string()))
         } else {
-            match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
+            match crate::graph_store::read_rows_where(
+                &path,
+                &crate::backlog::RowQuery {
+                    fields: Some(
+                        [
+                            "id",
+                            "title",
+                            "parent",
+                            "cwd",
+                            "sessions",
+                            "created_at",
+                            "completed_at",
+                            "status",
+                            "merge_status",
+                            "pr_number",
+                            "pr_url",
+                            "source_session_id",
+                            "source_harness",
+                            "source_model",
+                            "source_effort",
+                            "source_parent_session",
+                            "source_team",
+                        ]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    ),
+                    with_blockers: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+            {
                 Ok(list) => (list, None),
                 Err(e) => (Vec::new(), Some(format!("graph store skipped ({})", e.0))),
             }

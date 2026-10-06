@@ -332,7 +332,20 @@ pub fn classify(runs: &Value, workflow: &str, contains: &dyn Fn(&str) -> Option<
 fn read_node(node_id: &str, cwd: &Path) -> Option<Value> {
     let graph_path = crate::org_board::scope::graph_json_path(cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
-    let rows = crate::backlog::api::rows(&store).ok()?;
+    let rows = crate::graph_store::read_rows_where(
+        &store.graph,
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![node_id.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map(|rows| crate::backlog::api::rows_in(&rows))
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .ok()?;
     crate::graph_get::find_entry(&rows, node_id).cloned()
 }
 

@@ -108,6 +108,8 @@ fi
 } >> .fno/pr-body.md
 ```
 
+The test-delta output ends with the owner census. A branch that changed production files but neither cut a test declaration nor touched the owner test files prints `Owner tests unaudited: <files>`. That line is an obligation, not an audit. Before the PR opens, run `/fno:test-audit` prune mode over the named owner files. Then land cuts and regenerate the census with a fresh `fno-agents test-delta --base "$BASE"`. Or replace the line with the authored form `Audited owners: <file> (no cut: <why each owner survives the value bar>)`. An `Audited owners:` line already present means the diff itself carries the audit evidence. pr create refuses (exit 5) a code PR whose body has neither a cut nor the line.
+
 `.fno/pr-title.txt` and `.fno/pr-body.md` are the draft of record. Every later step reuses them.
 
 ### 3. Pre-PR Checks
@@ -356,6 +358,9 @@ fno do pr create \
 if [[ $RC -eq 3 ]]; then
   echo "fail: duplicate PR: the refusal above names the twin, its branch and its author; pass --not-duplicate <n> ONLY when you have read the twin and it is genuinely not one" >&2
   exit 1
+elif [[ $RC -eq 5 ]]; then
+  echo "fail: audited-owners gate: the refusal names the owner test files; run /fno:test-audit prune on them, land cuts or the authored Audited owners line in .fno/pr-body.md, then rerun the create" >&2
+  exit 1
 elif [[ $RC -eq 127 ]]; then
   echo "fail: the fno binary predates pr create (exit 127); run fno doctor update --rust, then rerun" >&2
   exit 1
@@ -366,7 +371,7 @@ fi
 
 On body-check exit 1, follow the guard's own fix text and rerun the check. If the guard still refuses, end `RESULT: BLOCKED step=body-check reason=<the guard's fix text> draft=.fno/pr-body.md`. Never open the PR: the CI guards read the PR body field, so no commit can fix a body failure. The session-URL guard also scans commit messages, so a commit hit needs a reword, not a body edit.
 
-On `fno do pr create` exit 3, the PR is NOT created: end `RESULT: BLOCKED step=create reason=duplicate of PR #<n> (<branch> by <author>) draft=.fno/pr-body.md`. Rerun with `--not-duplicate <n>` only after reading the twin and judging it not a duplicate. The verb then proceeds past that PR. On exit 127 the deployed binary predates the guard, which is a repair, not a fallback: end `RESULT: BLOCKED step=create reason=binary predates pr create, run fno doctor update --rust draft=.fno/pr-body.md`. On any other nonzero, gh failed before a PR opened. End `RESULT: BLOCKED step=create reason=<verb's message> draft=.fno/pr-body.md`.
+On `fno do pr create` exit 3, the PR is NOT created: end `RESULT: BLOCKED step=create reason=duplicate of PR #<n> (<branch> by <author>) draft=.fno/pr-body.md`. Rerun with `--not-duplicate <n>` only after reading the twin and judging it not a duplicate. The verb then proceeds past that PR. Exit 5 is the audited-owners gate: run the prune pass the refusal names and rerun. A session that cannot audit ends `RESULT: BLOCKED step=create reason=audited-owners gate refused an unaudited code PR draft=.fno/pr-body.md`. On exit 127 the deployed binary predates the guard, which is a repair, not a fallback: end `RESULT: BLOCKED step=create reason=binary predates pr create, run fno doctor update --rust draft=.fno/pr-body.md`. On any other nonzero, gh failed before a PR opened. End `RESULT: BLOCKED step=create reason=<verb's message> draft=.fno/pr-body.md`.
 
 **Capture PR number** from the verb's output URL (e.g., `/pull/105` → `105`).
 

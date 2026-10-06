@@ -1,6 +1,6 @@
 # graph.db schema (version 4)
 
-`graph.db` is the backlog store. `crates/fno-agents/src/backlog` holds its only DDL and its only write connection, `backlog::open`, which sets `PRAGMA foreign_keys=ON`. Each table has one owning module, listed in `TABLE_OWNERS` (`backlog/mod.rs`). The `table_ownership` test fails on a write to a table outside its owner's file. It also fails on a new `Connection::open` of the graph.db path outside the allowed read-only probes.
+`graph.db` is the backlog store. `crates/fno-agents/src/backlog` holds its DDL. `backlog::open` prepares the schema and sets `PRAGMA foreign_keys=ON`. `store_conn::open_write` and `store_conn::open_read` own the connection calls. Each table has one owning module, listed in `TABLE_OWNERS` (`backlog/mod.rs`). The `table_ownership` test fails on a write to a table outside its owner's file. It also fails on a new `Connection::open` of the graph.db path outside the allowed connection seam and read-only probes.
 
 ## Tables
 
@@ -61,6 +61,26 @@ Both ends of a `relations` row are real nodes. An edge whose far end names no no
 ## Row versions
 
 `nodes.version` and `nodes_raw.version` count the writes of each row. The statement that writes the row (the `nodes` upsert in `nodes::save`, the `nodes_raw` upsert in `nodes::save_raw`) bumps it. When the status pass (`nodes::recompute_status`) moves a status or a defect, it bumps the version too. A writer that began before that roll-up then conflicts. Nothing else writes it. The node JSON never carries it. The keeper's `commit_rows` compares it: see [coordination](coordination.md#commit_rows-compares-per-row-versions).
+
+## Query reads
+
+`backlog::RowQuery` carries a node filter, optional fields, archived-row inclusion, and blocker inclusion. `read_entries_where` pushes id or slug, project, parent, status, and archive filters into SQL before loading node aggregates. The exact matcher runs after defaults and live claim projection. A filter for `in_progress` also considers stored `claimed`, `idea`, and `ready` rows, because their served status can change.
+
+`state_type: "open"` excludes `done`, `deferred`, and `superseded`. It includes ideas and work in review. When Rust readers need board or selection fields, they choose `graph_store::SLIM_FIELDS`. A history or completion reader retains closed rows and names the fields its fold consumes.
+
+Raw rows pass through defaults before the exact matcher. A row that defaults into a valid node participates in typed filters. Malformed objects remain available to whole and by-id reads.
+
+A field projection skips child tables whose data the filter, readiness calculation, and returned fields do not require. Defaults and overlays run before the final projection. A projected reply contains only the requested keys, including after the keeper attaches claim or reading markers. Fields needed for an internal calculation do not expand the reply.
+
+With blocker inclusion, the loader reads the selected nodes' blockers and follows their superseded successors within the readiness hop bound. It calculates readiness against that closure and returns only the selected rows. A caller must not recompute readiness against the returned list alone: a completed blocker can be absent from that list.
+
+The keeper's `read_ids` preserves argument order and exact id-before-slug resolution. It reports unresolved tokens in `missing`. A missing token does not trigger a whole export inside the keeper. When the narrow read is unavailable, the client can use its existing fallback.
+
+Whole reads retain their existing export and archive meaning. Rust whole reads include archived rows. The Python `wire_rows` client excludes them by default. Narrow callers state their archive policy explicitly. Typed pagination preserves the previous whole-export cursor positions through an ordinal-only scan, without adding metadata keys to node replies.
+
+Whole API rows retain stored statuses under archive filtering. Filtered or projected queries can serve active work as `in_progress`.
+
+Strict query reads report an unreadable store as an error. They never answer with an empty set to imply that no node exists. Verify read performance and row parity through the store-exec lane on a database copy. `FNO_STORE_EXEC_LOG` records `wall_us`, returned row count, and reply bytes for each request.
 
 ## Costs and provenance
 

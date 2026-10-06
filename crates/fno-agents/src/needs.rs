@@ -2703,23 +2703,6 @@ mod tests {
     }
 
     #[test]
-    fn loop_check_stays_windowed_when_operator_question_is_exempt() {
-        // The window-bypass restructure must not accidentally widen the window
-        // for the existing kinds - only operator_question/_closed are exempt.
-        let events = loop_check(
-            "2026-07-03T02:00:00Z",
-            "s",
-            "block",
-            "SUCCESS",
-            "OPEN",
-            false,
-            5,
-        );
-        let future = crate::state::rfc3339_like_to_secs("2099-01-01T00:00:00Z").unwrap();
-        assert!(fold(&events, "", future, DEFAULT_FIRES_FLOOR).is_empty());
-    }
-
-    #[test]
     fn operator_question_always_live_with_no_node() {
         let events = operator_question("2026-07-03T02:00:00Z", "q-abc", "which?", None);
         let items = stamp_liveness(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR));

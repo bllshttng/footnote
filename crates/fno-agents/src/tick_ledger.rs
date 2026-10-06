@@ -128,8 +128,8 @@ fn cadence_of(arm: &str) -> u64 {
 pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
         arm: "lead_wake",
-        default_interval_s: 900,
-        scheduler: SCHED_LAUNCHD,
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
         reader: None,

@@ -54,6 +54,59 @@ fail=0
 pass() { printf 'PASS[%s] %s\n' "$1" "$2"; }
 miss() { printf 'FAIL[%s] %s\n' "$1" "$2"; fail=1; }
 run_capture() { OUT="$("$@" 2>&1)"; RC=$?; return "$RC"; }
+# run_capture_bounded MAX_SECONDS cmd...: run_capture with a wall-clock bound.
+# Homebrew's own fetches (update metadata, bottles) have no mid-transfer
+# deadline, so a stalled ghcr.io/PyPI read would sit silent until the job
+# timeout (the same stall the channel matrix's brew row hit twice on
+# 2026-10-06). A bound here turns that stall into an honest rc=124 the check
+# scores as a channel failure. Standalone copy: this script runs alone on a
+# clean runner, like its own run_capture above.
+BOUND_LOG="$(mktemp "${TMPDIR:-/tmp}/fno-brew-bound.XXXXXX")"
+trap 'rm -f "$BOUND_LOG"' EXIT
+run_capture_bounded() {
+  local max="$1" pid waited=0
+  shift
+  : >"$BOUND_LOG"
+  "$@" >"$BOUND_LOG" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$max" ]; then
+      break
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null
+    RC=$?
+    OUT="$(cat "$BOUND_LOG")"
+    return 0
+  fi
+  # The bound fired. TERM the job AND its live children (brew's auto-update
+  # runs git/curl beneath it), grace-wait, then KILL; no step here can block
+  # past the grace bound.
+  pkill -TERM -P "$pid" 2>/dev/null
+  kill -TERM "$pid" 2>/dev/null
+  local grace=0
+  while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+    sleep 1
+    grace=$((grace + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    pkill -KILL -P "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null
+  OUT="exceeded the ${max}s bound; last output: $(tail -3 "$BOUND_LOG" | tr '\n' ' ')"
+  RC=124
+}
+# The bound helper self-checks its two modes: a bounded command keeps its real
+# rc, and an overrun is killed at the bound with rc=124. A silent regression
+# here would mis-score the release-gating install leg.
+run_capture_bounded 5 /usr/bin/false
+[ "$RC" -eq 1 ] || { echo "bounded capture lost the real rc (got $RC, want 1)"; exit 1; }
+run_capture_bounded 1 sleep 9
+[ "$RC" -eq 124 ] || { echo "bounded capture did not fire at the bound (got $RC, want 124)"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # STRUCTURAL tier (always)
@@ -176,7 +229,7 @@ end
 RUBY
 
   # --- check 4: install (no pre-existing fno - guaranteed by the guard above) ---
-  run_capture brew install --build-from-source "$TAP/fno"
+  run_capture_bounded 900 brew install --build-from-source "$TAP/fno"
   if [ "$RC" -eq 0 ]; then
     pass "install" "brew install of the local-wheel formula succeeded (rc=0)"
   else

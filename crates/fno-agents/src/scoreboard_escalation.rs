@@ -84,7 +84,25 @@ pub fn run_escalation_view(since_days: i64, json_out: bool) -> i32 {
                 .and_then(|e| e.as_array().cloned())
         })
         .unwrap_or_default();
-    let entries = match crate::graph_store::read_rows(&fno_dir.join("graph.db")) {
+    let entries = match crate::graph_store::read_rows_where(
+        &fno_dir.join("graph.db"),
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "merge_status",
+                    "merged_at",
+                    "completed_at",
+                    "created_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) {
         Ok(rows) => rows,
         Err(e) => {
             eprintln!("fno-agents: graph store unreadable: {e}");

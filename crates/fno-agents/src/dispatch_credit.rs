@@ -53,11 +53,19 @@ fn node_project(row: &Value) -> String {
 /// The graph row for a node id or its slug, or `None` on an unreadable
 /// store: the same id-or-slug resolution every backlog reader accepts.
 fn graph_row(node: &str) -> Option<Value> {
-    let rows = crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).ok()?;
-    rows.into_iter().find(|r| {
-        r.get("id").and_then(Value::as_str) == Some(node)
-            || r.get("slug").and_then(Value::as_str) == Some(node)
-    })
+    let rows = crate::graph_store::read_rows_where(
+        &crate::graph_get::default_graph_path(),
+        &crate::backlog::RowQuery {
+            filter: crate::backlog::api::NodeFilter {
+                id_in: Some(vec![node.to_string()]),
+                ..Default::default()
+            },
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    crate::graph_get::find_entry(&rows, node).cloned()
 }
 
 /// The registry as row values, empty on a read fault (fail open).

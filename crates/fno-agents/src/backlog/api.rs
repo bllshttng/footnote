@@ -127,6 +127,21 @@ pub struct NodeFilter {
     pub session_id: Option<String>,
 }
 
+impl NodeFilter {
+    pub(crate) fn only_ids(&self) -> bool {
+        self.project.is_none()
+            && self.status_in.is_none()
+            && self.state_type.is_none()
+            && self.parent.is_none()
+            && self.label.is_none()
+            && self.claimed.is_none()
+            && self.session_id.is_none()
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.id_in.is_none() && self.only_ids()
+    }
+}
+
 // -- inputs ----------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -305,26 +320,48 @@ pub fn defaulted(mut rows: Vec<Value>) -> Vec<Value> {
 }
 
 pub fn node_in(rows: &[Value], id: &str) -> Option<Node> {
-    // The holder of record comes from the live claim projection, never from
-    // the parsed row; an unreadable projection degrades to unclaimed.
+    node_in_with_ordinals(rows, id, &HashMap::new())
+}
+
+pub fn node_in_with_ordinals(
+    rows: &[Value],
+    id: &str,
+    ordinals: &HashMap<String, i64>,
+) -> Option<Node> {
     let claims = crate::backlog::nodes::node_claims_by_id().unwrap_or_default();
+    let parse = |(ordinal, row): (usize, &Value)| {
+        Node::from_json(row).ok().map(|mut node| {
+            node.ordinal = ordinals.get(&node.id).copied().unwrap_or(ordinal as i64);
+            if let Some(claim) = claims.get(&node.id) {
+                node.claim = claim.clone();
+            }
+            node
+        })
+    };
     rows.iter()
         .enumerate()
-        .filter_map(|(ordinal, row)| {
-            Node::from_json(row).ok().map(|mut node| {
-                node.ordinal = ordinal as i64;
-                if let Some(claim) = claims.get(&node.id) {
-                    node.claim = claim.clone();
-                }
-                node
-            })
+        .filter_map(parse)
+        .find(|node| node.id.eq_ignore_ascii_case(id))
+        .or_else(|| {
+            rows.iter()
+                .enumerate()
+                .filter_map(parse)
+                .find(|node| node.slug.eq_ignore_ascii_case(id))
         })
-        .find(|n| n.id == id)
 }
 
 /// Filter, then drop archived rows unless asked. Ordering and pagination
 /// happen in [`nodes`], so `first` counts the rows the caller would see.
 pub fn nodes_in(rows: &[Value], filter: &NodeFilter, page: &Page) -> Connection<Node> {
+    nodes_in_with_ordinals(rows, filter, page, &HashMap::new())
+}
+
+pub fn nodes_in_with_ordinals(
+    rows: &[Value],
+    filter: &NodeFilter,
+    page: &Page,
+    ordinals: &HashMap<String, i64>,
+) -> Connection<Node> {
     // The claimed filter reads the projection, so claims attach at the same
     // parse that feeds it; an unreadable projection degrades to unclaimed.
     let claims = crate::backlog::nodes::node_claims_by_id().unwrap_or_default();
@@ -333,7 +370,7 @@ pub fn nodes_in(rows: &[Value], filter: &NodeFilter, page: &Page) -> Connection<
         .enumerate()
         .filter_map(|(ordinal, row)| {
             Node::from_json(row).ok().map(|mut node| {
-                node.ordinal = ordinal as i64;
+                node.ordinal = ordinals.get(&node.id).copied().unwrap_or(ordinal as i64);
                 if let Some(claim) = claims.get(&node.id) {
                     node.claim = claim.clone();
                 }
@@ -354,9 +391,12 @@ pub fn nodes_in(rows: &[Value], filter: &NodeFilter, page: &Page) -> Connection<
     paginate(rows, page)
 }
 
-fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
+pub(crate) fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
     if let Some(ids) = &filter.id_in {
-        if !ids.iter().any(|id| id == &node.id) {
+        if !ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(&node.id) || id.eq_ignore_ascii_case(&node.slug))
+        {
             return false;
         }
     }
@@ -374,15 +414,24 @@ fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
         }
     }
     if let Some(name) = &filter.state_type {
-        let wanted = match name.as_str() {
-            "unstarted" => StateType::Unstarted,
-            "started" => StateType::Started,
-            "completed" => StateType::Completed,
-            "canceled" => StateType::Canceled,
-            _ => return false,
-        };
-        if state_type(node.status) != wanted {
-            return false;
+        if name == "open" {
+            if matches!(
+                node.status,
+                Status::Done | Status::Deferred | Status::Superseded
+            ) {
+                return false;
+            }
+        } else {
+            let wanted = match name.as_str() {
+                "unstarted" => StateType::Unstarted,
+                "started" => StateType::Started,
+                "completed" => StateType::Completed,
+                "canceled" => StateType::Canceled,
+                _ => return false,
+            };
+            if state_type(node.status) != wanted {
+                return false;
+            }
         }
     }
     if let Some(parent) = &filter.parent {
@@ -418,7 +467,20 @@ fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
 }
 
 pub fn node(store: &Store, id: &str) -> Result<Option<Node>, ApiError> {
-    Ok(node_in(&read_rows(store)?, id))
+    let query = super::RowQuery {
+        filter: NodeFilter {
+            id_in: Some(vec![id.into()]),
+            ..Default::default()
+        },
+        with_blockers: true,
+        ..Default::default()
+    };
+    let rows = crate::graph_store::read_rows_where(&store.graph, &query)?;
+    Ok(node_in_with_ordinals(
+        &rows,
+        id,
+        &super::row_ordinals(&store.graph)?,
+    ))
 }
 
 fn paginate(rows: Vec<Node>, page: &Page) -> Connection<Node> {
@@ -454,7 +516,19 @@ pub fn nodes(
     filter: &NodeFilter,
     page: &Page,
 ) -> Result<Connection<Node>, ApiError> {
-    Ok(nodes_in(&read_rows(store)?, filter, page))
+    let query = super::RowQuery {
+        filter: filter.clone(),
+        include_archived: page.include_archived,
+        with_blockers: true,
+        ..Default::default()
+    };
+    let rows = crate::graph_store::read_rows_where(&store.graph, &query)?;
+    Ok(nodes_in_with_ordinals(
+        &rows,
+        filter,
+        page,
+        &super::row_ordinals(&store.graph)?,
+    ))
 }
 
 /// Every working-graph row through the store, in ordinal order. The one

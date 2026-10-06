@@ -236,6 +236,7 @@ pub mod lead_state;
 pub mod lead_term;
 pub mod lead_termination;
 pub mod lead_verdict_inputs;
+pub mod lead_wake;
 pub mod ledger_axes;
 pub(crate) mod ledger_workers;
 mod lifecycle_child;
@@ -467,6 +468,7 @@ pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
+pub mod wake_name;
 pub mod watch_expiry;
 pub mod wave;
 pub mod worked_nodes;
@@ -1689,6 +1691,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "lead_armed",
     "lead_checkin",
     "lead_dispatch_exception",
+    // The lead-wake arm's receipt: one row per daemon wake episode, the
+    // dedupe memory the arm folds before it wakes again (lead_wake.rs).
+    "lead_wake",
     // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
