@@ -902,13 +902,21 @@ fn x586d_done_node_session_with_a_typed_turn_two_minutes_old_survives_the_sweep(
         summary.kept_active.is_empty(),
         "the age seam read quiet, so the hold must come from the typed turn: {summary:?}"
     );
-    assert_eq!(
-        summary.kept_attended,
-        vec![(
-            "t-attended".to_string(),
-            "typed user turn 120s ago".to_string()
-        )],
-        "the attended hold names the typed turn: {summary:?}"
+    assert_eq!(summary.kept_attended.len(), 1);
+    assert_eq!(summary.kept_attended[0].0, "t-attended");
+    // The age reads from wall-clock seconds between the fixture write and
+    // the sweep read, so a loaded runner prints 121s and an exact-string
+    // assert flakes. Assert the tolerance window the fixture implies.
+    let age: i64 = summary.kept_attended[0]
+        .1
+        .trim_start_matches("typed user turn ")
+        .trim_end_matches("s ago")
+        .parse()
+        .expect("the attended hold names a typed turn age");
+    assert!(
+        (120..=180).contains(&age),
+        "the typed turn age drifted past the fixture window: {}",
+        summary.kept_attended[0].1
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
