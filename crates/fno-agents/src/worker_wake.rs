@@ -308,7 +308,7 @@ fn run_pass_with(
         acted += 1;
         if let Some(lead) = row.spawned_by_session.as_deref() {
             let notice = format!(
-                "Worker wake: {} resumed on {node} after {}s idle through codex turn/start.",
+                "Worker wake: nudge sent to {} on {node} after {}s idle through codex turn/start.",
                 row.name,
                 (now - last) / 1000
             );
