@@ -282,20 +282,33 @@ fn is_executable_file(p: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// `fno mux pane ls --session <s> --json` -> pane_id -> OSC title. `None`
-/// when the session is unreachable (no server, skewed binary, bad output) -
-/// the caller treats that as "no panes", which clears verdicts: panes live in
-/// the server process, so an unanswerable server has no live panes to badge.
+/// One row of `fno mux pane ls --json`: the pane id, its OSC title, and the
+/// registry identity the mux joined to it.
+pub(crate) struct PaneLsRow {
+    pub pane_id: u64,
+    pub title: Option<String>,
+    pub fno_id: Option<String>,
+}
+
+/// `fno mux pane ls --server <s> --json` -> one row per pane. `session: None`
+/// resolves the ambient/default server (the lead-checkin prompt reader reads
+/// the shared fleet server without naming it). `None` comes back when the
+/// server is unreachable (no server, skewed binary, bad output) - the caller
+/// treats that as "no panes", which clears verdicts: panes live in the server
+/// process, so an unanswerable server has no live panes to badge.
 ///
 /// ponytail: no subprocess timeout - the mux CLI bounds its own socket
 /// reads/writes, so a wedged server errors instead of hanging; a hung
 /// FNO_BIN stalls only this sweep thread (the in-flight gate skips further
 /// sweeps rather than piling them up).
-fn mux_pane_ls(bin: &std::ffi::OsStr, session: &str) -> Option<BTreeMap<u64, Option<String>>> {
-    let out = Command::new(bin)
-        .args(["mux", "pane", "ls", "--server", session, "--json"])
-        .output()
-        .ok()?;
+pub(crate) fn mux_pane_ls(bin: &std::ffi::OsStr, session: Option<&str>) -> Option<Vec<PaneLsRow>> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("mux").arg("pane").arg("ls");
+    if let Some(session) = session {
+        cmd.arg("--server").arg(session);
+    }
+    cmd.arg("--json");
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -304,30 +317,34 @@ fn mux_pane_ls(bin: &std::ffi::OsStr, session: &str) -> Option<BTreeMap<u64, Opt
         panes
             .iter()
             .filter_map(|p| {
-                Some((
-                    p.get("pane_id")?.as_u64()?,
-                    p.get("title").and_then(|t| t.as_str()).map(String::from),
-                ))
+                Some(PaneLsRow {
+                    pane_id: p.get("pane_id")?.as_u64()?,
+                    title: p.get("title").and_then(|t| t.as_str()).map(String::from),
+                    fno_id: p
+                        .get("fno_id")
+                        .and_then(|t| t.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                })
             })
             .collect(),
     )
 }
 
-/// `fno mux pane read <pane> --session <s> --json` -> the pane's rendered
+/// `fno mux pane read <pane> [--server <s>] --json` -> the pane's rendered
 /// grid text. `None` on any failure (dead pane, unreachable server).
-pub(crate) fn mux_pane_read(bin: &std::ffi::OsStr, session: &str, pane: u64) -> Option<String> {
-    let out = Command::new(bin)
-        .args([
-            "mux",
-            "pane",
-            "read",
-            &pane.to_string(),
-            "--server",
-            session,
-            "--json",
-        ])
-        .output()
-        .ok()?;
+pub(crate) fn mux_pane_read(
+    bin: &std::ffi::OsStr,
+    session: Option<&str>,
+    pane: u64,
+) -> Option<String> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("mux").arg("pane").arg("read").arg(pane.to_string());
+    if let Some(session) = session {
+        cmd.arg("--server").arg(session);
+    }
+    cmd.arg("--json");
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -391,7 +408,7 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter, notify_on_blocked
     // Per-provider manifest cache (a parse-bad manifest logs once per sweep,
     // not once per pane) and per-session pane listing (one `ls` per session).
     let mut manifests: BTreeMap<String, Option<Manifest>> = BTreeMap::new();
-    let mut sessions: BTreeMap<String, Option<BTreeMap<u64, Option<String>>>> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, Option<Vec<PaneLsRow>>> = BTreeMap::new();
 
     // (name, expected-mux-ref, verdict). The ref is re-verified under the
     // lock so a row removed+recreated (or re-homed to a new pane) with the
@@ -419,11 +436,16 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter, notify_on_blocked
         };
         let panes = sessions
             .entry(t.session.clone())
-            .or_insert_with(|| mux_pane_ls(&bin, &t.session));
+            .or_insert_with(|| mux_pane_ls(&bin, Some(&t.session)));
         let evidence = panes
             .as_ref()
-            .and_then(|p| p.get(&t.pane_id))
-            .map(|title| (title.clone(), mux_pane_read(&bin, &t.session, t.pane_id)));
+            .and_then(|p| p.iter().find(|r| r.pane_id == t.pane_id))
+            .map(|row| {
+                (
+                    row.title.clone(),
+                    mux_pane_read(&bin, Some(&t.session), t.pane_id),
+                )
+            });
         let decision = match evidence {
             // Pane absent from the listing, or its read failed: no screen to
             // trust. Clear a stored verdict; a never-badged row stays silent.
