@@ -206,7 +206,7 @@ function cardTree(ui: any, c: Companion, said: string, r: Rerolls): any {
   const stat = (s: StatName) => {
     const v = c.stats[s]
     const n = Math.round(v / 10)
-    return Text({ children: [`${s.padEnd(10)} `, '█'.repeat(n) + '░'.repeat(10 - n) + ' ', Text({ dimColor: true, children: [String(v).padStart(3)] })] })
+    return Box({ flexDirection: 'row', children: [Box({ width: 11, children: [Text({ children: [s] })] }), Text({ children: ['█'.repeat(n) + '░'.repeat(10 - n) + ' '] }), Text({ dimColor: true, children: [String(v).padStart(3)] })] })
   }
   return Box({
     flexDirection: 'column',
@@ -219,7 +219,7 @@ function cardTree(ui: any, c: Companion, said: string, r: Rerolls): any {
     children: [
       Box({ justifyContent: 'space-between', children: [Text({ bold: true, color, children: [`${RARITY_STARS[c.rarity]} ${c.rarity.toUpperCase()}`] }), Text({ color, children: [c.species.toUpperCase()] })] }),
       ...(c.shiny ? [Text({ color: 'warning', bold: true, children: ['✨ SHINY ✨'] })] : []),
-      Box({ flexDirection: 'column', marginY: 1, children: renderSprite(c, 0).map(l => Text({ color, children: [l] })) }),
+      Box({ flexDirection: 'column', marginY: 1, children: drawArt(ui, c, renderSprite(c, 0)) }),
       Text({ bold: true, children: [c.name] }),
       Box({ marginY: 1, children: [Text({ dimColor: true, italic: true, children: [`"${c.personality}"`] })] }),
       Box({ flexDirection: 'column', children: STAT_NAMES.map(stat) }),
@@ -569,6 +569,19 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
 
 const BUBBLE_COLUMNS = 34
 
+// Desktop sets text in a proportional font, which collapses the spaces in a sprite. There the
+// sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes a fixed color.
+let desktop = false
+const SVG_COLORS: Record<string, string> = { common: '#8a8a8a', uncommon: '#4caf50', rare: '#3fa7d6', epic: '#b36ae2', legendary: '#e0a526' }
+const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+function drawArt(ui: any, c: Companion, lines: string[]): any[] {
+  if (!desktop) return lines.map(line => ui.Text({ color: RARITY_THEME[c.rarity], children: [line] }))
+  const w = Math.ceil(Math.max(...lines.map(l => l.length)) * 8.4) + 2
+  const h = lines.length * 17
+  const rows = lines.map((l, i) => `<text x="0" y="${i * 17 + 13}" xml:space="preserve">${esc(l)}</text>`).join('')
+  return [ui.Svg({ alt: `${c.name} the ${c.species}`, width: w, height: h, source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" font-family="ui-monospace,Menlo,monospace" font-size="14" fill="${SVG_COLORS[c.rarity]}">${rows}</svg>` })]
+}
+
 export function register(on: On) {
   on('session.start', async ($, e, next) => {
     const now = await $.clock.now()
@@ -665,7 +678,8 @@ export function register(on: On) {
       const r = await rerolls($, now)
       if (r.bank < 1) return { text: `${buddy!.name} stays. ${rerollLine(r)}.` }
       await $.store.set('rerolls', { ...r, bank: r.bank - 1 })
-      const soul = hatch(newSeed(), now)
+      let soul = hatch(newSeed(), now)
+      while (soul.name === buddy!.name) soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
       recent = []
@@ -722,6 +736,7 @@ export function register(on: On) {
 
   // The /buddy row: the card the original drew, or the hatch that leads into it.
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
     const text = String(e.props.text ?? '')
     if (!text.startsWith(CARD_MARK) && !text.startsWith(HATCH_MARK)) return next(e)
     let snap = shown.get(e.requestId)
@@ -735,6 +750,7 @@ export function register(on: On) {
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
     if (e.requestId !== CARD_ID || !cardSnap) return next(e)
     const ui = $.ui.resolve(e)
     const shut = () => {
@@ -752,6 +768,7 @@ export function register(on: On) {
   // The fallback when the status line is not wrapped: a narrow dock on the right,
   // the buddy standing at the bottom and its words above it.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
     if (e.requestId !== PANE_ID || !buddy || muted) return next(e)
     // One buddy on screen: a pane left open (a resumed session, a late open) closes once the status line has it.
     if (wrapped) {
@@ -770,7 +787,7 @@ export function register(on: On) {
       children: [
         ...(words ? [Box({ borderStyle: 'round', children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: ['  ◦ ·'] })] : []),
         ...(fleet ? [Text({ dimColor: true, wrap: 'wrap', children: [fleet] }), Text({ children: [' '] })] : []),
-        ...sprite(buddy, now).map(line => Text({ color, children: [line] })),
+        ...drawArt({ Text, Svg: $.ui.resolve(e).Svg }, buddy, sprite(buddy, now)),
         Button({ key: 'pet', label: buddy.name, hotkey: 'p', plain: true, dimColor: true, onPress: async () => {
           pettedAt = await $.clock.now()
           $.ui.invalidate('ui.render')
@@ -781,6 +798,7 @@ export function register(on: On) {
 
   // The band only holds a one-line face, and only where neither the status line nor the dock has the buddy.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
     // Desktop draws no status line but shares its settings, so a wrapped status line hides nothing there.
     if (!buddy || muted || (wrapped && e.surface !== 'desktop') || e.props.hasSurvey) return next(e)
     const now = await $.clock.now()
@@ -802,7 +820,7 @@ export function register(on: On) {
         alignItems: 'flex-end',
         children: [
           ...(words ? [Box({ borderStyle: 'round', width: BUBBLE_COLUMNS, children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: [' ◦ · '] })] : []),
-          Box({ flexDirection: 'column', alignItems: 'center', children: [...art.map(line => Text({ color, children: [line] })), Text({ bold: true, children: [buddy.name] })] }),
+          Box({ flexDirection: 'column', alignItems: 'center', children: [...drawArt({ Text, Svg: $.ui.resolve(e).Svg }, buddy, art), Text({ bold: true, children: [buddy.name] })] }),
         ],
       })
       const theirs = await next(e)
