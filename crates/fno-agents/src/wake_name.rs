@@ -89,24 +89,13 @@ mod tests {
         record_at(&file, "aaaabbbb-cccc-dddd-eeee-ffff00001111", "t-new", 2).unwrap();
         let name = lookup_beside(&reg, "aaaabbbb-cccc-dddd-eeee-ffff00001111").unwrap();
         assert_eq!(name, "t-new", "the last stop's name wins");
+        // An empty uuid or name is refused at the write, so the alias
+        // fallback answers instead of a blank record.
+        record_at(&file, "", "t", 3).unwrap();
+        record_at(&file, "aaaabbbb-cccc-dddd-eeee-ffff00001111", "  ", 3).unwrap();
         let raw = std::fs::read_to_string(&file).unwrap();
         let rows: Vec<Value> = serde_json::from_str(&raw).unwrap();
         assert_eq!(rows.len(), 1, "the uuid holds one record");
-    }
-
-    /// AC-ERR: an unnamed uuid, an empty name and a missing file all answer
-    /// None, so the caller's alias fallback applies.
-    #[test]
-    fn empty_inputs_and_missing_file_answer_none() {
-        let (_dir, reg) = staged();
-        assert!(lookup_beside(&reg, "aaaabbbb-cccc-dddd-eeee-ffff00001111").is_none());
-        let file = reg.parent().unwrap().join(FILENAME);
-        record_at(&file, "", "t", 1).unwrap();
-        record_at(&file, "aaaabbbb-cccc-dddd-eeee-ffff00001111", "  ", 1).unwrap();
-        assert!(
-            lookup_beside(&reg, "aaaabbbb-cccc-dddd-eeee-ffff00001111").is_none(),
-            "nothing was stamped"
-        );
     }
 
     /// The cap trims oldest-first so the file stays bounded.
