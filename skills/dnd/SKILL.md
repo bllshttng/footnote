@@ -36,11 +36,11 @@ Run the genuine command and report its receipt line verbatim. The CLI calls the 
 
 ## Scope
 
-The hold applies to the session that runs the command. When the ask arrives by chat or mail, the king runs it on the king's own session. To quiet another session, run the door in that session.
+The hold applies to the session that runs the command. When the ask arrives by chat or mail, the lead runs it on the lead's own session. To quiet another session, run the door in that session.
 
 ## Not a pause
 
-`fno agents loops pause-all` and the reign halts stop fleet work. They are not the answer to a user who wants quiet. Codex invokes this skill as `$fno:dnd`.
+`fno agents loops pause-all` and the lead halts stop fleet work. They are not the answer to a user who wants quiet. Codex invokes this skill as `$fno:dnd`.
 
 ## Known Limitations and Deferred Work
 

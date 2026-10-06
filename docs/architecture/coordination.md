@@ -193,9 +193,9 @@ Readers get facts served with their measurement time instead. The reconcile swee
 
 The daemon's `agent.watch` RPC is the subscription face of that registry. It serves the full document on connect. It serves again whenever the registry's (mtime, len) stamp moves, which is what any write does to the file. Otherwise it answers a bare version echo, so a subscriber pays one stat per idle tick. The mux sideline subscribes through it. Reading `registry.json` directly is the degraded fallback for the supported no-daemon shape. The fallback announces itself with one log line.
 
-### Mail origin and crown are separate axes
+### Mail origin and role are separate axes
 
-Mail `origin` is a channel claim and is floored to `peer` whenever the caller has an agent identity. A crown is ambient sender standing. The renderer uses the sender's full session ID to read its live registry row. The message cannot assert a crown with an origin value, body text, or flag. The trailer reports that verified rung and scope separately from the content's warrant. It never implies superuser authority, and the recipient can still challenge the ruling. An unreadable registry grants no crown.
+Mail `origin` is a channel claim and is floored to `peer` whenever the caller has an agent identity. A role is ambient sender standing. The renderer uses the sender's full session ID to read its live registry row. The message cannot assert a role with an origin value, body text, or flag. The trailer reports that verified rung and scope separately from the content's warrant. It never implies superuser authority, and the recipient can still challenge the ruling. An unreadable registry grants no role.
 
 ### Registry row removal is never silent
 
@@ -218,7 +218,7 @@ Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_li
 
 ## Reservations: a lane slot held for a name
 
-A reservation is a lane slot held for a worker that has not spawned yet. A king can order the next freed slot to go to a named worker. Without enforcement the gate knows nothing about the promise. The reserved work loses the race to whatever spawns first, and obeying the order costs the slot. `fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason "<why>" [--node <id>]` mints `worker:<name>` under the global claims root with `model_provider`, `reserved_by` and `reserved_reason` metadata. The claim is counted by `provider_live_slot_claims`. A reservation already spends a lane slot against every stranger before the worker exists.
+A reservation is a lane slot held for a worker that has not spawned yet. A lead can order the next freed slot to go to a named worker. Without enforcement the gate knows nothing about the promise. The reserved work loses the race to whatever spawns first, and obeying the order costs the slot. `fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason "<why>" [--node <id>]` mints `worker:<name>` under the global claims root with `model_provider`, `reserved_by` and `reserved_reason` metadata. The claim is counted by `provider_live_slot_claims`. A reservation already spends a lane slot against every stranger before the worker exists.
 
 The gate refuses on that lane and names the reservation, in these words:
 
@@ -236,13 +236,13 @@ The gate skips the redeemer's own reservation in the provider count. It releases
 
 The cap refuses (never queues) at `territory_cap`. It stays enforced under `--force`: force speaks for the machine being busy, never for one territory overrunning its team. Waiting cannot help, since the team is full where the caller is standing, so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP` (86) separates this from the machine-wide cap so a caller can tell "the fleet is full" (queueable) from "this territory's team is over the line" (the other territories keep their headroom).
 
-A node counts for the deepest live crown whose scope holds it, then the lowest canonical scope on a tie (`territory::node_owners`). A node that no live crown holds counts for its project's loose territory. The court's owned counts read the same rule. A spawn refusal and the court readout can never disagree about whose node a worker is on. Where the L1 fno crown and live L2 crowns coexist, an L2 node's worker counts for that L2 territory. It never counts for the fno root.
+A node counts for the deepest live role whose scope holds it, then the lowest canonical scope on a tie (`territory::node_owners`). A node that no live role holds counts for its project's loose territory. The org's owned counts read the same rule. A spawn refusal and the org readout can never disagree about whose node a worker is on. Where the L1 fno role and live L2 roles coexist, an L2 node's worker counts for that L2 territory. It never counts for the fno root.
 
-Two CLI verbs read the same Rust territory projection so no two surfaces disagree. `fno config active-backlog` (`config_cli.py`) passes through the `active-backlog-receipt` binary call: territories resolved from the graph, the crown registry, the workspace map, and `config.active_backlog`. It is read-only and exit 1 names the unreadable source. `fno config active-backlog-territories` (hidden) passes through `territory-rows`: one row per scope, with its missions, king or kingless state, and live count against the cap. Both verbs are read-only.
+Two CLI verbs read the same Rust territory projection so no two surfaces disagree. `fno config active-backlog` (`config_cli.py`) passes through the `active-backlog-receipt` binary call: territories resolved from the graph, the role registry, the workspace map, and `config.active_backlog`. It is read-only and exit 1 names the unreadable source. `fno config active-backlog-territories` (hidden) passes through `territory-rows`: one row per scope, with its missions, lead or kingless state, and live count against the cap. Both verbs are read-only.
 
 ## A dispatch outcome is dispatched, skipped, or failed
 
-Every dispatcher verdict answers one question: is the condition a property of the node, or of the machine? A dispatch failure records `advance_failed` and charges the node's failure budget. A dispatch refusal records `advance_skipped` and leaves the row ready. The discriminator is the spawn gate's own exit code, read once in `cli/src/fno/backlog/advance.py` (`gate_refusal`). Exits 75 to 80 are capacity conditions true for every caller equally: queue timeout, no-wait, RAM, provider cap, load, king share. They skip as `capacity-refused`. Exit 81 (registry schema) is a spawn path no row can pass, so it skips as `gate-unavailable`. Exit 82 comes from the codex sandbox probe at the spawn seam. The sandbox blocks a tool that every code payload on that lane needs, so it skips as `sandbox-unreachable`. Its provenance marker is `sandbox-probe:`, not `spawn-gate:`. Nothing outside that closed family is machine-scoped. A node fault can only enter it through a gate change.
+Every dispatcher verdict answers one question: is the condition a property of the node, or of the machine? A dispatch failure records `advance_failed` and charges the node's failure budget. A dispatch refusal records `advance_skipped` and leaves the row ready. The discriminator is the spawn gate's own exit code, read once in `cli/src/fno/backlog/advance.py` (`gate_refusal`). Exits 75 to 80 are capacity conditions true for every caller equally: queue timeout, no-wait, RAM, provider cap, load, lead share. They skip as `capacity-refused`. Exit 81 (registry schema) is a spawn path no row can pass, so it skips as `gate-unavailable`. Exit 82 comes from the codex sandbox probe at the spawn seam. The sandbox blocks a tool that every code payload on that lane needs, so it skips as `sandbox-unreachable`. Its provenance marker is `sandbox-probe:`, not `spawn-gate:`. Nothing outside that closed family is machine-scoped. A node fault can only enter it through a gate change.
 
 The sandbox probe (`cli/src/fno/agents/sandbox_probe.py`) runs each check through `codex sandbox`, under the worker's own seatbelt policy, `config.toml`, and git grant. `gh api rate_limit` must print a positive limit. A `git update-ref --stdin` transaction must print `prepare: ok`. It takes the lock a commit takes and then aborts, so it never creates a ref. Two controls keep a refusal honest. A sandboxed echo must return its nonce, or the probe never ran. A tool that fails inside the sandbox runs again outside it. Only a tool that answers outside and fails inside is blocked by the sandbox. A tool that fails in both places, gh logged out or GitHub down, says nothing about the sandbox. It reads unknown and the spawn launches with a note.
 
@@ -286,7 +286,7 @@ With a resolved session pid, a task claim uses pure PID liveness, so a dead pane
 
 ## Who writes `node:<id>`, and who can prove it dead
 
-Measured 2026-08-19: nine nodes each named by a live roster worker, and seven read `free`. Two live claimants landed on one node and a third nearly did. The claim is documented as THE work-claim primitive, so four kings read `free` and staffed duplicates onto nodes that already had someone on them.
+Measured 2026-08-19: nine nodes each named by a live roster worker, and seven read `free`. Two live claimants landed on one node and a third nearly did. The claim is documented as THE work-claim primitive, so four leads read `free` and staffed duplicates onto nodes that already had someone on them.
 
 The cause was a guard on one of many paths. `node:<id>` had exactly one producer, a shell script that tokenized a prompt string, and it only ran under `fno do target init`. Every other route to a node bypassed it: a verb buried mid-sentence, a payload naming two ids, a run that went through `/blueprint` instead. This section records the rules that replaced it, because each one is a trap somebody will otherwise re-derive.
 
@@ -411,7 +411,7 @@ fno agents claim status node:ab-thisnode
 
 ## The worker must be able to write the claim store
 
-If the worker cannot create the lockfile, the claim is not mutual exclusion. Every harness sandboxes writes to the launch cwd by default. fno's state lives outside it. So a spawned worker on a bounded posture writes nothing and holds no claim. `fno agents claim status node:<id>` then answers `free` while that worker is live, on its branch, doing the work. Any king reading the graph sees a free node and dispatches a second worker onto it. The standing rule "check the claim before manual node work" cannot catch this, because the check returns free.
+If the worker cannot create the lockfile, the claim is not mutual exclusion. Every harness sandboxes writes to the launch cwd by default. fno's state lives outside it. So a spawned worker on a bounded posture writes nothing and holds no claim. `fno agents claim status node:<id>` then answers `free` while that worker is live, on its branch, doing the work. Any lead reading the graph sees a free node and dispatches a second worker onto it. The standing rule "check the claim before manual node work" cannot catch this, because the check returns free.
 
 This is not one harness's problem. codex `workspace-write` is the visible case. A claude worker fails the same way. When a personal `~/.claude/settings.json` grants `permissions.additionalDirectories`, it looks fine on that maintainer's machine. The repository ships no such file, so a fresh clone reproduces it.
 
@@ -441,7 +441,7 @@ archive-then-recreate).
 
 ## Coordination today
 
-`fno agents claim` is the coordination primitive across target (and the later king/reign loop arms). Megawalk's legacy coordination mechanisms (`megawalk-state.md`, `in_flight_nodes`, the PID lock) have been removed in favor of the `walker:` and `node:` claims. `fno agents claim list` + `events.jsonl` provide observability into what is in flight.
+`fno agents claim` is the coordination primitive across target (and the later lead/lead loop arms). Megawalk's legacy coordination mechanisms (`megawalk-state.md`, `in_flight_nodes`, the PID lock) have been removed in favor of the `walker:` and `node:` claims. `fno agents claim list` + `events.jsonl` provide observability into what is in flight.
 
 One legacy mirror remains: `/target` still writes a graph `session_id`
 onto the backlog node when it claims (alongside acquiring the `node:`
@@ -471,7 +471,7 @@ not folklore, and records why the limb cannot be made fully addressable.
 A **citizen** is what `fno agents spawn` produces: a row in the fno agents
 registry, discoverable by `fno agents peek`, addressable by `fno agents mail`,
 holding its own `node:` claim, surviving its spawner's death, and
-handoff-able to a successor king.
+handoff-able to a successor lead.
 Its transcript sits beside its peers at the project root as
 `~/.claude/projects/<proj>/<session-id>.jsonl`.
 
@@ -497,7 +497,7 @@ into a registry row someone would have to go read.
 
 Reach for **`fno agents spawn`** when any of these hold: the work must
 outlive its spawner; someone other than the spawner must observe, message,
-or drive it; it must be handed to a successor king; it holds a `node:`
+or drive it; it must be handed to a successor lead; it holds a `node:`
 claim, since the registry row is what makes the claim attributable; or it
 needs its own worktree or branch. Review does not require a spawned session.
 
@@ -523,7 +523,7 @@ enumerates sidechain transcripts (keyed on `agentId`, not pid, since a limb
 has no pid), lists each with its parent session and an mtime-based liveness
 verdict against a stated threshold, and is claude-only today.
 
-The king check-in also reads its own session's held subagents from the parent transcript's task notifications, and still gives them no slot and no mail.
+The lead check-in also reads its own session's held subagents from the parent transcript's task notifications, and still gives them no slot and no mail.
 The codex, agy, and opencode task primitives have their own on-disk layouts
 that are unmeasured here; a future harness reader slots into the same
 per-harness discovery seam.

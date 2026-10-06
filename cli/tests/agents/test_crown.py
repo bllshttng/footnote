@@ -2166,7 +2166,7 @@ def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     assert result.exit_code == 2
     out = result.output.lower()
     assert "your own scope" in out
-    assert "fno agents spawn --crown" in out
+    assert "fno agents spawn --promote" in out
     # The remedies that contradict the refusal must not appear: every one of
     # them tells the caller to act on its own live row.
     assert "already held" not in out
@@ -2247,6 +2247,7 @@ def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
     assert "re-scope" in result.output.lower()
     assert "--level" not in result.output
     assert "--succeed" not in result.output
+    assert "--hand-off" not in result.output
 
 
 def test_in_place_crown_emits_one_success_event_only_after_commit(
@@ -2465,7 +2466,7 @@ def test_spawn_crown_refuses_before_launch_when_scope_already_occupied(
     # caller is an attended human (no agent identity), so it is authorized to
     # attempt the grant; the pre-launch check still refuses because the
     # incumbent holds the scope and no --succeed named the transfer.
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_crowned(
             monkeypatch, tmp_path,
             grantor_env=None,

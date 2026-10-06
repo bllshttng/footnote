@@ -223,7 +223,7 @@ A codex row's `model` can name a family instead of a version: `sol`, `astra`, `t
 
 A row can carry `operator_view`: `claude-native` or `codex-native`, matching its harness. A row with a vendor `route` cannot: that coordinate is not native, and labeling it so is a named refusal. Under `remote` or `unknown`, only labeled rows qualify. The point is observability: a launch must land in a view the operator can actually see. Under `local` every declared lane qualifies.
 
-The work kind picks the slot. Rust owns the ruling: a planless `/target` does planning work and walks the blueprint slot while its command stays target. A planned target, think, blueprint, review, and crown walk their own slots. The qualification owner is one Rust verb, `fno-agents route-slot`. The spawn seam, `fno backlog explain`, and `fno config route inventory` all read the same decision, and the readouts carry its verdict: `routing=armed|unarmed|policy-held|capacity-held`. A policy hold is never described as a spent quota, and a held capacity never as a broken dispatch.
+The work kind picks the slot. Rust owns the ruling: a planless `/target` does planning work and walks the blueprint slot while its command stays target. A planned target, think, blueprint, review, and role walk their own slots. The qualification owner is one Rust verb, `fno-agents route-slot`. The spawn seam, `fno backlog explain`, and `fno config route inventory` all read the same decision, and the readouts carry its verdict: `routing=armed|unarmed|policy-held|capacity-held`. A policy hold is never described as a spent quota, and a held capacity never as a broken dispatch.
 
 Completion evidence is a read-only audit: `fno-agents route-slot audit --project <root> --node <node> --since 30m --json`. A bounded snapshot (config fingerprint, spawn receipts, registry rows, decision records) is loaded through the established readers and a pure verifier answers. Exit 0 prints `ROUTING_POLICY_VERIFIED` per session and names the account, vendor/model and observed model. The operator view evidence is a live decision record under subject `routing-view:<session-id>`. Record it with `fno inbox decide` only after the operator confirms that exact session in the named view. A worker or peer assertion is not operator confirmation. Anything missing, stale, contradictory, or merely simulated exits nonzero naming its boundary.
 
@@ -239,7 +239,7 @@ The optional OpenRouter snapshot can supply a percentile for a row whose `band` 
 
 **Effort is the third grid coordinate.** The grid injects an atomic harness/model/effort triple. A row whose harness has no effort surface omits it, and nothing is injected. An explicit `--effort` wins.
 
-**A crown spawn gets a profile key.** A seed with no leading slash-verb, or one opening with `reign` or `fno-me`, resolves `crown`. King work walks the crown slot whichever verb opens its seed, and an `[agents.profiles.reign]` table is never read. `[agents.profiles.crown]` reaches a crown spawn exactly like every other stage row. The attended/unattended axis is declared this way, never inferred. The response-time instrument was retracted because fno mail is injected as user-shaped text.
+**A role spawn gets a profile key.** A seed with no leading slash-verb, or one opening with `reign` or `fno-me`, resolves `crown`. Lead work walks the role slot whichever verb opens its seed, and an `[agents.profiles.reign]` table is never read. `[agents.profiles.crown]` reaches a role spawn exactly like every other stage row. The attended/unattended axis is declared this way, never inferred. The response-time instrument was retracted because fno mail is injected as user-shaped text.
 
 `fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
 
@@ -291,7 +291,7 @@ config:
       API_TIMEOUT_MS: "3000000"
 ```
 
-A `[1m]` worker injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000` as the compaction backstop. The variant already selects the 1M context. This variable only sets the compaction threshold, capped at the model window. A value of `1000000` is therefore a no-op. The king compact nudge fires near 40%. The 800000 backstop fires near 80%. Override it through `extra_env` only to tune that backstop.
+A `[1m]` worker injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000` as the compaction backstop. The variant already selects the 1M context. This variable only sets the compaction threshold, capped at the model window. A value of `1000000` is therefore a no-op. The lead compact nudge fires near 40%. The 800000 backstop fires near 80%. Override it through `extra_env` only to tune that backstop.
 
 The built-in `zai` provider already routes the background (haiku) tier to the cheaper `glm-4.7`. Opus/sonnet run `glm-5.3`, while judgment-light background traffic stays cheap on the same provider.
 

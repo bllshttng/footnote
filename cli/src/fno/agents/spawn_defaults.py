@@ -94,11 +94,10 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
         "--pane",
         "--node", "--node-reason", "--slug", "--plan", "--name", "--recorded-provider",
-        # --route/--account/--crown were absent, so their VALUES read as
-        # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
-        # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
-        # (test_spawn_value_flags_cover_every_value_option pins the two together).
-        "--route", "--account", "--crown", "-k", "--dispatch-account",
+        # --route/--account/--crown were absent, so their VALUES read as positionals:
+        # a nameless `spawn --route zai,glm-5.2` registered an agent named "zai,glm-5.2".
+        # Kept in lockstep with cmd_spawn (test_spawn_value_flags_cover_every_value_option).
+        "--route", "--account", "--promote", "--crown", "-k", "--dispatch-account",
         # --at's value (current|<pane>) must not read as a positional.
         "--at",
         # --portal's index is a value, never a prompt word.

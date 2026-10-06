@@ -137,9 +137,9 @@ Every dispatch path mints its worker name through one contract in `cli/src/fno/a
 - **Source** names who launched the worker. The codes:
 - `ab` active-backlog daemon, `ac` merge continuation, `rd` reconcile de-stub.
 - `th` spawn_think, `pm` post-merge judgment, `pw` pr-watch, `rec` recovery.
-- `kg` keep-going, `gr` groom, `ro` restart revive, `ev` evals, `kl` king loop.
+- `kg` keep-going, `gr` groom, `ro` restart revive, `ev` evals, `kl` lead loop.
 - `oh` outage handoff, `sh` self-handoff, `ex` foreign wave, `jn` backlog join.
-- An attended operator or king launch carries no source. The name then starts with the verb. A source the bridge does not know refuses with exit 3 before spawn.
+- An attended operator or lead launch carries no source. The name then starts with the verb. A source the bridge does not know refuses with exit 3 before spawn.
 - **Verb** names what it runs: `t` target, `bp` blueprint, `r` research/review, `th` think, `f` fix. `--verb` also accepts the work-verb word (`/target`, `blueprint`, ...). An unknown word refuses. Nothing defaults to `t`.
 - **Identity** is the full configured node id (`x-aaaa`, never a bare hex tail, because prefixes are per-project config). A non-node workload uses a typed identity: `backlog` (groom), `evals`, or `session-<handle>` for a nodeless resume. A PR-scoped worker carries `pr-<n>` as a qualifier.
 - **Budget**: source, verb, identity, qualifier, and discriminator are required. Only the human slug gives way to the 64-character runtime limit. An unrepresentable identity refuses before spawn.

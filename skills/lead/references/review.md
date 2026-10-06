@@ -1,6 +1,6 @@
 # Reviewing a worker's change
 
-Workers review completed diffs inline in the same session and worktree that built them. This keeps review attached to the builder's actual tree and lets the worker address findings without a king-mediated handoff.
+Workers review completed diffs inline in the same session and worktree that built them. This keeps review attached to the builder's actual tree and lets the worker address findings without a lead-mediated handoff.
 
 | Harness | Invocation |
 |---|---|
@@ -9,7 +9,7 @@ Workers review completed diffs inline in the same session and worktree that buil
 
 Choose `medium` below 300 changed lines, `high` at 300 or more, or `xhigh` for risky state or protocol changes. Verify each finding against source and fix the valid ones. If fixes change the tree, run round two with `--verify-fixes` so the final head receives its own review result.
 
-Never mail the king to fire a native review command. Never spawn a review subagent or substitute a shell approximation. If the inline fno review skill refuses, report its exact refusal and stop. Do not end the worker turn on an unconfirmed paste that needs someone else to resume it.
+Never mail the lead to fire a native review command. Never spawn a review subagent or substitute a shell approximation. If the inline fno review skill refuses, report its exact refusal and stop. Do not end the worker turn on an unconfirmed paste that needs someone else to resume it.
 
 ## Repeated findings in the peer lane
 

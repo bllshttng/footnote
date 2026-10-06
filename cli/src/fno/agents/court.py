@@ -290,7 +290,7 @@ def gather_court(rows: Optional[list] = None, *, agree: Optional[bool] = True) -
 
 def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold each crown's scope onto its row via `fno-agents org-fold`; any
-    fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md).
+    fault marks the crown unresolved (design: docs/architecture/org-scope-fold.md).
 
     Returns the fold's own stuck verdict, computed beside the rows it judges
     so no second reader can disagree about what a row means. A fault answers

@@ -424,7 +424,7 @@ dual_owner_kinds = {
     # emit their own asks until they port.
     "operator_question",
     # decision_span: the Rust decision_trace emitters are the only writers
-    # (the mail-record leaf, the question intake, the decide door, the king
+    # (the mail-record leaf, the question intake, the decide door, the lead
     # stop check); the Python side carries it in schema.yaml for the
     # validator and `doctor event find`, the way pr_watch_unparked above does.
     "decision_span",

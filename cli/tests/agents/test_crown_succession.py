@@ -138,7 +138,7 @@ def test_same_scope_spawn_refuses_without_explicit_succession(court) -> None:
 
     _seat("sitting-king", CALLER_SESSION)
 
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_heir()
 
     king = _row("sitting-king")
@@ -156,7 +156,7 @@ def test_a_shell_spawn_over_a_held_scope_refuses_before_launch(court, monkeypatc
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_heir()
 
     assert _row("other-king").crown_level == 2, "another king's crown must not move"
@@ -438,7 +438,7 @@ def test_a_refused_spawn_journals_no_crown_event(court, monkeypatch) -> None:
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
-    with pytest.raises(DispatchAskError, match="--succeed"):
+    with pytest.raises(DispatchAskError, match="--hand-off"):
         _spawn_heir()
 
     assert _row("heir") is None
@@ -493,7 +493,7 @@ def test_a_race_holder_still_declines_in_the_write(court, monkeypatch, capsys) -
 
     assert _row("heir").crown_level is None
     assert _row("other-king").crown_level == 2, "the actual holder is untouched"
-    assert "crown declined" in capsys.readouterr().err
+    assert "role declined" in capsys.readouterr().err
 
 
 def test_a_name_rebound_since_the_plan_keeps_its_crown(court, monkeypatch, capsys) -> None:
@@ -517,7 +517,7 @@ def test_a_name_rebound_since_the_plan_keeps_its_crown(court, monkeypatch, capsy
     assert heir is not None and heir.crown_level is None
     assert holder is not None
     assert (holder.crown_level, holder.harness_session_id) == (2, "new-session")
-    assert "crown declined" in capsys.readouterr().err
+    assert "role declined" in capsys.readouterr().err
     assert not any(
         event["kind"] == "agent_crown_vacated" and event["holder"] == "other-king"
         for event in _events()

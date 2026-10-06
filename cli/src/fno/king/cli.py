@@ -31,9 +31,6 @@ def _refuse(msg: str) -> NoReturn:
     raise typer.Exit(2)
 
 
-EVENTS_PATH = ".fno/events.jsonl"
-
-
 def _emit_cancel_signal(path: Path, scope: str) -> None:
     """Record a king cancel after the sentinel is safely on disk."""
     try:
@@ -673,7 +670,7 @@ def history_cmd(
     """Read this crown's recorded reign: its check-ins, newest first, verbatim.
 
     ``fno agents court -n`` answers who rules NOW; this answers what
-    happened across the reign. Contract: docs/architecture/reign.md.
+    happened across the reign. Contract: docs/architecture/lead.md.
     """
     from fno.king.history import run_native
     from fno.paths import event_journals
@@ -758,7 +755,7 @@ def ledger_cmd(
     """Render the reign ledger page: every crown, its territory, its nodes.
 
     The page assembly is the native ``lead-rundown`` verb; this shell resolves
-    the court and the paths. Contract: docs/architecture/reign.md.
+    the court and the paths. Contract: docs/architecture/lead.md.
     """
     from fno.king.ledger import build_ledger_data, write_ledger
 
@@ -766,7 +763,9 @@ def ledger_cmd(
         path = write_ledger(build_ledger_data(), out)
     except RuntimeError as exc:
         _refuse(f"king: {exc}")
-    typer.echo(f"reign ledger: {path}")
+    # The daemon's team_ledger arm greps this exact prefix
+    # (crates/fno-agents/src/rundown.rs run_ledger); keep the two in step.
+    typer.echo(f"lead ledger: {path}")
 
 
 @king_app.command("board")
@@ -812,13 +811,14 @@ def board_cmd(
 
     if last_run:
         from fno.king.state import last_run_is_fresh, parse_window
+        from fno.paths import project_events_json
 
         try:
             window_s = parse_window(since)
         except ValueError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(2) from exc
-        fresh = last_run_is_fresh(Path(EVENTS_PATH), since_s=window_s)
+        fresh = last_run_is_fresh(project_events_json(), since_s=window_s)
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
