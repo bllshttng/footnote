@@ -1296,7 +1296,8 @@ def test_king_wake_row_names_refusal_counts(monkeypatch, _no_global_tick_events)
     result = CliRunner().invoke(app, [])
     assert result.exit_code == 0, result.output
     rows = [d for _t, d in _no_global_tick_events if d.get("arm") == "king_wake"]
-    assert rows and rows[0]["skip_reason"] == "court_read_incomplete"
+    # The fixture holds both invocations' rows; the cut read's is the newest.
+    assert rows and rows[-1]["skip_reason"] == "court_read_incomplete"
 
 
 def test_completed_sweep_stamps_its_arm_row(monkeypatch, _no_global_tick_events):
