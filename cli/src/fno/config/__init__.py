@@ -3728,6 +3728,11 @@ class MuxBlock(BaseModel):
     theme: Optional[str] = None
     # While a theme is active, paint the terminal's own palette from it (OSC 11/10/4); restore on exit.
     paint_background: bool = True
+    # What the sideline card's graph slot plots: `activity` (default) draws
+    # the tool-activity ramp, `context` the context percent's fill bar. Read
+    # by the Rust client via the same config ladder as `hover_focus`; an
+    # unknown value falls back to `activity`.
+    card_graph: Literal["activity", "context"] = "activity"
 
     @field_validator("shell_integration", mode="before")
     @classmethod
