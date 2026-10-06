@@ -74,7 +74,7 @@ To change the name later, run `fno agents rename <you> --name <new>`. It moves t
 
 Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/install/plugin-root" 2>/dev/null)}}`. The writer resolves the role's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact. Past the compaction ceiling (default 3), a doc older than 24 hours blocks the stop gate. The beat refresh is what keeps the lead exitable.
 
-Role mail delivers live between beats. Peers (other leads included) message through `fno agents mail send`; the native SendMessage is the outage fallback only, and a send aimed at an fno-registered session is refused by the send-message-guard with a redirect to fno mail.
+Role mail delivers live between beats. Peers, other leads included, message through `fno agents mail send`. The native SendMessage is the outage fallback only. When mail is healthy, the send-message-guard refuses a native send aimed at an fno-registered session and redirects to fno mail.
 
 Every status update to the user is the `lineup:` table `fno agents org checkin` prints. Paste it as printed. Seated workers come first, then the on-deck queue in seat order. Do not rebuild the table by hand from per-node reads. Record the seat order with `fno agents org checkin --queue <ids>`. The ids are a comma list, on-deck first to last. Never use `fno backlog rank`: it orders dispatch, not the lineup.
 
