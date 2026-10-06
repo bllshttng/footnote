@@ -1716,7 +1716,7 @@ mod tests {
                 ("lead-two", "bbbb2222-3333-4444-8555-666677778888"),
             ] {
                 reg.entries.push(crate::state::RegistryEntry {
-                    name: name.into(),
+                    name: n.into(),
                     cwd: repo.display().to_string(),
                     harness: Some("claude".into()),
                     harness_session_id: Some(sid.into()),
