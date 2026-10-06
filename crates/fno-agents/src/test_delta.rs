@@ -656,6 +656,7 @@ mod tests {
         );
         // The report and the gate are one census contract: the diff touch
         // or cut is audit evidence, else the body line or nothing.
+        let owners = vec!["t/a_test.py".to_string(), "t/b_test.py".to_string()];
         assert_eq!(
             owners_report(&owners, &[], &[("t/a_test.py".to_string(), 2)]),
             Some("Audited owners: t/a_test.py (cut 2), t/b_test.py (no cut)".to_string())
