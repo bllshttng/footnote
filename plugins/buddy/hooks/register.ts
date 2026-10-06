@@ -427,14 +427,18 @@ async function react($: EngineInterface, why: Reason | 'idle' = 'turn', context?
   await remember($, c, why, line, now)
 }
 
-// Every observation the buddy makes, one JSON row each, so you can read them back.
+// Every observation the buddy makes, one JSON row each, so you can read them back. The mods API
+// has no append, so each write rewrites the file; the cap keeps that cheap.
+// ponytail: two sessions writing at once can drop a row; an append call would fix it if the API gains one.
+const OBSERVATIONS_KEPT = 1000
 async function remember($: EngineInterface, c: Companion, why: string, line: string, now: number): Promise<void> {
   const path = `${buddyDir()}/observations.jsonl`
-  let old = ''
+  let old: string[] = []
   try {
-    old = await $.fs.read(path)
+    old = (await $.fs.read(path)).split('\n').filter(Boolean)
   } catch {}
-  await $.fs.write(path, old + JSON.stringify({ at: new Date(now).toISOString(), name: c.name, why, line }) + '\n')
+  const rows = [...old, JSON.stringify({ at: new Date(now).toISOString(), name: c.name, why, line })].slice(-OBSERVATIONS_KEPT)
+  await $.fs.write(path, rows.join('\n') + '\n').catch(() => {})
 }
 
 // One feed read serves every session on the machine: a read costs about 4 s of
@@ -679,7 +683,7 @@ export function register(on: On) {
       if (r.bank < 1) return { text: `${buddy!.name} stays. ${rerollLine(r)}.` }
       await $.store.set('rerolls', { ...r, bank: r.bank - 1 })
       let soul = hatch(newSeed(), now)
-      while (soul.name === buddy!.name) soul = hatch(newSeed(), now)
+      for (let i = 0; i < 20 && soul.name === buddy!.name; i++) soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
       recent = []
