@@ -89,55 +89,17 @@ def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner) -> N
     threads = read_unread_threads("acme-docs")
     assert len(threads) == 1
 
-
-def test_kind_lane_without_subject_receipt_subject_is_null(isolated, runner) -> None:
-    result = _invoke(
+    # No --subject: the receipt's subject reads null.
+    plain = _invoke(
         isolated,
         runner,
         "--to-project", "acme-docs", "--kind", "fyi",
         "--from-name", "acme-web", "plain body",
     )
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.output.strip().splitlines()[0])
-    assert receipt["subject"] is None
+    assert plain.exit_code == 0, plain.output
+    assert json.loads(plain.output.strip().splitlines()[0])["subject"] is None
 
-
-def test_raw_refuses_subject(isolated, runner) -> None:
-    result = _invoke(isolated, runner, "peer", "hi", "--raw", "--subject", "s")
-    assert result.exit_code == 2, result.output
-    assert "--subject" in result.output
-
-
-def test_team_relays_subject_expires_urgent_as_pairs(isolated, monkeypatch) -> None:
-    """Click parked an unknown option's VALUE in the positional body,
-    so `--subject S` relayed a bare --subject and the writer refused S as a
-    flag. The shim now declares the three announcement flags and relays each
-    flag with its value as one pair."""
-    import shutil
-
-    from fno.mail.cli import mail_app
-
-    argv_log = isolated / "argv.log"
-    script = isolated / "fake-fno-agents"
-    script.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
-        "exit 0\n"
-    )
-    script.chmod(0o755)
-    monkeypatch.setattr(
-        shutil, "which", lambda name, path=None: str(script) if name == "fno-agents" else shutil.which(name, path)
-    )
-
-    result = CliRunner().invoke(
-        mail_app,
-        [
-            "team", "--scope", "all", "--subject", "merge-hold-cli-ci",
-            "--expires", "12h", "--urgent", "stand down",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    argv = argv_log.read_text().strip().splitlines()
-    for flag, value in (("--subject", "merge-hold-cli-ci"), ("--expires", "12h")):
-        i = argv.index(flag)
-        assert argv[i + 1] == value, argv
+    # --raw strips the envelope, so a subject has nothing to ride.
+    refused = _invoke(isolated, runner, "peer", "hi", "--raw", "--subject", "s")
+    assert refused.exit_code == 2, refused.output
+    assert "--subject" in refused.output

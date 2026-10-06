@@ -4210,14 +4210,6 @@ def cmd_team(
     message: str | None = typer.Argument(None, help="One announcement body."),
     from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
-    subject: str | None = typer.Option(
-        None, "--subject",
-        help="Supersede key; also the delivered header's third field.",
-    ),
-    expires: str | None = typer.Option(
-        None, "--expires", help="Standing window: 45m | 24h | 7d (default 24h).",
-    ),
-    urgent: bool = typer.Option(False, "--urgent", help="Mark the announcement urgent."),
 ) -> None:
     """Announce one body to a fleet scope as ONE bus line.
 
@@ -4227,12 +4219,12 @@ def cmd_team(
     <id>`). The body is linted here (the single style implementation); the
     Rust writer owns authority, the audience snapshot, and the locked append.
 
-    `--subject`, `--expires`, and `--urgent` are declared HERE as paired
-    options and relayed flag+value (click parked the VALUE of an
-    unknown option in the positional body, so `--subject S` relayed a bare
-    `--subject` and the writer refused S as a flag). Any other unrecognized
-    flag still passes through verbatim and is refused there, so this shim
-    adds no Python flag surface beyond the pairs.
+    Announcement flags belong to the Rust writer and are relayed verbatim:
+    `--subject=S` (supersede key; the = spelling keeps click from parking
+    the value in the positional body), `--expires=45m|24h|7d` (standing
+    window, default 24h, max 7d), `--urgent`. Any unrecognized flag is
+    passed through the same way and refused there, so this shim adds no
+    Python flag surface.
     """
     import shutil
 
@@ -4251,19 +4243,11 @@ def cmd_team(
         )
         raise typer.Exit(code=1)
 
-    relayed: list[str] = []
-    if subject is not None:
-        relayed += ["--subject", subject]
-    if expires is not None:
-        relayed += ["--expires", expires]
-    if urgent:
-        relayed.append("--urgent")
     args = [
         binary, "announce", "send",
         "--scope", scope,
         "--from", sender,
         "--sender-kind", sender_kind,
-        *relayed,
         *ctx.args,
     ]
     if json_out:

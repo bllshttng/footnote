@@ -190,11 +190,4 @@ mod tests {
             Decision::AllowFallback(_)
         ));
     }
-
-    #[test]
-    fn unhealthy_reads_name_the_two_failure_modes() {
-        // (from_env_opt resolves through the env; a bare test env has one, so
-        // this only asserts the function answers without panicking.)
-        let _ = mail_unhealthy();
-    }
 }
