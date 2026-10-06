@@ -460,7 +460,7 @@ async fn granted_thread_puts_the_roots_on_every_turn_start() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ungranted_thread_emits_todays_frames_unchanged() {
+async fn ungranted_thread_resumes_large_history_without_a_turn_policy() {
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -469,10 +469,15 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
     // a runner with a real cache would grow a sandboxPolicy and fail here.
     let uv_prev = std::env::var_os("UV_CACHE_DIR");
     unsafe { std::env::set_var("UV_CACHE_DIR", "/nonexistent-fno-uv-cache-probe") };
-    let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-plain"));
+    let daemon = FakeDaemon::start(Behavior {
+        resume_history_bytes: 17 * 1024 * 1024,
+        cold_thread: true,
+        ..Behavior::quick().with_thread_id("thread-plain")
+    });
     let worktree = tempfile::tempdir().unwrap();
-    let mut thread = CodexThread::start_with_state_dirs(
+    let mut thread = CodexThread::resume_with_state_dirs(
         worktree.path(),
+        "thread-plain",
         None,
         &CodexPosture::bounded(),
         None,
@@ -480,7 +485,7 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
         None,
     )
     .await
-    .expect("thread starts");
+    .expect("thread resumes without returning its oversized history");
     thread.drive_turn("go").await.expect("turn");
 
     match uv_prev {
@@ -488,8 +493,11 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
         None => unsafe { std::env::remove_var("UV_CACHE_DIR") },
     }
 
-    let start = daemon.first_params("thread/start").expect("a thread/start");
-    assert_eq!(start["sandbox"], "workspace-write");
+    let resume = daemon
+        .first_params("thread/resume")
+        .expect("a thread/resume");
+    assert_eq!(resume["sandbox"], "workspace-write");
+    assert_eq!(resume["excludeTurns"], true);
     let turn = daemon.first_params("turn/start").expect("a turn/start");
     assert!(
         turn.get("sandboxPolicy").is_none(),
