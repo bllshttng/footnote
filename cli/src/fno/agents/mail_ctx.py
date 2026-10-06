@@ -28,6 +28,9 @@ class _MailCtx:
     # The RECIPIENT's full session id, rendering its own live crown into
     # the envelope header as to_rank. Live delivery only; None omits it.
     to_session: Optional[str] = None
+    # The sender's --subject; rides the live, hosted, and durable
+    # envelopes built from this ctx so all three carry one header.
+    subject: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -38,6 +41,7 @@ def _build_mail_ctx(
     id: Optional[str] = None,
     origin: Optional[str] = None,
     to_session: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
@@ -64,4 +68,5 @@ def _build_mail_ctx(
         from_session=from_session,
         harness=from_harness,
         to_session=to_session or None,
+        subject=(subject or "").strip() or None,
     )

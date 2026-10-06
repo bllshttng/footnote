@@ -114,6 +114,24 @@ def durable_leg_story(
     return story + "; durable leg holds"
 
 
+def json_receipt(
+    msg_id: str,
+    *,
+    to: str,
+    status: str,
+    subject: Optional[str] = None,
+) -> str:
+    """The default send receipt: one JSON line, SendMessage-shaped.
+
+    Four keys, always: ``msg_id`` (the reply handle), ``subject`` (the
+    sender's ``--subject``, null when none), ``to``, and ``status`` carrying
+    the delivery verdict in the receipt vocabulary every reader already
+    greps (``delivered (hosted)``, ``queued (durable)``, ``typed``)."""
+    return json.dumps(
+        {"msg_id": msg_id, "subject": subject, "to": to, "status": status}
+    )
+
+
 def demotion_receipt(
     msg_id: str,
     *,
@@ -122,8 +140,9 @@ def demotion_receipt(
     target: Optional[str] = None,
     project: Optional[str] = None,
     age_target: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> str:
-    """The stdout line for a durable demotion (refined by x-aaaa)."""
+    """The stdout receipt for a durable demotion (refined by x-aaaa)."""
     token = durable_leg_story(reason, age_target if age_target is not None else target)
     if token is None:
         token = reason or "live-miss"
@@ -131,10 +150,10 @@ def demotion_receipt(
             age_of = age_target if age_target is not None else target
             if age_of is not None:
                 token += _live_miss_age_suffix(age_of)
-    where = f" for {target}" if target else ""
+    status = f"queued (durable) [{token}]" + durable_window_clause(owner)
     if project:
-        where += f" [project {project}]"
-    return f"{msg_id} queued (durable){where} [{token}]" + durable_window_clause(owner)
+        status += f" [project {project}]"
+    return json_receipt(msg_id, to=target or project or "", status=status, subject=subject)
 
 
 def not_landed_receipt(
@@ -250,7 +269,7 @@ def _live_pane_for(target: str, session_id: Optional[str]) -> Optional[int]:
     return None
 
 
-def print_project_demotion(result, to_project: str) -> None:
+def print_project_demotion(result, to_project: str, subject: Optional[str] = None) -> None:
     """Stdout receipt(s) for a --to-project send that wrote durable.
 
     A resolved live peer demoted to durable is addressed to that PEER (same
@@ -264,29 +283,39 @@ def print_project_demotion(result, to_project: str) -> None:
             from fno.mail import hold as _hold
 
             _note = _hold.bounce_reason(result.recipient)
-            print(
-                f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}] "
-                f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
-                + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
-                + durable_window_clause(result.durable_owner)
-            )
+            print(json_receipt(
+                result.msg_id,
+                to=result.recipient,
+                status=(
+                    f"queued (durable) [project {to_project}] "
+                    f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
+                )
+                + durable_window_clause(result.durable_owner),
+                subject=subject,
+            ))
+            if _note:
+                print(f"`fno agents mail withdraw {result.msg_id}` retracts it.")
         else:
             _warn_deferred(result.recipient, reason=result.reason)
             print(demotion_receipt(
                 result.msg_id,
                 reason=result.reason, owner=result.durable_owner,
                 target=result.recipient, project=to_project,
+                subject=subject,
             ))
         return
     from fno.inbox.store import DurableOwner
 
     _warn_deferred(to_project, project=True)
-    print(
-        f"{result.msg_id} queued (durable) for project {to_project} "
-        f"[param-forced: --to-project]"
-        + durable_window_clause(DurableOwner.INBOX_DRAIN.value)
-    )
+    print(json_receipt(
+        result.msg_id,
+        to=to_project,
+        status=(
+            "queued (durable) [param-forced: --to-project]"
+            + durable_window_clause(DurableOwner.INBOX_DRAIN.value)
+        ),
+        subject=subject,
+    ))
 
 
 def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:

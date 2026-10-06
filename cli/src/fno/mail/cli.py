@@ -66,6 +66,7 @@ from fno.mail.receipts import (
     demotion_receipt,
     durable_leg_story,
     durable_window_clause,
+    json_receipt,
     print_project_demotion,
 )
 from fno.inbox.store import (
@@ -1782,6 +1783,7 @@ def _forced_pane_send(
     sender_model: str,
     authored_words: Optional[int],
     reservation,
+    subject: Optional[str] = None,
 ) -> bool:
     """``mail send --force``: type the wrapped body into the recipient's pane.
 
@@ -1900,6 +1902,7 @@ def _forced_pane_send(
             from_model=sender_model,
             to_kind="name",
             word_count=authored_words,
+            subject=subject,
         )
     except Exception as exc:  # noqa: BLE001 - the bytes are already typed
         print(
@@ -1908,7 +1911,11 @@ def _forced_pane_send(
         )
     corr = f" re:{reply_to}" if reply_to else ""
     label = f"thread viewport {mux_session}:{pane_id}" if thread_viewport else f"pane {pane_id}"
-    print(f"typed ({label}) to {recipient} id:{msg_id}{corr}")
+    print(json_receipt(
+        msg_id, to=recipient, status=f"typed ({label})", subject=subject,
+    ))
+    if corr:
+        print(corr)
     return True
 
 
@@ -1981,6 +1988,7 @@ def _name_lane_send(
     style_exception: Optional[str] = None,
     force: bool = False,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
@@ -2128,6 +2136,7 @@ def _name_lane_send(
             from_session=sender_session,
             origin=origin,
             to_session=to_session,
+            subject=subject,
         )
 
     # Live carries the recipient's crown; the durable floor below carries none,
@@ -2179,6 +2188,7 @@ def _name_lane_send(
             sender_model=sender_model,
             authored_words=authored_words,
             reservation=reservation,
+            subject=subject,
         )
         return
 
@@ -2347,10 +2357,6 @@ def _name_lane_send(
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
-    # Surface the minted id so the sender can quote it and the recipient (who
-    # also sees it in the injected <fno_mail id=...>) can reply --to it even
-    # though a live-confirmed delivery writes no durable thread (US3).
-    idtag = f" id:{msg_id}"
     if injected:
         from fno.bus.log import record_hosted_delivery
 
@@ -2371,6 +2377,7 @@ def _name_lane_send(
                 to_kind="name",
                 word_count=authored_words,
                 to_session=to_session,
+                subject=subject,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -2379,10 +2386,19 @@ def _name_lane_send(
                 file=sys.stderr,
             )
     if injected and woken_as:
-        print(f"delivered (woken) to {recipient}{idtag}{corr} [revived as bg thread {woken_as}]")
+        print(json_receipt(
+            msg_id,
+            to=recipient,
+            status=f"delivered (woken) [revived as bg thread {woken_as}]",
+            subject=subject,
+        ))
+        if corr:
+            print(corr)
         return
     if injected:
-        print(f"delivered (hosted) to {recipient}{idtag}{live}{corr}")
+        print(json_receipt(
+            msg_id, to=recipient, status=f"delivered (hosted){live}{corr}", subject=subject,
+        ))
         return
 
     # Every live rung that applied has now been attempted and missed. Durable is
@@ -2447,6 +2463,7 @@ def _name_lane_send(
             from_model=sender_model,
             word_count=authored_words,
             origin=origin,
+            subject=subject,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         if not injected:
@@ -2492,7 +2509,14 @@ def _name_lane_send(
             "`codex app-server daemon start`, then restart the session "
             "(the socket must exist before the codex TUI starts)"
         )
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}{window_tail}")
+    print(json_receipt(
+        th.thread_id,
+        to=recipient,
+        status=f"queued (durable){live}{corr} [{reason}]{window_tail}",
+        subject=subject,
+    ))
+    if hint:
+        print(hint)
     # Live-miss escalation lane (node widened this from attended-only). A
     # miss to an operator-attended session is the stranded case: the human is not
     # watching the drain, so nothing else surfaces it. A miss to a worker the
@@ -3415,6 +3439,14 @@ def cmd_send(
         None, "--style-exception",
         help="Bypass the style check for this body with a stated reason.",
     ),
+    subject: str | None = typer.Option(
+        None, "--subject",
+        help=(
+            "One-line subject; renders as the delivered header's third field "
+            "and on the bus row, the Messages tab and the feed. Without it the "
+            "header shows the body's first sentence."
+        ),
+    ),
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
@@ -3425,10 +3457,11 @@ def cmd_send(
     column is a spawn label, not a mailbox. A stranded send:
     ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
 
-    Stdout: one line, ``msg-<id> delivered (hosted)`` or
-    ``msg-<id> queued (durable) [<reason>]`` plus the drain-window clause
-    (: an empty unread inside the window is not a failure). Exit 0 for
-    both.
+    Stdout: one JSON receipt line, ``{msg_id, subject, to, status}``, where
+    ``status`` carries the verdict (``delivered (hosted)``,
+    ``queued (durable) [<reason>]``, ``typed (pane <id>)``) plus the
+    drain-window clause (an empty unread inside the window is not a
+    failure). Exit 0 for both.
     """
     from fno.agents.dispatch import (
         DispatchAskError,
@@ -3590,6 +3623,13 @@ def cmd_send(
             print(
                 "error: --raw strips the envelope, so --from-self has no `from` "
                 "attribute to stamp; the ledger records the sender instead",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if subject is not None:
+            print(
+                "error: --raw strips the envelope, so --subject has nothing to "
+                "ride; drop one of the two",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -3810,6 +3850,7 @@ def cmd_send(
                 msg_id=msg_id,
                 word_count=authored_words,
                 origin=mail_origin,
+                subject=subject,
             )
         except ValueError as exc:
             _release_budget(reservation)
@@ -3851,9 +3892,14 @@ def cmd_send(
                 "appended": res.appended,
             }))
         else:
-            verb = "appended (durable) to" if res.appended else "queued (durable) for"
+            verb = "appended (durable)" if res.appended else "queued (durable)"
             window_tail = durable_window_clause(DurableOwner.INBOX_DRAIN.value)
-            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]{window_tail}")
+            print(json_receipt(
+                res.msg_id,
+                to=recipient,
+                status=f"{verb} [param-forced: --kind {kind}]{window_tail}",
+                subject=subject,
+            ))
         return
 
     # Project mode: the message is the sole positional, so `send --to-project X
@@ -3879,18 +3925,21 @@ def cmd_send(
                 from_name=stamp_from(from_name),
                 origin=mail_origin,
                 any_=any_live,
+                subject=subject,
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=exc.exit_code) from exc
 
         if result.delivery == "hosted":
-            print(
-                f"{result.msg_id} delivered (hosted) to {result.recipient} "
-                f"[project {to_project}]"
-            )
+            print(json_receipt(
+                result.msg_id,
+                to=result.recipient or to_project,
+                status=f"delivered (hosted) [project {to_project}]",
+                subject=subject,
+            ))
         else:
-            print_project_demotion(result, to_project)
+            print_project_demotion(result, to_project, subject=subject)
         return
 
     # Job-address mode (part 2): node:<id> / pr:<n> names the work, not a
@@ -3915,6 +3964,7 @@ def cmd_send(
                 from_name=stamp_from(from_name),
                 style_exception=style_exception,
                 origin=mail_origin,
+                subject=subject,
             )
             return
 
@@ -3948,7 +3998,7 @@ def cmd_send(
 
         if send_by_thread_identity(
             name, message=message, from_name=from_name, harness=harness,
-            style_exception=style_exception, origin=mail_origin,
+            style_exception=style_exception, origin=mail_origin, subject=subject,
         ):
             return
         forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
@@ -3965,6 +4015,7 @@ def cmd_send(
                 style_exception=style_exception,
                 force=True,
                 origin=mail_origin,
+                subject=subject,
             )
         except AmbiguousTokenError as amb:
             # Discovery is liveness-gated, so a registered worker whose listing
@@ -3989,6 +4040,7 @@ def cmd_send(
             **({"lock_timeout": float(timeout_override)} if timeout_override else {}),
             from_name=stamp_from(from_name),
             origin=mail_origin,
+            subject=subject,
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -4025,6 +4077,7 @@ def cmd_send(
                 resolved=resolved,
                 style_exception=style_exception,
                 origin=mail_origin,
+                subject=subject,
             )
             return
 
@@ -4055,6 +4108,7 @@ def cmd_send(
                 token=name,
                 style_exception=style_exception,
                 origin=mail_origin,
+                subject=subject,
             )
         except AmbiguousTokenError as amb:
             _ambiguous_token_exit(name, amb)
@@ -4073,7 +4127,9 @@ def cmd_send(
     # none: it sends the reader to diagnose a recipient that was never the
     # problem.
     if result.delivery == "hosted":
-        print(f"{result.msg_id} delivered (hosted)")
+        print(json_receipt(
+            result.msg_id, to=name, status="delivered (hosted)", subject=subject,
+        ))
     elif result.reason == "bus-only":
         # the registered-agent lane's gate refused by policy; the
         # durable write already happened inside dispatch_send. Designed, not
@@ -4081,18 +4137,24 @@ def cmd_send(
         from fno.mail import hold as _hold
 
         _note = _hold.bounce_reason(name)
-        print(
-            f"{result.msg_id} queued (durable) "
-            f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
-            + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
-        )
+        print(json_receipt(
+            result.msg_id,
+            to=name,
+            status=(
+                f"queued (durable) "
+                f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
+            ),
+            subject=subject,
+        ))
+        if _note:
+            print(f"`fno agents mail withdraw {result.msg_id}` retracts it.")
     else:
         # a live-lane failure renders as legs on stdout; the raw token
         # (io-error, attach-failed, ...) stays diagnostic on stderr.
         _warn_deferred(name, reason=result.reason)
         print(demotion_receipt(
             result.msg_id, reason=result.reason, owner=result.durable_owner,
-            age_target=name,
+            age_target=name, subject=subject,
         ))
         # Post-send verify : a durable receipt is not a landing. NOT LANDED
         # exits non-zero so a last-line reader cannot record it as delivered.
@@ -4135,6 +4197,14 @@ def cmd_team(
     message: str | None = typer.Argument(None, help="One announcement body."),
     from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
+    subject: str | None = typer.Option(
+        None, "--subject",
+        help="Supersede key; also the delivered header's third field.",
+    ),
+    expires: str | None = typer.Option(
+        None, "--expires", help="Standing window: 45m | 24h | 7d (default 24h).",
+    ),
+    urgent: bool = typer.Option(False, "--urgent", help="Mark the announcement urgent."),
 ) -> None:
     """Announce one body to a fleet scope as ONE bus line.
 
@@ -4144,10 +4214,12 @@ def cmd_team(
     <id>`). The body is linted here (the single style implementation); the
     Rust writer owns authority, the audience snapshot, and the locked append.
 
-    Announcement flags belong to the Rust writer and are relayed verbatim:
-    `--subject S` (supersede key), `--expires 45m|24h|7d` (standing window,
-    default 24h, max 7d), `--urgent`. Any unrecognized flag is passed through
-    the same way and refused there, so this shim adds no Python flag surface.
+    `--subject`, `--expires`, and `--urgent` are declared HERE as paired
+    options and relayed flag+value (click parked the VALUE of an
+    unknown option in the positional body, so `--subject S` relayed a bare
+    `--subject` and the writer refused S as a flag). Any other unrecognized
+    flag still passes through verbatim and is refused there, so this shim
+    adds no Python flag surface beyond the pairs.
     """
     import shutil
 
@@ -4166,11 +4238,19 @@ def cmd_team(
         )
         raise typer.Exit(code=1)
 
+    relayed: list[str] = []
+    if subject is not None:
+        relayed += ["--subject", subject]
+    if expires is not None:
+        relayed += ["--expires", expires]
+    if urgent:
+        relayed.append("--urgent")
     args = [
         binary, "announce", "send",
         "--scope", scope,
         "--from", sender,
         "--sender-kind", sender_kind,
+        *relayed,
         *ctx.args,
     ]
     if json_out:
