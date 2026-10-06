@@ -196,8 +196,8 @@ def test_init_node_input_is_covered(stub_exec, monkeypatch, tmp_path):
     # node's plan and modulates (the megawalk/megatron path).
     plan = _plan(tmp_path, "| `db/migrations/x.sql` | modify | 1.1 |\n")
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda *a, **k: [{"id": "x-518f", "plan_path": plan}],
+        "fno.graph.store.read_nodes_by_ids",
+        lambda *a, **k: {"entries": [{"id": "x-518f", "plan_path": plan}], "missing": []},
     )
     _enable(monkeypatch)
     res = _invoke(["--input", "x-518f", "--size", "S"])
@@ -210,8 +210,8 @@ def test_init_modifier_prefixed_node_is_covered(stub_exec, monkeypatch, tmp_path
     # IS covered: the id token resolves even though the arg carries modifiers.
     plan = _plan(tmp_path, "| `db/migrations/x.sql` | modify | 1.1 |\n")
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda *a, **k: [{"id": "x-518f", "plan_path": plan}],
+        "fno.graph.store.read_nodes_by_ids",
+        lambda *a, **k: {"entries": [{"id": "x-518f", "plan_path": plan}], "missing": []},
     )
     _enable(monkeypatch)
     res = _invoke(["--input", "no-merge x-518f", "--size", "S"])
@@ -237,11 +237,11 @@ def test_resolve_plan_for_blast_matrix(monkeypatch, tmp_path):
     assert _resolve_plan_for_blast("a/b/plan.md", "x-518f") == "a/b/plan.md"
 
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda *a, **k: [
+        "fno.graph.store.read_nodes_by_ids",
+        lambda *a, **k: {"entries": [
             {"id": "x-518f", "plan_path": "p/blast.md"},
             {"id": "ab-other", "plan_path": "p/other.md"},
-        ],
+        ], "missing": []},
     )
     assert _resolve_plan_for_blast(None, "x-518f") == "p/blast.md"        # clean id
     assert _resolve_plan_for_blast(None, "no-merge x-518f") == "p/blast.md"  # modifier
@@ -256,6 +256,7 @@ def test_resolve_plan_for_blast_malformed_graph(monkeypatch):
     # Defensive: a non-list graph / non-dict entries never raise -> None.
     from fno.target_cli import _resolve_plan_for_blast
 
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda *a, **k: None)
     monkeypatch.setattr("fno.graph.load.load_graph", lambda *a, **k: "not-a-list")
     assert _resolve_plan_for_blast(None, "x-518f") is None
     monkeypatch.setattr("fno.graph.load.load_graph", lambda *a, **k: ["junk", 42])

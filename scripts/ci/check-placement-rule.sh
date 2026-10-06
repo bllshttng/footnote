@@ -168,6 +168,9 @@
 #      plansDirectory tier of the plans-dir chain, i.e. Claude Code's own
 #      config (not footnote state); its inline tests write fixture copies
 #      under a tempdir. Nothing accumulates in either.
+#      crates/fno-agents/src/eval_part4.rs answers over the plans-dir
+#      chain and its inline test writes the same tempdir fixture copy of
+#      Claude Code's own settings.local.json. Nothing accumulates there.
 #      crates/fno/src/uninstall.rs reads Claude Code's plugin registry and
 #      removes the hook entry cli_hooks.py merged into its settings.json:
 #      the reverse of that write, in Claude Code's own config. It stores
@@ -348,6 +351,7 @@ crates/fno-agents/src/law_match.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/daemon_tests.rs
+crates/fno-agents/src/eval_part4.rs
 crates/fno-agents/src/finalize.rs
 crates/fno-agents/src/hook/lead_guard.rs
 crates/fno-agents/src/hook/stop.rs

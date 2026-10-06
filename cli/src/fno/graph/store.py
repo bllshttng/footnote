@@ -1849,9 +1849,11 @@ def reap_open_session_record(
         report["settled"] = bool(report.get("found"))
         return report
     try:
-        entries = read_graph_strict(Path(path))
-        node = next((e for e in entries if e.get("id") == resolved), None)
-        if node is None:
+        node, answered = _readback_row(Path(path), resolved)
+        if not answered:
+            report["settled"] = report.get("found", False)
+            return report
+        if node is None or node.get("archived_at"):
             report.update({"status_after": None, "remaining_open_do": 0, "settled": report.get("found", False)})
             return report
         rows = node.get("sessions") or []

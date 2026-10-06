@@ -465,7 +465,52 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             graph_error = Some(error);
             None
         }
-        Some(_) => match crate::backlog::api::rows(&store) {
+        Some(_) => match crate::graph_store::read_rows_where(
+            &store.graph,
+            &crate::backlog::RowQuery {
+                fields: Some(
+                    crate::graph_store::SLIM_FIELDS
+                        .iter()
+                        .copied()
+                        .chain([
+                            "size",
+                            "model",
+                            "dispatch_verb",
+                            "dispatch_brief",
+                            "mission_id",
+                            "mission_wave",
+                            "mission_slug",
+                            "mission_from_msg_id",
+                            "roadmap_id",
+                            "sessions",
+                            "additional_prs",
+                            "dispatch_hold",
+                            "contained_in",
+                            "queued_at",
+                            "queued_reason",
+                            "deferred_at",
+                            "superseded_by",
+                            "supersession",
+                            "encounters",
+                            "orphan_ok",
+                            "batch",
+                            "tags",
+                            "blocked_reason",
+                            "children_total",
+                            "children_done",
+                            "discovery",
+                            "pr_url",
+                            "cost_sessions",
+                        ])
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                with_blockers: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+        {
             Ok(e) => Some(e),
             Err(e) => {
                 let error = format!("graph unreadable: {}", e.0);

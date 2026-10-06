@@ -8000,6 +8000,11 @@ event_types:
     sources: [daemon, agents]
     data:
       required: []
+  - name: lead_wake
+    description: "One lead-wake arm episode: the daemon woke a lead past its check-in beat and told the rung-up leads. The arm folds the newest row per scope as its dedupe memory (lead_wake.rs)."
+    sources: [daemon]
+    data:
+      required: [scope, level, idle_secs, beat_secs, acted]
   - name: mcp_channel_demoted_to_socket
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]

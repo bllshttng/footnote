@@ -554,8 +554,7 @@ def run_king_wake(
 
     _step = on_step or (lambda _s: None)
 
-    def _wait_cap(left):
-        cap = _KING_TRUTH_WAIT_S
+    def _wait_cap(left, cap=_KING_TRUTH_WAIT_S):
         return cap if left is None else min(cap, max(0.0, left - _KING_STEP_FLOOR_S))
 
     def _bounded(fn, *args, wait_s: float):
@@ -569,13 +568,14 @@ def run_king_wake(
         finally:
             pool.shutdown(wait=False)
 
-    def _setup_bounded(step, fn, *args):
+    def _setup_bounded(step, fn, *args, cap: Optional[float] = None):
         left = seconds_left_fn() if seconds_left_fn is not None else None
         if left is not None and left < _KING_STEP_FLOOR_S:
             return None, True
         if step:
             _step(step)
-        return _bounded(fn, *args, wait_s=_wait_cap(left))
+        return _bounded(fn, *args,
+                        wait_s=_wait_cap(left, cap if cap is not None else _KING_TRUTH_WAIT_S))
 
     if unread_fn is None:
         from fno.bus.cursor import scan_unread
@@ -596,7 +596,13 @@ def run_king_wake(
         return summary
 
 
-    outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn)
+    # gather_court misses the 10s truth bound even unloaded; scale by load.
+    try:
+        load = os.getloadavg()[0] / (os.cpu_count() or 1)
+        court_wait_s = min(45.0, _KING_TRUTH_WAIT_S * max(1.0, load / 2.0))
+    except (AttributeError, OSError):
+        court_wait_s = _KING_TRUTH_WAIT_S
+    outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn, cap=court_wait_s)
     targets, note = outcome or ([], "court read did not complete in its slice bound")
     summary: dict[str, Any] = {
         "armed": True,
@@ -606,6 +612,7 @@ def run_king_wake(
         "truth_reads": 0,
         "evaluated": 0,
         "note": note,
+        "court_incomplete": court_cut,
     }
     # One question-journal read per tick, shared by every scope like `entries`.
     try:

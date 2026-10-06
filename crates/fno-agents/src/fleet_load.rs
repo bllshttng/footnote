@@ -161,13 +161,14 @@ struct SamplePoint {
     usable: bool,
 }
 
-/// One pass over both journals. Dedup by exact line text across the pair:
-/// every daemon tick is mirrored to the global file, so the second sight of
-/// a line is the same row, not a new measurement.
+/// One pass over every journal lead rows can sit in (the resolver also
+/// carries the rostered space journals). Dedup by exact line text across
+/// the set: every daemon tick is mirrored to the global file, so the
+/// second sight of a line is the same row, not a new measurement.
 fn read_events(home: &AgentsHome) -> EventPass {
     let mut pass = EventPass::default();
     let mut seen: HashSet<String> = HashSet::new();
-    for journal in [home.events_jsonl(), crate::daemon::global_events_path(home)] {
+    for journal in crate::lead_eval::checkin_journals(home) {
         let text = crate::event_store::journal_text(&journal, EVENT_TYPES);
         for line in text.lines() {
             if !seen.insert(line.to_string()) {
@@ -586,7 +587,21 @@ fn merged_count(home: &AgentsHome, floor_ms: i64, now_ms: i64) -> Option<u64> {
     if !path.exists() {
         return Some(0);
     }
-    let rows = crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)).ok()?;
+    let rows = crate::graph_store::read_rows_where(
+        &path,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                ["id", "slug", "merge_status", "merged_at", "completed_at"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| crate::backlog::api::ApiError(error.to_string()))
+    .ok()?;
     let empty: Vec<String> = Vec::new();
     let vocab = crate::scoreboard::TerminalVocabulary {
         doc: &empty,

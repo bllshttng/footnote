@@ -192,11 +192,17 @@ pub(super) async fn mark_claude_stopped(
     name: &str,
 ) -> Result<(), Response> {
     let claude_name = name.to_string();
+    let wake_home = ctx.home.clone();
     update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if let Some(e) = r.find_mut(&claude_name) {
             e.status = AgentStatus::Exited;
             e.exited_at = Some(now_rfc3339_like());
             state::record_stop(e, "stop-verb", Some("claude".into()));
+            // best-effort: a failed stamp costs a later wake its name,
+            // never the stop.
+            let sid = e.harness_session_id.clone().unwrap_or_default();
+            let n = e.name.clone();
+            crate::wake_name::record(&wake_home, &sid, &n);
         }
     })
     .await
@@ -263,6 +269,20 @@ pub(super) async fn stop_claude(
     name: &str,
     entry: &RegistryEntry,
 ) -> Response {
+    // Never stop a session the user is talking to. A typed turn inside the
+    // attended window refuses with the why, whatever the caller believes
+    // about the row's work state.
+    if let Some(why) = crate::attended::stop_refusal(&ctx.home, entry) {
+        let _ = ctx.emitter.emit(
+            "agent_stop_refused",
+            &json!({"name": name, "attended": why}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidStatus,
+            format!("agent {name} is attended ({why}); stop refused - a session the user typed into is not stopped"),
+        );
+    }
     let short = match entry
         .transport_short()
         .or(entry.session_id.as_deref())

@@ -61,6 +61,7 @@ pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;
 pub mod attach;
+pub(crate) mod attended;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
@@ -152,6 +153,7 @@ pub mod effort_surface;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
+pub mod eval_part4;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_qualification;
@@ -183,6 +185,7 @@ pub mod gc_verify;
 pub mod gemini_ask;
 pub mod gh_budget;
 pub mod gh_cache;
+pub mod gh_incident;
 #[cfg(test)]
 mod git_test_helpers;
 pub mod graph_get;
@@ -233,6 +236,7 @@ pub mod lead_state;
 pub mod lead_term;
 pub mod lead_termination;
 pub mod lead_verdict_inputs;
+pub mod lead_wake;
 pub mod ledger_axes;
 pub(crate) mod ledger_workers;
 mod lifecycle_child;
@@ -444,6 +448,7 @@ pub mod team_alarm;
 pub mod team_identity;
 pub mod team_names;
 pub mod team_reap;
+pub mod team_rescope;
 pub mod team_settle;
 pub mod team_split;
 pub mod team_widen;
@@ -463,8 +468,10 @@ pub mod verify_evidence;
 pub mod version;
 pub mod wait;
 pub mod wake_meter;
+pub mod wake_name;
 pub mod watch_expiry;
 pub mod wave;
+pub mod worked_nodes;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1684,6 +1691,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "lead_armed",
     "lead_checkin",
     "lead_dispatch_exception",
+    // The lead-wake arm's receipt: one row per daemon wake episode, the
+    // dedupe memory the arm folds before it wakes again (lead_wake.rs).
+    "lead_wake",
     // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`

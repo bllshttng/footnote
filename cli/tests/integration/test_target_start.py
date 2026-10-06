@@ -1349,7 +1349,8 @@ def test_resolve_node_model_degrades_on_error(monkeypatch):
     def _raise(_p):
         raise RuntimeError("snapshot unreadable")
 
-    monkeypatch.setattr("fno.graph.load.load_graph", _raise)
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda *a, **k: None)
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", _raise)
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
     assert target_cli._resolve_node_model("x-d7a7") == (None, "provider-default(no-difficulty)")
 
@@ -1372,8 +1373,8 @@ def test_resolve_node_model_uses_route_resolve(monkeypatch):
     difficulty stays out of the call (the capacity grid owns it, x-baef)."""
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda p: [{"id": "x-d7a7", "model": "glm-5.2", "difficulty": "high"}],
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{"id": "x-d7a7", "model": "glm-5.2", "difficulty": "high"}], "missing": []},
     )
     seen = {}
 
@@ -1393,8 +1394,8 @@ def test_resolve_node_model_scopes_by_provider(monkeypatch):
     """The seam scopes resolution by the provider it is handed (x-da6e)."""
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
     monkeypatch.setattr(
-        "fno.graph.load.load_graph",
-        lambda p: [{"id": "x-d7a7", "model": "claude-sonnet-5"}],
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{"id": "x-d7a7", "model": "claude-sonnet-5"}], "missing": []},
     )
     seen = {}
 

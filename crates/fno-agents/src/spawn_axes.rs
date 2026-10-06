@@ -607,8 +607,14 @@ pub fn wake_name_decide(ask: &Value) -> Value {
         return serde_json::json!({ "refused": "session_id is required" });
     }
     let alias = format!("wake-{}", crate::identity::canonical_handle(session_id));
-    let name = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
-        .map(|registry| crate::reentry::wake_spawn_name(&registry, session_id))
+    let home = crate::paths::AgentsHome::from_env();
+    let registry_path = home.registry_json();
+    let name = crate::state::load_registry(&registry_path)
+        .ok()
+        .map(|registry| crate::reentry::wake_spawn_name(&registry, &registry_path, session_id))
+        // An unreadable registry degrades through the tombstone before the
+        // alias: a stamped name is the better answer at every rung.
+        .or_else(|| crate::wake_name::lookup_beside(&registry_path, session_id))
         .unwrap_or(alias);
     serde_json::json!({ "name": name })
 }

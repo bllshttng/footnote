@@ -17,8 +17,8 @@ use super::{
     execute_retask, refused_receipt, RetaskRow, RetaskSeams, RetaskTarget, TransportFailure,
 };
 use crate::bounded_cmd::output_with_timeout_result;
+use crate::claude_drive;
 use crate::state::{classify_session_transition, rename_agent, update_registry, RegistryEntry};
-use crate::{claude_drive, graph_store};
 
 /// How long each pane op may run, mirroring the Python transport's budgets.
 const PANE_READ_SECS: u64 = 10;
@@ -606,7 +606,19 @@ impl LiveSeams {
         else {
             return refused("source_node_unresolved", json!({}));
         };
-        let rows = match graph_store::read_rows(&self.graph_path) {
+        let rows = match crate::graph_store::read_rows_where(
+            &self.graph_path,
+            &crate::backlog::RowQuery {
+                fields: Some(
+                    ["id", "sessions", "status", "pr_number", "merge_status"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                with_blockers: true,
+                ..Default::default()
+            },
+        ) {
             Ok(rows) => rows,
             // Unreadable graph evidence cannot authorize clear.
             Err(error) => {

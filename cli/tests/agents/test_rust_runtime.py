@@ -37,7 +37,7 @@ def _open_node_row(monkeypatch, tmp_path):
         "plan_path": str(tmp_path / "p.md"),
         "cwd": str(tmp_path),
     }
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [row])
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row], "missing": []})
     # The verb reads the store itself for the nodeless derive: point its
     # FNO_HOME at a fixture graph naming the same row.
     monkeypatch.setenv("FNO_HOME", str(tmp_path))
@@ -1708,10 +1708,16 @@ def test_opencode_bridge_carries_marker_before_the_message_fence(monkeypatch) ->
         from_name="k",
         model="m1",
         node="x-90a9",
+        # A profile-sourced effort must reach the serve lane, never the seed:
+        # the front door carries the axis on the opencode thread row, so
+        # dropping it here would silently seat the worker on the account
+        # default effort.
+        effort="high",
     )
     argv = captured["argv"]
     assert argv[1] == "spawn"
     assert argv[2].startswith("--defaults-applied=")
+    assert argv.index("--effort=high") < argv.index("--")
     tail = argv[argv.index("--") + 1 :]
     assert tail == ["/target x-90a9"]
 
@@ -1840,7 +1846,7 @@ def test_fleet_incident_journey_stop_gates_and_clear_reopens(tmp_path, monkeypat
     assert announced.returncode == 0, announced.stderr + announced.stdout
     payload = json.loads(announced.stdout.strip().splitlines()[-1])
     assert payload.get("id") and payload["scope"] == "all", announced.stdout
-    lines = [json.loads(l) for l in (bus_dir / "messages.jsonl").read_text().splitlines()]
+    lines = [json.loads(line) for line in (bus_dir / "messages.jsonl").read_text().splitlines()]
     assert [m["kind"] for m in lines] == ["announce"], lines
 
     # 7. Clear is a positive record at the NEXT generation.

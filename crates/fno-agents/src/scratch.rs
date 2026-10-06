@@ -539,7 +539,26 @@ struct KeyedNode {
 /// the store reader, never a raw mirror read.
 fn keyed_nodes(graph: &Path) -> HashMap<String, Vec<KeyedNode>> {
     let mut map: HashMap<String, Vec<KeyedNode>> = HashMap::new();
-    let Ok(rows) = crate::graph_store::read_rows(graph) else {
+    let Ok(rows) = crate::graph_store::read_rows_where(
+        graph,
+        &crate::backlog::RowQuery {
+            fields: Some(
+                [
+                    "id",
+                    "status",
+                    "origin_evidence",
+                    "progress_notes",
+                    "created_at",
+                    "completed_at",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            with_blockers: true,
+            ..Default::default()
+        },
+    ) else {
         return map;
     };
     for node in &rows {
