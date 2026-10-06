@@ -829,13 +829,19 @@ mod tests {
         let lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // FNO_SPACES_DIR, never FNO_AGENTS_HOME: the pin the manifest arm
+        // resolves through, while the seeded registry stays an AgentsHome::at
+        // path that the source-ahead schema guard never reads as the shared
+        // file. Saved and restored around the whole test.
+        let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
         let dir = tempfile::tempdir().unwrap();
-        let home_root = dir.path().join("home");
-        std::fs::create_dir_all(&home_root).unwrap();
-        std::env::set_var("FNO_AGENTS_HOME", &home_root);
-        let home = AgentsHome::at(home_root);
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        let home = AgentsHome::at(dir.path().join("home"));
+        std::fs::create_dir_all(home.root()).unwrap();
         let cwd = dir.path().join("repo");
-        std::fs::create_dir_all(&cwd).unwrap();
+        // A .git child makes space_dir resolve the repo itself, so the
+        // manifest lands at a deterministic path whatever the ambient env.
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
         let heir = "01a10f07-d704-75a0-a460-7913efe8971b";
         let predecessor = "99473043-aaaa-4bbb-8ccc-ddddeeeeeeee";
         seed_registry(
@@ -853,15 +859,22 @@ mod tests {
         std::fs::write(
             &manifest,
             format!(
-                "---\nterm: span:96h\nscope: x-aaaa\nshape: court\nharness: claude\n\
-                 harness_session_id: {predecessor}\ncrown_level: 2\ncrown_scope: x-aaaa\n---\n"
+                "---\nfno_id: 21fa9486-2bd8-426f-b7e8-8c376b60bf72\ncreated_at: 2026-10-05T20:31:14Z\n\
+                 term: span:96h\nscope: x-aaaa\nshape: court\nharness: claude\n\
+                 harness_session_id: {predecessor}\ncrown_level: 2\ncrown_scope: x-aaaa\n\
+                 crown_grantor: vellum\n---\n"
             ),
         )
         .unwrap();
 
         let params = report_params("codex", heir, json!({"agent_self": "lead-wren"}));
         let resp = handle_session_report(&home, &emitter(&home), &req(params));
-        assert_eq!(response_json(&resp)["result"]["stored"], true);
+        assert_eq!(
+            response_json(&resp)["result"]["stored"],
+            true,
+            "resp was {:?}",
+            response_json(&resp)
+        );
         let bound = std::fs::read_to_string(&manifest).unwrap();
         assert!(
             bound.contains(&format!("harness_session_id: {heir}")),
@@ -887,6 +900,10 @@ mod tests {
             bound.contains(&format!("harness_session_id: {heir}")),
             "{bound}"
         );
+        match saved_spaces {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
         drop(lock);
     }
 
