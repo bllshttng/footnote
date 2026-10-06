@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { embody, restore, rollBones } from './companion'
 import { fleetLine, refill } from './register'
-import { narrate, summarizeTurn } from './voice'
+import { newsFact, summarizeTurn } from './voice'
 
 const OLD_CONFIG = JSON.stringify({
   oauthAccount: { accountUuid: 'u-1' },
@@ -11,7 +11,7 @@ const OLD_CONFIG = JSON.stringify({
 
 function pane() {
   return {
-    plugin: 'fno',
+    plugin: 'buddy',
     component: 'Pane',
     surface: 'terminal',
     requestId: 'buddy',
@@ -22,7 +22,7 @@ function pane() {
 
 function band(maxRows: number) {
   return {
-    plugin: 'fno',
+    plugin: 'buddy',
     component: 'AbovePrompt',
     surface: 'terminal',
     viewport: { columns: 120, rows: 40 },
@@ -106,7 +106,7 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   expect(fleetLine(undefined, undefined, undefined)).toBe('')
 })
 
-test('a finished turn shows a quick line, then the model reaction', async ($, on) => {
+test('a finished turn shows the model reaction, with no canned line first', async ($, on) => {
   const { clock } = boot(on)
   on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the parser', toolUses: [] }, { role: 'assistant', text: 'done', toolUses: [{ tool: 'Edit', input: {} }] }] }))
   on('model.complete', () => ({ value: { isAnswered: true, text: '"That null check does zero work."', usage: null } }))
@@ -119,16 +119,12 @@ test('a finished turn shows a quick line, then the model reaction', async ($, on
   await ui.unmount()
 
   const after = await $.ui.mount(band(8))
-  expect(await after.find({ type: 'Text', text: /Quip: that null check does zero work\.$/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /Quip: That null check does zero work\.$/ })).toBeDefined()
 })
 
-test('a shipped node in the fleet feed becomes a line with no model call', async ($, on) => {
+test('a shipped node in the fleet feed is told in the buddy voice', async ($, on) => {
   const { clock } = boot(on)
-  let modelCalls = 0
-  on('model.complete', () => {
-    modelCalls += 1
-    return { value: { isAnswered: true, text: 'no', usage: null } }
-  })
+  on('model.complete', (_: any, e: any) => ({ value: /parser-fix shipped PR 42/.test(JSON.stringify(e)) ? { isAnswered: true, text: 'parser-fix shipped pr 42. took long enough.', usage: null } : { isAnswered: false, text: '', usage: null } }))
   const row = { ts: new Date(60_000).toISOString(), kind: 'node_shipped', node: 'parser-fix', ref: '42', title: 'PR 42' }
   on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify([row]), stderr: '' } }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -139,9 +135,8 @@ test('a shipped node in the fleet feed becomes a line with no model call', async
   await ui.unmount()
 
   const after = await $.ui.mount(band(8))
-  expect(await after.find({ type: 'Text', text: /: psst\. parser-fix shipped pr 42\.$/ })).toBeDefined()
-  expect(modelCalls).toBe(0)
-  expect(narrate({ ts: '', kind: 'session_spawned' })).toBe(null)
+  expect(await after.find({ type: 'Text', text: /: parser-fix shipped pr 42\. took long enough\.$/ })).toBeDefined()
+  expect(newsFact({ ts: '', kind: 'session_spawned' })).toBe(null)
   // Rerolls: one a day, one per two ships counted once however many sessions read them, banked to three.
   expect(refill(undefined, 'd1').bank).toBe(1)
   expect(refill({ bank: 0, day: 'd1', ships: 0, shipAt: 0 }, 'd1', [5, 5, 9])).toEqual({ bank: 1, day: 'd1', ships: 0, shipAt: 9 })
@@ -159,4 +154,60 @@ test('petting a short sprite puts the hearts above it, not over its head', async
   expect(await ui.find({ type: 'Text', text: /\u2665/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '    __      ' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '♥' })).toBeDefined()
+})
+
+test('a fresh buddy hatches from the egg into the original card, and any key closes it', async ($, on) => {
+  const { clock } = boot(on)
+  on('model.complete', (_: any, e: any) => ({ value: { isAnswered: true, text: /personality/i.test(JSON.stringify(e)) ? 'A ghost who haunts flaky tests and gloats when they pass on retry.' : '*drifts in* hello.', usage: null } }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
+  on('session.root', () => ({ value: '/work' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run({ command: 'buddy', args: '' })
+  const row = { plugin: 'buddy', component: 'Pane', requestId: 'buddy-card', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { title: 'Quip', isFocused: true, bodyColumns: 60, placement: 'above', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
+
+  const egg = await $.ui.mount(row)
+  expect(await egg.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeDefined()
+  await egg.unmount()
+
+  // The crack starts on the first redraw after the soul is ready, then plays its frames.
+  await clock.advance(4_000)
+  await (await $.ui.mount(row)).unmount()
+  await clock.advance(2_000)
+  const shown = await $.ui.mount(row)
+  expect(await shown.find({ type: 'Text', text: /^★+ [A-Z]+$/ })).toBeDefined()
+  expect(await shown.find({ type: 'Text', text: /is here · it'll chime in as you code$/ })).toBeDefined()
+  expect(await shown.find({ type: 'Text', text: 'hatching a coding buddy…' })).toBeUndefined()
+  // Any key closes the card, as the original's press any key did.
+  await shown.input({ key: 'close', text: 'x', kind: 'change' })
+  await shown.unmount()
+  const gone = await $.ui.mount(row)
+  expect(await gone.find({ type: 'Text', text: /chime in as you code$/ })).toBeUndefined()
+  // Desktop draws an Input as a text box, so the card there closes with a button.
+  await $.command.run({ command: 'buddy', args: '' })
+  const desk = await $.ui.mount({ ...row, surface: 'desktop' })
+  await desk.press({ key: 'close' })
+  await desk.unmount()
+  expect(await (await $.ui.mount({ ...row, surface: 'desktop' })).find({ type: 'Text', text: /chime in as you code$/ })).toBeUndefined()
+})
+
+test('on Desktop the buddy shows above the prompt even when it wraps the terminal status line', async ($, on) => {
+  const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus' })]])
+  boot(on, OLD_CONFIG, new Map(), files)
+  on('process.run', ($: any, e: any) =>
+    e.argv.join(' ') === 'fno config get state_dir'
+      ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run({ command: 'buddy', args: 'statusline' })
+
+  const terminal = await $.ui.mount(band(3))
+  expect(await terminal.find({ type: 'Text', text: /Quip/ })).toBeUndefined()
+  await terminal.unmount()
+  const desktop = await $.ui.mount({ ...band(3), surface: 'desktop' })
+  expect(await desktop.find({ type: 'Text', text: /Quip/ })).toBeDefined()
+  await desktop.unmount()
+  // With room above the input, Desktop shows the full sprite and the name below it, not the one-line face.
+  const roomy = await $.ui.mount({ ...band(10), surface: 'desktop' })
+  expect(await roomy.find({ type: 'Text', text: 'Quip' })).toBeDefined()
+  expect(await roomy.find({ type: 'Text', text: /: / })).toBeUndefined()
 })
