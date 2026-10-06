@@ -20,23 +20,18 @@ import pytest
 
 
 def test_role_bearing_spawn_detected_across_forms() -> None:
-    from fno.agents.rust_runtime import _is_role_bearing_spawn
+    from fno.agents.rust_runtime import _is_promotion_bearing_spawn
 
-    assert _is_role_bearing_spawn(
+    assert _is_promotion_bearing_spawn(
         "spawn", ["spawn", "--name", "w", "--promote", "level=1,scope=x-d7e4"]
     )
-    assert _is_role_bearing_spawn(
+    assert _is_promotion_bearing_spawn(
         "spawn", ["spawn", "w", "--promote=level=1,scope=x-d7e4"]
     )
-    # The short form and its Click attachments route the same way; the attached
-    # -kVAL form (no space, no =) is the one the old detector missed, routing a
-    # bg spawn to the Rust binary that exits 'unknown flag'.
-    assert _is_role_bearing_spawn("spawn", ["spawn", "w", "-k", "x-d7e4"])
-    assert _is_role_bearing_spawn("spawn", ["spawn", "w", "-k=x-d7e4"])
-    assert _is_role_bearing_spawn("spawn", ["spawn", "w", "-kx-d7e4"])
+    assert not _is_promotion_bearing_spawn("spawn", ["spawn", "w", "-k", "x"])
     # A non-role flag does not trip it; only spawn carries it.
-    assert not _is_role_bearing_spawn("spawn", ["spawn", "w", "--role", "build"])
-    assert not _is_role_bearing_spawn("role", ["role", "w", "--promote", "level=1,scope=x"])
+    assert not _is_promotion_bearing_spawn("spawn", ["spawn", "w", "--role", "build"])
+    assert not _is_promotion_bearing_spawn("role", ["role", "w", "--promote", "level=1,scope=x"])
 
 
 @pytest.mark.parametrize("substrate_args", [
@@ -46,17 +41,17 @@ def test_role_bearing_spawn_detected_across_forms() -> None:
 ])
 def test_role_fix_load_bearing_on_autonomous_substrates(substrate_args) -> None:
     """The fix is needed here and ONLY here. On bg/headless the pane exclusion
-    returns False, so without _is_role_bearing_spawn the spawn would reach the
+    returns False, so without _is_promotion_bearing_spawn the spawn would reach the
     Rust client and die. Asserting pane=False alongside role=True proves the
     role detector is the load-bearing diversion - not a redundant copy of what
     pane already does. A green bare-spawn test would assert nothing; this does."""
     from fno.agents.rust_runtime import (
-        _is_role_bearing_spawn,
+        _is_promotion_bearing_spawn,
         _is_pane_substrate_spawn,
     )
 
     args = ["spawn", "w", *substrate_args, "--promote", "level=1,scope=x-d7e4"]
-    assert _is_role_bearing_spawn("spawn", args) is True
+    assert _is_promotion_bearing_spawn("spawn", args) is True
     assert _is_pane_substrate_spawn("spawn", args) is False
 
 
@@ -77,9 +72,9 @@ def test_pane_substrate_already_diverts_without_the_fix() -> None:
 def test_role_bearing_spawn_respects_argv_separator() -> None:
     # --promote after the --argv break belongs to the spawned payload, not fno, so
     # it must NOT keep an otherwise-Rustable spawn in Python (parity with --role).
-    from fno.agents.rust_runtime import _is_role_bearing_spawn
+    from fno.agents.rust_runtime import _is_promotion_bearing_spawn
 
-    assert not _is_role_bearing_spawn(
+    assert not _is_promotion_bearing_spawn(
         "spawn", ["spawn", "w", "--argv", "--promote", "level=1,scope=x"]
     )
 

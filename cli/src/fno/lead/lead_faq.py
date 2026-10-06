@@ -49,7 +49,7 @@ def write_faq_entry(
     created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     path = directory / f"lead-{slug_component(scope, cap=24) or 'faq'}-{secrets.token_hex(4)}.md"
     path.write_text(
-        f"---\ncreated: {created}\nking: {lead}\nsession: {session}\nscope: {scope}\n---\n\n"
+        f"---\ncreated: {created}\nlead: {lead}\nsession: {session}\nscope: {scope}\n---\n\n"
         f"# {question}\n\n## Answer\n\n{answer}\n\n## Specimen\n\n{specimen}\n\n## Exit\n\n{exit_}\n",
         encoding="utf-8",
     )

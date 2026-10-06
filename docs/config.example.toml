@@ -740,7 +740,7 @@ write_roots = []
 # The /loop interval a lead self-injects on Claude (default 55m, under the one-hour prompt cache). Fail-safe: a value that is not <digits>[smhd] degrades to 55m at load, never raises.
 checkin_interval = "55m"
 # The /loop prompt text a lead self-injects at each check-in (default: run fno agents org checkin, which gathers the readings, diffs the last beat, and journals lead_checkin; print 'no change' when idle).
-checkin_text = "lead check-in. Run fno agents org checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals lead_checkin. Then act on the printout per the term skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. "
+checkin_text = "lead check-in. Run fno agents org checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals lead_checkin. Then act on the printout per the lead skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. "
 
 [accounts]
 # Name of the account record currently active for provider rotation.

@@ -599,7 +599,7 @@ fn append_refuses_newline_and_bad_scope_and_bad_ts() {
     let live = dir.path().join("events.jsonl");
     assert!(append_envelope(&live, "{\"a\":1}\n{\"b\":2}", None).is_err());
     let bad_scope = json!({"ts": "2026-09-17T12:00:00Z", "type": "lead_checkin",
-        "source": "loop", "data": {"scope": "x-1 ready, two words"}})
+        "source": "loop", "data": {"scope": "x-1 ready, two words", "change": "one"}})
     .to_string();
     let err = append_envelope(&live, &bad_scope, None).unwrap_err();
     assert!(err.contains("canonical team scope"), "err: {err}");

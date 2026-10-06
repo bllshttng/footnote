@@ -298,7 +298,8 @@ def test_map_covers_current_surface_once():
     # The org alias mount allocates the lead app's fourteen leaves under the
     # canonical spelling both fronts accept: 599 -> 613 counted over the
     # merged file.
-    assert len(mapped) == 613, (
+    # The vocabulary migration coalesces two duplicate action rows.
+    assert len(mapped) == 611, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

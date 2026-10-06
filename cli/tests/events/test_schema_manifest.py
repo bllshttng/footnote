@@ -59,7 +59,7 @@ def test_lead_checkin_declares_canonical_required_and_forbidden() -> None:
     rc = next((e for e in data["event_types"] if e["name"] == "lead_checkin"), None)
     assert rc is not None, "lead_checkin event type missing"
     assert rc["data"]["required"] == ["scope", "change"]
-    assert sorted(rc["data"]["forbidden"]) == ["role", "role_scope", "result"]
+    assert sorted(rc["data"]["forbidden"]) == ["result", "role", "role_scope"]
 
 
 def test_source_enum_present() -> None:

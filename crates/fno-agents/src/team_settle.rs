@@ -1150,6 +1150,10 @@ mod tests {
         let raw = match crate::event_store::query_events(&journal, &Default::default()) {
             Ok(rows) => rows
                 .iter()
+                .filter(|r| {
+                    serde_json::from_str::<Value>(&r.line)
+                        .is_ok_and(|v| v["data"]["scope"] == "x-aaaa")
+                })
                 .map(|r| r.line.clone())
                 .collect::<Vec<_>>()
                 .join("\n"),

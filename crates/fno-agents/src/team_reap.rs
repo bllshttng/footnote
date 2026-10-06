@@ -563,7 +563,7 @@ mod tests {
         let body = format!(
             "---\nfno_id: 20260919T000000Z-kg1-deadbeef\nscope: {scope}\nshape: pass\n\
              harness: {harness}\nharness_session_id: {session}\nowner_pid: 1\n\
-             created_at: {created_at}\ncrown_scope: {scope}\ncrown_level: 2\n\
+             created_at: {created_at}\nrole_scope: {scope}\nrole_level: 2\n\
              role_grantor: operator\n---\n"
         );
         fs::write(&path, body).unwrap();

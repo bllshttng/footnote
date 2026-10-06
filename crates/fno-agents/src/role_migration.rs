@@ -69,6 +69,8 @@ fn vocabulary(text: &str) -> String {
         .replace("term_checkin", "lead_checkin")
         .replace("term_dispatch_exception", "lead_dispatch_exception")
         .replace("role_succession_reverted", "team_succession_reverted")
+        .replace("role_ledger", "team_ledger")
+        .replace("term_eval", "lead_eval")
         .replace("fno agents lead", "fno agents org")
 }
 
@@ -131,6 +133,7 @@ fn migrate_value(value: &mut Value, field: &str) -> Result<(), String> {
                 field,
                 "type"
                     | "event"
+                    | "arm"
                     | "lane"
                     | "driver"
                     | "kind"
@@ -204,21 +207,38 @@ fn migrate_file(path: &Path) -> Result<(), String> {
         "json" => {
             let mut value: Value =
                 serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            if value.get("agents").is_some()
+                && value
+                    .get("schema_version")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|v| v > 40)
+            {
+                return Ok(());
+            }
+            let original = value.clone();
             migrate_value(&mut value, "")?;
+            if value == original {
+                return Ok(());
+            }
             serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? + "\n"
         }
         "jsonl" => {
             let mut out = String::new();
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    out.push('\n');
+            for line in text.split_inclusive('\n') {
+                let Ok(mut value) = serde_json::from_str::<Value>(line) else {
+                    out.push_str(line);
                     continue;
-                }
-                let mut value: Value =
-                    serde_json::from_str(line).map_err(|e| format!("{}: {e}", path.display()))?;
+                };
+                let original = value.clone();
                 migrate_value(&mut value, "")?;
-                out.push_str(&serde_json::to_string(&value).map_err(|e| e.to_string())?);
-                out.push('\n');
+                if value == original {
+                    out.push_str(line);
+                } else {
+                    out.push_str(&serde_json::to_string(&value).map_err(|e| e.to_string())?);
+                    if line.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
             }
             out
         }
@@ -226,7 +246,11 @@ fn migrate_file(path: &Path) -> Result<(), String> {
             let document: toml::Value =
                 toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let mut value = serde_json::to_value(document).map_err(|e| e.to_string())?;
+            let original = value.clone();
             migrate_value(&mut value, "")?;
+            if value == original {
+                return Ok(());
+            }
             let document: toml::Value = serde_json::from_value(value).map_err(|e| e.to_string())?;
             toml::to_string_pretty(&document).map_err(|e| e.to_string())?
         }
@@ -377,7 +401,8 @@ pub fn run() -> Result<(), String> {
             roots.insert(PathBuf::from(path));
         }
     }
-    if roots.is_empty() {
+    let explicit_roots = !roots.is_empty();
+    if !explicit_roots {
         if let Some(root) = crate::live_store_fence::operator_state_root() {
             roots.insert(root);
         }
@@ -389,8 +414,10 @@ pub fn run() -> Result<(), String> {
             migrate_file(&config)?;
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.insert(cwd.join(".fno"));
+    if !explicit_roots {
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.insert(cwd.join(".fno"));
+        }
     }
     for root in roots {
         run_at(&root)?;
@@ -443,8 +470,13 @@ pub fn upgrade_event_store(conn: &mut rusqlite::Connection) -> Result<(), String
         let current_type = vocabulary(&event_type);
         let current_line = match serde_json::from_str::<Value>(&line) {
             Ok(mut value) => {
+                let original = value.clone();
                 migrate_value(&mut value, "")?;
-                serde_json::to_string(&value).map_err(|e| e.to_string())?
+                if value != original {
+                    serde_json::to_string(&value).map_err(|e| e.to_string())?
+                } else {
+                    line.clone()
+                }
             }
             Err(_) => line.clone(),
         };
@@ -491,7 +523,7 @@ mod tests {
     fn migration_preserves_authority_and_history_refuses_conflicts_and_is_once_only() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":39,"agents":[{"name":"stable-row","crown_level":2,"crown_scope":"x-abcd","crown_grantor":"human"}]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":39,"agents":[{"name":"stable-row","crown_level":2,"crown_scope":"epic-alpha","crown_grantor":"human"}]}"#).unwrap();
         let events = tmp.path().join("events.jsonl");
         std::fs::write(
             &events,
@@ -501,7 +533,7 @@ mod tests {
         run_at(tmp.path()).unwrap();
         let migrated = std::fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&migrated).unwrap();
-        assert_eq!(value["agents"][0]["role_scope"], "x-abcd");
+        assert_eq!(value["agents"][0]["role_scope"], "epic-alpha");
         assert_eq!(value["agents"][0]["role_level"], 2);
         assert_eq!(value["agents"][0]["role_grantor"], "human");
         assert_eq!(value["agents"][0]["name"], "stable-row");

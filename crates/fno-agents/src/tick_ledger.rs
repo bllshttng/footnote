@@ -75,29 +75,6 @@ pub fn row_is_unarmed(row: &ArmStatus) -> bool {
     row.arm_key.is_some() && row.arm_value.as_deref() == Some("false")
 }
 
-/// The permanent old->new spellings of the 2026-10 role-arm rename
-/// (lead->lead, role->team, term->lead). Stored tick rows are never
-/// rewritten, so the arms fold canonicalizes `data.arm` through this table
-/// and a renamed arm's history folds into its current row instead of
-/// surfacing forever as a second, dead arm reading STALE. This table never
-/// shrinks.
-pub const ARM_ALIASES: &[(&str, &str)] = &[
-    ("role_ledger", "team_ledger"),
-    ("lead_settle", "lead_settle"),
-    ("lead_wake", "lead_wake"),
-    ("term_eval", "lead_eval"),
-];
-
-/// The canonical (current) spelling of an arm name: an old stored spelling
-/// maps to its replacement, anything else is itself.
-pub fn arm_alias(arm: &str) -> &str {
-    ARM_ALIASES
-        .iter()
-        .find(|(old, _)| *old == arm)
-        .map(|(_, new)| *new)
-        .unwrap_or(arm)
-}
-
 /// The upstream arm named in [`KNOWN_ARMS`], if any.
 pub fn upstream_of(arm: &str) -> Option<&'static str> {
     KNOWN_ARMS
@@ -569,7 +546,6 @@ fn fold_arm_row(
     let Some(arm) = data.get("arm").and_then(Value::as_str) else {
         return;
     };
-    let arm = arm_alias(arm);
     let Some(ts_unix) = value
         .get("ts")
         .and_then(Value::as_str)
@@ -4199,10 +4175,7 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
 
-        // The 2026-10 role-arm rename renamed the arms but not the stored
-        // rows: a fold without the alias table surfaced lead_settle/
-        // role_ledger/term_eval as separate arms reading STALE forever
-        // beside their live successors.
+        // Current arm rows fold their receipts into one row per arm.
         let dir = temp_dir();
         let journal = dir.join("events.jsonl");
         write_rows(
@@ -4218,7 +4191,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-22T04:00:00Z",
-                    "role_ledger",
+                    "team_ledger",
                     SCHED_DAEMON,
                     1,
                     json!(null),
@@ -4226,7 +4199,7 @@ mod tests {
                 ),
                 tick_envelope(
                     "2026-09-22T04:00:00Z",
-                    "term_eval",
+                    "lead_eval",
                     SCHED_DAEMON,
                     0,
                     json!("not_due"),
@@ -4236,24 +4209,20 @@ mod tests {
         );
         let now = parse_rfc3339_unix("2026-09-22T04:00:10Z").unwrap();
         let rows = read_arms(&[journal], now);
-        assert!(
-            !rows.iter().any(|r| r.arm == "lead_settle"),
-            "old spelling must not surface as its own arm"
-        );
         let settle = rows
             .iter()
             .find(|r| r.arm == "lead_settle")
-            .expect("lead_settle folds into lead_settle");
+            .expect("lead_settle row");
         assert_eq!(settle.age_s, Some(10));
         let ledger = rows
             .iter()
             .find(|r| r.arm == "team_ledger")
-            .expect("role_ledger folds into team_ledger");
+            .expect("team_ledger row");
         assert_eq!(ledger.acted, Some(1));
         let eval = rows
             .iter()
             .find(|r| r.arm == "lead_eval")
-            .expect("term_eval folds into lead_eval");
+            .expect("lead_eval row");
         assert_eq!(eval.age_s, Some(10));
         std::fs::remove_dir_all(&dir).ok();
 

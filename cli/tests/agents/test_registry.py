@@ -908,7 +908,8 @@ def test_us2_schema_version_is_three() -> None:
     # v38: sweep-owned context and unread facts survive compatibility writes.
     # v39 (x-fdab): additive `tool_calls`/`tool_errors` - the daemon's
     # incremental transcript fold, the sideline card graph's input.
-    assert SCHEMA_VERSION == 39
+    # v40 migrates the authority vocabulary and fences older writers.
+    assert SCHEMA_VERSION == 40
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:

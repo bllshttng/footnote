@@ -1697,27 +1697,27 @@ fn harness_flag_rows() {
         "spawn",
         &[
             "wk".to_string(),
-            "--promote".to_string(),
+            "--role-level".to_string(),
             "2".to_string(),
             "--role-scope".to_string(),
             "x-aaaa".to_string(),
         ],
     )
-    .expect("--promote must parse");
+    .expect("--role-level must parse");
     assert_eq!(space["role_level"], 2);
     assert_eq!(space["role_scope"], "x-aaaa");
     let (_m2, equals) = build_request(
         "spawn",
         &[
             "wk".to_string(),
-            "--promote=1".to_string(),
+            "--role-level=1".to_string(),
             "--role-scope=x-bbbb".to_string(),
         ],
     )
     .expect("the role equals forms must parse");
     assert_eq!(equals["role_level"], 1);
     assert_eq!(equals["role_scope"], "x-bbbb");
-    let err = build_request("spawn", &["wk".to_string(), "--promote=7".to_string()])
+    let err = build_request("spawn", &["wk".to_string(), "--role-level=7".to_string()])
         .expect_err("a level outside the ladder refuses");
     assert!(err.contains("level 0-2"), "got: {err}");
 }

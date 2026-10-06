@@ -776,7 +776,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         try:
             answer = verb_call("spawn-axes", {"node_seed": {
                 "family": list(_TARGET_FAMILY_VERBS),
-                "role": _is_role_bearing_spawn("spawn", args),
+                "role": _is_promotion_bearing_spawn("spawn", args),
                 "resume": _is_resume_bearing_spawn("spawn", args),
                 "argv": list(args),
             }}, VerbUnavailable)
@@ -820,7 +820,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         "derive_error": derive_error,
         "node_source": node_source,
         "family": list(_TARGET_FAMILY_VERBS),
-        "role": _is_role_bearing_spawn("spawn", args),
+        "role": _is_promotion_bearing_spawn("spawn", args),
         "resume": _is_resume_bearing_spawn("spawn", args),
         "argv": list(args),
         "seed_index": (slot[0] + 1) if slot else None,
@@ -1134,20 +1134,9 @@ def _gate_rm_at_seam(args: Sequence[str]) -> bool:
         return True
 
 
-def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` carrying ``--promote`` (grant-at-spawn).
-
-    Implemented only in the Python spawn path; the Rust client parses no
-    spelling, so a promote-bearing spawn routed to the binary would exit
-    ``unknown flag``. EVERY spelling must be listed: the docs teach ``-k etl
-    -k web`` for a portfolio, and Click accepts the attached ``-kVAL`` form,
-    so a detector missing either routes exactly that spawn into the binary.
-    Load-bearing on ``--substrate bg``, where bg spawns otherwise exec the
-    binary; the pane substrate diverts on its own.
-    """
-    if verb != "spawn":
-        return False
-    return _has_flag(args, "-k", ("--promote", "--promote"))
+def _is_promotion_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """Keep grant-at-spawn on the Python path that owns promotion."""
+    return verb == "spawn" and _has_flag(args, longs=("--promote",))
 
 
 def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -1782,7 +1771,7 @@ def make_agents_group_cls() -> type:
                 py_spawn = (
                     existing_pane is not None
                     or _is_role_bearing_spawn(verb, args)
-                    or _is_role_bearing_spawn(verb, args)
+                    or _is_promotion_bearing_spawn(verb, args)
                     or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)

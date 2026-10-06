@@ -494,7 +494,7 @@ def render_team(as_json: bool, nodes: bool = False) -> str:
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")
     s = team["summary"]
     lines.append(
-        f"\ncourt: {s['total']} role{'s' if s['total'] != 1 else ''}, "
+        f"\nteam: {s['total']} role{'s' if s['total'] != 1 else ''}, "
         f"{s['disagreements']} disagreement"
         f"{'s' if s['disagreements'] != 1 else ''}, {s['unknowns']} unknown"
         f"{'s' if s['unknowns'] != 1 else ''}, {s['splits']} split"

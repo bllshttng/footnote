@@ -73,7 +73,7 @@ trap 'rm -rf "$SBX" "$BINDIR"' EXIT
 mkdir -p "$SBX/.fno/agents" "$SBX/.fno/latches"
 printf 'schema_version: 1\nconfig:\n  state_dir: %s/.fno/\n' "$SBX" > "$SBX/.fno/settings.yaml"
 touch "$SBX/.fno/.path-migration-done"
-printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
+printf '[target.handoff]\nlead_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
 export FNO_AGENTS_HOME="$SBX/.fno/agents"

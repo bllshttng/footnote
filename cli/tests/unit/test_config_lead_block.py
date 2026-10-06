@@ -17,7 +17,7 @@ def test_ac19_defaults_with_no_config() -> None:
     assert block.checkin_text == LEAD_CHECKIN_TEXT
     # The default is the skill's own check-in text, so a fresh install runs
     # with no config.
-    assert "term check-in" in block.checkin_text
+    assert "lead check-in" in block.checkin_text
     assert not hasattr(block, "goal_text")
 
 

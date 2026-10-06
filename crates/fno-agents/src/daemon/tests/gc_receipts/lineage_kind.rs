@@ -221,7 +221,7 @@ fn an_unstamped_row_with_a_live_manifest_is_kept_teamed() {
         leads.join("x-demo.md"),
         "---\nscope: x-demo\nshape: pass\nharness: claude\n\
          harness_session_id: s-leadm\nowner_pid: 1\ncreated_at: 2026-09-01T00:00:00Z\n\
-         role_scope: x-demo\ncrown_level: 2\ncrown_grantor: vellum\n---\n",
+         role_scope: x-demo\nrole_level: 2\nrole_grantor: vellum\n---\n",
     )
     .unwrap();
     stage_graph(

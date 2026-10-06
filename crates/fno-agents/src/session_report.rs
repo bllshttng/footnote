@@ -861,7 +861,7 @@ mod tests {
             format!(
                 "---\nfno_id: 21fa9486-2bd8-426f-b7e8-8c376b60bf72\ncreated_at: 2026-10-05T20:31:14Z\n\
                  term: span:96h\nscope: x-aaaa\nshape: team\nharness: claude\n\
-                 harness_session_id: {predecessor}\ncrown_level: 2\ncrown_scope: x-aaaa\n\
+                 harness_session_id: {predecessor}\nrole_level: 2\nrole_scope: x-aaaa\n\
                  role_grantor: vellum\n---\n"
             ),
         )

@@ -467,7 +467,7 @@ def test_valid_role_pairs_and_the_unpromoted_pair_pass() -> None:
 # --- the literal copies in cli.py must not drift from registry ---------------
 
 
-@pytest.mark.parametrize("flag", ["--promote", "-k"])
+@pytest.mark.parametrize("flag", ["--promote"])
 def test_both_role_spellings_stay_on_the_python_path(flag: str) -> None:
     """A role-bearing bg spawn must NOT exec the Rust client, which parses
     neither spelling and would die on an unknown flag.
@@ -478,18 +478,18 @@ def test_both_role_spellings_stay_on_the_python_path(flag: str) -> None:
     pane substrate is excluded from the assertion on purpose - it diverts on its
     own, so it would pass with or without this guard and prove nothing."""
     from fno.agents.rust_runtime import (
-        _is_role_bearing_spawn,
+        _is_promotion_bearing_spawn,
         _is_pane_substrate_spawn,
     )
 
     args = ["spawn", "w", "--substrate", "thread", flag, "etl", flag, "web"]
-    assert _is_role_bearing_spawn("spawn", args) is True
+    assert _is_promotion_bearing_spawn("spawn", args) is True
     assert _is_pane_substrate_spawn("spawn", args) is False
 
 
 def test_a_role_after_the_argv_break_belongs_to_the_payload() -> None:
     """`-k` past `--argv` is the spawned command's flag, not fno's, so it must not
     drag an otherwise-Rustable spawn onto the Python path."""
-    from fno.agents.rust_runtime import _is_role_bearing_spawn
+    from fno.agents.rust_runtime import _is_promotion_bearing_spawn
 
-    assert not _is_role_bearing_spawn("spawn", ["spawn", "w", "--argv", "-k", "etl"])
+    assert not _is_promotion_bearing_spawn("spawn", ["spawn", "w", "--argv", "-k", "etl"])

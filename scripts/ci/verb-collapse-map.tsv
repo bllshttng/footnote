@@ -608,7 +608,5 @@ doctor intel	T1	doctor intel	0
 agents select-read	T1	agents select-read	1
 agents team-fold	T1	agents team-fold	0
 agents team-orphans	T1	agents team-orphans	0
-agents lead-checkin	T1	agents lead-checkin	0
-agents lead-history	T1	agents lead-history	0
 agents term-ledger	T1	agents term-ledger	0
 agents worked-nodes	T1	agents worked-nodes	0

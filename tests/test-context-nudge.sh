@@ -138,7 +138,7 @@ printf 'schema_version: 1\nconfig:\n  state_dir: %s/.fno/\n' "$SBX" > "$SBX/.fno
 touch "$SBX/.fno/.path-migration-done"   # prevent [setup] state_dir re-migration
 LATCHES="$SBX/.fno/latches"               # latches live in a subdir, not the root
 mkdir -p "$LATCHES"
-printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
+printf '[target.handoff]\nlead_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
 export FNO_REPO_ROOT="$SBX"
@@ -790,7 +790,7 @@ chmod +x "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
 
 # Configure BOTH triggers away from their defaults (50/40) so a stale-value bug
 # (e.g. a fold that reads the block but keeps hardcoded defaults) cannot pass.
-printf '[target.handoff]\nking_used_pct_trigger = 41\nused_pct_trigger = 55\n' > "$SBX/.fno/config.toml"
+printf '[target.handoff]\nlead_used_pct_trigger = 41\nused_pct_trigger = 55\n' > "$SBX/.fno/config.toml"
 
 # unpromoted, 54% (below the configured 55): the OLD default (50) would have
 # blocked here, so a no-block proves the new value reached the hook, not just

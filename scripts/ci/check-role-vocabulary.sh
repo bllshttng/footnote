@@ -15,6 +15,7 @@ files = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--e
 failures = []
 suspect = re.compile("|".join(re.escape(word) for word in sorted(banned)), re.I)
 def found(text):
+    text = re.sub(r"\\[nrt]", " ", text)
     if not suspect.search(text):
         return False
     for word in re.findall('[A-Za-z]+', text):
@@ -22,6 +23,9 @@ def found(text):
         if any(part.lower() in banned for part in parts):
             return True
     return False
+legacy_lead = next(old for old, new in re.findall(r'\("([A-Za-z]+)",\s*"([a-z_]+)"\)', table) if new == 'lead')
+assert found("\\n" + legacy_lead + "_scope"), "escaped manifest keys must be checked"
+assert not found("working blocking courtesy foreign"), "ordinary words must remain allowed"
 for filename in sorted(set(files)):
     if not filename or filename in allowed:
         continue
