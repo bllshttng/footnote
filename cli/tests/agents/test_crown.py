@@ -448,6 +448,82 @@ def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog
     assert vacated == []
 
 
+def test_settle_spawn_crown_reown_skips_a_provenance_less_child(
+    tmp_path: Path, monkeypatch, native_backlog_door,
+) -> None:
+    """A child with no spawn_provenance (adopt, pre-v33 birth edge) is never
+    reowned: the planner selects provenance-carrying rows only, and the
+    applier must not fork a block onto one (an origin-less block zeroed the
+    Rust decode fleet-wide)."""
+    from dataclasses import replace
+
+    from fno.agents.crown import plan_spawn_crown, settle_spawn_crown
+    from fno.agents.registry import update_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    caller = _crown_row("caller")
+    child = replace(
+        _crown_row("w5", scope=None),
+        spawned_by_session="caller-sess",
+    )
+    update_registry(lambda _: [caller, child])
+    refusal, plan = plan_spawn_crown("epic-x", None, True)
+    assert refusal is None
+    rows, outcome, vacated = settle_spawn_crown(
+        [caller, child], scope="epic-x", plan=plan,
+        heir="heir", heir_harness="codex", heir_session="heir-sess", heir_cwd="/w",
+    )
+    assert outcome == "succeeded"
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")], (
+        "the provenance-less child is not reowned"
+    )
+    assert rows[1].spawn_provenance is None, (
+        "no provenance block is forked onto the child"
+    )
+
+
+def test_settle_spawn_crown_applier_never_forks_provenance(
+    tmp_path: Path, monkeypatch, native_backlog_door,
+) -> None:
+    """The write-site guard: even a plan naming a provenance-less row in
+    reown_rows leaves the row alone - the applier moves an existing block,
+    never mints one."""
+    from fno.agents import spawn_overlay_client
+    from fno.agents.crown import settle_spawn_crown
+    from fno.agents.registry import update_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    caller = _crown_row("caller")
+    child = replace(
+        _crown_row("w5", scope=None),
+        spawned_by_session="caller-sess",
+    )
+    update_registry(lambda _: [caller, child])
+
+    def stale_plan(*args, **kwargs):
+        return {
+            "outcome": "succeeded",
+            "clear_terminal_rows": [],
+            "vacate_rows": [0],
+            "reown_rows": [1],
+            "reown_owner": {
+                "kind": "session", "harness": "codex",
+                "session_id": "heir-sess", "cwd": "/w",
+            },
+        }
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", stale_plan)
+    rows, outcome, vacated = settle_spawn_crown(
+        [caller, child], scope="epic-x", plan={"caller": {"kind": "human"}},
+        heir="heir", heir_harness="codex", heir_session="heir-sess", heir_cwd="/w",
+    )
+    assert outcome == "succeeded"
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
+    assert rows[1].spawn_provenance is None, "the guard skips the fork"
+
+
 def test_settle_spawn_crown_declines_when_rust_is_unavailable(
     tmp_path: Path, monkeypatch, native_backlog_door,
 ) -> None:
