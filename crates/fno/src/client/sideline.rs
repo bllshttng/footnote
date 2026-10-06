@@ -928,15 +928,12 @@ impl View {
                     Some(TabContext::Ordinal(ord)) => suffix.push_str(&format!(" \u{b7}{ord}")),
                     None => {
                         // A squad-less row's cwd base disambiguates paneless
-                        // agents launched from arbitrary directories - unless
-                        // the worktree IS the agent's own node worktree, where
-                        // the basename repeats the node id and prints noise.
+                        // agents launched from arbitrary directories, minus
+                        // the node-repeat noise (`cwd_base_repeats_node`).
                         // Squad members never read cwd here.
                         if a.squad.is_none() {
-                            if let Some(base) = a
-                                .cwd_base
-                                .as_deref()
-                                .filter(|b| Some(*b) != a.node.as_deref())
+                            if let Some(base) =
+                                a.cwd_base.as_deref().filter(|b| !cwd_base_repeats_node(a))
                             {
                                 suffix.push_str(&format!(" ({base})"));
                             }
@@ -1342,10 +1339,9 @@ impl View {
     /// project basename. The dim `Sub` row's join, moved into the label.
     /// A base that repeats the row's own node id never tags: a node-backed
     /// thread lives in its node's worktree, and the node is already painted
-    /// on the card's right edge (the x-54bb leak the squad-less guard
-    /// below already covered).
+    /// on the card's right edge.
     pub(super) fn foreign_base<'a>(&self, a: &'a AgentRow) -> Option<&'a str> {
-        if a.cwd_base.is_some() && a.cwd_base.as_deref() == a.node.as_deref() {
+        if cwd_base_repeats_node(a) {
             return None;
         }
         let squad_id = a.squad?;
@@ -1406,6 +1402,13 @@ fn row_age(a: &AgentRow, now: u64) -> String {
 /// handle; the team's own name replaces it when the wire carries one.
 fn team_display_name(lead: &AgentRow) -> &str {
     &lead.name
+}
+
+/// The one cwd-base noise rule, shared by both tag sites: a worktree named
+/// for the row's own node repeats the id the card already paints, so its
+/// basename tags nothing.
+fn cwd_base_repeats_node(a: &AgentRow) -> bool {
+    a.node.is_some() && a.cwd_base == a.node
 }
 
 /// The message text an agent's row shows: the markup-stripped tail, or the

@@ -645,11 +645,11 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
 
 #[test]
 fn a_teamed_rows_node_worktree_cwd_never_tags_the_name_with_its_node() {
-    // The x-54bb leak: a node-backed codex thread inherits its spawner's
-    // workspace, so its own node worktree reads as a FOREIGN cwd and the
-    // card rendered `t-<node> (x-<node>)` - the node twice on one line.
-    // The parenthetical drops whenever the cwd base repeats the row's node,
-    // teamed or not; a genuinely foreign directory still tags.
+    // A node-backed codex thread inherits its spawner's workspace, so its
+    // own node worktree reads as a FOREIGN cwd and the card rendered
+    // `t-<node> (x-<node>)` - the node twice on one line. The parenthetical
+    // drops whenever the cwd base repeats the row's node, teamed or not; a
+    // genuinely foreign directory still tags.
     let mut leak = agent_row("t-x64d4", 11, Some(AgentBadge::Working), false);
     leak.harness = Some("codex".into());
     leak.node = Some("x-64d4".into());
