@@ -4289,7 +4289,8 @@ mod tests {
         assert_eq!(wake.skip_reason.as_deref(), Some("court_read_incomplete"));
         assert!(wake.failing, "line: {}", wake.line);
         assert!(wake.line.contains("FAIL"), "line: {}", wake.line);
-        assert_eq!(wake.failing_for_s, Some(10));
+        // The healthy 03:00 run anchors the failing duration, not the cut one.
+        assert_eq!(wake.failing_for_s, Some(3610));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
