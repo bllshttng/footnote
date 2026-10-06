@@ -7,6 +7,7 @@ the Python-tree ratchet holds. Contract: docs/architecture/reign.md.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,8 +56,15 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
         "--out",
         str(out),
     ]
+    # Load-scaled bound: 60s idle, capped at half the arm's 300s beat, so a
+    # starved machine's page render is not killed into a permanent error.
+    try:
+        load = os.getloadavg()[0] / (os.cpu_count() or 1)
+    except (AttributeError, OSError):
+        load = 0.0
     proc = subprocess.run(
-        argv, input=json.dumps(court), capture_output=True, text=True, check=False, timeout=60
+        argv, input=json.dumps(court), capture_output=True, text=True, check=False,
+        timeout=min(150.0, 60.0 * max(1.0, load / 2.0)),
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"lead-rundown exited {proc.returncode}")
