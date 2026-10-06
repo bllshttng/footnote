@@ -277,7 +277,7 @@ def stamp_late_bind(name, session_id, child_pid, mux, registry_path=None) -> boo
 
     Compare-and-set as reconcile's backfill: only this pane's codex row, id-less
     and non-terminal, never an id another row holds. A raced miss leaves the row
-    `spawning` for the next reconcile to heal (x-3b89).
+    `spawning` for the next reconcile to heal.
     """
     def apply(rows):
         dup = any(r.name != name and r.harness_session_id == session_id for r in rows)

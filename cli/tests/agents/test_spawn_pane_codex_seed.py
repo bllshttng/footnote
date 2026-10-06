@@ -126,16 +126,15 @@ def test_failed_delivery_falls_back_to_typing_once(tmp_path: Path, monkeypatch) 
 
 
 def test_late_bind_after_window_is_stamped_and_kept(tmp_path: Path, monkeypatch) -> None:
-    """x-3b89: a bind landing just past the window keeps its row.
+    """A bind landing just past the window keeps its row.
 
     The old path reaped the pane and dropped the row once reconcile came up
-    empty, orphaning a live mid-task worker; the re-probe stamps the late id
-    onto the id-less row instead.
+    empty, orphaning a live mid-task worker; the re-probe (the _spawn fixture's
+    patched backfill stands in for it) stamps the late id onto the id-less row.
     """
     from fno.agents.registry import load_registry
 
     use_tmpdir(monkeypatch, tmp_path)
-    late_id = "019fb024-2327-75f3-8b80-06e9d5ade05e"
     monkeypatch.setattr(
         mux_spawn,
         "_await_pane_binding",
@@ -146,11 +145,6 @@ def test_late_bind_after_window_is_stamped_and_kept(tmp_path: Path, monkeypatch)
             tail="",
         ),
     )
-    monkeypatch.setattr(
-        mux_spawn,
-        "_codex_session_id_for_pid",
-        lambda pid: late_id,
-    )
     result, runner = _spawn(
         monkeypatch,
         tmp_path,
@@ -160,14 +154,14 @@ def test_late_bind_after_window_is_stamped_and_kept(tmp_path: Path, monkeypatch)
     )
 
     row = next(r for r in load_registry() if r.name == "latebound")
-    assert row.harness_session_id == late_id
+    assert row.harness_session_id == BOUND_ID
     assert row.status == "live"
-    assert result.session_uuid == late_id
+    assert result.session_uuid == BOUND_ID
     assert not runner.kill_calls
 
 
 def test_still_silent_reprobe_reaps_as_before(tmp_path: Path, monkeypatch) -> None:
-    """x-3b89 negative arm: a silent re-probe leaves the reap untouched."""
+    """Negative arm: a silent re-probe leaves the reap untouched."""
     from fno.agents.dispatch_errors import DispatchAskError
 
     use_tmpdir(monkeypatch, tmp_path)
@@ -181,11 +175,8 @@ def test_still_silent_reprobe_reaps_as_before(tmp_path: Path, monkeypatch) -> No
             tail="",
         ),
     )
-    monkeypatch.setattr(
-        mux_spawn,
-        "_codex_session_id_for_pid",
-        lambda pid: None,
-    )
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda pid, **k: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
     monkeypatch.setattr(mux_spawn, "_reap_spawned_pane", lambda *a, **k: (True, ""))
     runner = FakeRunner()
     with pytest.raises(DispatchAskError) as exc:
@@ -196,6 +187,7 @@ def test_still_silent_reprobe_reaps_as_before(tmp_path: Path, monkeypatch) -> No
             name="silent",
             message=SEED,
             runner=runner,
+            codex_binding=False,
         )
 
     assert "binding-window-expired" in str(exc.value)
@@ -226,6 +218,8 @@ def test_unbound_live_pane_types_the_seed_before_the_required_gate(
             tail="",
         ),
     )
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda pid, **k: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
     with pytest.raises(DispatchAskError):
         _spawn(
             monkeypatch,
@@ -234,6 +228,7 @@ def test_unbound_live_pane_types_the_seed_before_the_required_gate(
             name="unbound",
             message=SEED,
             runner=runner,
+            codex_binding=False,
         )
 
     assert calls == []

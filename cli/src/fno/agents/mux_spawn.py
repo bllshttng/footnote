@@ -4808,28 +4808,37 @@ def dispatch_spawn_pane(
                 stored_session_uuid = backfilled_row.harness_session_id
                 row_status = backfilled_row.status
             else:
-                # x-3b89: a bind landing just past the window left a live worker
-                # whose row was dropped; one pid-tied re-probe, and a late bind
-                # is stamped so the row is kept under its name.
+                # A bind landing just past the window left a live worker whose
+                # row was dropped; re-probe with a short bounded retry (the
+                # rollout can open seconds after the window closes), and a late
+                # bind is stamped so the row is kept under its name.
                 from fno.agents.codex_pane import stamp_late_bind
 
+                probe_failed = False
                 try:
                     late_sid = (
-                        _codex_session_id_for_pid(child_pid)
+                        _backfill_codex_session_id(
+                            cwd, spawn_started_ms, child_pid=child_pid
+                        )
                         if child_pid is not None
                         else None
                     )
-                    late_bound = bool(late_sid) and stamp_late_bind(
-                        name, late_sid, child_pid, this_mux, registry_path
-                    )
-                except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
-                    late_sid, late_bound = None, False
+                except Exception:  # noqa: BLE001 -- an unresolved probe never reaps a live pane
+                    late_sid, probe_failed = None, True
+                late_bound = False
+                if late_sid:
+                    try:
+                        late_bound = stamp_late_bind(
+                            name, late_sid, child_pid, this_mux, registry_path
+                        )
+                    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+                        late_bound = False
                 if late_bound:
                     stored_session_uuid, row_status = late_sid, "live"
-                elif late_sid:
+                elif late_sid or probe_failed:
                     raise DispatchAskError(
-                        f"agent {name!r} bound {late_sid} past the window but the row "
-                        "could not be stamped (raced or write failed); the pane is "
+                        f"agent {name!r} could not be bound to a stamped row after the "
+                        "window closed (re-probe failed or the stamp raced); the pane is "
                         "alive and kept - `fno agents reconcile` will backfill it",
                         exit_code=1,
                     )
