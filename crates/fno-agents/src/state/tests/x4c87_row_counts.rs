@@ -58,19 +58,22 @@ fn registry_update_uses_python_shared_lock() {
 
 /// A sanitized 3-row registry whose middle row the typed reader cannot
 /// represent. Keys and value types mirror a real worker row; names, ids,
-/// and paths are synthetic.
+/// and paths are synthetic. The broken row CARRIES a well-formed provenance
+/// block, so the provenance-strip heal must refuse it: the failure is
+/// elsewhere, and the same-schema read stays fatal.
 fn divergent_registry_fixture() -> String {
-    let row = |name: &str, status: &str| {
+    let row = |name: &str, status: &str, extra: &str| {
         format!(
-            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"{extra}}}"#
         )
     };
+    let valid_provenance = r#","spawn_provenance":{"origin":{"kind":"session","parent":{"harness":"claude","session_id":"p-sess","cwd":"/w"},"invocation":null},"owner":{"kind":"session","harness":"claude","session_id":"p-sess","cwd":"/w"}}"#;
     format!(
         r#"{{"schema_version":{},"agents":[{},{},{}]}}"#,
         REGISTRY_SCHEMA_VERSION,
-        row("worker-alpha", "live"),
-        row("worker-beta", "hibernating"),
-        row("worker-gamma", "live")
+        row("worker-alpha", "live", ""),
+        row("worker-beta", "hibernating", valid_provenance),
+        row("worker-gamma", "live", "")
     )
 }
 
