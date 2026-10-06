@@ -4,10 +4,11 @@
 //! halves take their facts as arguments so unit tests need no filesystem or
 //! network; the fetching halves ride the caller's `Probes` handle.
 
-use crate::authorized_merge::{Blocker, Probes};
+use crate::authorized_merge::{node_carries_tag, pr_bound_entry, Blocker, Probes, MAIN_REPAIR_TAG};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// `fno do pr coverage-check <n> --recompute`'s exit contract (the verb's
 /// own help text is the source of truth).
@@ -610,22 +611,213 @@ pub(crate) fn visual_approval_blocker<P: Probes>(
     if touched.is_empty() {
         return None;
     }
+    // Ruling: a declared main-repair node IS the red-main fix; its lane
+    // already merges through red, so the look holds nothing. Fail toward
+    // holding: only a positive tag on the bound node exempts.
+    let entry = pr_bound_entry(cwd, pr);
+    if entry
+        .as_ref()
+        .is_some_and(|e| node_carries_tag(e, MAIN_REPAIR_TAG))
+    {
+        return None;
+    }
     if answered_question_names_pr(cwd, pr) || crown_chat_clears_pr(probes, cwd, pr, head) {
         return None;
     }
-    Some(Blocker::held(
-        "visual_approval",
-        format!(
-            "PR {pr} touches the paint surface the config lists ({}); the user's look is \
-             the only clear: an answered question page naming the PR, or a crown-recorded \
-             decision whose rationale attests the chat and whose text names the PR and \
-             its head sha (`fno backlog decide <node> 'Approved: PR {pr} at {head}' \
-             --authority crown --rationale 'user in chat: <the user's words>'`). Ask via \
-             `fno inbox outstanding ask`, then the user answers the page or the lead \
-             records the chat approval.",
-            touched.join(", ")
+    // The page auto-files on the first hold read of this head: node, PR,
+    // paint files, and the mux shots embedded, deduped per head. Best-effort:
+    // a failed filing never softens the hold, it only names the remedy.
+    let node_id = entry.as_ref().and_then(crate::graph_store::entry_id);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let shots = node_id
+        .as_deref()
+        .map(|n| mux_shots(cwd, home.as_deref(), n))
+        .unwrap_or_default();
+    let mut detail = format!(
+        "PR {pr} touches the paint surface the config lists ({}); the user's look is \
+         the only clear: an answered question page naming the PR, or a crown-recorded \
+         decision whose rationale attests the chat and whose text names the PR and \
+         its head sha (`fno backlog decide <node> 'Approved: PR {pr} at {head}' \
+         --authority crown --rationale 'user in chat: <the user's words>'`). Ask via \
+         `fno inbox outstanding ask`, then the user answers the page or the lead \
+         records the chat approval.",
+        touched.join(", ")
+    );
+    match (node_id.as_deref(), shots.as_slice()) {
+        (Some(node), []) => detail.push_str(&format!(
+            "; no shots at internal/fno/mux/{node}-*.png: capture them first, then \
+             re-read status - the gate files no empty page"
+        )),
+        (None, _) => detail.push_str(
+            "; no node is bound to this PR (by pr_number), so the page has no shots \
+             key: bind the node, then re-read status",
         ),
-    ))
+        (Some(node), shots) => {
+            let short = head.chars().take(8).collect::<String>();
+            detail.push_str(&file_visual_question(
+                cwd,
+                pr,
+                head,
+                &short,
+                node,
+                &touched.join(", "),
+                shots,
+            ));
+        }
+    }
+    Some(Blocker::held("visual_approval", detail))
+}
+
+/// The repo root whose `.fno/config.toml` carries the project id: the vault
+/// paths (`internal/<project>/...`) resolve wrong from a worktree, whose
+/// checkout has no project id and falls to the git-remote slug.
+fn vault_root(cwd: &Path) -> PathBuf {
+    crate::paths::canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// The mux captures for one node's PR: `internal/<project>/mux/<node>-*.png`
+/// top level, plus files inside a `<node>-shots/` folder, as vault-relative
+/// embed names. Sorted, so the embedded list is stable.
+fn mux_shots(cwd: &Path, home: Option<&Path>, node: &str) -> Vec<String> {
+    let root = vault_root(cwd);
+    let dir = crate::escalation::vault_dir_with_home(&root, home, "mux");
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = read.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    for e in entries {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with(node) && name.to_ascii_lowercase().ends_with(".png") {
+            out.push(name);
+        } else if name == format!("{node}-shots") && e.path().is_dir() {
+            let Ok(sub) = std::fs::read_dir(e.path()) else {
+                continue;
+            };
+            let mut sub_entries: Vec<_> = sub.flatten().collect();
+            sub_entries.sort_by_key(|e| e.file_name());
+            out.extend(sub_entries.iter().filter_map(|e| {
+                let sub_name = e.file_name().to_string_lossy().to_string();
+                sub_name
+                    .to_ascii_lowercase()
+                    .ends_with(".png")
+                    .then(|| format!("{node}-shots/{sub_name}"))
+            }));
+        }
+    }
+    out
+}
+
+/// True when a question page (open or archived) already names this PR at this
+/// head: the once-per-head dedup. An open page keeps the hold; it only stops
+/// a second identical page.
+fn visual_page_filed(cwd: &Path, pr: u64, head: &str) -> bool {
+    let root = vault_root(cwd);
+    let dir = crate::escalation::questions_dir(&root);
+    let dirs = [dir.clone(), dir.join("done")];
+    dirs.iter().any(|d| {
+        crate::lead_answers::read_question_pages(d).is_ok_and(|pages| {
+            pages
+                .iter()
+                .any(|(_stem, text)| page_names_pr(text, pr) && text.contains(head))
+        })
+    })
+}
+
+/// The question-file text the gate files: title names the PR, the context
+/// carries head + paint files, the shots embed on option 1 (the option the
+/// user ticks after looking), and `why_user: taste` is what lets a
+/// reversible question reach the user at all.
+fn visual_question_markdown(
+    pr: u64,
+    head: &str,
+    short: &str,
+    node: &str,
+    files: &str,
+    shots: &[String],
+) -> String {
+    let mut embeds = String::new();
+    for shot in shots {
+        embeds.push_str(&format!("\n![[{shot}]]"));
+    }
+    format!(
+        "---\n\
+         recommend: 1\n\
+         why_user: taste - whether the paint looks right is the user's call\n\
+         ---\n\n\
+         May PR {pr} merge as painted? ({node} at {short})\n\n\
+         ## Blocked because\n\
+         The visual-approval gate holds PR {pr} at head {head}: its diff touches the \
+         paint surface the config lists ({files}). The user's look is the only clear.\n\n\
+         ## Options\n\
+         1. Merge as painted. What happens next: the answered page or a crown decision \
+         clears the gate and the PR merges{embeds}\n\
+         2. Hold for changes. What happens next: say what to change; the worker \
+         reshoots and the PR re-asks at its new head\n\n\
+         ## Why these options\n\
+         Option 1 ships exactly the paint in the embedded shots. Option 2 keeps the \
+         surface unchanged until you name the change.\n\n\
+         ## Recommendation\n\
+         1, because the embedded shots show this head's own paint; the diff is already \
+         review-green and CI-green.\n\n\
+         ## Not thought through\n\
+         Whether the embedded shots cover every surface PR {pr} paints: they are the \
+         mux captures named internal/fno/mux/{node}-*.png.\n\n\
+         ## Reversible\n\
+         yes\n\n\
+         ## Meanwhile\n\
+         The PR stays held and green; this page files once per head.\n"
+    )
+}
+
+/// File the question through the ask verb (journal + index now, the page
+/// itself materialized by the attention arm's next beat). Best-effort: the
+/// returned line appends to the hold detail, never softens the hold. Exit 2
+/// is the intake's dedup refusal, which reads as already-filed, not failure.
+fn file_visual_question(
+    cwd: &Path,
+    pr: u64,
+    head: &str,
+    short: &str,
+    node: &str,
+    files: &str,
+    shots: &[String],
+) -> String {
+    if visual_page_filed(cwd, pr, head) {
+        return format!("; the question page for PR {pr} at {short} is already filed");
+    }
+    let root = vault_root(cwd);
+    let path = std::env::temp_dir().join(format!("fno-visual-ask-{pr}-{short}.md"));
+    let markdown = visual_question_markdown(pr, head, short, node, files, shots);
+    if let Err(e) = std::fs::write(&path, markdown) {
+        return format!("; the question could not be staged: {e}");
+    }
+    let subject = format!("visual approval PR {pr} at {short}");
+    let out = Command::new(crate::scrape::fno_bin())
+        .current_dir(&root)
+        .args(["inbox", "outstanding", "ask", "--question-file"])
+        .arg(&path)
+        .args(["--node", node])
+        .args(["--subject", &subject])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            format!("; question page filed (subject: {subject})")
+        }
+        // Exit 2 is the intake's dedup refusal: an open question on the same
+        // subject + node already waits.
+        Ok(o) if o.status.code() == Some(2) => {
+            format!("; the question page for PR {pr} at {short} is already filed")
+        }
+        Ok(o) => format!(
+            "; the question page could not be filed (ask exited {:?}); file it by hand: \
+             fno inbox outstanding ask --question-file {} --node {node}",
+            o.status.code(),
+            path.display()
+        ),
+        Err(e) => format!("; the question page could not be filed: {e}"),
+    }
 }
 
 /// Does one changed file match the paint-path list? Two pattern shapes: a
@@ -649,7 +841,8 @@ fn path_matches_paint(path: &str, patterns: &[String]) -> bool {
 /// True when any ANSWERED question page in this project's questions directory
 /// names the PR: the pages the lead check-in reads, parsed the same way.
 fn answered_question_names_pr(cwd: &Path, pr: u64) -> bool {
-    let dir = crate::escalation::questions_dir(cwd);
+    let root = vault_root(cwd);
+    let dir = crate::escalation::questions_dir(&root);
     // Answered pages are archived into done/ after the fact; an approval
     // must not lapse because its page moved there.
     let mut dirs = vec![dir.clone()];
@@ -798,6 +991,86 @@ pub(crate) fn repo_slug_from_origin(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mux_shots_scans_node_prefix_and_shots_folder() {
+        let tmp = std::env::temp_dir().join(format!("mg-shots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // The space fallback resolves from the state root; under test that
+        // must be declared, or the hermetic guard refuses.
+        let lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let spaces = tmp.join("spaces");
+        std::fs::create_dir_all(&spaces).unwrap();
+        let saved = std::env::var("FNO_SPACES_DIR").ok();
+        std::env::set_var("FNO_SPACES_DIR", &spaces);
+        let mux = crate::escalation::vault_dir_with_home(&tmp, None, "mux");
+        std::fs::create_dir_all(mux.join("x-aaaa-shots")).unwrap();
+        std::fs::write(mux.join("x-aaaa-bell-dark.png"), "x").unwrap();
+        std::fs::write(mux.join("x-aaaa-bell-light.png"), "x").unwrap();
+        std::fs::write(mux.join("x-other-dark.png"), "x").unwrap();
+        std::fs::write(mux.join("x-aaaa-shots/one-after.png"), "x").unwrap();
+        std::fs::write(mux.join("x-aaaa-shots/notes.txt"), "png-noted.txt").unwrap();
+        let shots = mux_shots(&tmp, None, "x-aaaa");
+        assert_eq!(
+            shots,
+            vec![
+                "x-aaaa-bell-dark.png".to_string(),
+                "x-aaaa-bell-light.png".to_string(),
+                "x-aaaa-shots/one-after.png".to_string(),
+            ]
+        );
+        match saved {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        drop(lock);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn visual_question_markdown_survives_the_intake_parse_with_embeds() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let md = visual_question_markdown(
+            3114,
+            head,
+            "0123abcd",
+            "x-aaaa",
+            "crates/fno/src/client/keys.rs",
+            &["x-aaaa-a-dark.png".to_string()],
+        );
+        let parsed = crate::escalation::parse(&md);
+        assert_eq!(parsed.options.len(), 2, "{md}");
+        assert!(
+            parsed.options[0].text.contains("![[x-aaaa-a-dark.png]]"),
+            "{md}"
+        );
+        assert_eq!(
+            parsed.options[0].next,
+            "the answered page or a crown decision clears the gate and the PR merges"
+        );
+        assert_eq!(parsed.recommend, Some(1));
+        assert!(
+            crate::escalation::why_user_is_user_only(&parsed.why_user),
+            "{md}"
+        );
+        assert!(
+            md.contains(head),
+            "head rides the page for the per-head dedup"
+        );
+        for section in [
+            "## Blocked because",
+            "## Options",
+            "## Why these options",
+            "## Recommendation",
+            "## Not thought through",
+            "## Reversible",
+            "## Meanwhile",
+        ] {
+            assert!(md.contains(section), "missing {section}");
+        }
+    }
 
     #[test]
     fn overlaps_drops_documentation_paths_from_both_sides() {

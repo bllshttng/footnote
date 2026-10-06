@@ -1960,8 +1960,9 @@ fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 /// The graph tag that declares a repair lane: a node carrying it may merge
-/// through a red main, because it IS the repair.
-const MAIN_REPAIR_TAG: &str = "main-repair";
+/// through a red main, because it IS the repair. The visual gate reads it
+/// too: the lane's whole point is merging without further ceremony.
+pub(crate) const MAIN_REPAIR_TAG: &str = "main-repair";
 
 /// The refusal: the red run named, then the repair lane.
 fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {
@@ -1973,11 +1974,23 @@ fn main_red_reason(workflow: &str, sha: &str, lane: &str) -> String {
 }
 
 /// Does one graph entry carry the tag?
-fn node_carries_tag(entry: &Value, tag: &str) -> bool {
+pub(crate) fn node_carries_tag(entry: &Value, tag: &str) -> bool {
     entry
         .get("tags")
         .and_then(Value::as_array)
         .is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(|t| t == tag))
+}
+
+/// The graph entry bound to this PR by its recorded `pr_number`. `None` on an
+/// unreadable graph or no bound node: callers above treat absent as "not
+/// bound", which for every gate here must hold rather than release.
+pub(crate) fn pr_bound_entry(cwd: &Path, pr: u64) -> Option<Value> {
+    let graph_path = crate::org_board::scope::graph_json_path(cwd);
+    let store = GraphStore::new(&graph_path);
+    let entries = backlog_api::rows(&store).ok()?;
+    entries
+        .into_iter()
+        .find(|e| e.get("pr_number").and_then(Value::as_i64) == Some(pr as i64))
 }
 
 /// The main-repair exemption probe over the live graph: `None` when this
@@ -4730,13 +4743,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fno")).unwrap();
         // questions_dir falls back to the space dir, and the hermetic guard
-        // refuses a HOME-derived one under test; point it at a tempdir.
-        struct RestoreEnv(Option<std::ffi::OsString>);
+        // refuses a HOME-derived one under test; point it at a tempdir. The
+        // graph store reads the state root too (the bound-node lookup), so
+        // FNO_HOME is declared as well.
+        struct RestoreEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
         impl Drop for RestoreEnv {
             fn drop(&mut self) {
                 match self.0.take() {
                     Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
                     None => std::env::remove_var("FNO_SPACES_DIR"),
+                }
+                match self.1.take() {
+                    Some(v) => std::env::set_var("FNO_HOME", v),
+                    None => std::env::remove_var("FNO_HOME"),
                 }
             }
         }
@@ -4746,7 +4765,9 @@ mod tests {
         let _env = {
             let prior = std::env::var_os("FNO_SPACES_DIR");
             std::env::set_var("FNO_SPACES_DIR", &spaces);
-            RestoreEnv(prior)
+            let prior_home = std::env::var_os("FNO_HOME");
+            std::env::set_var("FNO_HOME", &tmp);
+            RestoreEnv(prior, prior_home)
         };
         std::fs::write(
             tmp.join(".fno/config.toml"),
@@ -4804,12 +4825,16 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("xc39f-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fno")).unwrap();
-        struct RestoreEnv(Option<std::ffi::OsString>);
+        struct RestoreEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
         impl Drop for RestoreEnv {
             fn drop(&mut self) {
                 match self.0.take() {
                     Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
                     None => std::env::remove_var("FNO_SPACES_DIR"),
+                }
+                match self.1.take() {
+                    Some(v) => std::env::set_var("FNO_HOME", v),
+                    None => std::env::remove_var("FNO_HOME"),
                 }
             }
         }
@@ -4819,7 +4844,9 @@ mod tests {
         let _env = {
             let prior = std::env::var_os("FNO_SPACES_DIR");
             std::env::set_var("FNO_SPACES_DIR", &spaces);
-            RestoreEnv(prior)
+            let prior_home = std::env::var_os("FNO_HOME");
+            std::env::set_var("FNO_HOME", &tmp);
+            RestoreEnv(prior, prior_home)
         };
         std::fs::write(
             tmp.join(".fno/config.toml"),
