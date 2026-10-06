@@ -7847,10 +7847,19 @@ event_types:
     data:
       required: []
   - name: crown_manifest_arm_failed
-    description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
+    description: "A crowned row's identification could not rebind the lead manifest to the naming session; the report still stored, and the crown reads stale until a promote or a later identification."
     sources: [daemon, agents]
     data:
-      required: []
+      required: [scope, session_id, error]
+      properties:
+        name:
+          type: [string, "null"]
+        scope:
+          type: string
+        session_id:
+          type: string
+        error:
+          type: string
   - name: king_woken
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
