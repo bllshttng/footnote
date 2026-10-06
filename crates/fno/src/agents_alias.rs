@@ -100,10 +100,7 @@ fn rundown_argv(rest: &[OsString], default_out: Option<OsString>) -> Vec<OsStrin
     argv
 }
 
-/// The spawn door answers `--promote` natively, so a spawn argv is not
-/// claimed here: it dispatches through the normal front unchanged, and the
-/// retired `--promote`/`--succeed` spellings reach the door's one-release alias
-/// path, which prints the notice.
+/// The spawn door owns promotion and hand-off flags; this group routes lifecycle actions.
 fn org(rest: &[OsString]) -> Org {
     let first = rest.first().and_then(|a| a.to_str());
     let tail: Vec<OsString> = rest.iter().skip(1).cloned().collect();

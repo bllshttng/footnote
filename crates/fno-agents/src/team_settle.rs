@@ -911,7 +911,7 @@ mod tests {
         let mut holder = row("lead-a", "epic-a", "busy");
         holder["harness_session_id"] = json!("sess-a");
         let out = resolve(&json!({
-            "kind": "role-settle", "scope": "epic-a", "succession": true, "proposed_name": "Taylor",
+            "kind": "role-settle", "scope": "epic-a", "successor": "Taylor", "succession": true, "proposed_name": "Taylor",
             "caller": caller, "rows": [holder],
         }))
         .unwrap();
@@ -929,7 +929,7 @@ mod tests {
         // names a vacated holder's session follows the team; a child already
         // owned by another session stays put; a terminal row never moves.
         let out = resolve(&json!({
-            "kind": "role-settle", "scope": "epic-a",
+            "kind": "role-settle", "scope": "epic-a", "successor": "Taylor",
             "successor_identity": {"harness": "codex", "session_id": "sess-successor", "cwd": "/w"},
             "plan": {
                 "caller": {"kind": "human"},
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(out["reown_owner"]["kind"], "session");
 
         let out = resolve(&json!({
-            "kind": "role-settle", "scope": "epic-a",
+            "kind": "role-settle", "scope": "epic-a", "successor": "Taylor",
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "lead-a", "harness_session_id": "sess-a"}],
@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(out["vacate_rows"], json!([]));
 
         let out = resolve(&json!({
-            "kind": "role-settle", "scope": "epic-a",
+            "kind": "role-settle", "scope": "epic-a", "successor": "Taylor",
             "plan": {
                 "caller": {"kind": "human"},
                 "holder_ids": [{"name": "lead-a", "harness_session_id": "sess-a"}],
@@ -993,7 +993,7 @@ mod tests {
 
         let out = resolve_with_projects(
             &json!({
-                "kind": "role-settle", "scope": "epic-a",
+                "kind": "role-settle", "scope": "epic-a", "successor": "Taylor",
                 "plan": {
                     "caller": {"kind": "human"}, "holder_ids": [],
                     "outcome": "granted", "vacate": [],
@@ -1056,7 +1056,7 @@ mod tests {
             ),
         ] {
             let error = resolve(&json!({
-                "kind": "role-settle", "scope": "epic-a", "rows": rows,
+                "kind": "role-settle", "scope": "epic-a", "successor": "Taylor", "rows": rows,
                 "plan": plan,
             }))
             .unwrap_err();
@@ -1107,11 +1107,11 @@ mod tests {
             &team_store(tmp.path()),
         )
         .unwrap();
-        assert_eq!(answer["outcome"], "succeeded");
+        assert_eq!(answer["outcome"], "declined");
         let store = std::fs::read_to_string(team_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
-        assert_eq!(doc["teams"]["x-aaaa"]["generation"], json!(2));
-        assert_eq!(doc["teams"]["x-aaaa"]["holder_session"], json!(null));
+        assert_eq!(doc["teams"]["x-aaaa"]["generation"], json!(1));
+        assert_eq!(doc["teams"]["x-aaaa"]["holder_session"], json!("sess-old"));
 
         // A payload carrying the successor key pends the succession with the
         // predecessor identity from the plan's holder_ids.
@@ -1188,7 +1188,7 @@ mod tests {
             &team_store(tmp.path()),
         )
         .unwrap();
-        assert_eq!(answer["outcome"], "succeeded");
+        assert_eq!(answer["outcome"], "declined");
         let store = std::fs::read_to_string(team_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
         assert!(doc["teams"]["x-aaaa"].get("pending_succession").is_none());
@@ -1268,6 +1268,6 @@ mod tests {
             &store,
         )
         .unwrap();
-        assert_eq!(answer["outcome"], "succeeded");
+        assert_eq!(answer["outcome"], "declined");
     }
 }
