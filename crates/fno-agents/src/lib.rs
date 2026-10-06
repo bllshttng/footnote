@@ -234,6 +234,7 @@ pub mod lead_state;
 pub mod lead_term;
 pub mod lead_termination;
 pub mod lead_verdict_inputs;
+pub mod lead_wake;
 pub mod ledger_axes;
 pub(crate) mod ledger_workers;
 mod lifecycle_child;
