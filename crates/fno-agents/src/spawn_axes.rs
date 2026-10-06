@@ -830,20 +830,45 @@ pub fn insert_crown_flag(
     params: &mut serde_json::Map<String, Value>,
 ) -> Result<(), String> {
     match flag {
-        "--crown" | "--team-level" => {
-            let raw = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        "--crown" => {
+            let raw = args.next().ok_or("--crown needs a value")?;
             let level = raw
                 .parse::<u32>()
                 .ok()
                 .filter(|l| *l <= 2)
-                .ok_or_else(|| format!("{flag} takes an integer level 0-2"))?;
+                .ok_or("--crown takes an integer level 0-2")?;
             params.insert("crown_level".into(), Value::from(level));
         }
-        "--crown-scope" | "--team-scope" => {
-            let scope = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        "--crown-scope" => {
+            let scope = args.next().ok_or("--crown-scope needs a value")?;
             params.insert("crown_scope".into(), Value::from(scope));
         }
         other => return Err(format!("unknown crown flag: {other}")),
+    }
+    Ok(())
+}
+
+/// The role spelling of the same two halves. The thread carrier emits only
+/// this spelling; the older flags above stay for existing callers.
+pub fn insert_role_flag(
+    flag: &str,
+    args: &mut impl Iterator<Item = String>,
+    params: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let raw = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
+    match flag {
+        "--role-level" => {
+            let level = raw
+                .parse::<u32>()
+                .ok()
+                .filter(|l| *l <= 2)
+                .ok_or("--role-level takes an integer level 0-2")?;
+            params.insert("crown_level".into(), Value::from(level));
+        }
+        "--role-scope" => {
+            params.insert("crown_scope".into(), Value::from(raw));
+        }
+        other => return Err(format!("unknown role flag: {other}")),
     }
     Ok(())
 }

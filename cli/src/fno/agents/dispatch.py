@@ -2527,7 +2527,7 @@ def dispatch_spawn(
             passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
-            team_level=crown_level, team_scope=crown_scope,
+            role_level=crown_level, role_scope=crown_scope,
         )
         if promotion is not None:
             settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=session_id)

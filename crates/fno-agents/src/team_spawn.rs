@@ -140,23 +140,7 @@ fn apply(payload: &Value) -> Result<Value, String> {
             vacated.push(json!([i, cause, {}]));
         }
     }
-    if !answer["reown_owner"].is_null() {
-        for index in answer["reown_rows"]
-            .as_array()
-            .ok_or("spawn-team: missing reown indexes")?
-        {
-            let i = index.as_u64().ok_or("spawn-team: invalid reown index")? as usize;
-            let row = rows.get(i).ok_or("spawn-team: reown index out of bounds")?;
-            let mut provenance = row["spawn_provenance"]
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            provenance.insert("owner".into(), answer["reown_owner"].clone());
-            updates.entry(i.to_string()).or_insert_with(|| json!({}))["spawn_provenance"] =
-                json!(provenance);
-            vacated.push(json!([i, "reowned", {"spawn_provenance": provenance}]));
-        }
-    }
+    reown(rows, &answer, &mut updates, &mut vacated)?;
     if let Some(i) = heir_index {
         let stamp = if outcome == "declined" {
             json!({"crown_level": null, "crown_scope": null, "crown_grantor": null})
@@ -175,6 +159,36 @@ fn apply(payload: &Value) -> Result<Value, String> {
         json!({"outcome": outcome, "updates": updates, "vacated": vacated,
         "heir_index": heir_index}),
     )
+}
+
+fn reown(
+    rows: &[Value],
+    answer: &Value,
+    updates: &mut Map<String, Value>,
+    vacated: &mut Vec<Value>,
+) -> Result<(), String> {
+    if answer["reown_owner"].is_null() {
+        return Ok(());
+    }
+    for index in answer["reown_rows"]
+        .as_array()
+        .ok_or("spawn-team: missing reown indexes")?
+    {
+        let i = index.as_u64().ok_or("spawn-team: invalid reown index")? as usize;
+        let row = rows.get(i).ok_or("spawn-team: reown index out of bounds")?;
+        // Reown moves an existing owner only. A block forked onto a
+        // provenance-less row has no origin, and the typed registry reader
+        // rejects it.
+        let Some(provenance) = row["spawn_provenance"].as_object() else {
+            continue;
+        };
+        let mut provenance = provenance.clone();
+        provenance.insert("owner".into(), answer["reown_owner"].clone());
+        updates.entry(i.to_string()).or_insert_with(|| json!({}))["spawn_provenance"] =
+            json!(provenance);
+        vacated.push(json!([i, "reowned", {"spawn_provenance": provenance}]));
+    }
+    Ok(())
 }
 
 fn journal(payload: &Value) -> Value {
@@ -310,5 +324,19 @@ mod tests {
         assert_eq!(answer["outcome"], "declined");
         assert_eq!(answer["updates"], json!({}));
         assert_eq!(answer["vacated"], json!([]));
+    }
+
+    #[test]
+    fn reown_never_forks_provenance_onto_a_bare_row() {
+        let (mut updates, mut vacated) = (Map::new(), Vec::new());
+        let answer = json!({"reown_rows": [0], "reown_owner": {"kind": "session"}});
+        reown(
+            &[json!({"name": "w5"})],
+            &answer,
+            &mut updates,
+            &mut vacated,
+        )
+        .unwrap();
+        assert!(updates.is_empty() && vacated.is_empty());
     }
 }

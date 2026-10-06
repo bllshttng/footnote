@@ -548,6 +548,10 @@ fn claim_status_value_with_witness(
     if !metadata.is_empty() {
         out.insert("metadata".into(), Value::Object(metadata));
     }
+    let (caller, harness) = crate::claims::resolve_identity();
+    if crate::first_check::lead_can_delegate(rec, caller.as_deref(), harness.as_deref()) {
+        out.insert("dispatch_occupied".into(), Value::Bool(false));
+    }
     Value::Object(out)
 }
 
