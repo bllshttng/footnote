@@ -1340,7 +1340,14 @@ impl View {
     /// (US3, inline) The foreign-cwd base an agent shows inline in parens:
     /// `Some` only when the agent's cwd basename differs from its squad's
     /// project basename. The dim `Sub` row's join, moved into the label.
+    /// A base that repeats the row's own node id never tags: a node-backed
+    /// thread lives in its node's worktree, and the node is already painted
+    /// on the card's right edge (the x-54bb leak the squad-less guard
+    /// below already covered).
     pub(super) fn foreign_base<'a>(&self, a: &'a AgentRow) -> Option<&'a str> {
+        if a.cwd_base.is_some() && a.cwd_base.as_deref() == a.node.as_deref() {
+            return None;
+        }
         let squad_id = a.squad?;
         let squad = self.layout.squads.iter().find(|s| s.id == squad_id)?;
         let base = super::section_project_base(&squad.canonical_cwd);
