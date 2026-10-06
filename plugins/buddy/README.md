@@ -1,6 +1,6 @@
 # buddy
 
-Bring back buddy: a terminal companion beside your Claude Code status line. It hatches from an egg, watches your work, and says one line in its own voice after a turn. Every line is one small model call in its personality. It has no canned lines.
+A Claude Code mod (claude-mod-buddy). Bring back buddy: a terminal companion beside your Claude Code status line. It hatches from an egg, watches your work, and says one line in its own voice after a turn. Every line is one small model call in its personality. It has no canned lines.
 
 It needs Claude Code 2.1.287 or later. You do not need fno, but with the `fno` CLI it also tells you when your fleet ships work or a question waits for you.
 

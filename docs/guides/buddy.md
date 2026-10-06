@@ -1,6 +1,6 @@
 # Buddy: a companion beside your status line
 
-Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. It is a Claude Code mod in its own plugin, `buddy`, in the footnote marketplace. You do not need fno to use it. `/buddy` and `/bbb` (bring back buddy) are the same command.
+Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. It is a Claude Code mod, claude-mod-buddy, in its own plugin, `buddy`, in the footnote marketplace. You do not need fno to use it. `/buddy` and `/bbb` (bring back buddy) are the same command.
 
 It needs Claude Code 2.1.287 or later. That is the first version that loads mods.
 
