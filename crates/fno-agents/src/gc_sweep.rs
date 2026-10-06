@@ -1820,6 +1820,7 @@ pub(crate) fn run_with_release(
             &id,
             home,
             store_matches(e),
+            sid,
             matches!(age, Some(a) if *a <= grace_secs),
             now,
             hold_age_s,

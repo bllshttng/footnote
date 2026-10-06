@@ -48,6 +48,17 @@ pub(crate) fn newest_typed_turn_age_s(
 ) -> Option<i64> {
     let mut newest: Option<i64> = None;
     for path in paths {
+        // Transcripts are append-only JSONL: a file quiet past the window
+        // cannot hold an in-window typed turn, so the full read is skipped.
+        if let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) {
+            let m = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0) as i64;
+            if now - m > WINDOW_SECS {
+                continue;
+            }
+        }
         let Ok(file) = std::fs::File::open(path) else {
             continue;
         };
@@ -76,6 +87,7 @@ pub(crate) fn sweep_hold(
     id: &str,
     home: &crate::paths::AgentsHome,
     hits: Option<Vec<PathBuf>>,
+    sid: &str,
     quiet: bool,
     now: i64,
     hold_age_s: Option<i64>,
@@ -85,7 +97,7 @@ pub(crate) fn sweep_hold(
         return None;
     }
     let hits = hits?;
-    let typed_age = newest_typed_turn_age_s(&hits, &bus_for(home), &session_of(&hits)?, now)?;
+    let typed_age = newest_typed_turn_age_s(&hits, &bus_for(home), sid, now)?;
     (typed_age <= WINDOW_SECS).then(|| crate::gc_sweep::Hold {
         id: id.to_string(),
         reason: "attended",
@@ -96,18 +108,10 @@ pub(crate) fn sweep_hold(
     })
 }
 
-/// The transcript's own session id for the bus join: derived from the
-/// file stem (the store names files by session id), falling back to an
-/// empty join key that simply never matches a bus row.
-fn session_of(hits: &[PathBuf]) -> Option<String> {
-    hits.first()
-        .and_then(|p| p.file_stem())
-        .map(|s| s.to_string_lossy().to_string())
-}
-
 /// The stop-verb refusal: `Some(why)` when the row's store-resolved
-/// transcript carries a typed turn inside the window. The caller names its
-/// own error shape.
+/// transcript carries a typed turn inside the window. The bus join keys on
+/// the row's harness session id, the same key `fno-agents intel` joins on.
+/// The caller names its own error shape.
 pub(crate) fn stop_refusal(home: &crate::paths::AgentsHome, e: &RegistryEntry) -> Option<String> {
     let mut index = crate::gc_inventory::HarnessStoreIndex::default();
     let hits = index.matches(e)?;
@@ -163,6 +167,30 @@ mod tests {
             newest_typed_turn_age_s(&[machine_only], &bus, "s2", now),
             None,
             "machine-only transcript: nothing testifies"
+        );
+        // The append-only short-circuit: a file quiet past the window is
+        // skipped even when its rows carry an in-window stamp.
+        let aged = dir.path().join("s3.jsonl");
+        std::fs::write(
+            &aged,
+            format!(
+                "{}\n",
+                json!({"type":"user","timestamp":ts(120),"message":{"role":"user","content":"typing now"}})
+            ),
+        )
+        .unwrap();
+        let old =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(WINDOW_SECS as u64 + 600);
+        std::fs::File::options()
+            .write(true)
+            .open(&aged)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert_eq!(
+            newest_typed_turn_age_s(&[aged], &bus, "s3", now),
+            None,
+            "a file quiet past the window is skipped"
         );
     }
 }
