@@ -351,23 +351,23 @@ mod tests {
         entry.status = crate::AgentStatus::Live;
         entry.fno_id = Some("fid-1".into());
         reg.entries.push(entry);
-        // Stub mux: one pane whose grid shows a permission prompt.
-        let stub = home.path().join("fno-stub");
+        // Stub mux: one pane whose grid shows a permission prompt. The ❯ is
+        // a literal UTF-8 byte in the file (POSIX printf has no \xHH), and
+        // the stub goes through write_exec_stub, never a bare test-process
+        // write (Text file busy under a sibling fork).
         let script = r#"#!/bin/sh
 case "$1 $2" in
   "mux pane")
     if [ "$3" = "ls" ]; then
       printf '[{"pane_id": 9, "fno_id": "fid-1"}]\n'
     else
-      printf '{"text": "Do you want to proceed?\\n  \xe2\x9d\xaf 1. Yes\\n  2. No"}\n'
+      printf '{"text": "Do you want to proceed?\\n  ❯ 1. Yes\\n  2. No"}\n'
     fi
     ;;
   *) exit 3 ;;
 esac
 "#;
-        std::fs::write(&stub, script).unwrap();
-        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        let stub = crate::write_exec_stub(home.path(), "fno-stub", script);
         let value = reading_with(&reg, stub.as_os_str(), None).expect("reading");
         assert_eq!(value["server_reachable"], true);
         let rows = value["rows"].as_array().unwrap();
