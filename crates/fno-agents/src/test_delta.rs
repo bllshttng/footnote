@@ -380,11 +380,12 @@ pub fn python_test_files(root: &Path) -> Vec<String> {
 }
 
 /// The test files that own one changed production file, by repo convention:
-/// Python maps to same-stem suites under the tests tree (`test_<stem>.py`,
-/// `test_<pkg>_<stem>.py`); Rust maps to its own inline test module when the
-/// file carries `#[cfg(test)]`, plus a same-stem integration file beside the
-/// crate when one exists. No mapped owner means no audit obligation, not a
-/// pass on coverage.
+/// Python maps to the suite named for the module (`test_<stem>.py`, or
+/// `test_<parent>_<stem>.py` for the package's cli-style entry points);
+/// Rust maps to its own inline test module when the file carries
+/// `#[cfg(test)]`, plus a same-stem integration file beside the crate when
+/// one exists. No mapped owner means no audit obligation, not a pass on
+/// coverage.
 pub fn owner_test_files(path: &str, py_tests: &[String], root: &Path) -> Vec<String> {
     let mut owners: Vec<String> = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -396,13 +397,13 @@ pub fn owner_test_files(path: &str, py_tests: &[String], root: &Path) -> Vec<Str
         return owners;
     }
     if path.ends_with(".py") {
-        let exact = format!("test_{stem}.py");
-        let suffix = format!("_{stem}.py");
+        let mut wanted: Vec<String> = vec![format!("test_{stem}.py")];
+        if let Some(parent) = path.rsplit('/').nth(1) {
+            wanted.push(format!("test_{parent}_{stem}.py"));
+        }
         for candidate in py_tests {
             let candidate_name = candidate.rsplit('/').next().unwrap_or(candidate);
-            if candidate_name == exact
-                || (candidate_name.starts_with("test_") && candidate_name.ends_with(&suffix))
-            {
+            if wanted.iter().any(|w| candidate_name == w) {
                 owners.push(candidate.clone());
             }
         }
@@ -620,6 +621,9 @@ mod tests {
         let py_tests = vec![
             "cli/tests/unit/test_pr_cli.py".to_string(),
             "cli/tests/unit/test_cli.py".to_string(),
+            // A sibling package's suite never owns this module: the parent
+            // prefix is exact, not a suffix wildcard.
+            "cli/tests/unit/test_agent_cli.py".to_string(),
             "test_other.py".to_string(),
         ];
         assert_eq!(
