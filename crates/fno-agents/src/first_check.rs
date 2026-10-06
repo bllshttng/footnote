@@ -362,7 +362,6 @@ pub(crate) fn run_pass(
     now: i64,
     runner: crate::burn_watch::Runner<'_>,
 ) -> Result<(), String> {
-    let mut runner = runner;
     let dir = home.root().join("first-checks");
     if !dir.exists() {
         return Ok(());
