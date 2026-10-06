@@ -1915,7 +1915,7 @@ def _forced_pane_send(
         msg_id, to=recipient, status=f"typed ({label})", subject=subject,
     ))
     if corr:
-        print(corr)
+        print(corr.strip())
     return True
 
 
@@ -2393,7 +2393,7 @@ def _name_lane_send(
             subject=subject,
         ))
         if corr:
-            print(corr)
+            print(corr.strip())
         return
     if injected:
         print(json_receipt(
@@ -2516,7 +2516,7 @@ def _name_lane_send(
         subject=subject,
     ))
     if hint:
-        print(hint)
+        print(hint.strip())
     # Live-miss escalation lane (node widened this from attended-only). A
     # miss to an operator-attended session is the stranded case: the human is not
     # watching the drain, so nothing else surfaces it. A miss to a worker the
@@ -3473,6 +3473,19 @@ def cmd_send(
 
     refuse_retired_provider(_provider_tombstone)
 
+    # A subject is one header line on every reader surface; the renderer
+    # refuses backticks, separators and newlines, and the length cap here
+    # keeps a pasted file from riding every recipient's header.
+    if subject is not None:
+        subject = subject.strip() or None
+        if subject is not None and len(subject) > 200:
+            print(
+                f"error: --subject is {len(subject)} characters (cap 200); "
+                "put the detail in the body",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
     # --body/--body-file bind in EVERY mode, not only --kind. One resolution
     # here; each mode below falls back to its own positional slots.
     from fno.text_or_file import read_text_arg
@@ -4154,7 +4167,7 @@ def cmd_send(
         _warn_deferred(name, reason=result.reason)
         print(demotion_receipt(
             result.msg_id, reason=result.reason, owner=result.durable_owner,
-            age_target=name, subject=subject,
+            target=name, age_target=name, subject=subject,
         ))
         # Post-send verify : a durable receipt is not a landing. NOT LANDED
         # exits non-zero so a last-line reader cannot record it as delivered.

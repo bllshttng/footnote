@@ -797,13 +797,14 @@ mod tests {
             &chats,
             "chat-aaaaaaaaaaaaaaaa",
             &[
-                msg(
-                    "fmail-111111111111",
-                    "2026-10-01T09:00:00Z",
-                    "s-candor",
-                    "vellum",
-                    "Ship the auth fix. It blocks the release.",
-                ),
+                json!({
+                    "type": "message", "kind": "send", "v": 1,
+                    "id": "fmail-111111111111", "ts": "2026-10-01T09:00:00Z",
+                    "thread": "fmail-111111111111",
+                    "from": "s-candor", "to": "vellum",
+                    "subject": "release blocker",
+                    "body": "Ship the auth fix. It blocks the release.",
+                }),
                 json!({
                     "type": "message", "kind": "send", "v": 1,
                     "id": "fmail-222222222222", "ts": "2026-10-01T09:05:00Z", "thread": "fmail-111111111111",
@@ -1005,6 +1006,20 @@ mod tests {
         assert_eq!(body_of("fmail-b1b1b1b1b1b1"), "Ship it.");
         assert_eq!(body_of("fmail-b2b2b2b2b2b2"), "Ship it. Then merge.");
         assert_eq!(body_of("fmail-b3b3b3b3b3b3"), "see <fno_mail> docs");
+        // The sender's --subject rides the projected row; a row without one
+        // reads null.
+        let subject_of = |id: &str| -> Option<String> {
+            threads
+                .iter()
+                .flat_map(|t| t.get("rows").and_then(Value::as_array).unwrap())
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                .and_then(|r| r.get("subject").and_then(Value::as_str).map(str::to_string))
+        };
+        assert_eq!(
+            subject_of("fmail-111111111111").as_deref(),
+            Some("release blocker")
+        );
+        assert_eq!(subject_of("fmail-b2b2b2b2b2b2"), None);
         // AC4-HP: the registry never named s-lone; its from name shows and
         // the id stays the key.
         let lone = participants

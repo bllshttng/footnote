@@ -734,6 +734,22 @@ impl MessagesBoard {
                 owners.push(Some(index));
             }
             run_key = Some(key.to_string());
+            // The sender's --subject rides the row; a headline line under
+            // the sender, only when one was given.
+            let subject = text_of(r, "subject");
+            if !subject.is_empty() {
+                for mut line in BLine::of(&[seg(subject, BRole::Head)]).wrap(wrap_w) {
+                    if mine_row {
+                        let pad = w
+                            .saturating_sub(1)
+                            .saturating_sub(line.text.chars().count());
+                        line.text = format!("{}{}", " ".repeat(pad), line.text);
+                    }
+                    line.band = selected;
+                    lines.push(line);
+                    owners.push(Some(index));
+                }
+            }
             let wrapped = BLine::plain(text_of(r, "body")).wrap(wrap_w);
             for mut line in wrapped {
                 if mine_row {
