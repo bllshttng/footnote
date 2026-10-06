@@ -150,9 +150,17 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     assert "king loop disabled" in result.output
 
 
-def test_promote_is_primary_and_crown_aliases_with_a_notice(bg_home, monkeypatch) -> None:
+def test_promote_is_primary_and_crown_aliases_with_a_notice(
+    bg_home, monkeypatch
+) -> None:
     """`--promote` is the taught spelling and lands the same registry fields;
-    `--crown` still answers for one release and prints the replacement."""
+    `--crown` still answers for one release and prints the replacement. The
+    notice reads the process argv, so the test pins the argv it asserts."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fno", "agents", "spawn", "--name", "promote-primary", "-H", "claude",
+         "reign", "--substrate", "thread", "--promote", "alpha"],
+    )
     result = _spawn(
         "spawn", "--name", "promote-primary", "-H", "claude", "reign",
         "--substrate", "thread", "--promote", "alpha",
@@ -162,6 +170,11 @@ def test_promote_is_primary_and_crown_aliases_with_a_notice(bg_home, monkeypatch
     assert _row("promote-primary").crown_level == 1
     assert _row("promote-primary").crown_scope == "alpha"
 
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fno", "agents", "spawn", "--name", "promote-alias", "-H", "claude",
+         "reign", "--substrate", "thread", "--crown", "alpha"],
+    )
     aliased = _spawn(
         "spawn", "--name", "promote-alias", "-H", "claude", "reign",
         "--substrate", "thread", "--crown", "alpha",

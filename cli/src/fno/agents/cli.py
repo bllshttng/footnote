@@ -1597,15 +1597,15 @@ def cmd_spawn(
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
     # Retired spellings bind the same options; name the replacement when the
-    # argv used one. Read from Click's raw args, never sys.argv: the CLI runs
-    # under test runners and in-process dispatches where sys.argv lies.
-    _raw = typer.get_current_context().raw_args or []
+    # argv used one. The process argv is exact for the real door; a test
+    # runner's argv is its own, so the notice test pins the argv it asserts.
+    _args = sys.argv[1:]
 
     def _used(flag: str) -> bool:
-        return any(t == flag or t.startswith(flag + "=") for t in _raw)
+        return any(t == flag or t.startswith(flag + "=") for t in _args)
 
     if _used("--crown") or any(
-        t.startswith("-k") and not t.startswith("--") for t in _raw
+        t.startswith("-k") and not t.startswith("--") for t in _args
     ):
         print(
             "--crown is now --promote; the old spelling answers for one release.",
