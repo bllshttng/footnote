@@ -870,6 +870,8 @@ class TestNodeIsDone:
     def test_false_when_absent(self, monkeypatch):
         self._patch_graph(monkeypatch, [{"id": "x-other", "status": "done"}])
         assert recovery._node_is_done("x-370f") is False
+        self._patch_graph(monkeypatch, [{"id": "x-370f", "status": "done", "archived_at": "2026-09-01"}])
+        assert recovery._node_is_done("x-370f") is False
 
     def test_load_error_degrades_to_false(self, monkeypatch):
         from fno.graph import store as gl
@@ -1090,6 +1092,7 @@ class TestMissionComplete:
         ({"id": "x-1111", "status": "ready"}, False),
         # AC5: a blueprinted-but-unshipped target node is NOT complete.
         ({"id": "x-1111", "status": "ready", "plan_path": "/p.md"}, False),
+        ({"id": "x-1111", "status": "done", "archived_at": "2026-09-01"}, None),
     ])
     def test_target_artifacts(self, monkeypatch, entry, expected):
         self._patch_graph(monkeypatch, [entry])

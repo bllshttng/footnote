@@ -1537,7 +1537,7 @@ def resolve_provenance(
 
             fast = read_nodes_by_ids(GRAPH_JSON, [node])
             for rec in fast["entries"] if fast is not None else load_graph():
-                if rec.get("id") == node or rec.get("slug") == node:
+                if not rec.get("archived_at") and (rec.get("id") == node or rec.get("slug") == node):
                     node = rec.get("id") or node  # normalize a slug input to id
                     if slug is None:
                         slug = rec.get("slug") or ""

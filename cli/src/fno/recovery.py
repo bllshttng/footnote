@@ -714,7 +714,7 @@ def _node_is_done(node: str) -> bool:
         from fno.graph.statuses import node_is_done
 
         entry, _ = _readback_row(GRAPH_JSON, node)
-        return node_is_done(entry) if entry is not None else False
+        return node_is_done(entry) if entry is not None and not entry.get("archived_at") else False
     except Exception:  # noqa: BLE001 - a status read must never crash the sweep
         return False
 
@@ -761,7 +761,7 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
         from fno.graph.store import GRAPH_JSON, _readback_row
 
         entry, _ = _readback_row(GRAPH_JSON, node_id)
-        if entry is None:
+        if entry is None or entry.get("archived_at"):
             return None
         if kind == "think":
             # Only a BIRTH pass is certified by the node's artifacts (spawn_think:

@@ -418,7 +418,7 @@ def find_node_row(node: str) -> Optional[dict]:
 
         fast = read_nodes_by_ids(GRAPH_JSON, [node])
         for candidate in fast["entries"] if fast is not None else load_graph():
-            if candidate.get("id") == node or candidate.get("slug") == node:
+            if not candidate.get("archived_at") and (candidate.get("id") == node or candidate.get("slug") == node):
                 return candidate
     except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
         return None

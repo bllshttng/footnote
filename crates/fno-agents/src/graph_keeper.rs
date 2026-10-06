@@ -1636,12 +1636,13 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     let mut query = row_query(params)?;
     let fields = query.fields.clone();
     reading_fields(&mut query);
-    let mut entries = if params.get("filter").is_some() || fields.is_some() {
-        let _gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
-        query_entries(state, &query, keep_malformed)?
-    } else {
-        (*cached_entries(state, keep_malformed, strict)?).clone()
-    };
+    let mut entries =
+        if params.get("filter").is_some() || fields.is_some() || !query.include_archived {
+            let _gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+            query_entries(state, &query, keep_malformed)?
+        } else {
+            (*cached_entries(state, keep_malformed, strict)?).clone()
+        };
     overlay_work_claim_statuses(&mut entries);
     crate::node_reading::attach_reading(&mut entries);
     project_fields(&mut entries, fields.as_deref());

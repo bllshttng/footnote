@@ -311,7 +311,7 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
         by_id = {
             entry["id"].lower(): entry
             for entry in graph_data
-            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str) and not entry.get("archived_at")
         }
         matched = {tok.lower(): by_id[tok.lower()] for tok in tokens if tok.lower() in by_id}
         if len(matched) == 1:
@@ -2344,7 +2344,8 @@ def _find_node(node_id: str) -> Optional[dict]:
         from fno.graph.store import _readback_row
         from fno.paths import graph_json
 
-        return _readback_row(graph_json(), node_id)[0]
+        row = _readback_row(graph_json(), node_id)[0]
+        return row if row is not None and not row.get("archived_at") else None
     except Exception:  # noqa: BLE001 - best-effort; caller degrades to default
         return None
 

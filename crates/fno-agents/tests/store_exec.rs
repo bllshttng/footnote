@@ -94,7 +94,7 @@ fn store_exec_serves_read_begin_commit_across_processes() {
     let graph = dir.path().join("graph.json");
     fno_agents::graph_store::seed_rows(&graph, &[
         json!({"id": "x-exe", "slug": "exec-node", "title": "e", "type": "feature", "status": "ready", "priority": "p2", "tags":["important"], "sessions":[{"phase":"think", "harness":"codex", "session_id":"test-session"}]}),
-        json!({"id": "x-closed", "slug": "closed-node", "title": "c", "type": "feature", "status": "done", "priority": "p2", "completed_at":"2026-09-01T00:00:00Z"})
+        json!({"id": "x-closed", "slug": "closed-node", "title": "c", "type": "feature", "status": "done", "priority": "p2", "completed_at":"2026-09-01T00:00:00Z", "archived_at":"2026-09-02T00:00:00Z"})
     ]).unwrap();
 
     // A read answers and binds no socket beside the graph file.
@@ -140,6 +140,14 @@ fn store_exec_serves_read_begin_commit_across_processes() {
         .unwrap()
         .clone();
     assert_eq!(landed["title"], json!("executed"));
+    let (_, unarchived) = exec_request(
+        &graph,
+        r#"{"id":8,"method":"read","params":{"include_archived":false}}"#,
+    );
+    let unarchived = unarchived.unwrap();
+    let unarchived = unarchived["result"]["entries"].as_array().unwrap();
+    assert_eq!(unarchived.len(), 1);
+    assert_eq!(unarchived[0]["id"], "x-exe");
     for (method, params, key) in [
         (
             "read",

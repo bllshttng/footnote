@@ -3698,7 +3698,7 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
 
     try:
         fast = read_nodes_by_ids(graph_path, [node_token])
-        match = resolve_node(node_token, (fast or {}).get("entries") or [])
+        match = resolve_node(node_token, [row for row in (fast or {}).get("entries") or [] if not row.get("archived_at")])
         if match.kind != "exact":
             match = resolve_node(node_token, read_graph_strict(graph_path))
     except GraphUnreadableError as e:

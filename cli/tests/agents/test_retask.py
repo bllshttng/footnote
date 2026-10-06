@@ -83,6 +83,11 @@ def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
 
     assert retask._resolve_retask_node("retask-destination") == "x-bdb9"
     assert retask._resolve_retask_node("bdb9") == "x-bdb9"
+    monkeypatch.setattr(
+        "fno.graph.store.read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{"id": "x-old", "slug": "retask-destination", "archived_at": "2026-09-01"}]},
+    )
+    assert retask._resolve_retask_node("retask-destination") == "x-bdb9"
 
 
 def test_explicit_model_and_effort_override_target_profile(tmp_path, monkeypatch):

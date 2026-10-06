@@ -1853,7 +1853,7 @@ def reap_open_session_record(
         if not answered:
             report["settled"] = report.get("found", False)
             return report
-        if node is None:
+        if node is None or node.get("archived_at"):
             report.update({"status_after": None, "remaining_open_do": 0, "settled": report.get("found", False)})
             return report
         rows = node.get("sessions") or []

@@ -257,7 +257,7 @@ def register_lifecycle_commands(
         from fno.graph.store import read_graph_strict, read_nodes_by_ids
 
         fast = read_nodes_by_ids(graph_path(), [node_id])
-        node = _find_node((fast or {}).get("entries") or [], node_id)
+        node = _find_node([row for row in (fast or {}).get("entries") or [] if not row.get("archived_at")], node_id)
         if node is None:
             node = _find_node(read_graph_strict(graph_path()), node_id)
         if node is None:

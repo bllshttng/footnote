@@ -56,7 +56,7 @@ def _resolve_retask_node(node: str) -> str:
     from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
     fast = read_nodes_by_ids(GRAPH_JSON, [node])
-    match = resolve_node(node, (fast or {}).get("entries") or [])
+    match = resolve_node(node, [row for row in (fast or {}).get("entries") or [] if not row.get("archived_at")])
     if match.kind != "exact":
         match = resolve_node(node, load_graph())
     if match.kind != "exact" or not match.id:

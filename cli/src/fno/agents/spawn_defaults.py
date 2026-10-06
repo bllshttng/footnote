@@ -380,7 +380,7 @@ def _node_slug_from_graph(node: str) -> Tuple[Optional[str], Optional[str]]:
 
     fast = read_nodes_by_ids(GRAPH_JSON, [node])
     for rec in fast["entries"] if fast is not None else load_graph():
-        if rec.get("id") == node or rec.get("slug") == node:
+        if not rec.get("archived_at") and (rec.get("id") == node or rec.get("slug") == node):
             return rec.get("id") or node, rec.get("slug") or None
     return node, None
 
@@ -1061,5 +1061,4 @@ def resolve_spawn_gates(substrate, monitor, *, once, harness):
         )
         raise SystemExit(2)
     return substrate
-
 
