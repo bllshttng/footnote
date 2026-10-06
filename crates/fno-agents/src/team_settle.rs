@@ -67,42 +67,29 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         let projects = crate::org_board::project_map(&std::env::current_dir().unwrap_or_default());
         return resolve_with_projects(payload, &projects);
     }
-    let home = crate::paths::AgentsHome::from_env_opt();
-    let store = home.as_ref().map(|h| h.team_names_json());
+    let store = crate::paths::AgentsHome::from_env_opt().map(|h| h.team_names_json());
     let projects = crate::org_board::project_map(&std::env::current_dir().unwrap_or_default());
     let answer = resolve_with_projects(payload, &projects)?;
     // No declared home (a test) reads as no store, so the plan answer is
     // unchanged; production always declares one.
     if let Some(store) = store.as_ref() {
-        let registry = home.as_ref().map(|h| h.registry_json());
-        apply_name_effect(payload, &answer, store, registry.as_deref());
+        apply_name_effect(payload, &answer, store);
     }
     Ok(answer)
 }
 
 /// [`resolve`] with an explicit store path, so tests pass a tempdir store
-/// instead of setting the agents home env. The registry sits beside it,
-/// the way the home lays the pair out.
+/// instead of setting the agents home env.
 pub fn resolve_at(payload: &Value, store: &std::path::Path) -> Result<Value, String> {
     let projects = crate::org_board::project_map(&std::env::current_dir().unwrap_or_default());
     let answer = resolve_with_projects(payload, &projects)?;
-    apply_name_effect(
-        payload,
-        &answer,
-        store,
-        Some(&store.with_file_name("registry.json")),
-    );
+    apply_name_effect(payload, &answer, store);
     Ok(answer)
 }
 
 /// The registry commit is the authority: a store error prints one stderr
 /// line and never changes the answer.
-fn apply_name_effect(
-    payload: &Value,
-    answer: &Value,
-    store: &std::path::Path,
-    registry: Option<&std::path::Path>,
-) {
+fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
     if payload.get("plan").is_none() {
         return;
     }
@@ -128,13 +115,21 @@ fn apply_name_effect(
                 .get("heir")
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty());
-            match (forgotten, heir, registry) {
-                (Ok(()), Some(name), Some(reg)) => {
+            // The heir's session rides `heir_identity` (dispatch plumbs the
+            // row's own id); the carry is registry-free, so the apply path
+            // never waits on the registry lock.
+            let session = payload
+                .get("heir_identity")
+                .and_then(|i| i.get("session_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match (forgotten, heir) {
+                (Ok(()), Some(name)) => {
                     // A fresh grant carries the crowned row's own name, so
                     // the team never lands anonymous.
-                    crate::team_names::carry_holder_name(store, reg, scope, name).map(|_| ())
+                    crate::team_names::carry_holder_name(store, session, 2, scope, name).map(|_| ())
                 }
-                (result, _, _) => result,
+                (result, _) => result,
             }
         }
         _ => Ok(()),
@@ -1151,19 +1146,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         // A fresh grant carries the heir's own people-shaped row name: the
         // stale record from the dead predecessor team is forgotten, then the
-        // new team takes the row's name bound to the live holder session. A
-        // hex-shaped heir name stays unnamed for checkin to name once.
-        let _reg = team_registry(
-            tmp.path(),
-            json!([{"name": "kestrel", "status": "live", "crown_scope": "x-aaaa",
-                    "crown_level": 2, "cwd": "/repo", "harness": "claude",
-                    "harness_session_id": "sess-new",
-                    "created_at": "2026-10-04T00:00:00Z"}]),
-        );
+        // new team takes the row's name bound to the heir session the payload
+        // plumbs. No registry read anywhere: the carry keys on the payload's
+        // heir_identity.
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
                 "kind": "crown-settle", "scope": "x-aaaa", "heir": "kestrel",
+                "heir_identity": {"harness": "claude", "session_id": "sess-new",
+                                   "cwd": "/repo"},
                 "plan": {
                     "caller": {"kind": "human"},
                     "holder_ids": [],

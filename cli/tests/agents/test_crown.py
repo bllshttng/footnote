@@ -1146,6 +1146,8 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
         "old_scope": "beta",
         "new_scope": "alpha",
         "candidate": "worker",
+        "holder_session": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "level": 1,
     }
     assert json.loads(result.stdout)["vacated_scope"] == "beta"
     assert json.loads(result.stdout)["vacated_level"] == 1
