@@ -37,7 +37,7 @@ def _open_node_row(monkeypatch, tmp_path):
         "plan_path": str(tmp_path / "p.md"),
         "cwd": str(tmp_path),
     }
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [row])
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row]})
     # The verb reads the store itself for the nodeless derive: point its
     # FNO_HOME at a fixture graph naming the same row.
     monkeypatch.setenv("FNO_HOME", str(tmp_path))
@@ -1840,7 +1840,7 @@ def test_fleet_incident_journey_stop_gates_and_clear_reopens(tmp_path, monkeypat
     assert announced.returncode == 0, announced.stderr + announced.stdout
     payload = json.loads(announced.stdout.strip().splitlines()[-1])
     assert payload.get("id") and payload["scope"] == "all", announced.stdout
-    lines = [json.loads(l) for l in (bus_dir / "messages.jsonl").read_text().splitlines()]
+    lines = [json.loads(line) for line in (bus_dir / "messages.jsonl").read_text().splitlines()]
     assert [m["kind"] for m in lines] == ["announce"], lines
 
     # 7. Clear is a positive record at the NEXT generation.

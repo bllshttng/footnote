@@ -1533,8 +1533,10 @@ def resolve_provenance(
     if slug is None or plan is None or not has_node_id_prefix(node):
         try:
             from fno.graph.load import load_graph
+            from fno.graph.store import GRAPH_JSON, read_nodes_by_ids
 
-            for rec in load_graph():
+            fast = read_nodes_by_ids(GRAPH_JSON, [node])
+            for rec in fast["entries"] if fast is not None else load_graph():
                 if rec.get("id") == node or rec.get("slug") == node:
                     node = rec.get("id") or node  # normalize a slug input to id
                     if slug is None:

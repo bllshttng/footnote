@@ -3687,21 +3687,20 @@ TASK_NO_GRAIN_EXIT = 6
 def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
 
-    Reads through the CALLER's ``graph_path`` (a redirect seam): the tracker
-    guard lives on the tracker-owned task verbs that call this. An unreadable
-    graph is its own TASK_GRAPH_UNREADABLE_EXIT refusal, never a misread
-    "node does not resolve" and never the 3 that means "a peer holds it, skip
-    this round" - a corrupt graph must stop a wave, not make it skip every
-    task and log each one as peer-held. A bound plan that is not a readable
-    file is a named refusal, never a traceback: rows derive from the plan, so
-    an unreadable plan is a stop, not an empty list.
+    Honors the caller's graph redirect. Exact rows use the native read;
+    missing rows fall back for bare-hex resolution and strict read failures.
+    An unreadable graph exits TASK_GRAPH_UNREADABLE_EXIT, never peer-held;
+    an unreadable bound plan refuses instead of reporting an empty task list.
     """
     from fno.graph.collision import resolve_plan_path
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import GraphUnreadableError, read_graph_strict
+    from fno.graph.store import GraphUnreadableError, read_graph_strict, read_nodes_by_ids
 
     try:
-        entries = read_graph_strict(graph_path)
+        fast = read_nodes_by_ids(graph_path, [node_token])
+        match = resolve_node(node_token, (fast or {}).get("entries") or [])
+        if match.kind != "exact":
+            match = resolve_node(node_token, read_graph_strict(graph_path))
     except GraphUnreadableError as e:
         typer.echo(
             f"Could not read the graph cleanly, so '{node_token}' cannot be "
@@ -3709,7 +3708,6 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
             err=True,
         )
         raise typer.Exit(code=TASK_GRAPH_UNREADABLE_EXIT)
-    match = resolve_node(node_token, entries)
     if match.kind != "exact":
         typer.echo(f"Error: node '{node_token}' does not resolve to a node", err=True)
         raise typer.Exit(code=1)

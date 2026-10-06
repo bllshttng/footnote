@@ -489,12 +489,12 @@ def test_graph_read_failure_falls_back_to_adjective_noun(monkeypatch):
     # A spawn must never die on a naming lookup: the graph read raising falls
     # back to the plain adjective-noun mint, not a refusal, not a t-<node>
     # name built on an unresolved identity.
-    import fno.graph.load as gl
+    import fno.graph.store as gl
 
-    def _raise():
+    def _raise(*args):
         raise RuntimeError("graph unreadable")
 
-    monkeypatch.setattr(gl, "load_graph", _raise)
+    monkeypatch.setattr(gl, "read_nodes_by_ids", _raise)
     out = _norm(["spawn", "--node", "x919", "--slug", "arms", "go"])
     from fno.agents import spawn_defaults as sd
 
@@ -504,12 +504,12 @@ def test_graph_read_failure_falls_back_to_adjective_noun(monkeypatch):
 def test_graph_read_supplies_the_slug_when_flag_absent(monkeypatch):
     # --slug omitted: the best-effort graph read fills id + slug, and a slug
     # input normalizes to the canonical id.
-    import fno.graph.load as gl
+    import fno.graph.store as gl
 
     monkeypatch.setattr(
         gl,
-        "load_graph",
-        lambda: [{"id": "x-919abcd", "slug": "sentinel-arms", "plan_path": None}],
+        "read_nodes_by_ids",
+        lambda path, tokens: {"entries": [{"id": "x-919abcd", "slug": "sentinel-arms", "plan_path": None}]},
     )
     out = _norm(["spawn", "--node", "x-919abcd", "--model", "glm-5.2", "go"])
     assert out[2] == "t-919abcd-sentinel-glm"
