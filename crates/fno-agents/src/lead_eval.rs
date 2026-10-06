@@ -1711,10 +1711,15 @@ mod tests {
         std::fs::write(&journal, "").unwrap();
         crate::state::update_registry(&home.registry_json(), |reg| {
             // Two roster rows of one canonical root collapse to one journal.
-            for name in ["lead-one", "lead-two"] {
+            for (n, sid) in [
+                ("lead-one", "aaaa1111-2222-4333-8444-555566667777"),
+                ("lead-two", "bbbb2222-3333-4444-8555-666677778888"),
+            ] {
                 reg.entries.push(crate::state::RegistryEntry {
                     name: name.into(),
                     cwd: repo.display().to_string(),
+                    harness: Some("claude".into()),
+                    harness_session_id: Some(sid.into()),
                     ..Default::default()
                 });
             }
@@ -1743,6 +1748,10 @@ mod tests {
             reg.entries.push(crate::state::RegistryEntry {
                 name: "lead-one".into(),
                 cwd: repo.display().to_string(),
+                // crown_scope stays unset, so the live-session filter
+                // still excludes the row: the seeded holder is ended.
+                harness: Some("claude".into()),
+                harness_session_id: Some("99998888-7777-4666-8555-444433332222".into()),
                 ..Default::default()
             });
         })
