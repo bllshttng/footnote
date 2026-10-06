@@ -621,17 +621,18 @@ pub(crate) fn visual_approval_blocker<P: Probes>(
     {
         return None;
     }
-    if answered_question_names_pr(cwd, pr) || crown_chat_clears_pr(probes, cwd, pr, head) {
-        return None;
-    }
     // The page auto-files on the first hold read of this head: node, PR,
     // paint files, and the mux shots embedded, deduped per head. Best-effort:
     // a failed filing never softens the hold, it only names the remedy.
+    let root = vault_root(cwd);
+    if answered_question_names_pr(&root, pr) || crown_chat_clears_pr(probes, cwd, pr, head) {
+        return None;
+    }
     let node_id = entry.as_ref().and_then(crate::graph_store::entry_id);
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let shots = node_id
         .as_deref()
-        .map(|n| mux_shots(cwd, home.as_deref(), n))
+        .map(|n| mux_shots(&root, home.as_deref(), n))
         .unwrap_or_default();
     let mut detail = format!(
         "PR {pr} touches the paint surface the config lists ({}); the user's look is \
@@ -655,7 +656,7 @@ pub(crate) fn visual_approval_blocker<P: Probes>(
         (Some(node), shots) => {
             let short = head.chars().take(8).collect::<String>();
             detail.push_str(&file_visual_question(
-                cwd,
+                &root,
                 pr,
                 head,
                 &short,
@@ -678,9 +679,8 @@ fn vault_root(cwd: &Path) -> PathBuf {
 /// The mux captures for one node's PR: `internal/<project>/mux/<node>-*.png`
 /// top level, plus files inside a `<node>-shots/` folder, as vault-relative
 /// embed names. Sorted, so the embedded list is stable.
-fn mux_shots(cwd: &Path, home: Option<&Path>, node: &str) -> Vec<String> {
-    let root = vault_root(cwd);
-    let dir = crate::escalation::vault_dir_with_home(&root, home, "mux");
+fn mux_shots(root: &Path, home: Option<&Path>, node: &str) -> Vec<String> {
+    let dir = crate::escalation::vault_dir_with_home(root, home, "mux");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -712,9 +712,8 @@ fn mux_shots(cwd: &Path, home: Option<&Path>, node: &str) -> Vec<String> {
 /// True when a question page (open or archived) already names this PR at this
 /// head: the once-per-head dedup. An open page keeps the hold; it only stops
 /// a second identical page.
-fn visual_page_filed(cwd: &Path, pr: u64, head: &str) -> bool {
-    let root = vault_root(cwd);
-    let dir = crate::escalation::questions_dir(&root);
+fn visual_page_filed(root: &Path, pr: u64, head: &str) -> bool {
+    let dir = crate::escalation::questions_dir(root);
     let dirs = [dir.clone(), dir.join("done")];
     dirs.iter().any(|d| {
         crate::lead_answers::read_question_pages(d).is_ok_and(|pages| {
@@ -773,10 +772,12 @@ fn visual_question_markdown(
 
 /// File the question through the ask verb (journal + index now, the page
 /// itself materialized by the attention arm's next beat). Best-effort: the
-/// returned line appends to the hold detail, never softens the hold. Exit 2
-/// is the intake's dedup refusal, which reads as already-filed, not failure.
+/// returned line appends to the hold detail, never softens the hold. The
+/// intake's dedup (same subject + node already open) refuses before a second
+/// page is written; any other non-zero exit is a real failure, surfaced with
+/// the ask's own stderr so a refused page is never mislabeled as filed.
 fn file_visual_question(
-    cwd: &Path,
+    root: &Path,
     pr: u64,
     head: &str,
     short: &str,
@@ -784,18 +785,20 @@ fn file_visual_question(
     files: &str,
     shots: &[String],
 ) -> String {
-    if visual_page_filed(cwd, pr, head) {
+    if visual_page_filed(root, pr, head) {
         return format!("; the question page for PR {pr} at {short} is already filed");
     }
-    let root = vault_root(cwd);
-    let path = std::env::temp_dir().join(format!("fno-visual-ask-{pr}-{short}.md"));
+    let path = std::env::temp_dir().join(format!(
+        "fno-visual-ask-{pr}-{short}-{}.md",
+        std::process::id()
+    ));
     let markdown = visual_question_markdown(pr, head, short, node, files, shots);
     if let Err(e) = std::fs::write(&path, markdown) {
         return format!("; the question could not be staged: {e}");
     }
     let subject = format!("visual approval PR {pr} at {short}");
     let out = Command::new(crate::scrape::fno_bin())
-        .current_dir(&root)
+        .current_dir(root)
         .args(["inbox", "outstanding", "ask", "--question-file"])
         .arg(&path)
         .args(["--node", node])
@@ -805,17 +808,21 @@ fn file_visual_question(
         Ok(o) if o.status.success() => {
             format!("; question page filed (subject: {subject})")
         }
-        // Exit 2 is the intake's dedup refusal: an open question on the same
-        // subject + node already waits.
-        Ok(o) if o.status.code() == Some(2) => {
-            format!("; the question page for PR {pr} at {short} is already filed")
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let last = stderr.trim().lines().last().unwrap_or("");
+            let note = if last.is_empty() {
+                String::new()
+            } else {
+                format!(": {last}")
+            };
+            format!(
+                "; the question page could not be filed (ask exited {:?}{note}); file it by \
+                 hand: fno inbox outstanding ask --question-file {} --node {node}",
+                o.status.code(),
+                path.display()
+            )
         }
-        Ok(o) => format!(
-            "; the question page could not be filed (ask exited {:?}); file it by hand: \
-             fno inbox outstanding ask --question-file {} --node {node}",
-            o.status.code(),
-            path.display()
-        ),
         Err(e) => format!("; the question page could not be filed: {e}"),
     }
 }
@@ -840,9 +847,8 @@ fn path_matches_paint(path: &str, patterns: &[String]) -> bool {
 
 /// True when any ANSWERED question page in this project's questions directory
 /// names the PR: the pages the lead check-in reads, parsed the same way.
-fn answered_question_names_pr(cwd: &Path, pr: u64) -> bool {
-    let root = vault_root(cwd);
-    let dir = crate::escalation::questions_dir(&root);
+fn answered_question_names_pr(root: &Path, pr: u64) -> bool {
+    let dir = crate::escalation::questions_dir(root);
     // Answered pages are archived into done/ after the fact; an approval
     // must not lapse because its page moved there.
     let mut dirs = vec![dir.clone()];
