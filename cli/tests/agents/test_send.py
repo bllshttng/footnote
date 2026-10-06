@@ -186,7 +186,9 @@ def test_dispatch_send_happy_path_live_claude(
 def test_cmd_send_happy_path_stdout_format(
     tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
-    """AC3-HP / AC3-UI: cmd_send stdout is exactly 'msg-<id> delivered (hosted)\\n', exit 0."""
+    """AC3-HP / AC3-UI: cmd_send stdout is the JSON receipt, exit 0."""
+    import json as _json
+
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
@@ -209,10 +211,12 @@ def test_cmd_send_happy_path_stdout_format(
 
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    # "msg-<id> delivered (hosted)"
-    assert out.startswith("fmail-"), f"stdout: {out!r}"
-    assert "delivered (hosted)" in out, f"stdout: {out!r}"
-    assert "queued" not in out, "stdout must not say 'queued' for a live delivery"
+    receipt = _json.loads(out)
+    assert set(receipt) == {"msg_id", "subject", "to", "status"}
+    assert receipt["msg_id"].startswith("fmail-"), f"stdout: {out!r}"
+    assert receipt["to"] == "red"
+    assert "delivered (hosted)" in receipt["status"], f"stdout: {out!r}"
+    assert "queued" not in receipt["status"], "stdout must not say 'queued' for a live delivery"
 
 
 @pytest.mark.parametrize(
