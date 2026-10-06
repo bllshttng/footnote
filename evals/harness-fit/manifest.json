@@ -5,7 +5,7 @@
   "ceiling_usd": 200.0,
   "arms": {
     "run0": ["claude-code+zai-env", "opencode+zai-provider", "zcode", "pi+zai-provider"],
-    "run0_reference": "terminus-2",
+    "run0_reference": "terminus-2+zai-provider",
     "run1_lanes": ["claude", "opencode", "zcode", "pi"]
   },
   "fixed": {
@@ -30,9 +30,130 @@
     "an arm under 20 graded attempts is underpowered and fires no rule alone"
   ],
   "prices": {
-    "glm-5.3-flash": {"input_per_m": null, "output_per_m": null, "cache_read_per_m": null, "cache_write_per_m": null},
-    "claude-sonnet-4-5": {"input_per_m": 3.0, "input_per_m_note": "Terminus 2 reference arm, Sonnet pricing; fill exact per-million USD rates from the vendor pricing page before Run 0",
-    "output_per_m": 15.0, "cache_read_per_m": 0.3, "cache_write_per_m": 3.75}
+    "glm-5.3-flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "glm-5.3-flash[1m]": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "GLM-5.3-Flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "zai/glm-5.3-flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15},
+    "zai-coding-plan/glm-5.3-flash": {"input_per_m": 0.15, "output_per_m": 0.5, "cache_read_per_m": 0.03, "cache_write_per_m": 0.15}
   },
-  "prices_note": "null rates are filled from the z.ai pricing page in a commit dated before the first results commit; the report refuses to price a null rate (cost reads unmeasured)"
+  "prices_note": "GLM-5.3-Flash list price from the z.ai pricing page, read 2026-09-29: input 0.15, cached input 0.03, output 0.50 USD per 1M tokens. z.ai lists no cache-write charge and bills written tokens as input, so cache write is 0.15. The report prices by the exact model string, so every string an arm can report carries the same rates. An unlisted string reads unmeasured.",
+  "amendment_1": {
+    "declared_at": "2026-09-29T20:05:00Z",
+    "run0_repeats": 1,
+    "run0_repeats_reason": "Run 0 is one pass per arm over the 89 Terminal-Bench 2 tasks, paired by task. The 3-repeat rule applies to Run 1.",
+    "run0_timeout": "each Terminal-Bench 2 task's own agent timeout at timeout_multiplier 1.0; the 45m budget applies to Run 1",
+    "run0_reference_model": "Terminus 2 runs glm-5.3-flash through z.ai like every other arm; the Sonnet price row is removed",
+    "harbor": "harbor 0.23.0 through uvx",
+    "concurrency": "one Harbor job at a time with n_concurrent_trials 4; Run 1 runs one attempt at a time beside Run 0",
+    "stop_rule_granularity": "before each Harbor job, spent USD plus 3 x the arm's smoke cost per task x 89 must stay under the ceiling; before each Run 1 lane, spent USD plus 3 x the lane's projection must stay under it"
+  },
+  "amendment_4": {
+    "declared_at": "2026-09-29T23:40:00Z",
+    "scope": "attempts that never started; no grade or rule changes",
+    "docker_down": "a Run 0 trial whose docker environment never started is an infrastructure exclusion; harbor jobs resume -f RuntimeError reruns it in place; unrun arms run in the same seeded order",
+    "provider_cap": "a Run 1 spawn refused before the worker starts reads unavailable; a top-up pass reruns missing graded attempts up to 3 per task, at most 3 passes; each refusal stays counted by reason",
+    "started_attempts": "a started attempt or trial is never rerun; it is scored as it stands",
+    "stalls": "a Run 1 worker that exhausts its 45m budget (spawn exit 12 opencode, 124 claude) started; the runner files it unavailable with no grade; this study scores it as a stall, an attempt with no accepted change, and prints each rate with and without stalls"
+  },
+  "amendment_5": {
+    "declared_at": "2026-09-30T14:13:25Z",
+    "scope": "work a machine restart killed in flight; no grade or rule changes",
+    "restart": "machine boot 2026-09-30T12:21:17Z; last Harbor log write 10:43:47Z; last Run 1 row 09:43:11Z",
+    "run_0": "a trial that wrote no result is run again by harbor jobs resume; a trial that wrote a result stands; unrun arms run in the same seeded order",
+    "resume_token": "harbor stores the token masked in the job config; the first resume (14:13Z to 14:33Z) sent it masked; 4 reruns ended in HTTP 401 with zero tokens and 4 were in setup; none reached the model; all 8 are parked and run again; an opencode job that started out of order was stopped before any agent ran and starts fresh after the claude-code arm",
+    "pause": "1-minute load 359 on 12 cores at 16:43Z; both runs paused at 16:45:48Z on the fleet lead's order; harbor has no drain, so 4 claude-code trials and 1 opencode attempt in flight stopped with no result and run again on resume; every written result stands",
+    "load": "from 16:40Z a sampler records the load average once a minute; the results print load beside each timeout and stall, and each rate again without results that ran above load 50; no load record exists before 16:40Z",
+    "run_1": "the opencode lane finishes through the top-up script in one pass; the zcode lane runs next; then the top-up runs its 3 passes over the claude and opencode lanes"
+  },
+  "amendment_6": {
+    "declared_at": "2026-09-30T22:54:00Z",
+    "scope": "a new machine; no grade or rule changes",
+    "machine": "the user's Intel iMac (x86_64, 128 GB); task images are linux/amd64 and the first machine (arm64) emulated them",
+    "pilot": "every result from the arm64 Mac, Run 0 and Run 1, is a pilot; reported apart; fires no decision rule",
+    "restart": "both runs restart clean on the iMac: Run 0 smokes first, then the same seeded arm order; Run 1 the same seeded lane order, then the top-up",
+    "concurrency": "Run 0 runs min(4, floor(physical cores / 2)) trials at once; Run 1 one attempt at a time beside it",
+    "scripts": "run scripts live in evals/harness-fit/run/; evals/harness-fit/setup-imac.sh installs Docker, Harbor, the harness CLIs and the key; the zcode adapter stays out of the repo, so zcode reads unavailable unless its files are copied in",
+    "account": "same z.ai account and key; the 1302 rule stays",
+    "dollars": "the pilot spend counts against the 200 USD ceiling",
+    "pilot_spend_usd": 7.0,
+    "pilot_spend_basis": "Run 0 Harbor jobs 2.54 + Run 1 priced rows 2.36 + 2.00 floor for 8 unmeasured opencode stalls (0.25 each) = 6.90, rounded up"
+  },
+  "amendment_7": {
+    "declared_at": "2026-10-01T01:40:00Z",
+    "scope": "the move waits; no grade or rule changes",
+    "machine": "both runs continue on the arm64 Mac from where they paused (user, 2026-10-01)",
+    "rows": "the arm64 rows count as the study, not a pilot; if the iMac runs later, the results report each machine apart and the iMac rows decide",
+    "emulation": "every Terminal-Bench 2 task runs under amd64 emulation here; run-0.md names it beside every rate",
+    "guard": "both runs pause when the 5-minute load stays at 150 or more for 10 minutes",
+    "concurrency": "4 Run 0 trials; Run 1 one attempt at a time"
+  },
+  "amendment_8": {
+    "declared_at": "2026-10-01T18:20:00Z",
+    "scope": "low load; no grade or rule changes",
+    "concurrency": "2 Run 0 trials; Run 1 one attempt at a time",
+    "guard": "pause both runs when the 5-minute load stays at 48 or more for 5 minutes; resume them when it stays at 24 or less for 10 minutes",
+    "paused_trials": "in-flight trials stop with no result and rerun on resume; never counted as failures",
+    "docker_networks": "46 claude-code trials at 2026-10-01T02:36Z failed on Docker subnet exhaustion before any agent started; rerun, counted as infrastructure"
+  },
+  "amendment_9": {
+    "declared_at": "2026-10-01T21:55:00Z",
+    "scope": "drain, never kill (vellum ruling on the guard question); no grade or rule changes",
+    "drain": "5-minute load at 48 or more for 5 minutes: both runs start no new trial or attempt; in-flight work finishes and counts",
+    "lift": "24 or less for 10 minutes: new work starts again",
+    "kill": "only 150 or more for 5 minutes kills both runs; killed work reruns on resume",
+    "mechanism": "a drain file holds each new Run 0 trial before its first timer and each Run 1 attempt before it starts; zcode runs one attempt at a time through the top-up",
+    "concurrency": "2 Run 0 trials; Run 1 one attempt at a time"
+  },
+  "amendment_10": {
+    "declared_at": "2026-10-02T18:05:00Z",
+    "scope": "the iMac run and the Claude Code 1M window; no grade or decision rule changes",
+    "machine": "both runs started clean on the Intel iMac at 2026-10-02T11:24Z; the iMac rows decide and the arm64 rows are reported apart",
+    "concurrency": "Run 0 runs 4 trials at once on the iMac (Amendment 6); the load sampler runs, no drain guard runs",
+    "claude_code_model": "glm-5.3-flash[1m] for the Run 0 claude-code arm and the Run 1 claude lane (user ruling: without [1m] the cap is low); effort high; opencode, pi and Terminus 2 strings unchanged",
+    "probe": "Claude Code 2.1.286 at 17:59Z: context window 1000000 with the suffix, 200000 without; z.ai answered both",
+    "not_comparable": "every Claude Code result before this amendment ran on the 200000 window (arm64 Run 0 claude-code arm and smokes, arm64 Run 1 claude lane, one iMac Run 1 claude attempt); reported apart; fires no decision rule",
+    "smoke_false_negative": "the 16:03Z iMac claude-code smoke hit the 900 s timeout with no finished turn, so Harbor read zero tokens and the driver logged unavailable; the agent log shows the model streamed about 40000 thinking tokens; the driver now reads the agent log when the token count is zero",
+    "arm_order": "seeded order pi, claude-code, opencode, terminus-2; claude-code runs last because opencode had started before the false negative was read",
+    "identity": "the observe door compares requested and observed model by family (one trailing bracket suffix dropped from each side), the agent registry's rule",
+    "run1_restarts": "four stops and restarts on the iMac; no worker started in any set-aside attempt; rows kept in logs/aborted-start-1 to aborted-start-4 in the run workspace; Run 1 runs the branch CLI from its own environment",
+    "pi_run1": "the pi lane reads unavailable on both machines: the headless substrate has no pi lane on this branch"
+  },
+  "amendment_11": {
+    "declared_at": "2026-10-02T18:50:00Z",
+    "scope": "one load rule for every arm and lane on the iMac (user ruling: the key is consistency); no grade or decision rule changes",
+    "rule": "a Run 0 trial or Run 1 attempt is an infrastructure exclusion and runs again when the 5-minute load average passed 16 at any sample between its start and its end",
+    "load_threshold_5min": 16,
+    "threshold_basis": "two per physical core on the iMac; chosen after reading the load series and before reading any outcome; before 18:00Z the 5-minute load never passed 12.0",
+    "window": "5-minute load above 16 from 18:21Z to 18:38Z on 2026-10-02, peak 43.4; cause: a study shim made a cleanup command call itself and about 9000 processes piled up",
+    "in_flight": "a trial already running in a bad window finishes and is then set aside; nothing is killed for the rule",
+    "rerun": "same arm, job and settings",
+    "concurrency": "Run 0 stays at 4 trials for every remaining arm",
+    "claude_code_version": "the Run 0 claude-code container installs Claude Code 2.1.286, the Run 1 pin; the 16:03Z smoke had installed 2.1.287",
+    "images": "unused task images were removed at 18:29Z to free disk; later arms pull them again in environment setup, before the agent timer",
+    "freeze": "no setting, image or environment changes mid-arm unless the machine is at risk"
+  },
+  "amendment_12": {
+    "declared_at": "2026-10-04T04:56:24Z",
+    "scope": "one retry for every Run 0 trial excluded under the 1302 rule, in every arm (user ruling: re-run the rate-limited trials before the results ship); no grade or decision rule changes",
+    "first_results_commit": "71151e0a50",
+    "excluded_1302": {"pi": 7, "claude-code": 27, "opencode": 7, "terminus-2": 13, "total": 54},
+    "rule": "each such trial runs once more in the same job, model, effort, Claude Code pin and concurrency; the original attempt is set aside",
+    "one_retry": "a re-run that ends in a 1302 timeout again stays excluded and does not run a third time",
+    "spend": "cost tables count the attempts in the final record, as after Amendment 11; set-aside attempts and their spend are reported apart; decision.md shows the margin with and without them",
+    "order": "one arm at a time in the seeded order: pi, claude-code, opencode, terminus-2",
+    "when_set": "after the first results were written and read, before any re-run started; no re-run outcome existed at commit",
+    "run_1": "unchanged; its top-up already refilled every rate-limited attempt",
+    "load_rule": "the Amendment 11 load rule applies to the re-runs"
+  },
+  "amendment_13": {
+    "declared_at": "2026-10-05T16:34:00Z",
+    "scope": "the scorer applies Amendment 2 as written: a 1302 exclusion needs z.ai's error, not the characters 1302 anywhere in the log; no grade or decision rule changes",
+    "found_by": "external code review of the scorer on the results PR",
+    "test": "a timeout whose agent log carries 'Rate limit reached for requests' (the message z.ai sends with code 1302 in every harness's log); HARNESS_FIT_LEGACY_1302=1 restores the old substring test",
+    "bug_effect": "91 timeouts flagged across the record and the Amendment 12 retries; 17 carried the error; 74 were ordinary timeouts; 7 opencode timeouts with the error but no code were missed and graded",
+    "record": "an original attempt stands unless it really hit the limit (Amendment 4); 44 of the 54 Amendment 12 originals stand and their retries are discarded and reported apart; for the 10 that really hit the limit the retry stands",
+    "new_retries": "the 7 missed opencode trials each run once more in the same job, settings and concurrency 4; a second rate limit stays excluded",
+    "when_set": "after the second results were written and read, before the 7 retries started; none of those outcomes existed at commit",
+    "run_1": "unchanged; its rate-limit check already reads the row's reason"
+  }
 }

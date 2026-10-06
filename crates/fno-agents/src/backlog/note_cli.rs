@@ -616,7 +616,11 @@ pub fn run_comment(args: &[String]) -> i32 {
 
     let text = positionals[1..].join(" ");
     if text.trim().is_empty() {
-        eprintln!("fno-agents backlog-note comment: nothing to post");
+        eprintln!(
+            "fno-agents backlog-note comment: nothing to post; pass the text as the \
+             second argument: comment <id> \"<text>\" appends to the node thread \
+             (older comments stay); read the thread with comment <id> --list"
+        );
         return 2;
     }
     let kind = if reply.is_some() { "reply" } else { "comment" };
