@@ -1169,10 +1169,10 @@ def _run_journey(root: Path) -> Path:
 
     rollout_path, rollout_offset = _rollout_snapshot(Path(env["CODEX_HOME"]), thread_id)
     team_name = _register_exact_session(fno, repo, env, thread_id)
-    init = _run([fno, "agents", "lead", "init", "--scope", scope, "--harness-session-id", thread_id], env=env, cwd=repo)
+    init = _run([fno, "agents", "org", "init", "--scope", scope, "--harness-session-id", thread_id], env=env, cwd=repo)
     if init.returncode:
         raise RuntimeError(f"private lead init refused: {init.stderr.strip() or init.stdout.strip()}")
-    match = re.search(r"lead: manifest written: (.+)", init.stdout)
+    match = re.search(r"(?:king|org|lead): manifest written: (.+)", init.stdout)
     if not match:
         raise RuntimeError("malformed-output: lead init returned no manifest path")
     manifest = Path(match.group(1).strip())
@@ -1186,7 +1186,7 @@ def _run_journey(root: Path) -> Path:
         method="thread/goal/get", expected_action="goal_get",
     )
     manifest_before_retry = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    refused_retry = _run([fno, "agents", "lead", "init", "--scope", scope, "--harness-session-id", thread_id], env=env, cwd=repo)
+    refused_retry = _run([fno, "agents", "org", "init", "--scope", scope, "--harness-session-id", thread_id], env=env, cwd=repo)
     retry_unchanged = hashlib.sha256(manifest.read_bytes()).hexdigest() == manifest_before_retry
     if refused_retry.returncode == 0:
         raise RuntimeError("parser-rejected: repeated lead init unexpectedly replaced the team")

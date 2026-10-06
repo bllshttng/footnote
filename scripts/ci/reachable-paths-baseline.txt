@@ -138,7 +138,11 @@ A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-a
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	hooks/worktree-remove.sh	py=cli/src/fno/setup/cli_hooks.py|cli/src/fno/setup_cli.py;rs=crates/fno/src/uninstall.rs	# CLASSIFY protocol|msg-twin|data
 A	https://api.anthropic.com/api/oauth/profile	py=cli/src/fno/adapters/providers/managed.py;rs=crates/fno-agents/src/claude_vault.rs	# CLASSIFY protocol|msg-twin|data
-A	https://api.z.ai/api/anthropic	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/footnote_harness/model.rs|crates/fno-agents/src/footnote_harness/tests.rs|crates/fno-agents/src/model_env_scrub.rs|crates/fno/src/model_catalog.rs	# CLASSIFY protocol|msg-twin|data
+A	https://api.z.ai/api/anthropic	py=cli/src/fno/agents/model_routing.py|evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/footnote_harness/model.rs|crates/fno-agents/src/footnote_harness/tests.rs|crates/fno-agents/src/model_env_scrub.rs|crates/fno/src/model_catalog.rs	# CLASSIFY protocol|msg-twin|data
+A	anthropic_default_fable_model	py=evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/model_env_scrub.rs	# data: the harness-fit eval launcher hands these z.ai endpoints and Claude Code env names to Harbor task containers; an external harness config, not a second routing implementation
+A	anthropic_default_opus_model	py=evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/claude_supervisor.rs|crates/fno-agents/src/client_tests.rs|crates/fno-agents/src/model_env_scrub.rs	# data: the harness-fit eval launcher hands these z.ai endpoints and Claude Code env names to Harbor task containers; an external harness config, not a second routing implementation
+A	anthropic_default_sonnet_model	py=evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/model_env_scrub.rs	# data: the harness-fit eval launcher hands these z.ai endpoints and Claude Code env names to Harbor task containers; an external harness config, not a second routing implementation
+A	https://api.z.ai/api/coding/paas/v4	py=evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/codex_route.rs|crates/fno/src/model_catalog.rs	# data: the harness-fit eval launcher hands these z.ai endpoints and Claude Code env names to Harbor task containers; an external harness config, not a second routing implementation
 A	https://github.com/bllshttng/footnote	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# CLASSIFY protocol|msg-twin|data
 A	https://github.com/{slug}/pull/{pr}	py=cli/src/fno/graph/_reconcile.py|cli/src/fno/retro/cli.py;rs=crates/fno-agents/src/backlog/pr_link.rs	# CLASSIFY protocol|msg-twin|data
 A	insert into outbox (event_id, payload) values (?,?)	py=cli/src/fno/approvals/store.py;rs=crates/fno-agents/src/effect_gate.rs	# CLASSIFY protocol|msg-twin|data
@@ -224,7 +228,6 @@ A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/s
 A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crates/fno-agents/src/provider.rs	# CLASSIFY protocol|msg-twin|data
 A	schema_version=2 requires pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	scripts/ci/check-oos-tracked.sh	py=cli/src/fno/plan/fidelity.py;rs=crates/fno-agents/src/pr_body_check.rs	# CLASSIFY protocol|msg-twin|data
-A	select line from events order by seq	py=cli/src/fno/events/store_client.py;rs=crates/fno-agents/src/event_store.rs|crates/fno/src/event_store.rs	# CLASSIFY protocol|msg-twin|data
 A	select seq, payload from outbox order by seq	py=cli/src/fno/approvals/store.py;rs=crates/fno-agents/src/effect_gate.rs	# CLASSIFY protocol|msg-twin|data
 A	selector_entries_scanned	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/next.rs	# CLASSIFY protocol|msg-twin|data
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data

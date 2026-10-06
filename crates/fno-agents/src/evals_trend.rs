@@ -547,13 +547,16 @@ fn cohort_score(rows: &[&Row], prices: Option<&Value>) -> Value {
             .unwrap_or("unverified");
         *lane_statuses.entry(lane_status.to_string()).or_default() += 1;
         let reason = r.raw.get("excluded_reason").and_then(Value::as_str);
-        if let Some(reason) = reason {
-            *by_reason.entry(reason.to_string()).or_default() += 1;
-        }
         if status == "graded" && lane_status != "substituted" && reason.is_none() {
             scored.push(r);
         } else {
             excluded += 1;
+            let why = match reason {
+                Some(reason) => reason,
+                None if lane_status == "substituted" => "substituted",
+                None => status,
+            };
+            *by_reason.entry(why.to_string()).or_default() += 1;
         }
     }
     let accepted = scored.iter().filter(|r| r.pass).count();
@@ -593,15 +596,15 @@ fn cohort_score(rows: &[&Row], prices: Option<&Value>) -> Value {
             tokens.2 + cache_read,
             tokens.3 + cache_write,
         );
-        let model_key = r
-            .raw
-            .get("observed_model")
-            .and_then(Value::as_str)
-            .or_else(|| r.raw.get("requested_model").and_then(Value::as_str))
-            .unwrap_or("");
-        let price = prices
-            .and_then(|p| p.get(model_key))
-            .and_then(Value::as_object);
+        let observed = r.raw.get("observed_model").and_then(Value::as_str);
+        let requested = r.raw.get("requested_model").and_then(Value::as_str);
+        // opencode observes `provider/model`; a price table keyed by the bare
+        // model still prices it.
+        let bare = observed.and_then(|m| m.rsplit_once('/')).map(|(_, m)| m);
+        let price = [observed, bare, requested]
+            .into_iter()
+            .flatten()
+            .find_map(|key| prices.and_then(|p| p.get(key)).and_then(Value::as_object));
         let Some(price) = price else {
             measured = false;
             continue;
