@@ -302,12 +302,31 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     if default is None:
         return ("unknown", "could not read the repository default branch (REST read failed)")
 
-    base, _head_oid = _base_ref_and_head(pr_number, slug, cwd)
+    base, head_oid = _base_ref_and_head(pr_number, slug, cwd)
     if base is None:
         return ("unknown", f"could not read the base ref of PR #{pr_number} (REST read failed)")
 
     if base == default:
-        return ("ok", f"base is the default branch ({default})")
+        # A base that IS the default branch: the head must contain the tip. A
+        # behind head merges cleanly while landing code CI never ran on. Only a
+        # POSITIVE behind verdict blocks; failed probes answer unknown, proceed.
+        if not head_oid:
+            return ("unknown", f"could not read the head sha of PR #{pr_number} (REST read failed)")
+        tip = _rev(f"origin/{default}", cwd) if _fetch_ref(default, cwd) else ""
+        if not tip:
+            return ("unknown", f"could not refresh '{default}' to test the lineage")
+        res = _probe(["git", "merge-base", "--is-ancestor", tip, head_oid], cwd)
+        if res is None or res.returncode not in (0, 1):
+            return ("unknown", f"ancestry probe failed between '{default}' and the head (git merge-base)")
+        if res.returncode == 0:
+            return ("ok", f"head contains the '{default}' tip ({tip[:8]})")
+        return (
+            "stale",
+            f"PR #{pr_number} is behind '{default}': its head does not contain the '{default}' "
+            f"tip ({tip[:8]}), so merging now lands code CI never ran on; merge origin/{default} "
+            f"into the branch and push, then merge once CI is green on the updated head. "
+            f"Set {BYPASS_ENV}={BYPASS_VALUE} to acknowledge once.",
+        )
 
     merged, merged_head = _merged_pr_for_head(base, slug, cwd)
     fetched, base_current, base_gone = _fetch_refs(base, default, cwd)

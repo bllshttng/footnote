@@ -149,20 +149,24 @@ def patch_run(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    "kwargs,verdict,fragment",
     [
-        {"pr_head": ""},
-        {"contained": True},
-        {"contained": False},
-        {"fetch_fails": True},
+        ({"pr_head": ""}, "unknown", "head sha"),
+        ({"contained": True}, "ok", "contains"),
+        ({"contained": False}, "stale", "merge origin/main into the branch"),
+        ({"fetch_fails": True}, "unknown", "could not refresh"),
     ],
 )
-def test_default_base_lineage_table(patch_run, kwargs):
-    """The default branch remains a live destination even for a behind head."""
+def test_default_base_lineage_table(patch_run, kwargs, verdict, fragment):
+    """A base that IS the default branch: ancestry decides, probes stay humble.
+
+    The stale row asserts the remedy, not just the fault: a refusal that
+    closes the door without pointing at the key invites improvisation.
+    """
     patch_run(FakeRun(base="main", **kwargs))
     got, why = _base_lineage.lineage_verdict(805, "/repo")
-    assert got == "ok"
-    assert "base is the default branch (main)" in why
+    assert got == verdict
+    assert fragment in why
 
 
 def test_merged_pr_on_unmoved_base_refuses(patch_run):

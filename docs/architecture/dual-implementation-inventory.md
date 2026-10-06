@@ -12,8 +12,6 @@ This page answers four questions. Which cross-tree guards mark a real second imp
 
 **The registry skew write.** Dual, disposition dual-logic. Under schema skew, `cli/src/fno/agents/registry.py::update_registry` delegates to `crates/fno-agents/src/registry_commit.rs` under the shared registry lock; the Rust door merges unknown row and top-level fields before atomic publish. Python retains its strict writer at or below its own schema until those writers port.
 
-**Default branch lineage.** Dual, disposition dual-logic. Python `cli/src/fno/pr/_base_lineage.py:309` and Rust `crates/fno-agents/src/gate_probes.rs:246` both check the PR's merge destination. The Python requirement that the head contain the latest default-branch tip is deleted. Rust already accepts the default branch as a live destination. This deletion restores the existing native policy. Other stacked-branch checks retain both implementations until their transport ports.
-
 ## The discriminator
 
 A parity guard exists because two things can drift. Two implementations do not follow from that.
