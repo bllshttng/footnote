@@ -828,3 +828,49 @@ def test_the_launch_edge_stamp_is_wired_into_the_spawn(workdir_claude, monkeypat
 
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
     assert seen == ["x-1234"], f"expected the stamp to see the node, got {seen!r}"
+@pytest.mark.dev_build
+def test_resume_spawn_without_markers_inherits_the_source_rows_parent_edge(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """A relaunch (`spawn --resume`) runs where no ambient identity
+    exists keeps the SOURCE row's parent edge, so its original spawner's
+    orphan check still sees it instead of printing `parent edge NOT recorded`."""
+    from fno.agents.registry import AgentEntry, update_registry
+
+    source_uuid = "11111111-2222-3333-4444-555555555555"
+    update_registry(
+        lambda entries: entries
+        + [
+            AgentEntry(
+                name="source-row",
+                harness="claude",
+                cwd="/tmp",
+                log_path="/tmp/source-row.log",
+                harness_session_id=source_uuid,
+                short_id="11111111",
+                spawned_by_session="original-spawner-1",
+                spawned_by_harness="claude",
+                spawned_by_cwd="/original/spawner/dir",
+            )
+        ]
+    )
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "relaunch-worker", "-H", "claude",
+         "--resume", source_uuid, "--substrate", "thread", "continue"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+
+    entries = load_registry()
+    entry = next((e for e in entries if e.name == "relaunch-worker"), None)
+    assert entry is not None, "registry row must exist after the relaunch"
+    assert entry.spawned_by_session == "original-spawner-1", (
+        f"expected the source row's spawner, got {entry.spawned_by_session!r}"
+    )
+    assert entry.spawned_by_harness == "claude"
+    assert entry.spawned_by_cwd == "/original/spawner/dir"
