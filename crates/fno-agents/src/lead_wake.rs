@@ -418,12 +418,12 @@ mod tests {
             team("x-aaa", 2, "candor", "s-l2a"),
             team("x-bbb", 2, "finch", "s-l2b"),
         ];
+        let now = 1_000_000_000 + 55 * 60 + 61;
         let beats = BTreeMap::from([
             ("fno".to_string(), Some(1_000_000_000)),
-            ("x-aaa".to_string(), Some(1_000_000_000)),
-            ("x-bbb".to_string(), Some(1_000_000_000)),
+            ("x-aaa".to_string(), Some(now - 600)),
+            ("x-bbb".to_string(), Some(now - 600)),
         ]);
-        let now = 1_000_000_000 + 55 * 60 + 61;
         let plans = plan_wakes(&teams, &projects(), &beats, &BTreeMap::new(), 55 * 60, now);
         assert_eq!(plans.len(), 1, "only the L1 head is past the line");
         let plan = &plans[0];
