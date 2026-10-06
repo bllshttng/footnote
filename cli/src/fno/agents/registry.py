@@ -649,6 +649,9 @@ class AgentEntry:
     context_used_pct: Optional[int] = None
     context_used_tokens: Optional[int] = None
     context_window_tokens: Optional[int] = None
+    tool_calls: Optional[int] = None
+    tool_errors: Optional[int] = None
+    harness_args: list[str] = field(default_factory=list)
     context_measured_at: Optional[str] = None
     mail_unread: Optional[int] = None
     harness_title: Optional[str] = None

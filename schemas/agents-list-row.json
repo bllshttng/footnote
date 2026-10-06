@@ -131,6 +131,7 @@
       "fno_id",
       "git_grant",
       "granted_writable_roots",
+      "harness_args",
       "host_mode",
       "inside_leg",
       "keeper_child_pid",
@@ -159,6 +160,8 @@
       "spawned_by_session",
       "start_source",
       "stop",
+      "tool_calls",
+      "tool_errors",
       "transcript_path",
       "turn_policy_source"
     ]
