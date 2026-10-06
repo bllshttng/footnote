@@ -421,8 +421,20 @@ async function react($: EngineInterface, why: Reason | 'idle' = 'turn', context?
   if (!line || buddy?.seed !== c.seed) return
   recent = [...recent, line].slice(-3)
   lastSaid = line
-  say(line, await $.clock.now())
+  const now = await $.clock.now()
+  say(line, now)
   $.ui.invalidate('ui.render')
+  await remember($, c, why, line, now)
+}
+
+// Every observation the buddy makes, one JSON row each, so you can read them back.
+async function remember($: EngineInterface, c: Companion, why: string, line: string, now: number): Promise<void> {
+  const path = `${buddyDir()}/observations.jsonl`
+  let old = ''
+  try {
+    old = await $.fs.read(path)
+  } catch {}
+  await $.fs.write(path, old + JSON.stringify({ at: new Date(now).toISOString(), name: c.name, why, line }) + '\n')
 }
 
 // One feed read serves every session on the machine: a read costs about 4 s of
@@ -475,6 +487,7 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
   if (line) {
     say(line, now)
     $.ui.invalidate('ui.render')
+    if (buddy) await remember($, buddy, 'news', line, now)
   }
 }
 
