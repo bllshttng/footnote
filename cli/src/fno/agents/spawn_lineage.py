@@ -98,9 +98,10 @@ def _parent_edge(
     captured = parent_edge or _capture_parent_edge()
     if captured[0] or lineage_row is None:
         return captured
-    inherited = tuple(
-        getattr(lineage_row, f"spawned_by_{k}", None)
-        for k in ("session", "harness", "cwd")
+    inherited = (
+        getattr(lineage_row, "spawned_by_session", None),
+        getattr(lineage_row, "spawned_by_harness", None),
+        getattr(lineage_row, "spawned_by_cwd", None),
     )
     if inherited[0]:
         return inherited
