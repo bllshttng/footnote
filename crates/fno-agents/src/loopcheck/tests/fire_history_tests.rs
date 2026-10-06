@@ -5,17 +5,41 @@ fn target_stream_emit_lands_beside_legacy_lock_dirs() {
     // The store commit owns serialization now; a legacy lock or
     // maintenance marker beside the journal neither blocks nor drops a
     // hook emission.
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("events.jsonl");
-    let global = dir.path().join("global-events.jsonl");
-    std::fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
-    std::fs::create_dir(dir.path().join("events.jsonl.gc.d")).unwrap();
+    for checked in [false, true] {
+        for shared in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let project = dir.path().join("events.jsonl");
+            let global = if shared {
+                project.clone()
+            } else {
+                dir.path().join("global-events.jsonl")
+            };
+            std::fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
+            std::fs::create_dir(dir.path().join("events.jsonl.gc.d")).unwrap();
 
-    emit_to_both(&project, &global, "mutex_probe", serde_json::json!({}));
+            if checked {
+                crate::loopcheck::fire_history::emit_to_both_checked(
+                    &project,
+                    &global,
+                    "mutex_probe",
+                    serde_json::json!({}),
+                )
+                .unwrap();
+            } else {
+                emit_to_both(&project, &global, "mutex_probe", serde_json::json!({}));
+            }
 
-    for path in [&project, &global] {
-        let text = crate::events::committed_journal_text(path);
-        assert!(text.contains("mutex_probe"), "missing in {path:?}");
+            for path in [&project, &global] {
+                let text = crate::events::committed_journal_text(path);
+                assert_eq!(
+                    text.lines()
+                        .filter(|line| line.contains("mutex_probe"))
+                        .count(),
+                    1,
+                    "checked={checked}, shared={shared}, journal={path:?}: {text}"
+                );
+            }
+        }
     }
 }
 

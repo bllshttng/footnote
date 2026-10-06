@@ -12,6 +12,8 @@ we monkeypatch to tmp_path so nothing touches the real ~/.fno.
 """
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -66,13 +68,60 @@ def test_parse_ddgs_empty_and_malformed() -> None:
     assert core._parse_ddgs('{"results": [{"href": "https://a.com"}]}') == ["https://a.com"]
 
 
-def test_search_missing_binary_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*a, **k):
-        raise FileNotFoundError()
+@pytest.mark.parametrize("mode", ["file", "stdout", "whitespace", "empty"])
+def test_search_reads_ddgs_output_without_leaving_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "ddgs-cwd.txt"
+    stub = bin_dir / "ddgs"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(Path.cwd()))\n"
+        f"mode = {mode!r}\n"
+        "payload = '[]' if mode == 'empty' else '[{\"href\": \"https://example.com/source\"}]'\n"
+        "if mode == 'stdout':\n"
+        "    print(payload)\n"
+        "else:\n"
+        "    Path('text_two_words_20261006_000000.json').write_text(payload)\n"
+        "    if mode == 'whitespace':\n"
+        "        print('   ')\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    expected = [] if mode == "empty" else ["https://example.com/source"]
+    assert core.search("two words") == expected
+    assert list(caller.iterdir()) == []
+    assert not Path(marker.read_text()).exists()
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "exit"])
+def test_search_errors_raise_unavailable_and_clean_up(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    scratch = None
+
+    def boom(argv, **kwargs):
+        nonlocal scratch
+        scratch = Path(kwargs["cwd"])
+        (scratch / "partial.json").write_text("[]")
+        if failure == "missing":
+            raise FileNotFoundError()
+        if failure == "timeout":
+            raise core.subprocess.TimeoutExpired(argv, 30)
+        return core.subprocess.CompletedProcess(argv, 1, "", "rate limited")
 
     monkeypatch.setattr(core.subprocess, "run", boom)
     with pytest.raises(core.DdgsUnavailable):
         core.search("two words")
+    assert scratch is not None and not scratch.exists()
 
 
 # --- fetch / source build --------------------------------------------------
