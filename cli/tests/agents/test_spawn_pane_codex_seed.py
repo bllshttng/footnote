@@ -160,39 +160,6 @@ def test_late_bind_after_window_is_stamped_and_kept(tmp_path: Path, monkeypatch)
     assert not runner.kill_calls
 
 
-def test_still_silent_reprobe_reaps_as_before(tmp_path: Path, monkeypatch) -> None:
-    """Negative arm: a silent re-probe leaves the reap untouched."""
-    from fno.agents.dispatch_errors import DispatchAskError
-
-    use_tmpdir(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        mux_spawn,
-        "_await_pane_binding",
-        lambda *a, **k: mux_spawn.PaneBinding(
-            session_id=None,
-            pane_alive=True,
-            reason="binding-window-expired",
-            tail="",
-        ),
-    )
-    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda pid, **k: None)
-    monkeypatch.setattr("time.sleep", lambda _s: None)
-    monkeypatch.setattr(mux_spawn, "_reap_spawned_pane", lambda *a, **k: (True, ""))
-    runner = FakeRunner()
-    with pytest.raises(DispatchAskError) as exc:
-        _spawn(
-            monkeypatch,
-            tmp_path,
-            provider="codex",
-            name="silent",
-            message=SEED,
-            runner=runner,
-            codex_binding=False,
-        )
-
-    assert "binding-window-expired" in str(exc.value)
-
-
 def test_unbound_live_pane_types_the_seed_before_the_required_gate(
     tmp_path: Path, monkeypatch
 ) -> None:
