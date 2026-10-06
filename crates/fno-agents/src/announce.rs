@@ -50,6 +50,10 @@ const MAX_EXPIRES: Duration = Duration::from_secs(7 * 24 * 3600);
 pub(crate) struct AnnouncePaths {
     bus_live: PathBuf,
     registry: PathBuf,
+    /// The chats store the mirror seam records into. Env constructors take
+    /// the config ladder (`chats_dir()`); the test fixture pins its own root,
+    /// so a fixture send can never mirror into the live store.
+    chats_dir: PathBuf,
     /// `~/.fno` (the Python `paths.state_dir()`); holds `announce-cursors/`.
     state_root: PathBuf,
 }
@@ -65,6 +69,7 @@ impl AnnouncePaths {
         Self {
             bus_live: dot_fno.join("bus").join("messages.jsonl"),
             registry: home.registry_json(),
+            chats_dir: crate::chats::chats_dir(),
             state_root: dot_fno,
         }
     }
@@ -81,6 +86,7 @@ impl AnnouncePaths {
         Some(Self {
             bus_live: dot_fno.join("bus").join("messages.jsonl"),
             registry: home.registry_json(),
+            chats_dir: crate::chats::chats_dir(),
             state_root: dot_fno,
         })
     }
@@ -265,17 +271,38 @@ fn rotate_bus_locked(live: &Path) {
 /// rotation and owner-only mode (the bus-append port, d-697ea9c4). A bare
 /// `fno` sender refuses before the write, so a refused send leaves no bus
 /// row.
-pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
+pub(crate) fn append_line(live: &Path, obj: &Value, chats_dir: &Path) -> Result<(), String> {
     if let Some(from) = obj.get("from").and_then(Value::as_str) {
         crate::system_sender::guard_sender(from)?;
     }
-    append_line_open(live, obj)
+    append_line_open(live, obj, chats_dir)
+}
+
+/// A test build must never touch the operator's mail store. Same rule as
+/// [`fence_test_bus`], on both files the append writes: the bus line and the
+/// chats mirror. A fixture that passes explicit paths but leaves the env
+/// unpinned used to leak the mirror into `~/.fno/chats` silently.
+fn fence_test_store(path: &Path) -> Result<(), String> {
+    if !cfg!(test) {
+        return Ok(());
+    }
+    if crate::paths::under_temp_dir(path) {
+        return Ok(());
+    }
+    Err(format!(
+        "append fenced under test: {} is not under the temp dir; pin FNO_AGENTS_HOME to a temp home in the test",
+        path.display()
+    ))
 }
 
 /// The append without the announce sender guard: the Python appender's
 /// parity surface, where the caller owns sender validation and a tested
-/// send from the bare fleet name lands as-is.
-pub(crate) fn append_line_open(live: &Path, obj: &Value) -> Result<(), String> {
+/// send from the bare fleet name lands as-is. `chats_dir` is the store the
+/// chat mirror records into - always pass the dir that belongs to the same
+/// root as `live`, so a fixture bus gets a fixture chats store.
+pub(crate) fn append_line_open(live: &Path, obj: &Value, chats_dir: &Path) -> Result<(), String> {
+    fence_test_store(live)?;
+    fence_test_store(chats_dir)?;
     let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("");
     let has_delivery = obj
         .get("delivery")
@@ -286,7 +313,7 @@ pub(crate) fn append_line_open(live: &Path, obj: &Value) -> Result<(), String> {
     // (`landed`, or an envelope carrying a delivery mark) record AFTER the
     // bus write and warn only - a receipt must never break an ack flow.
     if crate::chats::is_message_kind(kind) && !has_delivery {
-        crate::chats::record(&crate::chats::chats_dir(), obj)?;
+        crate::chats::record(chats_dir, obj)?;
     }
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
@@ -312,7 +339,7 @@ pub(crate) fn append_line_open(live: &Path, obj: &Value) -> Result<(), String> {
     f.write_all(line.as_bytes())
         .map_err(|e| format!("bus append: {e}"))?;
     if kind == "landed" || has_delivery {
-        if let Err(e) = crate::chats::record(&crate::chats::chats_dir(), obj) {
+        if let Err(e) = crate::chats::record(chats_dir, obj) {
             eprintln!("chats record (receipt) failed: {e}");
         }
     }
@@ -642,7 +669,7 @@ fn send_announcement(
     );
     obj.insert("body".into(), json!(body));
 
-    append_line(&paths.bus_live, &Value::Object(obj))
+    append_line(&paths.bus_live, &Value::Object(obj), &paths.chats_dir)
         .map_err(|e| (1, format!("announce send: {e}")))?;
     Ok(SendReceipt {
         id,
@@ -1107,7 +1134,7 @@ fn transcript_has_id(path: &Path, id: &str) -> Result<bool, String> {
     Ok(needle.is_match(&normalized))
 }
 
-fn record_landed_row(live: &Path, from: &str, session_key: &str, id: &str) {
+fn record_landed_row(live: &Path, chats_dir: &Path, from: &str, session_key: &str, id: &str) {
     let mut obj = Map::new();
     obj.insert("v".into(), json!(ENVELOPE_VERSION));
     obj.insert("id".into(), json!(new_msg_id()));
@@ -1119,7 +1146,7 @@ fn record_landed_row(live: &Path, from: &str, session_key: &str, id: &str) {
     obj.insert("word_count".into(), json!(0));
     obj.insert("meta".into(), json!({"landed": id, "session": session_key}));
     obj.insert("body".into(), json!(""));
-    if let Err(e) = append_line(live, &Value::Object(obj)) {
+    if let Err(e) = append_line(live, &Value::Object(obj), chats_dir) {
         eprintln!("announce status: landed row write failed: {e}");
     }
 }
@@ -1191,7 +1218,7 @@ fn announce_receipt(
             Some(path) => match transcript_has_id(&path, id) {
                 Ok(true) => {
                     landed += 1;
-                    record_landed_row(&paths.bus_live, from, key, id);
+                    record_landed_row(&paths.bus_live, &paths.chats_dir, from, key, id);
                     per_session.push(json!({"session": key, "state": "landed"}));
                 }
                 Ok(false) => {
@@ -1327,6 +1354,7 @@ mod tests {
             paths: AnnouncePaths {
                 bus_live: root.join("bus").join("messages.jsonl"),
                 registry: root.join("agents").join("registry.json"),
+                chats_dir: root.join("chats"),
                 state_root: root.clone(),
             },
             root,
@@ -1339,6 +1367,26 @@ mod tests {
             serde_json::to_string(&json!({ "schema_version": 1, "agents": rows })).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_test_build_is_fenced_from_the_live_mail_store() {
+        // The live-store fence: a test whose paths resolve outside the temp dir
+        // refuses loudly instead of leaking fixture rows into the
+        // operator's Messages tab. A repo-relative path is never under
+        // $TMPDIR, so it stands in for the real ~/.fno store without
+        // reading the operator's home.
+        let outside = std::env::current_dir()
+            .expect("cargo test runs with a cwd")
+            .join(".fno")
+            .join("bus")
+            .join("messages.jsonl");
+        let err =
+            fence_test_store(&outside).expect_err("the live store must refuse under a test build");
+        assert!(err.contains("fenced under test"), "{err}");
+        let fixture = fixture("fence-ok");
+        fence_test_store(&fixture.paths.chats_dir).expect("a temp fixture passes the fence");
+        std::fs::remove_dir_all(&fixture.root).ok();
     }
 
     #[test]
@@ -1979,7 +2027,12 @@ mod tests {
             .unwrap()
             .lines()
             .count();
-        assert!(append_line(&f.paths.bus_live, &json!({"id":"x","from":"fno"})).is_err());
+        assert!(append_line(
+            &f.paths.bus_live,
+            &json!({"id":"x","from":"fno"}),
+            &f.paths.chats_dir
+        )
+        .is_err());
         let bus_after = std::fs::read_to_string(&f.paths.bus_live)
             .unwrap()
             .lines()
