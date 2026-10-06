@@ -20,14 +20,26 @@ export function personalityPrompt(c: Bones & { name: string }, seed: string): st
     `Rarity: ${c.rarity}${c.shiny ? ' (shiny)' : ''}. Stats: ${STAT_NAMES.map(s => `${s} ${c.stats[s]}`).join(', ')}.`,
     `Inspiration words: ${vibes.join(', ')}.`,
     'Make it distinct and specific: quirks, what it loves, what annoys it. Let the stats show.',
-    'Reply with 2-3 sentences, under 300 characters, nothing else.',
+    'Reply with 2-3 short sentences, under 240 characters, nothing else.',
   ].join('\n')
 }
 
 export function cleanPersonality(raw: string): string | null {
   const text = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ')
   if (text.length < 20) return null
-  return text.length > 300 ? text.slice(0, 297) + '...' : text
+  return fit(text, 300)
+}
+
+// Cut a model's text to whole sentences, so a line never ends mid-word. A text with no sentence
+// end in reach keeps its whole words.
+export function fit(text: string, max: number): string {
+  // A reply the token cap stopped mid-sentence ends without punctuation: drop the broken tail.
+  const whole = text.length <= max && /[.!?*)"'…~]$/.test(text)
+  if (whole) return text
+  const head = text.slice(0, max)
+  const end = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '), head.lastIndexOf('* '))
+  if (end > 0) return head.slice(0, end + 1)
+  return text.length <= max ? text : head.slice(0, head.lastIndexOf(' ')) + '…'
 }
 
 export function systemPrompt(c: Companion): string {
@@ -164,7 +176,7 @@ export function reactionPrompt(context: string, reason: Reason = 'turn', recent:
 
 export function cleanReaction(raw: string): string {
   const line = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim()
-  return line.length > 150 ? line.slice(0, 147) + '...' : line
+  return fit(line, 150)
 }
 
 // Idle talk is written live, like a reaction: the buddy's own voice on whatever the session is doing.

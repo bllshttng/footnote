@@ -143,7 +143,7 @@ async function givePersonality($: EngineInterface): Promise<void> {
   const c = buddy
   if (!c) return
   try {
-    const reply = await $.model.complete({ model: 'haiku', prompt: personalityPrompt(c, c.seed), maxTokens: 120, timeoutMs: 20_000 })
+    const reply = await $.model.complete({ model: 'haiku', prompt: personalityPrompt(c, c.seed), maxTokens: 200, timeoutMs: 20_000 })
     const personality = reply.isAnswered ? cleanPersonality(reply.text) : null
     if (!personality || buddy?.seed !== c.seed) return
     const soul: Soul = { seed: c.seed, name: c.name, personality, hatchedAt: c.hatchedAt, ...(c.species ? { species: c.species } : {}) }
@@ -414,7 +414,7 @@ async function react($: EngineInterface, why: Reason | 'idle' = 'turn', context?
     model: 'haiku',
     system: systemPrompt(c),
     prompt: why === 'idle' ? idlePrompt(summary) : reactionPrompt(summary, why, recent),
-    maxTokens: 100,
+    maxTokens: 160,
     timeoutMs: 20_000,
   })
   const line = reply.isAnswered ? cleanReaction(reply.text) : ''
@@ -467,7 +467,7 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
   const earned = after.bank > before ? `+1 reroll (${after.bank}/${REROLL_BANK})` : ''
   if (line && buddy) {
     const c = buddy
-    const reply = await $.model.complete({ model: 'haiku', system: systemPrompt(c), prompt: newsPrompt(line), maxTokens: 80, timeoutMs: 20_000 }).catch(() => null)
+    const reply = await $.model.complete({ model: 'haiku', system: systemPrompt(c), prompt: newsPrompt(line), maxTokens: 160, timeoutMs: 20_000 }).catch(() => null)
     // Unvoiced, the fact still gets through: a question waiting on the user must not vanish.
     line = (reply?.isAnswered && cleanReaction(reply.text)) || line
   }

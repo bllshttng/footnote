@@ -40,18 +40,23 @@ def cut(s, n):
     return out
 
 
-def bubble(text, room):
+def bubble(text, room, widest=BUBBLE_W):
     """A thought bubble over `room` rows, bottom-aligned, its trail of dots pointing at the buddy.
 
     Three rows or more get the outline; fewer get the bare words.
     """
     framed = room >= 3
     rows = room - 2 if framed else room
-    lines = wrap(text, BUBBLE_W)
-    if not lines or rows < 1:
+    if rows < 1 or not text.strip():
         return [""] * room
+    # Start at the original's 30 columns and widen until the words fit the rows beside the buddy.
+    w = BUBBLE_W
+    lines = wrap(text, w)
+    while len(lines) > rows and w < widest:
+        w = min(widest, w + 4)
+        lines = wrap(text, w)
     if len(lines) > rows:
-        lines = lines[: rows - 1] + [cut(" ".join(lines[rows - 1 :]), BUBBLE_W)]
+        lines = lines[: rows - 1] + [cut(" ".join(lines[rows - 1 :]), w)]
     bw = max(width(line) for line in lines)
     body = [line + " " * (bw - width(line)) for line in lines]
     if framed:
@@ -141,7 +146,9 @@ def layout(left, frame, cols):
     # Speech wraps beside the body like the original bubble, bottom-aligned; the fleet line sits beside the name row.
     labels = [""] * len(art)
     labels[-1] = fleet
-    for i, line in enumerate(bubble(frame.get("speech") or "", len(art) - 1)):
+    # The bubble may widen into the room the user's rows leave free beside the buddy.
+    widest = max(BUBBLE_W, min(BUBBLE_W * 2, cols - max([width(l) for l in left] + [0]) - aw - 12))
+    for i, line in enumerate(bubble(frame.get("speech") or "", len(art) - 1, widest)):
         labels[i] = line
 
     for rows in range(max(len(left), len(art), MIN_ROWS), MAX_ROWS + 1):
