@@ -5775,7 +5775,8 @@ impl View {
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
         // event handler already sounded); painted by row_stamp.
         paint_notice_overlay(cells, cols, self.notice_overlay(cols));
-        // The bell keeps the bar's rightmost seat; painted after the notice.
+        // The bell keeps the bar's rightmost seat (one column in from the
+        // edge); painted after the notice.
         bell::paint_button(self, cells, cols);
     }
 
