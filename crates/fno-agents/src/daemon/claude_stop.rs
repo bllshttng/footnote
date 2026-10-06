@@ -263,6 +263,20 @@ pub(super) async fn stop_claude(
     name: &str,
     entry: &RegistryEntry,
 ) -> Response {
+    // Never stop a session the user is talking to. A typed turn inside the
+    // attended window refuses with the why, whatever the caller believes
+    // about the row's work state.
+    if let Some(why) = crate::attended::stop_refusal(&ctx.home, entry) {
+        let _ = ctx.emitter.emit(
+            "agent_stop_refused",
+            &json!({"name": name, "attended": why}),
+        );
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidStatus,
+            format!("agent {name} is attended ({why}); stop refused - a session the user typed into is not stopped"),
+        );
+    }
     let short = match entry
         .transport_short()
         .or(entry.session_id.as_deref())

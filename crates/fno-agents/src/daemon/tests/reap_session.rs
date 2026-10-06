@@ -810,3 +810,105 @@ fn x2774_additional_pr_openness_decides_the_settle() {
     let stale = gc_sweep::stale_open_do_rows(&entries);
     assert!(stale.is_empty(), "{stale:?}");
 }
+
+// ── x-586d: a done ledger never overrides an attended session ───────────
+
+/// A transcript whose rows carry a typed user turn `typed_age_s` old plus an
+/// older keepalive ping. The mtime is NOT the instrument here: the sweep's
+/// age seam is injected, and the test stages the incident's divergence - the
+/// age answer reads quiet while the file itself holds the fresh typed turn.
+fn typed_turn_transcript(
+    dir: &std::path::Path,
+    name: &str,
+    typed_age_s: i64,
+) -> std::path::PathBuf {
+    use std::io::Write;
+    let now = crate::daemon::now_epoch_secs();
+    let ts = |age: i64| {
+        chrono::DateTime::from_timestamp(now - age, 0)
+            .unwrap()
+            .to_rfc3339()
+    };
+    let path = dir.join(name);
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        "{}",
+        json!({"type":"user","timestamp":ts(typed_age_s + 600),"message":{"role":"user","content":"[cache-keepalive] Ping 1/4"}})
+    )
+    .unwrap();
+    writeln!(
+        f,
+        "{}",
+        json!({"type":"user","timestamp":ts(typed_age_s),"message":{"role":"user","content":"checking your notes on x-bc73 now"}})
+    )
+    .unwrap();
+    path
+}
+
+/// The node reads done and merged, the age seam answers 2 hours quiet, and
+/// the transcript carries a typed turn 2 minutes old: the sweep must hold
+/// the row under kept_attended, never reap it.
+#[test]
+fn x586d_done_node_session_with_a_typed_turn_two_minutes_old_survives_the_sweep() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let attended = typed_turn_transcript(transcripts.path(), "s-attended.jsonl", 120);
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "N1",
+            "status": "done",
+            "merge_status": "merged",
+            "sessions": [
+                {"phase": "execute", "harness": "claude", "session_id": "s-attended", "started_at": "2026-09-01T01:00:00Z"}
+            ]
+        }]),
+    );
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries
+            .push(x2774_spawn("row-attended", "t-attended", "s-attended"));
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-attended") => Some(vec![attended.clone()]),
+        _ => None,
+    };
+    let roster = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-attended", Some("done")),
+    ]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900, // grace: 7200s is far past it, so only the attended gate holds
+        false,
+        7,
+        &gc_sweep::read_graph_entries,
+        &picks,
+        &uniform_ages(2 * 3600),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &move || roster.clone(),
+        &|_| (None, None),
+        &|_| None,
+    );
+    assert!(
+        summary.retired.is_empty(),
+        "an attended session is never reaped: {summary:?}"
+    );
+    assert!(
+        summary.kept_active.is_empty(),
+        "the age seam read quiet, so the hold must come from the typed turn: {summary:?}"
+    );
+    assert_eq!(
+        summary.kept_attended,
+        vec![(
+            "t-attended".to_string(),
+            "typed user turn 120s ago".to_string()
+        )],
+        "the attended hold names the typed turn: {summary:?}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
