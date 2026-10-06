@@ -186,9 +186,9 @@ fn supervisor_birth_command(config_dir: Option<&Path>) -> std::process::Command 
 }
 
 /// The OTEL_* env a supervisor birth carries when fno's localhost receiver is
-/// up (`<agents home>/otel/port` parses) and the ambient env has no telemetry
-/// of its own. Empty means "leave this supervisor's telemetry alone": an
-/// operator endpoint wins, and an already-running supervisor keeps its env
+/// endpoint is known, even before its listener starts, and the ambient env
+/// has no telemetry of its own. An empty result leaves telemetry alone:
+/// an operator endpoint wins, and a running supervisor keeps its env
 /// until restart.
 pub(crate) fn otel_env(
     port_file: &Path,
@@ -206,11 +206,12 @@ pub(crate) fn otel_env(
     {
         return Vec::new();
     }
-    let Some(port) = std::fs::read_to_string(port_file)
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-    else {
-        return Vec::new();
+    let port = match crate::otel_ingest::receiver_port(port_file) {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!("fno OTEL supervisor: {error}");
+            return Vec::new();
+        }
     };
     vec![
         ("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "1".into()),
@@ -549,16 +550,18 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_birth_command_changes_nothing_that_is_not_poison() {
-        // AC2-EDGE, pure half: whatever the ambient env holds, the only
-        // explicit entries the birth command carries are poison removals -
-        // nothing else is set, stripped or rewritten. With a poison-free
-        // ambient env that is the empty set, and the notice (driven by the
-        // same held list in guard_birth) prints nothing.
+    fn birth_command_changes_only_poison_and_telemetry() {
+        // The machine endpoint is the only non-poison overlay.
         let cmd = supervisor_birth_command(None);
         for (n, v) in env_of(&cmd) {
             assert!(
-                v.is_none() && is_poison(&n),
+                (v.is_none() && is_poison(&n))
+                    || otel_env(
+                        &crate::paths::AgentsHome::from_env().otel_dir().join("port"),
+                        |key| std::env::var(key).ok()
+                    )
+                    .iter()
+                    .any(|(key, value)| key == &n && v.as_ref() == Some(value)),
                 "non-poison key {n} was changed: {v:?}"
             );
         }
