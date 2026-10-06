@@ -766,7 +766,9 @@ def ledger_cmd(
         path = write_ledger(build_ledger_data(), out)
     except RuntimeError as exc:
         _refuse(f"king: {exc}")
-    typer.echo(f"reign ledger: {path}")
+    # The daemon's team_ledger arm greps this exact prefix
+    # (crates/fno-agents/src/rundown.rs run_ledger); keep the two in step.
+    typer.echo(f"lead ledger: {path}")
 
 
 @king_app.command("board")
