@@ -4768,6 +4768,8 @@ mod tests {
         let spaces = std::env::temp_dir().join(format!("xc129-spaces-{}", std::process::id()));
         std::fs::create_dir_all(&spaces).unwrap();
         let _env_lock = crate::pr_status::cache_env_lock();
+        // The bound-node lookup transitively resolves the global claims root.
+        crate::paths::pin_test_claims_root(&spaces);
         let _env = {
             let prior = std::env::var_os("FNO_SPACES_DIR");
             std::env::set_var("FNO_SPACES_DIR", &spaces);
@@ -4847,6 +4849,8 @@ mod tests {
         let spaces = std::env::temp_dir().join(format!("xc39f-spaces-{}", std::process::id()));
         std::fs::create_dir_all(&spaces).unwrap();
         let _env_lock = crate::pr_status::cache_env_lock();
+        // The bound-node lookup transitively resolves the global claims root.
+        crate::paths::pin_test_claims_root(&spaces);
         let _env = {
             let prior = std::env::var_os("FNO_SPACES_DIR");
             std::env::set_var("FNO_SPACES_DIR", &spaces);
