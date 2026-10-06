@@ -3889,7 +3889,7 @@ class TestDurableGrantExecution:
             if reason is not None:
                 from fno.pr import _merge as merge_mod
 
-                merge_mod.LAST_RECEIPT["reason"] = reason
+                merge_mod.LAST_RECEIPT.update(reason=reason, observed_head="headsha")
             return rc
 
         monkeypatch.setattr("fno.pr._merge.run_merge", _merge)
@@ -3962,37 +3962,32 @@ class TestDurableGrantExecution:
         assert entry["retries"] == 0
         assert not entry.get("parked")
 
-    @pytest.mark.parametrize(("reason", "park", "read_error"), [
+    @pytest.mark.parametrize(("reason", "park", "missing_head"), [
         ("checks are red; the healer or the worker owns the next push", "checks-red", ""),
         ("held: worktree_head_mismatch: /w is at a but the PR would merge b; retry after the worker syncs",
          "worktree_head_mismatch", ""),
         ("held: worktree_dirty: /w carries uncommitted changes; retry after the worker commits",
          "worktree_dirty", ""),
-        ("held: worktree_dirty: /w carries uncommitted changes", "worktree_dirty", "tool-missing"),
-        ("held: worktree_dirty: /w carries uncommitted changes", "worktree_dirty", "deadline"),
+        ("held: worktree_dirty: /w carries uncommitted changes", "worktree_dirty", True),
     ])
     def test_head_bound_hold_parks_until_the_pr_head_moves(
-        self, tmp_path, monkeypatch, reason, park, read_error
+        self, tmp_path, monkeypatch, reason, park, missing_head
     ):
         """Head-bound holds park once with the REST head and await a push."""
-        from fno.pr_watch.cli import TickDeadlineExceeded
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
         merge_calls = self._fake_merge(monkeypatch, 2, reason=reason)
-        if read_error:
-            def _read_head(_pr, _repo):
-                if read_error == "tool-missing":
-                    raise OSError("gh unavailable")
-                raise TickDeadlineExceeded()
+        if missing_head:
+            from fno.pr import _merge
+            original = _merge.run_merge
+            def no_head(*args, **kwargs):
+                rc = original(*args, **kwargs)
+                _merge.LAST_RECEIPT.pop("observed_head", None)
+                return rc
+            monkeypatch.setattr(_merge, "run_merge", no_head)
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-            monkeypatch.setattr("fno.pr._merge._pr_head_oid", _read_head)
-        if read_error == "deadline":
-            with pytest.raises(TickDeadlineExceeded):
-                self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
-        else:
-            counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
-
-            assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
         parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
         assert [e["data"]["reason"] for e in parked] == [park]
         assert len(deps["notifications"]) == 1
@@ -4000,7 +3995,7 @@ class TestDurableGrantExecution:
 
         entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
         assert entry["parked"] == park
-        assert entry["parked_head"] == (None if read_error else "headsha")
+        assert entry["parked_head"] == (None if missing_head else "headsha")
         assert entry["retries"] == 0
 
         next_deps = _make_tick_deps(tmp_path, candidates=[])
@@ -4022,6 +4017,10 @@ class TestDurableGrantExecution:
             monkeypatch, 2,
             reason="held: checks are red; the healer or the worker owns the next push",
         )
+        def push_during_notification(*args, **kwargs):
+            from fno.pr import _merge
+            monkeypatch.setattr(_merge, "_pr_head_oid", lambda *a: "pushed-head")
+        deps["notify"] = push_during_notification
         counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
         assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
@@ -4031,6 +4030,7 @@ class TestDurableGrantExecution:
 
         entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
         assert entry["parked"] == "checks-red"
+        assert entry["parked_head"] == "headsha"
 
     def test_already_terminal_on_outcome_prefixed_reason(self, tmp_path, monkeypatch):
         """Same prefix defeats the ALREADY_TERMINAL exemption: 'held: PR

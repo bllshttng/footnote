@@ -1396,18 +1396,13 @@ def run_execute_queue(
                 _grant("held", pr, cand, grant_fields, reason=reason)
                 if bare.startswith(("checks are red", WORKTREE_HEAD_MISMATCH, WORKTREE_DIRTY)):
                     entry["parked"] = park = "checks-red" if bare.startswith("checks are red") else bare.split(":", 1)[0]
-                    entry["parked_head"] = None
+                    entry["parked_head"] = _merge.LAST_RECEIPT.get("observed_head")
                     store.set(key, entry)
                     emit("pr_watch_parked", {"pr": pr, "reason": park})
                     _notify_parked_pr(
                         notify, pr, cand.repo_slug, prior_retries,
                         "durable-grant merge",
                     )
-                    try:
-                        entry["parked_head"] = _merge._pr_head_oid(pr, str(cand.repo_dir))
-                    except Exception as exc:  # noqa: BLE001 - a failed read still parks
-                        log.warning("pr-watch: PR #%d head read failed while parking: %s", pr, exc)
-                    store.set(key, entry)
             else:
                 counts["failed"] += 1
                 _grant("failed", pr, cand, grant_fields, exit_code=rc, reason=reason)
