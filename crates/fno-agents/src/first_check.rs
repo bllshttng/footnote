@@ -146,6 +146,55 @@ pub(crate) fn record_birth(
     Ok(())
 }
 
+pub(crate) fn record_envelope(
+    journal: &Path,
+    event_id: &str,
+    envelope: &str,
+) -> Result<(), String> {
+    let value: Value = serde_json::from_str(envelope).map_err(|e| e.to_string())?;
+    let stamp = value
+        .get("ts")
+        .and_then(Value::as_str)
+        .ok_or("birth has no timestamp")?;
+    let born_at = chrono::DateTime::parse_from_rfc3339(stamp)
+        .map_err(|e| e.to_string())?
+        .timestamp_millis();
+    record_birth(journal, event_id, &value["data"], born_at)
+}
+
+pub fn run_record(args: &[String]) -> i32 {
+    let result = (|| -> Result<(), String> {
+        if !args.is_empty() {
+            return Err("first-check takes its request on stdin".into());
+        }
+        let request: Value =
+            serde_json::from_reader(std::io::stdin()).map_err(|e| e.to_string())?;
+        let journal = request
+            .get("journal")
+            .and_then(Value::as_str)
+            .ok_or("missing journal")?;
+        let event_id = request
+            .get("event_id")
+            .and_then(Value::as_str)
+            .ok_or("missing event_id")?;
+        let envelope = request
+            .get("envelope")
+            .and_then(Value::as_str)
+            .ok_or("missing envelope")?;
+        record_envelope(Path::new(journal), event_id, envelope)
+    })();
+    match result {
+        Ok(()) => {
+            println!("{{\"status\":\"processed\"}}");
+            0
+        }
+        Err(error) => {
+            eprintln!("first-check: {error}");
+            1
+        }
+    }
+}
+
 fn transfer_birth_claim(row: &RegistryEntry, born_at: i64) -> Result<(), String> {
     let (Some(node), Some(parent)) = (&row.node, &row.spawned_by_session) else {
         return Ok(());
