@@ -1,7 +1,7 @@
 //! The terminal-stop sweep: every tick, spend the terminal-stop markers the
 //! client left for bg sessions that reached end-of-turn. Extracted verbatim
 //! from daemon.rs (shrink-only) beside its claude_stop arms; the wake-name
-//! tombstone stamp rides the confirmed-stop write (x-d6c5).
+//! tombstone stamp rides the confirmed-stop write.
 
 use super::claude_stop;
 use super::claude_stop::end_survivors;

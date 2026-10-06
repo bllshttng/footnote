@@ -851,7 +851,7 @@ pub fn resolve_reentry(
 /// this uuid, whatever the row's status or harness - a reaped, orphaned or
 /// non-claude row revives under the name the board and mail already know.
 /// A stopped row whose retirement dropped it answers from the wake-name
-/// tombstone (x-d6c5). The `wake-<handle>` alias is only for a uuid that
+/// tombstone. The `wake-<handle>` alias is only for a uuid that
 /// never named a row. The name is the worker-to-node join, so the rule must
 /// not gate it on status.
 pub fn wake_spawn_name(registry: &Registry, registry_path: &Path, session_id: &str) -> String {
@@ -1920,7 +1920,7 @@ mod tests {
         );
     }
 
-    /// x-d6c5: the row is gone (stopped, then the retirement sweep dropped
+    /// The row is gone (stopped, then the retirement sweep dropped
     /// it), but the stop stamped the wake-name tombstone, so the wake still
     /// revives under the name the board and mail already know.
     #[test]
