@@ -575,14 +575,17 @@ fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
 }
 
 /// The visual-approval gate: a PR whose changed files touch a configured
-/// paint path holds until an ANSWERED question page names the PR. The user's
-/// look is the only clear, mechanizing the prose rulings this gate replaces
-/// (rebrand and splash PRs merged with no user look). `merge.visual_paint_paths`
-/// lists the lines the gate watches; empty (the default everywhere) disarms it.
+/// paint path holds until an ANSWERED question page names the PR, or a
+/// crown-recorded decision row transcribes the user's chat approval of this
+/// exact head. The user's look is the only clear, mechanizing the prose
+/// rulings this gate replaces (rebrand and splash PRs merged with no user
+/// look). `merge.visual_paint_paths` lists the lines the gate watches; empty
+/// (the default everywhere) disarms it.
 pub(crate) fn visual_approval_blocker<P: Probes>(
     probes: &P,
     cwd: &Path,
     pr: u64,
+    head: &str,
 ) -> Option<Blocker> {
     let paint_paths = crate::agents_config::visual_paint_paths(cwd);
     if paint_paths.is_empty() {
@@ -607,15 +610,19 @@ pub(crate) fn visual_approval_blocker<P: Probes>(
     if touched.is_empty() {
         return None;
     }
-    if answered_question_names_pr(cwd, pr) {
+    if answered_question_names_pr(cwd, pr) || crown_chat_clears_pr(probes, cwd, pr, head) {
         return None;
     }
     Some(Blocker::held(
         "visual_approval",
         format!(
-            "PR {pr} touches the paint surface the config lists ({}) and no answered \
-             question page names it; the user's look is the only clear. Ask via \
-             `fno inbox outstanding ask`, then the user answers the page.",
+            "PR {pr} touches the paint surface the config lists ({}); the user's look is \
+             the only clear: an answered question page naming the PR, or a crown-recorded \
+             decision whose rationale attests the chat and whose text names the PR and \
+             its head sha (`fno backlog decide <node> 'Approved: PR {pr} at {head}' \
+             --authority crown --rationale 'user in chat: <the user's words>'`). Ask via \
+             `fno inbox outstanding ask`, then the user answers the page or the lead \
+             records the chat approval.",
             touched.join(", ")
         ),
     ))
@@ -699,6 +706,73 @@ fn page_names_pr(text: &str, pr: u64) -> bool {
         }
     }
     false
+}
+
+/// The row text the PR/head match reads: decision plus rationale, the two
+/// free-text fields a recording carries.
+fn row_text(row: &Value) -> String {
+    format!(
+        "{}\n{}",
+        row.get("decision").and_then(Value::as_str).unwrap_or(""),
+        row.get("rationale").and_then(Value::as_str).unwrap_or("")
+    )
+}
+
+/// The rationale attests the approval came from the user's own chat words.
+/// `superuser in chat` contains `user in chat`, so one casefold covers both
+/// spellings the leads already record.
+fn row_is_chat_attested(row: &Value) -> bool {
+    row.get("rationale")
+        .and_then(Value::as_str)
+        .is_some_and(|r| r.to_lowercase().contains("user in chat"))
+}
+
+/// True when a live crown decision row transcribes the user's chat approval
+/// of this PR at this head: authority `crown` (the decide door scopes who may
+/// mint one), a chat-attested rationale, and text naming both the PR and the
+/// exact head sha the user looked at. Head-scoped like the operator head
+/// grant: a push invalidates the approval. An unreadable index never clears.
+fn crown_chat_clears_pr<P: Probes>(probes: &P, cwd: &Path, pr: u64, head: &str) -> bool {
+    if head.is_empty() {
+        return false;
+    }
+    let args: Vec<String> = [
+        "backlog",
+        "decisions",
+        "--lane",
+        "unattributed",
+        "--state",
+        "all",
+        "--limit",
+        "200",
+        "--json",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let Some((Some(0), out, _)) = probes.fno_shell(cwd, &args).ok() else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&out) else {
+        return false;
+    };
+    payload
+        .get("decisions")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("authority_source").and_then(Value::as_str) == Some("crown")
+                    && matches!(
+                        row.get("lifecycle").and_then(Value::as_str),
+                        Some("live") | Some("unscoped")
+                    )
+                    && row_is_chat_attested(row)
+                    && {
+                        let text = row_text(row);
+                        text.contains(head) && page_names_pr(&text, pr)
+                    }
+            })
+        })
 }
 
 /// The `owner/name` pair a remote url names, normalized across the ssh

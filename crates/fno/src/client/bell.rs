@@ -80,7 +80,10 @@ impl Panel {
 
 pub(crate) type Tx = tokio::sync::mpsc::UnboundedSender<(u64, Result<Value, String>)>;
 
-pub(crate) fn open(view: &mut View) {
+/// Open the panel and hand back the generation a later
+/// [`apply`] must carry: the snapshot seam pairs this with one synchronous
+/// gather where the live loop would kick one.
+pub(crate) fn open(view: &mut View) -> u64 {
     let generation = view.bell.generation.wrapping_add(1);
     view.bell.open = true;
     view.bell.generation = generation;
@@ -92,6 +95,7 @@ pub(crate) fn open(view: &mut View) {
     }
     view.feed = None;
     view.region_owner = super::region_focus::RegionOwner::Pane;
+    generation
 }
 
 pub(crate) fn close(view: &mut View) {
