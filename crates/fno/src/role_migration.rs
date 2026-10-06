@@ -401,6 +401,16 @@ pub fn run() -> Result<(), String> {
 
 pub fn upgrade_event_store(conn: &mut rusqlite::Connection) -> Result<(), String> {
     use sha2::Digest;
+    let ready: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM events_meta WHERE key = 'role_vocabulary_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if ready {
+        return Ok(());
+    }
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;

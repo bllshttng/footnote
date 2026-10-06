@@ -15,10 +15,6 @@ use fno_agents::paths::AgentsHome;
 use std::time::Duration;
 
 fn main() {
-    if let Err(error) = fno_agents::role_migration::run() {
-        eprintln!("role migration: {error}");
-        std::process::exit(2);
-    }
     // `version [--json]`: report the baked-in build rev so `fno doctor update` can
     // verify this bin is the SAME build as its triad siblings, not just present.
     // Execs cheaply and returns without touching a running daemon or the runtime.
@@ -151,6 +147,10 @@ fn main() {
     // it BEFORE the chdir below, or the daemon would bind its socket under
     // the anchor while the client still waits under the launch dir.
     home = AgentsHome::at(absolutize_home(launch_dir.as_deref(), home.root()));
+    if let Err(error) = fno_agents::role_migration::run() {
+        eprintln!("role migration: {error}");
+        std::process::exit(2);
+    }
     let _ = home.ensure_root();
     let anchor = daemon_anchor(launch_dir.as_deref(), home.root());
     match std::env::set_current_dir(&anchor) {

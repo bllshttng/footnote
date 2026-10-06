@@ -94,21 +94,7 @@ pub fn is_gate_event(kind: &str) -> bool {
 /// append-only history), so queries expand a kind to its old spelling and
 /// readers canonicalize the row type through [`event_type_alias`]. This
 /// table never shrinks.
-pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[
-    ("agent_role_vacated", "agent_team_vacated"),
-    ("team_succession_reverted", "team_succession_reverted"),
-    ("lead_action", "lead_action"),
-    ("lead_context_nudge", "lead_context_nudge"),
-    ("lead_drain_reserve", "lead_drain_reserve"),
-    ("lead_goal_resumed", "lead_goal_resumed"),
-    ("lead_loop_check", "lead_loop_check"),
-    ("lead_orphan_block", "lead_orphan_block"),
-    ("lead_term", "lead_term"),
-    ("lead_wake", "lead_wake"),
-    ("lead_armed", "lead_armed"),
-    ("lead_checkin", "lead_checkin"),
-    ("lead_dispatch_exception", "lead_dispatch_exception"),
-];
+pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[("agent_role_vacated", "agent_team_vacated")];
 
 /// The canonical (new) spelling of an event kind: an old stored spelling
 /// maps to its replacement, anything else is itself.
