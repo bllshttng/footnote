@@ -2315,10 +2315,20 @@ mod tests {
             None => std::env::remove_var("FNO_AGENTS_HOME"),
         }
         assert_eq!(code, 0);
+        // One daemon serves every arm: arm B's wake is the LAST turn/start
+        // for sess-1 with the wake text (arm A ran first, arm C sends "go").
         let turn = daemon
             .received()
             .iter()
-            .find(|frame| frame.get("method").and_then(Value::as_str) == Some("turn/start"))
+            .filter(|frame| frame.get("method").and_then(Value::as_str) == Some("turn/start"))
+            .filter(|frame| {
+                frame.pointer("/params/threadId").and_then(Value::as_str) == Some("sess-1")
+                    && frame
+                        .pointer("/params/input/0/text")
+                        .and_then(Value::as_str)
+                        == Some("continue")
+            })
+            .last()
             .and_then(|frame| frame.get("params").cloned())
             .expect("the wake turn ran");
         assert_eq!(turn["threadId"], "sess-1");
