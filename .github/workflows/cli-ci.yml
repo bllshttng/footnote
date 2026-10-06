@@ -147,11 +147,13 @@ jobs:
           # One runner leg died 7 of 8 attempts at a FIXED point ~1/3 into a
           # 313-file packet (2026-10-05, all tests green to each kill; the
           # same head's full lane passed the identical suite 13-ways sharded),
-          # so volume on one runner is what kills it, not content. Split the
-          # packet so a leg prices roughly est/15 (five legs at est 72; a
-          # packet at est 15 or under keeps today's single-leg shape). 13
-          # legs is the full lane's ceiling.
-          shards=$(( (est + 14) / 15 ))
+          # so volume on one runner is what kills it, not content. The 5-way
+          # split left the heaviest slice dying 7 more times while its
+          # siblings stayed green, so the packet spreads thinner still: a leg
+          # prices roughly est/10 (eight legs at est 72; a packet at est 10
+          # or under keeps today's single-leg shape). 13 legs is the full
+          # lane's ceiling.
+          shards=$(( (est + 9) / 10 ))
           [ "$shards" -gt 13 ] && shards=13
           [ "$shards" -lt 1 ] && shards=1
           shard_array="$(python3 -c "print('[' + ','.join(str(i) for i in range(1, $shards + 1)) + ']')")"
