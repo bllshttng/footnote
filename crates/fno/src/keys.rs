@@ -1298,7 +1298,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "the yard (fleet as a menagerie)",
         ),
         b(
-            b'M',
+            b'W',
             "sideline-menu",
             OpenSidelineMenu,
             Global,
