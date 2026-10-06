@@ -589,6 +589,20 @@ def test_open_binding_bound_when_the_node_points_back():
     assert verdicts[0].node_id == "x-1a2b"
 
 
+def test_open_binding_skips_a_cross_repo_row():
+    # A fork PR naming a real node yields no binding at all: outside
+    # code never enters fleet automation, so reconcile never hands it
+    # a node.
+    entries = [_node(id="x-1a2b", pr_number=5, pr_url="https://github.com/o/r/pull/5")]
+    row = _open_row(6, "feature/x-1a2b")
+    row["isCrossRepository"] = True
+    assert _classify([row], entries) == []
+    # Only a positive true skips: an older producer row classifies as
+    # today.
+    row = _open_row(6, "feature/x-1a2b")
+    assert _classify([row], entries)[0].verdict == "ambiguous"
+
+
 def test_open_binding_bound_via_additional_prs_ref():
     # The negative control for the task-3.1 reporters: a PR already present in
     # the node's additional refs is bound, never reported missing.
