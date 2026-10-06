@@ -92,8 +92,8 @@ pub(crate) fn plan_wakes<'a>(
             .collect();
         // One rung up: a live lead session one level above; when none
         // exists the rung above is the unteamed human, so the operator
-        // lane carries it.
-        let operator = up.is_empty() && level <= 1;
+        // lane carries it at every level.
+        let operator = up.is_empty();
         out.push(WakePlan {
             lead: team,
             idle_secs,
