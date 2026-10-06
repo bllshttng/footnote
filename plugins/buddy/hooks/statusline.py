@@ -16,7 +16,7 @@ HOME = os.path.dirname(os.path.abspath(__file__))
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
 MIN_ROWS, MAX_ROWS = 3, 6
 # Under this many columns the original buddy showed a one-line face.
-NARROW = 100
+NARROW = 60
 # The original speech bubble held about 30 columns of text.
 BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
@@ -141,7 +141,7 @@ def layout(left, frame, cols):
         art.pop(0)
     name = frame.get("name", "")
     fleet = frame.get("fleet") or ""
-    # Like the original: the full sprite with its name row below, at 100 columns or more.
+    # Like the original: the full sprite with its name row below, at 60 columns or more.
     aw = max([width(a) for a in art] + [len(name)])
     art.append(name.center(aw).rstrip())
     # Speech wraps beside the body like the original bubble, bottom-aligned; the fleet line sits beside the name row.
@@ -153,10 +153,15 @@ def layout(left, frame, cols):
     for i, line in enumerate(bubble(frame.get("speech") or "", len(art) - 1, widest)):
         labels[i] = line
 
-    for rows in range(max(len(left), len(art), MIN_ROWS), MAX_ROWS + 1):
+    least = max(len(left), len(art), MIN_ROWS)
+    if least > MAX_ROWS:
+        return face_row(left, frame, cols)
+    # Prefer a row count where the user's rows fit whole; else keep the full buddy and cut the rows beside it.
+    tries = [*range(least, MAX_ROWS + 1), least]
+    for n, rows in enumerate(tries):
         lefts = left + [""] * (rows - len(left))
         top = rows - len(art)
-        if all(width(lefts[top + i]) + aw + 2 <= cols for i in range(len(art))):
+        if n == len(tries) - 1 or all(width(lefts[top + i]) + aw + 2 <= cols for i in range(len(art))):
             out = lefts[:top]
             for i, a in enumerate(art):
                 l = lefts[top + i] or LEAD
