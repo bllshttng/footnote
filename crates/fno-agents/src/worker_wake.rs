@@ -1,5 +1,6 @@
 //! Wake an ended Codex turn on an open node, once per quiet episode.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,7 @@ pub struct Arm {
 struct Tail {
     last: Option<i64>,
     ended: bool,
-    parked: bool,
+    parked: Option<String>,
 }
 
 fn epoch(raw: &str) -> Option<i64> {
@@ -33,10 +34,18 @@ fn epoch(raw: &str) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 
-fn intentional_stop(text: &str) -> bool {
-    text.contains("<watching")
-        || text.contains("<help")
-        || text.contains("<promise>MISSION COMPLETE")
+fn intentional_stop(text: &str) -> Option<String> {
+    if let Some(start) = text.find("<watching") {
+        let tag = text[start..].split('>').next().unwrap_or_default();
+        let reason =
+            crate::loopcheck::parse_xml_attr(tag, "reason").unwrap_or_else(|| "declared".into());
+        return Some(format!("{reason}_watch"));
+    }
+    if text.contains("<help") {
+        return Some("declared_help".into());
+    }
+    text.contains("<promise>MISSION COMPLETE")
+        .then(|| "mission_complete".into())
 }
 
 fn tail(path: &Path) -> Result<Tail, String> {
@@ -52,7 +61,7 @@ fn tail(path: &Path) -> Result<Tail, String> {
             (Some("event_msg"), Some("task_started" | "user_message"))
             | (Some("response_item"), Some("function_call" | "custom_tool_call")) => {
                 out.ended = false;
-                out.parked = false;
+                out.parked = None;
             }
             (Some("event_msg"), Some("task_complete")) => {
                 out.ended = true;
@@ -64,7 +73,7 @@ fn tail(path: &Path) -> Result<Tail, String> {
             (Some("response_item"), Some("message")) => {
                 if payload["role"] == "user" {
                     out.ended = false;
-                    out.parked = false;
+                    out.parked = None;
                 } else if payload["role"] == "assistant" && payload["phase"] == "final_answer" {
                     out.ended = true;
                     let text = payload["content"]
@@ -136,6 +145,7 @@ fn run_pass_with(
         &crate::event_store::EventQuery::of_types(&[EVENT]),
     )?;
     let mut acted = 0;
+    let mut seen = HashSet::new();
     for row in rows {
         if row.harness_name() != "codex"
             || row.origin.as_deref() != Some("spawn")
@@ -193,26 +203,6 @@ fn run_pass_with(
         let Some(node) = node_row["id"].as_str() else {
             continue;
         };
-        if crate::graph_get::entry_status(node_row) == "in_review" {
-            if let Some(pr) = node_row["pr_number"].as_u64().filter(|pr| *pr > 0) {
-                let status = pr_for(&row.cwd, pr);
-                let reason = match (
-                    status["pr_state"].as_str(),
-                    status["verdict"].as_str(),
-                    status["settled"].as_bool(),
-                ) {
-                    (Some("OPEN"), Some("red"), Some(true)) => None,
-                    (Some("MERGED" | "CLOSED"), _, _) => Some("pr_terminal"),
-                    (Some("OPEN"), Some("green"), _) => Some("green_pr_or_grant_hold"),
-                    (Some("OPEN"), Some("pending"), _) => Some("ci_pending"),
-                    _ => Some("pr_status_unmeasured"),
-                };
-                if let Some(reason) = reason {
-                    report_skip(dry_run, row, &format!("{reason} pr={pr}"));
-                    continue;
-                }
-            }
-        }
         match claim_for(node, sid) {
             Claim::Own => {}
             Claim::Free if latest_worker(node_row) == Some(sid) => {}
@@ -248,18 +238,45 @@ fn run_pass_with(
         .and_then(|v| v.as_integer())
         .filter(|v| *v > 0)
         .unwrap_or(900);
-        if !tail.ended || tail.parked || now.saturating_sub(last) < threshold.saturating_mul(1000) {
+        if !tail.ended
+            || tail.parked.is_some()
+            || now.saturating_sub(last) < threshold.saturating_mul(1000)
+        {
             report_skip(
                 dry_run,
                 row,
-                if tail.parked {
-                    "declared_wait"
-                } else if !tail.ended {
+                tail.parked.as_deref().unwrap_or(if !tail.ended {
                     "turn_active"
                 } else {
                     "not_overdue"
-                },
+                }),
             );
+            continue;
+        }
+        if crate::graph_get::entry_status(node_row) == "in_review" {
+            if let Some(pr) = node_row["pr_number"].as_u64().filter(|pr| *pr > 0) {
+                let status = pr_for(&row.cwd, pr);
+                let reason = match (
+                    status["pr_state"].as_str(),
+                    status["verdict"].as_str(),
+                    status["settled"].as_bool(),
+                ) {
+                    (Some("OPEN"), Some("red"), Some(true)) => None,
+                    (Some("MERGED" | "CLOSED"), _, _) => Some("pr_terminal"),
+                    (Some("OPEN"), Some("green"), _) => Some("green_pr_or_grant_hold"),
+                    (Some("OPEN"), _, Some(false)) | (Some("OPEN"), Some("pending"), _) => {
+                        Some("ci_pending")
+                    }
+                    _ => Some("pr_status_unmeasured"),
+                };
+                if let Some(reason) = reason {
+                    report_skip(dry_run, row, &format!("{reason} pr={pr}"));
+                    continue;
+                }
+            }
+        }
+        if !seen.insert((sid.to_string(), last)) {
+            report_skip(dry_run, row, "duplicate_episode");
             continue;
         }
         if receipts
@@ -484,10 +501,13 @@ mod tests {
             deliver: &dyn Fn(&str, &str) -> Result<(), String>,
             notify: &dyn Fn(&str, &str) -> bool,
         ) -> u64 {
+            let mut alias = self.row.clone();
+            alias.name.push_str("-alias");
+            let rows = [self.row.clone(), alias];
             run_pass_with(
                 &self.home,
                 Pass {
-                    rows: std::slice::from_ref(&self.row),
+                    rows: &rows,
                     nodes: &self.nodes,
                     now: self.now,
                     dry_run: false,
