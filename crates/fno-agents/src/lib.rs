@@ -447,6 +447,7 @@ pub mod team_alarm;
 pub mod team_identity;
 pub mod team_names;
 pub mod team_reap;
+pub mod team_rescope;
 pub mod team_settle;
 pub mod team_split;
 pub mod team_widen;
