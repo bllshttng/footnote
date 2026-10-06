@@ -3,7 +3,7 @@ name: stacked-base-guard
 # Refuse a PR whose base branch no longer leads to the default branch: GitHub
 # merges it, reports MERGED, and the commits never reach main.
 #
-# Two triggers, because one of them is not enough:
+# Three triggers, because one of them is not enough:
 #
 #   pull_request - re-evaluates on every push to the PR. This alone would have
 #     caught the incident: PR #800's head moved at 18:51:44Z and 19:09:00Z,
@@ -12,6 +12,12 @@ name: stacked-base-guard
 #     server-side later, so a base can die with no push to the PR to invalidate
 #     a green check. The sweep re-stamps every open PR whose base is not the
 #     default branch, which is the only way that window closes.
+#   merge_group - a merge-queue entry. The queue's test branch contains the
+#     default-branch tip by construction, so the lineage answer is known and
+#     the job stamps it directly instead of running the PR-shaped probe (a
+#     merge_group event carries no PR number). Without this, marking the
+#     context required while a merge queue is on would hang every entry: the
+#     required context never reports on the group's head SHA.
 #
 # Marking this a REQUIRED status check is a repository-settings action nobody
 # can take from code. Until an operator marks the `stacked-base-guard` context
@@ -30,6 +36,8 @@ name: stacked-base-guard
 
 on:
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
   pull_request:
     types: [opened, synchronize, reopened, edited]
   push:
@@ -74,6 +82,33 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/ci/check-stacked-base.sh "$PR_NUMBER" "$HEAD_SHA"
+
+  queue-guard:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Stamp the queue entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          # Same retry shape as check-stacked-base.sh: a dropped POST that
+          # reads as reported is how a required context hangs the queue.
+          for attempt in 1 2 3; do
+            if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+              -f state=success \
+              -f context=stacked-base-guard \
+              -f description="merge group contains the default branch tip" \
+              -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              >/dev/null; then
+              exit 0
+            fi
+            echo "status post attempt $attempt failed; retrying after a backoff" >&2
+            sleep 5
+          done
+          echo "FAIL: could not post the stacked-base-guard status for the queue entry" >&2
+          exit 1
 
   sweep:
     if: github.event_name == 'push'

@@ -804,11 +804,19 @@ fn dispatch_opencode_serve_inner(
 
     // Detached writer, launched before the registry row. The serve owns the
     // session after this process exits, so its pid is capture metadata only.
+    // Effort lands as opencode's variant for ONE model key, so with effort set
+    // and no caller model the turn must run the same default the variant was
+    // written under, never opencode's own ambient default.
+    let writer_model = model.filter(|m| !m.is_empty()).or(if effort.is_some() {
+        Some(OPENCODE_DEFAULT_MODEL)
+    } else {
+        None
+    });
     let writer_pid = match spawn_attach_writer(
         &serve,
         &session_id,
         &full_prompt,
-        model,
+        writer_model.as_deref(),
         cwd,
         &log_path,
         opencode_bin,
