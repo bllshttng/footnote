@@ -1354,7 +1354,8 @@ fn exited_relaunch_transcript(
             };
             for f in per_slug.flatten() {
                 let name = f.file_name();
-                let Some(stem) = name.to_string_lossy().strip_suffix(".jsonl") else {
+                let lossy = name.to_string_lossy();
+                let Some(stem) = lossy.strip_suffix(".jsonl") else {
                     continue;
                 };
                 if !stem.starts_with(short_id) {
@@ -1426,7 +1427,13 @@ pub(crate) fn relaunch_exited_claude_with(
 ) -> i32 {
     let uuid = match exited_relaunch_transcript(claude_home, short_id, session_uuid) {
         Some(uuid) if transcript_exists(claude_home, &uuid) => uuid,
-        _ => return live_claude_missing_row(name, short_id, session_uuid, cwd),
+        _ => {
+            eprintln!(
+                "fno agents resume: no transcript for {name} ({short}) exists to                  seed a relaunch from",
+                short = short_id
+            );
+            return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        }
     };
     // A down-route launch refuses when another holder took the node or PR:
     // the same gate the dead arm runs before its relaunch.
