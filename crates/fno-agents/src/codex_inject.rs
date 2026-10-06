@@ -489,7 +489,7 @@ pub fn thread_resume_probe_json(id: u64, thread_id: &str) -> String {
     serde_json::json!({
         "id": id,
         "method": "thread/resume",
-        "params": {"threadId": thread_id}
+        "params": {"threadId": thread_id, "excludeTurns": true}
     })
     .to_string()
 }
@@ -2030,20 +2030,52 @@ async fn inject(
         }
     }
 
+    match start_turn(&mut sink, &mut stream, thread_id, text, policy.as_ref()).await {
+        Err(ReviewStartError::Reason("thread-not-loaded")) => {
+            // Only an explicit rejection permits replay; an unacked turn may
+            // already be running. Resume metadata avoids the history frame cap.
+            let raw = round_trip(
+                &mut sink,
+                &mut stream,
+                THREAD_RESUME_ID,
+                thread_resume_probe_json(THREAD_RESUME_ID, thread_id),
+            )
+            .await
+            .map_err(ReviewStartError::Reason)?;
+            let (confirmed, _) = crate::codex_thread::parse_thread_start_response(&raw).map_err(
+                |error| match error {
+                    crate::codex_thread::ThreadStartError::Server(message) => {
+                        ReviewStartError::Server(message)
+                    }
+                    _ => ReviewStartError::Reason("unexpected-response"),
+                },
+            )?;
+            if confirmed != thread_id {
+                return Err(ReviewStartError::Reason("thread-resume-mismatch"));
+            }
+            start_turn(&mut sink, &mut stream, thread_id, text, policy.as_ref()).await
+        }
+        result => result,
+    }
+}
+
+async fn start_turn(
+    sink: &mut AppServerSink,
+    stream: &mut AppServerStream,
+    thread_id: &str,
+    text: &str,
+    policy: Option<&serde_json::Value>,
+) -> Result<(), ReviewStartError> {
     sink.send(Message::Text(
-        turn_start_request_json_with_policy(TURN_START_ID, thread_id, text, policy.as_ref()).into(),
+        turn_start_request_json_with_policy(TURN_START_ID, thread_id, text, policy).into(),
     ))
     .await
     .map_err(|_| ReviewStartError::Reason("io-error"))?;
-    // The request is OUT once the send answers; a lost response is an
-    // acknowledgment gap, not a failed delivery. The seed lane reads this
-    // token as "in flight, never type a duplicate" - naming it keeps the
-    // caller from turning an ack loss into a second seed.
-    let resp = match read_until_id(&mut stream, &serde_json::json!(TURN_START_ID)).await {
-        Ok(resp) => resp,
-        Err(_) => return Err(ReviewStartError::Reason("turn-start-unacked")),
-    };
-    classify_turn_start_response(&resp)
+    // Once sent, a missing acknowledgment never authorizes another turn.
+    let raw = read_until_id(stream, &json!(TURN_START_ID))
+        .await
+        .map_err(|_| ReviewStartError::Reason("turn-start-unacked"))?;
+    classify_turn_start_response(&raw)
 }
 
 async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
@@ -2119,6 +2151,9 @@ where
                 }
             }
             Some(Ok(_)) => {} // non-Text frame (ping/binary/close-less); skip
+            Some(Err(tokio_tungstenite::tungstenite::Error::Capacity(_))) => {
+                return Err("app-server-response-over-cap");
+            }
             Some(Err(_)) | None => return Err("io-error"),
         }
     }
@@ -3273,7 +3308,7 @@ mod tests {
     #[tokio::test]
     async fn seed_delivery_names_an_unacked_turn_start() {
         let _guard = crate::path_test_guard();
-        let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
             crate::codex_fake_daemon::Behavior::quick().with_unacked_turn_start(),
         );
         let result =
@@ -3282,6 +3317,14 @@ mod tests {
             result,
             Err(ReviewStartError::Reason("turn-start-unacked")),
             "an ack loss must be named, not read as io-error"
+        );
+        assert_eq!(
+            daemon
+                .received()
+                .iter()
+                .filter(|f| f["method"] == "turn/start")
+                .count(),
+            1
         );
     }
 
@@ -3328,17 +3371,68 @@ mod tests {
         );
     }
 
-    /// A reply with no posture key sends no policy either.
+    /// Cold threads with oversized history load before the accepted turn.
     #[tokio::test]
     async fn deliver_sends_no_policy_when_the_posture_is_missing() {
         let _guard = crate::path_test_guard();
-        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
-            crate::codex_fake_daemon::Behavior::quick(),
+        for (refuses, returned_id) in [
+            (false, "thread-t"),
+            (true, "thread-t"),
+            (false, "other-thread"),
+        ] {
+            let daemon =
+                crate::codex_fake_daemon::FakeDaemon::start(crate::codex_fake_daemon::Behavior {
+                    thread_cwd: String::new(),
+                    cold_thread: true,
+                    resume_history_bytes: 17 * 1024 * 1024,
+                    fail_thread_resume: refuses,
+                    thread_id: returned_id.to_string(),
+                    ..crate::codex_fake_daemon::Behavior::quick()
+                });
+            let result = deliver_via_codex_daemon("thread-t", "hello").await;
+            if refuses {
+                assert!(
+                    matches!(result, Err(ReviewStartError::Server(ref reason)) if reason == "thread/resume refused")
+                );
+            } else if returned_id != "thread-t" {
+                assert_eq!(
+                    result,
+                    Err(ReviewStartError::Reason("thread-resume-mismatch"))
+                );
+            } else {
+                assert!(result.is_ok(), "{result:?}");
+            }
+            let resume = daemon
+                .first_params("thread/resume")
+                .expect("cold thread resumes");
+            assert_eq!(resume["excludeTurns"], true);
+            let turns = daemon
+                .received()
+                .into_iter()
+                .filter(|f| f["method"] == "turn/start")
+                .count();
+            assert_eq!(
+                turns,
+                if refuses || returned_id != "thread-t" {
+                    1
+                } else {
+                    2
+                }
+            );
+            let turn = daemon.first_params("turn/start").expect("turn ran");
+            assert!(turn.get("sandboxPolicy").is_none());
+        }
+        let mut stream =
+            futures_util::stream::iter([Err(tokio_tungstenite::tungstenite::Error::Capacity(
+                tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong {
+                    size: 17 * 1024 * 1024,
+                    max_size: 16 * 1024 * 1024,
+                },
+            ))]);
+        assert_eq!(
+            read_until_id(&mut stream, &json!(THREAD_RESUME_ID)).await,
+            Err("app-server-response-over-cap")
         );
-        let result = deliver_via_codex_daemon("thread-t", "hello").await;
-        assert!(result.is_ok());
-        let turn = daemon.first_params("turn/start").expect("turn ran");
-        assert!(turn.get("sandboxPolicy").is_none());
     }
 
     /// A refused `thread/resume` is not a delivery failure: the turn still

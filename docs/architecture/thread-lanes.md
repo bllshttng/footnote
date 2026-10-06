@@ -29,6 +29,8 @@ The `attach` lane has two destinations. The lane alone cannot pick between them.
 | codex | `pre_exec = ["codex","app-server","daemon","start"]`, then `codex resume {session_id} --remote unix://` | a shared harness-owned server, started outside the spawn |
 | claude | no `pre_exec`, `claude attach {short_id}` | the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host` |
 
+Codex resumes request `excludeTurns: true`. The reply carries thread metadata and resume state, while conversation history stays on the server. Returning full history can exceed the WebSocket client's 16 MiB frame cap. This applies to startup recovery, control actions, and delivery probes. If `turn/start` explicitly rejects an unloaded thread, delivery resumes that exact thread and retries once. Resume refusals preserve the server reason. A missing turn acknowledgment never permits replay.
+
 A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the harness starts its own supervisor on demand, so fno ensures nothing. The spawning client exits once the session is backgrounded. The daemon does not host that session. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
 
 That refusing arm is the reason the split is written down. A route that tested the lane alone sends a claude thread spawn into codex's app-server, because both read `attach`. No claude thread spawn reaches the daemon today. The arm guards the next attach-lane harness rather than fixing a live misroute.
