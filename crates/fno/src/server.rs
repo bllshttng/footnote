@@ -9102,11 +9102,11 @@ impl Core {
                             .and_then(|c| c.last_press.take())
                             == Some((pane, event.row, event.col));
                         if clicked {
-                            if let Some(url) = self
-                                .panes
-                                .get(&pane)
-                                .and_then(|e| e.vt.link_at(event.row, event.col))
-                            {
+                            let url = self.panes.get(&pane).and_then(|e| {
+                                let cwd = crate::pane_cwd::live_or_spawn(e.pty.child_pid(), &e.cwd);
+                                e.vt.link_at(event.row, event.col, &cwd)
+                            });
+                            if let Some(url) = url {
                                 self.send_open_link(client_id, url);
                             }
                         }
@@ -9163,7 +9163,7 @@ impl Core {
                         == MouseAction::SelectRelease
                         && c.visible.contains(&pane) =>
                 {
-                    e.vt.link_span(row, col)
+                    self.pane_link_span(pane, row, col)
                         .map(|span| span.cells)
                         .unwrap_or_default()
                 }

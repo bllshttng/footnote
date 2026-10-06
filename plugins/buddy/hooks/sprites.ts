@@ -154,3 +154,24 @@ const FACES: Record<Species, string> = {
 export function renderFace(bones: Bones): string {
   return FACES[bones.species].replaceAll('{E}', bones.eye)
 }
+
+// The original hatch: the egg wobbles while the soul is written, then cracks and bursts.
+const EGG = ['    _____    ', '   /     \\   ', '  /       \\  ', ' |         | ', '  \\       /  ', '   \\_____/   ']
+export const HATCH_FRAMES: { offset: number; lines: string[] }[] = [
+  { offset: 0, lines: EGG },
+  { offset: 1, lines: EGG },
+  { offset: -1, lines: EGG },
+  { offset: 1, lines: EGG },
+  { offset: 0, lines: ['    _____    ', '   /     \\   ', '  /       \\  ', ' |    .    | ', '  \\       /  ', '   \\_____/   '] },
+  { offset: -1, lines: ['    _____    ', '   /     \\   ', '  /       \\  ', ' |    ∕    | ', '  \\       /  ', '   \\_____/   '] },
+  { offset: 1, lines: ['    _____    ', '   /     \\   ', '  /   .   \\  ', ' |   ∕ \\   | ', '  \\       /  ', '   \\_____/   '] },
+  { offset: 0, lines: ['    _____    ', '   /  .  \\   ', '  /  ∕ \\  \\  ', ' |  ∕   \\  | ', '  \\   .   /  ', '   \\_____/   '] },
+  { offset: -1, lines: ['    _____    ', '   / ∕ \\ \\   ', '  / ∕   \\ \\  ', ' | ∕     \\ | ', '  \\   ∨   /  ', '   \\__∨__/   '] },
+  { offset: 1, lines: ['    __ __    ', '   / V V \\   ', '  / ∕   \\ \\  ', ' | ∕     \\ | ', '  \\   ∨   /  ', '   \\__∨__/   '] },
+  { offset: 0, lines: ['   ·  ✦  ·   ', '  ·       ·  ', ' ·    ✦    · ', '  ✦       ✦  ', ' ·    ·    · ', '   ·  ✦  ·   '] },
+]
+// 160 ms a frame; the first four wobble for at least three rounds, then the crack plays once.
+export const HATCH_FRAME_MS = 160
+export const HATCH_WOBBLE = 4
+export const HATCH_MIN_ROUNDS = 3
+export const RAINBOW = ['rainbow_red', 'rainbow_orange', 'rainbow_yellow', 'rainbow_green', 'rainbow_blue', 'rainbow_indigo', 'rainbow_violet']

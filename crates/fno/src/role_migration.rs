@@ -112,17 +112,6 @@ fn migrate_value(value: &mut Value, field: &str) -> Result<(), String> {
             }
             let sorted = std::mem::take(map).into_iter().collect::<BTreeMap<_, _>>();
             map.extend(sorted);
-            if map.contains_key("agents") && map.contains_key("schema_version") {
-                // Older writers must not silently reintroduce authority keys.
-                let version = map
-                    .get("schema_version")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                if version <= 40 {
-                    map.insert("schema_version".into(), Value::from(40));
-                    map.insert("min_writer_version".into(), Value::from(40));
-                }
-            }
         }
         Value::Array(items) => {
             for item in items {
@@ -218,6 +207,18 @@ fn migrate_file(path: &Path) -> Result<(), String> {
             }
             let original = value.clone();
             migrate_value(&mut value, "")?;
+            if path.file_name().and_then(|n| n.to_str()) == Some("registry.json") {
+                if let Some(map) = value.as_object_mut() {
+                    if map.contains_key("agents") && map.contains_key("schema_version") {
+                        let floor = map
+                            .get("min_writer_version")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        map.insert("schema_version".into(), Value::from(40));
+                        map.insert("min_writer_version".into(), Value::from(floor.max(40)));
+                    }
+                }
+            }
             if value == original {
                 return Ok(());
             }
