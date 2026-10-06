@@ -199,8 +199,9 @@ impl FleetArms {
         crate::attention_arm::maybe_tick(&self.attention, ctx.home.clone());
         crate::burn_watch::maybe_tick(&self.burn_watch, ctx.home.clone());
         crate::watch_expiry::maybe_tick(&self.watch_expiry, ctx.home.clone());
-        // The codex waker: on CI settle it injects turn/start into
-        // the parked codex thread. Registered beside its expiry sibling.
+        // The settle waker: on CI settle it wakes the parked session
+        // through its harness lane - codex turn/start, every other harness
+        // the mail lane. Registered beside its expiry sibling.
         crate::codex_watch::maybe_tick(&self.codex_watch, ctx.home.clone());
         // The lead waker: a lead past its check-in beat by one minute
         // gets the daemon's wake, and its rung-up lead is told. Writes
