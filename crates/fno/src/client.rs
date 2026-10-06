@@ -2660,7 +2660,10 @@ impl View {
         // Resolve what the row needs while `display_rows()` holds the borrow, so
         // the section arm below is free to mutate `self`.
         let pick = match self.display_rows().get(i) {
-            Some(DisplayRow::Agent(a)) => {
+            // A card's detail and metrics lines are the agent row's own span:
+            // the menu opens from any line of the card, so a
+            // right-click or long-press on lines 2-3 is not a dead cell.
+            Some(DisplayRow::Agent(a) | DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a)) => {
                 let mut menu = build_row_menu(a, anchor);
                 // A pane-hosted row can relocate its live pane into another
                 // workspace; a paneless row already gets the `p` placement
@@ -3673,9 +3676,13 @@ impl View {
             DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
             DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
             DisplayRow::NewSquad => Some("newsquad".into()),
+            // Card lines carry their agent's identity, so a hold arms on
+            // any line of the card and re-checks against the agent, matching
+            // the span the tap path already resolves.
+            DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a) => {
+                Some(format!("agent:{}", a.name))
+            }
             DisplayRow::Blank
-            | DisplayRow::CardDetail(..)
-            | DisplayRow::CardMetrics(..)
             | DisplayRow::CardRule
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
