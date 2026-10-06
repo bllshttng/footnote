@@ -924,6 +924,9 @@ struct PrState {
     /// this repo never reads `behind`, so base drift is NOT read here -- the
     /// compare endpoint owns that and the merge-slot claim already encodes it.
     mergeable: Option<bool>,
+    /// Some(why) when the PR is from outside; the run skips, fail
+    /// closed. An unreadable origin read lands here too.
+    outside: Option<String>,
 }
 
 /// The PR's head sha, head ref, body, base ref, and mergeability.
@@ -951,6 +954,10 @@ fn read_pr(a: &Args, pr: &str) -> Result<PrState, String> {
         .unwrap_or_default()
         .to_string();
     let mergeable = v.get("mergeable").and_then(|m| m.as_bool());
+    let outside = match crate::pr_admission::outside_reason(&v) {
+        Ok(inside) => inside,
+        Err(msg) => Some(msg),
+    };
     if head.is_empty() {
         return Err("pr json carried no head sha".to_string());
     }
@@ -960,6 +967,7 @@ fn read_pr(a: &Args, pr: &str) -> Result<PrState, String> {
         body,
         base_ref,
         mergeable,
+        outside,
     })
 }
 
@@ -2318,6 +2326,11 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
                 continue;
             }
         };
+        if let Some(why) = &state.outside {
+            bump(&mut counts, "skip_outside");
+            receipt(&pr, "skip_outside", why);
+            continue;
+        }
         let (head, head_ref) = (state.head.clone(), state.head_ref.clone());
         // Refusal 1: a live worker owns this node; a healer pushing under it
         // is the two-writers failure. It runs FIRST: a rebase is a bigger
@@ -2621,6 +2634,10 @@ fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
             return (code, Vec::new());
         }
     };
+    if let Some(why) = &state.outside {
+        println!("skip outside: {why}");
+        return (EXIT_CLEAN, Vec::new());
+    }
     let (head, head_ref, body) = (state.head, state.head_ref, state.body);
     if a.apply {
         if let Some(why) = refuse_wrong_worktree(a, &head_ref) {
@@ -3213,7 +3230,7 @@ mod tests {
 D="$(dirname "$0")"
 echo "gh $*" >> "$D/gh.log"
 for a in "$@"; do case "$a" in
-  */pulls/*) echo '{{"head":{{"sha":"deadbeef","ref":"feature/x"}},"body":"b"}}'; exit 0 ;;
+  */pulls/*) echo '{{"head":{{"sha":"deadbeef","ref":"feature/x","repo":{{"full_name":"o/r"}}}},"base":{{"ref":"main","repo":{{"full_name":"o/r"}}}},"author_association":"OWNER","body":"b"}}'; exit 0 ;;
   */check-runs) B=completed; {flip}
      if [ "$B" = in_progress ]; then
        echo '{{"check_runs":[{{"name":"cargo fmt --check (pinned)","status":"in_progress","conclusion":null,"html_url":"https://github.com/o/r/actions/runs/1/job/9"}}]}}'
@@ -3480,10 +3497,11 @@ D="$(dirname "$0")"
 echo "gh $*" >> "$D/gh.log"
 for a in "$@"; do case "$a" in
   *'pulls?state=open'*)
-     echo '[{{"number":1,"head":{{"sha":"aaa1","ref":"feature/x-1111"}},"body":"b"}},{{"number":2,"head":{{"sha":"bbb2","ref":"feature/x-2222"}},"body":"b"}}]'
+     echo '[{{"number":1,"head":{{"sha":"aaa1","ref":"feature/x-1111"}},"body":"b"}},{{"number":2,"head":{{"sha":"bbb2","ref":"feature/x-2222"}},"body":"b"}},{{"number":3,"head":{{"sha":"ccc3","ref":"patch-1","repo":{{"full_name":"stranger/footnote"}}}},"base":{{"ref":"main","repo":{{"full_name":"o/r"}}}},"author_association":"FIRST_TIMER","body":"b"}}]'
      exit 0 ;;
-  *pulls/1*) echo '{{"head":{{"sha":"aaa1","ref":"feature/x-1111"}},"body":"b"}}'; exit 0 ;;
-  *pulls/2*) echo '{{"head":{{"sha":"bbb2","ref":"feature/x-2222"}},"body":"b"}}'; exit 0 ;;
+  *pulls/1*) echo '{{"head":{{"sha":"aaa1","ref":"feature/x-1111","repo":{{"full_name":"o/r"}}}},"base":{{"ref":"main","repo":{{"full_name":"o/r"}}}},"author_association":"OWNER","body":"b"}}'; exit 0 ;;
+  *pulls/2*) echo '{{"head":{{"sha":"bbb2","ref":"feature/x-2222","repo":{{"full_name":"o/r"}}}},"base":{{"ref":"main","repo":{{"full_name":"o/r"}}}},"author_association":"OWNER","body":"b"}}'; exit 0 ;;
+  *pulls/3*) echo '{{"head":{{"sha":"ccc3","ref":"patch-1","repo":{{"full_name":"stranger/footnote"}}}},"base":{{"ref":"main","repo":{{"full_name":"o/r"}}}},"author_association":"FIRST_TIMER","body":"b"}}'; exit 0 ;;
   *check-runs) echo '{{"check_runs":[{check}]}}'; exit 0 ;;
   */logs) echo "{log_line}"; exit 0 ;;
   */status) echo '{{"statuses":[]}}'; exit 0 ;;
@@ -3530,8 +3548,8 @@ for a in "$@"; do case "$a" in
   *'pulls?state=open'*)
      echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"body":"b"},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"body":"b"}]'
      exit 0 ;;
-  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"body":"b"}'; exit 0 ;;
-  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"body":"b"}'; exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"cancelled","html_url":"https://github.com/o/r/actions/runs/777/job/9"}]}'; exit 0 ;;
   */logs) echo "the run was cancelled before any step ran"; exit 0 ;;
   */status) echo '{"statuses":[]}'; exit 0 ;;
@@ -3627,6 +3645,7 @@ exit 0
         assert!(events.contains("pr_heal_tick"), "{events}");
         assert!(events.contains("\"dry_run\":true"), "{events}");
         assert!(events.contains("\"skip_claim_held\":1"), "{events}");
+        assert!(events.contains("\"skip_outside\":1"), "{events}");
         assert!(events.contains("\"would_heal\":1"), "{events}");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3642,9 +3661,27 @@ exit 0
         let git = log_of(d, "git.log");
         assert_eq!(git.matches("git push").count(), 1, "one push: {git}");
         assert_ne!(log_of(d, "cargo.log"), "", "the remedy ran");
+        let git_fork = log_of(d, "git.log");
+        assert!(
+            !git_fork.contains("patch-1"),
+            "no git work for the fork: {git_fork}"
+        );
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"healed\":1"), "{events}");
         assert!(events.contains("\"skip_claim_held\":1"), "{events}");
+        assert!(events.contains("\"skip_outside\":1"), "{events}");
+
+        // The single-PR path skips an outside PR before any worktree
+        // read: exit clean, no git call.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive(d, false);
+        stub_git_drive(d);
+        stub_cargo(d);
+        stub_fno(d);
+        let code = run_heal(&args_for(d, &["3", "--apply"]));
+        assert_eq!(code, EXIT_CLEAN, "the fork PR skips clean: {code}");
+        assert_eq!(log_of(d, "git.log"), "", "no git call for the fork PR");
 
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
@@ -3875,8 +3912,8 @@ for a in "$@"; do case "$a" in
   *'pulls?state=open'*)
      echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":MERGEABLE,"body":"b"},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}]'
      exit 0 ;;
-  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":MERGEABLE,"body":"b"}'; exit 0 ;;
-  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":MERGEABLE,"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":null,"body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[{"name":"cargo fmt --check (pinned)","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/1/job/9"}]}'; exit 0 ;;
   */logs) echo "Diff in /w/w/crates/fno-agents/src/x.rs:1:"; exit 0 ;;
   */status) echo '{"statuses":[]}'; exit 0 ;;
@@ -4014,7 +4051,7 @@ echo "gh $*" >> "$D/gh.log"
 for a in "$@"; do case "$a" in
   *'pulls?state=open'*) echo 'LISTING'
      exit 0 ;;
-  *pulls/*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":false,"body":"b"}'; exit 0 ;;
+  *pulls/*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":false,"body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[]}'; exit 0 ;;
   */status) echo '{"statuses":[]}'; exit 0 ;;
 esac; done
@@ -4048,8 +4085,8 @@ for a in "$@"; do case "$a" in
   *'pulls?state=open'*)
      echo '[{"number":1,"head":{"sha":"aaa1","ref":"pytest-leak-guard"},"base":{"ref":"main"},"mergeable":null},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null}]'
      exit 0 ;;
-  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"pytest-leak-guard"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
-  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"pytest-leak-guard","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":null,"body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[{"name":"smoke-pytest (5)",CHECKROW}]}'; exit 0 ;;
   */logs) echo "FAILED tests/test_a.py::test_flaky_a"; exit 0 ;;
   */status) echo '{"statuses":[]}'; exit 0 ;;
@@ -4145,7 +4182,7 @@ for a in "$@"; do case "$a" in
      echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null}]'
      exit 0 ;;
   *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
-  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":null,"body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/777/job/9"}]}'; exit 0 ;;
   */logs) echo "all steps passed"; exit 0 ;;
   */status) echo '{"statuses":[]}'; exit 0 ;;

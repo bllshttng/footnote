@@ -419,6 +419,20 @@ pub(crate) enum PushOutcome {
 /// the verb derives it from `@{u}`). Empty `head` skips the read: a branch
 /// with no upstream has nothing in flight anywhere.
 pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
+    let branch = run_labeled(
+        "pr-push",
+        &ctx.git_bin,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        &ctx.cwd,
+        READ_TIMEOUT,
+    )
+    .map(|(_, out, _)| out.trim().to_string())
+    .unwrap_or_default();
+    if PROTECTED.contains(&branch.as_str()) {
+        return PushOutcome::PushFailed(format!(
+            "refusing to push the protected branch '{branch}'"
+        ));
+    }
     if ctx.force {
         emit_bypass_row(ctx);
     } else {
@@ -434,15 +448,6 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
     // born off origin/main carries exactly that tracking), and the create
     // path has no upstream at all. `--set-upstream origin HEAD:<branch>`
     // covers both and pins correct tracking on the first push.
-    let branch = run_labeled(
-        "pr-push",
-        &ctx.git_bin,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        &ctx.cwd,
-        READ_TIMEOUT,
-    )
-    .map(|(_, out, _)| out.trim().to_string())
-    .unwrap_or_default();
     let refspec = format!("HEAD:{branch}");
     // The lease flag rides after the positionals: git's option parser
     // accepts it there, and the `push --set-upstream origin HEAD:<branch>`
@@ -1369,6 +1374,31 @@ mod tests {
     use super::*;
     use crate::write_exec_stub as write_exec;
     use std::process::Command;
+
+    #[test]
+    fn guarded_push_refuses_a_protected_branch_and_runs_no_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "#!/bin/sh\nD=\"$(dirname \"$0\")\"\necho \"git $*\" >> \"$D/git.log\"\ncase \"$1 $2\" in\n  \"rev-parse --abbrev-ref\") echo main; exit 0 ;;\nesac\necho pushed\nexit 0\n";
+        let git = write_exec(dir.path(), "git", body);
+        let ctx = PushCtx {
+            git_bin: git.to_string_lossy().into_owned(),
+            gh_bin: "gh".to_string(),
+            fno_bin: "fno".to_string(),
+            cwd: dir.path().to_path_buf(),
+            stamps_dir: dir.path().to_path_buf(),
+            force: true,
+            lease: None,
+        };
+        let failed = match guarded_push(&ctx, "") {
+            PushOutcome::PushFailed(msg) => msg,
+            PushOutcome::Pushed { .. } => panic!("a protected branch pushed"),
+            PushOutcome::InFlight { .. } => panic!("in-flight before the guard"),
+            PushOutcome::Unreadable(msg) => panic!("unreadable: {msg}"),
+        };
+        assert!(failed.contains("protected branch 'main'"), "{failed}");
+        let log = std::fs::read_to_string(dir.path().join("git.log")).unwrap();
+        assert!(!log.contains(" push"), "no git push ran: {log}");
+    }
 
     /// A fake gh: green rust-ci check runs, an empty status read, a failed
     /// cli-ci run with no check-run link, and a jobs read answering zero.
