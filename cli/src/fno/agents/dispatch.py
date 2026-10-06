@@ -822,12 +822,7 @@ def _codex_create_path(
 
 
 # Moved to fno.agents.spawn_lineage (file budget); re-exported here.
-from fno.agents.spawn_lineage import (
-    _capture_parent_edge,
-    _fill_parent_edge_from_lineage,
-    _report_unlinked_parent,
-    build_spawn_provenance,
-)  # noqa: E402
+from fno.agents.spawn_lineage import _capture_parent_edge, _parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
 
 
 def _reign_typed_message(
@@ -1699,9 +1694,7 @@ def _claude_create_path(
 
     # Best-effort ambient capture; never raises. The
     # spawn_trigger was already popped before bg_create above.
-    spawned_by_session, spawned_by_harness, spawned_by_cwd = _fill_parent_edge_from_lineage(
-        parent_edge or _capture_parent_edge(), lineage_row
-    )
+    spawned_by_session, spawned_by_harness, spawned_by_cwd = _parent_edge(parent_edge, lineage_row)
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the

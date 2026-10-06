@@ -87,13 +87,15 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     return reason
 
 
-def _fill_parent_edge_from_lineage(
-    captured: tuple[Optional[str], Optional[str], Optional[str]],
+def _parent_edge(
+    parent_edge: Optional[tuple],
     lineage_row: object | None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """A relaunch continues the SOURCE row's lineage: its original spawner
-    keeps seeing it in the orphan check. Ambient capture already had its
-    chance; the source record only fills a miss."""
+    """The triple a created row records: the caller's explicit edge, else the
+    ambient capture. A relaunch keeps the SOURCE row's edge, so its original
+    spawner still sees it in the orphan check; the source record only fills
+    a miss."""
+    captured = parent_edge or _capture_parent_edge()
     if captured[0] or lineage_row is None:
         return captured
     inherited = tuple(

@@ -860,7 +860,7 @@ def test_resume_spawn_without_markers_inherits_the_source_rows_parent_edge(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "--name", "relaunch-worker", "-H", "claude",
+        ["spawn", "--name", "relaunch-worker", "-H", "claude", "--here",
          "--resume", source_uuid, "--substrate", "thread", "continue"],
         catch_exceptions=False,
     )
