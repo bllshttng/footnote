@@ -18,23 +18,6 @@ from fno.bus.log import Envelope, from_json_line, to_json_line
 from fno.paths_testing import use_tmpdir
 
 
-def test_envelope_subject_round_trips_and_omits_when_unset() -> None:
-    env = Envelope.new(
-        from_="a", to="b", kind="send", body="hi", subject="gate fix"
-    )
-    line = to_json_line(env)
-    assert '"subject":"gate fix"' in line
-    parsed = from_json_line(line)
-    assert parsed.subject == "gate fix"
-    # A pre-field row parses with subject None and re-serializes without it.
-    legacy = from_json_line(
-        '{"v":1,"id":"fmail-aaaaaaaaaaaa","ts":"2026-10-06T00:00:00Z",'
-        '"thread":"fmail-aaaaaaaaaaaa","from":"a","to":"b","kind":"send","body":"x"}'
-    )
-    assert legacy.subject is None
-    assert "subject" not in to_json_line(legacy)
-
-
 def test_json_receipt_four_keys_always() -> None:
     from fno.mail.receipts import json_receipt
 
@@ -103,3 +86,16 @@ def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner) -> N
     refused = _invoke(isolated, runner, "peer", "hi", "--raw", "--subject", "s")
     assert refused.exit_code == 2, refused.output
     assert "--subject" in refused.output
+
+    # The bus row serializes with the subject and parses it back; a row from
+    # before the field existed parses None and re-serializes without it.
+    env = Envelope.new(from_="a", to="b", kind="send", body="hi", subject="gate fix")
+    line = to_json_line(env)
+    assert '"subject":"gate fix"' in line
+    assert from_json_line(line).subject == "gate fix"
+    legacy = from_json_line(
+        '{"v":1,"id":"fmail-aaaaaaaaaaaa","ts":"2026-10-06T00:00:00Z",'
+        '"thread":"fmail-aaaaaaaaaaaa","from":"a","to":"b","kind":"send","body":"x"}'
+    )
+    assert legacy.subject is None
+    assert "subject" not in to_json_line(legacy)
