@@ -1056,12 +1056,18 @@ pub fn run_lead_verdict(args: &[String]) -> i32 {
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
     let (v, bounds) = verdict(&readings);
     let summary = bound_summary(v, &bounds);
+    if let Some(note) = &inputs.harness_disagreement {
+        eprintln!("lead-history --verdict: harness disagreement: {note}");
+    }
     let payload = json!({
         "scope": inputs.scope,
         "verdict": v,
         "summary": summary,
         "bounds": bounds,
         "lifetime": if lifetime_partial { "partial" } else { "measured" },
+        "harness": inputs.harness,
+        "harness_source": inputs.harness_source,
+        "harness_disagreement": inputs.harness_disagreement,
         "coverage": json!({
             "status": cov_status,
             "complete_since": complete_since_ms.map(ms_to_rfc3339),

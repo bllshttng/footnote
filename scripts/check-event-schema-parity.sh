@@ -368,6 +368,11 @@ dual_owner_kinds = {
     "worktree_removed",
     "control_plane_tick",
     "state_reap",
+    # crown_manifest_arm_failed: the manifest rebind at a crowned row's
+    # first identification is fail-soft in both runtimes - the Rust
+    # session-report arm and the Python identification arm emit the same
+    # failure row into one journal.
+    "crown_manifest_arm_failed",
     # Evals demand: the pr-watch tick's evals leg (Python) is the only
     # emitter; the rows ride the daemon's journal, so the Rust known-kind
     # table carries them for acceptance without emitting.

@@ -174,7 +174,7 @@ pub(crate) fn handle_session_report(
     // Set when this report is the heir's first self-identification: the
     // primary id filled on a crowned row. The manifest arm runs after the
     // registry write commits.
-    let mut manifest_arm: Option<(String, String)> = None;
+    let mut manifest_arm: Option<(String, String, Option<String>)> = None;
     if let Err(e) = state::update_registry(&home.registry_json(), |r| {
         let Some(find) = find_row(&r.entries, &harness, &session_id, agent_self.as_deref()) else {
             outcome = Outcome::Unknown;
@@ -249,8 +249,15 @@ pub(crate) fn handle_session_report(
     // `_arm_crown_after_identification`): spawn-time succession has no heir
     // id at settle, so the transfer leaves the manifest naming the abdicating
     // session and the heir holds with no levers until this rewrite names it.
-    if let Some((scope, cwd)) = manifest_arm {
-        arm_crown_manifest(&scope, &cwd, &session_id, row_name.as_deref(), emitter);
+    if let Some((scope, cwd, row_harness)) = manifest_arm {
+        arm_crown_manifest(
+            &scope,
+            &cwd,
+            row_harness.as_deref(),
+            &session_id,
+            row_name.as_deref(),
+            emitter,
+        );
     }
 
     match outcome {
@@ -299,13 +306,15 @@ pub(crate) fn handle_session_report(
 }
 
 /// The crowned-row read that decides the arm: a crown stamp plus a scope on
-/// the row the report just identified.
-fn crowned_first_fill(entry: &RegistryEntry, out: &mut Option<(String, String)>) {
+/// the row the report just identified, with the row's own harness so the
+/// rebind never leaves the manifest naming the arming path's harness.
+fn crowned_first_fill(entry: &RegistryEntry, out: &mut Option<(String, String, Option<String>)>) {
     if entry.crown_level.is_none() {
         return;
     }
     if let Some(scope) = entry.crown_scope.as_deref().filter(|s| !s.is_empty()) {
-        *out = Some((scope.to_string(), entry.cwd.clone()));
+        let harness = entry.harness.clone().filter(|h| !h.trim().is_empty());
+        *out = Some((scope.to_string(), entry.cwd.clone(), harness));
     }
 }
 
@@ -313,10 +322,12 @@ fn crowned_first_fill(entry: &RegistryEntry, out: &mut Option<(String, String)>)
 /// itself, fail-soft like the Python arm: a failed write emits
 /// `crown_manifest_arm_failed` and never fails the report. A scope with no
 /// manifest yet is a fresh grant, not a stale succession; that arm stays
-/// Python's.
+/// Python's. `row_harness` rides when the row carries one, so a manifest
+/// naming the predecessor's harness never outlives the succession.
 fn arm_crown_manifest(
     scope: &str,
     cwd: &str,
+    row_harness: Option<&str>,
     session_id: &str,
     row_name: Option<&str>,
     emitter: &EventEmitter,
@@ -348,12 +359,11 @@ fn arm_crown_manifest(
     if !path.is_file() {
         return;
     }
-    if let Err(e) = crate::lead_state::set_manifest_fields(
-        &space,
-        scope,
-        &[("harness_session_id", session_id)],
-        None,
-    ) {
+    let mut fields = vec![("harness_session_id", session_id)];
+    if let Some(row_harness) = row_harness {
+        fields.push(("harness", row_harness));
+    }
+    if let Err(e) = crate::lead_state::set_manifest_fields(&space, scope, &fields, None) {
         fail(e);
     }
 }
@@ -811,7 +821,9 @@ mod tests {
     /// naming the abdicating session, and the heir's levers (shape, term)
     /// read that manifest, so the heir holds with no levers. The heir's
     /// first session report is the arm point: the fill rebinds the manifest
-    /// to the heir. A later resume (related-slot fill) rewrites nothing.
+    /// to the heir, including the harness when the row carries one (a claude
+    /// predecessor's `harness: claude` must not outlive a codex heir). A
+    /// later resume (related-slot fill) rewrites nothing.
     #[test]
     fn a_crowned_heirs_first_report_binds_the_manifest_to_its_session() {
         let lock = crate::claims::test_env_lock()
@@ -824,14 +836,14 @@ mod tests {
         let home = AgentsHome::at(home_root);
         let cwd = dir.path().join("repo");
         std::fs::create_dir_all(&cwd).unwrap();
-        let heir = "aa2f99d7-9155-4fca-9eca-adf9ca1aafb2";
+        let heir = "01a10f07-d704-75a0-a460-7913efe8971b";
         let predecessor = "99473043-aaaa-4bbb-8ccc-ddddeeeeeeee";
         seed_registry(
             &home,
             json!({
                 "name": "lead-wren", "cwd": cwd.display().to_string(),
                 "status": "spawning", "created_at": "2026-10-05T20:06:00Z",
-                "harness": "claude", "crown_level": 2,
+                "harness": "codex", "crown_level": 2,
                 "crown_scope": "x-aaaa", "crown_grantor": "vellum"
             }),
         );
@@ -847,7 +859,7 @@ mod tests {
         )
         .unwrap();
 
-        let params = report_params("claude", heir, json!({"agent_self": "lead-wren"}));
+        let params = report_params("codex", heir, json!({"agent_self": "lead-wren"}));
         let resp = handle_session_report(&home, &emitter(&home), &req(params));
         assert_eq!(response_json(&resp)["result"]["stored"], true);
         let bound = std::fs::read_to_string(&manifest).unwrap();
@@ -855,7 +867,11 @@ mod tests {
             bound.contains(&format!("harness_session_id: {heir}")),
             "{bound}"
         );
-        // Everything but the holder id survives the rewrite.
+        // The harness rides with the id: the row's own harness wins, and the
+        // predecessor's `harness: claude` cannot outlive the succession.
+        assert!(bound.contains("harness: codex"), "{bound}");
+        assert!(!bound.contains("harness: claude"), "{bound}");
+        // Everything but the holder identity survives the rewrite.
         assert!(bound.contains("term: span:96h"), "{bound}");
         assert!(bound.contains("shape: court"), "{bound}");
         assert!(bound.contains("crown_grantor: vellum"), "{bound}");
@@ -863,7 +879,7 @@ mod tests {
 
         // A resume fills the related slot and never rewrites the manifest.
         let resume = "0197bbbb-1234-7abc-9def-0123456789ab";
-        let params = report_params("claude", resume, json!({"agent_self": "lead-wren"}));
+        let params = report_params("codex", resume, json!({"agent_self": "lead-wren"}));
         let resp = handle_session_report(&home, &emitter(&home), &req(params));
         assert_eq!(response_json(&resp)["result"]["related_filled"], true);
         let bound = std::fs::read_to_string(&manifest).unwrap();
