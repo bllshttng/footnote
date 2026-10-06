@@ -264,6 +264,8 @@ tasks:
 
 ## Guidelines
 
+**Firm and volatile:** the goal, the acceptance contract, the invariants and the files to read are firm; the executor trusts them. Line numbers and snippets are volatile as of `code_index.main_sha`. Say so once above the Changes section, and never trust a volatile line without a re-read - `fno backlog freshness <node> --plan <plan>` names which cited paths moved.
+
 **Length:** 50-100 lines. A larger multi-wave feature still stays one `.md` - use the design-doc mutation path (`/blueprint <design-doc>` after `/think`), which builds its `## Execution Strategy` from the design. Drop `quick` for the fuller section set on an idea input.
 
 **Execution Strategy:** Emit one. Transcribe the numbered changes rather than re-deriving them, because both inputs the rule needs are already written above.
