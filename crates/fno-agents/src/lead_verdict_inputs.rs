@@ -104,6 +104,12 @@ pub(crate) struct VerdictInputs {
     pub manifest: crate::loopcheck::LeadManifest,
     pub manifest_path: PathBuf,
     pub harness: String,
+    /// Where the harness answer came from: `manifest`, or `registry` when the
+    /// holder row outranked a manifest naming a foreign harness.
+    pub harness_source: String,
+    /// Set when the holder row's harness differs from the manifest's claim:
+    /// the manifest is stale, the row wins, and the payload says so.
+    pub harness_disagreement: Option<String>,
     pub now: chrono::DateTime<chrono::Utc>,
     pub window: String,
     pub checkin_interval_secs: i64,
@@ -327,8 +333,43 @@ pub(crate) fn resolve_verdict_inputs(
         .map_err(|e| format!("{}: unreadable manifest: {e}", manifest_path.display()))?;
     let manifest = crate::loopcheck::parse_lead_manifest(&content)
         .ok_or_else(|| "lead manifest has no frontmatter".to_string())?;
-    let harness = crate::loopcheck::scan_manifest_field(&content, "harness")
+    let registry = crate::state::load_registry(registry_path)
+        .map_err(|error| format!("{}: registry unreadable: {error}", registry_path.display()))?;
+    let manifest_harness = crate::loopcheck::scan_manifest_field(&content, "harness")
         .unwrap_or_else(|| "claude".into());
+    let holder_session = manifest
+        .harness_session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty());
+    // The row outranks the manifest on a harness disagreement: a role write
+    // that stamped the arming caller's harness (fixed at the write) leaves
+    // older manifests naming a foreign harness, and every transcript reader
+    // keyed on the manifest harness resolves blind. Prefer the holder row's
+    // own harness and name the source so the payload can print the split.
+    let (harness, harness_source, harness_disagreement) = match holder_session.as_deref() {
+        Some(session_id) => {
+            let row = crate::lead_state::find_by_session(
+                &registry.entries,
+                session_id,
+                Some(&manifest_harness),
+            )
+            .or_else(|| crate::lead_state::find_by_session(&registry.entries, session_id, None));
+            match row {
+                Some(row) if row.harness.as_deref().is_some_and(|h| !h.is_empty()) => {
+                    let row_harness = row.harness.clone().unwrap();
+                    let disagreement = (row_harness != manifest_harness).then(|| {
+                        format!(
+                            "manifest names harness {manifest_harness}; the holder row says \
+                             {row_harness}, which wins"
+                        )
+                    });
+                    (row_harness, "registry".to_string(), disagreement)
+                }
+                _ => (manifest_harness.clone(), "manifest".to_string(), None),
+            }
+        }
+        None => (manifest_harness.clone(), "manifest".to_string(), None),
+    };
     let (interval, ceiling) = read_config(cwd, &harness)?;
     let teamed_at = manifest.created_at.clone().ok_or_else(|| {
         format!(
@@ -343,12 +384,8 @@ pub(crate) fn resolve_verdict_inputs(
             manifest_path.display()
         )
     })?;
-    let registry = crate::state::load_registry(registry_path)
-        .map_err(|error| format!("{}: registry unreadable: {error}", registry_path.display()))?;
-    let holder_row = manifest
-        .harness_session_id
+    let holder_row = holder_session
         .as_deref()
-        .filter(|session_id| !session_id.trim().is_empty())
         .and_then(|session_id| registry.find_by_session(&harness, session_id));
     let (generation_start, generation_start_source) = generation_start(
         &registry,
@@ -417,6 +454,8 @@ pub(crate) fn resolve_verdict_inputs(
         manifest,
         manifest_path,
         harness,
+        harness_source,
+        harness_disagreement,
         now: current,
         window: window_display(window_secs),
         checkin_interval_secs: interval,
