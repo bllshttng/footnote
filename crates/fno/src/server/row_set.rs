@@ -39,7 +39,8 @@ static RINGS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ActivityRing>
     std::sync::OnceLock::new();
 
 pub(crate) fn rings() -> std::sync::MutexGuard<'static, HashMap<String, ActivityRing>> {
-    RINGS.get_or_init(Default::default)
+    RINGS
+        .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
