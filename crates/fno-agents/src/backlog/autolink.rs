@@ -132,8 +132,8 @@ fn id(e: &Value) -> &str {
 /// The team outcome for a teamed filer's unlinked node, or None. The guess
 /// rides `reason` and the caller prints the receipt, so the edge is never
 /// silent. Nesting and cycle guards match the auto-link path.
-fn team_resolution(node: &Value, entries: &[Value], crown_scope: &str) -> Option<Resolution> {
-    let epic_id = team_epic_from_scope(Some(crown_scope), entries)?;
+fn team_resolution(node: &Value, entries: &[Value], role_scope: &str) -> Option<Resolution> {
+    let epic_id = team_epic_from_scope(Some(role_scope), entries)?;
     let target = find_node(entries, &epic_id)?;
     if would_exceed_epic_depth(entries, node, &target) {
         return None;
@@ -170,14 +170,14 @@ fn current_team_scope() -> Option<String> {
     let registry = crate::state::load_registry(&registry_path).ok()?;
     registry
         .find_by_session(harness, session_id)
-        .and_then(|row| row.crown_scope.clone())
+        .and_then(|row| row.role_scope.clone())
 }
 
 /// Run the rollup ladder for a node that already exists in `entries`.
-/// Pure: scores and decides, never mutates. `crown_scope` overrides the
+/// Pure: scores and decides, never mutates. `role_scope` overrides the
 /// ambient registry read when the caller already holds one; None resolves
 /// the caller's own team lazily on the suggest/orphan tail only.
-pub fn resolve(node: &Value, entries: &[Value], crown_scope: Option<String>) -> Resolution {
+pub fn resolve(node: &Value, entries: &[Value], role_scope: Option<String>) -> Resolution {
     if !ROLLUP_TYPES.contains(&node.get("type").and_then(Value::as_str).unwrap_or_default())
         || node
             .get("orphan_ok")
@@ -215,7 +215,7 @@ pub fn resolve(node: &Value, entries: &[Value], crown_scope: Option<String>) -> 
         if !any_live_epic {
             return exempt_with("no epics in graph");
         }
-        return team_or_orphan(node, entries, crown_scope, candidates);
+        return team_or_orphan(node, entries, role_scope, candidates);
     }
     let top = candidates[0].clone();
     let runner_up = candidates.get(1).map(|c| c.1).unwrap_or(0.0);
@@ -228,7 +228,7 @@ pub fn resolve(node: &Value, entries: &[Value], crown_scope: Option<String>) -> 
             reason: top.2,
         };
     }
-    team_or_orphan(node, entries, crown_scope, candidates)
+    team_or_orphan(node, entries, role_scope, candidates)
 }
 
 fn exempt_with(reason: &str) -> Resolution {
@@ -244,10 +244,10 @@ fn exempt_with(reason: &str) -> Resolution {
 fn team_or_orphan(
     node: &Value,
     entries: &[Value],
-    crown_scope: Option<String>,
+    role_scope: Option<String>,
     candidates: Vec<(String, f64, String)>,
 ) -> Resolution {
-    let scope = match crown_scope {
+    let scope = match role_scope {
         Some(scope) => Some(scope),
         None => current_team_scope(),
     };

@@ -58,7 +58,7 @@ fn child_row(name: &str, sid: &str, parent_sid: &str) -> state::RegistryEntry {
     e
 }
 
-/// AC1-HP: a finished blueprint parent (uncrowned, idle, otherwise
+/// AC1-HP: a finished blueprint parent (unpromoted, idle, otherwise
 /// retire-eligible) with a live busy handoff row (`sob-t-`) naming its
 /// session retires; a handoff never holds its spawner.
 #[test]
@@ -179,7 +179,7 @@ fn a_teamed_parent_is_kept_and_its_org_reads_as_child() {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     crate::state::update_registry(&home.registry_json(), |r| {
         let mut lead = parent_row("lead-x-demo", "s-lead");
-        lead.crown_level = Some(1);
+        lead.role_level = Some(1);
         r.entries.push(lead);
         let mut org = child_row("node-x-demo2-g2", "s-org", "s-lead");
         org.status = crate::AgentStatus::Busy;
@@ -215,13 +215,13 @@ fn an_unstamped_row_with_a_live_manifest_is_kept_teamed() {
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     let space = crate::paths::space_dir(&repo);
-    let leads = space.join("kings");
+    let leads = space.join("leads");
     std::fs::create_dir_all(&leads).unwrap();
     std::fs::write(
         leads.join("x-demo.md"),
         "---\nscope: x-demo\nshape: pass\nharness: claude\n\
          harness_session_id: s-leadm\nowner_pid: 1\ncreated_at: 2026-09-01T00:00:00Z\n\
-         crown_scope: x-demo\ncrown_level: 2\ncrown_grantor: vellum\n---\n",
+         role_scope: x-demo\nrole_level: 2\nrole_grantor: vellum\n---\n",
     )
     .unwrap();
     stage_graph(

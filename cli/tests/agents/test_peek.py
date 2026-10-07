@@ -180,22 +180,22 @@ def test_peek_gone_pane_names_the_exit_and_the_resume(tmp_path, monkeypatch):
     )
     out, err = io.StringIO(), io.StringIO()
     rc = peek(
-        "king-4d9b-delivery",
+        "lead-4d9b-delivery",
         stdout=out,
         stderr=err,
         resolve=lambda h: (None, ["someone-else"]),
         projects_root=tmp_path,
-        mux_lookup=lambda h: ("main", 2277, "king-4d9b-delivery"),
+        mux_lookup=lambda h: ("main", 2277, "lead-4d9b-delivery"),
         mux_reader=lambda sess, pane, n: (1, ""),
     )
     msg = err.getvalue()
     assert "pane 2277 is gone" in msg
-    assert "fno agents resume king-4d9b-delivery" in msg
+    assert "fno agents resume lead-4d9b-delivery" in msg
     assert "the mux did not answer" not in msg
     # The fall-through continues past the pane read, so the not-found shape
     # (no registry row in this test) is the expected exit here, not 1.
     assert rc == 13
-    assert "peer not found in the registry: king-4d9b-delivery" in msg
+    assert "peer not found in the registry: lead-4d9b-delivery" in msg
 
 
 def test_peek_mux_pane_no_row_falls_through_to_not_found(tmp_path):
@@ -1464,7 +1464,7 @@ def _quiet_claude_fleet(tmp_path, monkeypatch, session_id):
 
     The x-f715 shape: the live listing is liveness-gated, so nothing here
     answers a live resolver, and the exact row match takes only the name
-    ("king-harness-pi") and the full session id - the 8-hex handle hits
+    ("lead-harness-pi") and the full session id - the 8-hex handle hits
     neither. The durable-store rung is the only reader left.
     """
     from fno import paths
@@ -1494,7 +1494,7 @@ def _quiet_claude_fleet(tmp_path, monkeypatch, session_id):
     write_registry(
         [
             AgentEntry(
-                name="king-harness-pi",
+                name="lead-harness-pi",
                 harness="claude",
                 harness_session_id=session_id,
                 status="orphaned",
@@ -1514,7 +1514,7 @@ def test_peek_resolves_a_quiet_session_by_short_session_id(tmp_path, monkeypatch
 
     x-f715: peek refused a short-id handle with "peer not found in the
     registry" while three other readers resolved the same session. The refusal
-    named an absence the roster contradicted, and the crown rerouted a launch
+    named an absence the roster contradicted, and the role rerouted a launch
     order on the strength of it.
     """
     session_id = "647b3a9c-6544-43fe-899e-704382f3d973"

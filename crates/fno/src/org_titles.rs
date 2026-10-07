@@ -16,7 +16,7 @@ pub fn titles(store_path: &Path) -> BTreeMap<String, String> {
             // One release of dual-read: a store the daemon-start move has
             // not reached yet still lives under the pre-rename name.
             if store_path.file_name().and_then(|n| n.to_str()) == Some("team_names.json") {
-                let legacy = store_path.with_file_name("crown_names.json");
+                let legacy = store_path.with_file_name("role_names.json");
                 match std::fs::read(legacy) {
                     Ok(bytes) => bytes,
                     Err(_) => return BTreeMap::new(),
@@ -57,9 +57,9 @@ mod tests {
             std::fs::write(
                 &path,
                 r#"{"version": 1, "teams": {
-                    "x-aaaa": {"name": "kestrel", "regnal": 1, "nodes": [], "updated_at": "t",
+                    "x-aaaa": {"name": "kestrel", "generation": 1, "nodes": [], "updated_at": "t",
                                "title": "Lead of native backlog"},
-                    "fno": {"name": "folio", "regnal": 1, "nodes": [], "updated_at": "t"}
+                    "fno": {"name": "folio", "generation": 1, "nodes": [], "updated_at": "t"}
                 }}"#,
             )
             .unwrap();

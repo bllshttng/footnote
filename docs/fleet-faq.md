@@ -32,7 +32,7 @@ Run the `/simple-english` skill over your entry before you send it. That is ASD-
 
 **Retiring one.** The PR that satisfies a `Graduates to:` line replaces that entry with one Retired line, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
-**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A reigning lead's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/lead/SKILL.md](../skills/lead/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
+**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A serving lead's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/lead/SKILL.md](../skills/lead/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
 
 Do not trust that backstop on its own. This file's own beat entry records a lead losing its check-in loop at a compact, with no reader that reported the loss. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
@@ -154,7 +154,7 @@ The shapes, each measured:
 
 **A missing verb reads as an empty list.** `fno inbox outstanding list` does not exist. The command printed a usage error, a grep filtered it to nothing, and the shell exited 0. When 283 questions were open, the read looked like none.
 
-**A path in an error is a path from somewhere.** CI reported `ERROR collecting tests/unit/test_king_scope.py`. That path exists nowhere in the tree. The file is at `cli/tests/unit/test_king_scope.py`, because CI reports relative to the root it runs pytest from. A session nearly filed the check as stale.
+**A path in an error is a path from somewhere.** CI reported `ERROR collecting tests/unit/test_lead_scope.py`. That path exists nowhere in the tree. The file is at `cli/tests/unit/test_lead_scope.py`, because CI reports relative to the root it runs pytest from. A session nearly filed the check as stale.
 
 **A refusal blames the reader that worked.** `fno agents rm` refuses with `its harness row's presence in 'claude agents --json --all' could not be confirmed (the roster read failed)`. The same command seconds later in the same shell: exit 0, 32,578 bytes on stdout, 0 on stderr, 121 rows, target row present with `state: done`. The code folds "row still present" and "roster unreadable" into one condition and reports the second. Its printed remedy asks the caller to retry once the roster is readable, which names a condition already true.
 
@@ -271,7 +271,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 
 Do not change reap to agree with `top`. Reap holds the correct guards, and a change there removes them.
 
-**Specimen.** `top` printed `retirable: <id> holds a zai lane; <node> is done, merged` for two rows. `reap --dry-run` retired zero and placed the same two in `kept_crowned` and `kept_active`, with `age_s: 56`, because that session had just sent mail.
+**Specimen.** `top` printed `retirable: <id> holds a zai lane; <node> is done, merged` for two rows. `reap --dry-run` retired zero and placed the same two in `kept_promoted` and `kept_active`, with `age_s: 56`, because that session had just sent mail.
 
 *Graduates to:* the retirable label reading the same guards as reap, or a weaker name that does not promise a reap.
 
@@ -315,7 +315,7 @@ Until the fix merges, confirm ownership against the worker roster. Do not trust 
 
 **Answer.** Share counts live harness rows, and a session never ends. A finished worker holds its lane forever.
 
-**Specimen.** `spawn-gate: king <id> holds 6 of max_live 30 across 5 kings (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every lead's share fills with dead rows, dispatch stops, and no reader reports it.
+**Specimen.** `spawn-gate: lead <id> holds 6 of max_live 30 across 5 leads (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every lead's share fills with dead rows, dispatch stops, and no reader reports it.
 
 **Specimen, the clean case.** A worker shipped its pull request and the pull request merged. The node closed with its claim released. The loop reported the terminal reason `DonePRGreen`. Its row then read `parked` rather than disappearing, and the share stayed full. Four terminal events, and none released the lane. Nothing further is available to that worker to give the slot back.
 
@@ -367,7 +367,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Answer.** No. Re-arm them by hand after a compact, and test each arm rather than trusting a receipt.
 
-**Specimen.** `hooks/king-postcompact-reinject.sh:100` states that the loop, goal and monitors survive a compact, then tells the reader to verify and re-arm any that is missing. The two halves contradict each other, and a lead who reads the first half stops checking. After a compact on 2026-09-08 `CronList` returned no scheduled jobs, and both monitors were reported stopped as orphans with no completion record. All three were re-armed by hand.
+**Specimen.** `hooks/lead-postcompact-reinject.sh:100` states that the loop, goal and monitors survive a compact, then tells the reader to verify and re-arm any that is missing. The two halves contradict each other, and a lead who reads the first half stops checking. After a compact on 2026-09-08 `CronList` returned no scheduled jobs, and both monitors were reported stopped as orphans with no completion record. All three were re-armed by hand.
 
 *Graduates to:* the sentence stating what actually survives, and a recovery step that tests each arm and reports each result.
 
@@ -443,7 +443,7 @@ An earlier version of this entry cited a task reader here, and that citation was
 
 **You cannot answer this for anyone else.** A check-in event carries a timestamp, a type, a source and a data blob. It names no session, no lead and no role scope. With no state file present, the source field defaults to `test`. A lead session has none, so every lead check-in journals as a test event. A fleet-wide question about which leads still have a beat has no reader at all.
 
-The source field cannot be fixed by hand either. `fno doctor event emit -s king-<id>` is refused, because the enum is closed and carries no lead value. Its one extensible pattern is `worker:` or `stream-worker:`. So a lead defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
+The source field cannot be fixed by hand either. `fno doctor event emit -s lead-<id>` is refused, because the enum is closed and carries no lead value. Its one extensible pattern is `worker:` or `stream-worker:`. So a lead defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
 
 *Graduates to:* a check-in verb that stamps source, role scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
 

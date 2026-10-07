@@ -104,7 +104,7 @@ def _deliver_answer(
     asker = getattr(question, "asker", None)
     if not asker:
         return (
-            f"outstanding: {qid} answered; no asker on record (king escalation), "
+            f"outstanding: {qid} answered; no asker on record (lead escalation), "
             f"nobody to wake. Decision {did}; recover it via: fno backlog decisions"
         )
 

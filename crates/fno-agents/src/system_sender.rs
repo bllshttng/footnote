@@ -9,7 +9,7 @@
 
 /// The daemon arms that send mail, and the `fno/<arm>` name each one uses.
 pub const SYSTEM_ARMS: &[&str] = &[
-    "king-settle",
+    "lead-settle",
     "pr-nudge",
     "burn-watch",
     "fleet-incident",
@@ -21,14 +21,14 @@ pub const SYSTEM_ARMS: &[&str] = &[
 /// The legacy stamps old bus rows carry, and the `fno/<arm>` name each one
 /// reads as. A stamp is recognized with or without its dash.
 pub const LEGACY_ALIASES: &[(&str, &str)] = &[
-    ("king-settle", "fno/king-settle"),
+    ("lead-settle", "fno/lead-settle"),
     ("pr-nudge", "fno/pr-nudge"),
     ("burn-watch", "fno/burn-watch"),
     ("fleet-incident", "fno/fleet-incident"),
     ("fno-mail-hold", "fno/mail-hold"),
 ];
 
-/// The `fno/<arm>` name for an arm word (`king-settle` -> `fno/king-settle`).
+/// The `fno/<arm>` name for an arm word (`lead-settle` -> `fno/lead-settle`).
 /// An unknown arm is still allowed - a new daemon arm takes the prefix and
 /// the read model marks it system from the prefix, so the table lists the
 /// arms only for documentation and tests.
@@ -36,8 +36,8 @@ pub fn system_name(arm: &str) -> String {
     format!("fno/{arm}")
 }
 
-/// The canonical `fno/<already-prefixed>` or legacy stamp read: `king-settle`
-/// and `fno/king-settle` and `fno-mail-hold` all read `fno/king-settle` and
+/// The canonical `fno/<already-prefixed>` or legacy stamp read: `lead-settle`
+/// and `fno/lead-settle` and `fno-mail-hold` all read `fno/lead-settle` and
 /// `fno/mail-hold` respectively. An unknown sender reads unchanged.
 pub fn canonical(sender: &str) -> &str {
     for (legacy, name) in LEGACY_ALIASES {
@@ -50,7 +50,7 @@ pub fn canonical(sender: &str) -> &str {
 
 /// True when the sender is a system voice: the `fno/` prefix, a legacy stamp
 /// that maps to one, or the bare `fno` the old floor produced. Old rows
-/// stamped `king-settle` or bare `fno` read system; the read model marks
+/// stamped `lead-settle` or bare `fno` read system; the read model marks
 /// them from this table, never by name matching.
 pub fn is_system_sender(sender: &str) -> bool {
     sender == "fno"
@@ -74,9 +74,9 @@ mod tests {
 
     #[test]
     fn system_names_map_and_the_bare_fno_guard_hold() {
-        assert_eq!(canonical("king-settle"), "fno/king-settle");
+        assert_eq!(canonical("lead-settle"), "fno/lead-settle");
         assert_eq!(canonical("fno-mail-hold"), "fno/mail-hold");
-        assert_eq!(canonical("fno/king-settle"), "fno/king-settle");
+        assert_eq!(canonical("fno/lead-settle"), "fno/lead-settle");
         assert_eq!(canonical("candor"), "candor");
         assert!(is_system_sender("fno/pr-nudge"));
         assert!(is_system_sender("burn-watch"));

@@ -71,18 +71,18 @@ pub(crate) fn fno_verdict(e: &RegistryEntry) -> RowVerdict {
     )
 }
 
-/// The crown-vacancy read: does this row's death vacate what it holds?
+/// The role-vacancy read: does this row's death vacate what it holds?
 /// Orphaned is the reversible resumable word (a quiet live lead settles
 /// Orphaned), so the word alone never vacates - only a Finished verdict
 /// does. A Live row holds what it carries, and an Unknown row holds too:
-/// an undecided reader never hands a crown away.
+/// an undecided reader never hands a role away.
 pub(crate) fn finished(e: &RegistryEntry) -> bool {
     matches!(fno_verdict(e), RowVerdict::Finished(_))
 }
 
 /// [`finished`] over a raw registry row rendered as JSON - the
 /// spawn-overlay payload shape, where rows arrive as Python `asdict`
-/// output and the crown-widen caller as a slim projection. Only the
+/// output and the role-widen caller as a slim projection. Only the
 /// reversible word re-answers through the door; every other status keeps
 /// the legacy word list, so this read changes exactly one contract. A row
 /// whose door fields do not parse keeps the legacy answer too.
@@ -296,10 +296,10 @@ mod tests {
         assert!(drift(&decided, None).is_none());
         assert!(drift(&unknown, Some("done")).is_none());
 
-        // The crown-vacancy read: the reversible word never vacates on the
+        // The role-vacancy read: the reversible word never vacates on the
         // word alone. Orphaned with a live pid holds, Orphaned with a
         // reaped pid vacates, and Orphaned with no evidence at all holds -
-        // an undecided reader never hands a crown away. The decided words
+        // an undecided reader never hands a role away. The decided words
         // keep the legacy list.
         let mut quiet_live = entry();
         quiet_live.status = crate::AgentStatus::Orphaned;

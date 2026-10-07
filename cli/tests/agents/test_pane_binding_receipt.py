@@ -592,7 +592,7 @@ def test_an_unreadable_frame_is_unattempted_not_unconfirmed() -> None:
 def test_an_argv_seed_is_submitted_even_when_the_frame_is_blank() -> None:
     """A pane that has not painted has not refused anything.
 
-    This is the false-negative that nearly cost a live worker: a king reading
+    This is the false-negative that nearly cost a live worker: a lead reading
     `unattempted` either re-seeds a pane that is already running its task, or
     reaps it and respawns.
     """

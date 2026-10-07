@@ -175,7 +175,7 @@ impl Router {
             }
             if candidates.is_empty() {
                 if let Some(row) = row {
-                    if let Some(scope) = row.crown_scope.as_deref() {
+                    if let Some(scope) = row.role_scope.as_deref() {
                         let canon = crate::event_store::canonical_scope(scope);
                         if !canon.is_empty() {
                             out.team = Some(canon.clone());

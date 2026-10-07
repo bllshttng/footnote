@@ -80,7 +80,7 @@ def test_explicit_command_wins_over_config_and_builtin():
 
 
 def test_qualified_dispatch_verb_canonicalizes_before_the_allowlist():
-    # US7 review: the court contract sets `--dispatch-verb /fno:target` (every
+    # US7 review: the team contract sets `--dispatch-verb /fno:target` (every
     # dispatched verb is plugin-qualified). The bare-only allowlist must not
     # refuse it - it canonicalizes to `/target`, then renders per-harness.
     out = resolve_dispatch(harness="claude", node_id="x-abcd", verb="/fno:target")
@@ -602,7 +602,7 @@ def test_missing_runtime_refuses_naming_the_remedy(monkeypatch):
 
 
 def assert_refusal_names_subject_and_cites_no_node(exc: DispatchResolveError) -> None:
-    # A king reads the refusal cold: the failing node must be the first
+    # A lead reads the refusal cold: the failing node must be the first
     # identifier in the sentence, and a trailing citation invites a misread
     # (the node that shipped this assertion went to fix the cited node).
     message = str(exc)

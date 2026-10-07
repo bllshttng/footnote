@@ -96,25 +96,25 @@ fn apply(payload: &Value) -> Result<Value, String> {
     let rows = payload["rows"]
         .as_array()
         .ok_or("spawn-team: rows must be an array")?;
-    let heir_index = if payload["stamp"].as_bool() == Some(true) {
+    let successor_index = if payload["stamp"].as_bool() == Some(true) {
         let identity = crate::team_identity::resolve(&json!({
             "rows": rows,
-            "expect": {"name": payload["heir"],
-                "harness_session_id": payload["heir_identity"]["session_id"]},
+            "expect": {"name": payload["successor"],
+                "harness_session_id": payload["successor_identity"]["session_id"]},
         }))?;
         if identity["matched"] != true {
             return Ok(json!({"outcome": "declined", "updates": {}, "vacated": [],
-                "heir_index": null}));
+                "successor_index": null}));
         }
         identity["index"].as_u64().map(|i| i as usize)
     } else {
         None
     };
     let mut settlement = payload.clone();
-    if heir_index.is_some() {
+    if successor_index.is_some() {
         // A carrier may stamp at mint, before the seed turn runs. Its own
-        // verified heir is not a competing holder during settlement.
-        settlement["exclude_name"] = payload["heir"].clone();
+        // verified successor is not a competing holder during settlement.
+        settlement["exclude_name"] = payload["successor"].clone();
     }
     let answer = crate::team_settle::resolve(&settlement)?;
     let outcome = answer["outcome"]
@@ -134,19 +134,19 @@ fn apply(payload: &Value) -> Result<Value, String> {
             rows.get(i).ok_or("spawn-team: row index out of bounds")?;
             updates.insert(
                 i.to_string(),
-                json!({"crown_level": null,
-                "crown_scope": null, "crown_grantor": null}),
+                json!({"role_level": null,
+                "role_scope": null, "role_grantor": null}),
             );
             vacated.push(json!([i, cause, {}]));
         }
     }
     reown(rows, &answer, &mut updates, &mut vacated)?;
-    if let Some(i) = heir_index {
+    if let Some(i) = successor_index {
         let stamp = if outcome == "declined" {
-            json!({"crown_level": null, "crown_scope": null, "crown_grantor": null})
+            json!({"role_level": null, "role_scope": null, "role_grantor": null})
         } else {
-            json!({"crown_level": payload["level"], "crown_scope": payload["scope"],
-                "crown_grantor": payload["grantor"]})
+            json!({"role_level": payload["level"], "role_scope": payload["scope"],
+                "role_grantor": payload["grantor"]})
         };
         updates
             .entry(i.to_string())
@@ -157,7 +157,7 @@ fn apply(payload: &Value) -> Result<Value, String> {
     }
     Ok(
         json!({"outcome": outcome, "updates": updates, "vacated": vacated,
-        "heir_index": heir_index}),
+        "successor_index": successor_index}),
     )
 }
 
@@ -198,16 +198,16 @@ fn journal(payload: &Value) -> Value {
         let cause = vacated[1].as_str().unwrap_or("");
         let (kind, data) = if cause == "reowned" {
             (
-                "agent_court_reowned",
+                "agent_team_reowned",
                 json!({"scope": payload["scope"],
                 "successor": payload["name"], "child": row["name"]}),
             )
         } else {
             (
-                "agent_crown_vacated",
+                "agent_role_vacated",
                 json!({"scope": payload["scope"],
-                "level": row["crown_level"], "holder": row["name"],
-                "holder_session": row["harness_session_id"], "grantor": row["crown_grantor"],
+                "level": row["role_level"], "holder": row["name"],
+                "holder_session": row["harness_session_id"], "grantor": row["role_grantor"],
                 "cause": cause, "successor": if cause == "succession" {payload["name"].clone()} else {Value::Null}}),
             )
         };
@@ -215,7 +215,7 @@ fn journal(payload: &Value) -> Value {
     }
     let armed = matches!(payload["outcome"].as_str(), Some("granted" | "succeeded"));
     if armed {
-        events.push(json!({"kind": "agent_crowned", "data": {
+        events.push(json!({"kind": "agent_promoted", "data": {
             "name": payload["name"], "level": payload["level"],
             "scope": payload["scope"], "grantor": payload["grantor"],
             "vacated_scope": null, "vacated_level": null, "stranded_subordinates": []}}));
@@ -315,11 +315,11 @@ mod tests {
     }
 
     #[test]
-    fn rebound_heir_cannot_clear_the_predecessor() {
+    fn rebound_successor_cannot_clear_the_predecessor() {
         let answer = resolve(&json!({"op": "apply", "stamp": true, "scope": "epic-a",
-            "heir": "heir", "heir_identity": {"session_id": "original"},
-            "rows": [{"name": "heir", "harness_session_id": "rebound"},
-                {"name": "predecessor", "crown_level": 2, "crown_scope": "epic-a"}]}))
+            "successor": "successor", "successor_identity": {"session_id": "original"},
+            "rows": [{"name": "successor", "harness_session_id": "rebound"},
+                {"name": "predecessor", "role_level": 2, "role_scope": "epic-a"}]}))
         .unwrap();
         assert_eq!(answer["outcome"], "declined");
         assert_eq!(answer["updates"], json!({}));

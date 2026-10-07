@@ -52,8 +52,8 @@ pub(crate) fn registry_json_logic(rows: &[Value]) -> Value {
                 },
                 "harness_session_id": row.get("harness_session_id").and_then(Value::as_str),
                 "status": row.get("status").and_then(Value::as_str).unwrap_or("live"),
-                "crown_level": row.get("crown_level").cloned().unwrap_or(Value::Null),
-                "crown_scope": row.get("crown_scope").and_then(Value::as_str),
+                "role_level": row.get("role_level").cloned().unwrap_or(Value::Null),
+                "role_scope": row.get("role_scope").and_then(Value::as_str),
                 "spawned_by_session": row.get("spawned_by_session").and_then(Value::as_str),
                 "spawned_by_harness": row.get("spawned_by_harness").and_then(Value::as_str),
                 "lineage_reason": row.get("lineage_reason").and_then(Value::as_str),
@@ -82,7 +82,7 @@ mod tests {
     fn row(fields: Value) -> Value {
         let mut base = json!({
             "name": "w1", "harness": "codex", "status": "live",
-            "crown_level": null, "crown_scope": null,
+            "role_level": null, "role_scope": null,
             "spawned_by_session": "parent-1", "origin": null,
         });
         let obj = base.as_object_mut().unwrap();
@@ -155,8 +155,8 @@ mod tests {
                 "session_id",
                 "harness_session_id",
                 "status",
-                "crown_level",
-                "crown_scope",
+                "role_level",
+                "role_scope",
                 "spawned_by_session",
                 "origin",
                 "liveness",

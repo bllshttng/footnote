@@ -75,10 +75,10 @@ if [[ "$(printf '%s' "$HOOK_INPUT" | jq -r '.invocationNum // empty' 2>/dev/null
     MY_ROW="$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$CONVERSATION_ID" \
         '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)"
     [[ -n "$MY_ROW" ]] || { emit; exit 0; }
-    CROWN_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)"
-    CROWN_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)"
-    [[ -n "$CROWN_LEVEL" || -n "$CROWN_SCOPE" ]] \
-      && STEPS+=("You are the lead: team level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami\`. Before any CLI verb, load the lead reference at skills/lead/references/cli-commands.md.")
+    ROLE_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.role_level // empty' 2>/dev/null)"
+    ROLE_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.role_scope // empty' 2>/dev/null)"
+    [[ -n "$ROLE_LEVEL" || -n "$ROLE_SCOPE" ]] \
+      && STEPS+=("You are the lead: team level ${ROLE_LEVEL:-?} over ${ROLE_SCOPE:-?}. Confirm with \`fno whoami\`. Before any CLI verb, load the lead reference at skills/lead/references/cli-commands.md.")
 fi
 
 emit

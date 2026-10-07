@@ -90,7 +90,7 @@ pub fn actor_kind_in(
 pub fn actor_kind_from_authority(authority_source: Option<&str>) -> &'static str {
     match authority_source {
         Some("operator") => "user",
-        Some("crown") => "lead",
+        Some("role") => "lead",
         _ => "worker",
     }
 }
@@ -511,7 +511,7 @@ mod tests {
         // A plain body writes the origin row and nothing else (AC4).
         let plain = MailRecordArgs {
             origin: "operator".into(),
-            lane: "king".into(),
+            lane: "lead".into(),
             sender: None,
             target_session: None,
             reply_to: None,

@@ -404,17 +404,17 @@ def whoami_command(
     # must never gain a failure mode, and a fresh SessionStart stays byte-for-byte
     # unchanged (the inject block carries a real number exactly on a post-compaction
     # resume, where re-orientation matters).
-    from fno.agents.crown import current_crown
+    from fno.agents.role import current_role
     from fno.context_probe import probe_context
 
     context_reading = probe_context()
     # Registry-derived identity, like `mail` and `agent_self` above: resolved
-    # once and rendered by both branches. `current_crown` never raises, so an
+    # once and rendered by both branches. `current_role` never raises, so an
     # attended human shell (no agent identity, no registry row) answers None
     # and both branches below omit the line/key entirely - byte-for-byte
-    # unchanged from before this session gained a crown to report.
-    crown = current_crown()
-    # Resolved once and rendered by both branches, like mail and crown above.
+    # unchanged from before this session gained a role to report.
+    role = current_role()
+    # Resolved once and rendered by both branches, like mail and role above.
     foreign_identity = _foreign_identity_line()
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
@@ -447,8 +447,8 @@ def whoami_command(
             from fno.config import provider_subagent_budget
 
             payload["subagent_budget"] = provider_subagent_budget(provider)
-        if crown is not None:
-            payload["crown"] = crown["text"]
+        if role is not None:
+            payload["role"] = role["text"]
         if context_reading is not None:
             payload["context_used_pct"] = context_reading.used_pct
             payload["context_used_tokens"] = context_reading.used_tokens
@@ -519,8 +519,8 @@ def whoami_command(
         typer.echo(f"agent:    {agent_self} (mesh)")
     elif agent_registry_name:
         typer.echo(f"agent:    {agent_registry_name} (registry)")
-    if crown is not None:
-        typer.echo(f"crown:    {crown['text']}")
+    if role is not None:
+        typer.echo(f"role:    {role['text']}")
     _emit_warnings(state)
 
 

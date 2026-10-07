@@ -9393,7 +9393,7 @@ impl Core {
                 .unwrap_or("<unknown>");
             // Identity is the id the pane's row answers to - its own fno_id or
             // its harness session id, either spelling - never the name: a
-            // rename (or a succession heir renamed after spawn) leaves the
+            // rename (or a succession successor renamed after spawn) leaves the
             // pane label stale while the ids still name the same live session.
             // The answers_to check is the whole gate.
             let addressed = occupants

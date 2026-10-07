@@ -376,7 +376,7 @@ fn continuation_owner_for_goal(
         }
         return Ok(format!("lead:{}", scope.trim()));
     }
-    if objective.starts_with("$fno:lead ") || objective.starts_with("$fno:reign ") {
+    if objective.starts_with("$fno:lead ") || objective.starts_with("$fno:lead ") {
         return Err("Codex lead goal owner requires the exact manifest scope".into());
     }
     if session_id.trim().is_empty() {

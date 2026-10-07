@@ -26,7 +26,7 @@ from fno.rust_binary import VerbUnavailable
 from typer.testing import CliRunner
 
 from fno.harness_identity import OwnedHarnessIdentity
-from fno.king.lane import LaneItem
+from fno.lead.lane import LaneItem
 from fno.outstanding.cli import outstanding_app
 from fno.outstanding.core import RENDER_CAP, Outstanding, Question, VerdictRow, render
 
@@ -1990,32 +1990,32 @@ def test_lane_leads_the_block_above_carveouts(root: Path):
     assert "ship 981 and 971 tonight" in out
 
 
-def test_render_hides_the_action_line_when_uncrowned():
-    """AC6-HP: an uncrowned session gets the count and top item, no action line."""
+def test_render_hides_the_action_line_when_unpromoted():
+    """AC6-HP: an unpromoted session gets the count and top item, no action line."""
     outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")])
-    block = render(outstanding, crowned=False)
+    block = render(outstanding, promoted=False)
     assert "1 item on your lane, top first." in block
     assert "ship it" in block
     assert "File one with:" not in block
 
 
-def test_render_shows_the_action_line_when_crowned():
-    """AC6-HP, the crowned half: the same input gets all three lines."""
+def test_render_shows_the_action_line_when_promoted():
+    """AC6-HP, the promoted half: the same input gets all three lines."""
     outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")])
-    block = render(outstanding, crowned=True)
+    block = render(outstanding, promoted=True)
     assert "File one with:" in block
 
 
 def test_render_reports_the_parked_count():
     outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")], lane_parked=1)
-    block = render(outstanding, crowned=False)
+    block = render(outstanding, promoted=False)
     assert "1 parked" in block
 
 
 def test_lane_alone_is_enough_to_break_silence():
     """AC4-EDGE positive control: a non-empty lane renders even with both other legs clear."""
     outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")])
-    assert render(outstanding, crowned=False) != ""
+    assert render(outstanding, promoted=False) != ""
     assert Outstanding(0, {}, None, [], []).empty
 
 
@@ -2228,13 +2228,13 @@ def test_an_unexpected_resolver_failure_is_a_stated_line_not_a_traceback(
 
 
 def test_no_asker_gets_a_stated_posture_not_a_silent_drop(monkeypatch: pytest.MonkeyPatch):
-    """AC4: king escalations carry asker None; the answer still says where it landed."""
+    """AC4: lead escalations carry asker None; the answer still says where it landed."""
     from fno.outstanding import deliver as deliver_mod
 
     sent: list[list[str]] = []
     monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
 
-    q = Question(id="q-00000001", ts="2026-08-21T00:00:00Z", question="king stalled", asker=None)
+    q = Question(id="q-00000001", ts="2026-08-21T00:00:00Z", question="lead stalled", asker=None)
     line = deliver_mod.deliver_answer(q, "reap them", "d-9f")
 
     assert not sent
@@ -2535,7 +2535,7 @@ def test_operator_authority_refusal_names_the_drop_flag_remedy(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The superuser lane is not an agent's to claim, and the remedy is the
-    flag drop: an agent answer records as agent or crown."""
+    flag drop: an agent answer records as agent or role."""
     from types import SimpleNamespace
 
     qid = (
@@ -2563,7 +2563,7 @@ def test_operator_authority_refusal_names_the_drop_flag_remedy(
     # The all-or-nothing statement survives too.
     assert "Nothing was closed" in refused.output
     # The remedy is the flag drop, not a second door.
-    assert "An agent answers as agent or crown" in refused.output
+    assert "An agent answers as agent or role" in refused.output
     assert "Drop --authority operator" in refused.output
     assert "/fno:law" not in refused.output
 

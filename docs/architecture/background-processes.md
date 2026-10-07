@@ -61,7 +61,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | arm | scheduler | hosted by | what it does | default interval |
 |---|---|---|---|---|
 | `lead_wake` | `daemon` | `fno-agents-daemon` | wakes a lead one minute past its check-in beat and tells the rung up | 300 s |
-| `king_wake` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the python-served pre-rename spelling of `lead_wake` | 900 s |
+| `lead_wake` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the python-served pre-rename spelling of `lead_wake` | 900 s |
 | `watchdog` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the fleet watchdog classifier over lanes | 600 s |
 | `pr_watch_sweep` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | scans open-PR backlog nodes and fires `/fno:ship pr check` | 600 s |
 | `pr_watch_merge` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the merge phase: fires the merge queue for ready PRs | 600 s |

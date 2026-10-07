@@ -451,7 +451,7 @@ pub enum Event {
     /// census, and the lane advisor's own answer. The block is always
     /// visible; this only expands or collapses it, and the client's view
     /// layer interprets that, not here.
-    OpenCourt,
+    OpenTeam,
     /// Toggle the activity feed panel on the right edge (e):
     /// questions, decisions and node lifecycle, newest first. The panel is
     /// chrome and consumes no keys; a click deep-links a row and the border
@@ -1307,7 +1307,7 @@ fn default_bindings() -> Vec<KeyBinding> {
         b(
             b'C',
             "org",
-            OpenCourt,
+            OpenTeam,
             Global,
             "the org block (load, census, lanes)", // minimize/expand, sideline
         ),

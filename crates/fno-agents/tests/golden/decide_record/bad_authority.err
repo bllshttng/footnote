@@ -1,1 +1,1 @@
-decide: --authority 'king' is not one of operator, crown, agent, beastmode. Nothing was recorded. Use 'crown' for a king ruling inside its own scope; omit the flag to resolve it from this session.
+decide: --authority 'lead' is not one of operator, role, agent, beastmode. Nothing was recorded. Use 'role' for a lead ruling inside its own scope; omit the flag to resolve it from this session.

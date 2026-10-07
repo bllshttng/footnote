@@ -1,0 +1,119 @@
+"""Promoting surfaces an epic's settled children, never re-derives them (x-ada6).
+
+The check-in body filters the board to open rows, so a freshly promoted lead
+walks past the done children that record what its epic already established and
+re-measures them. `fno agents lead init` is the promoting verb, so its output
+names the settled children as titles. Nothing prints when none exist: an
+absent section is the positive control, never an empty one.
+"""
+from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
+
+import json
+
+import pytest
+from typer.testing import CliRunner
+
+from fno.paths import graph_json
+from fno.paths_testing import use_tmpdir
+
+
+@pytest.fixture
+def team(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    monkeypatch.setattr("fno.lead.state.lead_loop_enabled", lambda: True)
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json", lambda *a, **k: (None, {"ready": True})
+    )
+    return tmp_path
+
+
+def _seed(rows: list[dict]) -> None:
+    complete = []
+    for row in rows:
+        entry = {"priority": "p2", "domain": "code", **row}
+        entry.setdefault("slug", entry["id"])
+        if entry.get("status") == "done":
+            entry.setdefault("completed_at", "2026-09-01T00:00:00Z")
+        complete.append(entry)
+    seed_graph(graph_json(), complete)
+
+
+def _init(team, scope: str):
+    from fno.lead.cli import lead_app
+
+    return CliRunner().invoke(
+        lead_app,
+        ["init", "--scope", scope, "--harness-session-id", "sess-1"],
+    )
+
+
+def test_promoting_output_names_the_settled_children(team) -> None:
+    _seed(
+        [
+            {"id": "x-00000001", "type": "epic", "title": "the epic"},
+            {
+                "id": "x-00000002",
+                "parent": "x-00000001",
+                "status": "done",
+                "title": "drain cost measured at 11 seconds per call",
+            },
+            {
+                "id": "x-00000003",
+                "parent": "x-00000001",
+                "status": "superseded",
+                "title": "megawalk dispatch, moved to compose",
+            },
+            {
+                "id": "x-00000004",
+                "parent": "x-00000001",
+                "status": "ready",
+                "title": "open work the board already shows",
+            },
+            {
+                "id": "x-00000005",
+                "parent": "x-00000006",
+                "status": "done",
+                "title": "another epic's settled row",
+            },
+        ]
+    )
+
+    result = _init(team, "x-00000001")
+
+    assert result.exit_code == 0, result.output
+    assert "Settled findings" in result.output
+    assert "drain cost measured at 11 seconds per call" in result.output
+    assert "megawalk dispatch, moved to compose" in result.output
+    assert "open work the board already shows" not in result.output
+    assert "another epic's settled row" not in result.output
+
+
+def test_no_settled_children_prints_no_section(team) -> None:
+    _seed(
+        [
+            {"id": "x-00000001", "type": "epic", "title": "the epic"},
+            {
+                "id": "x-00000002",
+                "parent": "x-00000001",
+                "status": "ready",
+                "title": "open work",
+            },
+        ]
+    )
+
+    result = _init(team, "x-00000001")
+
+    assert result.exit_code == 0, result.output
+    assert "Settled findings" not in result.output
+
+
+def test_unreadable_graph_prints_no_section(team, monkeypatch) -> None:
+    monkeypatch.setattr("fno.agents.role._graph_index", lambda: None)
+
+    result = _init(team, "epic-1")
+
+    assert result.exit_code == 0, result.output
+    assert "Settled findings" not in result.output

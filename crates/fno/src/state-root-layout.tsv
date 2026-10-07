@@ -50,7 +50,7 @@ approvals.db	db/approvals.db	sqlite	daemon
 # pages/ - regenerated renders.
 graph.md	pages/graph.md	page	daemon
 graph.html	pages/graph.html	page	daemon
-reign.html	pages/lead.html	page	daemon
+term.html	pages/lead.html	page	daemon
 rundown.html	pages/rundown.html	page	daemon
 fleet.html	pages/fleet.html	page	daemon
 # logs/ - append-only logs; launchd fds keep writing the renamed inode.

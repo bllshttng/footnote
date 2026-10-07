@@ -1,10 +1,10 @@
 //! `org_rivals`: the org view's rivalry scan, answered from the SAME
 //! ladder-aware rule the grant path enforces (`loop_lead::team_rivals`), so
 //! the view and the grant-time refusal cannot disagree. Reached as payload
-//! kind `court-rivals` on the spawn-overlay verb.
+//! kind `team-rivals` on the spawn-overlay verb.
 //!
-//! Input: `rows` of (name, crown_scope, crown_level); rows without a
-//! non-blank `crown_scope` claim nothing. Output: one rival PAIR per
+//! Input: `rows` of (name, role_scope, role_level); rows without a
+//! non-blank `role_scope` claim nothing. Output: one rival PAIR per
 //! double-ruled territory, `{"members": [...], "holders": [a, b]}` - one
 //! entry PER PAIR, never a merged group: rivalry is not transitive (A/e-1,
 //! B/e-1,e-2, C/e-2 rivals A-B and B-C only), so a group would claim three
@@ -48,11 +48,11 @@ fn scan(payload: &Value, projects: &HashMap<String, String>) -> Result<Value, St
     let rows = payload
         .get("rows")
         .and_then(Value::as_array)
-        .ok_or_else(|| "court-rivals: payload needs a rows array".to_string())?;
+        .ok_or_else(|| "team-rivals: payload needs a rows array".to_string())?;
     let mut claims: Vec<(String, Option<u32>, String)> = Vec::new();
     for row in rows {
         let scope = row
-            .get("crown_scope")
+            .get("role_scope")
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim();
@@ -64,7 +64,7 @@ fn scan(payload: &Value, projects: &HashMap<String, String>) -> Result<Value, St
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            row.get("crown_level")
+            row.get("role_level")
                 .and_then(Value::as_u64)
                 .map(|n| n as u32),
             scope.to_string(),
