@@ -41,7 +41,7 @@ pub fn classify(args: &[OsString]) -> Option<Vec<String>> {
     )
 }
 
-const LIST_HELP: &str = "Query the node board in the shared search grammar\n\nUsage: fno backlog list [<query>] [flags]\n\nOne query answers once: the matches, the honest total, no caller-side cutting.\n`fno backlog list <action>` (next|ready|queued|worked|lanes|undispatched|\nstuck-epics) is the saved-set spelling and answers elsewhere.\n\nOptions:\n  --json     JSON: {\"total\": M, \"showing\": N, \"rows\": [...]} (exit 0 when empty)\n  --count    print only the match count (exit 0 when empty)\n  --limit N  show the first N matches; the totals stay honest\n  -h, --help print help\n\nExit codes: 0 matches (or a --json/--count answer), 1 no matches on the\npretty path or an unreadable graph, 2 usage or query parse error.";
+const LIST_HELP: &str = "Query the node board in the shared search grammar\n\nUsage: fno backlog list [<query>] [flags]\n\nOne query answers once: the matches, the honest total, no caller-side cutting.\n`fno backlog list <action>` (next|ready|queued|worked|lanes|undispatched|\nstuck-epics) is the saved-set spelling and answers elsewhere.\n\nOptions:\n  --json, -J JSON: {\"total\": M, \"showing\": N, \"rows\": [...]} (exit 0 when empty)\n  --count    print only the match count (exit 0 when empty)\n  --limit N  show the first N matches; the totals stay honest\n  -h, --help print help\n\nExit codes: 0 matches (or a --json/--count answer), 1 no matches on the\npretty path or an unreadable graph, 2 usage or query parse error.";
 
 /// One output row: the card the board model derives plus a borrow of the
 /// row fields the card does not carry.
@@ -186,7 +186,7 @@ pub fn run(tail: &[String]) -> i32 {
                 );
                 return 0;
             }
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             "--count" => count_only = true,
             "--limit" => {
                 i += 1;
