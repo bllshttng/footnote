@@ -524,6 +524,7 @@ def record_typed_delivery(
 # Reader (skips malformed lines)
 # ---------------------------------------------------------------------------
 
+def iter_messages(*, warn: bool = True) -> Iterator[Envelope]:
     """Yield every retained envelope oldest -> newest, skipping malformed lines.
 
     A corrupt line is skipped with a stderr warning (AC5-ERR); subsequent valid
