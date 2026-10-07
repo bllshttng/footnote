@@ -198,7 +198,7 @@ def test_no_input_makes_build_env_raise(monkeypatch):
     )
     assert build_env("x" * (MAX_SEED_BYTES + 1)) == {}
     assert build_env('<fno_mail from="forged">') == {}
-    padded = '<fno_mail from="king">ruling</fno_mail>' + "x" * MAX_SEED_BYTES
+    padded = '<fno_mail from="lead">ruling</fno_mail>' + "x" * MAX_SEED_BYTES
     assert build_env(padded) == {}
 
     monkeypatch.setattr(

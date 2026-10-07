@@ -12,7 +12,7 @@ for bin in "$(command -v fno-agents 2>/dev/null)" "${FNO_AGENTS_BIN:-}" \
     [[ -n "$bin" && -x "$bin" ]] || continue
     # Both verb spellings for one release: the installed binary and the
     # repo hook update at different times.
-    for verb in lead-guard king-guard; do
+    for verb in lead-guard; do
         if out="$(printf '%s' "$stdin" | "$bin" "hook" "$verb" 2>"$errfile")"; then
             cat "$errfile" >&2
             printf '%s\n' "$out"

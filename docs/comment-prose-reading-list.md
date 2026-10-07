@@ -80,7 +80,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.75x | 11 | 4 | `cli/src/fno/adapters/providers/cli.py:935` | `pick_env_lines` |
 | 2.75x | 11 | 4 | `cli/src/fno/adapters/providers/managed.py:1105` | `slot_principal` |
 | 2.75x | 11 | 4 | `cli/src/fno/agents/rust_runtime.py:309` | `runtime_mode` |
-| 2.75x | 11 | 4 | `cli/src/fno/agents/rust_runtime.py:400` | `_is_crown_bearing_spawn` |
+| 2.75x | 11 | 4 | `cli/src/fno/agents/rust_runtime.py:400` | `_is_role_bearing_spawn` |
 | 2.75x | 11 | 4 | `cli/src/fno/graph/collision.py:101` | `_strip_path` |
 | 2.75x | 11 | 4 | `cli/src/fno/graph/store.py:737` | `_graph_lock_path` |
 | 2.75x | 11 | 4 | `cli/src/fno/plan/_ownership.py:36` | `assert_blueprint_can_write` |
@@ -486,7 +486,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.14x | 25 | 22 | `cli/src/fno/adapters/providers/error_taxonomy.py:244` | `normalize` |
 | 1.14x | 8 | 7 | `cli/src/fno/adapters/providers/managed.py:214` | `_read_slot_blob` |
 | 1.14x | 8 | 7 | `cli/src/fno/adapters/providers/model.py:146` | `_expand_config_dir` |
-| 1.14x | 16 | 14 | `cli/src/fno/agents/cli.py:428` | `_derive_crown_level_from_scope` |
+| 1.14x | 16 | 14 | `cli/src/fno/agents/cli.py:428` | `_derive_role_level_from_scope` |
 | 1.14x | 8 | 7 | `cli/src/fno/agents/cli.py:2733` | `cmd_stop` |
 | 1.14x | 8 | 7 | `cli/src/fno/agents/model_routing.py:391` | `emit_env_scrub_warning` |
 | 1.14x | 8 | 7 | `cli/src/fno/agents/peek.py:252` | `_parse_opencode_record` |
@@ -543,7 +543,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.08x | 14 | 13 | `cli/src/fno/agents/model_routing.py:635` | `resolve_explicit_route` |
 | 1.08x | 13 | 12 | `cli/src/fno/agents/self_stamp.py:161` | `resolve_own_transcript` |
 | 1.08x | 13 | 12 | `cli/src/fno/cli.py:258` | `_load_v2_config_flag` |
-| 1.08x | 14 | 13 | `cli/src/fno/config/__init__.py:1143` | `king_trigger_below_teammate_trigger` |
+| 1.08x | 14 | 13 | `cli/src/fno/config/__init__.py:1143` | `lead_trigger_below_teammate_trigger` |
 | 1.08x | 14 | 13 | `cli/src/fno/graph/ladder.py:41` | `resolve_plan_probe` |
 | 1.08x | 14 | 13 | `cli/src/fno/plan/_status.py:184` | `coerce_status_from_yaml` |
 | 1.08x | 14 | 13 | `cli/src/fno/pr/_reviews.py:51` | `optional_reviewer_names` |

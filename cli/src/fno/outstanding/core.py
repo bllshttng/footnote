@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional
 
-from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
+from fno.lead.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 
 # Rows rendered before the footer takes over. A growing pile should read as a
 # number, not as a wall - a block that scrolls the operator's screen gets
@@ -834,7 +834,7 @@ def _plural(n: int, word: str) -> str:
 
 
 def render(
-    outstanding: Outstanding, *, session_id: Optional[str] = None, crowned: bool = False
+    outstanding: Outstanding, *, session_id: Optional[str] = None, promoted: bool = False
 ) -> str:
     """Render the human block. Empty string when nothing is outstanding.
 
@@ -850,10 +850,10 @@ def render(
     any session's share to three rows plus a count, which is what the short
     render was for, so the branch bought nothing that the cap does not.
 
-    The crown splits the RENDER, never the READ. Every session prints the lane
-    count and top item; only a crowned session also gets the action line.
+    The role splits the RENDER, never the READ. Every session prints the lane
+    count and top item; only a promoted session also gets the action line.
     Gating the read itself would reproduce the defect this block exists to
-    fix - most sessions are not crowned, so the lane would stay invisible in
+    fix - most sessions are not promoted, so the lane would stay invisible in
     the common case and nobody would read it again.
     """
     if outstanding.empty:
@@ -867,7 +867,7 @@ def render(
             head += f" {outstanding.lane_parked} parked."
         lines.append(head)
         lines.append(f"  {outstanding.lane[0].text}")
-        if crowned:
+        if promoted:
             lines.append(
                 '  File one with: fno backlog idea "<text>", then stamp `-> <id>` '
                 "onto its line, or park it with `-> parked: <reason>`."

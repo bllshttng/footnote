@@ -3,7 +3,7 @@
 # remedies, and a destructive-only remedy states the loss first.
 #
 # A refusal is self-teaching runtime text; an agent obeys it literally (a
-# king passed --force to five rows because the error string named it; another
+# lead passed --force to five rows because the error string named it; another
 # withdrew four unclaimed mails because the nag named only withdraw). These
 # checks pin the remedy text so a rewrite cannot reintroduce the shape.
 #

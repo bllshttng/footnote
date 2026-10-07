@@ -7,7 +7,7 @@
 [[rule]]
 id = "chat_ask_unfiled"
 event = "stop"
-when = ["crowned", "last_message_decision_ask", "not:turn_filed_question"]
+when = ["promoted", "last_message_decision_ask", "not:turn_filed_question"]
 action = "block"
 what = "you asked the user a decision in chat"
 why = "a chat ask is lost at compaction and no reader sees it"
@@ -41,5 +41,5 @@ when = ["actor_is_session", "reversible", "has_recommendation", "why_user_set", 
 action = "nudge"
 what = "you sent the user a reversible question you hold a recommendation for"
 why = "only public-surface, irreversible, money-security and law-change go to the user"
-instead = "withdraw it and record: fno backlog decide <node> \"<ruling>\" --authority crown"
+instead = "withdraw it and record: fno backlog decide <node> \"<ruling>\" --authority role"
 default = true

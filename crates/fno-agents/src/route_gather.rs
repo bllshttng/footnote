@@ -10,7 +10,7 @@ use std::path::Path;
 
 const MODEL_TIERS_TABLE: &str = include_str!("model_tiers.toml");
 
-const SLOT_VERBS: [&str; 5] = ["think", "blueprint", "target", "review", "crown"];
+const SLOT_VERBS: [&str; 5] = ["think", "blueprint", "target", "review", "role"];
 const OBJECTIVES: [&str; 3] = ["cheapest-that-clears", "best-available", "prefer-harness"];
 /// A band's minimum coding percentile; a tier is a MINIMUM, so a model
 /// clears it at the floor or above.

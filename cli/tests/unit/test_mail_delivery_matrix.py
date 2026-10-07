@@ -559,7 +559,7 @@ def test_live_miss_age_suffix_names_unknown_when_no_transcript(
 
 # ---------------------------------------------------------------------------
 # x-1602: the durable receipt carries its drain window, and a live-lane
-# failure renders as legs, never as an error token. A king once read an
+# failure renders as legs, never as an error token. A lead once read an
 # absence inside the drain window, called a working lane broken, and held a
 # fleet-wide standing order an extra cycle; `queued (durable) [io-error]` is
 # the receipt that did it -- no clock, and an error string in a success.

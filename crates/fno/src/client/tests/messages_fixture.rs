@@ -4,8 +4,8 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     use serde_json::json;
     let lead = crate::proto::AgentRow {
         name: "finch".into(),
-        crown_scope: Some("team".into()),
-        crown_level: Some(1),
+        role_scope: Some("team".into()),
+        role_level: Some(1),
         ..Default::default()
     };
     let worker = |name: &str, sid: &str, node: &str| crate::proto::AgentRow {
@@ -88,7 +88,7 @@ async fn messages_reply_board_contracts() {
             {"id":"m9","ts":"2026-10-01T09:10:00Z","from":"fno/pr-nudge","from_key":"fno/pr-nudge","to_key":"s-c","summary":"Nudge.","body":"Nudge.","system":true}]},
         "channels": [
             {"scope":"fno","rows":[{"id":"m10","ts":"2026-10-01T09:00:00Z","from":"first","from_key":"s1","to":"fleet:fno","summary":"Standup.","body":"Standup.","system":false}]},
-            {"scope":"kings","rows":[]},
+            {"scope":"leads","rows":[]},
         ],
         "announcements": [], "unreadable": 0,
     }));
@@ -131,7 +131,7 @@ async fn messages_reply_board_contracts() {
     assert!(!text1.contains('#'), "{text1}");
     assert!(!text1.contains('▸') && !text1.contains('▾'), "{text1}");
     // The Broadcasts filter lists the groups alone, with the retired
-    // `kings` scope reading as `leads` (item 5).
+    // `leads` scope reading as `leads` (item 5).
     b.filter = ListFilter::Broadcasts;
     let text_b: String = b
         .tree_column(100)

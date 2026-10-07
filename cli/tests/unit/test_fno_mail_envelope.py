@@ -87,17 +87,17 @@ def test_an_id_is_required_to_wrap():
 def test_the_header_carries_the_registry_name_and_no_rank_attributes(
     monkeypatch, tmp_path
 ):
-    # The crown lines left the delivered text: the sender is the registry
+    # The role lines left the delivered text: the sender is the registry
     # name, and rank/name facts live on the bus row and registry, read back
     # by the Messages tab group (x-f1f0's attributes stay there).
     import fno.mail.envelope as envelope
-    registry = tmp_path / "crowned.json"
+    registry = tmp_path / "promoted.json"
     _write_registry(
         registry,
         [
             {"name":"folio", "status":"live", "harness":"claude", "cwd":"/repo",
              "harness_session_id":"647b3a9c-6544-43fe-899e-704382f3d973", "created_at":"2026-09-23T20:00:00Z",
-             "crown_level":2, "crown_scope":"epic-scope"},
+             "role_level":2, "role_scope":"epic-scope"},
         ],
     )
 
@@ -141,7 +141,7 @@ def test_the_codex_row_names_the_sender(monkeypatch, tmp_path):
 
 def test_envelope_overhead_budget(monkeypatch, tmp_path):
     # The header is the whole envelope: 55 characters over a 25-character
-    # body, crown-independent now that rank rides the registry. Raising the
+    # body, role-independent now that rank rides the registry. Raising the
     # bound is a decision a PR must argue, not a test fix.
     import fno.mail.envelope as envelope
     body = "ship the compact envelope"
@@ -150,7 +150,7 @@ def test_envelope_overhead_budget(monkeypatch, tmp_path):
     _write_registry(registry, [
         {"name":"a", "status":"live", "harness":"claude", "cwd":"/repo",
          "harness_session_id":full_id, "created_at":"2026-09-23T20:00:00Z",
-         "crown_level":2, "crown_scope":"epic-scope"},
+         "role_level":2, "role_scope":"epic-scope"},
     ])
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     wrapped = envelope.wrap_fno_mail(

@@ -306,8 +306,8 @@ pub fn read(
     let mut warnings = Vec::new();
     let live = crate::spawn_gate::live_rows(&home.registry_json(), &mut warnings);
     sample.live_rows = Some(live.len() as u64);
-    sample.leads = Some(live.iter().filter(|row| row.crown_level.is_some()).count() as u64);
-    sample.workers = Some(live.iter().filter(|row| row.crown_level.is_none()).count() as u64);
+    sample.leads = Some(live.iter().filter(|row| row.role_level.is_some()).count() as u64);
+    sample.workers = Some(live.iter().filter(|row| row.role_level.is_none()).count() as u64);
     #[cfg(target_os = "macos")]
     {
         if let Ok(out) = std::process::Command::new("vm_stat").output() {

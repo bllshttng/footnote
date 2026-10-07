@@ -78,7 +78,7 @@ def test_a_wrapped_body_prints_wrapped_with_nothing_added(monkeypatch, capsys) -
     wrapped = "<fno_mail from=\"alice\">\nhello\n</fno_mail>"
     out = _drain_output(monkeypatch, capsys, wrapped)
     assert wrapped in out
-    assert out.count("verified sender crown") == 0
+    assert out.count("verified sender role") == 0
 
 
 def test_an_operator_origin_gets_a_header_label(monkeypatch, capsys) -> None:

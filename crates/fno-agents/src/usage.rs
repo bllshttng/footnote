@@ -29,7 +29,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // because this line is what `restart --help` prints.
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
-    "rename <name> --name <new-label>   -- renames the registry label and, for a teamed session, its team name (regnal restarts at 1); old label stays an alias; harness session is untouched",
+    "rename <name> --name <new-label>   -- renames the registry label and, for a teamed session, its team name (generation restarts at 1); old label stays an alias; harness session is untouched",
     "rename --from-journal [--apply]    -- plan registry label rebuilds from the agents journal; --apply renames",
     "stop <name> [--force] [--cross-project]   --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.

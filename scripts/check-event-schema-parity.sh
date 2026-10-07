@@ -368,11 +368,11 @@ dual_owner_kinds = {
     "worktree_removed",
     "control_plane_tick",
     "state_reap",
-    # crown_manifest_arm_failed: the manifest rebind at a crowned row's
+    # role_manifest_arm_failed: the manifest rebind at a promoted row's
     # first identification is fail-soft in both runtimes - the Rust
     # session-report arm and the Python identification arm emit the same
     # failure row into one journal.
-    "crown_manifest_arm_failed",
+    "role_manifest_arm_failed",
     # Evals demand: the pr-watch tick's evals leg (Python) is the only
     # emitter; the rows ride the daemon's journal, so the Rust known-kind
     # table carries them for acceptance without emitting.
@@ -384,7 +384,7 @@ dual_owner_kinds = {
     "scratch_shape_observed",
     "scratch_shape_filed",
     # Succession transaction: the Rust side is the one writer (team-settle
-    # announce/transfer, the heir beat's verify/release/retro, the reap
+    # announce/transfer, the successor beat's verify/release/retro, the reap
     # rollback, all through succession_txn.rs); the Python side carries them
     # in schema.yaml for the validator and `doctor event find`, the way the
     # scratch pair above does.
@@ -449,7 +449,7 @@ dual_owner_kinds = {
     "agent_stopped",
     "agent_stop_error",
     "agent_stop_refused",
-    "agent_crown_vacated",
+    "agent_role_vacated",
     "agent_ask_done",
     "agent_inconsistent",
     "reconcile_done",

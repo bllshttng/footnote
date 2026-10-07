@@ -402,9 +402,9 @@
   },
   {
    "keep": [
-    "ev-crown"
+    "ev-role"
    ],
-   "q": "l:heir",
+   "q": "l:successor",
    "surface": "event"
   },
   {
@@ -416,7 +416,7 @@
   },
   {
    "keep": [
-    "ev-crown",
+    "ev-role",
     "ev-reap"
    ],
    "q": "ar:agents",
@@ -456,7 +456,7 @@
    "keep": [
     "ev-mail"
    ],
-   "q": "sid:s-king",
+   "q": "sid:s-lead",
    "surface": "event"
   },
   {
@@ -532,36 +532,36 @@
    },
    "surface": "event"
   },
-  "ev-crown": {
+  "ev-role": {
    "fields": {
     "agent": [
-     "heir"
+     "successor"
     ],
     "area": [
      "agents"
     ],
     "details": [
-     "heir crowned L2 x-eeee"
+     "successor promoted L2 x-eeee"
     ],
     "id": [
      "x-eeee"
     ],
     "kind": [
-     "crown_granted"
+     "role_granted"
     ],
     "lead": [
-     "heir"
+     "successor"
     ],
     "session": [
-     "s-heir"
+     "s-successor"
     ],
     "text": [
-     "heir crowned L2 x-eeee",
+     "successor promoted L2 x-eeee",
      "x-eeee",
-     "heir"
+     "successor"
     ],
     "title": [
-     "heir crowned L2 x-eeee"
+     "successor promoted L2 x-eeee"
     ],
     "ts": [
      "2026-09-30T10:00:00Z"
@@ -620,7 +620,7 @@
      "2890"
     ],
     "session": [
-     "s-king"
+     "s-lead"
     ],
     "text": [
      "proceed with the merge?",

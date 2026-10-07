@@ -52,10 +52,10 @@ class WhoamiResult:
     status: Optional[str] = None
     live_status: Optional[str] = None
     node: Optional[str] = None
-    # Crown (US9): a rendered "level N, scope=X (by <grantor>)" when this
-    # session's row carries an orchestrator crown, so a compacted king recovers
-    # its own authority. None for an uncrowned worker.
-    crown: Optional[str] = None
+    # Role (US9): a rendered "level N, scope=X (by <grantor>)" when this
+    # session's row carries an orchestrator role, so a compacted lead recovers
+    # its own authority. None for an unpromoted worker.
+    role: Optional[str] = None
     resolved_via: Optional[str] = None  # "env" | "session-fallback" | None
     warnings: list[str] = field(default_factory=list)
     exit_code: int = 0
@@ -129,7 +129,7 @@ def _find_by_session(
                 # ponytail: the prefix match is 32 bits of jobId. A same-harness
                 # row whose jobId prefix collides with this session's uuid would
                 # match the wrong row - in succession (is_caller_row) that vacates
-                # a crown that is not the abdicating king's. ~1/2^32 per pair, and
+                # a role that is not the stepping_down lead's. ~1/2^32 per pair, and
                 # harness scoping above already cut it to same-harness rows. The
                 # upgrade is storing the FULL session id on spawn rows, not
                 # tightening the matcher here: that re-diverges auth and succession.
@@ -160,19 +160,19 @@ def _find_by_session(
 def is_caller_row(
     row, session_uuid: Optional[str], harness: Optional[str] = None
 ) -> bool:
-    """Is ``row`` the session that issued the current spawn - the king whose
-    crown a succession would transfer?
+    """Is ``row`` the session that issued the current spawn - the lead whose
+    role a succession would transfer?
 
     Delegates to :func:`_find_by_session` so the succession check can NEVER
     diverge from the authorization check (:func:`calling_agent_row` runs the same
     ``_find_by_session`` over the full registry). The matching is harness-scoped
-    (a codex session id cannot match a claude row and vacate an unrelated crown),
+    (a codex session id cannot match a claude row and vacate an unrelated role),
     and for claude spans ``harness_session_id``, ``cc_session_id``, and the
     ``short_id`` prefix - the complete matcher. Re-implementing any of it here is
     the bug: a partial copy diverged from the auth check and either declined a
-    legitimate abdication (a field missed) or transferred the wrong crown (no
-    harness scoping). One matcher, two callers; if the auth check found the king,
-    this finds the same king.
+    legitimate departure (a field missed) or transferred the wrong role (no
+    harness scoping). One matcher, two callers; if the auth check found the lead,
+    this finds the same lead.
     """
     if not session_uuid:
         return False
@@ -256,10 +256,10 @@ def resolve_self(
         except Exception:  # noqa: BLE001 — best-effort, silent
             node = None
 
-    from fno.agents.crown import crown_reading
+    from fno.agents.role import role_reading
 
-    reading = crown_reading(row)
-    crown: Optional[str] = reading["text"] if reading is not None else None
+    reading = role_reading(row)
+    role: Optional[str] = reading["text"] if reading is not None else None
 
     return WhoamiResult(
         registered=True,
@@ -270,7 +270,7 @@ def resolve_self(
         status=status,
         live_status=live_status,
         node=node,
-        crown=crown,
+        role=role,
         resolved_via=resolved_via,
         warnings=warnings,
         exit_code=0,
@@ -357,8 +357,8 @@ def render_human(result: WhoamiResult) -> str:
         lines.append(f"live_status: {result.live_status}")
     if result.node:
         lines.append(f"node:        {result.node}")
-    if result.crown:
-        lines.append(f"crown:       {result.crown}")
+    if result.role:
+        lines.append(f"role:       {result.role}")
     return "\n".join(lines)
 
 
@@ -378,7 +378,7 @@ def render_json(result: WhoamiResult) -> str:
             "status": result.status,
             "live_status": result.live_status,
             "node": result.node,
-            "crown": result.crown,
+            "role": result.role,
             "resolved_via": result.resolved_via,
         },
         indent=2,

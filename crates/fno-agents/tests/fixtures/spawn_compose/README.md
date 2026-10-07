@@ -54,7 +54,7 @@ The compose owns the routing-provenance line (`applied axis=value (source) (rout
 
 ## Hand-authored cases
 
-`crown-codex-yolo.json`, `crown-codex-short-flag.json`, and `crown-codex-bounded-refuses.json` have no Python capture behind them. They pin the crown-codex posture the Rust compose owns. A crowned codex spawn defaults to `yolo` at rung `builtin.crown` (`--crown` on the first case, the attached `-kx-aaaa` spelling on the second). One that names a bounded mode refuses with exit 2. Each case is authored against the compose contract, in the same shape as the captured goldens.
+`role-codex-yolo.json`, `role-codex-short-flag.json`, and `role-codex-bounded-refuses.json` have no Python capture behind them. They pin the role-codex posture the Rust compose owns. A promoted codex spawn defaults to `yolo` at rung `builtin.role` (`--promote` on the first case, the attached `-kx-aaaa` spelling on the second). One that names a bounded mode refuses with exit 2. Each case is authored against the compose contract, in the same shape as the captured goldens.
 
 ## Post-capture drift applied
 

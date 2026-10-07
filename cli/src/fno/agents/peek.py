@@ -105,7 +105,7 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
         timestamp=timestamp if isinstance(timestamp, str) else None,
     )
 
-_TAIL_BYTES = 4 << 20  # 4 MiB holds the last 40 records of every live king transcript
+_TAIL_BYTES = 4 << 20  # 4 MiB holds the last 40 records of every live lead transcript
 
 
 def _records_from_jsonl(
@@ -1148,7 +1148,7 @@ def peek(
         # Name the instrument. Both reads above (the live-session resolver and
         # the mux-pane fallback) are registry-shaped, and the registry is not
         # the transcript: a reaped row leaves 4.9M of conversation on disk
-        # while this line used to answer a bare "peer not found". A king read
+        # while this line used to answer a bare "peer not found". A lead read
         # that as destroyed and nearly spawned fresh over a green PR.
         err.write(f"peer not found in the registry: {handle}\n")
         adoptable = _adoptable_sessions(

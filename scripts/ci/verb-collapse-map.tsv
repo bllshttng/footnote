@@ -16,7 +16,7 @@ agents claim session-pid	T1	agents claim session-pid	2
 agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents compaction	T1	agents compaction	1
-agents court	T1	agents court	3
+agents team	T1	agents team	3
 agents org-vacancies	T1	agents org-vacancies	0
 agents org-fold	T1	agents org-fold	0
 agents route-slot	T1	agents route-slot	0
@@ -25,7 +25,7 @@ agents spawn-overlay	T1	agents spawn-overlay	0
 agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
 agents authorized-merge	T1	agents authorized-merge	0
-agents crown	T1	agents crown	17
+agents role	T1	agents role	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents distress-scan	T1	agents distress-scan	0
@@ -41,19 +41,19 @@ agents history	T1	agents history	3
 agents incident	T1	agents incident	0
 agents judge	T1	agents judge	0
 agents kill-check	T1	agents kill-check	4
-agents king cancel	T1	agents king cancel	0
-agents king checkin	T1	agents king checkin	8
+agents lead cancel	T1	agents lead cancel	0
+agents lead checkin	T1	agents lead checkin	8
 agents lead-checkin	T1	agents lead-checkin	0
-agents king done	T1	agents king done	5
-agents king drain	T1	agents king drain	1
-agents king escalate	T1	agents king escalate	1
-agents king faq add	T1	agents king faq add	2
-agents king faq list	T1	agents king faq list	2
-agents king history	T1	agents king history	0
-agents king init	T1	agents king init	7
-agents king manifest-path	T1	agents king manifest-path	3
-agents king ledger	T1	agents king ledger	0
-agents king verdict	T1	agents king verdict	5
+agents lead done	T1	agents lead done	5
+agents lead drain	T1	agents lead drain	1
+agents lead escalate	T1	agents lead escalate	1
+agents lead faq add	T1	agents lead faq add	2
+agents lead faq list	T1	agents lead faq list	2
+agents lead history	T1	agents lead history	0
+agents lead init	T1	agents lead init	7
+agents lead manifest-path	T1	agents lead manifest-path	3
+agents lead ledger	T1	agents lead ledger	0
+agents lead verdict	T1	agents lead verdict	5
 agents lead-history	T1	agents lead-history	0
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
@@ -156,9 +156,9 @@ approvals show	T1	approvals show	3
 backlog contain	T1	backlog contain	3
 backlog advance	KEEP	backlog advance	43	deliberate readability slack for a high-traffic distinct operation
 backlog album	T1	backlog album	0
-backlog annotate add	T1	backlog annotate add	7	
-backlog annotate list	T1	backlog annotate list	0	
-backlog annotate resolve	T1	backlog annotate resolve	5	
+backlog annotate add	T1	backlog annotate add	7
+backlog annotate list	T1	backlog annotate list	0
+backlog annotate resolve	T1	backlog annotate resolve	5
 backlog archive	T1	backlog archive	2
 backlog bases	T1	backlog bases	0
 backlog backfill-deferred-kind	T1	backlog backfill-deferred-kind	1
@@ -179,10 +179,10 @@ backlog capture list	T1	backlog capture list	3
 backlog capture promote	T1	backlog capture promote	1
 backlog capture scan	T1	backlog capture scan	1
 backlog capture tidy	T1	backlog capture tidy	3
-backlog carveout add	T1	backlog carveout add	22	
-backlog carveout list	T1	backlog carveout list	2	
-backlog carveout resolve	T1	backlog carveout resolve	1	
-backlog carveout update	T1	backlog carveout update	1	
+backlog carveout add	T1	backlog carveout add	22
+backlog carveout list	T1	backlog carveout list	2
+backlog carveout resolve	T1	backlog carveout resolve	1
+backlog carveout update	T1	backlog carveout update	1
 backlog collisions check	T1	backlog collisions check	11
 backlog cost	T1	backlog cost	1
 backlog decompose	T1	backlog decompose	8
@@ -221,9 +221,9 @@ backlog render-views	T1	backlog render-views	5
 backlog reopen	T1	backlog reopen	3
 backlog reprioritize	T1	backlog reprioritize	1
 backlog retract	T1	backlog retract	3
-backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1	
-backlog retro run	T1	backlog retro run	16	
-backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
+backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1
+backlog retro run	T1	backlog retro run	16
+backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7
 backlog roadmap	T1	backlog roadmap	1
 backlog stuck-epics	T1	backlog stuck-epics	1
 backlog session add	T1	backlog session add	4
@@ -269,7 +269,7 @@ claim status	T1	claim status	32
 codemap	KEEP	codemap	18	single-leaf group
 config accounts	KEEP	config accounts	71	deliberate readability slack for a high-traffic distinct operation
 config active-backlog	T1	config active-backlog	5
-config assert-subagent-budget	T1	config assert-subagent-budget	6	
+config assert-subagent-budget	T1	config assert-subagent-budget	6
 config build-dir	T1	config build-dir	0
 config doctor	T1	config doctor	20
 config get	KEEP	config get	69	deliberate readability slack for a high-traffic distinct operation
@@ -278,11 +278,11 @@ config paths	T1	config paths	36
 config plugins	T1	config plugins	10
 config project	T1	config project	9
 config rm	T1	config rm	0
-config route	T1	config route	16	
-config routing	T1	config routing	6	
+config route	T1	config route	16
+config routing	T1	config routing	6
 config schema	T1	config schema	10
 config set	KEEP	config set	43	deliberate readability slack for a high-traffic distinct operation
-config setup	T1	config setup	38	
+config setup	T1	config setup	38
 config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
@@ -318,7 +318,7 @@ do pr evidence-check	T1	do pr evidence-check	1
 do pr evidence-required	T1	do pr evidence-required	1
 do pr global-receipt-events-path	T1	do pr global-receipt-events-path	0
 do pr graphql-exec	T1	do pr graphql-exec	1
-do pr heal	T1	do pr heal	2	
+do pr heal	T1	do pr heal	2
 do pr hold-check	T1	do pr hold-check	0
 do pr info	T1	do pr info	10
 do pr list	T1	do pr list	3
@@ -349,7 +349,7 @@ do resume receipt show	T1	do resume receipt show	1
 do resume receipt validate	T1	do resume receipt validate	3
 do resume receipt write	T1	do resume receipt write	2
 do review classify	T1	do review classify	8
-do review resolve-level	T1	do review resolve-level	10	
+do review resolve-level	T1	do review resolve-level	10
 do state archive	T1	do state archive	1
 do state init	T1	do state init	3
 do state set	T1	do state set	20
@@ -394,7 +394,7 @@ doctor harness-matrix	T1	doctor harness-matrix	3
 doctor lanes	T1	doctor lanes	0
 doctor lint	T1	doctor lint	39
 doctor observer replay	T1	doctor observer replay	2
-doctor observer judge	T1	doctor observer judge	2	
+doctor observer judge	T1	doctor observer judge	2
 doctor observer sweep	T1	doctor observer sweep	4
 doctor plugin-file	T1	doctor plugin-file	2
 doctor route	T1	doctor route	6
@@ -449,7 +449,7 @@ mcp send	KEEP	mcp send	10	single-leaf group
 notify	KEEP	notify	18	single-leaf group
 observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4
-observer judge	T1	observer judge	0	
+observer judge	T1	observer judge	0
 paths handoff	T1	paths handoff	9
 phase kill-check	KEEP	phase kill-check	16	single-leaf group
 plan brief	T1	plan brief	4
@@ -483,7 +483,7 @@ pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
 pr graphql-exec	T1	pr graphql-exec	1
-pr heal	T1	pr heal	2	
+pr heal	T1	pr heal	2
 pr hold-check	T1	pr hold-check	0
 pr info	T1	pr info	10
 pr list	T1	pr list	3
@@ -520,8 +520,8 @@ roles ls	T1	roles ls	1
 roles resolve	T1	roles resolve	2
 roles show	T1	roles show	2
 route env	T1	route env	4
-route init	T1	route init	0	
-route inventory	T1	route inventory	0	
+route init	T1	route init	0
+route inventory	T1	route inventory	0
 route ls	T1	route ls	3
 route set	T1	route set	4
 route settings ls	T1	route settings ls	1
@@ -583,32 +583,30 @@ agents stale-escalate	T1	agents stale-escalate	6
 agents friction-escalate	T1	agents friction-escalate	5
 agents feed	T1	agents feed	13
 agents harness probe	T1	agents harness probe	0
-agents king shape	T1	agents king shape	5
-agents king term	T1	agents king term	7
-agents org cancel	T1	agents org cancel	6	
-agents org checkin	T1	agents org checkin	14	
-agents org done	T1	agents org done	10	
-agents org drain	T1	agents org drain	2	
-agents org escalate	T1	agents org escalate	2	
-agents org faq add	T1	agents org faq add	4	
-agents org faq list	T1	agents org faq list	0	
-agents org history	T1	agents org history	8	
-agents org init	T1	agents org init	6	
-agents org ledger	T1	agents org ledger	0	
-agents org manifest-path	T1	agents org manifest-path	0	
-agents org shape	T1	agents org shape	6	
-agents org term	T1	agents org term	6	
-agents org verdict	T1	agents org verdict	3	
-do review invocations	T1	do review invocations	3	
-do review post-dispositions	T1	do review post-dispositions	1	
-backlog version	T1	backlog version	19	
-agents prove-it-verdicts	T1	agents prove-it-verdicts	1	
+agents lead shape	T1	agents lead shape	5
+agents lead term	T1	agents lead term	7
+agents org cancel	T1	agents org cancel	6
+agents org checkin	T1	agents org checkin	14
+agents org done	T1	agents org done	10
+agents org drain	T1	agents org drain	2
+agents org escalate	T1	agents org escalate	2
+agents org faq add	T1	agents org faq add	4
+agents org faq list	T1	agents org faq list	0
+agents org history	T1	agents org history	8
+agents org init	T1	agents org init	6
+agents org ledger	T1	agents org ledger	0
+agents org manifest-path	T1	agents org manifest-path	0
+agents org shape	T1	agents org shape	6
+agents org term	T1	agents org term	6
+agents org verdict	T1	agents org verdict	3
+do review invocations	T1	do review invocations	3
+do review post-dispositions	T1	do review post-dispositions	1
+backlog version	T1	backlog version	19
+agents prove-it-verdicts	T1	agents prove-it-verdicts	1
 agents honesty-sweep	T1	agents honesty-sweep	0
 doctor intel	T1	doctor intel	0
-agents select-read	T1	agents select-read	1	
-agents court-fold	T1	agents court-fold	0	
-agents court-orphans	T1	agents court-orphans	0	
-agents king-checkin	T1	agents king-checkin	0	
-agents king-history	T1	agents king-history	0	
-agents reign-ledger	T1	agents reign-ledger	0	
-agents worked-nodes	T1	agents worked-nodes	0	
+agents select-read	T1	agents select-read	1
+agents team-fold	T1	agents team-fold	0
+agents team-orphans	T1	agents team-orphans	0
+agents term-ledger	T1	agents term-ledger	0
+agents worked-nodes	T1	agents worked-nodes	0

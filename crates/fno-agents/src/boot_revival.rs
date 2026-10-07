@@ -139,7 +139,7 @@ pub(crate) fn plan(
         let state = listing.find(&job).and_then(|row| row.state.clone());
         match state.as_deref() {
             Some("stopped" | "failed") => {
-                if e.crown_level.is_some() {
+                if e.role_level.is_some() {
                     leads.push(e.name.clone());
                 } else {
                     workers.push(e.name.clone());
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn the_boot_pass_revives_stopped_and_failed_workers_leads_first() {
         let mut lead = row("quill", "99473043-aaaa", AgentStatus::Live);
-        lead.crown_level = Some(1);
+        lead.role_level = Some(1);
         let failed = row("kestrel", "11112222-bbbb", AgentStatus::Orphaned);
         // Exited by this boot's own daemon: it was live when the machine
         // went down.

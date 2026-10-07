@@ -316,9 +316,9 @@ def _agy_adapter_path() -> "Optional[Path]":
     return p if p.is_file() else None
 
 
-def _agy_crown_adapter_path() -> "Optional[Path]":
-    # Same load-shape as _agy_adapter_path for the PreInvocation crown adapter.
-    # agy has no session-start event, so the crown line rides PreInvocation
+def _agy_role_adapter_path() -> "Optional[Path]":
+    # Same load-shape as _agy_adapter_path for the PreInvocation role adapter.
+    # agy has no session-start event, so the role line rides PreInvocation
     # gated on invocationNum == 0 (first model call == session start).
     from fno.paths import resolve_plugin_script
 
@@ -328,10 +328,10 @@ def _agy_crown_adapter_path() -> "Optional[Path]":
 
 def _agy_guard_adapter_path() -> "Optional[Path]":
     # Same load-shape for the PreToolUse lead guard shim; it translates agy's
-    # payload to the shared king guard through `king-guard --wire agy`.
+    # payload to the shared lead guard through `lead-guard --wire agy`.
     from fno.paths import resolve_plugin_script
 
-    p = resolve_plugin_script("hooks/agy-king-guard.sh")
+    p = resolve_plugin_script("hooks/agy-lead-guard.sh")
     return p if p.is_file() else None
 
 
@@ -339,7 +339,7 @@ def _agy_is_installed() -> bool:
     from fno.rust_binary import call_binary_json
 
     adapter = _agy_adapter_path()
-    crown = _agy_crown_adapter_path()
+    role = _agy_role_adapter_path()
     args = [
         "agy",
         "--hooks-status",
@@ -349,8 +349,8 @@ def _agy_is_installed() -> bool:
     ]
     if adapter is not None:
         args += ["--adapter", str(adapter)]
-    if crown is not None:
-        args += ["--crown", str(crown)]
+    if role is not None:
+        args += ["--promote", str(role)]
     guard = _agy_guard_adapter_path()
     if guard is not None:
         args += ["--guard", str(guard)]
@@ -398,9 +398,9 @@ def _agy_install() -> IntegrationResult:
         str(hooks_file),
         "--json",
     ]
-    crown = _agy_crown_adapter_path()
-    if crown is not None:
-        args += ["--crown", str(crown)]
+    role = _agy_role_adapter_path()
+    if role is not None:
+        args += ["--promote", str(role)]
     guard = _agy_guard_adapter_path()
     if guard is not None:
         args += ["--guard", str(guard)]

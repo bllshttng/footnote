@@ -193,7 +193,7 @@ mod tests {
         // first); the layout layer falls back to the spawn-captured name
         // when this returns None. An unhosted pane reads None.
         let agents = vec![
-            agent("kestrel-heir", Some(("mux0", 7)), true),
+            agent("kestrel-successor", Some(("mux0", 7)), true),
             agent("bob", Some(("mux0", 7)), false),
         ];
         assert_eq!(

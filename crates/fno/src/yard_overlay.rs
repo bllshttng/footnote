@@ -35,7 +35,7 @@ pub struct YardItem {
     #[serde(default)]
     pub rarity: String,
     #[serde(default)]
-    pub crown_level: u32,
+    pub role_level: u32,
     #[serde(default)]
     pub first_sighting: bool,
 }
@@ -110,7 +110,7 @@ use crate::client::{pad_to, NeedsFooter, YARD_OVERLAY_W};
 /// publishes (`PANEL_W` 28 fits one sprite plus a label, two plus nothing).
 /// Without an identity payload the spotlight shows its pending notice and
 /// NO sprite - a species with no reading is a guessed cat, and the yard does
-/// not guess. The hat reads the ROW's `crown_level` (the same wire value the
+/// not guess. The hat reads the ROW's `role_level` (the same wire value the
 /// sideline orders by), never a payload copy.
 pub(crate) fn overlay_lines(
     crowd: &[(&str, crate::sprites::Eye, u32)],
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn parses_a_citizen_array() {
-        let json = br#"{"citizens":[{"id":"1111-aaaa","name":"worker","harness":"claude","species":4,"rarity":"common","crown_level":0,"first_sighting":false}]}"#;
+        let json = br#"{"citizens":[{"id":"1111-aaaa","name":"worker","harness":"claude","species":4,"rarity":"common","role_level":0,"first_sighting":false}]}"#;
         let items = parse(json).expect("valid payload parses");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "worker");
@@ -207,11 +207,11 @@ mod tests {
 
     #[test]
     fn missing_optional_fields_default() {
-        // crown_level / first_sighting / rarity absent -> defaults, not a
+        // role_level / first_sighting / rarity absent -> defaults, not a
         // parse failure (the fold may predate a field).
         let json = br#"{"citizens":[{"id":"i","name":"n"}]}"#;
         let items = parse(json).expect("parses with defaults");
-        assert_eq!(items[0].crown_level, 0);
+        assert_eq!(items[0].role_level, 0);
         assert!(!items[0].first_sighting);
         assert_eq!(items[0].rarity, "");
     }

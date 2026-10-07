@@ -874,7 +874,7 @@ def test_age_sweep_removes_old_clean_detached_tree(repo: Path):
 
 def test_age_sweep_is_dry_run_by_default(repo: Path):
     """Both removal modes share one default: a bare sweep reports, --apply
-    executes. The age mode used to remove on a bare call - a king ran it
+    executes. The age mode used to remove on a bare call - a lead ran it
     expecting a preview and 13 trees went."""
     wt = _add_detached(repo, repo / "wt-age-default")
 

@@ -889,7 +889,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         }
     }
     if let Some((transport, method, expected_proof)) = recipe.as_ref() {
-        let scope = row.crown_scope.as_deref();
+        let scope = row.role_scope.as_deref();
         let (status, before_digest, after_digest, detail, provider_receipt) =
             match run_provider_action(
                 &session_id,

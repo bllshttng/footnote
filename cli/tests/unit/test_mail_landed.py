@@ -227,7 +227,7 @@ def test_ac3_edge_durable_row_with_unread_cursor_still_nags(tmp_path, monkeypatc
     from fno.bus.log import Envelope, append
 
     send = Envelope.new(
-        from_="alice", to="king", kind="send", body="status report", ts=_ts_ago(3600)
+        from_="alice", to="lead", kind="send", body="status report", ts=_ts_ago(3600)
     )
     append(send)
 
@@ -242,9 +242,9 @@ def test_ac3_edge_durable_row_with_unread_cursor_still_nags(tmp_path, monkeypatc
     from fno.bus.cursor import write_cursor
     from fno.mail.landed import post_send_landed
 
-    assert post_send_landed(send.id, to="king") == (False, "")
-    write_cursor("king", send.id)
-    assert post_send_landed(send.id, to="king") == (
+    assert post_send_landed(send.id, to="lead") == (False, "")
+    write_cursor("lead", send.id)
+    assert post_send_landed(send.id, to="lead") == (
         True,
         "bus claim (recipient read past it)",
     )
@@ -301,14 +301,14 @@ def test_is_deliverable_refuses_a_landed_ack(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     from fno.bus.log import Envelope, is_deliverable, record_landed
 
-    send = Envelope.new(from_="worker", to="king", kind="send", body="status")
-    ack = record_landed(msg_id=send.id, sender="worker", recipient="king")
+    send = Envelope.new(from_="worker", to="lead", kind="send", body="status")
+    ack = record_landed(msg_id=send.id, sender="worker", recipient="lead")
 
     assert is_deliverable(ack) is False
     assert is_deliverable(send) is True
 
 
-def _durable_send_and_ack(*, to: str = "king") -> str:
+def _durable_send_and_ack(*, to: str = "lead") -> str:
     """One durable `send` row plus the `landed` row acknowledging it: the exact
     pair the field incident rendered as a blank message (x-22ce)."""
     from fno.bus.log import Envelope, append, record_landed
@@ -330,7 +330,7 @@ def test_reader_1_scan_unread_shows_the_message_never_the_ack(
 
     send_id = _durable_send_and_ack()
 
-    unread = scan_unread("king")
+    unread = scan_unread("lead")
 
     assert [(m.id, m.kind, m.body) for m in unread] == [
         (send_id, "send", "status report")
@@ -340,8 +340,8 @@ def test_reader_1_scan_unread_shows_the_message_never_the_ack(
 def test_reader_1_unread_cli_reports_one_real_message(
     tmp_path, monkeypatch
 ):
-    """End to end through the verb a king actually ran during the incident:
-    `mail unread -n king --json` must show one message with a body, never the
+    """End to end through the verb a lead actually ran during the incident:
+    `mail unread -n lead --json` must show one message with a body, never the
     seven empty rows the old reader produced."""
     use_tmpdir(monkeypatch, tmp_path)
     import json as _json
@@ -352,7 +352,7 @@ def test_reader_1_unread_cli_reports_one_real_message(
 
     send_id = _durable_send_and_ack()
 
-    res = CliRunner().invoke(app, ["mail", "unread", "-n", "king", "--json"])
+    res = CliRunner().invoke(app, ["mail", "unread", "-n", "lead", "--json"])
 
     assert res.exit_code == 0
     rows = _json.loads(res.stdout)
@@ -372,8 +372,8 @@ def test_reader_4_markdown_render_shows_the_message_never_the_ack(
 
     send_id = _durable_send_and_ack()
 
-    written = rebuild_render("king")
-    inbox = inbox_dir_for("king")
+    written = rebuild_render("lead")
+    inbox = inbox_dir_for("lead")
     text = "\n".join(
         p.read_text(encoding="utf-8") for p in sorted(inbox.glob("*.md"))
     )
@@ -398,23 +398,23 @@ def test_cmd_ack_names_a_landed_row_a_receipt(tmp_path, monkeypatch):
     from fno.bus.log import Envelope, append, record_landed
     from fno.cli import app
 
-    send = Envelope.new(from_="worker", to="king", kind="send", body="status report")
+    send = Envelope.new(from_="worker", to="lead", kind="send", body="status report")
     append(send)
-    ack = record_landed(msg_id=send.id, sender="worker", recipient="king")
+    ack = record_landed(msg_id=send.id, sender="worker", recipient="lead")
 
-    res = CliRunner().invoke(app, ["mail", "ack", ack.id, "--name", "king"])
+    res = CliRunner().invoke(app, ["mail", "ack", ack.id, "--name", "lead"])
 
     assert res.exit_code == 2
     assert "landed" in res.stderr
     assert send.id in res.stderr
-    assert read_cursor("king") is None
+    assert read_cursor("lead") is None
 
     # Positive control: a real durable send row acks cleanly and moves the
     # cursor, proving the new branch did not swallow the ack path.
-    ok = CliRunner().invoke(app, ["mail", "ack", send.id, "--name", "king"])
+    ok = CliRunner().invoke(app, ["mail", "ack", send.id, "--name", "lead"])
 
     assert ok.exit_code == 0
-    assert read_cursor("king") == send.id
+    assert read_cursor("lead") == send.id
     assert _json.loads(
-        CliRunner().invoke(app, ["mail", "unread", "-n", "king", "--json"]).stdout
+        CliRunner().invoke(app, ["mail", "unread", "-n", "lead", "--json"]).stdout
     ) == []

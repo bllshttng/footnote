@@ -67,7 +67,7 @@ def test_ac1_hp_every_known_spawner_appears(
 
     # master switch + 9 known spawners + groom/evals (wave 2 gated
     # these) + recovery sweep (found while building the wave-3 registry ratchet)
-    # + the king loop. The blueprint auto-launch row is gone with its config
+    # + the lead loop. The blueprint auto-launch row is gone with its config
     # leaf, so 14 - 1 = 13.
     assert len(rows) == 13
     for r in rows:
@@ -125,10 +125,10 @@ def test_previously_ungated_spawners_now_gated_and_default_true(
         assert by_name[name].rank == "config"
 
 
-def test_king_loop_row_is_present_and_defaults_off(
+def test_lead_loop_row_is_present_and_defaults_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The king loop is the first self-sustaining row in this table, and it is
+    """The lead loop is the first self-sustaining row in this table, and it is
     the discoverability contract for it: an autonomous spawner that does not
     appear here is exactly what this verb exists to stop hiding."""
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
@@ -137,11 +137,11 @@ def test_king_loop_row_is_present_and_defaults_off(
 
 
     rows = collect_status(tmp_path)
-    king = next(r for r in rows if r.name == "king loop")
-    assert king.gate_key == "config.king.enabled"
-    assert king.armed is False, "the king loop must default off"
-    assert king.rank == "config"
-    assert "board non-empty" in king.trigger
+    lead = next(r for r in rows if r.name == "lead loop")
+    assert lead.gate_key == "config.lead.enabled"
+    assert lead.armed is False, "the lead loop must default off"
+    assert lead.rank == "config"
+    assert "board non-empty" in lead.trigger
 
 
 def test_master_switch_row_present_and_armed_by_default(

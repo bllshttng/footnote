@@ -1166,7 +1166,7 @@ def resolve_attester_identity(
         # preserves an argv0 rename), never the whole argv: an `env
         # CLAUDE_CODE_SESSION_ID=<forged>` wrapper or a shell assignment
         # carries the MARKER SPELLING in its argv, and the marker contains
-        # the family token - matching the full argv would crown that wrapper
+        # the family token - matching the full argv would role that wrapper
         # the deciding family carrier and stamp the forgery `process`
         # (reproduced live in review round 2). Unreadable -> not family,
         # which can only degrade the witness, never forge one.
