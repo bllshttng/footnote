@@ -567,13 +567,11 @@ mod engine_tests {
             uuid: "row-1".into(),
             ts: "2026-10-07T10:00:00.000Z".into(),
             sender_session: "sess-a".into(),
-            to: "lead".into(),
             summary: None,
             body,
             sender_transcript: "s.jsonl".into(),
         };
         let mk_block = |body: &str, session: &str| BlockRow {
-            from: Some("uds:/tmp/cc-socks/9.sock".into()),
             from_name: Some("worker-1".into()),
             body: body.to_string(),
             receiver_session: session.into(),

@@ -4653,10 +4653,6 @@ from fno.mail.hold_cli import cmd_hold, cmd_hold_release  # noqa: E402
 mail_app.command("hold")(cmd_hold)
 mail_app.command("hold-release", hidden=True)(cmd_hold_release)
 
-from fno.mail.backfill_cli import cmd_mail_backfill  # noqa: E402
-
-mail_app.command("backfill", hidden=True)(cmd_mail_backfill)
-
 
 @mail_app.command("drain-self", hidden=True)
 def cmd_drain_self(

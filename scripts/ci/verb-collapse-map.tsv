@@ -61,7 +61,6 @@ agents loop	KEEP	agents loop	61	deliberate readability slack for a high-traffic 
 agents loop-check	KEEP	agents loop-check	61	deliberate readability slack for a high-traffic distinct operation
 agents loops	T1	agents loops	0
 agents mail ack	T1	agents mail ack	10
-agents mail backfill	T1	agents mail backfill	0	
 agents mail drain	T1	agents mail drain	10
 agents mail drain-self	T1	agents mail drain-self	6
 agents mail hold	T1	agents mail hold	0
@@ -426,7 +425,6 @@ loops pause-all	T1	loops pause-all	1
 loops resume-all	KEEP	loops resume-all	0	ruled KEEP: only release for the pause-all kill switch
 loops status	T1	loops status	3
 mail ack	T1	mail ack	10
-mail backfill	T1	mail backfill	0	
 mail drain	T1	mail drain	10
 mail drain-self	T1	mail drain-self	6
 mail hold	T1	mail hold	0
