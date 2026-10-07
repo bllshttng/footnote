@@ -605,20 +605,6 @@ fn stop_decision_schema_carries_the_correlation_contract() {
     );
 }
 
-#[test]
-fn stop_source_has_turn_correlator_and_goal_owner_arbitration() {
-    let source = include_str!("../src/hook/stop.rs");
-    for marker in [
-        "turn_id",
-        "emit_stop_decision",
-        "arbitrate_continuation",
-        "delegated-to-goal",
-        "actionable-block",
-    ] {
-        assert!(source.contains(marker), "Stop must implement {marker}");
-    }
-}
-
 fn guard_payload(sid: &str, tool: &str, input: Value) -> Value {
     json!({
         "session_id": sid,

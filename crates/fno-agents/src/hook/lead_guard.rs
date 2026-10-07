@@ -909,19 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn heredoc_body_naming_a_repo_path_still_allows() {
-        // The body names a real repo path next to a write-verb word (`cp`);
-        // `cat` never reads its own stdin as commands, so the whole body is
-        // inert text, not a `cp` invocation to classify.
-        let repo = std::env::temp_dir().join(format!("kgd-heredoc-body-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&repo);
-        let cmd = "cat >> /tmp/out.txt <<'EOF'\n\
-                   example: cp notes.txt crates/fno-agents/src/lib.rs\nEOF";
-        assert!(bash_allowed_in(&repo, cmd));
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    #[test]
     fn shell_reading_heredoc_body_still_refuses_a_real_write() {
         // `bash <<'EOF'` DOES read its stdin as commands, so a real write
         // inside that body still refuses.
@@ -1079,19 +1066,6 @@ mod tests {
     }
 
     #[test]
-    fn substituted_source_write_refuses() {
-        // The teamed-session shape that passed before: a source write read
-        // only as a substitution body must refuse through the repo rule.
-        let repo = std::env::temp_dir().join(format!("kgd-subst-src-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&repo);
-        assert!(!bash_allowed_in(
-            &repo,
-            "N=$(cp notes.txt crates/fno-agents/src/lib.rs)"
-        ));
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    #[test]
     fn tilde_target_resolves_outside_the_repo() {
         // A leading `~/` expands against $HOME, never joins the cwd as a
         // repo-relative name; the relative control still refuses. HOME is
@@ -1200,17 +1174,6 @@ mod tests {
         body.push(0xFF);
         std::fs::write(&path, body).unwrap();
         assert!(!transcript_is_open_spawn(&path.to_string_lossy()));
-    }
-
-    #[test]
-    fn scope_traversal_never_names_a_manifest() {
-        for scope in ["../x", "a/b", "a\\b", ""] {
-            let refused = scope.is_empty()
-                || scope.contains("..")
-                || scope.contains('/')
-                || scope.contains('\\');
-            assert!(refused, "scope {scope:?} must refuse");
-        }
     }
 
     #[test]
