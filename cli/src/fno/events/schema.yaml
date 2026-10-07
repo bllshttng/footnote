@@ -2614,7 +2614,7 @@ event_types:
     description: "A Codex app-server turn failed. Its unfinished work remains working while the actor schedules a continuation."
     sources: [daemon]
     data:
-      required: [name, backend, turn_id, turn_status, session_id]
+      required: [name, backend, turn_id, turn_status]
       properties:
         name: { type: string }
         backend: { type: string }

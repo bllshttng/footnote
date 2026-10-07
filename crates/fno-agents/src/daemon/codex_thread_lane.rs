@@ -140,7 +140,7 @@ pub(super) async fn spawn_codex_thread_lane(
                 &crate::gc_sweep::graph_path(&home),
                 &crate::backlog::RowQuery {
                     fields: Some(
-                        ["id", "slug", "status"]
+                        ["id", "slug", "status", "deferred_kind"]
                             .into_iter()
                             .map(str::to_string)
                             .collect(),
@@ -356,10 +356,11 @@ pub(super) fn worker_retry_config(config: &mut serde_json::Map<String, Value>) {
         ("model_providers.openai.stream_idle_timeout_ms", 600_000),
     ] {
         let field = key.rsplit('.').next().expect("provider field");
-        if config
-            .get("model_providers.openai")
-            .and_then(|provider| provider.get(field))
-            .is_some()
+        if config.get(key).is_some()
+            || config
+                .get("model_providers.openai")
+                .and_then(|provider| provider.get(field))
+                .is_some()
             || config
                 .get("model_providers")
                 .and_then(|providers| providers.get("openai"))
@@ -377,6 +378,7 @@ fn codex_lead_recovery_blocker(rows: &[Value]) -> Option<&str> {
         .find(|row| {
             row.get("slug").and_then(Value::as_str) == Some("codex-turn-that-ends-error-is")
                 && row.get("status").and_then(Value::as_str) != Some("done")
+                && row.get("deferred_kind").is_none_or(Value::is_null)
         })
         .and_then(|row| row.get("id").and_then(Value::as_str))
 }
@@ -464,6 +466,9 @@ mod recovery_guard_tests {
         ];
         assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
         rows[0]["status"] = json!("done");
+        assert_eq!(codex_lead_recovery_blocker(&rows), None);
+        rows[0]["status"] = json!("in_progress");
+        rows[0]["deferred_kind"] = json!("operator_request");
         assert_eq!(codex_lead_recovery_blocker(&rows), None);
         assert_eq!(codex_lead_recovery_blocker(&[]), None);
     }

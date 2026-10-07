@@ -353,10 +353,8 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
                 crate::AgentStatus::Failed
                     | crate::AgentStatus::Exited
                     | crate::AgentStatus::PermanentDead
-            ) {
-                return Ok(());
-            }
-            if stopped.contains(sid) {
+            ) || stopped.contains(sid)
+            {
                 return Ok(());
             }
             let Some(node) = entry.node.as_deref() else {

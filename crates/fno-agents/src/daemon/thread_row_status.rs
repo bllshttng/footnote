@@ -61,8 +61,10 @@ pub(super) fn codex_thread_on_done(
                 "backend": "codex-thread",
                 "turn_id": turn_id,
                 "turn_status": status,
-                "session_id": session_id,
             });
+            if let Some(session_id) = session_id {
+                payload["session_id"] = json!(session_id);
+            }
             if let Some(error) = error {
                 payload["error"] = error;
             }
