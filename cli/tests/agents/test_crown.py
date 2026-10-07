@@ -90,28 +90,6 @@ def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) ->
     assert crown.scope_contains("alpha", "epic-1") is False
 
 
-@pytest.mark.parametrize(
-    "level,scope",
-    [
-        (-1, "epic-x"),          # cannot deserialize into the Rust Option<u32>
-        (3, "epic-x"),           # over the ladder ceiling
-        (True, "epic-x"),        # bool is an int subclass; serializes as JSON true
-        (1, ""),                 # blank scope
-        (1, None),               # a crown that rules nothing
-        (None, "epic-x"),        # a scope with no rung
-        (0, "web,etl"),          # not canonical: unsorted
-        (1, "etl,web"),          # a portfolio is level 0, not 1
-    ],
-)
-def test_the_store_gate_rejects_unstampable_pairs(level, scope) -> None:
-    """The last check before the shared registry. Values arrive here from
-    in-process callers that never touch the CLI, so this cannot live in the flag
-    layer."""
-    from fno.agents.crown import crown_validation_error
-
-    assert crown_validation_error(level, scope) is not None
-
-
 def test_a_mislabeled_level_cannot_switch_off_rivalry(monkeypatch, tmp_path) -> None:
     """The rung is a fact about the SCOPE, not the stored number: a row stamped
     level 0 over an epic set must not read as a different rung and slip the
@@ -135,48 +113,6 @@ def test_a_mislabeled_level_cannot_switch_off_rivalry(monkeypatch, tmp_path) -> 
     # A mislabeled portfolio (stored 2 over two projects) still courts its
     # project king: derivation reads 0 vs 1, equality decides, not rivals.
     assert _crown_rivals("alpha,beta", 2, "alpha", 1) is False
-
-
-def test_the_store_gate_refuses_a_level_that_names_a_different_rung(
-    monkeypatch, tmp_path
-) -> None:
-    """A stored level that contradicts its members is a stamp no resolver
-    produces; the gate refuses on positive evidence only, so a machine where
-    nothing resolves stays with the runtime guards."""
-    from fno.agents.crown import crown_validation_error
-    from fno.projects import resolve as proj_resolve
-
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        '[work.workspaces.ws1]\nprojects = [{ name = "alpha" }, { name = "beta" }]\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
-    proj_resolve._clear_cache()
-
-    assert crown_validation_error(2, "alpha,beta") is not None
-    assert crown_validation_error(0, "e-1,e-2") is not None
-    assert crown_validation_error(0, "alpha,beta") is None
-    assert crown_validation_error(2, "e-1,e-2") is None
-
-
-def test_the_store_gate_passes_the_two_legal_shapes(monkeypatch, tmp_path) -> None:
-    from fno.agents.crown import crown_validation_error
-    from fno.projects import resolve as proj_resolve
-
-    # Level 0 needs its members to RESOLVE as projects, so the config declares
-    # the two names this test stamps a portfolio over.
-    cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        '[work.workspaces.ws1]\nprojects = [{ name = "etl" }, { name = "web" }]\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
-    proj_resolve._clear_cache()
-
-    assert crown_validation_error(None, None) is None      # an uncrowned spawn
-    assert crown_validation_error(2, "epic-x") is None     # a Director
-    assert crown_validation_error(0, "etl,web") is None    # a portfolio
 
 
 # --- spawn stamps the crown, grantor is provenance not self-declared ---------
@@ -481,47 +417,6 @@ def test_settle_spawn_crown_reown_skips_a_provenance_less_child(
     assert rows[1].spawn_provenance is None, (
         "no provenance block is forked onto the child"
     )
-
-
-def test_settle_spawn_crown_applier_never_forks_provenance(
-    tmp_path: Path, monkeypatch, native_backlog_door,
-) -> None:
-    """The write-site guard: even a plan naming a provenance-less row in
-    reown_rows leaves the row alone - the applier moves an existing block,
-    never mints one."""
-    from fno.agents import spawn_overlay_client
-    from fno.agents.crown import settle_spawn_crown
-    from fno.agents.registry import update_registry
-    from fno.paths_testing import use_tmpdir
-
-    use_tmpdir(monkeypatch, tmp_path)
-    caller = _crown_row("caller")
-    child = replace(
-        _crown_row("w5", scope=None),
-        spawned_by_session="caller-sess",
-    )
-    update_registry(lambda _: [caller, child])
-
-    def stale_plan(*args, **kwargs):
-        return {
-            "outcome": "succeeded",
-            "clear_terminal_rows": [],
-            "vacate_rows": [0],
-            "reown_rows": [1],
-            "reown_owner": {
-                "kind": "session", "harness": "codex",
-                "session_id": "heir-sess", "cwd": "/w",
-            },
-        }
-
-    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", stale_plan)
-    rows, outcome, vacated = settle_spawn_crown(
-        [caller, child], scope="epic-x", plan={"caller": {"kind": "human"}},
-        heir="heir", heir_harness="codex", heir_session="heir-sess", heir_cwd="/w",
-    )
-    assert outcome == "succeeded"
-    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
-    assert rows[1].spawn_provenance is None, "the guard skips the fork"
 
 
 def test_settle_spawn_crown_declines_when_rust_is_unavailable(
@@ -1815,16 +1710,6 @@ def test_a_project_kings_grant_covers_an_epic_set_under_it(
 
     assert grant_error("e-1,e-2", king) is None
     assert grant_error("e-1,e-3", king) is not None
-
-
-def test_the_store_gate_passes_a_rung_2_epic_set() -> None:
-    """A multi-member scope is level 0 (a project portfolio) or level 2 (an
-    epic set). The gate read multi-member as portfolio-only and refused the
-    rung-2 set the resolver had just minted on the spawn path."""
-    from fno.agents.crown import crown_validation_error
-
-    assert crown_validation_error(2, "e-1,e-2") is None
-    assert crown_validation_error(1, "e-1,e-2") is not None
 
 
 def test_two_epics_crown_in_place_as_one_set(

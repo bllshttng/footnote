@@ -693,56 +693,31 @@ def settle_spawn_crown(
     heir_harness: Optional[str] = None,
     heir_session: Optional[str] = None,
     heir_cwd: Optional[str] = None,
+    stamp: bool = False,
+    level: Optional[int] = None,
+    grantor: Optional[str] = None,
 ) -> "tuple[list, str, list]":
-    """Apply a pre-launch crown-settle PLAN under the registry lock.
-
-    ``plan`` is the answer :func:`plan_spawn_crown` got from Rust before
-    launch. Rust checks its holder identities against the rows this write sees
-    and returns indexes to clear; it also composes the heir's owner block from
-    ``heir_harness``/``heir_session``/``heir_cwd``, so one session-id rule
-    writes it. If Rust is unavailable or its answer is malformed, the spawn
-    declines without changing any row. Returns ``(rows, outcome, vacated)``:
-    outcome is ``granted`` | ``succeeded`` | ``declined`` (the caller stamps
-    its own row, dropping the crown fields when declined), and ``vacated``
-    lists ``(row, cause)`` to journal once the write commits - cause
-    ``succession`` for a vacated holder, ``reowned`` for a court child whose
-    ``spawn_provenance.owner`` moved to the heir in this same write.
+    """Apply Rust's lock-time row updates and return vacated rows for journaling.
+    The native owner checks occupancy and the heir's carried identity; a missing
+    or malformed answer declines without changing the caller's rows.
     """
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
     try:
         answer = spawn_overlay_call({
-            "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
+            "kind": "spawn-team", "op": "apply", "scope": scope, "exclude_name": exclude_name,
             "plan": plan, "heir": heir, "rows": [asdict(row) for row in rows],
-            "heir_identity": {
-                "harness": heir_harness, "session_id": heir_session, "cwd": heir_cwd,
-            },
+            "heir_identity": {"harness": heir_harness, "session_id": heir_session, "cwd": heir_cwd},
+            "stamp": stamp, "level": level, "grantor": grantor,
         })
         outcome = answer["outcome"]
         if outcome not in ("granted", "succeeded", "declined"):
-            raise ValueError("invalid crown-settle outcome")
-        marks = [(i, "holder_terminal") for i in answer["clear_terminal_rows"]]
-        marks += [(i, "succession") for i in answer["vacate_rows"]]
-        vacated = [(rows[i], cause) for i, cause in marks]
-        reown_indexes = [int(i) for i in answer.get("reown_rows", [])]
-        [rows[i] for i in reown_indexes]  # an out-of-range index declines, like the marks
-        heir_owner = answer.get("reown_owner")
+            raise ValueError("invalid spawn-team outcome")
+        vacated = [(replace(rows[int(i)], **fields), cause) for i, cause, fields in answer["vacated"]]
+        updates = {int(i): replace(rows[int(i)], **fields) for i, fields in answer["updates"].items()}
     except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
         return rows, "declined", []
-    for index, _ in marks:
-        rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
-    if heir_owner is not None:
-        for index in reown_indexes:
-            if rows[index].spawn_provenance is None:
-                # Reown moves an existing provenance owner only. Forking a
-                # block onto a provenance-less row (adopt, pre-v33 birth edge)
-                # wrote an origin-less block the typed Rust reader rejects.
-                continue
-            provenance = dict(rows[index].spawn_provenance)
-            provenance["owner"] = dict(heir_owner)
-            rows[index] = replace(rows[index], spawn_provenance=provenance)
-            vacated.append((rows[index], "reowned"))
-    return rows, outcome, vacated
+    return [updates.get(i, row) for i, row in enumerate(rows)], outcome, vacated
 
 
 def plan_spawn_crown(
@@ -751,17 +726,9 @@ def plan_spawn_crown(
     succession: bool,
     exclude_name: Optional[str] = None,
 ) -> "tuple[Optional[str], Optional[dict]]":
-    """Decide, BEFORE launch, whether a crowned spawn is granted, transfers, or
-    refuses. Runs the same authority check both spawn doors ran inline
-    (:func:`grant_error`, same arguments), then asks Rust's ``crown-settle``
-    payload kind (``crown_settle::resolve``) for occupancy against a fresh
-    registry read. Returns ``(refusal, answer)``: a non-``None`` refusal means
-    refuse before launch; ``answer`` (the full crown-settle JSON) is the PLAN
-    :func:`settle_spawn_crown` applies again under the lock.
-
-    Fails closed: a crowned spawn with no occupancy answer must not launch, so
-    a missing/broken ``fno-agents`` binary refuses rather than proceeding
-    uncrowned.
+    """Check authority, then ask team_settle for a pre-launch occupancy plan.
+    Return the refusal and native answer. A failed read refuses before launch;
+    settlement rechecks that plan under the registry lock.
     """
     grant_problem = grant_error(
         scope, caller_row, allow_terminal_recovery=True, allow_succession=succession,
@@ -865,21 +832,16 @@ def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, s
     """Journal one committed spawn write: a vacate line per cleared holder, one
     reown line per court child that followed the crown, plus the grant line."""
     from fno.agents import events
+    from fno.agents.spawn_overlay_client import spawn_overlay_call
 
-    for row, cause in vacated:
-        if cause == "reowned":
-            events.emit("agent_court_reowned", scope=scope, successor=name, child=row.name)
-            continue
-        emit_crown_vacated(
-            scope=scope, level=row.crown_level, holder=row.name,
-            holder_session=row.harness_session_id, grantor=row.crown_grantor,
-            cause=cause, successor=name if cause == "succession" else None,
-        )
-    if outcome in ("granted", "succeeded"):
-        events.emit(
-            "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
-            vacated_scope=None, vacated_level=None, stranded_subordinates=[],
-        )
+    answer = spawn_overlay_call({
+        "kind": "spawn-team", "op": "journal", "outcome": outcome,
+        "vacated": [(asdict(row), cause) for row, cause in vacated],
+        "name": name, "level": level, "scope": scope, "grantor": grantor,
+    })
+    for event in answer["events"]:
+        events.emit(event["kind"], **event["data"])
+    if answer["arm_missions"]:
         arm_crowned_missions(scope)
 
 
@@ -1430,56 +1392,18 @@ def _stranded_subordinates(
 
 
 def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
-    """Why ``(level, scope)`` is not a stampable crown, or None when it is.
+    """Ask the native stamp validator; project resolution remains a caller fact."""
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
-    The last gate before the shared store, and it lives away from the CLI on
-    purpose: ``--crown`` reaches a parser, but ``dispatch_spawn`` and
-    ``dispatch_spawn_pane`` take ``(level, scope)`` straight from in-process
-    callers. A value that skipped this lands in the registry, and a negative or
-    boolean level cannot deserialize into the Rust row's ``Option<u32>``, so one
-    bad write breaks reads for every reader, not just the caller.
-
-    Both-None is the uncrowned spawn and passes. Anything else must name BOTH
-    halves: a level with no scope stamps a crown that rules nothing and that the
-    one-live-crown guard, which keys on scope, can never see or supersede.
-    """
-    if level is None and scope is None:
-        return None
-    if level is None or scope is None:
-        return f"a crown needs both level and scope; got level={level!r} scope={scope!r}"
-    # bool before int: `True` is an int subclass and would serialize as JSON
-    # `true`, failing the same u32 decode a negative does.
-    if isinstance(level, bool) or not isinstance(level, int):
-        return f"crown level must be an int 0..{MAX_CROWN_LEVEL}; got {level!r}"
-    if not 0 <= level <= MAX_CROWN_LEVEL:
-        return (
-            f"crown level must be 0..{MAX_CROWN_LEVEL} "
-            f"(0 several projects, 1 one project, 2 one epic); got {level}"
-        )
-    if not isinstance(scope, str) or not scope.strip():
-        return f"crown scope must be a nonblank id; got {scope!r}"
-    members = split_scope(scope)
-    if canonical_scope(members) != scope:
-        return (
-            "crown scope must be canonical (sorted, deduped, no blank members); "
-            f"got {scope!r}, want {canonical_scope(members)!r}"
-        )
-    if len(members) > 1 and level not in (0, 2):
-        return (
-            f"a scope naming {len(members)} members is level 0 (a portfolio of "
-            f"projects) or 2 (a set of epics), not {level}"
-        )
-    # The pairing the message above promises, on positive evidence only: where
-    # nothing resolves (no readable config) the runtime guards fail closed.
-    resolved = [_canonical_project(m) for m in members]
-    if level == 0 and len(members) > 1 and not any(resolved):
-        return (
-            f"level 0 is a portfolio of PROJECTS, but no member of {scope!r} "
-            "resolves to a configured project"
-        )
-    if level == 2 and any(resolved):
-        return (
-            f"level 2 is a SET OF EPICS, but {', '.join(m for m, r in zip(members, resolved) if r)} "
-            "resolve(s) to a configured project"
-        )
-    return None
+    try:
+        return spawn_overlay_call({
+            "kind": "spawn-team", "op": "validate", "level": None if level is None else str(level),
+            "scope": scope if scope is None or isinstance(scope, str) else repr(scope),
+            "level_repr": repr(level), "scope_repr": repr(scope),
+            "level_is_int": isinstance(level, int) and not isinstance(level, bool),
+            "scope_is_str": isinstance(scope, str),
+            "projects": [m for m in split_scope(scope if isinstance(scope, str) else None)
+                         if _canonical_project(m)],
+        })["refusal"]
+    except SpawnOverlayUnavailable as exc:
+        return f"cannot validate promotion: {exc}"
