@@ -388,6 +388,14 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
         ),
         file=sys.stderr,
     )
+
+
+# Send-time human escalation for a question, per (sender, recipient). A burst
+# re-nudges every window rather than once forever (marker refreshed only on an
+# actual escalation, so the window runs from the last nudge, not the first send).
+_ESCALATION_DEBOUNCE_S = 300
+
+
 def _recipient_is_attended(recipient: str) -> bool:
     """True iff ``recipient``'s registry row was stamped ``origin=operator`` at
     a hand-start (SessionStart register hook / ``fno agents register``).
