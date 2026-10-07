@@ -125,7 +125,7 @@ NUDGE_BUDGET="$(hook_budget_secs)"
 
 # ── 2. Both triggers from config (general 50, lead 40). ───────────────────────
 GENERAL_TRIGGER="50"
-KING_TRIGGER="40"
+LEAD_TRIGGER="40"
 if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
     # ONE boot for the whole block. Each `fno config get` pays ~1.7s of
     # interpreter startup, so a read per scalar costs a boot per scalar; a Stop
