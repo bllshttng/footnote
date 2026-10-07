@@ -178,6 +178,14 @@ fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
     }
     let backup = parent.join("backups/claims-table");
     std::fs::create_dir_all(&backup).map_err(|e| e.to_string())?;
+    if metadata.is_none() {
+        if let Some((temporary, source)) = interrupted_handoff(&backup)? {
+            // A crash fell between retiring the directory and publishing the
+            // marker. Finish the handoff so the archived claims still import.
+            std::fs::rename(&temporary, dir).map_err(|e| e.to_string())?;
+            return Ok(Some(source));
+        }
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -236,6 +244,34 @@ fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
         ));
     }
     Ok(source)
+}
+
+fn interrupted_handoff(backup: &Path) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    for entry in std::fs::read_dir(backup).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("marker-"))
+        {
+            continue;
+        }
+        let Ok(marker) =
+            serde_json::from_slice::<Value>(&std::fs::read(&path).map_err(|e| e.to_string())?)
+        else {
+            continue;
+        };
+        if let Some(source) = marker
+            .get("source")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+        {
+            if source.is_dir() {
+                return Ok(Some((path, source)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn migrate_auxiliary(dir: &Path, source: Option<&Path>) -> Result<(), String> {
@@ -411,9 +447,13 @@ pub(crate) fn acquire(
     )?;
     let connection = open_for_key(key, options.root.as_deref())?;
     let observed = record_for(&connection, key)?;
+    // Takeover is a compare-and-swap on the row we classified. The clock
+    // alone never decides: an expired lease whose pid or session is live stays held.
     let local_dead = observed.as_ref().filter(|r| {
-        claims::is_same_machine(&r.host, r.machine_id.as_deref())
-            && claims::classify_with_session_witness(r, witness) == ClaimState::Stale
+        !matches!(
+            claims::classify_with_session_witness(r, witness),
+            ClaimState::Live | ClaimState::Suspect
+        )
     });
     let record = claims::make_claim(key, holder, options);
     claims::validate_record(&record)?;
@@ -422,7 +462,7 @@ pub(crate) fn acquire(
         acquired_at=MAX(excluded.acquired_at,claims.acquired_at+1), expires_at=excluded.expires_at,
         pid=excluded.pid,pid_unavailable=excluded.pid_unavailable,host=excluded.host,machine_id=excluded.machine_id,
         reason=excluded.reason,harness=excluded.harness,session_id=excluded.session_id,pid_provenance=excluded.pid_provenance,metadata=excluded.metadata
-        WHERE claims.holder=excluded.holder OR claims.expires_at <= {CLOCK}
+        WHERE claims.holder=excluded.holder
         OR (claims.holder IS ?14 AND claims.acquired_at IS ?15 AND claims.expires_at IS ?16)
         RETURNING {COLUMNS}");
     let result = connection
@@ -597,24 +637,27 @@ pub fn force_release(
         return Err("key and override reason must be non-empty".into());
     }
     let connection = open_for_key(key, root)?;
-    let removed = connection
+    // Raw columns, not a decoded record: the force path is the one way out
+    // for a row that no longer validates.
+    let removed: Option<(Option<String>, Option<i64>)> = connection
         .query_row(
-            &format!("DELETE FROM claims WHERE key=?1 RETURNING {COLUMNS}"),
+            "DELETE FROM claims WHERE key=?1 RETURNING holder, pid",
             [key],
-            decode,
+            |r| Ok((r.get(0).ok(), r.get(1).ok().flatten())),
         )
         .optional()
         .map_err(|e| e.to_string())?;
+    let (holder, pid) = removed.clone().unwrap_or_default();
     let mut data = serde_json::Map::new();
     data.insert("key".into(), json!(key));
     data.insert("override_reason".into(), json!(reason));
-    if let Some(record) = &removed {
-        data.insert("previous_holder".into(), json!(record.holder));
-        data.insert("previous_pid".into(), json!(record.pid));
+    if removed.is_some() {
+        data.insert("previous_holder".into(), json!(holder));
+        data.insert("previous_pid".into(), json!(pid));
     }
     claims::emit_audit_event(None, "claim_force_overridden", data);
     Ok(
-        json!({"key":key,"path":database_path(root)?,"archived":removed.is_some(),"force_released":removed.is_some(),"previous_holder":removed.as_ref().map(|r| &r.holder),"previous_pid":removed.as_ref().and_then(|r| r.pid)}),
+        json!({"key":key,"path":database_path(root)?,"archived":removed.is_some(),"force_released":removed.is_some(),"previous_holder":holder,"previous_pid":pid}),
     )
 }
 
