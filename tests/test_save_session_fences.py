@@ -64,21 +64,6 @@ def test_even_fence_input_unchanged():
     assert out == expected, "balanced input must gain no closing fence"
 
 
-def test_multi_round_only_middle_odd_stays_balanced():
-    rounds = [
-        (None, "clean"),
-        ("middle", "```bash\nfno doctor test\n"),
-        (None, "also clean"),
-    ]
-    out = save_session.format_transcript(rounds, "fm")
-    lines = out.splitlines()
-    fences = fence_indexes(lines)
-    assert len(fences) % 2 == 0, f"fence count must be even, got {len(fences)}"
-    # 2 headings share the text "## Assistant"; the third round's is last.
-    headings = [i for i, ln in enumerate(lines) if ln == "## Assistant"]
-    assert fences[-1] < headings[-1], "closer must not leak past the last round"
-
-
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

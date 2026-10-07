@@ -952,6 +952,11 @@ mod tests {
 
     #[test]
     fn table_loads_and_overrides_disable() {
+        // The override leg points FNO_CONFIG at a file that disables the
+        // ask row; every fire reads config, so a sibling test mid-loop would
+        // see the row off.
+        let lock = crate::claims::test_env_lock();
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         let rows = parse_table().expect("the shipped table loads");
         for id in [
             "chat_ask_unfiled",

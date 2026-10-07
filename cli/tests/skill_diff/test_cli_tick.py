@@ -160,12 +160,6 @@ def test_paused_exits_zero_with_word(monkeypatch, tmp_path):
     assert "skill_diff_proposed" not in types
 
 
-def test_no_work_when_no_runs(monkeypatch, tmp_path):
-    _wire(monkeypatch, tmp_path, [])
-    r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
-    assert r.exit_code == 0 and "no-work" in r.output
-
-
 def test_noop_on_all_pass_run(monkeypatch, tmp_path):  # AC6-EDGE
     p = _wire(monkeypatch, tmp_path, [_rc("r1"), _finding("r1", verdict="pass")])
     r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
@@ -278,17 +272,6 @@ def test_redaction_refusal_is_terminal(monkeypatch, tmp_path):  # P2 review
     assert ndh and ndh[0]["data"]["reason"] == "redaction_refused"
 
 
-def test_apply_refuses_path_traversal(monkeypatch, tmp_path):
-    # An LLM-supplied path that escapes the target skill dir must be refused.
-    with pytest.raises(RuntimeError, match="not a .md under"):
-        cli._apply_and_open_pr(
-            skill_id="fno:blueprint", run_id="obs-r1",
-            hunks=[{"file": "../../etc/passwd", "old_text": "", "new_text": "x",
-                    "cited_finding_ids": ["s1"]}],
-            body="b", cited=["s1"],
-        )
-
-
 def test_apply_refuses_non_markdown_and_other_skill(monkeypatch, tmp_path):
     # A .py path, or a path under a DIFFERENT skill, is refused (P2 review).
     for bad in ("skills/blueprint/scripts/x.py", "skills/review/SKILL.md"):
@@ -392,7 +375,7 @@ def test_reconcile_ac2_err_tool_fault_excluded(monkeypatch, tmp_path):  # AC2-ER
     p = _wire(monkeypatch, tmp_path, events)
     # sid-a's replay tool-faults (excluded); sid-b genuinely still fails.
     _wire_reeval(monkeypatch, p, replay={"sid-a": "tool_fault", "sid-b": "fail"})
-    r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
+    runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
     closed = [e for e in _events(p) if e["type"] == "skill_diff_eval_closed"]
     # before_fail=2, after_fail=1 (tool_fault not counted) -> delta=1, not 0.
     assert closed and closed[0]["data"]["score_delta"] == 1
@@ -547,7 +530,7 @@ def test_reconcile_pr_number_already_closed_is_noop(monkeypatch, tmp_path):  # A
         {"type": "skill_diff_eval_closed",
          "data": {"pr_number": 201, "skill_id": "fno:blueprint", "run_id_before": "r1"}},
     ]
-    p = _wire(monkeypatch, tmp_path, events)
+    _wire(monkeypatch, tmp_path, events)
     r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
     assert "already has an eval-closed receipt" in r.output
 

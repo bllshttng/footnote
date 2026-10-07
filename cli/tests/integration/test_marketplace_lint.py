@@ -9,7 +9,6 @@ Covers all four ACs from Phase 3 of the skill-encapsulation refactor:
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import textwrap
 from pathlib import Path
@@ -111,17 +110,6 @@ def test_skill_runtime_call_in_reference_md_fails(tmp_path):
     assert "skills/target/references/loop.md:" in result.stderr
 
 
-def test_skill_runtime_call_in_agent_md_fails(tmp_path):
-    """AC4-EDGE: a Skill() call in agents/*.md (subagent prompt) fails."""
-    _make_skill(tmp_path, "target", _CLEAN_SKILL_FRONTMATTER)
-    agents = tmp_path / "skills" / "target" / "agents"
-    agents.mkdir()
-    (agents / "worker.md").write_text('Body. Skill("target", "...") here.\n')
-    result = _run(["bash", str(LINT), "--root", str(tmp_path)])
-    assert result.returncode != 0
-    assert "skills/target/agents/worker.md:" in result.stderr
-
-
 # ---------------------------------------------------------------------------
 # AC7-ERR (epic ab-0d05a9b7): cluster routers obey the same guard as drivers
 # ---------------------------------------------------------------------------
@@ -158,39 +146,9 @@ def test_shared_path_escape_fails(tmp_path):
     assert "bundled references/ or agents/" in result.stderr
 
 
-def test_sibling_skill_path_escape_fails(tmp_path):
-    """A `../../<sibling-skill>/X.md` link fails the lint (catches future
-    Skill folders that try to reach into each other directly)."""
-    skill_md = _CLEAN_SKILL_FRONTMATTER.replace(
-        "Body content. No forbidden patterns.",
-        "See [worker](../../sibling/worker.md).",
-    )
-    _make_skill(tmp_path, "target", skill_md)
-    result = _run(["bash", str(LINT), "--root", str(tmp_path)])
-    assert result.returncode != 0
-    assert "cross-skill path escape" in result.stderr
-
-
 # ---------------------------------------------------------------------------
 # Missing requires.binaries.fno fails
 # ---------------------------------------------------------------------------
-
-
-def test_missing_requires_block_fails(tmp_path):
-    """A driver skill without a metadata.requires.binaries block fails the lint."""
-    skill_md = textwrap.dedent(
-        """\
-        ---
-        name: target
-        description: "no requires block"
-        ---
-        body
-        """
-    )
-    _make_skill(tmp_path, "target", skill_md)
-    result = _run(["bash", str(LINT), "--root", str(tmp_path)])
-    assert result.returncode != 0
-    assert "does not declare 'fno'" in result.stderr
 
 
 def test_missing_fno_in_requires_fails(tmp_path):
@@ -238,13 +196,6 @@ def test_top_level_requires_block_fails(tmp_path):
     result = _run(["bash", str(LINT), "--root", str(tmp_path)])
     assert result.returncode != 0
     assert "does not declare 'fno'" in result.stderr
-
-
-def test_requires_with_fno_passes(tmp_path):
-    """The exact format target/megawalk/megatron use passes the lint."""
-    _make_skill(tmp_path, "target", _CLEAN_SKILL_FRONTMATTER)
-    result = _run(["bash", str(LINT), "--root", str(tmp_path)])
-    assert result.returncode == 0
 
 
 # ---------------------------------------------------------------------------

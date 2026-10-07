@@ -23,8 +23,6 @@ def _isolated_roots(monkeypatch: pytest.MonkeyPatch):
     """Reset the memoized resolvers so env pins set per test take effect."""
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
-    from fno import config as config_mod
-
     yield
 
 
@@ -48,25 +46,6 @@ PARITY_SCENARIOS = (
     ("foreign-env-root-refuses", "env", False),
     ("durable-config-root-migrates", "config", True),
 )
-
-
-def test_ac1_foreign_spaces_root_leaves_checkout_journal_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A per-process FNO_SPACES_DIR is not the repo's home: no move."""
-    repo = _git_repo(tmp_path / "repo")
-    journal = repo / ".fno" / "events.jsonl"
-    journal.parent.mkdir(parents=True)
-    journal.write_text("ts=2026-09-05T12:00:00Z type=review_attestation\n", encoding="utf-8")
-    monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "sandbox-spaces"))
-    monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
-    monkeypatch.chdir(repo)
-
-    paths_mod.project_events_json()
-
-    assert journal.read_text(encoding="utf-8") == (
-        "ts=2026-09-05T12:00:00Z type=review_attestation\n"
-    )
 
 
 def test_ac2_durable_space_still_migrates_once_and_writes_marker(

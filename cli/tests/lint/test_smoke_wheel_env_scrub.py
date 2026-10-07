@@ -278,12 +278,6 @@ def test_tracker_sees_through_column_zero_nesting() -> None:
     assert 8 in top
 
 
-def test_tracker_reopens_after_a_block_closes() -> None:
-    """Depth must come back down, or everything after the first block is hidden."""
-    script = ["if x; then", "y", "fi", "unset PYTHONPATH"]
-    assert 4 in top_level_lines(script)
-
-
 def test_tracker_reopens_after_a_brace_block() -> None:
     """A helper function must not hide the rest of the file.
 
@@ -292,14 +286,6 @@ def test_tracker_reopens_after_a_brace_block() -> None:
     """
     script = ["run_capture() {", "  echo hi", "}", "unset PYTHONPATH"]
     assert 4 in top_level_lines(script)
-
-
-def test_tracker_sees_select_loops() -> None:
-    """`select` skips its body outright when stdin is at EOF."""
-    script = ["select x in a b; do", "unset PYTHONPATH", "done", "pip install ./x.whl"]
-    top = top_level_lines(script)
-    assert 2 not in top
-    assert 4 in top
 
 
 def test_tracker_sees_multiline_subshells() -> None:

@@ -240,7 +240,9 @@ fn a_row_that_merged_while_parked_is_handled_not_resumed() {
 
 #[test]
 fn resolve_follows_a_configured_state_dir() {
-    let _env_lock = crate::claims::test_env_lock();
+    let _env_lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // The store must follow the same `state_dir` the Python watcher reads,
     // or the lead's parked board and the daemon sweep watch an empty file
     // while the parks live under the override.

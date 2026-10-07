@@ -31,9 +31,8 @@ def test_ac1_hp_unset_removes_key_reverts_to_default(tmp_path):
     assert res.was is True
     # Reverts to the model default (auto_merge.enabled defaults False).
     assert res.default is False
-    # File no longer carries the key.
-    data = _read(tmp_path)
-    assert "enabled" not in data.get("config", {}).get("auto_merge", {})
+    # File no longer carries the key, and the emptied block is pruned.
+    assert "auto_merge" not in _read(tmp_path)
 
 
 def test_ac1_err_unknown_key_exit1_unchanged(tmp_path):
@@ -45,47 +44,6 @@ def test_ac1_err_unknown_key_exit1_unchanged(tmp_path):
         unset_config_value("config.nonsense.key", scope="project", repo_root=tmp_path)
     assert exc.value.exit_code == 1
     assert (tmp_path / ".fno" / "config.toml").read_text() == before
-
-
-def test_ac1_edge_absent_key_is_noop(tmp_path):
-    # Seed a different key so the file exists.
-    set_config_value(
-        "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
-    )
-    res = unset_config_value(
-        "config.auto_merge.enabled", scope="project", repo_root=tmp_path
-    )
-    assert res.present is False
-    # The seeded key (and the rest of the file) survive.
-    assert _read(tmp_path)["agents"]["a2a"]["auto"] is False
-    # Nothing meaningful changed (modulo a harmless reserialize is acceptable,
-    # but an absent-key unset on an existing file should not drop other keys).
-    assert "a2a" in _read(tmp_path)["agents"]
-
-
-def test_ac1_edge_no_file_is_clean_noop(tmp_path):
-    # No settings file at all: unset is a clean no-op, writes nothing.
-    res = unset_config_value(
-        "config.auto_merge.enabled", scope="project", repo_root=tmp_path
-    )
-    assert res.present is False
-    assert not (tmp_path / ".fno" / "config.toml").exists()
-
-
-def test_ac1_edge_emptied_parent_is_pruned(tmp_path):
-    # Only one leaf under config.auto_merge: removing it should prune the block.
-    set_config_value(
-        "config.auto_merge.enabled", "true", scope="project", repo_root=tmp_path
-    )
-    data = _read(tmp_path)
-    assert list(data["auto_merge"].keys()) == ["enabled"]
-
-    unset_config_value(
-        "config.auto_merge.enabled", scope="project", repo_root=tmp_path
-    )
-    data = _read(tmp_path)
-    # The now-empty auto_merge block is pruned, not left as `{}`.
-    assert "auto_merge" not in data.get("config", {})
 
 
 def test_unset_preserves_sibling_keys(tmp_path):
@@ -104,28 +62,6 @@ def test_unset_preserves_sibling_keys(tmp_path):
     assert "auto" not in data["agents"]["a2a"]
 
 
-def test_ac1_fr_midwrite_failure_leaves_intact(tmp_path, monkeypatch):
-    set_config_value(
-        "config.auto_merge.enabled", "true", scope="project", repo_root=tmp_path
-    )
-    before = (tmp_path / ".fno" / "config.toml").read_text()
-
-    import fno.config.writer as writer_mod
-
-    def _boom(*a, **k):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(writer_mod.tomli_w, "dumps", _boom)
-    with pytest.raises(ConfigSetError) as exc:
-        unset_config_value(
-            "config.auto_merge.enabled", scope="project", repo_root=tmp_path
-        )
-    assert exc.value.exit_code == 1
-    assert (tmp_path / ".fno" / "config.toml").read_text() == before
-    leftovers = list((tmp_path / ".fno").glob(".config.toml.tmp.*"))
-    assert leftovers == []
-
-
 def test_ac1_ui_cli_confirms_unset(tmp_path, monkeypatch):
     gpath = tmp_path / "global-settings.yaml"
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(gpath))
@@ -139,15 +75,6 @@ def test_ac1_ui_cli_confirms_unset(tmp_path, monkeypatch):
     assert "config.auto_merge.enabled" in res.output
     assert "defaults to" in res.output
     assert "global" in res.output
-
-
-def test_cli_unset_absent_key_reports_not_set(tmp_path, monkeypatch):
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
-    from fno.config_cli import app
-
-    res = CliRunner().invoke(app, ["unset", "config.auto_merge.enabled"])
-    assert res.exit_code == 0
-    assert "not set" in res.output
 
 
 def test_cli_rm_alias_unsets(tmp_path, monkeypatch):

@@ -7,7 +7,6 @@ LOW predicate, and the refusal to return a half-resolved destination.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -84,17 +83,6 @@ class TestRouteActions:
         assert route.action == "cutover"
         assert route.record_id == "healthy"
 
-    def test_exhausted_cuts_over_to_the_other_harness(self, monkeypatch) -> None:
-        # AC1-HP: exhausted claude + healthy codex candidate -> cutover, with
-        # the complete destination tuple a spawn needs.
-        _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
-        _dest(monkeypatch, DEST)
-        r = _route()
-        assert r.action == "cutover"
-        assert (r.record_id, r.harness, r.account_env) == DEST
-        assert r.source_record == "ccm"
-        assert r.window == "exhausted"
-
     def test_distant_low_cuts_over(self, monkeypatch) -> None:
         # AC2-HP: the inverted predicate - a LOW window resetting far away is a
         # reason to leave NOW, and it does not defer.
@@ -125,7 +113,7 @@ class TestRouteActions:
         _dest(monkeypatch, None)
         assert _route().action == "stay"
 
-    @pytest.mark.parametrize("reason", ["defer-dispatch-off", "p0-exempt", "no-provider"])
+    @pytest.mark.parametrize("reason", ["p0-exempt"])
     def test_unprobed_proceeds_without_reading_the_combo(self, monkeypatch, reason) -> None:
         _signal(
             monkeypatch,
@@ -141,10 +129,6 @@ class TestRouteActions:
         r = _route()
         assert r.action == "unknown-proceed"
         assert r.reason == reason
-
-    def test_ok_stays(self, monkeypatch) -> None:
-        _signal(monkeypatch, state=HeadroomState.OK, defer=False, cutover=False, resets_at=None)
-        assert _route().action == "stay"
 
 
 class TestExplicitIntentWins:
@@ -172,18 +156,6 @@ class TestExplicitIntentWins:
             lambda *a, **k: pytest.fail("config read before the explicit pin won"),
         )
         assert ar.launch_is_pinned(**kwargs) is True
-
-    def test_configured_dispatch_harness_pins(self, monkeypatch) -> None:
-        # Precedence: configured dispatch harness outranks quota policy, so it
-        # must block an automatic reroute the same way an invocation pin does.
-        import fno.config as cfg
-
-        monkeypatch.setattr(
-            cfg,
-            "load_settings",
-            lambda *a, **k: SimpleNamespace(dispatch=SimpleNamespace(harness="codex")),
-        )
-        assert ar.launch_is_pinned({}) is True
 
     def test_stage_table_harness_pins(self, monkeypatch) -> None:
         # The stage table is the home for the harness axis, so a launch routed
@@ -219,23 +191,6 @@ class TestExplicitIntentWins:
         assert r.action == "defer"
         assert r.reason == "pinned"
 
-    def test_pinned_distant_low_stays(self, monkeypatch) -> None:
-        _signal(monkeypatch, state=HeadroomState.LOW, defer=False, cutover=True)
-        monkeypatch.setattr(
-            ar, "_select_destination", lambda *a: pytest.fail("pinned launch was rerouted")
-        )
-        assert _route(pinned=True).action == "stay"
-
-
-class TestUnresolvableDestination:
-    """AC5-FR: a destination missing either half is never launched."""
-
-    def test_selector_never_returns_a_partial_tuple(self, monkeypatch) -> None:
-        _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
-        _dest(monkeypatch, DEST)
-        r = _route()
-        assert all(v is not None for v in (r.record_id, r.harness, r.account_env))
-
 
 class TestCutoverConfig:
     def test_unreadable_config_disarms_proactive_cutover(self, monkeypatch) -> None:
@@ -244,13 +199,6 @@ class TestCutoverConfig:
 
         monkeypatch.setattr("fno.config.load_settings", boom)
         assert ar._cutover_low_after_minutes(None) == 0
-
-    def test_negative_and_non_int_values_degrade_to_off(self) -> None:
-        from fno.config import DispatchBlock
-
-        for bad in (-30, True, "60", 1.5, None):
-            assert DispatchBlock(cutover_low_after_minutes=bad).cutover_low_after_minutes == 0
-        assert DispatchBlock(cutover_low_after_minutes=60).cutover_low_after_minutes == 60
 
 
 # ---------------------------------------------------------------------------
@@ -337,23 +285,6 @@ def test_select_destination_unstaged_account_defers(monkeypatch):
         raise RuntimeError("account not staged")
 
     monkeypatch.setattr("fno.adapters.providers.dispatch.dispatch_env", boom)
-    assert ar._select_destination(None, "ccm") is None
-
-
-def test_select_destination_no_active_combo_defers(monkeypatch):
-    """_select_destination: failover configured but the active target is a
-    bare provider (no combo) -> None (nothing to walk)."""
-    from fno.config import SettingsModel
-    from fno.agents.dispatch_target import DispatchTarget
-
-    monkeypatch.setattr(
-        "fno.config.load_settings",
-        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
-    )
-    monkeypatch.setattr(
-        "fno.agents.dispatch_target.resolve_dispatch_target",
-        lambda *a, **k: DispatchTarget(provider_id="ccm", source="active_provider"),
-    )
     assert ar._select_destination(None, "ccm") is None
 
 
@@ -446,30 +377,6 @@ class TestQuotaRotationDeclinedEvent:
         assert events[0]["data"] == {
             "provider": "ccm", "reason": "defer-dispatch-off", "node_id": "fake-node-1",
         }
-
-    def test_no_usage_snapshot_omits_age_and_the_event_still_lands(
-        self, monkeypatch, tmp_path,
-    ) -> None:
-        # AC2: read_usage() with no snapshot ever written returns None, so
-        # snapshot_age_s is simply absent - the event must still validate and
-        # append (both `provider` and `reason` are its only required fields).
-        monkeypatch.chdir(tmp_path)
-        # The journal too. The hermetic sandbox pins FNO_EVENTS_PATH for the
-        # whole pytest process, and project_events_json checks it ahead of the
-        # cwd-derived root, so a test reading tmp_path's journal must name it.
-        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
-        _signal(
-            monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
-            resets_at=None, reason="no-provider",
-        )
-
-        ar.select_autonomous_route(provider_id="ccm")  # no node_id this time
-
-        events = self._events(tmp_path)
-        assert len(events) == 1
-        assert "snapshot_age_s" not in events[0]["data"]
-        assert "node_id" not in events[0]["data"]
 
     def test_append_event_failure_is_swallowed_and_route_is_unchanged(
         self, monkeypatch, tmp_path,

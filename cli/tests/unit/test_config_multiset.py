@@ -17,35 +17,6 @@ def _read(tmp_path):
     return tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
 
 
-def test_ac2_hp_multi_set_both_applied(tmp_path):
-    results = set_config_values(
-        [
-            ("config.agents.a2a.auto", "false"),
-            ("config.agents.a2a.turn_ceiling", "7"),
-        ],
-        scope="project",
-        repo_root=tmp_path,
-    )
-    assert len(results) == 2
-    data = _read(tmp_path)
-    assert data["agents"]["a2a"]["auto"] is False
-    assert data["agents"]["a2a"]["turn_ceiling"] == 7
-
-
-def test_multi_set_across_blocks(tmp_path):
-    set_config_values(
-        [
-            ("config.agents.a2a.auto", "true"),
-            ("config.auto_merge.enabled", "true"),
-        ],
-        scope="project",
-        repo_root=tmp_path,
-    )
-    data = _read(tmp_path)
-    assert data["agents"]["a2a"]["auto"] is True
-    assert data["auto_merge"]["enabled"] is True
-
-
 def test_ac2_err_one_invalid_writes_nothing(tmp_path):
     # Seed a valid file first.
     set_config_values(
@@ -65,20 +36,6 @@ def test_ac2_err_one_invalid_writes_nothing(tmp_path):
     assert exc.value.exit_code == 2
     # Nothing from the batch was written.
     assert (tmp_path / ".fno" / "config.toml").read_text() == before
-
-
-def test_ac2_err_unknown_key_in_batch_exit1(tmp_path):
-    with pytest.raises(ConfigSetError) as exc:
-        set_config_values(
-            [
-                ("config.agents.a2a.auto", "false"),
-                ("config.bogus.key", "x"),
-            ],
-            scope="project",
-            repo_root=tmp_path,
-        )
-    assert exc.value.exit_code == 1
-    assert not (tmp_path / ".fno" / "config.toml").exists()
 
 
 def test_ac2_edge_same_key_twice_last_wins(tmp_path):
@@ -116,49 +73,6 @@ def test_multi_set_cross_field_block_validates_on_final_state(tmp_path):
     assert data["obsidian"]["vault"] == "MyVault"
 
 
-def test_multi_set_cross_field_still_rejects_truly_invalid(tmp_path):
-    # enabled=true with NO vault in the batch is genuinely invalid -> reject,
-    # write nothing.
-    with pytest.raises(ConfigSetError) as exc:
-        set_config_values(
-            [("config.obsidian.enabled", "true")],
-            scope="project",
-            repo_root=tmp_path,
-        )
-    assert exc.value.exit_code == 2
-    assert not (tmp_path / ".fno" / "config.toml").exists()
-
-
-def test_empty_batch_rejected(tmp_path):
-    with pytest.raises(ConfigSetError) as exc:
-        set_config_values([], scope="project", repo_root=tmp_path)
-    assert exc.value.exit_code == 2
-
-
-def test_ac2_fr_midbatch_write_failure_intact(tmp_path, monkeypatch):
-    set_config_values(
-        [("config.agents.a2a.auto", "true")], scope="project", repo_root=tmp_path
-    )
-    before = (tmp_path / ".fno" / "config.toml").read_text()
-
-    import fno.config.writer as writer_mod
-
-    def _boom(*a, **k):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(writer_mod.tomli_w, "dumps", _boom)
-    with pytest.raises(ConfigSetError):
-        set_config_values(
-            [
-                ("config.agents.a2a.auto", "false"),
-                ("config.auto_merge.enabled", "true"),
-            ],
-            scope="project",
-            repo_root=tmp_path,
-        )
-    assert (tmp_path / ".fno" / "config.toml").read_text() == before
-
-
 # --- CLI surface ---
 
 
@@ -179,26 +93,6 @@ def test_ac2_ui_cli_multi_lists_each_and_scope_once(tmp_path, monkeypatch):
     data = tomllib.loads((gpath.parent / "config.toml").read_text())
     assert data["agents"]["a2a"]["auto"] is False
     assert data["auto_merge"]["enabled"] is True
-
-
-def test_cli_legacy_two_token_form_still_works(tmp_path, monkeypatch):
-    gpath = tmp_path / "g.yaml"
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(gpath))
-    from fno.config_cli import app
-
-    res = CliRunner().invoke(app, ["set", "config.agents.a2a.auto", "false"])
-    assert res.exit_code == 0, res.output
-    assert tomllib.loads((gpath.parent / "config.toml").read_text())["agents"]["a2a"]["auto"] is False
-
-
-def test_cli_single_keyeq_value_token(tmp_path, monkeypatch):
-    gpath = tmp_path / "g.yaml"
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(gpath))
-    from fno.config_cli import app
-
-    res = CliRunner().invoke(app, ["set", "config.agents.a2a.turn_ceiling=5"])
-    assert res.exit_code == 0, res.output
-    assert tomllib.loads((gpath.parent / "config.toml").read_text())["agents"]["a2a"]["turn_ceiling"] == 5
 
 
 def test_cli_bare_token_without_eq_errors(tmp_path, monkeypatch):

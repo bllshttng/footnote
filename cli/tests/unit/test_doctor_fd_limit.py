@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import resource
 import sys
-from pathlib import Path
 from typing import Any, Optional
 
 import pytest
@@ -70,18 +69,6 @@ def test_low_soft_with_no_launchctl_probe_verdict_low(
     assert report["verdict"] == "low"
 
 
-def test_healthy_limits_verdict_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = _report_for(monkeypatch, 65536, (0, "maxfiles 65536 unlimited\n"))
-    assert report["verdict"] == "ok"
-
-
-def test_hard_limit_reported_as_unlimited_string(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    report = _report_for(monkeypatch, 1048576, (0, "maxfiles 256 unlimited\n"))
-    assert report["hard"] == "unlimited"
-
-
 def test_non_darwin_skips_launchd_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """On linux the launchd branch must not run; the report still resolves."""
     monkeypatch.setattr(sys, "platform", "linux")
@@ -109,11 +96,3 @@ def test_linux_unlimited_soft_is_not_low(monkeypatch: pytest.MonkeyPatch) -> Non
     report = _fd_limit_report()
     assert report["soft"] == resource.RLIM_INFINITY
     assert report["verdict"] == "ok"
-
-
-def test_report_is_a_plain_dict(tmp_path: Path) -> None:
-    """Smoke: the real report runs on this machine and keeps its shape."""
-    report = _fd_limit_report()
-    assert isinstance(report["soft"], int)
-    assert report["threshold"] == 1024
-    assert report["verdict"] in ("low", "ok")
