@@ -118,12 +118,12 @@ def test_bg_spawn_stamps_the_role(bg_home, monkeypatch) -> None:
     )
 
     result = _spawn(
-        "spawn", "--name", "lead-bg", "-H", "claude", "term",
+        "spawn", "--name", "Rowan", "-H", "claude", "term",
         "--substrate", "thread", "--cwd", str(bg_home), "--promote", "epic-x", "--succeed",
     )
     assert result.exit_code == 0, result.output
 
-    row = _row("lead-bg")
+    row = _row("Rowan")
     assert row.role_level == 2, "an epic is a Director"
     assert row.role_scope == "epic-x"
     # Provenance, not self-declaration: the grantor is the session that spawned it.

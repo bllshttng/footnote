@@ -502,7 +502,7 @@ def test_a_name_rebound_since_the_plan_keeps_its_role(team, monkeypatch, capsys)
 
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-lead", "old-session")
-    refusal, plan = role.plan_spawn_role(SCOPE, None, True)
+    refusal, plan = role.plan_spawn_role(SCOPE, None, True, proposed_name="successor")
     assert refusal is None
     assert plan is not None
 

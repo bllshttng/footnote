@@ -604,7 +604,7 @@ fn append_refuses_newline_and_bad_scope_and_bad_ts() {
     let err = append_envelope(&live, &bad_scope, None).unwrap_err();
     assert!(err.contains("canonical team scope"), "err: {err}");
     let bad_ts = json!({"ts": "not-a-time", "type": "lead_checkin",
-        "source": "loop", "data": {}})
+        "source": "loop", "data": {"scope": "x-1", "change": "one"}})
     .to_string();
     let err = append_envelope(&live, &bad_ts, None).unwrap_err();
     assert!(err.contains("RFC3339"), "err: {err}");

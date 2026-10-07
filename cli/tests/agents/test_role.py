@@ -227,7 +227,7 @@ def _spawn_promoted(monkeypatch, tmp_path, *, grantor_env: Optional[str], **role
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     return dispatch_spawn_pane(
-        name="lead-epic",
+        name="Avery",
         message="term",
         provider="claude",
         cwd=tmp_path,
@@ -271,7 +271,7 @@ def test_role_stamped_grantor_is_the_spawning_session(
         grantor_env="parent-sess-abc",
         role_level=1, role_scope="epic-x", succession=True,
     )
-    successor = next(e for e in load_registry() if e.name == "lead-epic")
+    successor = next(e for e in load_registry() if e.name == "Avery")
     assert successor.role_level == 1
     assert successor.role_scope == "epic-x"
     # Provenance, not self-declared: the grantor is who actually spawned it.
@@ -335,7 +335,7 @@ def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
         None,
     )
     assert [row.name for row in load_registry() if row.role_scope == "epic-x"] == [
-        "lead-epic"
+        "Avery"
     ]
     # The reclaim is journaled from the committed write: holder_terminal for
     # the dead row, the grant for the new one.
@@ -351,7 +351,7 @@ def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
     assert vacates[0]["holder_session"] == "dead-session"
     assert vacates[0]["scope"] == "epic-x"
     roles = [e for e in events if e["kind"] == "agent_promoted"]
-    assert [c["name"] for c in roles] == ["lead-epic"]
+    assert [c["name"] for c in roles] == ["Avery"]
 
 
 def _role_row(name: str, *, status: str = "busy", scope="epic-x"):
@@ -2549,7 +2549,7 @@ def test_spawn_role_refuses_before_launch_when_scope_already_occupied(
             role_level=1, role_scope="epic-x",
         )
     rows = load_registry()
-    assert not [r for r in rows if r.name == "lead-epic"], "a refused role must launch nothing"
+    assert not [r for r in rows if r.name == "Avery"], "a refused role must launch nothing"
     # The incumbent's role is untouched
     inc = next(r for r in rows if r.name == "incumbent")
     assert inc.role_level == 1

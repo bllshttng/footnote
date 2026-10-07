@@ -862,6 +862,7 @@ pub(crate) fn succession_replaces(
     live: &[RegistryEntry],
     caller: Option<&str>,
     scope: &str,
+    proposed_name: &str,
 ) -> Result<String, &'static str> {
     let caller = caller
         .filter(|session| !session.is_empty())
@@ -879,6 +880,7 @@ pub(crate) fn succession_replaces(
         "scope": scope,
         "rows": rows,
         "succession": true,
+        "proposed_name": proposed_name,
         "caller": {"kind": "agent", "name": row.name.clone()},
     }))
     .map_err(|_| "settle_unreadable")?;
