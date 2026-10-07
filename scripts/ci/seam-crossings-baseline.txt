@@ -135,3 +135,4 @@ resolver	crates/fno/src/doctor_update.rs	fn read_source_wire(source: &Path) -> O
 resolver	crates/fno/src/mux_cli.rs	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {
 resolver	crates/fno/src/squad_store_tests.rs	fn build_tree_marker_detection_is_pure_over_path() {
+crossing	crates/fno-agents/src/pr_admission.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
