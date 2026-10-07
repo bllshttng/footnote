@@ -392,8 +392,43 @@ mode_from_source() {
   return 0
 }
 
+# The one run-once setup, best effort: resolve the front door the way
+# check_frontdoor does, hand it FNO_YES / --yes, and let its own done
+# markers keep reruns cheap. A report-only pass (READY=0) never runs it.
+run_setup_once() {
+  local cand=""
+  if [[ -n "$TOOL_DIR" && -x "$TOOL_DIR/fno/bin/fno" ]]; then
+    cand="$TOOL_DIR/fno/bin/fno"
+  elif [[ -n "$TOOL_BIN" && -x "$TOOL_BIN/fno" ]]; then
+    cand="$TOOL_BIN/fno"
+  else
+    cand="$(command -v fno 2>/dev/null || true)"
+  fi
+  [[ -n "$cand" ]] || return 0
+  local yes=""
+  [[ -n "${FNO_YES:-}" ]] && yes="--yes"
+  local out
+  if out="$("$cand" config setup run --once $yes --json 2>&1)"; then
+    printf '%s\n' "$out"
+  fi
+}
+
 main() {
   local arg="${1:-}"
+  # `--yes` anywhere on the line (or FNO_YES=1): the run-once setup pass
+  # takes its recommended defaults instead of trusting the TTY. Filtered
+  # out before dispatch so the mode verbs keep their own argv.
+  local a
+  local args=()
+  for a in "$@"; do
+    if [[ "$a" == "--yes" ]]; then
+      FNO_YES=1
+    else
+      args+=("$a")
+    fi
+  done
+  set -- ${args[@]+"${args[@]}"}
+  arg="${1:-}"
   case "$arg" in
     "") ;;
     --repair) shift; mode_repair "$@" ;;
@@ -407,6 +442,13 @@ main() {
   esac
 
   run_all_checks
+
+  # The one run-once setup, best effort and only when the CLI landed ready:
+  # after a repair the wheel carries the verb, its own done markers keep
+  # reruns cheap, and FNO_YES / --yes passes through.
+  if [[ "$READY" == 1 ]]; then
+    run_setup_once
+  fi
 
   if [[ "$MODE" != "report" ]]; then
     RESTART_NEEDED=1   # any install pass leaves a running session's PATH stale
