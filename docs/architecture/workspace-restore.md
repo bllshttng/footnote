@@ -20,7 +20,7 @@ fno mux workspace restore [--dry-run] [--harness <harness>] [--member-session <f
 
 The verb enumerates every live, non-tombstoned worker member in the workspace store. It joins each to its registry row and resumes it: the pane runs the harness's own resume argv with the member's full session id. `--dry-run` classifies every member and spawns nothing. `--harness` narrows the run to one harness. `--json` prints one row per member with its outcome, so a script can branch without parsing prose.
 
-`--member-session` restores only the member with that exact native session ID and skips unrelated portals. An absent match returns a refusal. The CLI refuses servers below protocol 109 before sending this filter. An older server could ignore it and perform a bulk restore.
+`--member-session` restores only the member with that exact native session ID and skips unrelated portals. An absent match returns a refusal. The CLI refuses servers below protocol 109 before sending this filter. Servers below protocol 109 ignore it and can restore every member.
 
 Every member that cannot come back is named, with the reason. The reasons include: no registry row, no session id, a harness the table gives no resume form, an ambiguous name, and a failed spawn. A seat already live in this session names the pane. Silence is never an outcome. A run that resumes two and refuses one prints all three.
 
