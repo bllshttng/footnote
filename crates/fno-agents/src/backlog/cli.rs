@@ -37,7 +37,7 @@ struct Resolved<'a> {
 /// Native auxiliary vocabulary: commands the dispatcher routes by engine
 /// contract that the Python catalog never carried (the note corpus/history
 /// reader rode the folded `backlog-notes` action, not a catalog command).
-const NATIVE_AUX: &[&str] = &["notes", "target-binding", "birth-hook"];
+const NATIVE_AUX: &[&str] = &["freshness", "notes", "target-binding", "birth-hook"];
 
 /// Resolve the head of `args` to a legacy command. Grouped spelling first
 /// (`<group> <action>`, only when the second token IS one of that group's
@@ -139,6 +139,11 @@ pub fn run(args: &[String]) -> i32 {
         // The folded corpus/history reader: fully native, engine owns the
         // whole surface (inventory, migrate, history, stale, findings).
         "notes" => super::note_migrate::run_notes(resolved.tail),
+        // Internal: target init and blueprint step 2a ask whether a node's
+        // premise, or its plan, still holds against current main. Advisory:
+        // every verdict exits 0 and the one write is the verdict event.
+        // Not a catalog command, so it adds nothing to the menu.
+        "freshness" => super::freshness::run(resolved.tail),
         // Internal: target init/start and the init hook ask which node a run
         // may bind. Not a catalog command, so it adds nothing to the menu.
         "target-binding" => super::target_binding::run(resolved.tail),

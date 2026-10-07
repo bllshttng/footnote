@@ -890,6 +890,16 @@ Do NOT re-run decide; that records it twice."
         );
         return 1;
     }
+    // The row is durable in the journal and the recall index. A new
+    // operator pr-hold row disarms an armed queue at once, before anything
+    // can read the ruling and merge past it. Never fails the record.
+    if let Some(line) = crate::pr_admission::after_record(
+        &subject,
+        &decision,
+        provenance.authority_source.as_deref(),
+    ) {
+        eprintln!("{line}");
+    }
     // The graph decisions table is the store `fno backlog decisions` reads
     // first; a refusal degrades to the durable capture, never a lost ruling.
     let graph_path = crate::graph_get::default_graph_path();

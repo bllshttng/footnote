@@ -33,6 +33,8 @@ struct Producer {
     argv: Vec<String>,
     deliver: bool,
     sources: Option<Vec<String>>,
+    audience: Option<Vec<String>>,
+    warning: bool,
 }
 
 impl Clone for Producer {
@@ -42,6 +44,8 @@ impl Clone for Producer {
             argv: self.argv.clone(),
             deliver: self.deliver,
             sources: self.sources.clone(),
+            audience: self.audience.clone(),
+            warning: self.warning,
         }
     }
 }
@@ -70,9 +74,19 @@ struct CoreInput<'a> {
     /// The project directory the hook ran in: host of the native census and
     /// the space root the snapshot event appends to.
     host_dir: &'a Path,
+    /// The session's role, resolved by the caller from the payload session
+    /// id. run_core never reads the ambient home for it, so tests inject.
+    role: crate::owner_ladder::Role,
 }
 
 pub fn run_context_run(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("--role") {
+        let sid = args.get(1).map(String::as_str).unwrap_or("");
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let word = crate::owner_ladder::role_now(sid, &crate::paths::AgentsHome::from_env(), &cwd);
+        println!("{}", word.word());
+        return 0;
+    }
     if args.first().map(String::as_str) == Some("--probe") {
         return run_context_probe(&args[1..]);
     }
@@ -104,6 +118,20 @@ pub fn run_context_run(args: &[String]) -> i32 {
     let mut payload = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut payload);
     let host_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let session_id = serde_json::from_slice::<Value>(&payload)
+        .unwrap_or(Value::Null)
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // The role read fails soft: an unreadable source reads as User, which
+    // is the pre-role behavior.
+    let role = crate::owner_ladder::role_now(
+        &session_id,
+        &crate::paths::AgentsHome::from_env(),
+        &host_dir,
+    );
 
     let input = CoreInput {
         group_name,
@@ -113,6 +141,7 @@ pub fn run_context_run(args: &[String]) -> i32 {
         native_bound: native_bound(),
         native_cmd: None,
         host_dir: &host_dir,
+        role,
     };
     let out = run_core(&input);
     if !out.stdout.is_empty() {
@@ -414,11 +443,18 @@ fn parse_group(name: &str, value: &Value, file: &str) -> Result<Group, String> {
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect::<Vec<_>>()
         });
+        let audience = item.get("audience").and_then(Value::as_array).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        });
         producers.push(Producer {
             id: id.to_string(),
             argv,
             deliver: item.get("deliver").and_then(Value::as_bool) != Some(false),
             sources,
+            audience,
+            warning: item.get("warning").and_then(Value::as_bool) == Some(true),
         });
     }
     Ok(Group {
@@ -430,6 +466,18 @@ fn parse_group(name: &str, value: &Value, file: &str) -> Result<Group, String> {
             .map(str::to_string),
         producers,
     })
+}
+
+/// The audience check the run_core filter takes: a producer with no
+/// `audience` runs for every role; one with an audience list runs only for
+/// the roles it names.
+fn audience_includes_role(p: &Producer, role: crate::owner_ladder::Role) -> bool {
+    match &p.audience {
+        None => true,
+        Some(list) => list
+            .iter()
+            .any(|a| crate::owner_ladder::Role::parse(a) == role),
+    }
 }
 
 fn entry_state_for(group_entry: Option<&str>, payload_source: Option<&str>) -> String {
@@ -493,6 +541,8 @@ fn run_core(input: &CoreInput) -> CoreOutput {
         .to_string();
     let entry_state = entry_state_for(group.entry.as_deref(), payload_source);
 
+    // A producer whose audience omits the session's role does not run.
+    let role = input.role;
     let selected: Vec<&Producer> = group
         .producers
         .iter()
@@ -502,6 +552,7 @@ fn run_core(input: &CoreInput) -> CoreOutput {
                 .map(|src| sources.iter().any(|s| s == src))
                 .unwrap_or(false),
         })
+        .filter(|p| audience_includes_role(p, role))
         .collect();
 
     // Start every producer and the native census at the same moment; one
@@ -516,8 +567,9 @@ fn run_core(input: &CoreInput) -> CoreOutput {
         let producer: Producer = (*producer).clone();
         let plugin_root = input.plugin_root.to_path_buf();
         let slot = Arc::clone(&slots[index]);
+        let role_word = role.word().to_string();
         handles.push(std::thread::spawn(move || {
-            let out = run_producer(&producer, &payload_bytes, bound, &plugin_root);
+            let out = run_producer(&producer, &payload_bytes, bound, &plugin_root, &role_word);
             *slot.lock().expect("producer result lock") = Some(out);
         }));
     }
@@ -609,7 +661,12 @@ fn run_producer(
     payload: &[u8],
     bound: Duration,
     plugin_root: &Path,
+    role_word: &str,
 ) -> ProducerOut {
+    // The role word rides per-child env, so a hook outside context-run can
+    // gate its own output; set per child, never the process env, because
+    // producers spawn concurrently.
+    let role_env = ("FNO_SESSION_ROLE", role_word);
     // Own process group so a hung producer's grandchildren die with it.
     // Not `spawn_bounded`: producers take the payload on stdin and keep
     // stderr inherited (today's wrapper passes both through).
@@ -620,6 +677,7 @@ fn run_producer(
         .collect();
     let spawned = Command::new(&argv[0])
         .args(&argv[1..])
+        .env(role_env.0, role_env.1)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1023,6 +1081,7 @@ mod tests {
                 native_bound: Duration::from_secs(2),
                 native_cmd: Some(self.native_cmd(json!([]))),
                 host_dir: self.dir.path(),
+                role: crate::owner_ladder::Role::User,
             })
         }
 
@@ -1040,6 +1099,7 @@ mod tests {
                 native_bound: Duration::from_secs(2),
                 native_cmd: Some(self.native_cmd(native_rows)),
                 host_dir: self.dir.path(),
+                role: crate::owner_ladder::Role::User,
             })
         }
 
@@ -1373,5 +1433,48 @@ mod tests {
         assert!(transcript_reading(&path, "fixture", dir.path()).is_err());
         assert_eq!(run_context_probe(&args), 3);
         assert!(session_transcript("fixture", "unsupported").is_none());
+    }
+
+    /// AC6 + AC7 shape: the audience parse and the role filter. AC7's
+    /// `--role` door is a thin print of the same role read the filter
+    /// takes; the hook legs are bash, gated by `bash -n` in verify.
+    #[test]
+    fn ac6_ac7_audience_parse_and_role_filter() {
+        let doc: Value = serde_json::json!({
+            "harness": "claude",
+            "event": "SessionStart",
+            "producers": [
+                {"id": "all", "argv": ["/bin/true"]},
+                {"id": "lead-user", "argv": ["/bin/true"], "audience": ["lead", "user"]},
+                {"id": "warn", "argv": ["/bin/true"], "warning": true},
+                {"id": "warn-false", "argv": ["/bin/true"], "warning": false}
+            ]
+        });
+        let group = parse_group("t", &doc, "t.json").unwrap();
+        assert_eq!(group.producers.len(), 4);
+        let find = |id: &str| group.producers.iter().find(|p| p.id == id).unwrap().clone();
+        let all = find("all");
+        assert!(all.audience.is_none());
+        assert!(!all.warning);
+        let lu = find("lead-user");
+        assert_eq!(
+            lu.audience.as_ref().unwrap(),
+            &vec!["lead".to_string(), "user".to_string()]
+        );
+        assert!(find("warn").warning);
+        assert!(!find("warn-false").warning);
+
+        // The filter: the audience list omits worker, so a worker session
+        // drops it; the no-audience producer always runs.
+        assert!(audience_includes_role(
+            &all,
+            crate::owner_ladder::Role::Worker
+        ));
+        assert!(audience_includes_role(&lu, crate::owner_ladder::Role::Lead));
+        assert!(audience_includes_role(&lu, crate::owner_ladder::Role::User));
+        assert!(!audience_includes_role(
+            &lu,
+            crate::owner_ladder::Role::Worker
+        ));
     }
 }
