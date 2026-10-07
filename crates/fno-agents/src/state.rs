@@ -759,6 +759,10 @@ pub struct MuxRef {
     pub pane_id: u64,
 }
 
+fn legacy_row_status() -> AgentStatus {
+    AgentStatus::Live
+}
+
 /// One registry row. Optional fields default to `None`; fields not modeled
 /// here are retained in `extra` so a read-modify-write preserves newer data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -1023,6 +1027,8 @@ pub struct RegistryEntry {
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc_session_id: Option<String>,
+    /// Pre-v2 rows carry no status; Python reads them as `live`.
+    #[serde(default = "legacy_row_status")]
     pub status: AgentStatus,
     #[serde(default)]
     pub last_message_at: Option<String>,

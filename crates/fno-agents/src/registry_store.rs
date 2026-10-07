@@ -131,7 +131,14 @@ fn save_document(
             });
         let identity = if let Some(session) = session {
             fields.insert("harness_session_id".into(), json!(session));
-            format!("session:{session}")
+            // One session id may be live under two harnesses; the harness
+            // keeps those rows distinct.
+            let harness = fields
+                .get("harness")
+                .or_else(|| fields.get("provider"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("session:{harness}:{session}")
         } else {
             let id = match fields
                 .get("fno_id")
