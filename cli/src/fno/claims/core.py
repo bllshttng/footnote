@@ -531,12 +531,13 @@ def refresh_claim(
     _attempt: int = 0,
 ) -> Optional[Claim]:
     del _attempt
-    if ttl_ms is not None and ttl_ms <= 0:
-        raise ClaimValidationError("ttl_ms must be positive")
+    _validate_inputs(key, holder, ttl_ms)
     native_root = root or _configured_claim_root()
     flags = _native_root_flags(native_root)
+    status = _native_claim("status", key, flags)
+    if status.get("holder") and status.get("holder") != holder:
+        raise HolderMismatch(holder, status["holder"], key)
     if ttl_ms is None:
-        status = _native_claim("status", key, flags)
         state = status.get("state")
         if state == "free":
             raise ClaimGoneAway(str(claim_path(key, root=root)))

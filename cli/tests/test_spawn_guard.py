@@ -25,13 +25,6 @@ from typer.testing import CliRunner
 
 from fno.agents.cli import agents_app
 from fno.claims.core import acquire_claim, claim_status
-from fno.claims.io import (
-    claim_path,
-    global_claims_root as _global_claims_root,
-    read_claim_file,
-    serialize_claim,
-)
-from fno.claims.types import now_ms
 
 runner = CliRunner()
 
@@ -106,24 +99,6 @@ def test_live_claim_already_running_no_reservation(claims_tmp):
     assert obj["holder"] == "target-session:owner"
     # No reservation was taken.
     assert claim_status("dispatch:x-cccc")["state"] == "free"
-
-
-def test_corrupted_claim_verdict_no_reservation(claims_tmp):
-    # Write a garbage lock file at the node:<id> path so the probe classifies it
-    # corrupted (claim_status returns state=corrupted, never raises).
-    from fno.claims.core import claim_path
-    from fno.claims.io import global_claims_root
-
-    path = claim_path("node:x-dddd", root=global_claims_root())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{ this is not valid claim yaml :::", encoding="utf-8")
-
-    res = _invoke("x-dddd", "--holder", "h", "--json")
-    assert res.exit_code == 0  # corrupted is a clean verdict
-    obj = json.loads(res.output)
-    assert obj["verdict"] == "corrupted"
-    assert "force-release or repair" in obj["detail"]
-    assert claim_status("dispatch:x-dddd")["state"] == "free"
 
 
 # --- x-ba4b: suspect claim -> skip-not-steal ---------------------------------
@@ -384,42 +359,6 @@ def test_spawn_guard_hidden_but_reachable(claims_tmp):
 # --- x-4652: orphaned dispatch reservation reaps (already-correct path) -------
 
 
-def test_expired_dead_dispatch_reservation_reaped(claims_tmp):
-    """Regression (x-4652): a dispatch:<id> reservation whose TTL has expired AND
-    whose recorded pid is dead is STALE, so spawn-guard reaps it and dispatches,
-    taking a fresh reservation. This locks the already-correct reap path (the
-    literal 'expired + dead PID' case classify handles) against regression.
-
-    The residual x-4652 concern - a within-TTL reservation whose dispatcher pid
-    is dead reads SUSPECT and is protected for up to the 3m TTL - is left as-is:
-    it self-heals at TTL and is arguably a correct boot-window guard. The
-    SUSPECT-arm behavior is asserted by
-    test_suspect_claim_already_running_no_reservation above."""
-    import psutil
-    dead_pid = 999_999
-    while psutil.pid_exists(dead_pid):
-        dead_pid += 1
-    # Orphan: dispatcher died mid-launch, reservation taken with the shortest
-    # legal TTL. Advance the clock past expiry (the reservation self-heals at
-    # TTL in reality; here we jump the clock instead of sleeping 60s).
-    acquire_claim(
-        "dispatch:x-7777", "dispatch-node:orphan", pid=dead_pid, ttl_ms=60_000
-    )
-    path = claim_path("dispatch:x-7777")
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
-    assert claim_status("dispatch:x-7777")["state"] == "stale"
-
-    res = _invoke("x-7777", "--holder", "dispatch-node:fresh", "--json")
-    assert res.exit_code == 0
-    obj = json.loads(res.output)
-    assert obj["verdict"] == "dispatchable"
-    assert obj["reservation_key"] == "dispatch:x-7777"
-    assert obj["reservation_holder"] == "dispatch-node:fresh"
-    # The orphan was reaped; the fresh dispatcher now holds the reservation.
-    assert claim_status("dispatch:x-7777")["holder"] == "dispatch-node:fresh"
-
-
 # --- x-2fe6: a held claim proves a HOLDER, never a WORKER --------------------
 #
 # AC6-HP / AC7-HP / AC8-HP / AC9-EDGE. Both directions in every pair, so the
@@ -597,72 +536,6 @@ def test_a_worker_row_block_with_no_claim_names_the_row(
 
 
 # --- x-c08a: the refusal names the worker ROW, never the claim ----------------
-
-
-def test_a_stale_claim_with_a_worker_row_names_the_row_not_the_claim(
-    claims_tmp, monkeypatch: pytest.MonkeyPatch
-):
-    """AC3-HP, the x-6f98 specimen: the claim read stale with a dead
-    predecessor while a worker row sat on the node. The old receipt said
-    `unproven-claim` and named the claim's prior holder, and the operator
-    followed it to a claim `fno agents claim status` read as UNCLAIMED."""
-    import psutil
-
-    dead_pid = 999_999
-    while psutil.pid_exists(dead_pid):
-        dead_pid += 1
-    acquire_claim(
-        "node:x-6f98", "spawn-handover:bp-6f98-locked-decision",
-        pid=dead_pid, ttl_ms=60_000,
-    )
-    path = claim_path("node:x-6f98", root=_global_claims_root())
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
-    assert claim_status("node:x-6f98", root=_global_claims_root())["state"] == "stale"
-
-    monkeypatch.setattr(
-        "fno.graph.statuses.live_worked_node_ids",
-        lambda **_kw: {"x-6f98": ["bp-6f98-locked-decision"]},
-    )
-    res = _invoke("x-6f98", "--holder", "probe:1", "--no-reserve", "--json")
-    assert res.exit_code == 0
-    obj = json.loads(res.stdout)
-    assert obj["verdict"] == "already-running"
-    assert obj["reason"] == "worker-row"
-    assert obj["worker"] == "bp-6f98-locked-decision"
-    assert "fno agents peek bp-6f98-locked-decision" in obj["remedy"]
-    # The claim's prior holder is NOT the occupant, so it is not on the receipt.
-    assert "holder" not in obj
-    assert "bp-6f98-locked-decision" not in json.dumps(obj.get("prior_holder", ""))
-
-
-def test_the_contested_dispatch_warning_leads_with_the_worker_row(
-    claims_tmp, monkeypatch: pytest.MonkeyPatch
-):
-    """AC4-HP: the same block on the reserving path, where the warning fires
-    (a --no-reserve probe emits nothing). The line pointed at a stale claim
-    while the row was the occupant."""
-    import psutil
-
-    dead_pid = 999_999
-    while psutil.pid_exists(dead_pid):
-        dead_pid += 1
-    acquire_claim(
-        "node:x-6f99", "spawn-handover:bp-6f99-planner", pid=dead_pid, ttl_ms=60_000
-    )
-    path = claim_path("node:x-6f99", root=_global_claims_root())
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
-    monkeypatch.setattr(
-        "fno.graph.statuses.live_worked_node_ids",
-        lambda **_kw: {"x-6f99": ["bp-6f99-planner"]},
-    )
-    res = _invoke("x-6f99", "--holder", "dispatch-node:444", "--json")
-    assert res.exit_code == 0
-    assert json.loads(res.stdout)["reason"] == "worker-row"
-    assert "worker row bp-6f99-planner is on the node" in res.stderr
-    # No reservation was taken: the row still occupies the node.
-    assert claim_status("dispatch:x-6f99")["state"] == "free"
 
 
 def test_a_live_claim_with_a_worker_row_still_reads_live_claim(

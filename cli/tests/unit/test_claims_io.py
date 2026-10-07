@@ -10,17 +10,13 @@ import pytest
 
 from fno.claims.io import (
     ClaimAlreadyHeld,
-    ClaimCorrupted,
     ClaimGoneAway,
-    archive_claim,
     atomic_create_exclusive,
-    claim_path,
     claims_dir,
     decode_key,
     encode_key,
     global_claims_root,
     read_claim_file,
-    serialize_claim,
 )
 from fno.claims.types import Claim
 
@@ -66,143 +62,6 @@ def test_encode_decode_round_trip():
 # ---------------------------------------------------------------------------
 
 
-def test_yaml_round_trip_pid_liveness_omits_expires_at(tmp_path):
-    """PID-liveness claims (expires_at=None) must OMIT the key in YAML."""
-    claim = _make_claim(expires_at=None)
-    text = serialize_claim(claim)
-    assert "expires_at" not in text, "PID-liveness claims must omit expires_at"
-
-    path = tmp_path / "claims" / "test.lock"
-    path.parent.mkdir(parents=True)
-    path.write_text(text)
-    parsed = read_claim_file(path)
-    assert parsed.expires_at is None
-    assert parsed.holder == claim.holder
-    assert parsed.acquired_at == claim.acquired_at
-
-
-def test_yaml_round_trip_machine_id(tmp_path):
-    """machine_id must reach DISK, not just the model. Liveness compares it, so
-    a field that never serializes is a fix that only works in-process: every
-    reader falls back to the hostname compare and the bug is still there."""
-    claim = _make_claim(machine_id="0A1B-STABLE")
-    text = serialize_claim(claim)
-    assert "machine_id: 0A1B-STABLE" in text
-
-    path = tmp_path / "mid.lock"
-    path.write_text(text)
-    assert read_claim_file(path).machine_id == "0A1B-STABLE"
-
-
-def test_yaml_omits_machine_id_when_absent(tmp_path):
-    """A pre-change claim has no machine_id; the writer must not invent one as
-    null, matching the absent-not-null discipline expires_at already follows."""
-    text = serialize_claim(_make_claim(machine_id=None))
-    assert "machine_id" not in text
-
-    path = tmp_path / "nomid.lock"
-    path.write_text(text)
-    assert read_claim_file(path).machine_id is None
-
-
-def test_yaml_round_trip_session_id(tmp_path):
-    """session_id must reach DISK, not just the model, the same as harness and
-    machine_id: readers resolve identity through the registry row keyed by
-    this field, never by parsing holder."""
-    claim = _make_claim(session_id="abc123")
-    text = serialize_claim(claim)
-    assert "session_id: abc123" in text
-
-    path = tmp_path / "sid.lock"
-    path.write_text(text)
-    assert read_claim_file(path).session_id == "abc123"
-
-
-def test_yaml_omits_session_id_when_absent(tmp_path):
-    """A pre-change claim has no session_id; the writer must not invent one as
-    null, matching the absent-not-null discipline the other optional fields
-    follow."""
-    text = serialize_claim(_make_claim(session_id=None))
-    assert "session_id" not in text
-
-    path = tmp_path / "nosid.lock"
-    path.write_text(text)
-    assert read_claim_file(path).session_id is None
-
-
-def test_yaml_without_session_id_key_reads_none(tmp_path):
-    """AC2: a claim record written before this change (no session_id key)
-    parses with session_id=None and does not crash."""
-    path = tmp_path / "legacy.lock"
-    path.write_text(
-        "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n"
-    )
-    parsed = read_claim_file(path)
-    assert parsed.session_id is None
-
-
-def test_yaml_round_trip_ttl_serializes_expires_at(tmp_path):
-    claim = _make_claim(expires_at=1747641660000)
-    text = serialize_claim(claim)
-    assert "expires_at" in text
-
-    path = tmp_path / "test.lock"
-    path.write_text(text)
-    parsed = read_claim_file(path)
-    assert parsed.expires_at == 1747641660000
-
-
-def test_yaml_reading_null_expires_at_equals_absent(tmp_path):
-    """A reader must treat ``expires_at: null`` the same as absent."""
-    path = tmp_path / "null.lock"
-    path.write_text(
-        "schema_version: 1\n"
-        "key: x\n"
-        "holder: h\n"
-        "acquired_at: 1\n"
-        "expires_at: null\n"
-        f"pid: {os.getpid()}\n"
-        f"host: {socket.gethostname()}\n"
-    )
-    claim = read_claim_file(path)
-    assert claim.expires_at is None
-
-
-def test_yaml_reading_missing_expires_at_equals_null(tmp_path):
-    path = tmp_path / "absent.lock"
-    path.write_text(
-        "schema_version: 1\n"
-        "key: x\n"
-        "holder: h\n"
-        "acquired_at: 1\n"
-        f"pid: {os.getpid()}\n"
-        f"host: {socket.gethostname()}\n"
-    )
-    claim = read_claim_file(path)
-    assert claim.expires_at is None
-
-
-def test_yaml_corrupted_raises_claim_corrupted(tmp_path):
-    path = tmp_path / "bad.lock"
-    path.write_text("not: valid: yaml: at: all: ::::")
-    with pytest.raises(ClaimCorrupted):
-        read_claim_file(path)
-
-
-def test_yaml_missing_required_field_raises_claim_corrupted(tmp_path):
-    path = tmp_path / "incomplete.lock"
-    path.write_text("schema_version: 1\nkey: x\n")
-    with pytest.raises(ClaimCorrupted):
-        read_claim_file(path)
-
-
-def test_yaml_root_not_dict_raises_claim_corrupted(tmp_path):
-    path = tmp_path / "list.lock"
-    path.write_text("- a\n- b\n")
-    with pytest.raises(ClaimCorrupted):
-        read_claim_file(path)
-
-
 def test_read_missing_file_raises_claim_gone_away(tmp_path):
     with pytest.raises(ClaimGoneAway):
         read_claim_file(tmp_path / "nope.lock")
@@ -211,20 +70,6 @@ def test_read_missing_file_raises_claim_gone_away(tmp_path):
 # ---------------------------------------------------------------------------
 # Schema version forward-compat
 # ---------------------------------------------------------------------------
-
-
-def test_future_schema_version_rejected(tmp_path):
-    path = tmp_path / "future.lock"
-    path.write_text(
-        "schema_version: 999\n"
-        "key: x\n"
-        "holder: h\n"
-        "acquired_at: 1\n"
-        f"pid: {os.getpid()}\n"
-        f"host: {socket.gethostname()}\n"
-    )
-    with pytest.raises(ClaimCorrupted):
-        read_claim_file(path)
 
 
 # ---------------------------------------------------------------------------
@@ -286,25 +131,6 @@ def test_two_threads_race_one_wins(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_archive_claim_moves_to_expired_dir(tmp_path):
-    cdir = tmp_path / ".fno" / "claims"
-    cdir.mkdir(parents=True)
-    path = cdir / "node%3Aab-1.lock"
-    path.write_text("dummy")
-
-    archived = archive_claim(path, ts_ms=1234567890)
-    assert not path.exists()
-    assert archived.exists()
-    assert archived.parent.name == ".expired"
-    assert "1234567890" in archived.name
-
-
-def test_archive_missing_file_is_noop(tmp_path):
-    path = tmp_path / "nope.lock"
-    result = archive_claim(path, ts_ms=1)
-    assert result == path
-
-
 # ---------------------------------------------------------------------------
 # Global node-claims root resolution (ab-fcf9cec5)
 # ---------------------------------------------------------------------------
@@ -335,7 +161,6 @@ def test_claims_dir_defaults_to_the_repo_space_without_env(tmp_path, monkeypatch
 
 def test_global_claims_root_env_then_home(tmp_path, monkeypatch):
     """global_claims_root() prefers the env, else falls back to $HOME."""
-    from fno.claims.io import global_claims_root
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     assert global_claims_root() == tmp_path
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)

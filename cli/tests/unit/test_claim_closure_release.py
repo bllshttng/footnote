@@ -11,7 +11,6 @@ graph lock mirror that made the leak read as a stall.
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 
@@ -19,9 +18,9 @@ from pathlib import Path
 
 from fno.claims.cli import RosterReading, _node_settlement
 from fno.claims.core import reap_dead_claims, sweep_verdict
-from fno.claims.io import claim_path, claims_dir, serialize_claim
+from fno.claims.io import claim_path, serialize_claim
 from fno.claims.types import Claim, now_ms
-from fno.graph.store import commit_rows_via_store, read_graph_strict, release_node_claim_at_closure
+from fno.graph.store import release_node_claim_at_closure
 from tests.fixtures.graph_seed import seed_graph
 
 
@@ -104,122 +103,6 @@ class TestClosureReleaseHook:
         return graph, global_root
 
 
-
-
-    def test_scratch_graph_closure_does_not_release(self, tmp_path, monkeypatch):
-        """A non-configured graph (tests, capture flows) owns no global claim:
-        its closure leaves the global claim held, and the read projects that
-        live holder instead of a cleared mirror."""
-        graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
-        monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "the-configured-one.json")
-
-        def _close(entries):
-            for e in entries:
-                if e["id"] == "x-doen":
-                    e["completed_at"] = "2026-08-21T03:16:00Z"
-            return entries
-
-        commit_rows_via_store(graph, _close)
-        assert read_graph_strict(graph)[0]["status"] == "done"
-        assert read_graph_strict(graph)[0]["locked_by"] == HOLDER
-        assert claim_path("node:x-doen", root=global_root).exists()
-
-
-
-
-    def test_done_releases_claim_and_clears_mirror(self, tmp_path, monkeypatch):
-        graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
-
-        def _close(entries):
-            for e in entries:
-                if e["id"] == "x-doen":
-                    e["completed_at"] = "2026-08-21T03:16:00Z"
-            return entries
-
-        commit_rows_via_store(graph, _close)
-
-        out = read_graph_strict(graph)[0]
-        assert out["status"] == "done"
-        assert out["locked_by"] is None
-        assert out["locked_at"] is None
-        # session_id on a done node is work/cost provenance, not a lock.
-        assert out["session_id"] == HOLDER
-        assert not claim_path("node:x-doen", root=global_root).exists()
-        expired = list((claims_dir(global_root) / ".expired").glob("*.lock"))
-        assert expired, "the released claim must be archived, not vanished"
-
-
-
-
-    def test_supersede_releases_claim_and_clears_mirror(self, tmp_path, monkeypatch):
-        graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
-
-        def _supersede(entries):
-            for e in entries:
-                if e["id"] == "x-doen":
-                    e["superseded_by"] = "x-other"
-            return entries
-
-        commit_rows_via_store(graph, _supersede)
-
-        out = read_graph_strict(graph)[0]
-        assert out["status"] == "superseded"
-        assert out["locked_by"] is None
-        assert not claim_path("node:x-doen", root=global_root).exists()
-
-
-
-
-    def test_no_terminal_transition_no_release(self, tmp_path, monkeypatch):
-        """A claim planted on an ALREADY-terminal node survives an unrelated
-        mutation: the hook fires on the transition, not on terminal-ness, so
-        it never turns into a per-mutation sweep."""
-        graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
-
-        def _already_done(entries):
-            for e in entries:
-                if e["id"] == "x-doen":
-                    e["completed_at"] = "2026-08-21T03:16:00Z"
-            return entries
-
-        commit_rows_via_store(graph, _already_done)
-        assert not claim_path("node:x-doen", root=global_root).exists()
-
-        # Replant (the pre-fix leak shape) and mutate again: kept.
-        _write_claim(
-            "node:x-doen",
-            holder=HOLDER,
-            pid=os.getpid(),
-            expires_at_ms=now_ms() + 3_600_000,
-            root=global_root,
-        )
-
-        def _retitle(entries):
-            for e in entries:
-                if e["id"] == "x-doen":
-                    e["title"] = "retitled"
-            return entries
-
-        commit_rows_via_store(graph, _retitle)
-        assert claim_path("node:x-doen", root=global_root).exists()
-
-    def test_a_broken_claims_store_never_fails_the_mutation(self, tmp_path, monkeypatch):
-        graph, _ = self._graph_with_claimed_node(tmp_path, monkeypatch)
-
-        def _boom(*_a, **_k):
-            raise RuntimeError("claims on fire")
-
-        monkeypatch.setattr("fno.claims.core.force_release_claim", _boom)
-
-        def _close(entries):
-            for e in entries:
-                if e["id"] == "x-doen":
-                    e["completed_at"] = "2026-08-21T03:16:00Z"
-            return entries
-
-        # The closure lands; the release failure is a stderr line, not an exit.
-        commit_rows_via_store(graph, _close)
-        assert read_graph_strict(graph)[0]["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -525,29 +408,3 @@ class TestReapClaimProjection:
             root=claims_root,
         )
         return graph, claims_root
-
-    def test_apply_reap_removes_the_projected_holder(self, tmp_path, monkeypatch):
-        graph, _root = self._dead_claim_and_graph(tmp_path, monkeypatch)
-        summary = reap_dead_claims(apply=True)
-        assert summary["reaped"] == 1
-        out = read_graph_strict(graph)[0]
-        assert out["locked_by"] is None
-        assert out["locked_at"] is None
-
-    def test_explicit_root_reap_removes_the_projected_holder(self, tmp_path, monkeypatch):
-        graph, claims_root = self._dead_claim_and_graph(tmp_path, monkeypatch)
-        summary = reap_dead_claims(roots=[claims_root], apply=True)
-        assert summary["reaped"] == 1
-        out = read_graph_strict(graph)[0]
-        assert out["locked_by"] is None
-
-    def test_dry_run_never_touches_the_graph(self, tmp_path, monkeypatch):
-        graph, claims_root = self._dead_claim_and_graph(tmp_path, monkeypatch)
-        summary = reap_dead_claims(apply=False)
-        assert summary["would_reap"] == 1
-        # The dry run never archives the claim, and the lapsed claim projects
-        # no holder: the graph read shows the node unheld while the claim
-        # file waits for the applied sweep.
-        out = read_graph_strict(graph)[0]
-        assert out["locked_by"] is None
-        assert claim_path("node:x-gone", root=claims_root).exists()

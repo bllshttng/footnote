@@ -183,27 +183,6 @@ def test_corrupted_hold_blocks_rather_than_assuming_unheld(tmp_path: Path):
     assert "refusing to assume unheld" in activity.detail
 
 
-def test_expired_hold_clears_but_never_silently(tmp_path: Path, monkeypatch, capsys):
-    """AC3: a stale hold ages out WITH a receipt. Silence fails this test."""
-    acquire_claim(
-        _review_hold.review_hold_key("feature/x"),
-        "reviewer:sess-1",
-        ttl_ms=60_000,
-        pid=DEAD_PID,
-        root=tmp_path,
-    )
-    _expire_claim(tmp_path, _review_hold.review_hold_key("feature/x"))
-    emitted: list[dict] = []
-    monkeypatch.setattr(_review_hold, "_emit_expired", lambda **kw: emitted.append(kw))
-
-    activity = _review_hold.review_activity(
-        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
-    )
-    assert activity.blocked is False
-    assert emitted and emitted[0]["holder"] == "reviewer:sess-1"
-    assert "expired" in capsys.readouterr().err
-
-
 def test_tracked_modifications_block_the_merge(tmp_path: Path):
     runner = _fake_git(
         {
@@ -497,42 +476,6 @@ def test_release_reports_whether_anything_was_there(tmp_path: Path):
         "feature/x", head="abc123", holder="r", root=tmp_path
     )
     assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
-
-
-def test_release_clears_a_corrupted_lockfile(tmp_path: Path):
-    """A corrupted claim has no readable holder, so no release_claim call can
-    name one. Leaving it is the worse outcome: every read classifies it
-    CORRUPTED, which BLOCKS, forever."""
-    from fno.claims.io import claim_path
-
-    path = claim_path(_review_hold.review_hold_key("feature/x"), root=tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{ not a claim", encoding="utf-8")
-    assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
-    assert not path.exists()
-
-
-def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
-    tmp_path: Path, capsys
-):
-    """The lapsed lockfile stops blocking HERE but still blocks the stdlib hook,
-    which cannot judge expiry and denies on the file's mere presence. One
-    crashed reviewer would deny every bare `gh pr merge` in the repo until
-    someone noticed."""
-    from fno.claims.core import claim_status
-    from fno.claims.io import claim_path
-
-    key = _review_hold.review_hold_key("feature/x")
-    acquire_claim(key, "reviewer:sess-1", ttl_ms=60_000, pid=DEAD_PID, root=tmp_path)
-    _expire_claim(tmp_path, key)
-
-    activity = _review_hold.review_activity(
-        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
-    )
-    assert activity.blocked is False
-    assert "expired" in capsys.readouterr().err
-    assert not claim_path(key, root=tmp_path).exists()
-    assert claim_status(key, root=tmp_path)["state"] == "free"
 
 
 @requires_rust

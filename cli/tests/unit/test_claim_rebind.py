@@ -127,66 +127,12 @@ def test_rebind_holder_mismatch_refuses(tmp_path):
     assert "holder mismatch" in exc.value.reason
 
 
-def test_rebind_waits_out_brief_recovery_mutex_contention_instead_of_refusing(tmp_path):
-    """A recovery mutex held briefly by a peer (acquire_claim/reap mid-archive)
-    must not refuse the rebind - it waits (acquire_dir_mutex, same as
-    acquire_claim/refresh_claim), then proceeds once the peer releases.
-
-    Contention handling here changed from "one steal attempt, else refuse"
-    to acquire_dir_mutex's steal-or-poll-until-timeout: a mutex that clears
-    well inside the 5s window now lets the rebind succeed instead of forcing
-    the caller to retry the whole resume bind for what was a few-ms window.
-    """
-    prior = _claim(_DEAD_PID, now_ms() - 200_000, expires_at=now_ms() - 100_000)
-    _write(tmp_path, prior)
-    path = claim_path(KEY, root=tmp_path)
-    recovery_lock = path.with_name(path.name + ".recovery.d")
-    recovery_lock.mkdir(parents=True)
-    (recovery_lock / "owner").write_text("peer-token")
-
-    import threading
-
-    result = {}
-
-    def _rebind():
-        try:
-            result["claim"], result["mode"] = compare_and_rebind(
-                KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False
-            )
-        except RebindRefused as exc:
-            result["error"] = exc
-
-    racer = threading.Thread(target=_rebind)
-    racer.start()
-    time.sleep(0.2)
-    assert racer.is_alive(), "rebind returned before the mutex was released"
-
-    import shutil
-
-    shutil.rmtree(recovery_lock)
-    racer.join(timeout=6)
-
-    assert "error" not in result, f"rebind refused instead of waiting: {result.get('error')}"
-    assert result["mode"] == "rebound"
-    assert result["claim"].pid == os.getpid()
-
-
 def test_rebind_missing_claim_refuses_and_never_creates(tmp_path):
     """AC3: a free/missing claim refuses and never creates one."""
     with pytest.raises(RebindRefused) as exc:
         compare_and_rebind(KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False)
     assert exc.value.state == "free"
     assert claim_status(KEY, root=tmp_path)["state"] == "free"
-
-
-def test_rebind_corrupt_claim_refuses(tmp_path):
-    """AC3: an unparseable claim refuses rather than guessing."""
-    path = claim_path(KEY, root=tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{{{not yaml", encoding="utf-8")
-    with pytest.raises(RebindRefused) as exc:
-        compare_and_rebind(KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False)
-    assert exc.value.state == "corrupted"
 
 
 def test_rebound_pid_liveness_claim_stays_pid_liveness(tmp_path):

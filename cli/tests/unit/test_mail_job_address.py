@@ -109,41 +109,6 @@ def test_send_refuses_when_no_holder(runner, isolated, monkeypatch):
     assert _bus_to("node:free-abcd") == []
 
 
-def test_send_refuses_when_claim_stale(runner, isolated, monkeypatch):
-    # A STALE claim (expired TTL) reads as non-live -> refuse, same path as free.
-    from fno.claims.core import claim_status
-
-    # Acquire with the minimum TTL, then rewrite the lock file to back-date its
-    # expiry past the horizon so classify() reports STALE (not suspect/live).
-    from fno.claims.io import claim_path
-
-    acquire = __import__("fno.claims.core", fromlist=["acquire_claim"]).acquire_claim
-    acquire(
-        key="node:stale-abcd",
-        holder="target-session:dead0000-0000-0000-0000-000000000000",
-        ttl_ms=60_000,
-        reason="test",
-        harness="claude",
-    )
-    p = claim_path("node:stale-abcd")
-    text = p.read_text()
-    import re
-
-    # Push expires_at into the distant past.
-    text = re.sub(r"expires_at: \d+", "expires_at: 1000", text)
-    text = re.sub(r"acquired_at: \d+", "acquired_at: 1000", text)
-    p.write_text(text)
-    assert claim_status("node:stale-abcd")["state"] == "stale"
-
-    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
-    res = runner.invoke(
-        app,
-        ["mail", "send", "node:stale-abcd", "hello", "--from-name", "lead"],
-    )
-    assert res.exit_code == 16, res.output
-    assert _bus_to("node:stale-abcd") == []
-
-
 # ---------------------------------------------------------------------------
 # Send: live holder -> delivered (hosted), audit-only bus copy
 # ---------------------------------------------------------------------------

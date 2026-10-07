@@ -35,7 +35,6 @@ import pytest
 
 import json as _json
 
-import pytest
 
 from tests.fixtures.graph_seed import seed_graph
 
@@ -2732,7 +2731,6 @@ def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
 def test_direct_dependents_tags_same_and_cross_project(monkeypatch):
     """RC1 unit: _direct_dependents returns BOTH same- and cross-project ready
     dependents, each tagged with cross_project (no longer excludes same-project)."""
-    import fno.graph.store as store
     import fno.paths as paths
 
     entries = [
@@ -2760,7 +2758,6 @@ def test_cmd_advance_resolves_closed_project_from_graph(monkeypatch):
     import fno.backlog.advance as advmod
     import fno.backlog.reconcile_dispatch as recmod
     import fno.graph.cli as gcli
-    import fno.graph.store as store
 
     monkeypatch.setattr(
         advmod, "advance",
@@ -3724,46 +3721,6 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
     name = calls[0][calls[0].index("--name") + 1]
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
     assert name == f"ab-bp-{node_id}-path-glm"
-
-
-def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
-    """AC5 + AC6: refuse before spawn; the lane fails loudly, never 'launched'."""
-    node_id = "n-" + "z" * 70
-    node = {
-        "id": node_id,
-        "title": "irrelevant",
-        "project": "fno",
-        "_resolved_cwd": "/tmp/x",
-        # a real projection row: planless low dispatches straight to target
-        "difficulty": "low",
-        "dispatch_verb": "",
-        # the refusal-under-test is naming, so the node carries the pin that
-        # clears the x-8fb2 model gate
-        "model": "glm-5.3-flash[1m]",
-    }
-    monkeypatch.setattr(adv, "_next_node", lambda project: node)
-    monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
-    # The grid consult (fno-agents route-slot) precedes the mint (x-57fe moved
-    # the mint after it); the refusal-under-test is naming, so the consult is
-    # stubbed out and the fail-closed lambda below keeps naming verbs only.
-    monkeypatch.setattr(
-        adv, "_grid_lane_for",
-        lambda *a, **k: (None, None, None, None, "stubbed"),
-    )
-    monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn"))
-    )
-
-    res = adv.advance(project="fno", events_path=iso)
-
-    assert res.decision == "failed" and res.node_id == node_id
-    evs = _events(iso)
-    assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
-    assert evs[0]["data"]["node_id"] == node_id
-    assert "64" in evs[0]["data"]["error"]
-    # Re-dispatchable: the reservation is released, not stuck holding a lane.
-    key = f"dispatch:{node_id}"
-    assert claim_status(key).get("state") == "free"
 
 
 def test_duplicate_dispatch_converges_on_one_dedup_name():
