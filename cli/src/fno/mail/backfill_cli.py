@@ -4,9 +4,7 @@ import json
 import typer
 
 
-def cmd_mail_backfill(
-    apply: bool = typer.Option(False, "--apply"),
-) -> None:
+def cmd_mail_backfill(apply: bool = typer.Option(False, "--apply")) -> None:
     from fno.agents.discover import default_projects_dir
     from fno.bus.log import bus_log_path
     from fno.rust_binary import call_binary_json
