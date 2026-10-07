@@ -3707,6 +3707,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--harness-arg",
         "--crown",
         "--crown-scope",
+        "--role-level",
+        "--role-scope",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3986,6 +3988,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // thread spawn; the typed parse lives in spawn_axes.
             "--crown" | "--crown-scope" => {
                 fno_agents::spawn_axes::insert_crown_flag(&a, &mut it, &mut params)?;
+            }
+            "--role-level" | "--role-scope" => {
+                fno_agents::spawn_axes::insert_role_flag(&a, &mut it, &mut params)?;
             }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn

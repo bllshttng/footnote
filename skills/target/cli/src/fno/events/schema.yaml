@@ -2590,6 +2590,66 @@ event_types:
         duration_ms:
           type: integer
 
+  - name: agent_followup_started
+    description: "An fno-agents followup ask started against a live registry entry."
+    sources: [daemon, agents]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+        short_id:
+          type: string
+
+  - name: agent_followup_done
+    description: "An fno-agents followup ask completed; agent replied."
+    sources: [daemon, agents]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+        short_id:
+          type: string
+        stage:
+          type: string
+        reply_chars:
+          type: integer
+        backend:
+          type: string
+
+  - name: agent_followup_failed
+    description: "An fno-agents followup ask failed at a named stage."
+    sources: [daemon, agents]
+    data:
+      required: []
+      properties:
+        stage:
+          type: string
+        name:
+          type: string
+        short_id:
+          type: string
+        error:
+          type: string
+        reason:
+          type: string
+
+  - name: backlog_done_operator_initiated
+    description: "A backlog node closed while the operator drove it interactively (drive_audit attribution)."
+    sources: [backlog]
+    data:
+      required: []
+      properties:
+        source:
+          type: string
+        task_id:
+          type: string
+
   - name: channel_registered
     description: "An MCP channel was registered for an agent."
     sources: [daemon]
