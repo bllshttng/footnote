@@ -289,9 +289,11 @@ def _run_locked(
 
     # Each sink's starting (ts, n) cursor: a fresh sink (no file) starts at EOF so
     # no history is replayed; an existing sink resumes from its stored cursor.
-    # With a scan seq every row read is new, so EOF is simply "from here".
+    # With a scan seq EOF is now, a real ts that survives a lost scan cursor.
     eof = ("", 0)
-    if scan is None and any(fresh.values()):
+    if scan is not None:
+        eof = (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), 0)
+    elif any(fresh.values()):
         eof = _eof_cursor(active)  # (ts, count_at_ts) - the fresh-sink floor
     start = {name: cur if cur is not None else eof for name, cur in cursors.items()}
 

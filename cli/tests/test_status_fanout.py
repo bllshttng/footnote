@@ -895,7 +895,6 @@ def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
     assert found is True and plan_path == "/tmp/plan.md"
     # Second note accumulates (append-only, never replaces).
     append_progress_note(tmp_graph, "x-9", {"ts": "T2", "text": "again"})
-    import json as _json
     entry = read_graph_strict(tmp_graph)[0]
     assert [n["text"] for n in entry["progress_notes"]] == ["hi", "again"]
 
@@ -960,7 +959,6 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
         catch_exceptions=False,
     )
     assert appended.exit_code == 0, appended.output
-    import json as _json
 
     node = read_graph_strict(tmp_graph)[0]
     assert node["details"] == "original rationale"
