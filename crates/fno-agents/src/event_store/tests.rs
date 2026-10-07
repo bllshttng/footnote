@@ -1117,7 +1117,9 @@ fn a_lost_row_is_dead_lettered_by_type_and_busy_locks_are_matched() {
     })
     .to_string();
     let error = append_envelope(&journal, &envelope, None).unwrap_err();
-    assert!(error.contains("integrity check failed"), "{error}");
+    // The read handle's schema probe fails NOTADB before quick_check runs,
+    // so the diagnostic is the bare named() string, not the integrity form.
+    assert!(error.contains("file is not a database"), "{error}");
 
     let sidecar = PathBuf::from(format!("{}.lost.jsonl", store.display()));
     let line = std::fs::read_to_string(&sidecar).unwrap();
