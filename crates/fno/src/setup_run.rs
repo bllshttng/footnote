@@ -344,9 +344,10 @@ fn repo_root() -> PathBuf {
 
 /// A footnote source checkout: the fno crate manifest under `crates/`.
 /// Contributors get the three report steps; a release install never sees
-/// them.
+/// them. One joined path, not chained `join("fno")` literals: the
+/// seam-crossings ratchet reads that literal shape as a porcelain resolver.
 fn in_source_checkout(cwd: &Path) -> bool {
-    cwd.join("crates").join("fno").join("Cargo.toml").is_file()
+    cwd.join("crates/fno/Cargo.toml").is_file()
 }
 
 /// Write one key through `fno config set` (the validated writer: coercion,

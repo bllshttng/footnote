@@ -13,9 +13,11 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// The generated config reference, every key at its default. Embedded so the
-/// inventory cannot drift from the file the drift gate checks.
-const EXAMPLE: &str = include_str!("../../../docs/config.example.toml");
+/// The generated config reference, every key at its default. Embedded from
+/// the crate-local copy the drift gate checks beside docs/, because cargo
+/// publish packs only the crate and an escape into docs/ breaks the
+/// tarball compile.
+const EXAMPLE: &str = include_str!("../config.example.toml");
 
 /// One inventory row: the dotted key, its default rendered as text, the
 /// effective value, and the source that answered.
@@ -280,24 +282,23 @@ mod tests {
     }
 
     #[test]
-    fn every_example_key_lists_with_default_source() {
+    fn the_inventory_ladder_resolves_each_source() {
+        // No files: every example key answers from its default, optional
+        // keys read unset, and the list is real.
         let rows = inventory(None, None).unwrap();
         assert!(rows.len() > 50);
         assert!(rows.iter().all(|r| r.source == "default"));
-        let max_live = rows.iter().find(|r| r.key == "agents.max_live").unwrap();
-        assert_eq!(max_live.default, "3");
-    }
-
-    #[test]
-    fn optional_keys_print_unset() {
-        let rows = inventory(None, None).unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.key == "agents.max_live")
+                .unwrap()
+                .default,
+            "3"
+        );
         let idp = rows.iter().find(|r| r.key == "backlog.id_prefix").unwrap();
         assert_eq!(idp.default, "unset");
         assert_eq!(idp.value, "unset");
-    }
-
-    #[test]
-    fn a_global_override_reports_global() {
+        // A global override answers global with both values visible.
         let dir = tempdir("global");
         let path = dir.join("config.toml");
         std::fs::write(&path, "[branch]\nprefix = \"xx\"\n").unwrap();
@@ -306,30 +307,23 @@ mod tests {
         assert_eq!(row.source, "global");
         assert_eq!(row.default, "fno");
         assert_eq!(row.value, "xx");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn project_beats_global() {
-        let dir = tempdir("project");
+        // Project beats global on the same key.
         let g = dir.join("global.toml");
-        let p = dir.join("project.toml");
+        let pr = dir.join("project.toml");
         std::fs::write(&g, "[branch]\nprefix = \"gg\"\n").unwrap();
-        std::fs::write(&p, "[branch]\nprefix = \"pp\"\n").unwrap();
-        let rows = inventory(Some(&g), Some(&p)).unwrap();
+        std::fs::write(&pr, "[branch]\nprefix = \"pp\"\n").unwrap();
+        let rows = inventory(Some(&g), Some(&pr)).unwrap();
         let row = rows.iter().find(|r| r.key == "branch.prefix").unwrap();
         assert_eq!(row.source, "project");
         assert_eq!(row.value, "pp");
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn an_unparseable_config_names_the_file() {
+        // An unparseable config names the file instead of answering default.
         let dir = tempdir("bad");
         let path = dir.join("config.toml");
         std::fs::write(&path, "not [ valid toml").unwrap();
-        let err = inventory(Some(&path), None).unwrap_err();
-        assert!(err.contains(&path.display().to_string()));
+        assert!(inventory(Some(&path), None)
+            .unwrap_err()
+            .contains(&path.display().to_string()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
