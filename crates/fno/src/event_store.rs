@@ -349,23 +349,19 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 fn open_store(store: &Path) -> Result<Connection, String> {
     crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
     if store.exists() {
-        let check = Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))
-            .and_then(|conn| {
-                conn.busy_timeout(std::time::Duration::from_secs(5))
-                    .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
-                let result: String = conn
-                    .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-                    .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
-                if result == "ok" {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "{}: database disk image is malformed: integrity check failed: {result}",
-                        store.display()
-                    ))
-                }
-            });
+        let check = crate::store_conn::open_read(store).and_then(|conn| {
+            let result: String = conn
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
+            if result == "ok" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: database disk image is malformed: integrity check failed: {result}",
+                    store.display()
+                ))
+            }
+        });
         if let Err(error) = check {
             let parent = store.parent().unwrap_or_else(|| Path::new("."));
             let root = if parent.file_name().is_some_and(|name| name == "db") {

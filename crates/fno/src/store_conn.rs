@@ -35,19 +35,8 @@ pub fn open_write(path: &Path) -> Result<Connection, String> {
 /// A read-only handle. Never creates the file.
 pub fn open_read(path: &Path) -> Result<Connection, String> {
     refuse_truncated_database(path)?;
-    // A writer that died leaves a hot -wal, and a READ_ONLY open cannot run
-    // the recovery that reading it needs. Retry read-write, which recovers
-    // the log, before reporting the read-only error.
-    let connection = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(connection) => connection,
-        Err(read_only_error) => Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| named(path, read_only_error))?,
-    };
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| named(path, error))?;
     connection
         .busy_timeout(BUSY_WAIT)
         .map_err(|error| named(path, error))?;
@@ -58,6 +47,8 @@ pub fn open_read(path: &Path) -> Result<Connection, String> {
 }
 
 fn refuse_truncated_database(path: &Path) -> Result<(), String> {
+    // SQLite's header is 100 bytes. Metadata avoids a raw descriptor whose
+    // close could release this process's SQLite locks.
     match path.metadata() {
         Ok(meta) if meta.len() > 0 && meta.len() < 100 => {
             Err(format!("{}: file is not a database", path.display()))
