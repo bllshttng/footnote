@@ -1948,8 +1948,19 @@ fn write_handoff_doc(
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    // The cap actor runs on the machine hosting the capped session, so this
+    // machine IS the origin. Either value missing leaves the body unchanged;
+    // its `old transcript: unknown` line already says so.
+    let frontmatter = match (member.session_id.as_deref(), transcript.as_deref()) {
+        (Some(sid), Some(path)) => format!(
+            "---\n{}---\n\n",
+            fno::session_origin::SessionOrigin::for_this_machine(&member.harness, sid, path)
+                .frontmatter()
+        ),
+        _ => String::new(),
+    };
     let body = format!(
-        "# Cap handoff: {} -> {dest}\n\n- member: {}\n- node: {node}\n- old transcript: {old_transcript}\n- capped since: {}\n- excerpt: {}\n",
+        "{frontmatter}# Cap handoff: {} -> {dest}\n\n- member: {}\n- node: {node}\n- old transcript: {old_transcript}\n- capped since: {}\n- excerpt: {}\n",
         lane.lane,
         member.name,
         lane.reset_epoch.map(epoch_to_rfc3339).unwrap_or_else(|| "unknown".into()),
@@ -2546,7 +2557,20 @@ mod tests {
         let home = AgentsHome::at(root.join("agents-home"));
         let doc = write_handoff_doc(&home, lane, &lane.members[0], "dest", 1_000_000_000).unwrap();
         let body = std::fs::read_to_string(&doc).unwrap();
+        // The doc now opens with the origin frontmatter: harness, session id
+        // and transcript all name the capped member (AC4-HP).
+        assert!(body.starts_with("---\norigin:"), "{body}");
+        assert!(body.contains("harness: \"codex\""), "{body}");
+        assert!(
+            body.contains(&format!("session_id: \"{CODEX_THREAD}\"")),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!("transcript_path: \"{t}\"")),
+            "{body}"
+        );
         assert!(body.contains(&t), "{body}");
+        assert!(body.contains("old transcript:"), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
