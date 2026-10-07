@@ -306,6 +306,11 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
         let path = entry.path();
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         if kind.is_symlink() {
+            // A relocated spaces root is still this root's spaces; skipping
+            // it would stamp the marker over unmigrated role dirs.
+            if depth == 0 && entry.file_name() == "spaces" && path.is_dir() {
+                walk(&path, depth + 1)?;
+            }
             continue;
         }
         if kind.is_dir() {
