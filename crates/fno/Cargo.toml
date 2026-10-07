@@ -75,12 +75,13 @@ clap_complete = "4"
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"
-rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "fallible_uint"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 # `search_query.rs` names the nearest key on an unknown-key error (already
 # locked at 0.11.1 as a transitive dep, so no new download).
 strsim = "0.11"
 thiserror = "2"
+tempfile = "3"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
@@ -92,6 +93,3 @@ tokio = { version = "1", features = [
     # bounded, fail-open shell-out to `fno-agents digest` on attach.
     "process",
 ] }
-
-[dev-dependencies]
-tempfile = "3"
