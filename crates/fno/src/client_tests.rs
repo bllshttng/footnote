@@ -7678,8 +7678,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             frame.cells[r * cols].flags & cell_flags::DIM == cell_flags::DIM,
         )
     };
-    // A badgeless reading-less row paints `?` + DIM; a badgeless local row
-    // and a badgeless external row collide there on purpose (the glyph
+    // A badgeless reading-less row paints `Idle` + DIM (the 2026-10-06
+    // shell ruling dropped the `?` mark); a badgeless local row and a
+    // badgeless external row collide there on purpose (the word
     // discriminates STATE, never external-ness; DIM only reinforces it).
     // External-ness reads through the row's ACTIONS, and the exited
     // precedence below is unchanged.
@@ -7690,13 +7691,13 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     );
     let (word, dim) = probe("z-external");
     assert!(
-        word.trim_start().starts_with('?') && dim,
-        "external: ? + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && dim,
+        "external: Idle + DIM: {word:?}"
     );
     let (word, dim) = probe("z-fnolive");
     assert!(
-        word.trim_start().starts_with('?') && dim,
-        "fno-live: ? + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && dim,
+        "fno-live: Idle + DIM: {word:?}"
     );
     // AC1-UI: external + Blocked renders `Input` in the amber accent,
     // BOLD, and NOT dimmed even though it is external - the accent beats the
