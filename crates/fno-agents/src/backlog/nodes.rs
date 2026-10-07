@@ -359,6 +359,39 @@ fn raw_rows_filter(
     Ok(rows)
 }
 
+pub(crate) fn migrate_role_provenance(connection: &Connection) -> Result<(), String> {
+    for (table, column) in [("nodes", "extras"), ("nodes_raw", "body")] {
+        let mut query = connection
+            .prepare(&format!("SELECT id, {column} FROM {table}"))
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(query);
+        for (id, text) in rows {
+            let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if crate::role_migration::migrate_node_provenance(&mut value)? {
+                let text = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+                connection
+                    .execute(
+                        &format!(
+                            "UPDATE {table} SET {column} = ?1, version = version + 1 WHERE id = ?2"
+                        ),
+                        params![text, id],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(&ddl())

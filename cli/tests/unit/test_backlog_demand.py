@@ -146,7 +146,7 @@ def test_an_unknown_priority_weighs_as_p2(tmp_graph):
 def test_dispatch_context_renders_beside_the_number(tmp_graph):
     """AC9. Sybil-by-dispatch is shown, never corrected out of the count.
 
-    A row reading `enc 2, dispatched 2` is a king that fanned out. A row
+    A row reading `enc 2, dispatched 2` is a lead that fanned out. A row
     reading `enc 3, dispatched 0` is three sessions that hit the node while
     doing something else. Withholding the number would withhold the signal.
     """

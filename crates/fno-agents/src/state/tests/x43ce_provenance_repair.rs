@@ -1,5 +1,5 @@
 //! x-43ce: one undecodable OPTIONAL spawn_provenance block must not zero the
-//! whole decode. The live outage shape: a crown succession reown forked an
+//! whole decode. The live outage shape: a role succession reown forked an
 //! owner-only block (no `origin`) onto a provenance-less adopted row; the
 //! typed reader failed the whole file, raw_rows=28 decoded_rows=0. The repair
 //! strips the block (row kept, drop named); damage beyond the block still
@@ -14,10 +14,10 @@ fn plain_row(name: &str) -> String {
 }
 
 /// An adopted row carrying the owner-only spawn_provenance block the bad
-/// crown reown forked (no `origin`): the exact live outage shape.
+/// role reown forked (no `origin`): the exact live outage shape.
 fn adopted_row_with_owner_only_provenance(name: &str) -> String {
     format!(
-        r#"{{"name":"{name}","cwd":"/w","harness":"codex","harness_session_id":"{name}-sess","status":"live","created_at":"2026-10-06T00:00:00Z","origin":"adopted","spawned_by_session":"p-sess","spawn_provenance":{{"owner":{{"kind":"session","harness":"codex","session_id":"heir-sess","cwd":"/w"}}}}}}"#
+        r#"{{"name":"{name}","cwd":"/w","harness":"codex","harness_session_id":"{name}-sess","status":"live","created_at":"2026-10-06T00:00:00Z","origin":"adopted","spawned_by_session":"p-sess","spawn_provenance":{{"owner":{{"kind":"session","harness":"codex","session_id":"successor-sess","cwd":"/w"}}}}}}"#
     )
 }
 

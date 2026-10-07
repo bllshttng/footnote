@@ -1247,7 +1247,7 @@ pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Resul
         .unwrap_or(Value::Null),
     );
     // Dispatch credit: a --node spawn whose no producer named an owner
-    // answers to the live crown covering the node (native path). A kingless
+    // answers to the live role covering the node (native path). A kingless
     // node keeps the session owner.
     let owner_value = match params
         .get("node")
@@ -1256,7 +1256,7 @@ pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Resul
         .filter(|s| !s.is_empty())
     {
         Some(node) => {
-            let credit = crate::dispatch_credit::covering_crown(&json!({"node": node}));
+            let credit = crate::dispatch_credit::covering_role(&json!({"node": node}));
             credit
                 .get("owner")
                 .cloned()

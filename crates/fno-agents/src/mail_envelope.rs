@@ -23,8 +23,8 @@ fn live_entry_for_address<'a>(
 }
 
 fn team_label(registry_path: &Path, row: &crate::state::RegistryEntry) -> Option<String> {
-    let level = row.crown_level?;
-    let scope = row.crown_scope.as_deref().unwrap_or("?");
+    let level = row.role_level?;
+    let scope = row.role_scope.as_deref().unwrap_or("?");
     let theme =
         crate::team_names::theme_for(&registry_path.with_file_name("team_names.json"), scope);
     Some(crate::team_names::title(
@@ -208,7 +208,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             registry.as_ref(),
         ) {
             let fleet_is_teamed = registry.entries.iter().any(|row| {
-                row.crown_level.is_some()
+                row.role_level.is_some()
                     && !matches!(
                         row.status,
                         crate::AgentStatus::Exited
@@ -416,7 +416,7 @@ mod tests {
                 "agents": [
                     {"name":"folio", "short_id":"folio-short", "status":"live", "harness":"claude", "cwd":"/repo",
                      "harness_session_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7", "created_at":"2026-09-23T20:00:00Z",
-                     "crown_level":1,"crown_scope":"fno"},
+                     "role_level":1,"role_scope":"fno"},
                     {"name":"quill", "short_id":"quill-short", "status":"busy", "harness":"codex", "cwd":"/repo",
                      "harness_session_id":"codex-session", "created_at":"2026-09-23T20:00:00Z"}
                 ]

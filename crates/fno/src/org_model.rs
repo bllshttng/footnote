@@ -66,7 +66,7 @@ impl OrgSnapshot {
 }
 pub async fn gather(graph: &std::path::Path, agents: Vec<AgentRow>) -> OrgInputs {
     let teams: Vec<Value> = agents.iter().filter(|a| !a.exited).filter_map(|a| {
-        Some(serde_json::json!({"scope": a.crown_scope.as_ref()?, "level": a.crown_level?, "holder": a.name}))
+        Some(serde_json::json!({"scope": a.role_scope.as_ref()?, "level": a.role_level?, "holder": a.name}))
     }).collect();
     let mut command = tokio::process::Command::new("fno-agents");
     command
@@ -159,7 +159,7 @@ fn worker_node<'a>(agent: &AgentRow, inputs: &'a Inputs) -> Option<&'a str> {
 fn joined<'a>(session: &SessionView, agents: &'a [AgentRow]) -> Option<&'a AgentRow> {
     let sid = session.session_id.as_deref()?;
     let eligible = |a: &&AgentRow| {
-        a.crown_level.is_none()
+        a.role_level.is_none()
             && session
                 .harness
                 .as_deref()
@@ -218,7 +218,7 @@ fn org_node(inputs: &Inputs, id: &str, fold: &Value, now: u64) -> Result<OrgNode
     for agent in inputs
         .agents
         .iter()
-        .filter(|a| !a.exited && a.crown_level.is_none())
+        .filter(|a| !a.exited && a.role_level.is_none())
     {
         if worker_node(agent, inputs) != Some(id)
             || current
@@ -288,7 +288,7 @@ pub fn derive(inputs: &OrgInputs, now: u64) -> Result<OrgTree, String> {
         .ok_or("org-fold ownership unavailable")?;
     let mut leads = Vec::new();
     for holder in inputs.backlog.agents.iter().filter(|a| !a.exited) {
-        let (Some(scope), Some(level)) = (&holder.crown_scope, holder.crown_level) else {
+        let (Some(scope), Some(level)) = (&holder.role_scope, holder.role_level) else {
             continue;
         };
         let own = scopes
@@ -350,7 +350,7 @@ pub fn derive(inputs: &OrgInputs, now: u64) -> Result<OrgTree, String> {
         .backlog
         .agents
         .iter()
-        .filter(|a| !a.exited && a.crown_level.is_none())
+        .filter(|a| !a.exited && a.role_level.is_none())
         .filter(|a| {
             if worker_node(a, &inputs.backlog)
                 .and_then(|id| owners.get(id))

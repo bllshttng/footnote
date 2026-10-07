@@ -25,10 +25,8 @@ pub(super) fn reading() -> Result<Value, String> {
     if mine.is_empty() {
         return Err(format!("no registry row for session {session_id}"));
     }
-    let teamed: Vec<&&crate::state::RegistryEntry> = mine
-        .iter()
-        .filter(|row| row.crown_level.is_some())
-        .collect();
+    let teamed: Vec<&&crate::state::RegistryEntry> =
+        mine.iter().filter(|row| row.role_level.is_some()).collect();
     match teamed.len() {
         0 => Err("this session's registry row holds no team".into()),
         1 => fold(teamed[0]),
@@ -125,7 +123,7 @@ mod tests {
 
     fn teamed_row(sandbox: Option<&str>, mode: Option<&str>) -> RegistryEntry {
         RegistryEntry {
-            crown_level: Some(1),
+            role_level: Some(1),
             sandbox_posture: sandbox.map(str::to_string),
             requested_permission_mode: mode.map(str::to_string),
             ..Default::default()

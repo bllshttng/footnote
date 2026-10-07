@@ -62,7 +62,7 @@ def test_unprovable_caller_builds_no_record(monkeypatch):
     assert provenance["owner"]["kind"] == "session"
 
 
-def test_explicit_daemon_origin_requires_mission_or_crown_owner(monkeypatch):
+def test_explicit_daemon_origin_requires_mission_or_role_owner(monkeypatch):
     monkeypatch.setattr(
         "fno.agents.naming.dispatch_sources",
         lambda: frozenset({"ab", "ac", "rd", "th", "pw", "jn"}),
@@ -76,7 +76,7 @@ def test_explicit_daemon_origin_requires_mission_or_crown_owner(monkeypatch):
             "cause": "ab",
         },
     }
-    with pytest.raises(ValueError, match="mission or crown owner"):
+    with pytest.raises(ValueError, match="mission or role owner"):
         build_spawn_provenance(
             explicit_origin=origin,
             explicit_owner={"kind": "operator", "tty": "/dev/ttys001"},
@@ -101,7 +101,7 @@ def test_retired_sob_cause_refuses(monkeypatch):
             "cause": "sob",
         },
     }
-    owner = {"kind": "crown", "project": "fno", "scope": "epic-x"}
+    owner = {"kind": "role", "project": "fno", "scope": "epic-x"}
     with pytest.raises(ValueError, match="sob"):
         build_spawn_provenance(explicit_origin=origin, explicit_owner=owner)
 
@@ -120,7 +120,7 @@ def test_unknown_cause_code_refuses(monkeypatch):
             "cause": "zz",
         },
     }
-    owner = {"kind": "crown", "project": "fno", "scope": "epic-x"}
+    owner = {"kind": "role", "project": "fno", "scope": "epic-x"}
     with pytest.raises(ValueError, match="vocabulary"):
         build_spawn_provenance(explicit_origin=origin, explicit_owner=owner)
 
@@ -143,13 +143,13 @@ def test_carrier_env_outranks_ambient(monkeypatch):
     )
     monkeypatch.setenv(
         "FNO_SPAWN_OWNER",
-        json.dumps({"kind": "crown", "project": "fno", "scope": "epic-x"}),
+        json.dumps({"kind": "role", "project": "fno", "scope": "epic-x"}),
     )
     provenance = build_spawn_provenance()
     assert provenance is not None
     assert provenance["origin"]["kind"] == "non_session"
     assert provenance["origin"]["source"]["arm"] == "active-backlog"
-    assert provenance["owner"] == {"kind": "crown", "project": "fno", "scope": "epic-x"}
+    assert provenance["owner"] == {"kind": "role", "project": "fno", "scope": "epic-x"}
 
 
 def test_half_carrier_refuses(monkeypatch):

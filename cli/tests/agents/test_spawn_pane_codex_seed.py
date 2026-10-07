@@ -125,14 +125,50 @@ def test_failed_delivery_falls_back_to_typing_once(tmp_path: Path, monkeypatch) 
     assert result.seed_source != "turn-start"
 
 
+def test_late_bind_after_window_is_stamped_and_kept(tmp_path: Path, monkeypatch) -> None:
+    """A bind landing just past the window keeps its row.
+
+    The old path reaped the pane and dropped the row once reconcile came up
+    empty, orphaning a live mid-task worker; the re-probe (the _spawn fixture's
+    patched backfill stands in for it) stamps the late id onto the id-less row.
+    """
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_binding",
+        lambda *a, **k: mux_spawn.PaneBinding(
+            session_id=None,
+            pane_alive=True,
+            reason="binding-window-expired",
+            tail="",
+        ),
+    )
+    result, runner = _spawn(
+        monkeypatch,
+        tmp_path,
+        provider="codex",
+        name="latebound",
+        message=SEED,
+    )
+
+    row = next(r for r in load_registry() if r.name == "latebound")
+    assert row.harness_session_id == BOUND_ID
+    assert row.status == "live"
+    assert result.session_uuid == BOUND_ID
+    assert not runner.kill_calls
+
+
 def test_unbound_live_pane_types_the_seed_before_the_required_gate(
     tmp_path: Path, monkeypatch
 ) -> None:
     """AC2-ERR: a blown binding window types the seed, no turn/start.
 
-    Codex binding is required, so the id-less row is still reaped by the
-    post-reconcile gate; the typed seed preserves today's parity (the seed is
-    attempted, the pane's fate is the binding contract's, not the seed's).
+    Codex binding is required, so an id-less row whose re-probe is still
+    silent is reaped by the post-reconcile gate; the typed seed preserves
+    today's parity (the seed is attempted, the pane's fate is the binding
+    contract's, not the seed's).
     """
     from fno.agents.dispatch_errors import DispatchAskError
 
@@ -149,6 +185,8 @@ def test_unbound_live_pane_types_the_seed_before_the_required_gate(
             tail="",
         ),
     )
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda pid, **k: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
     with pytest.raises(DispatchAskError):
         _spawn(
             monkeypatch,
@@ -157,6 +195,7 @@ def test_unbound_live_pane_types_the_seed_before_the_required_gate(
             name="unbound",
             message=SEED,
             runner=runner,
+            codex_binding=False,
         )
 
     assert calls == []

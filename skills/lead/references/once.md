@@ -3,13 +3,13 @@
 
 You have been titled over one scope, and the role expires when you exit. That is the whole shape: real authority, no tenure. Tenure instead - a lead that stays active over a territory for days, checking in on a schedule - is `/fno:lead <scope>` without `--once`. This page is the one-wave pass and org.
 
-One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the lead.
+One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and steps_down. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the lead.
 
-Pending work once let the session exit immediately. Setting `config.king.enabled` now makes `fno agents org promote` or `fno agents spawn --promote` arm the scope manifest.
+Pending work once let the session exit immediately. Setting `config.lead.enabled` now makes `fno agents org promote` or `fno agents spawn --promote` arm the scope manifest.
 
-The `fno-agents loop-check --driver king` loop holds the session while `fno inbox board` lists work to shrink. A bare call uses the role manifest. `--state <path>` reads outside it.
+The `fno-agents loop-check --driver lead` loop holds the session while `fno inbox board` lists work to shrink. A bare call uses the role manifest. `--state <path>` reads outside it.
 
-Exit requires a clean board. This limits abdication but does not supervise the tail. The change follows an incident: a lead filed eight nodes, dispatched none, and sat idle for an hour with a full board.
+Exit requires a clean board. This limits departure but does not supervise the tail. The change follows an incident: a lead filed eight nodes, dispatched none, and sat idle for an hour with a full board.
 
 A clean board exits the session. When the board refills, a human promotes the next lead. If a full board stops shrinking, the loop records one user question with the stalled rows before exit. It never exits silently with a stuck board.
 
@@ -19,21 +19,21 @@ If you find yourself wanting to watch a worker, your lead is already over.
 
 Rule like it matters, because it does; the graph you leave behind is the only thing that outlives you.
 
-## Who runs this: the role is bestowed
+## Who runs this: the role is granted
 
 Orchestrator authority is not a role you infer from what you were asked to do.
 It is granted, it is explicit, and you know you hold it.
 The dispatch act is a spawn with `--promote <scope>` (or an in-place `fno agents org promote`); the registry row records the title.
 
-**A role is three things: who bestowed it, what level you hold, and what scope you rule.**
+**A role is three things: who granted it, what level you hold, and what scope you rule.**
 
-- **Level 0** is bestowed by a human. Its scope is whatever the human named.
-- **Level N+1** is bestowed by a level-N lead, and *only* by one.
+- **Level 0** is granted by a human. Its scope is whatever the human named.
+- **Level N+1** is granted by a level-N lead, and *only* by one.
 - **No role means you are a worker.** That is the default and it fails closed: a session that cannot name who titled it does not hold the authority.
 
 Two rules keep the org from growing:
 
-1. **A role's scope must be a strict subset of the grantor's scope.** You cannot bestow authority you do not hold, and you cannot bestow all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
+1. **A role's scope must be a strict subset of the grantor's scope.** You cannot grant authority you do not hold, and you cannot grant all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
 2. **The ladder is three rungs, and the rung is a fact about the territory, not a number you pick:**
    - **Level 0** - several projects; a portfolio. Its org is project leads.
    - **Level 1** - one project. Its org is epic leads.
@@ -44,7 +44,7 @@ Two rules keep the org from growing:
 State your level, altitude, and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
 **The role is stamped by a grantor, never self-declared.**
-Bestow it at spawn: `fno agents spawn ... --promote <scope>` (short form `-k`), repeating the flag for a portfolio or a set of epics.
+Grant it at spawn: `fno agents spawn ... --promote <scope>` (short form `-k`), repeating the flag for a portfolio or a set of epics.
 
 When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents org promote <printed-handle> --scope <scope>` from another attended terminal. When its own role strictly contains the scope, a live lead can run this path too, to re-scope a subordinate. The registry records the actual grantor, either the attended `human` or the granting lead. It preserves the target's transcript and placement and never performs succession.
 You never pass a level.
@@ -52,11 +52,11 @@ Naming one epic makes an epic lead, several epics one epic lead over the set, on
 The row records the derived `level`, the `scope`, and the grantor (a live superset-lead, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
 That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
 
-A role is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark titled rows, so a minion resolves who to escalate to. `fno agents org` names every live role, whether the registry and the graph agree, and any scope two live rows hold at once. When the session holds a role, `fno whoami` prints it as a `crown:` line, so you recover your own authority after a compaction.
+A role is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark titled rows, so a minion resolves who to escalate to. `fno agents org` names every live role, whether the registry and the graph agree, and any scope two live rows hold at once. When the session holds a role, `fno whoami` prints it as a `role:` line, so you recover your own authority after a compaction.
 
 Role liveness is just row liveness - the role dies with the session, no separate lifecycle.
 
-**Abdicate.**
+**StepDown.**
 This is orthogonal to the role and equally load-bearing.
 A lead who promotes a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
 Fan out, record what you fanned out, exit.
@@ -82,9 +82,9 @@ The role itself rides `--substrate thread` for Claude: a Claude thread worker is
 What a thread lead loses is placement.
 The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a thread session does not have.
 So a thread lead seats teammates in fresh tabs instead of beside itself, and the org stops cohering around one screen.
-Promote a thread lead for a pass, which abdicates before layout matters; promote a pane lead for a lead that runs an org.
+Promote a thread lead for a pass, which steps_down before layout matters; promote a pane lead for a lead that runs an org.
 
-**Place the lead in the mission workspace too, and for an org that is not optional.** Org teammates anchor to the lead's own pane, so wherever the lead sits IS the org. Pass `--workspace <epic>` at coronation and again when you anoint a sub-lead, and the naming stays legible; skip it and the org still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
+**Place the lead in the mission workspace too, and for an org that is not optional.** Org teammates anchor to the lead's own pane, so wherever the lead sits IS the org. Pass `--workspace <epic>` at promotion and again when you anoint a sub-lead, and the naming stays legible; skip it and the org still coheres around you, just under a cwd-routed name. A pass does not need it at all, having stepped_down before layout matters.
 
 **Anoint with the skill invocation as the prompt, never prose wrapping it.**
 
@@ -92,19 +92,19 @@ A wrapped prompt ("run $fno:target ... and here is why") does not reliably load 
 
 The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. Single-quote the codex payload: in double quotes the shell eats `$fno` and the verb with it. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a role is the defect this rule exists to prevent.
 
-**A role said in prose is not a role.** Telling a session it is lead does not stamp anything. Authority lives in three registry fields (`crown_level`, `crown_scope`, `crown_grantor`) that only `fno agents org promote` and spawn-time `--promote` write, and `fno agents org init` deliberately never writes them: a session enabled to stamp its own role could role itself. So the handshake is two steps and both are required. The target runs `fno agents register` and prints a handle. An attended shell, or a lead whose own role strictly contains the scope, runs `fno agents org promote <handle> --scope <scope>`.
+**A role said in prose is not a role.** Telling a session it is lead does not stamp anything. Authority lives in three registry fields (`role_level`, `role_scope`, `role_grantor`) that only `fno agents org promote` and spawn-time `--promote` write, and `fno agents org init` deliberately never writes them: a session enabled to stamp its own role could role itself. So the handshake is two steps and both are required. The target runs `fno agents register` and prints a handle. An attended shell, or a lead whose own role strictly contains the scope, runs `fno agents org promote <handle> --scope <scope>`.
 
-**What an unstamped row costs, so nobody mistakes the silence for success.** Three readers key on those fields and every one of them fails CLOSED and QUIETLY. `fno agents org done` refuses, so the lead cannot abdicate and its manifest is orphaned on disk. `fno agents org manifest-path` exits non-zero and prints no path, so the stop hook leaves `KING_STATE_FILE` unset. `hooks/king-postcompact-reinject.sh` exits 0 before injecting, so the post-compact brief - the one that tells you to reuse a live session with `fno agents retask` before spawning a cold one - never arrives. A lead with an armed manifest and an unstamped row looks exactly like a working lead until it tries to put the role down. `king init` now warns when it sees that state, and warns the same way when the row's role names OTHER territory, because these three readers key on `crown_scope` and a role over somewhere else is as absent to them as no role at all. Heed the warning rather than proceeding.
+**What an unstamped row costs, so nobody mistakes the silence for success.** Three readers key on those fields and every one of them fails CLOSED and QUIETLY. `fno agents org done` refuses, so the lead cannot step_down and its manifest is orphaned on disk. `fno agents org manifest-path` exits non-zero and prints no path, so the stop hook leaves `LEAD_STATE_FILE` unset. `hooks/lead-postcompact-reinject.sh` exits 0 before injecting, so the post-compact brief - the one that tells you to reuse a live session with `fno agents retask` before spawning a cold one - never arrives. A lead with an armed manifest and an unstamped row looks exactly like a working lead until it tries to put the role down. `lead init` now warns when it sees that state, and warns the same way when the row's role names OTHER territory, because these three readers key on `role_scope` and a role over somewhere else is as absent to them as no role at all. Heed the warning rather than proceeding.
 
-**That same silence has more than one cause, and the unstamped row is not the only one.** `manifest-path` also exits 1 with empty streams when the `--state-root` it was handed holds no `kings/<scope>.md`, which is what a repo-local `.fno` does - manifests live under the space dir, and both hooks used to pass the wrong root. Tell the causes apart: silent with `--state-root` and correct without it is the flag, silent both ways is the row. Since 2026-09-12 the verb prints the reason on stderr, so one run answers it.
+**That same silence has more than one cause, and the unstamped row is not the only one.** `manifest-path` also exits 1 with empty streams when the `--state-root` it was handed holds no `leads/<scope>.md`, which is what a repo-local `.fno` does - manifests live under the space dir, and both hooks used to pass the wrong root. Tell the causes apart: silent with `--state-root` and correct without it is the flag, silent both ways is the row. Since 2026-09-12 the verb prints the reason on stderr, so one run answers it.
 
 **If you promote a peer, run the verb or say you cannot.** Mailing "you are titled L2 over x-aaaa" and stopping there leaves that session believing it holds authority the machine cannot see. Either run `fno agents org promote` yourself, or tell them plainly that the grant needs an attended shell, and name the command they should ask for.
 
-**In-place coronation keeps the session where it is.** `fno agents org promote <handle> --scope <scope>` changes only the role fields on an existing live registered row. Its transcript, process, and pane stay in place. Run it from an attended terminal, or from a live lead whose own role strictly contains the scope. A session cannot role itself, with one exception. A lead over a set of epics can add an epic its own session created. It names every epic it holds plus the new one. Same-scope succession is refused here. When creating a lead, placing an org, or handing your own scope to an heir, use spawn-time `--promote`.
+**In-place promotion keeps the session where it is.** `fno agents org promote <handle> --scope <scope>` changes only the role fields on an existing live registered row. Its transcript, process, and pane stay in place. Run it from an attended terminal, or from a live lead whose own role strictly contains the scope. A session cannot role itself, with one exception. A lead over a set of epics can add an epic its own session created. It names every epic it holds plus the new one. Same-scope succession is refused here. When creating a lead, placing an org, or handing your own scope to a successor, use spawn-time `--promote`.
 
-**Succession happens at spawn too, but it is explicit.** An abdicating lead that spawns a successor over its OWN scope must pass `--hand-off`; without it, the spawn is refused and the caller keeps its role. With it, the vacate and stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. It has to happen while you still lead - a session that has already exited spawns nothing. A transferred heir can return the role with `fno agents org promote --reclaim`, which uses the recorded grantor and creates no session. An attended shell can also move a role between two LIVE sessions without spawning anyone. Re-scope the incumbent first with `fno agents org promote <incumbent> --scope <other territory>`, which frees the old scope in the same write. Then promote the newcomer over it. The order is the non-obvious half. Promoting the newcomer first is refused with the incumbent named and the same three remedies spelled out.
+**Succession happens at spawn too, but it is explicit.** An stepping_down lead that spawns a successor over its OWN scope must pass `--hand-off`; without it, the spawn is refused and the caller keeps its role. With it, the vacate and stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. It has to happen while you still lead - a session that has already exited spawns nothing. A transferred successor can return the role with `fno agents org promote --reclaim`, which uses the recorded grantor and creates no session. An attended shell can also move a role between two LIVE sessions without spawning anyone. Re-scope the incumbent first with `fno agents org promote <incumbent> --scope <other territory>`, which frees the old scope in the same write. Then promote the newcomer over it. The order is the non-obvious half. Promoting the newcomer first is refused with the incumbent named and the same three remedies spelled out.
 
-Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at coronation before teammates exist, never mid-wave with an org arranged around you.
+Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at promotion before teammates exist, never mid-wave with an org arranged around you.
 
 What a lead actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
 How you spell that depends on your provider, so take the requirement and not this line's defaults.
@@ -128,15 +128,15 @@ Prefer the skill surface, or pass your provider's own posture flag when you go s
 
 The role model above is unchanged. What changes is *tenure*: the role has two shapes, and you resolve which one you hold before you do anything else.
 
-- **Pass** (the default): read the track, encode the wave into the graph, kick off, abdicate. Nothing supervises afterward; the daemon's reflexes carry the tail. This is the whole of [Run it in this order](#run-it-in-this-order), and an org lead runs that same spine to kick off before it settles in to watch.
-- **Org**: you lead for the duration of one wave as a working orchestrator. You spawn your teammates into the panes around yourself, monitor them, answer their questions, reconcile each finished unit, route the next phase, and abdicate when the wave completes - running the same encode-before-exit ritual on the way out. The duties are in [Org mode: lead over the wave](#org mode-lead-over-the-wave).
+- **Pass** (the default): read the track, encode the wave into the graph, kick off, step_down. Nothing supervises afterward; the daemon's reflexes carry the tail. This is the whole of [Run it in this order](#run-it-in-this-order), and an org lead runs that same spine to kick off before it settles in to watch.
+- **Org**: you lead for the duration of one wave as a working orchestrator. You spawn your teammates into the panes around yourself, monitor them, answer their questions, reconcile each finished unit, route the next phase, and step_down when the wave completes - running the same encode-before-exit ritual on the way out. The duties are in [Org mode: lead over the wave](#org mode-lead-over-the-wave).
 
 **Resolve the shape, first match wins:**
 
 1. The titling brief names monitoring, answering questions, or running a team -> **org**.
-2. The role is bestowed autonomously (daemon, cron, another lead) with no monitoring language -> **pass**.
+2. The role is granted autonomously (daemon, cron, another lead) with no monitoring language -> **pass**.
 3. Ambiguous human titling -> ask in your first reply; if unattended, default to **pass** - the shape that completes with nobody awake to carry it.
-4. Workers who need live decisions or monitoring -> **not pass**. A pure pass abdicates at kickoff. Workers review their diffs inline, but blocked workers still need a live lead for in-scope rulings. Pick org, or hand off before exit by spawning your heir.
+4. Workers who need live decisions or monitoring -> **not pass**. A pure pass steps_down at kickoff. Workers review their diffs inline, but blocked workers still need a live lead for in-scope rulings. Pick org, or hand off before exit by spawning your successor.
 
 **What org actually costs.**
 Not idle tokens.
@@ -221,7 +221,7 @@ Prefer `peek` first: attaching is a drive action, and a lead that starts driving
 
 **Orient yourself after a compaction.**
 
-`fno whoami` (project, fleet, walker, session, your mail handle) · `fno whoami status` (gate satisfaction + events tail). `fno agents org` answers whether the coronations worked - every live role, and whether the registry and the graph agree.
+`fno whoami` (project, fleet, walker, session, your mail handle) · `fno whoami status` (gate satisfaction + events tail). `fno agents org` answers whether the promotions worked - every live role, and whether the registry and the graph agree.
 Run these instead of grepping state files.
 `fno whoami` also prints your own context line - `context: NN% used (X of Y tokens)` - and your role, so after a compaction you read both your window pressure and your authority from the one verb you are already told to run.
 Check it at boundaries (after a compaction, after reconciling a report, before arming a wait), never on a timer; the lead Stop hook nudges you past your trigger regardless, so a hand-rolled poll only burns cache.
@@ -321,7 +321,7 @@ When an S node is next in a chain you just serialized but unselectable for want 
 The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
 
-The machine enforces the implementation half in an org session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the user lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
+The machine enforces the implementation half in an org session: `hooks/lead-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the user lists in `config.lead.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.lead.implementation_guard` turns the whole guard to `warn` or `off`.
 
 Use `fno do plan path` for the canonical filename.
 
@@ -361,7 +361,7 @@ This is what makes the mission render as its own group in the mux sideline.
 On a default setup this command therefore does nothing at all and says so quietly.
 Confirm with `fno config get auto_continue.enabled` and arm it if the track is meant to walk itself.
 
-A role over an epic arms the mission by itself: the grant sets `mission_active` and emits `mission_activated` with `source: crown`.
+A role over an epic arms the mission by itself: the grant sets `mission_active` and emits `mission_activated` with `source: role`.
 So `fno backlog advance --epic` is the dispatch lever, not the activation step - the epic it names is already a mission.
 
 The verb is idempotent and respects `config.parallel.max_lanes` per project, but it dispatches real workers.
@@ -412,9 +412,9 @@ A refusal is an answer, so record it and move on. Do not re-run join against the
 
 ### 5. Exit
 
-Before you abdicate, record every ruling that changes what a worker does, through the channels in [Recording a ruling](../SKILL.md#recording-a-ruling). Your context is the only place these rulings live, and it is about to end.
+Before you step_down, record every ruling that changes what a worker does, through the channels in [Recording a ruling](../SKILL.md#recording-a-ruling). Your context is the only place these rulings live, and it is about to end.
 
-Expire your role as the last act of the lead: `fno agents org done`. It vacates your row and clears the scope manifest, so the next lead's role arms without `--force`. It also writes one `agent_crown_vacated` event to `~/.fno/events.jsonl`; a reader that finds a role missing should look there before reading the absence as a loss. A lead that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
+Expire your role as the last act of the lead: `fno agents org done`. It vacates your row and clears the scope manifest, so the next lead's role arms without `--force`. It also writes one `agent_role_vacated` event to `~/.fno/events.jsonl`; a reader that finds a role missing should look there before reading the absence as a loss. A lead that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
 
 No lead outlives its day.
 Do not stay to watch, and do not re-plan mid-batch.
@@ -439,7 +439,7 @@ fno agents spawn --name <node-name> "$payload" --substrate pane --at current --s
 ```
 
 - **Anchor to your own pane, do not aim at the workspace.** `--workspace <name> --split <dir>` splits that workspace's *focused* pane, and focus is shared mutable state: another client can move it between the moment you build the command and the moment the server runs it, landing your teammate in a different tab from you. `--at current` pins the new pane to the calling pane - yours - by resolving `FNO_PANE`, so the org accretes around the lead by construction rather than by hoping focus held. It is strict: if the anchor is gone or the split cannot fit, it refuses rather than minting a tab somewhere else, and the `--json` receipt reports the server-committed anchor and tab so you read where it actually landed. It requires `--split` and `--substrate pane`, and it only works from inside a mux pane.
-- **The workspace comes from where you are.** Because the teammate anchors to your pane, it inherits your workspace - which is the mission workspace, provided you were coronated with `--workspace <epic>` as above. That is why the lead's own placement is load-bearing and not cosmetic. Use explicit `--workspace <name> --split <dir>` only when you must place into a workspace you are not in, and accept the focus race when you do. An older deprecated alias for that flag still resolves, so a stale command runs clean and teaches the wrong spelling anyway - see the migration note in [the spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
+- **The workspace comes from where you are.** Because the teammate anchors to your pane, it inherits your workspace - which is the mission workspace, provided you were promoted with `--workspace <epic>` as above. That is why the lead's own placement is load-bearing and not cosmetic. Use explicit `--workspace <name> --split <dir>` only when you must place into a workspace you are not in, and accept the focus race when you do. An older deprecated alias for that flag still resolves, so a stale command runs clean and teaches the wrong spelling anyway - see the migration note in [the spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
 - **Creation is implicit.** The first placement into a workspace name creates it. There is no create verb, and nothing to set up before the first spawn. A blank name is refused at the CLI boundary rather than falling back to a default.
 - **Split.** First teammate `--split right`, subsequent teammates `--split down`, accreting quarters in your active tab so your viewport shows the whole org. Exact sequencing is yours; the invariant is only that every teammate lands in the one mission workspace. Treat a split direction as a placement *intent* at spawn time: several teammates launching at once are laid out concurrently, so the direction says where each one goes in, not what the final tab arrangement will be.
 - **Overflow refuses rather than degrades, and later moves are layout operations.** On a placement refusal, re-spawn with explicit `--workspace <mission-workspace> --split <dir>` (min-size fallback to a tab in that workspace); read the receipt, a fallback is a tab not a split. Relocating a live pane afterwards is `fno mux layout apply` (a whole-shape operation) or nothing - decoded refusals and the layout doctrine: [workflow-routes.md](workflow-routes.md).
@@ -489,7 +489,7 @@ fno agents mail send <teammate-handle> "Ruling: <approve/revise summary>. Cross-
 
 Context pressure is not a handoff trigger. A harness compacts its current session and preserves the node claim, worktree, branch, and PR. A fresh successor is allowed only for explicit capability escalation to an externally selected harness/model/account coordinate, and only after the destination passes the capability probe. Never spawn a successor because a teammate reported a high context percentage.
 
-**The lead's compact threshold is lower than a teammate's.** `config.target.handoff.king_used_pct_trigger` defaults to 40, below the general-session threshold of 50, because degraded lead decisions affect the whole fleet. The Stop hook tells the lead to compact in place. It never authorizes a successor.
+**The lead's compact threshold is lower than a teammate's.** `config.target.handoff.lead_used_pct_trigger` defaults to 40, below the general-session threshold of 50, because degraded lead decisions affect the whole fleet. The Stop hook tells the lead to compact in place. It never authorizes a successor.
 
 **A lead arriving on a node it did not spawn looks up the existing agent before it spawns.** The lookup ladder is claim status -> `fno agents top` (REACH column) -> transcript mtime -> resume/adopt, each step naming the store it reads; the default end is spawn-and-record with a `--dispatch-brief`, not resume. The ladder and the eight-spawn failure it prevents: [workflow-routes.md](workflow-routes.md).
 
@@ -511,22 +511,22 @@ Context pressure is not a handoff trigger. A harness compacts its current sessio
 
 ### Post-epic: interview the org
 
-When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard org step before you abdicate. This is the ceremony the synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
+When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard org step before you step_down. This is the ceremony the synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
 
 Interview each builder session that carried a node in this epic - mail it the prompt, collect its first-person account, write the account to your project's retros directory (the template names how to resolve it; do not assume the gitignored `internal/` vault path exists). The dogfooding-lens questions and the dig-deeper follow-up are baked into the template so it fires without prodding. The full prompt, delivery mechanics, landing path, and retro epistemics (how much to trust what comes back) are in [retro-interview.md](retro-interview.md) - load it when the epic completes.
 
-This is one pass, one interview per builder, then exit; it is not a synthesis (that is a separate pass under a two-plus-sessions bar). A wave-scoped org over a single wave of a larger epic skips this step and leaves it for whoever abdicates the epic's final wave.
+This is one pass, one interview per builder, then exit; it is not a synthesis (that is a separate pass under a two-plus-sessions bar). A wave-scoped org over a single wave of a larger epic skips this step and leaves it for whoever steps_down the epic's final wave.
 
-### Abdicate at the wave boundary
+### StepDown at the wave boundary
 
-The role expires when the wave completes - every teammate unit reconciled, the wave gate satisfied or explicitly parked - not at kickoff. Run the encode-before-exit ritual and exit. A org lead that outlives its wave is the same permanent-monarch drift the pass shape guards against. An empty wave (no ready teammate work in scope) is reported and abdicated immediately, never idled on.
+The role expires when the wave completes - every teammate unit reconciled, the wave gate satisfied or explicitly parked - not at kickoff. Run the encode-before-exit ritual and exit. A org lead that outlives its wave is the same permanent-monarch drift the pass shape guards against. An empty wave (no ready teammate work in scope) is reported and stepped_down immediately, never idled on.
 
 ## What a pass is not
 
-These bound the **pass** shape - the abdicate-at-kickoff lead. Org explicitly lifts the first and fourth for the duration of one wave (it monitors, and it answers), but never the rest, and never the *driver* line.
+These bound the **pass** shape - the step_down-at-kickoff lead. Org explicitly lifts the first and fourth for the duration of one wave (it monitors, and it answers), but never the rest, and never the *driver* line.
 
-- **Not a supervisor (pass only).** A pass narrows what the daemon may select and abdicates; it never stays to watch. Org monitors by contract, but only its own wave, and it still adds no second dispatch path - it encodes and lets the hands run.
-- **Not a shape for active org.** A pure pass abdicates at kickoff. It cannot answer in-scope questions or monitor the wave. Workers review their diffs inline. They do not need a lead to fire a review verb. If active monitoring or questions are part of the grant, pick org or hand off to the heir before exit.
+- **Not a supervisor (pass only).** A pass narrows what the daemon may select and steps_down; it never stays to watch. Org monitors by contract, but only its own wave, and it still adds no second dispatch path - it encodes and lets the hands run.
+- **Not a shape for active org.** A pure pass steps_down at kickoff. It cannot answer in-scope questions or monitor the wave. Workers review their diffs inline. They do not need a lead to fire a review verb. If active monitoring or questions are part of the grant, pick org or hand off to the successor before exit.
 - **Not self-appointed.** Being handed an epic to work on is not a tag. If nobody granted you orchestrator authority with a level and a scope, you are a worker on that epic, and spawning subordinates is out of bounds.
 - **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A lead promotes and wires. A lead's one supersession is the consolidation gate above, receipted with `--replaces` and a reason and reversible via `unsupersede`; outside it, quarantine means defer, and supersede stays with the groom pass or a human.
 - **Not a driver (both shapes).** You may `peek` at anything, and an org lead mails rulings - but neither shape attaches and steers a worker's pane. Driving means burning frontier tokens on work a builder already owns, and a human at the wheel of a session outranks the role: peek before you send, and never inject a ruling into a session a human is actively driving.

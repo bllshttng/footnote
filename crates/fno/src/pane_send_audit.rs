@@ -2,6 +2,10 @@
 //! "who told this worker to do that" is one grep, not a transcript sweep.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::mux_cli::{
     EXIT_CONTROL_UNANSWERED, EXIT_OK, EXIT_SUBMIT_UNCONFIRMED, EXIT_TARGET_DND,
@@ -137,6 +141,113 @@ pub(crate) fn append_agents_event(path: &Path, row: &serde_json::Value) -> std::
     crate::event_store::append_envelope(path, &row.to_string(), None)
         .map(|_| ())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+const JOURNAL_QUEUE_DEPTH: usize = 1024;
+
+enum JournalJob {
+    Row {
+        path: PathBuf,
+        row: serde_json::Value,
+        failures: Option<Arc<AtomicU64>>,
+    },
+    Flush(SyncSender<()>),
+}
+
+/// The server's one journal writer. A commit takes an fsync and the store's
+/// writer lock, both of which stretch under load, so it never runs on the
+/// core loop that feeds pane output and writes keystrokes.
+fn journal_queue() -> Option<&'static SyncSender<JournalJob>> {
+    static QUEUE: OnceLock<Option<SyncSender<JournalJob>>> = OnceLock::new();
+    QUEUE
+        .get_or_init(|| {
+            let (tx, rx) = sync_channel::<JournalJob>(JOURNAL_QUEUE_DEPTH);
+            std::thread::Builder::new()
+                .name("fno-mux-journal".into())
+                .spawn(move || {
+                    for job in rx {
+                        match job {
+                            JournalJob::Row {
+                                path,
+                                row,
+                                failures,
+                            } => {
+                                if append_agents_event(&path, &row).is_err() {
+                                    note_journal_failure(&row, failures.as_deref());
+                                }
+                            }
+                            JournalJob::Flush(ack) => {
+                                let _ = ack.send(());
+                            }
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        })
+        .as_ref()
+}
+
+fn note_journal_failure(row: &serde_json::Value, failures: Option<&AtomicU64>) {
+    let kind = row["type"].as_str().unwrap_or("journal");
+    match failures {
+        Some(count) => {
+            let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("fno mux: {kind} emit failed ({n} this session)");
+        }
+        None => eprintln!("fno mux: {kind} emit failed"),
+    }
+}
+
+/// Hand one row to the journal writer thread without blocking. A full or
+/// dead queue drops the row and counts it, never the keystroke that
+/// produced it. CLI callers keep [`append_agents_event`]: a short process
+/// would exit before a queued row committed.
+pub(crate) fn queue_agents_event(
+    path: &Path,
+    row: serde_json::Value,
+    failures: Option<&Arc<AtomicU64>>,
+) {
+    let job = JournalJob::Row {
+        path: path.to_path_buf(),
+        row,
+        failures: failures.cloned(),
+    };
+    let rejected = match journal_queue() {
+        Some(tx) => match tx.try_send(job) {
+            Ok(()) => return,
+            Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => job,
+        },
+        None => job,
+    };
+    if let JournalJob::Row { row, failures, .. } = rejected {
+        note_journal_failure(&row, failures.as_deref());
+    }
+}
+
+/// Wait until every row queued before this call has been committed or has
+/// failed, up to `timeout`. The server calls it after its last row so the
+/// stop row survives the exit. False means the wait ran out.
+pub(crate) fn flush_agents_journal(timeout: Duration) -> bool {
+    let Some(tx) = journal_queue() else {
+        return true;
+    };
+    let deadline = Instant::now() + timeout;
+    let (ack_tx, ack_rx) = sync_channel(1);
+    let mut job = JournalJob::Flush(ack_tx);
+    loop {
+        match tx.try_send(job) {
+            Ok(()) => break,
+            Err(TrySendError::Full(back)) if Instant::now() < deadline => {
+                job = back;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return false,
+        }
+    }
+    ack_rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .is_ok()
 }
 
 /// A submit key is a control byte, not a dispatch: the CRs, Tabs and ESC

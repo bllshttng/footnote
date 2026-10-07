@@ -200,7 +200,7 @@ def test_the_request_row_names_the_ambient_session_when_no_manifest_exists(
     tmp_path, monkeypatch
 ):
     # A canonical checkout is not a session, so it has no manifest; the
-    # merging process (here: the king's shell) names itself instead.
+    # merging process (here: the lead's shell) names itself instead.
     import fno.agents.events as E
     import fno.pr._merge as M
 
@@ -208,7 +208,7 @@ def test_the_request_row_names_the_ambient_session_when_no_manifest_exists(
     _stub_gh(monkeypatch, M, ok=True, stdout=MERGED)
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-lead")
     monkeypatch.setattr(
         E, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
     )
@@ -220,7 +220,7 @@ def test_the_request_row_names_the_ambient_session_when_no_manifest_exists(
     requested = _rows(log, "merge_cleanup_requested")
     assert len(requested) == 1
     data = requested[0]["data"]
-    assert data["session_id"] == "sess-king"
+    assert data["session_id"] == "sess-lead"
     assert data["harness"] == "claude"
 
 

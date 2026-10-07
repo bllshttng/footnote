@@ -119,7 +119,7 @@ def test_classify_provenance_facts_default_false_and_none():
 
 
 def test_live_outranks_pr_open():
-    """The epic king's correction: a live-fleet row must win even when the
+    """The epic lead's correction: a live-fleet row must win even when the
     same node also carries an open PR, or a minutes-old branch could get
     acted on because PR_OPEN was checked first."""
     row = classify(**_base_kwargs(registry_status="busy", node_entry={"status": "ready", "pr_number": 7}))

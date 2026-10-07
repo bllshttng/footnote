@@ -228,7 +228,7 @@ def test_bus_envelope_carries_origin_with_legacy_meta_fallback():
     assert parsed.origin == "recovery"
 
 
-def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
+def test_peer_envelope_is_footerless_without_a_role(tmp_path, monkeypatch):
     import fno.mail.envelope as envelope
 
     monkeypatch.setattr(
@@ -242,28 +242,28 @@ def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
     ) == "`@a1b2c3d4 · fmail-abc123def456 · run the smoke`\nrun the smoke"
 
 
-def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
-    # The sender crown is the header's registry name; rank rides the bus row.
+def test_promoted_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
+    # The sender role is the header's registry name; rank rides the bus row.
     import fno.mail.envelope as envelope
 
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
-        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp",'
+        '{"schema_version":19,"agents":[{"name":"lead","cwd":"/tmp",'
         '"log_path":"/tmp/log","harness":"codex",'
-        '"harness_session_id":"session-king","status":"live",'
-        '"created_at":"2026-01-01T00:00:00Z","crown_level":1,'
-        '"crown_scope":"fno"}]}',
+        '"harness_session_id":"session-lead","status":"live",'
+        '"created_at":"2026-01-01T00:00:00Z","role_level":1,'
+        '"role_scope":"fno"}]}',
         encoding="utf-8",
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
     rendered = envelope.wrap_fno_mail(
-        "run the smoke", from_="king", from_session="session-king", id="fmail-abc123def456"
+        "run the smoke", from_="lead", from_session="session-lead", id="fmail-abc123def456"
     )
-    assert rendered.startswith("`@king · fmail-abc123def456 · run the smoke`")
+    assert rendered.startswith("`@lead · fmail-abc123def456 · run the smoke`")
     assert not any(line.startswith("-- ") for line in rendered.splitlines())
 
 
-def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch):
+def test_role_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch):
     """The Rust renderer reads the registry this process's writer resolves."""
     import fno.mail.envelope as envelope
 
@@ -275,8 +275,8 @@ def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch)
         '{"schema_version":19,"agents":[{"name":"folio","cwd":"/tmp",'
         '"log_path":"/tmp/log","harness":"claude",'
         '"harness_session_id":"session-folio","status":"live",'
-        '"created_at":"2026-01-01T00:00:00Z","crown_level":1,'
-        '"crown_scope":"epic"}]}',
+        '"created_at":"2026-01-01T00:00:00Z","role_level":1,'
+        '"role_scope":"epic"}]}',
         encoding="utf-8",
     )
     (rust_home / "registry.json").write_text(
@@ -304,12 +304,12 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
     # degrades to the raw from value as the sender.
     rendered = envelope.wrap_fno_mail(
         "write the plan",
-        from_="king",
-        from_session="session-king",
+        from_="lead",
+        from_session="session-lead",
         id="fmail-abc123def456",
     )
 
-    assert rendered.startswith("`@session-king · fmail-abc123def456 · write the plan`")
+    assert rendered.startswith("`@session-lead · fmail-abc123def456 · write the plan`")
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):

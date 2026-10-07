@@ -92,7 +92,7 @@ class FakeMux:
         # <verb>`. It assumed otherwise twice over: it indexed argv[3]
         # unconditionally, and it recorded every call into `self.calls`, which
         # every assertion here reads as "the pane verbs, in order". A second
-        # caller appeared (the crown read resolves the registry through the
+        # caller appeared (the role read resolves the registry through the
         # config layer, which runs `git rev-parse`) and broke both.
         #
         # A foreign call is answered as success and NOT recorded, so `calls`

@@ -352,16 +352,16 @@ fn pi_wire(agents: &Path, src: Option<&str>, run: Run) -> Outcome {
 
 // --- agy --------------------------------------------------------------------
 
-/// The three plugin-shipped agy adapters (Stop adapter, crown inject, king
+/// The three plugin-shipped agy adapters (Stop adapter, role inject, lead
 /// guard), one per line, "-" when this CLI-only install carries none (a bare
 /// empty line would not survive the trimmed capture). The Stop adapter is
 /// load-bearing: without it the wiring degrades to manual.
 const AGY_PATHS_PY: &str = r#"from fno.setup.integration import (
     _agy_adapter_path,
-    _agy_crown_adapter_path,
+    _agy_role_adapter_path,
     _agy_guard_adapter_path,
 )
-for p in (_agy_adapter_path(), _agy_crown_adapter_path(), _agy_guard_adapter_path()):
+for p in (_agy_adapter_path(), _agy_role_adapter_path(), _agy_guard_adapter_path()):
     print(p if p is not None else "-")"#;
 
 pub fn parse_agy_paths(out: &str) -> Option<[String; 3]> {
@@ -381,7 +381,7 @@ pub fn parse_agy_paths(out: &str) -> Option<[String; 3]> {
 }
 
 fn agy_wire(agents: &Path, paths: Option<[String; 3]>, home: &Path, run: Run) -> Outcome {
-    let Some([adapter, crown, guard]) = paths else {
+    let Some([adapter, role, guard]) = paths else {
         return Outcome::Failed(
             "the fno-py engine is missing; cannot locate the agy adapters".into(),
         );
@@ -427,9 +427,9 @@ fn agy_wire(agents: &Path, paths: Option<[String; 3]>, home: &Path, run: Run) ->
         "--hooks-file".into(),
         hooks,
     ];
-    if !crown.is_empty() {
-        argv.push("--crown".into());
-        argv.push(crown);
+    if !role.is_empty() {
+        argv.push("--promote".into());
+        argv.push(role);
     }
     if !guard.is_empty() {
         argv.push("--guard".into());

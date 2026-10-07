@@ -75,8 +75,8 @@ def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
         out[row["id"]] = Retirement(None, None, False, f"not a spawn row: origin {origin}")
     for ident in summary.get("kept_operator", []):
         out[ident] = Retirement(None, None, False, "operator row")
-    for ident in summary.get("kept_crowned", []):
-        out[ident] = Retirement(None, None, False, "crowned")
+    for ident in summary.get("kept_promoted", []):
+        out[ident] = Retirement(None, None, False, "promoted")
     for ident in summary.get("kept_no_provenance", []):
         out[ident] = Retirement(None, None, False, "no-node")
     for row in summary.get("kept_active", []):

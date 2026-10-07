@@ -87,7 +87,7 @@ def _row(**over) -> dict:
         "log_path": "/tmp/w", "status": "live", "short_id": "w",
         "harness_session_id": "sid-worker",
         "created_at": "2026-01-01T00:00:00Z",
-        "crown_level": None, "crown_scope": None, "crown_grantor": None,
+        "role_level": None, "role_scope": None, "role_grantor": None,
     }
     base.update(over)
     return base

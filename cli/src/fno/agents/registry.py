@@ -97,13 +97,13 @@ KNOWN_STATUSES = frozenset(
 
 # The statuses that mean "this row will never act again". Lives here, next to the
 # vocabulary it is a subset of, because three call sites need the SAME answer and
-# a drifted copy is a real defect: the one-live-crown guards (spawn --crown on
-# both substrates, and `fno agents crown`) read "not terminal" as "still reigning",
-# so a set that forgets a status mints a second crown over one scope.
+# a drifted copy is a real defect: the one-live-role guards (spawn --promote on
+# both substrates, and `fno agents role`) read "not terminal" as "still serving",
+# so a set that forgets a status mints a second role over one scope.
 TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
 
-# The crown's MEANING (the ladder, scope encoding, derivation, validation) lives
-# in fno.agents.crown, not here: this module owns the three fields on the row and
+# The role's MEANING (the ladder, scope encoding, derivation, validation) lives
+# in fno.agents.role, not here: this module owns the three fields on the row and
 # nothing about what they signify. Storage does not get to define authority.
 
 # Valid host_mode values (interactive-drive node). A missing/null key coerces to
@@ -230,7 +230,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # pre-v29 reader must reject the store on version rather than TypeError on the
 # unknown kwarg.
 # v28: additive `adopted_by_session` - the session that VOUCHED for
-# an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
+# an adopted row; `spawned_by_session` keeps one meaning, so promoting cannot
 # re-attribute a row's cost. Same writer-protection rationale as v27.
 # v30 adds the effective git common-dir grant for Codex threads. The path is a
 # positive receipt of which repository metadata the sandbox can write; absence
@@ -544,20 +544,20 @@ class AgentEntry:
     # Gated by the v7 schema bump so a pre-v7 reader rejects instead of
     # silently dropping a stored verdict.
     screen_state: Optional[dict] = None
-    # Crown fields (US9, KFAD squad court): who holds an orchestrator crown and
+    # Role fields (US9, KFAD squad team): who holds an orchestrator role and
     # at what altitude. STAMPED BY THE SPAWN PATH, never self-declared - a
-    # session cannot write a crown onto its own row; the grantor
-    # (`crown_grantor`, the spawning session, or "human" for a direct human
+    # session cannot write a role onto its own row; the grantor
+    # (`role_grantor`, the spawning session, or "human" for a direct human
     # spawn) is captured ambiently, the same provenance discipline as
-    # harness-stamped mail identity. Crown liveness == this row's liveness (no
+    # harness-stamped mail identity. Role liveness == this row's liveness (no
     # separate lifecycle). Rust's RegistryEntry mirrors all three as
     # additive-optional passthrough, so the daemon preserves them on write-back
     # (a Python-only field is dropped when the daemon re-serializes the row);
     # gated by the v11 schema bump so a pre-v11 reader rejects instead of
-    # silently dropping a stored crown.
-    crown_level: Optional[int] = None
-    crown_scope: Optional[str] = None
-    crown_grantor: Optional[str] = None
+    # silently dropping a stored role.
+    role_level: Optional[int] = None
+    role_scope: Optional[str] = None
+    role_grantor: Optional[str] = None
     # The PATH of the route-settings/<sha16>.json this CLAUDE worker was launched
     # with (v12), or None for a worker that was never routed. Written by
     # the spawn seams only; read only by the relaunch paths, which re-apply it or
@@ -698,14 +698,14 @@ class AgentEntry:
         return self.harness_session_id or None
 
     @property
-    def crown_label(self) -> Optional[str]:
-        """Compact crown descriptor for display (``"L1 epic-x"``), or ``None``
-        when this row holds no crown. The single formatter both ``fno whoami``
+    def role_label(self) -> Optional[str]:
+        """Compact role descriptor for display (``"L1 epic-x"``), or ``None``
+        when this row holds no role. The single formatter both ``fno whoami``
         and ``fno agents list``/``top`` render from, so the two cannot drift.
         Excluded from ``asdict`` (a ``@property``), so it never persists."""
-        if self.crown_level is None:
+        if self.role_level is None:
             return None
-        return f"L{self.crown_level} {self.crown_scope or '?'}"
+        return f"L{self.role_level} {self.role_scope or '?'}"
 
 
 def mint_agent_entry(
@@ -2039,16 +2039,16 @@ def register_existing_session(
     _REGISTERED_STATUS: AgentStatus = status or "idle"
 
     # A restore can strip a row's stamp; a manifest naming this session re-stamps it when bare.
-    from fno.king.state import manifest_crown_for_session
+    from fno.lead.state import manifest_role_for_session
 
-    manifest_crown = manifest_crown_for_session(session_id, owner_cwd=cwd)
+    manifest_role = manifest_role_for_session(session_id, owner_cwd=cwd)
 
-    def _apply_manifest_crown(entry: AgentEntry) -> None:
-        if manifest_crown and not entry.crown_scope:
-            digits = manifest_crown.get("crown_level") or ""
-            entry.crown_level = int(digits) if digits.isdecimal() else None
-            entry.crown_scope = manifest_crown["crown_scope"]
-            entry.crown_grantor = manifest_crown.get("crown_grantor") or None
+    def _apply_manifest_role(entry: AgentEntry) -> None:
+        if manifest_role and not entry.role_scope:
+            digits = manifest_role.get("role_level") or ""
+            entry.role_level = int(digits) if digits.isdecimal() else None
+            entry.role_scope = manifest_role["role_scope"]
+            entry.role_grantor = manifest_role.get("role_grantor") or None
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         def _address_is_taken(
@@ -2179,7 +2179,7 @@ def register_existing_session(
                 # the current one is the wrong answer to keep.
                 if last_message_at is not None:
                     entry.last_message_at = last_message_at
-                _apply_manifest_crown(entry)
+                _apply_manifest_role(entry)
                 return entries
         generated = canonical_handle(session_id)
         if _address_is_taken(generated, same_session_only=True):
@@ -2272,7 +2272,7 @@ def register_existing_session(
             if _DERIVED_SHORT_RE.match(derived) and not _address_is_taken(derived):
                 fresh.short_id = derived
         entries.append(fresh)
-        _apply_manifest_crown(fresh)
+        _apply_manifest_role(fresh)
         return entries
 
     persisted = update_registry(_updater, path=registry_path)
@@ -2291,10 +2291,10 @@ def _mint_branch_row(
 ) -> AgentEntry:
     """Clone ``entry`` as an independently addressable branch row for B.
 
-    The one live predecessor keeps its row, name, crown, and every live ref;
+    The one live predecessor keeps its row, name, role, and every live ref;
     the branch carries only the new session id: a fresh name under the
     ``<name>-branch-<handle>`` convention, its own freshly minted ``fno_id``,
-    no crown (authority is not duplicated by a fork), and no
+    no role (authority is not duplicated by a fork), and no
     transport/lifecycle state copied from A. ``related_session_id`` is cleared
     too: A's historical ids are A's history, not the branch's.
     """
@@ -2333,31 +2333,31 @@ def _mint_branch_row(
         screen_state=None,
         exited_at=None,
         mux=None,
-        crown_level=None,
-        crown_scope=None,
-        crown_grantor=None,
+        role_level=None,
+        role_scope=None,
+        role_grantor=None,
         fno_id=mint_fno_id(),
     )
     entries.append(branch)
     return branch
 
 
-def _arm_crown_after_identification(entry: AgentEntry, session_id: str) -> None:
-    """Arm the king manifest the moment a crowned row first names the session
+def _arm_role_after_identification(entry: AgentEntry, session_id: str) -> None:
+    """Arm the lead manifest the moment a promoted row first names the session
     id it can be woken through: spawn-time succession has no id to arm with,
     so the SessionStart restamp is the arm point, and manifest_session stops
-    naming the abdicating session. Fail-soft like its callers."""
-    if entry.crown_level is None or not entry.crown_scope:
+    naming the stepping_down session. Fail-soft like its callers."""
+    if entry.role_level is None or not entry.role_scope:
         return
     try:
-        from fno.king.state import arm_king_manifest
+        from fno.lead.state import arm_lead_manifest
 
-        arm_king_manifest(entry.crown_scope, session_id, row=entry)
+        arm_lead_manifest(entry.role_scope, session_id, row=entry)
     except (OSError, ValueError) as exc:
         from fno.agents import events
 
-        events.emit("crown_manifest_arm_failed", name=entry.name,
-                    scope=entry.crown_scope, session_id=session_id, error=str(exc))
+        events.emit("role_manifest_arm_failed", name=entry.name,
+                    scope=entry.role_scope, session_id=session_id, error=str(exc))
 
 
 def restamp_harness_session_id(
@@ -2390,11 +2390,11 @@ def restamp_harness_session_id(
     Returns the updated entry, or ``None`` when there was nothing to do: no row
     under that name, a harness mismatch, or an id that already matches.
 
-    A crowned row is never re-pointed in place: this path has no liveness witness
+    A promoted row is never re-pointed in place: this path has no liveness witness
     for the predecessor, so it appends an independently addressable branch with
-    no crown and keeps the predecessor's authority on its original session.
+    no role and keeps the predecessor's authority on its original session.
     An explicit reachability result classifies every row: live predecessors
-    branch, dead predecessors succeed in place, and unknown uncrowned rows retain
+    branch, dead predecessors succeed in place, and unknown unpromoted rows retain
     the historical correction because there is no authority to duplicate.
     """
     if not name or not session_id or not harness:
@@ -2414,14 +2414,14 @@ def restamp_harness_session_id(
                 and stale != expected_predecessor_session_id
             ):
                 return entries
-            crown_present = any(
+            role_present = any(
                 getattr(entry, field) is not None
-                for field in ("crown_level", "crown_scope", "crown_grantor")
+                for field in ("role_level", "role_scope", "role_grantor")
             )
             transition = classify_session_transition(
                 stale, session_id, predecessor_reachable
             )
-            if transition == "branch" or (crown_present and transition == "deferred"):
+            if transition == "branch" or (role_present and transition == "deferred"):
                 existing = next(
                     (
                         candidate
@@ -2502,7 +2502,7 @@ def restamp_harness_session_id(
 
     update_registry(_updater, path=registry_path)
     for entry in restamped:
-        _arm_crown_after_identification(entry, session_id)
+        _arm_role_after_identification(entry, session_id)
     for filled in first_filled:
         _flush_pending_session_row(filled, session_id)
     return restamped[0] if restamped else None
@@ -2687,7 +2687,7 @@ def record_session_observation(
       the one row keeps its stable ``fno_id``.
     - A positively reachable -> BRANCH: A's row is untouched; B is minted as
       a distinct row with ``forked_from_session_id: A``, its own ``fno_id``,
-      and no inherited crown or claim. Two live workers, two rows.
+      and no inherited role or claim. Two live workers, two rows.
     - evidence unknown, absent, or stale (the row's primary moved since the
       evidence was sampled) -> the additive parking, never a guess.
 
@@ -2844,7 +2844,7 @@ def record_session_observation(
     if classified:
         outcome, written = classified[0]
         if outcome == "succession":
-            _arm_crown_after_identification(written, session_id)
+            _arm_role_after_identification(written, session_id)
         return written, outcome
     if not observed:
         # A concurrent observation won the slot between the pre-read and the
@@ -2854,7 +2854,7 @@ def record_session_observation(
         "primary" if observed[0].harness_session_id == session_id else "related"
     )
     if outcome == "primary":
-        _arm_crown_after_identification(observed[0], session_id)
+        _arm_role_after_identification(observed[0], session_id)
         _flush_pending_session_row(observed[0], session_id)
     return observed[0], outcome
 

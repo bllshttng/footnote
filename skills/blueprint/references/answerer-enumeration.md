@@ -82,7 +82,7 @@ Ten measured 2026-09-02. Each is one question with two answerers that disagree:
 
 Nine are many answerers to one question. The tenth is the inverse: one answerer conflating two questions. Both ship the same way, one facet fixed with the next facet arriving as PR two.
 
-One of the ten is verified here rather than taken on report. "How long may this read take?" is real: each external read in the lead board gets a slice of ONE budget (`run_with_timeout` in `crates/fno-agents/src/king_board.rs`), and the stop gate hands its own bound in as that whole-board budget (`BoardOpts.budget_ms`, set from `stopgate_read_timeout()` in `crates/fno-agents/src/loopcheck.rs`). The inner bound is a slice of the outer one, so the two can never disagree about who kills a slow read.
+One of the ten is verified here rather than taken on report. "How long may this read take?" is real: each external read in the lead board gets a slice of ONE budget (`run_with_timeout` in `crates/fno-agents/src/lead_board.rs`), and the stop gate hands its own bound in as that whole-board budget (`BoardOpts.budget_ms`, set from `stopgate_read_timeout()` in `crates/fno-agents/src/loopcheck.rs`). The inner bound is a slice of the outer one, so the two can never disagree about who kills a slow read.
 
 The eleventh, measured the same night: "is this the user?" has six env markers, a legacy marker, a process-tree walk and a tty as answerers. The markers outrank the tty, so a human at a keyboard was refused as agent `operator`. The fix is precedence in `resolve_owned_identity`, and it is its own node. The specimen records the shape.
 
@@ -92,7 +92,7 @@ Two more, measured 2026-09-13 and 2026-09-14, and in both the enumeration that w
 
 Question: which nodes need dispatch? Two answerers, thirty lines apart, with different feeds:
 
-- the undispatched filter in `build_board` (`crates/fno-agents/src/king_board.rs`). It consumes `classify_planned_unclaimed`'s rows, which require `status_ready` AND `plan_finalized`, so every row is planned by construction. Fed by `fno backlog undispatched --json`: 31 rows, all 31 planned (measured 2026-09-02).
+- the undispatched filter in `build_board` (`crates/fno-agents/src/lead_board.rs`). It consumes `classify_planned_unclaimed`'s rows, which require `status_ready` AND `plan_finalized`, so every row is planned by construction. Fed by `fno backlog undispatched --json`: 31 rows, all 31 planned (measured 2026-09-02).
 - the unplanned filter in the same function. Its filter keeps only planless nodes. Fed by `fno backlog ready --json -A`: 785 rows, 104 of them planless p0/p1 (measured 2026-09-02).
 
 A plan that said "the blueprint queue is dead, the feed is all planned" answered the first site's question about the second site. The example teaches step 2 by showing the shape that actually got read wrong, twice. Cite the iterated expression, with its line. Read the feed at the site.

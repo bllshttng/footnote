@@ -910,7 +910,7 @@ def test_ac1_hp_canonical_handle_is_first_eight():
 
 def test_legacy_suffix_handle_is_last_eight_read_only_lookup():
     """The retired last-eight address survives only as a read-only lookup so
-    pre-flip handles (e.g. a king addressed 08e8c104) still drain. It is never
+    pre-flip handles (e.g. a lead addressed 08e8c104) still drain. It is never
     generated for new mail and is NOT the canonical address."""
     assert legacy_suffix_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "4bcf4ae4"
     assert legacy_suffix_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "4bcf4ae4"

@@ -67,7 +67,7 @@ def test_map_covers_current_surface_once():
     # Counted from the merged file, not taken from either side: main carried
     # 529 and a branch added `config routing`, `doctor route`, `route init`
     # and `route inventory`; this branch adds `agents recover` from the
-    # re-entry work, and main independently added `agents king manifest-path`
+    # re-entry work, and main independently added `agents lead manifest-path`
     # and `backlog join` (the held-worktree joiner spawner, x-8d1d).
     # x-665d adds `agents registry-repair`, the hidden recovery verb for a
     # registry a source-ahead process already poisoned: 536 -> 537.
@@ -95,21 +95,21 @@ def test_map_covers_current_surface_once():
     # their own-surface rows: 562 -> 565.
     # x-a3e8 allocates `doctor harness-matrix`, the matrix regenerator:
     # counted from the merged file, 565 -> 566.
-    # x-a238 allocates `agents king history`, the crown-scope reign readback:
+    # x-a238 allocates `agents lead history`, the role-scope term readback:
     # 566 -> 567.
-    # This branch adds `agents king cancel`, the isolated cancellation
-    # control: counted from the merged file, 566 -> 567, and `agents king
-    # shape` (reign) lands on the same count: 567 total from 565.
+    # This branch adds `agents lead cancel`, the isolated cancellation
+    # control: counted from the merged file, 566 -> 567, and `agents lead
+    # shape` (term) lands on the same count: 567 total from 565.
     # This branch adds `backlog contain`, the plan-less containment fold,
     # as one new row (first allocated under a retired alias, renamed in
     # place before merge): 568 -> 569. Main added `agents feed`, the
     # activity feed projection, from the same base; main's sidecar
     # retirement deleted the `backlog rehash` row. The rust-conversion
     # ruling deleted this branch's `agents reseat` Python surface: net zero.
-    # The crown-durability branch allocated the directly invoked
-    # `agents court-orphans` sweep its row. Counted from the merged file,
+    # The role-durability branch allocated the directly invoked
+    # `agents team-orphans` sweep its row. Counted from the merged file,
     # never taken from either side: 570. This branch also adds
-    # `agents king drain`, the scope drain read the reign terminations key on:
+    # `agents lead drain`, the scope drain read the term terminations key on:
     # 570 -> 571. Upstream added `agents newest-assistant-text` (the hidden
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
@@ -131,18 +131,18 @@ def test_map_covers_current_surface_once():
     # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
     # allocates `agents authorized-merge`, the merge/arm decision every merge
     # path asks through the single Python door (hidden verb): 580 -> 581.
-    # x-9e1e allocates `agents king faq add` and `agents king faq list`, the
-    # king FAQ recipe-becomes-verb: 581 -> 583. Counted from the merged file,
+    # x-9e1e allocates `agents lead faq add` and `agents lead faq list`, the
+    # lead FAQ recipe-becomes-verb: 581 -> 583. Counted from the merged file,
     # not taken from either side: this branch independently allocates
-    # `agents distress-verdicts`, the king board's watchdog-verdict lookup
-    # (hidden verb): 583 -> 584. The court scope fold allocates
-    # `agents court-fold`, the native read `fno agents court -n` relays to
+    # `agents distress-verdicts`, the lead board's watchdog-verdict lookup
+    # (hidden verb): 583 -> 584. The team scope fold allocates
+    # `agents team-fold`, the native read `fno agents team -n` relays to
     # (hidden verb): 584 -> 585. Upstream allocates `agents spawn-axes`, the
     # spawn seam's axes round-trip (hidden verb): 585 -> 586, then allocates
     # `agents workspace reap`: 586 -> 587. Upstream also allocates
     # `agents test-run`, the native test-suite process-group owner, and
     # `backlog worked`, the one-read live-worker surface the ready gate and
-    # king board consume (hidden verbs): counted from the merged file, 587 -> 589.
+    # lead board consume (hidden verbs): counted from the merged file, 587 -> 589.
     # Upstream adds `doctor graph export`: 589 -> 590. Counted from the
     # merged file, not taken from either side: this branch independently
     # allocates `do pr merge-result-check` + its `pr` view, the merge-result
@@ -153,8 +153,8 @@ def test_map_covers_current_surface_once():
     # the running-process build-drift census (hidden verb): 594 -> 595.
     # `backlog session open`, the blueprint session claim holder (x-95dd),
     # allocated 594 -> 595 on main in the same window: 595 -> 596. The
-    # reign-readback branch allocates `agents king history` and its
-    # help-injected `agents king-history` twin: counted from the merged
+    # term-readback branch allocates `agents lead history` and its
+    # help-injected `agents lead-history` twin: counted from the merged
     # file, 596 -> 598. x-caf8 allocates `doctor scratch sweep` +
     # `doctor scratch report`, the scratch-shape sweep the daily eval-sweep
     # ignition runs as stage five (its Rust-runtime leaf): 598 -> 600.
@@ -170,7 +170,7 @@ def test_map_covers_current_surface_once():
     # provenance`, the dispatch-source inventory read: 603 -> 604. This
     # branch allocates `backlog version`, the typed API's counter read
     # (hidden verb, 19 corpus callers): counted from the merged file,
-    # 604 -> 605. `agents king ledger` and `agents reign-ledger`, the reign
+    # 604 -> 605. `agents lead ledger` and `agents term-ledger`, the term
     # ledger page and its native renderer: 605 -> 607. This branch allocated
     # `do resume receipt context-prepare` and its `resume` view (607 -> 609),
     # then retired both rows when the prepare transport moved into the native
@@ -184,9 +184,9 @@ def test_map_covers_current_surface_once():
     # one-act defer + retracted-kind stamp the blueprint consolidation gate
     # halts on: 612 -> 613. `agents announce`, the fleet-announcement
     # writer/reader/status surface the binary dispatches directly: counted
-    # from the merged file, 613 -> 614. `agents king checkin`, the one verb
-    # that runs the reign check-in body and journals its row, plus its
-    # direct-dispatch alias `agents king-checkin` beside king-history's:
+    # from the merged file, 613 -> 614. `agents lead checkin`, the one verb
+    # that runs the term check-in body and journals its row, plus its
+    # direct-dispatch alias `agents lead-checkin` beside lead-history's:
     # 614 -> 616. `agents provider-cap`, the relay that reads and answers the
     # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
     # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
@@ -225,10 +225,10 @@ def test_map_covers_current_surface_once():
     # `fleet-incident` argument (law d-fe66560a: no new client action), so
     # it allocates no row: counted from the merged file, 624. (The
     # backlog-update patch door is likewise transport-only and takes no
-    # row.) This branch allocates `agents king verdict`, the reign tenure
-    # verdict read: the direct binary spelling `agents king-verdict` took a
+    # row.) This branch allocates `agents lead verdict`, the term tenure
+    # verdict read: the direct binary spelling `agents lead-verdict` took a
     # row and then gave it back (law d-fe66560a refuses the new client
-    # action, so the verdict rides `king-history --verdict` and the dashed
+    # action, so the verdict rides `lead-history --verdict` and the dashed
     # leaf is gone again): counted from the merged file, 626 -> 627. The
     # target stop hook's build-dir read then allocated `config build-dir`:
     # 627 -> 628. The eval cohort leaves then allocated `doctor evals export`
@@ -239,8 +239,8 @@ def test_map_covers_current_surface_once():
     # nudge-peek leaf's removal then took its row back: 631 -> 630. The
     # decide shim then keeps four distinct compatibility leaves in the
     # baseline, including its hidden-origin retract option: 630 -> 634.
-    # This branch allocates `agents king term`, the crown's-term declare
-    # verb, sharing the `king shape` dispatch point: 634 -> 635. The
+    # This branch allocates `agents lead term`, the role's-term declare
+    # verb, sharing the `lead shape` dispatch point: 634 -> 635. The
     # command-tree cutover then deleted the 29 mux rows: the typed mux tree
     # declares those paths natively and the verb-ratchet reads the generated
     # inventory, so no collapse-map row is consumed: 635 -> 606.
@@ -288,17 +288,18 @@ def test_map_covers_current_surface_once():
     # (592 -> 591), then re-registers the leaf as the native forwarder
     # `fno-py` serves (591 -> 592). The verify port retires `paths verify`
     # the same way (592 -> 591): counted from the merged file, 591.
-    # The five lane-alias verbs (court/king/reign -> org/lead) joined the
+    # The five lane-alias verbs (team/lead/term -> org/lead) joined the
     # registry the same PR that taught the sync lists: 591 -> 596.
     # The duplicate-guard create allocates `pr create` plus its `do pr
     # create` spelling, the thin forwarder beside pr push/rebase/heal
     # (hidden, per the forwarder convention): 596 -> 598.
     # The worked-nodes verb joined the registry the PR that ported the
     # worked overlay to Rust: 598 -> 599 on that branch.
-    # The org alias mount allocates the king app's fourteen leaves under the
+    # The org alias mount allocates the lead app's fourteen leaves under the
     # canonical spelling both fronts accept: 599 -> 613 counted over the
     # merged file.
-    assert len(mapped) == 613, (
+    # The vocabulary migration coalesces two duplicate action rows.
+    assert len(mapped) == 611, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -388,8 +389,8 @@ def test_live_baseline_matches_the_projected_allocation():
     # still doubles it, netting +2 leaves over whatever main independently
     # carries. Bumped to the live count at rebase time, not a round number.
     # +1 for `project init`, the isolated-environment verb (x-20f1).
-    # +1 for `king manifest-path`, the king-loop manifest lookup verb.
-    # +1 for `king done`, the crown expire verb.
+    # +1 for `lead manifest-path`, the lead-loop manifest lookup verb.
+    # +1 for `lead done`, the role expire verb.
     # +1 for `doctor footprint`, landed on main while this branch ran; the
     # merged tree carries both rows, so both counts include it.
     # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
@@ -400,8 +401,8 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `law set`, the direct operator writer baselined in this PR.
     # +1 for `inbox law set`, the mounted spelling present on current main.
     # Bumped to the live count at rebase time, not a round number.
-    # king faq add/list (x-9e1e) added no leaves here: they live under the
-    # collapsed `agents` group (mapped-count only), not the top-level `king`
+    # lead faq add/list (x-9e1e) added no leaves here: they live under the
+    # collapsed `agents` group (mapped-count only), not the top-level `lead`
     # hidden alias.
     # +1 for `workspace reap`, the explicit state-retention operator control.
     # +3 for the inbox user queue leaves (ack/list/status under the renamed

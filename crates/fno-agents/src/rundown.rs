@@ -6,7 +6,7 @@
 //! page assembly, the same split `lead-history` applies to the journal
 //! readback, so the Python-tree ratchet holds. The team-to-nodes join stays
 //! in the fold the Python side already ran (`scope_nodes` rides in the org
-//! JSON); titles, uncrowned epics, and Unassigned leaves are read from the graph
+//! JSON); titles, unpromoted epics, and Unassigned leaves are read from the graph
 //! through the SAME compiler `org-fold` uses, so the page cannot disagree
 //! with the org about who holds a node.
 //!
@@ -186,7 +186,7 @@ fn active_row(n: &Value, titles: &BTreeMap<String, &Value>) -> String {
     )
 }
 
-/// Rows for the uncrowned-epic and orphan-leaf tables, which read graph
+/// Rows for the unpromoted-epic and orphan-leaf tables, which read graph
 /// entries directly rather than fold rows.
 fn entry_row(e: &Value) -> String {
     format!(
@@ -242,7 +242,7 @@ fn team_card(
     let card_cls = if level == Some(1) {
         "team root"
     } else {
-        "crown"
+        "role"
     };
     let status = s_str(team, "status").unwrap_or("-");
     let dot_cls = if status == "live" {
@@ -443,7 +443,7 @@ fn session_scope_map() -> BTreeMap<String, String> {
     if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
         if let Ok(registry) = crate::state::load_registry(&home.registry_json()) {
             for row in &registry.entries {
-                if let (Some(sid), Some(scope)) = (&row.harness_session_id, &row.crown_scope) {
+                if let (Some(sid), Some(scope)) = (&row.harness_session_id, &row.role_scope) {
                     map.insert(sid.clone(), crate::territory::canonical_scope(scope.trim()));
                 }
             }
@@ -602,7 +602,7 @@ fn verdict_card(
 
 /// Epics in no team's territory: absent from every fold, so the page names
 /// them instead of letting their absence read as zero.
-fn uncrowned_section(compiled: &[Option<BTreeSet<String>>], entries: &[Value]) -> String {
+fn unpromoted_section(compiled: &[Option<BTreeSet<String>>], entries: &[Value]) -> String {
     let mut covered: BTreeSet<String> = BTreeSet::new();
     for members in compiled.iter().flatten() {
         covered.extend(members.iter().cloned());
@@ -628,9 +628,9 @@ fn uncrowned_section(compiled: &[Option<BTreeSet<String>>], entries: &[Value]) -
     });
     let rows: String = orphans.iter().map(|e| entry_row(e)).collect();
     format!(
-        "<h2 class=\"sect\">uncrowned epics</h2><article class=\"crown\">\
-         <p class=\"holder\">{} uncrowned, {p1} at p1</p>\
-         <div class=\"tscroll\"><table><caption>Uncrowned epics</caption>\
+        "<h2 class=\"sect\">unpromoted epics</h2><article class=\"role\">\
+         <p class=\"holder\">{} unpromoted, {p1} at p1</p>\
+         <div class=\"tscroll\"><table><caption>Unpromoted epics</caption>\
          <thead><tr><th>node</th><th>work</th><th>state</th><th class=\"num\">priority</th></tr></thead>\
          <tbody>{rows}</tbody></table></div></article>",
         orphans.len()
@@ -666,7 +666,7 @@ fn unassigned_section(entries: &[Value]) -> String {
     });
     let rows: String = leaves.iter().map(|e| entry_row(e)).collect();
     format!(
-        "<h2 class=\"sect\">Unassigned</h2><article class=\"crown\">\
+        "<h2 class=\"sect\">Unassigned</h2><article class=\"role\">\
          <p class=\"holder\">{n} unassigned, {p1} at p1</p>\
          <div class=\"tscroll\"><table><caption>Unassigned</caption>\
          <thead><tr><th>node</th><th>work</th><th>state</th><th class=\"num\">priority</th></tr></thead>\
@@ -1000,14 +1000,14 @@ pub(crate) fn render(
                 out.push_str("</div>");
             }
         }
-        // One compile per team, shared by the uncrowned union: the page
+        // One compile per team, shared by the unpromoted union: the page
         // renders the join twice otherwise.
         let compiled: Vec<Option<BTreeSet<String>>> = teams
             .iter()
             .map(|c| members_of(c, entries, &projects))
             .collect();
         if !entries.is_empty() {
-            out.push_str(&uncrowned_section(&compiled, entries));
+            out.push_str(&unpromoted_section(&compiled, entries));
             out.push_str(&unassigned_section(entries));
         }
     }
@@ -1018,7 +1018,7 @@ pub(crate) fn render(
         parts.push(format!(
             "{} {}",
             as_i64(&summary, "total"),
-            plural(as_i64(&summary, "total"), "crown")
+            plural(as_i64(&summary, "total"), "role")
         ));
         let root = teams
             .iter()
@@ -1095,7 +1095,7 @@ pub fn run_lead_ledger(args: &[String]) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--org-json" | "--court-json" if i + 1 < args.len() => {
+            "--org-json" | "--team-json" if i + 1 < args.len() => {
                 org_json = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
@@ -1252,12 +1252,12 @@ mod tests {
     fn one_section_per_team_names_scope_and_holder() {
         let org = base_org(json!([base_team(), base_team()]));
         let page = page(org, vec![]);
-        assert_eq!(page.matches("<article class=\"crown").count(), 2);
+        assert_eq!(page.matches("<article class=\"role").count(), 2);
         assert!(page.contains("e-1") && page.contains("lead"));
         let rows = vec![
             json!({"name":"t-x-aaaa-glm", "node":"x-aaaa", "harness":"claude", "harness_session_id":"current", "model":"opus", "model_basis":"observed", "status":"writing", "status_basis":"transcript", "context_used_pct":26, "context_used_tokens":258687, "context_window_tokens":1000000, "context_measured_at":"2026-09-12T00:00:00Z", "progress":"awaiting-operator", "progress_basis":"report", "last_message":"RESULT: BLOCKED need a ruling <script>"}),
             json!({"name":"proof-x-bbbb-h3", "harness":"codex", "status":"quiet"}),
-            json!({"name":"lead-hidden", "node":"x-aaaa", "crown":{"scope":"e-1"}, "status":"writing"}),
+            json!({"name":"lead-hidden", "node":"x-aaaa", "role":{"scope":"e-1"}, "status":"writing"}),
         ];
         let workers = Ok(crate::ledger_workers::by_node(&rows));
         let mut team = base_team();
@@ -1359,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn uncrowned_epics_get_their_own_section() {
+    fn unpromoted_epics_get_their_own_section() {
         let entries = vec![
             json!({"id": "e-1", "type": "epic", "title": "leaded epic", "status": "ready", "priority": "p2"}),
             json!({"id": "x-9", "parent": "e-1", "title": "contained", "status": "in_progress"}),
@@ -1367,9 +1367,9 @@ mod tests {
             json!({"id": "e-3", "type": "epic", "title": "urgent stray", "status": "idea", "priority": "p1"}),
         ];
         let whole = page(base_org(json!([base_team()])), entries);
-        let at = whole.find("uncrowned epics").expect("uncrowned section");
+        let at = whole.find("unpromoted epics").expect("unpromoted section");
         let section = &whole[at..];
-        assert!(section.contains("2 uncrowned, 1 at p1"));
+        assert!(section.contains("2 unpromoted, 1 at p1"));
         assert!(section.contains("free one") && section.contains("urgent stray"));
         assert!(!section.contains("leaded epic"));
     }
@@ -1543,7 +1543,7 @@ mod tests {
     fn stale_teams_mark_their_tile_without_flipping_the_verdict() {
         let splits = Ok(crate::team_split::TeamSplits {
             double_ruled: Vec::new(),
-            stale: vec![crate::team_split::StaleCrown {
+            stale: vec![crate::team_split::StaleRole {
                 row: "lead-dead".into(),
                 session: None,
                 scope: "shared".into(),
@@ -1644,8 +1644,8 @@ mod tests {
         let doc = json!({
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "agents": [{
-                "name": "kestrel", "status": "live", "crown_scope": "e-1",
-                "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                "name": "kestrel", "status": "live", "role_scope": "e-1",
+                "role_level": 2, "cwd": "/repo", "harness": "claude",
                 "harness_session_id": "sess-k",
                 "created_at": "2026-09-29T00:00:00Z"
             }]

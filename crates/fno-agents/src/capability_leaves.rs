@@ -208,18 +208,19 @@ fn loop_gate_refusal(
             crate::loop_readiness::pre_launch_refusal(harness, command)
         }
         "extension" if !loop_extension.is_empty() => {
-            let verdict = probe();
-            match verdict {
-                Some(Ok(())) => None,
-
-                _ => Some(format!(
-                    "refused: harness '{harness}' closes its loop through a \
-                     fno-installed extension that is absent or stale on this \
-                     machine. Run 'fno config setup' to install it, then \
-                     dispatch again - a loop whose stop gate is not installed \
-                     would take '{command}' and never stop."
-                )),
-            }
+            let detail = match probe() {
+                Some(Ok(())) => return None,
+                Some(Err(detail)) => detail,
+                None => "no install probe answered".to_string(),
+            };
+            Some(format!(
+                "refused: harness '{harness}' closes its loop through a \
+                 fno-installed extension that is absent or stale on this \
+                 machine ({detail}). Run 'fno config plugin install \
+                 {harness}' to install it, then dispatch again - a loop \
+                 whose stop gate is not installed would take '{command}' \
+                 and never stop."
+            ))
         }
         _ => {
             let why = if participation == "none" {
@@ -374,8 +375,8 @@ mod tests {
             },
         )
         .expect("a missing pi extension must refuse");
-        assert!(refusal.contains("fno config setup"));
-        assert!(refusal.contains("absent or stale"));
+        assert!(refusal.contains("fno config plugin install pi"));
+        assert!(refusal.contains("pi extension /p/footnote.ts is absent or stale"));
     }
 
     #[test]

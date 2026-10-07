@@ -1,6 +1,6 @@
 """Tests for the carveout `scope` field (x-7685, US8/AC15 prerequisite).
 
-The king orphan check (hooks/context-nudge.sh) must match a carved-out
+The lead orphan check (hooks/context-nudge.sh) must match a carved-out
 orphaning by STRUCTURED scope, not by grepping `description` free text (a
 reworded sentence would silently silence it). So the Carveout record carries an
 optional `scope`, written via `fno carveout add --scope`, and the field is the
@@ -60,7 +60,7 @@ def test_cli_scope_round_trips_through_list_jsonl(tmp_path: Path, monkeypatch):
     add = runner.invoke(
         app,
         ["carveout", "add", "--kind", "deferred", "--scope", "zzz-probe",
-         "--need", "review-orphaned: no king to trigger review",
+         "--need", "review-orphaned: no lead to trigger review",
          "workers exit review-orphaned; advisory self-review"],
     )
     assert add.exit_code == 0, add.output + add.stderr

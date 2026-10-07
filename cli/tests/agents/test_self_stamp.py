@@ -112,7 +112,7 @@ def test_resolve_self_identity_rejects_canonical_collision(monkeypatch):
     def fake_detector(session_id, *, self_binding, walk_harness=None):
         captured["self_binding"] = self_binding
         captured["walk_harness"] = walk_harness
-        return "victim-king" if session_id == "victim-session" else None
+        return "victim-lead" if session_id == "victim-session" else None
 
     env = {
         "FNO_HARNESS_NAME": "claude",
@@ -133,7 +133,7 @@ def test_resolve_self_identity_rejects_canonical_collision(monkeypatch):
     assert identity.disposition == "ambiguous"
     assert identity.session_id is None
     assert identity.harness is None
-    assert identity.rejected[0]["owner"] == "victim-king"
+    assert identity.rejected[0]["owner"] == "victim-lead"
 
 
 def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch):
@@ -277,7 +277,7 @@ def test_restarted_session_resolves_through_its_own_row(monkeypatch):
 
 
 def test_ambiguity_message_names_the_owned_row(monkeypatch):
-    """AC5 (x-a409): the king's refusal said "multiple harness markers" for
+    """AC5 (x-a409): the lead's refusal said "multiple harness markers" for
     what was really the session's OWN backfilled row. When a rejection names a
     live owner, the message says that instead."""
     from fno.harness_identity import OwnedHarnessIdentity
@@ -293,12 +293,12 @@ def test_ambiguity_message_names_the_owned_row(monkeypatch):
                 "harness": "codex",
                 "session_id": "01a06d40-5f68-7da0-96cb-f57006ca2d2c",
                 "reason": "owned_by_live_row",
-                "owner": "king-4d9b-delivery",
+                "owner": "lead-4d9b-delivery",
             },
         ),
     )
     message = self_stamp.identity_ambiguity_message(identity)
-    assert "owned by live row king-4d9b-delivery" in message
+    assert "owned by live row lead-4d9b-delivery" in message
     assert "multiple harness markers" not in message
     assert "markers: CODEX_THREAD_ID" in message
 

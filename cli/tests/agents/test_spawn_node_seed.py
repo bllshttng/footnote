@@ -305,7 +305,7 @@ def test_seam_refuses_on_the_verbs_refuse_answer(monkeypatch):
 
 def test_seam_names_the_binary_when_the_verb_is_unavailable(monkeypatch, capsys):
     """AC3-HP: VerbUnavailable exits 2 naming the transport, never a silent
-    fallback to the crown profile."""
+    fallback to the role profile."""
     _stub_row(monkeypatch, _row())
 
     class _Unavailable(Exception):
@@ -356,7 +356,7 @@ def test_seam_projects_the_row_facts_into_the_payload(monkeypatch):
     assert p["effective_verb"] == "/blueprint"
     assert p["stored_verb"] == "/blueprint"
     assert p["family"] == ["/target", "/blueprint"]
-    assert p["crown"] is False
+    assert p["role"] is False
     assert p["resume"] is False
     assert p["argv"][0] == "spawn"
     assert p["seed_index"] == 1
@@ -402,15 +402,15 @@ def test_seam_profile_returns_the_derived_verb(monkeypatch):
     assert args[1] == "--node"
 
 
-def test_seam_crown_and_resume_pass_with_their_flags_set(monkeypatch):
-    """AC4-EDGE: crown/resume spawns answer pass and carry the flag as a
-    payload fact; the profile stays crown."""
+def test_seam_role_and_resume_pass_with_their_flags_set(monkeypatch):
+    """AC4-EDGE: role/resume spawns answer pass and carry the flag as a
+    payload fact; the profile stays role."""
     _stub_row(monkeypatch, _row())
     seen = _stub_verb(monkeypatch, {"action": "pass"})
     from fno.agents.rust_runtime import _node_seed_at_seam
 
-    _node_seed_at_seam(_seed_args("--node", "x-1", "--crown"))
-    assert seen[0]["crown"] is True
+    _node_seed_at_seam(_seed_args("--node", "x-1", "--promote"))
+    assert seen[0]["role"] is True
     _node_seed_at_seam(_seed_args("--node", "x-1", "--resume", "sid-9"))
     assert seen[1]["resume"] is True
 

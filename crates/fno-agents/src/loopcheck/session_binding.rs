@@ -132,7 +132,7 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
         }
         // The asking session IS the owner; the team disposition still gives
         // a teamed owner a path that does not depend on a target manifest.
-        if owner.crown_level.is_some() && owner.node.is_none() {
+        if owner.role_level.is_some() && owner.node.is_none() {
             return Gate::Team;
         }
         return Gate::Owner;
@@ -174,7 +174,7 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
     // A teamed row with no node of its own is a team, not a target owner:
     // the lead path evaluates its own evidence. When the row carries BOTH a
     // team and a node, the node binding is the tighter contract and wins.
-    if row.crown_level.is_some() && row.node.is_none() {
+    if row.role_level.is_some() && row.node.is_none() {
         return Gate::Team;
     }
     Gate::Owner

@@ -67,7 +67,7 @@ fn build_fixture(active_backlog_extra: &str, graph: Value, registry_rows: Value)
 
 fn team_registry() -> Value {
     json!({"schema_version": fno_agents::state::REGISTRY_SCHEMA_VERSION, "agents": [
-        {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+        {"name": "lead-a", "status": "live", "role_scope": "e-1", "role_level": 2,
          "cwd": "/", "harness": "claude", "created_at": "2026-09-07T00:00:00Z", "log_path": ""},
         {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/", "harness": "claude",
          "created_at": "2026-09-07T00:00:00Z", "log_path": "", "pid": std::process::id()}
@@ -185,34 +185,34 @@ fn drain_receipt_two_territories() {
     let fixture = build_fixture("", base_graph(&plan_doc), team_registry());
     assert_case("drain_two_territories", &fixture, || rust_drain(&fixture));
 
-    // Dispatch credit (dispatch_credit): the live crown whose scope covers
+    // Dispatch credit (dispatch_credit): the live role whose scope covers
     // the node answers for it; a kingless node keeps no owner. Pure core,
     // so the asserts stay hermetic beside the golden above.
     let projects = std::collections::HashMap::from([
         ("f".to_string(), "fno".to_string()),
         ("fno".to_string(), "fno".to_string()),
     ]);
-    let crown = |name: &str, scope: &str, session: &str, status: &str| {
+    let role = |name: &str, scope: &str, session: &str, status: &str| {
         serde_json::json!({
-            "name": name, "crown_scope": scope, "harness_session_id": session,
+            "name": name, "role_scope": scope, "harness_session_id": session,
             "harness": "claude", "status": status,
         })
     };
     let node_row =
         |id: &str, parent: &str| serde_json::json!({"id": id, "parent": parent, "project": "fno"});
-    let rows = vec![crown("lead", "x-epic", "aaaa-bbbb", "live")];
-    let covered = fno_agents::dispatch_credit::covering_crown_in(
+    let rows = vec![role("lead", "x-epic", "aaaa-bbbb", "live")];
+    let covered = fno_agents::dispatch_credit::covering_role_in(
         "x-child",
         Some(&node_row("x-child", "x-epic")),
         &rows,
         &projects,
     );
-    assert_eq!(covered["owner"]["kind"], "crown");
+    assert_eq!(covered["owner"]["kind"], "role");
     assert_eq!(covered["owner"]["scope"], "x-epic");
     assert_eq!(covered["lead"]["session"], "aaaa-bbbb");
 
-    let terminal_rows = vec![crown("gone", "x-epic", "aaaa-bbbb", "exited")];
-    let kingless = fno_agents::dispatch_credit::covering_crown_in(
+    let terminal_rows = vec![role("gone", "x-epic", "aaaa-bbbb", "exited")];
+    let kingless = fno_agents::dispatch_credit::covering_role_in(
         "x-child",
         Some(&node_row("x-child", "x-epic")),
         &terminal_rows,
@@ -220,8 +220,8 @@ fn drain_receipt_two_territories() {
     );
     assert!(kingless["owner"].is_null());
 
-    let elsewhere = vec![crown("far", "x-other", "aaaa-bbbb", "live")];
-    let kingless = fno_agents::dispatch_credit::covering_crown_in(
+    let elsewhere = vec![role("far", "x-other", "aaaa-bbbb", "live")];
+    let kingless = fno_agents::dispatch_credit::covering_role_in(
         "x-child",
         Some(&node_row("x-child", "x-epic")),
         &elsewhere,
@@ -230,10 +230,10 @@ fn drain_receipt_two_territories() {
     assert!(kingless["owner"].is_null());
 
     let specific = vec![
-        crown("portfolio", "x-a,x-epic", "pppp", "live"),
-        crown("epic-king", "x-epic", "eeee", "live"),
+        role("portfolio", "x-a,x-epic", "pppp", "live"),
+        role("epic-lead", "x-epic", "eeee", "live"),
     ];
-    let out = fno_agents::dispatch_credit::covering_crown_in(
+    let out = fno_agents::dispatch_credit::covering_role_in(
         "x-child",
         Some(&node_row("x-child", "x-epic")),
         &specific,
@@ -241,10 +241,9 @@ fn drain_receipt_two_territories() {
     );
     assert_eq!(out["lead"]["session"], "eeee");
 
-    let aliased = vec![crown("lead", "f", "aaaa", "live")];
+    let aliased = vec![role("lead", "f", "aaaa", "live")];
     let row = serde_json::json!({"id": "x-s", "parent": "fno", "project": "fno"});
-    let out =
-        fno_agents::dispatch_credit::covering_crown_in("x-s", Some(&row), &aliased, &projects);
+    let out = fno_agents::dispatch_credit::covering_role_in("x-s", Some(&row), &aliased, &projects);
     assert_eq!(out["lead"]["session"], "aaaa");
 
     let notice = fno_agents::dispatch_credit::launch_mail_text(
