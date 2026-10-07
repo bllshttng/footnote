@@ -2867,18 +2867,6 @@ class JoinBlock(BaseModel):
         return v if isinstance(v, bool) else False
 
 
-class MergeBlock(BaseModel):
-    """Merge-gate settings (nested under 'config.merge').
-
-    Rust owns the read (``agents_config::visual_paint_paths``); the model
-    declares the key so the Python loader does not warn on a working one.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    visual_paint_paths: list[str] = Field(default_factory=list)
-
-
 class AutoMergeBlock(BaseModel):
     """Auto-merge settings (nested under 'config.auto_merge').
 
@@ -3957,7 +3945,6 @@ class ConfigBlock(BaseModel):
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
-    merge: MergeBlock = Field(default_factory=MergeBlock)
     auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     groom: GroomBlock = Field(default_factory=GroomBlock)

@@ -490,10 +490,6 @@ conflict_resolution = "opus"
 # Post-failure remediation policy for auto-merge.
 remediation = "attempt"
 
-[merge]
-# Path globs for render surfaces. A PR that touches one holds at merge until the user has looked (answered question page or recorded decision). Empty = the visual-approval gate is off. Read in Rust.
-visual_paint_paths = []
-
 [auto_heal]
 # Arm the CI healer: each tick spawns one detached pr-heal --all --apply drive loop over every project root, off the tick's own budget. Default false. Measured 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. Arm with: fno config set auto_heal.enabled true.
 enabled = false
