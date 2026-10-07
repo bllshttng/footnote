@@ -429,6 +429,11 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
             let dead = entry.pid.is_some_and(|pid| crate::daemon::pid_is_gone(pid))
                 || daemon_dead
                 || thread_unloaded;
+            let read_receipt = episode
+                .pending
+                .as_ref()
+                .filter(|_| tail.read)
+                .map(|(marker, _, stage)| (marker.clone(), *stage));
             let decision = action(
                 &mut episode,
                 &tail,
@@ -436,11 +441,6 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
                 own && claim_state == crate::claims::ClaimState::Live,
                 dead,
             );
-            let read_receipt = episode
-                .pending
-                .as_ref()
-                .filter(|_| tail.read)
-                .map(|(marker, _, stage)| (marker.clone(), *stage));
             if decision != Action::Wait {
                 acted += 1;
             }

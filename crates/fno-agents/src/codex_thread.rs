@@ -877,8 +877,8 @@ pub fn parse_turn_completed_value(value: &Value) -> Option<TurnResult> {
         .to_string();
     let error = turn
         .get("error")
-        .or_else(|| params.get("error"))
         .filter(|error| !error.is_null())
+        .or_else(|| params.get("error").filter(|error| !error.is_null()))
         .cloned();
     let status = turn
         .get("status")
@@ -3474,6 +3474,20 @@ mod tests {
         .unwrap();
         assert_eq!(result.turn_id, "turn-1");
         assert_eq!(result.text, "recalled TOKEN");
+
+        let failed = parse_turn_completed_value(&serde_json::json!({
+            "method": "turn/completed",
+            "params": {
+                "turn": {"id": "turn-2", "status": "completed", "error": null},
+                "error": {"message": "workspace routing discovery timed out"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.error,
+            Some(serde_json::json!({"message": "workspace routing discovery timed out"}))
+        );
     }
 
     /// AC18: completed turns are parsed ONCE at push and claimed from a map.
