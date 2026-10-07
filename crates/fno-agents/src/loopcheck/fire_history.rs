@@ -251,7 +251,7 @@ pub(crate) fn emit_to_both(
     }
 }
 
-/// `emit_to_both` that reports a failed append: on codex the
+/// `emit_to_both` that reports a failed append: on every harness the
 /// `loop_check_watch_idle` event IS the daemon's watch registration, so a
 /// write that did not land must refuse the idle (AC4-ERR) instead of parking
 /// a session nobody will wake. The project write is best-effort as always;
@@ -262,7 +262,9 @@ pub(crate) fn emit_to_both_checked(
     event_type: &str,
     data: serde_json::Value,
 ) -> Result<(), String> {
-    append_loop_event(project_events, event_type, data.clone());
+    if project_events != global_events {
+        append_loop_event(project_events, event_type, data.clone());
+    }
     append_event_checked(global_events, event_type, data)
 }
 

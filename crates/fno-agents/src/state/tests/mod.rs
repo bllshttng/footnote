@@ -2554,6 +2554,9 @@ fn pty_state_collapses_inconsistent_legacy_shape() {
 #[path = "x4c87_row_counts.rs"]
 mod row_count_tests;
 
+#[path = "x43ce_provenance_repair.rs"]
+mod provenance_repair_tests;
+
 #[test]
 fn update_registry_mints_a_row_its_own_fno_id() {
     // The row-birth fill: a new row leaves the write with a v4 fno_id that

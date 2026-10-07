@@ -822,23 +822,7 @@ def _codex_create_path(
 
 
 # Moved to fno.agents.spawn_lineage (file budget); re-exported here.
-from fno.agents.spawn_lineage import _capture_parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
-
-
-def _reign_typed_message(
-    message: str,
-    crown_level: Optional[int],
-    crown_scope: Optional[str],
-    revive: bool,
-) -> tuple[str, bool]:
-    """A crowned spawn's payload opens with the plugin-qualified reign verb.
-
-    A revival keeps its own payload (the session already knows what it is);
-    the receipt names the not-typed case with the remedy.
-    """
-    if crown_level is not None and crown_scope and not revive:
-        return f"/fno:lead {crown_scope}\n{message}", True
-    return message, False
+from fno.agents.spawn_lineage import _capture_parent_edge, _parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
 
 
 def _capture_spawn_trigger() -> Optional[str]:
@@ -1573,7 +1557,10 @@ def _claude_create_path(
 
     # A crowned spawn TYPES the reign verb as the payload's first line, so the
     # king's first turn is the skill itself, not a hand-improvised ritual.
-    message, reign_typed = _reign_typed_message(message, crown_level, crown_scope, revive)
+    from fno.agents.team_thread import lead_typed_message
+
+    message, reign_typed = (lead_typed_message(message, crown_level, crown_scope, revive)
+                            if crown_level is not None else (message, False))
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -1694,7 +1681,7 @@ def _claude_create_path(
 
     # Best-effort ambient capture; never raises. The
     # spawn_trigger was already popped before bg_create above.
-    spawned_by_session, spawned_by_harness, spawned_by_cwd = parent_edge or _capture_parent_edge()
+    spawned_by_session, spawned_by_harness, spawned_by_cwd = _parent_edge(parent_edge, lineage_row)
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
@@ -2449,14 +2436,9 @@ def dispatch_spawn(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
-    # Crown eligibility, checked HERE rather than only at the CLI seam: this
-    # function is the in-process entry point too, and only the claude bg branch
-    # below reaches `_claude_create_path`, the one route that stamps the fields.
-    # Every other route builds its AgentEntry elsewhere and would drop the crown
-    # while reporting a successful spawn - a silently uncrowned king is the
-    # failure this refusal exists to make impossible. Fail closed before anything
-    # is created, so a refusal launches nothing and leaves the node dispatchable.
-    crown_problem = crown_validation_error(crown_level, crown_scope)
+    # In-process callers bypass the CLI parser. Validate requested stamps
+    # before any carrier launches; an ordinary worker has no stamp to validate.
+    crown_problem = crown_validation_error(crown_level, crown_scope) if crown_level is not None or crown_scope is not None else None
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
     # Bound for every path, not just the crowned one: the create call below
@@ -2468,13 +2450,7 @@ def dispatch_spawn(
         if once or headless:
             raise DispatchAskError(
                 "--promote needs a session that outlives the grant; a one-shot "
-                "exits after one answer. Use the pane or bg substrate.",
-                exit_code=2,
-            )
-        if harness != "claude":
-            raise DispatchAskError(
-                f"--promote on the bg substrate is claude-only; got harness "
-                f"{harness!r}. Use --substrate pane, which maps every harness.",
+                "exits after one answer. Use --substrate pane or --substrate thread.",
                 exit_code=2,
             )
 
@@ -2515,6 +2491,15 @@ def dispatch_spawn(
             exit_code=2,
         )
 
+    from fno.agents.team_thread import plan_thread_promotion, settle_thread_promotion
+
+    promotion = None
+    if crown_level is not None and harness != "claude":
+        promotion = plan_thread_promotion(
+            message, crown_level, crown_scope, succession, harness, parent_edge,
+            revive=bool(resume_session_id))
+        message = promotion["message"]
+
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
     # The spawn front door already demoted every flag the thread lane cannot
@@ -2542,7 +2527,10 @@ def dispatch_spawn(
             passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
+            role_level=crown_level, role_scope=crown_scope,
         )
+        if promotion is not None:
+            settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=session_id)
         _emit_ev(
             "agent_ask_done",
             stage="dispatch",
@@ -2576,6 +2564,7 @@ def dispatch_spawn(
             "deny_tools": deny_tools, "permission_mode": permission_mode,
             "resume_session_id": resume_session_id,
             "passthrough": list(passthrough) if passthrough else None,
+            "promotion": promotion,
         },
         lock_timeout=lock_timeout,
     )
@@ -2632,7 +2621,7 @@ def dispatch_spawn(
                     exit_code=2,
                 )
 
-            if crown_level is not None:
+            if crown_level is not None and harness == "claude":
                 # Refuses BEFORE launch - nothing exists as a result of an
                 # authority error. caller_row is read once and its name
                 # threaded to the write as crown_caller_name, so the receipt
@@ -2936,6 +2925,8 @@ def dispatch_spawn(
                         name=name, message=message, cwd=cwd,
                         from_name=from_name, model=model, node=node, effort=effort,
                     )
+                    if promotion is not None:
+                        settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=short_id)
                     _emit_ev(
                         "agent_ask_done",
                         stage="dispatch",

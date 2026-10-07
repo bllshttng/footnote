@@ -257,6 +257,7 @@ pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &
         "method": "thread/resume",
         "params": {
             "threadId": thread_id,
+            "excludeTurns": true,
             "cwd": cwd,
             "sandbox": "workspace-write",
             "approvalPolicy": approval_policy,
@@ -273,6 +274,7 @@ pub(crate) fn thread_resume_control_request_json(id: u64, thread_id: &str, cwd: 
         "method": "thread/resume",
         "params": {
             "threadId": thread_id,
+            "excludeTurns": true,
             "cwd": cwd,
         }
     })
@@ -2620,6 +2622,7 @@ fn thread_resume_request_with_options(
 ) -> String {
     let mut params = json!({
         "threadId": thread_id,
+        "excludeTurns": true,
         "cwd": cwd,
         "sandbox": posture.sandbox.as_scalar(),
         "approvalPolicy": posture.approval.as_str(),

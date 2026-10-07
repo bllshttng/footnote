@@ -295,6 +295,8 @@ confirm = "auto"
 auto_register_sessions = false
 # Launch routed claude panes through happy for remote monitoring; default false and pane-only.
 happy_routed_panes = false
+# Minutes after spawn before the daemon checks worker progress (default 10, range 1 to 60). With no progress it mails the spawning lead and checks once more after the same interval.
+first_check_minutes = 10
 # Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning.
 retire_grace_s = 900
 # Seconds between runs of the daemon's retirement sweep (default 300, a third of the retire grace). The Rust resolver clamps this under a third of agents.retire_grace_s: the interval must be a fraction of the grace, never a multiple, so an eligible row never waits past the grace window it retires inside. Unset, unparseable, or below the 5s daemon tick resolves to the default. The `retire` row in `fno agents status` carries the value the loop enforces.

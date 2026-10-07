@@ -2047,87 +2047,17 @@ pub(crate) fn decode_registry_value(
             reg
         }
         Err(typed_err) => {
-            // A newer writer can widen a field's VALUES, not only add keys, and
-            // `AgentStatus` has no catch-all variant -- so one row carrying a
-            // status this binary has never heard of failed the WHOLE file at
-            // serde and took the daemon's registry reads down with it. Tolerating
-            // added keys alone left that door open.
-            //
-            // Retry per row, keeping the ones this binary can represent, but ONLY
-            // when the store says it is newer than us. At or below our own schema
-            // an unparseable row is a writer bug and stays fatal -- and since
-            // it is fatal BY NAME when rows were on disk: the error
-            // carries the raw and decoded counts so a lost roster can never read
-            // as a valid empty one downstream.
-            let on_disk = probe
-                .get("schema_version")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if on_disk <= REGISTRY_SCHEMA_VERSION as u64 {
-                if raw_rows > 0 {
-                    // Keep the count-bearing refusal (AC3) but carry the typed
-                    // error too: a decode failure that lost no rows (a bad
-                    // top-level type) still names its field instead of
-                    // masquerading as a pure count divergence (PR 924 review).
-                    let mut msg = registry_row_divergence_msg(path, raw_rows, 0);
-                    msg.push_str(&format!("; typed error: {typed_err}"));
-                    return Err(StateError::InvariantViolation(msg));
-                }
-                return Err(typed_err.into());
-            }
-            let rows = probe
-                .get("agents")
-                .or_else(|| probe.get("entries"))
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let mut entries = Vec::with_capacity(rows.len());
-            let mut skipped: Vec<usize> = Vec::new();
-            for (i, row) in rows.into_iter().enumerate() {
-                match serde_json::from_value::<RegistryEntry>(row) {
-                    Ok(entry) => entries.push(entry),
-                    Err(_) => skipped.push(i),
-                }
-            }
-            if !skipped.is_empty() {
-                eprintln!(
-                    "fno agents: registry: skipped row(s) {skipped:?} this fno cannot \
-                     represent at schema_version={on_disk}. Those agents are invisible \
-                     to this process until it is upgraded."
-                );
-            }
-            // Forward-schema partial read: divergence is allowed HERE (every
-            // dropped row is announced above), so this arm is exempt from the
-            // count guard the Ok arm runs; the daemon's startup assertion is
-            // what refuses to serve a partial roster as complete.
-            let min_writer_version = probe
-                .get("min_writer_version")
-                .and_then(serde_json::Value::as_u64)
-                .map(|version| u32::try_from(version).unwrap_or(u32::MAX));
-            let writer_rev = probe
-                .get("writer_rev")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-            let mut extra = probe.as_object().cloned().unwrap_or_default();
-            for key in [
-                "schema_version",
-                "min_writer_version",
-                "writer_rev",
-                "agents",
-                "entries",
-            ] {
-                extra.remove(key);
-            }
-            Registry {
-                // Saturate rather than `as u32`. A truncating cast can wrap an
-                // absurd version DOWN to one at or below ours, and the write
-                // guard keys on that number -- so the one store we must never
-                // overwrite would be the one that looks safe to overwrite.
-                schema_version: u32::try_from(on_disk).unwrap_or(u32::MAX),
-                entries,
-                min_writer_version,
-                writer_rev,
-                extra,
+            // One row carrying an undecodable OPTIONAL enrichment block must
+            // not zero the decode: a crown succession reown once forked an
+            // owner-only spawn_provenance (no `origin`) onto a
+            // provenance-less adopted row, and that row failed the WHOLE
+            // typed file (raw_rows=28, decoded_rows=0). Heal rows whose only
+            // failure is that block; anything the heal cannot fully absorb
+            // still takes the paths below unchanged.
+            if let Some(reg) = repaired_spawn_provenance_registry(&probe, raw_rows) {
+                reg
+            } else {
+                decode_registry_after_typed_failure(path, &probe, typed_err, raw_rows)?
             }
         }
     };
@@ -2197,6 +2127,170 @@ pub(crate) fn decode_registry_value(
         }
     }
     Ok((reg, raw_rows))
+}
+
+/// Heal rows whose ONLY typed-decode failure is the optional
+/// `spawn_provenance` block: strip the block, keep the row, name the drop.
+/// A crown succession reown once forked an owner-only block (no `origin`)
+/// onto a provenance-less adopted row, and that one optional block failed
+/// the WHOLE typed file (raw_rows=28, decoded_rows=0), every Rust registry
+/// read with it. Returns None when no row is repairable or the healed file
+/// still fails its count guard, so every other damage keeps the
+/// same-schema/forward-schema paths unchanged.
+fn repaired_spawn_provenance_registry(
+    probe: &serde_json::Value,
+    raw_rows: usize,
+) -> Option<Registry> {
+    let (repaired_probe, notes) = strip_undecodable_spawn_provenance(probe)?;
+    let candidate = serde_json::from_value::<Registry>(repaired_probe).ok()?;
+    if candidate.entries.len() != raw_rows {
+        return None;
+    }
+    for note in &notes {
+        eprintln!("fno agents: registry {note}");
+    }
+    Some(candidate)
+}
+
+/// The strip half of [`repaired_spawn_provenance_registry`]: a row that
+/// fails its typed decode but decodes cleanly once `spawn_provenance` is
+/// removed comes back repaired (block gone) plus a note naming the row.
+fn strip_undecodable_spawn_provenance(
+    probe: &serde_json::Value,
+) -> Option<(serde_json::Value, Vec<String>)> {
+    let rows = probe
+        .get("agents")
+        .or_else(|| probe.get("entries"))?
+        .as_array()?
+        .clone();
+    let mut repaired_rows = Vec::with_capacity(rows.len());
+    let mut notes = Vec::new();
+    for row in rows {
+        if serde_json::from_value::<RegistryEntry>(row.clone()).is_ok() {
+            repaired_rows.push(row);
+            continue;
+        }
+        let mut stripped = row.clone();
+        if let Some(object) = stripped.as_object_mut() {
+            object.remove("spawn_provenance");
+        }
+        if serde_json::from_value::<RegistryEntry>(stripped.clone()).is_ok() {
+            notes.push(format!(
+                "row {:?}: undecodable spawn_provenance dropped, row kept",
+                row.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?")
+            ));
+            repaired_rows.push(stripped);
+        } else {
+            repaired_rows.push(row);
+        }
+    }
+    if notes.is_empty() {
+        return None;
+    }
+    let mut repaired_probe = probe.clone();
+    let key = if probe.get("agents").is_some() {
+        "agents"
+    } else {
+        "entries"
+    };
+    if let Some(object) = repaired_probe.as_object_mut() {
+        object.insert(key.to_owned(), serde_json::Value::Array(repaired_rows));
+    }
+    Some((repaired_probe, notes))
+}
+
+/// The pre-heal typed-failure handling, unchanged: same-schema damage is
+/// fatal by name; a newer store degrades per row with an announcement.
+fn decode_registry_after_typed_failure(
+    path: &Path,
+    probe: &serde_json::Value,
+    typed_err: serde_json::Error,
+    raw_rows: usize,
+) -> Result<Registry, StateError> {
+    // A newer writer can widen a field's VALUES, not only add keys, and
+    // `AgentStatus` has no catch-all variant -- so one row carrying a
+    // status this binary has never heard of failed the WHOLE file at
+    // serde and took the daemon's registry reads down with it. Tolerating
+    // added keys alone left that door open.
+    //
+    // Retry per row, keeping the ones this binary can represent, but ONLY
+    // when the store says it is newer than us. At or below our own schema
+    // an unparseable row is a writer bug and stays fatal -- and since
+    // it is fatal BY NAME when rows were on disk: the error
+    // carries the raw and decoded counts so a lost roster can never read
+    // as a valid empty one downstream.
+    let on_disk = probe
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if on_disk <= REGISTRY_SCHEMA_VERSION as u64 {
+        if raw_rows > 0 {
+            // Keep the count-bearing refusal (AC3) but carry the typed
+            // error too: a decode failure that lost no rows (a bad
+            // top-level type) still names its field instead of
+            // masquerading as a pure count divergence (PR 924 review).
+            let mut msg = registry_row_divergence_msg(path, raw_rows, 0);
+            msg.push_str(&format!("; typed error: {typed_err}"));
+            return Err(StateError::InvariantViolation(msg));
+        }
+        return Err(typed_err.into());
+    }
+    let rows = probe
+        .get("agents")
+        .or_else(|| probe.get("entries"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut skipped: Vec<usize> = Vec::new();
+    for (i, row) in rows.into_iter().enumerate() {
+        match serde_json::from_value::<RegistryEntry>(row) {
+            Ok(entry) => entries.push(entry),
+            Err(_) => skipped.push(i),
+        }
+    }
+    if !skipped.is_empty() {
+        eprintln!(
+            "fno agents: registry: skipped row(s) {skipped:?} this fno cannot \
+             represent at schema_version={on_disk}. Those agents are invisible \
+             to this process until it is upgraded."
+        );
+    }
+    // Forward-schema partial read: divergence is allowed HERE (every
+    // dropped row is announced above), so this arm is exempt from the
+    // count guard the Ok arm runs; the daemon's startup assertion is
+    // what refuses to serve a partial roster as complete.
+    let min_writer_version = probe
+        .get("min_writer_version")
+        .and_then(serde_json::Value::as_u64)
+        .map(|version| u32::try_from(version).unwrap_or(u32::MAX));
+    let writer_rev = probe
+        .get("writer_rev")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let mut extra = probe.as_object().cloned().unwrap_or_default();
+    for key in [
+        "schema_version",
+        "min_writer_version",
+        "writer_rev",
+        "agents",
+        "entries",
+    ] {
+        extra.remove(key);
+    }
+    Ok(Registry {
+        // Saturate rather than `as u32`. A truncating cast can wrap an
+        // absurd version DOWN to one at or below ours, and the write
+        // guard keys on that number -- so the one store we must never
+        // overwrite would be the one that looks safe to overwrite.
+        schema_version: u32::try_from(on_disk).unwrap_or(u32::MAX),
+        entries,
+        min_writer_version,
+        writer_rev,
+        extra,
+    })
 }
 
 /// The repo root when `exe` is a binary built inside a source checkout, else

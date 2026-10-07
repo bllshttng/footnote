@@ -256,6 +256,10 @@ def keeper_thread_spawn(
         **lane_kwargs,
     )
     session_id = receipt["session_id"]
+    if options.get("promotion") is not None:
+        from fno.agents.team_thread import settle_thread_promotion
+
+        settle_thread_promotion(options["promotion"], name=name, cwd=cwd, session_id=session_id)
     if message.strip():
         # The seed rides the keeper paste: a Resize forces a repaint, the idle
         # marker off the stream proves the composer is up, and the echo of the

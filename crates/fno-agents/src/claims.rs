@@ -1567,7 +1567,21 @@ pub(crate) fn acquire_with_session_witness(
     opts: AcquireOpts,
     witness: Option<SessionWitness<'_>>,
 ) -> AcquireOutcome {
-    crate::claim_store::acquire(key, holder, &opts, witness).unwrap_or_else(AcquireOutcome::Error)
+    let outcome = crate::claim_store::acquire(key, holder, &opts, witness)
+        .unwrap_or_else(AcquireOutcome::Error);
+    if !matches!(outcome, AcquireOutcome::HeldByOther { .. }) {
+        return outcome;
+    }
+    let existing = match crate::claim_store::read(key, opts.root.as_deref()) {
+        Ok(Some(existing)) => existing,
+        Ok(None) => return outcome,
+        Err(error) => return AcquireOutcome::Error(error),
+    };
+    match crate::first_check::take_parent_claim(key, holder, &opts, &existing) {
+        Ok(Some(claim)) => AcquireOutcome::Acquired(claim),
+        Ok(None) => outcome,
+        Err(error) => AcquireOutcome::Error(error),
+    }
 }
 
 /// Release a claim we hold (mirrors `core.release_claim`, non-strict):

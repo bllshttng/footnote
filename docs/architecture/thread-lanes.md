@@ -29,6 +29,8 @@ The `attach` lane has two destinations. The lane alone cannot pick between them.
 | codex | `pre_exec = ["codex","app-server","daemon","start"]`, then `codex resume {session_id} --remote unix://` | a shared harness-owned server, started outside the spawn |
 | claude | no `pre_exec`, `claude attach {short_id}` | the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host` |
 
+Codex resumes request `excludeTurns: true`. The reply carries thread metadata and resume state, while conversation history stays on the server. Returning full history can exceed the WebSocket client's 16 MiB frame cap. This applies to startup recovery, control actions, and delivery probes. If `turn/start` explicitly rejects an unloaded thread, delivery resumes that exact thread and retries once. Resume refusals preserve the server reason. A missing turn acknowledgment never permits replay.
+
 A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the harness starts its own supervisor on demand, so fno ensures nothing. The spawning client exits once the session is backgrounded. The daemon does not host that session. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
 
 That refusing arm is the reason the split is written down. A route that tested the lane alone sends a claude thread spawn into codex's app-server, because both read `attach`. No claude thread spawn reaches the daemon today. The arm guards the next attach-lane harness rather than fixing a live misroute.
@@ -38,6 +40,10 @@ That refusing arm is the reason the split is written down. A route that tested t
 One invariant governs the daemon's role, because the epic prose once said otherwise: the daemon does not HOST keepers, it DISCOVERS and REBINDS them. The keeper is a separate process whose parent is launchd, never the daemon; `handle_spawn` in `crates/fno-agents/src/daemon.rs` still states that the daemon hosts no agent PTYs, and the daemon-start sweep only walks existing keeper sockets and re-binds survivors to their registry rows.
 
 A `keeper` harness with no built lane still gets an honest refusal naming what is missing, never a verdict that the harness cannot thread.
+
+## Promotion
+
+`fno agents spawn --promote <scope> --substrate thread` applies the same authority and occupancy checks as pane promotion. Every built persistent carrier can carry the role. One-shot and headless requests refuse promotion because they exit after one answer. Rust owns the seed, validation, registry effects, journal facts, and receipts. Python uses the existing write boundaries. Codex carries promotion fields into the app-server request so the row is promoted at mint. Keeper carriers settle promotion before submitting the lead seed. When a carrier's session identity is not a full UUID, the manifest writer reports an unarmed loop. The receipt distinguishes that state from a recorded role.
 
 ## What a thread survives
 
