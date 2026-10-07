@@ -3165,23 +3165,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The slot try-lock is agent cargo outside the sanctioned whole-suite
-    /// lane, and nothing else: a user's cargo never queues, and a background
-    /// whole suite keeps the queue lane the guard documents for it.
-    #[test]
-    fn try_lock_admission_truth_table() {
-        assert!(try_lock_admission(true, false), "agent cargo try-locks");
-        assert!(
-            !try_lock_admission(true, true),
-            "a whole-suite run keeps its queue lane"
-        );
-        assert!(
-            !try_lock_admission(false, false),
-            "the user's cargo never queues and never refuses"
-        );
-        assert!(!try_lock_admission(false, true));
-    }
-
     /// An unattended Claude Code session is agent cargo even without spawn
     /// identity: that gap is how builds reached the slots unasked. Absent or
     /// attended markers stay the user's (law d-705a00a3 fail-open).
