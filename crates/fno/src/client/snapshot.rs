@@ -275,6 +275,9 @@ fn png(svg: &str, frame: &Frame, out: &Path) -> Result<(), String> {
         .arg("--headless=new")
         .arg("--disable-gpu")
         .arg("--hide-scrollbars")
+        // Its own profile: without this, headless Chrome races the user's
+        // running Chrome for the default user-data-dir and exits 2.
+        .arg(format!("--user-data-dir={}", dir.join("profile").display()))
         .arg("--force-device-scale-factor=2")
         .arg(format!("--window-size={w},{h}"))
         .arg(format!("--screenshot={}", out_abs.display()))
