@@ -58,15 +58,17 @@ fn tail(path: &Path, marker: Option<&str>) -> Option<Tail> {
             .map(|t| t.timestamp());
         if event == "task_started" {
             out.failed = false;
-            out.started_at = out.started_at.or(timestamp);
+            out.started_at = timestamp.or(out.started_at);
         }
         if event == "task_complete" {
             out.failed = payload.get("error").is_some_and(|e| !e.is_null());
         }
         if matches!(kind, "response_item" | "assistant" | "user" | "tool")
-            || matches!(event, "item_completed")
+            || matches!(event, "item_completed" | "task_started" | "task_complete")
         {
-            out.failed = false;
+            if event != "task_complete" {
+                out.failed = false;
+            }
             if let Some(at) = timestamp {
                 out.activity = out.activity.max(at);
             }
@@ -641,6 +643,13 @@ mod tests {
             evidence.read,
             "receipt bytes in the recipient transcript confirm the nudge"
         );
+
+        std::fs::write(
+            &path,
+            "{\"timestamp\":\"2026-01-01T00:15:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(tail(&path, None).unwrap().activity, 1767226500);
     }
 
     #[test]
