@@ -938,7 +938,7 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     }
 
     // (4b) the user's look: a PR touching the configured paint surface holds
-    // until an answered question page names it or a crown decision row
+    // until an answered question page names it or a role decision row
     // attests the user's chat approval of this head. Held, not refused: the
     // user answering the page clears it on the next read.
     if let Some(blocker) =

@@ -1,6 +1,6 @@
-//! The king-guard wire layer: payload translation and shared refusal text.
+//! The lead-guard wire layer: payload translation and shared refusal text.
 //!
-//! [`super::king_guard`] owns the decision core (registry, manifest, roots,
+//! [`super::lead_guard`] owns the decision core (registry, manifest, roots,
 //! mode). This module owns everything that crosses the payload boundary:
 //! the file-edit target derivation (claude file_path payloads and codex
 //! apply_patch bodies), the codex/agy payload translation, and the
@@ -13,8 +13,8 @@ use std::path::Path;
 /// the only copy of the rule it enforces.
 pub(super) fn deny_text(target: &str, repo_root: &Path) -> String {
     format!(
-        "king-delegation-guard: write target '{target}' is inside the repo ({repo}), and a crowned session does not write SOURCE.\n\
-         A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.king.write_roots.\n",
+        "lead-delegation-guard: write target '{target}' is inside the repo ({repo}), and a promoted session does not write SOURCE.\n\
+         A lead operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.lead.write_roots.\n",
         repo = repo_root.display(),
     )
 }

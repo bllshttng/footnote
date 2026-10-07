@@ -1613,7 +1613,7 @@ mod tests {
             "FNO_TEST_FOOTPRINT_PAYLOAD",
             r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
         );
-        let teamed = r#"{"name":"lead-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
+        let teamed = r#"{"name":"lead-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","role_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
         let worker = |name: &str, status: &str| {
             format!(
                 r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}}"#
@@ -1793,7 +1793,7 @@ mod tests {
         std::fs::write(
             &registry,
             format!(
-                r#"{{"schema_version":{},"entries":[{{"name":"lead","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"crown_level":1,"crown_scope":"x-epic","harness_session_id":"session-lead"}},{{"name":"worker","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"session-lead"}}]}}"#,
+                r#"{{"schema_version":{},"entries":[{{"name":"lead","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"role_level":1,"role_scope":"x-epic","harness_session_id":"session-lead"}},{{"name":"worker","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"session-lead"}}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
             ),
         )

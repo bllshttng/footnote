@@ -51,14 +51,14 @@ fn team_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
     let mut view = wide_view(vec![
         {
             let mut row = agent_row("folio", 4, Some(AgentBadge::Working), false);
-            row.crown_level = Some(1);
-            row.crown_scope = Some("fno".into());
-            row.crown_title = Some("Folio".into());
+            row.role_level = Some(1);
+            row.role_scope = Some("fno".into());
+            row.role_title = Some("Folio".into());
             row
         },
         {
             let mut row = agent_row("worker-a", 5, Some(AgentBadge::Working), false);
-            row.crown_title = Some("Folio".into());
+            row.role_title = Some("Folio".into());
             row
         },
     ]);

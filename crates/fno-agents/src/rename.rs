@@ -262,7 +262,7 @@ pub(crate) fn respond(
             "renamed": true,
             "old_name": old,
             "new_name": new,
-            "crown": team.map(|(from, to)| serde_json::json!({"from": from, "to": to})),
+            "role": team.map(|(from, to)| serde_json::json!({"from": from, "to": to})),
         }),
     )
 }
@@ -279,7 +279,7 @@ pub fn receipt(name: &str, result: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("(unknown)");
     let mut receipt = format!("renamed {old} -> {new}");
-    if let Some(team) = result.get("crown") {
+    if let Some(team) = result.get("role") {
         if let (Some(from), Some(to)) = (
             team.get("from").and_then(Value::as_str),
             team.get("to").and_then(Value::as_str),
@@ -502,13 +502,13 @@ mod tests {
             let mut teamed = row("kestrel", session);
             teamed.harness = Some("codex".into());
             teamed.status = crate::AgentStatus::Ready;
-            teamed.crown_scope = Some("x-test".into());
-            teamed.crown_level = Some(2);
+            teamed.role_scope = Some("x-test".into());
+            teamed.role_level = Some(2);
             let mut other = row("raven", other_session);
             other.harness = Some("codex".into());
             other.status = crate::AgentStatus::Ready;
-            other.crown_scope = Some("y-test".into());
-            other.crown_level = Some(2);
+            other.role_scope = Some("y-test".into());
+            other.role_level = Some(2);
             registry.entries = vec![teamed, other];
         })
         .unwrap();
@@ -519,14 +519,14 @@ mod tests {
                 "teams": {
                     "x-test": {
                         "name": "Kestrel",
-                        "regnal": 2,
+                        "generation": 2,
                         "holder_session": session,
                         "nodes": [],
                         "updated_at": "2026-09-29T00:00:00Z"
                     },
                     "y-test": {
                         "name": "Bob",
-                        "regnal": 1,
+                        "generation": 1,
                         "holder_session": other_session,
                         "nodes": [],
                         "updated_at": "2026-09-29T00:00:00Z"
@@ -569,7 +569,7 @@ mod tests {
                 "teams": {
                     "x-test": {
                         "name": "Kestrel",
-                        "regnal": 2,
+                        "generation": 2,
                         "holder_session": session,
                         "nodes": [],
                         "updated_at": "2026-09-29T00:00:00Z"
@@ -593,7 +593,7 @@ mod tests {
         };
         assert_eq!(
             receipt("kestrel", &result).as_deref(),
-            Some("renamed kestrel -> bob; team Kestrel II -> Bob")
+            Some("renamed kestrel -> bob; team Kestrel -> Bob")
         );
 
         let registry = crate::state::load_registry(&home.registry_json()).unwrap();
@@ -606,7 +606,7 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.team_names_json()).unwrap()).unwrap();
         assert_eq!(record["teams"]["x-test"]["name"], "bob");
-        assert_eq!(record["teams"]["x-test"]["regnal"], 1);
+        assert_eq!(record["teams"]["x-test"]["generation"], 1);
         assert_eq!(record["teams"]["x-test"]["holder_session"], session);
         assert!(crate::team_names::ensure_named_team(
             &home.team_names_json(),

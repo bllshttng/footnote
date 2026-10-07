@@ -12,7 +12,7 @@ Pick by authority:
 | Dispatch the whole ready board | `/fno:target bg --all-ready` - every ready, non-deferred node becomes a background worker |
 | Ship dependents after a merge | `fno backlog advance` - opt-in, merge-triggered; dispatches the next unblocked node |
 | Always-on drain of an active mission | the active-backlog daemon ([dispatcher doc](../architecture/active-backlog-dispatcher.md)) |
-| A titled session that keeps driving a scope for days | `/fno:reign` |
+| A titled session that keeps driving a scope for days | `/fno:lead` |
 
 Single-feature work still needs no backlog at all: `/fno:target "feature"` runs end to end.
 

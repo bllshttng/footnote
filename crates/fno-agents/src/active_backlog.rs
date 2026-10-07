@@ -1720,7 +1720,7 @@ fn spawn_provenance_env(cfg: &DrainConfig, arm: &str) -> Vec<(String, String)> {
         })
     } else {
         serde_json::json!({
-            "kind": "crown",
+            "kind": "role",
             "project": cfg.project,
             "scope": cfg.scope,
         })

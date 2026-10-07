@@ -2384,7 +2384,7 @@ fn a_paint_pr_holds_until_an_answered_page_names_it() {
 }
 
 #[test]
-fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
+fn a_role_chat_approval_clears_the_paint_hold_only_at_its_head() {
     let tmp = std::env::temp_dir().join(format!("xc39f-gate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join(".fno")).unwrap();
@@ -2432,7 +2432,7 @@ fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
         row(
             "Approved: PR 7 at <head> as built",
             "superuser in chat: approved",
-            "crown",
+            "role",
             "unscoped",
         )
         .replace("<head>", &head)
@@ -2449,14 +2449,14 @@ fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
         row(
             "Approved: PR 7 at <head> as built",
             "lead judges it good",
-            "crown",
+            "role",
             "unscoped",
         )
         .replace("<head>", &head)
         .into_bytes(),
     );
     assert!(crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).is_some());
-    // The row's authority is not crown: held.
+    // The row's authority is not role: held.
     fake.decisions_stdout = Some(
         row(
             "Approved: PR 7 at <head> as built",
@@ -2473,7 +2473,7 @@ fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
         row(
             "Approved: PR 7 at <head> as built",
             "user in chat: approved",
-            "crown",
+            "role",
             "retracted",
         )
         .replace("<head>", &head)
@@ -2485,7 +2485,7 @@ fn a_crown_chat_approval_clears_the_paint_hold_only_at_its_head() {
     fake.decisions_stdout = None;
     let held = crate::merge_gates::visual_approval_blocker(&fake, &tmp, 7, &head).expect("held");
     assert!(
-        held.detail.contains("crown-recorded decision"),
+        held.detail.contains("role-recorded decision"),
         "{}",
         held.detail
     );

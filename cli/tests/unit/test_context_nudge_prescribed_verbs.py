@@ -7,11 +7,11 @@ resolve against the checked-in verb surface (`scripts/ci/verb-baseline.txt`).
 A hook string is the highest-cost instance of the prescribed-verb class: a dead
 verb or a wrong-layer transport here is acted on blind.
 
-Backstory: the hook once prescribed `fno agents crown --succeed` (a deleted
+Backstory: the hook once prescribed `fno agents role --succeed` (a deleted
 succession shape) and `fno-agents mail-inject` (the daemon transport, not the
 agent front door). Both were caught by a human noticing a worker echo them back,
-not by any gate. The live succession form is `fno agents spawn --crown <scope>`;
-the restored `fno agents crown` verb is human-attended promotion and must never
+not by any gate. The live succession form is `fno agents spawn --promote <scope>`;
+the restored `fno agents role` verb is human-attended promotion and must never
 be prescribed to a running agent. The review front door is
 `fno agents mail send '<verb>' --to-self --raw`.
 
@@ -112,7 +112,7 @@ def test_hook_output_commands_resolve() -> None:
     emitted = "\n".join(lines)
     assert "fno agents mail send" in emitted, "expected the /compact front door in output"
     assert "agents" in prescribed, "collapsed agents dispatcher was not resolved"
-    assert "agents spawn" in prescribed, "expected the spawn --crown path in output"
+    assert "agents spawn" in prescribed, "expected the spawn --promote path in output"
 
     bad = [v for v in prescribed if v not in leaves]
     assert not bad, f"hook output prescribes non-resolving fno verbs: {bad}"
@@ -121,8 +121,8 @@ def test_hook_output_commands_resolve() -> None:
 def test_hook_output_prescribes_no_dead_verbs_or_transport() -> None:
     emitted = "\n".join(_output_lines(HOOK.read_text(encoding="utf-8")))
     # Human-attended promotion is live, but a hook injected into an agent must
-    # prescribe spawn-time succession rather than tell the agent to self-crown.
-    assert "agents crown " not in emitted, "human-only `fno agents crown` prescribed to an agent"
+    # prescribe spawn-time succession rather than tell the agent to self-role.
+    assert "agents role " not in emitted, "human-only `fno agents role` prescribed to an agent"
     assert "--succeed" not in emitted, "dead `--succeed` flag in output"
     # mail-inject is the daemon transport, not the agent front door.
     assert not _FNO_AGENTS.search(emitted), (

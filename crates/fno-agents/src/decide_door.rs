@@ -20,7 +20,7 @@ use crate::law_match::{
 // same exit contract (0 recorded, 1 recorded-but-index-failed or a failed
 // write, 2 a bad --authority or graduation, 3 refused). The law door above
 // is the chat_attested/operator slice of this door; the decide door adds the
-// agent, crown, and beastmode lanes with their origin floor, relayed_by
+// agent, role, and beastmode lanes with their origin floor, relayed_by
 // stamp, coord closure key, and waiver guard.
 // ---------------------------------------------------------------------------
 
@@ -38,7 +38,7 @@ fn max_authority_by_origin(origin: &str) -> &'static str {
 
 /// The authority lanes the decide CLI accepts (`AUTHORITY_SOURCES`);
 /// `chat_attested` is the law door's lane and never a decide flag value.
-const AUTHORITY_SOURCES: &[&str] = &["operator", "crown", "agent", "beastmode"];
+const AUTHORITY_SOURCES: &[&str] = &["operator", "role", "agent", "beastmode"];
 
 /// The caller identity a decide run resolves under: `Ambient` reads the
 /// process truth (the ancestry prover); `Forced` injects a handle (`Some`)
@@ -128,7 +128,7 @@ pub(crate) struct DecideDoor {
     origin: Option<String>,
 }
 
-const DECIDE_USAGE: &str = "usage: fno inbox decide <subject> <decision> [--question-id q] [--rationale s] [--option s]... [--supersedes d-x] [--answers-ask s] [--class c] [--overturns s-or-d] [--decided-by name] [--authority operator|crown|agent|beastmode] [--graduation k] [--graduation-ref r] [--read cmd]... [--origin o]";
+const DECIDE_USAGE: &str = "usage: fno inbox decide <subject> <decision> [--question-id q] [--rationale s] [--option s]... [--supersedes d-x] [--answers-ask s] [--class c] [--overturns s-or-d] [--decided-by name] [--authority operator|role|agent|beastmode] [--graduation k] [--graduation-ref r] [--read cmd]... [--origin o]";
 
 pub(crate) fn parse_decide_door(args: &[String]) -> Result<DecideDoor, String> {
     let mut door = DecideDoor {
@@ -228,7 +228,7 @@ pub(crate) fn decision_lane(row: &Value) -> &'static str {
         .and_then(Value::as_str)
         .unwrap_or("");
     match authority {
-        "agent" | "crown" => "coord",
+        "agent" | "role" => "coord",
         "beastmode" => "grant",
         "operator" | "chat_attested" => {
             let ts = row.get("ts").and_then(Value::as_str).unwrap_or("");
@@ -578,8 +578,8 @@ pub(crate) fn decide_door_write(mut door: DecideDoor, id: DecideIdentity) -> i32
     if let Some(a) = &door.authority {
         if !AUTHORITY_SOURCES.contains(&a.as_str()) {
             eprintln!(
-                "decide: --authority '{a}' is not one of {}. Nothing was recorded. Use 'crown' \
-for a king ruling inside its own scope; omit the flag to resolve it from this session.",
+                "decide: --authority '{a}' is not one of {}. Nothing was recorded. Use 'role' \
+for a lead ruling inside its own scope; omit the flag to resolve it from this session.",
                 AUTHORITY_SOURCES.join(", ")
             );
             return 2;
@@ -717,12 +717,12 @@ decision index. Run `fno backlog decide-reindex` before retrying."
             return decide_authority_refusal(&provenance.decided_by);
         }
     }
-    // A coord lane row (agent or crown) carries the closure key the subject
+    // A coord lane row (agent or role) carries the closure key the subject
     // proves; an unproven key stays None and reads `unscoped`.
     let mut expiry_ref: Option<Value> = None;
     if matches!(
         provenance.authority_source.as_deref(),
-        Some("agent") | Some("crown")
+        Some("agent") | Some("role")
     ) {
         let row = json!({"subject": subject, "expiry_ref": Value::Null});
         let entries = crate::backlog::decisions_cli::read_graph_entries().unwrap_or_default();
@@ -1196,7 +1196,7 @@ mod tests {
         crate::paths::pin_test_claims_root(env.0.path());
         assert_eq!(
             decide_door_write(
-                decide_argv(&["x-n1", "do it", "--authority", "king"]),
+                decide_argv(&["x-n1", "do it", "--authority", "lead"]),
                 DecideIdentity::Forced(None),
             ),
             2

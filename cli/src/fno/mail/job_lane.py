@@ -93,7 +93,7 @@ def job_lane_send(
             to_session=to_session,
         )
 
-    # Only the live envelope names a crown: a job address outlives its holder,
+    # Only the live envelope names a role: a job address outlives its holder,
     # so a queued body can be drained by a successor.
     wrapped = _envelope(session_id)
 

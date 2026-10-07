@@ -3,10 +3,10 @@
 Mints the inbox root (unit 2 of the command reorg). approvals,
 notify, and outstanding fold in whole - each app is registered here exactly
 as it was registered at the top level, so `fno inbox approvals ls` etc. reach
-the same commands `fno approvals ls` did. The king board LEAF joins them too
-(ruling d-8c62113b: a leaf places by its own meaning); the king root itself
+the same commands `fno approvals ls` did. The lead board LEAF joins them too
+(ruling d-8c62113b: a leaf places by its own meaning); the lead root itself
 stays put here and folds into agents in a later unit, so `board_cmd` is
-registered under both `king` and `inbox` rather than moved.
+registered under both `lead` and `inbox` rather than moved.
 
  (d-add90c60): the human-authority verbs join the human-facing group.
 `decisions` and the whole `law` app are the Rust front's nested verbs (no
@@ -20,7 +20,7 @@ import typer
 
 from fno.approvals.cli import approvals_app
 from fno.inbox.operator_turns import operator_app
-from fno.king.cli import board_cmd
+from fno.lead.cli import board_cmd
 from fno.notify.cli import notify_app
 from fno.outstanding.day import day_app
 from fno.outstanding.cli import outstanding_app
@@ -28,7 +28,7 @@ from fno.outstanding.cli import outstanding_app
 inbox_app = typer.Typer(
     name="inbox",
     help="What is waiting on a human: approvals, notifications, outstanding "
-    "carve-outs and questions, the king board, decisions, law, and the "
+    "carve-outs and questions, the lead board, decisions, law, and the "
     "user conversation queue.",
     no_args_is_help=True,
 )

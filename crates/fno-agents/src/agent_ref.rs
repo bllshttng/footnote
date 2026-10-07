@@ -113,10 +113,10 @@ mod tests {
         // never answers, and a predecessor session id still finds the row
         // that succeeded it.
         let rows = vec![
-            entry("king", "sess-1", serde_json::json!({"fno_id": "f-1"})),
+            entry("lead", "sess-1", serde_json::json!({"fno_id": "f-1"})),
             entry("f-1", "sess-2", serde_json::json!({})),
             entry(
-                "heir",
+                "successor",
                 "sess-3",
                 serde_json::json!({"predecessor_session_ids": ["sess-0"]}),
             ),
@@ -162,13 +162,13 @@ mod tests {
         );
         // An untagged address resolves across the tiers and refuses a
         // cross-tier second match.
-        let one = vec![entry("king", "sess-1", serde_json::json!({}))];
+        let one = vec![entry("lead", "sess-1", serde_json::json!({}))];
         assert!(matches!(
             resolve_address(&one, "sess-1", |_| true),
             Join::One(_)
         ));
         assert!(matches!(
-            resolve_address(&one, "king", |_| true),
+            resolve_address(&one, "lead", |_| true),
             Join::One(_)
         ));
         let twin = vec![

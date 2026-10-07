@@ -58,7 +58,7 @@ from fno.agents.reachability import (
 
 
 def test_dead_session_below_the_stalled_threshold_is_unreachable() -> None:
-    """The king's 2026-08-07 specimen: dead 43 minutes, reported live.
+    """The lead's 2026-08-07 specimen: dead 43 minutes, reported live.
 
     43 minutes is well under STALLED_AFTER_S, so the transcript classifies
     ``working`` and every transcript-keyed surface renders ``live``. Only an
@@ -76,7 +76,7 @@ def test_dead_session_below_the_stalled_threshold_is_unreachable() -> None:
 
 
 def test_busy_session_with_no_falsifier_stays_reachable() -> None:
-    """The king's counter-example, failing in the OPPOSITE direction.
+    """The lead's counter-example, failing in the OPPOSITE direction.
 
     ``fno agents mail send`` reported an idle session for a worker whose transcript was
     32 seconds old. mail-inject's ``not-live`` is ``resolve_control_sock()``
@@ -511,7 +511,7 @@ def test_unreadable_pane_liveness_never_condemns(monkeypatch) -> None:
 def test_ac9_fr_the_x_e747_import_shape_survives_the_progress_axis() -> None:
     """``_ACTIVE_STATES`` and ``WIRE_STATUS`` are untouched by the new axis.
 
-    The x-e747 king-loop plan imports ``_ACTIVE_STATES`` rather than copying
+    The x-e747 lead-loop plan imports ``_ACTIVE_STATES`` rather than copying
     it, so this pins the shape by assertion rather than by memory.
     """
     import fno.agents.reachability as reach

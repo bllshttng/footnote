@@ -29,6 +29,10 @@ _UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
 #: key the loader would lift must not report as unknown: warning on a working
 #: key is cried wolf.
 _HONORED_LEGACY_KEYS = frozenset({"recovery.retire_grace_s"})
+#: Keys only the Rust leg reads (agents_config.rs `visual_paint_paths`). The
+#: Python model does not carry them, and they work, so they never report as
+#: unknown.
+_RUST_READ_KEYS = frozenset({"merge.visual_paint_paths"})
 #: Top-level blocks retired with the md attention arm (attention-items.md
 #: "Config keys"): a leftover row is dead config, named as retired.
 _RETIRED_BLOCKS = frozenset({"attention", "reach_me"})
@@ -96,7 +100,7 @@ def warn_unknown_keys(
     # Only the outermost call returns: a recursive call hands its keys up, so
     # filtering at every level would repeat work the level above redoes.
     if not prefix:
-        return [k for k in unknown if k not in _HONORED_LEGACY_KEYS]
+        return [k for k in unknown if k not in _HONORED_LEGACY_KEYS | _RUST_READ_KEYS]
     return unknown
 
 

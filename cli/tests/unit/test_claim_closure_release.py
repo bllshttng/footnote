@@ -490,7 +490,7 @@ class TestNodeSettlement:
 
 
 # The done-node exclusion moved with build_board into the Rust collector
-# (x-25b8): king_board.rs stalled_holder_excludes_done_nodes /
+# (x-25b8): lead_board.rs stalled_holder_excludes_done_nodes /
 # stalled_holder_still_names_a_live_open_node cover them.
 
 

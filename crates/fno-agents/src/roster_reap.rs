@@ -12,7 +12,7 @@
 //! failed outright keeps everything. No fno registry row that owns its
 //! session may name the row, by session id, short id, or name: an owned
 //! row is the registry sweep's business, and this sweep keeps it with that
-//! reason (an adopted, uncrowned row owns nothing: see the scope rule
+//! reason (an adopted, unpromoted row owns nothing: see the scope rule
 //! below). The shared
 //! provenance verdict must resolve a provenance and read the node done,
 //! with the PR confirm passing - the same function the registry sweep runs,
@@ -328,7 +328,7 @@ pub(crate) fn run_with_scope_workers(
     // entry with no origin.
     let owned: BTreeSet<String> = registry
         .iter()
-        .filter(|e| !(e.origin.as_deref() == Some("adopted") && e.crown_level.is_none()))
+        .filter(|e| !(e.origin.as_deref() == Some("adopted") && e.role_level.is_none()))
         .flat_map(|e| {
             e.aliases
                 .iter()
@@ -1097,7 +1097,7 @@ mod tests {
         let mut teamed = RegistryEntry::default();
         teamed.name = "w-teamed".into();
         teamed.origin = Some("adopted".into());
-        teamed.crown_level = Some(1);
+        teamed.role_level = Some(1);
         teamed.harness_session_id = Some("sid-1".into());
         let mut unstamped = RegistryEntry::default();
         unstamped.name = "w-unstamped".into();
@@ -1250,12 +1250,12 @@ mod tests {
 
     // An owned row is the registry sweep's business.
 
-    // AC1-HP: an adopted, uncrowned registry row does NOT shield its listed
+    // AC1-HP: an adopted, unpromoted registry row does NOT shield its listed
     // session. The session still needs its own gates - marker, quiet - but
     // the adopted keep is no longer one of them.
 
     // AC3-ERR: spawn, operator, teamed, and unstamped entries all still
-    // shield their listed session; only the adopted-uncrowned carve-out
+    // shield their listed session; only the adopted-unpromoted carve-out
     // stops shielding.
 
     // AC6-HP: the age seam is called ONCE with every candidate, and a

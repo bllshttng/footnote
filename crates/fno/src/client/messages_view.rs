@@ -38,22 +38,22 @@ fn bool_of(v: &Value, key: &str) -> bool {
     v.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// The channel row's display word: the retired `kings` scope reads as
-/// `leads` (item 5: no king anymore), everything else as itself, never
+/// The channel row's display word: the retired `leads` scope reads as
+/// `leads` (item 5: no lead anymore), everything else as itself, never
 /// with a `#`.
 fn channel_label(scope: &str) -> String {
-    if scope == "kings" {
+    if scope == "leads" {
         "leads".to_string()
     } else {
         scope.to_string()
     }
 }
 
-/// The display label for a sender or system arm: the retired `king-settle`
+/// The display label for a sender or system arm: the retired `lead-settle`
 /// stamp reads `lead-settle` (item 5). A display rename only - the mail
-/// identity, and every stored row, still say `fno/king-settle`.
+/// identity, and every stored row, still say `fno/lead-settle`.
 fn display_label(name: &str) -> String {
-    name.replace("king-settle", "lead-settle")
+    name.replace("lead-settle", "lead-settle")
 }
 
 pub(crate) type MessagesTx =

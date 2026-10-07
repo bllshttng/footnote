@@ -4595,7 +4595,7 @@ mod tests {
         std::fs::create_dir(&mutex).unwrap();
         age_dir(&mutex, STALE_MUTEX_STEAL.as_secs() + 60);
 
-        let out = acquire("session:x", "pty:heir", opts_in(&td));
+        let out = acquire("session:x", "pty:successor", opts_in(&td));
 
         assert!(matches!(out, AcquireOutcome::Acquired(_)), "{out:?}");
         assert!(!mutex.exists(), "corpse survived the steal");

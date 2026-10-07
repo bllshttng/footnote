@@ -316,7 +316,7 @@ pub fn run_lead_escalation_text(args: &[String]) -> i32 {
 }
 
 /// The escalation channel's per-lead scope read: resolve the escalating
-/// session's registry row and return its `crown_scope`. Session ids compare
+/// session's registry row and return its `role_scope`. Session ids compare
 /// under the crate's one identity contract (`claims::same_session_id`), and
 /// a blank scope reads as None, keeping a malformed row on the legacy
 /// shared channel.
@@ -326,7 +326,7 @@ fn escalation_scope(entries: &[crate::state::RegistryEntry], session_id: &str) -
             .as_deref()
             .is_some_and(|sid| crate::claims::same_session_id(sid, session_id))
     })?;
-    row.crown_scope
+    row.role_scope
         .clone()
         .filter(|scope| !scope.trim().is_empty())
 }
@@ -685,7 +685,7 @@ mod tests {
         crate::state::RegistryEntry {
             name: "lead".to_owned(),
             harness_session_id: Some(sid.to_owned()),
-            crown_scope: scope.map(str::to_owned),
+            role_scope: scope.map(str::to_owned),
             ..Default::default()
         }
     }

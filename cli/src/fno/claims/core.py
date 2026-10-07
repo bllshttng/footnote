@@ -860,7 +860,7 @@ def compare_and_rebind(
         # A handover with no PINNED harness resolves one from the ambient
         # markers, exactly as `_make_claim` does on the ordinary acquire path.
         # Preserving the spawner's tag instead left a claude worker under a
-        # codex king reading as codex for the life of the claim, and that tag
+        # codex lead reading as codex for the life of the claim, and that tag
         # flows on into the do provenance row. The init hook omits --harness
         # whenever its owned-identity probe fails, so this is not a rare path.
         effective_new_harness = resolved_harness if handover_allowed else None

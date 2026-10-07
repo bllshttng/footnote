@@ -1055,7 +1055,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
 
     // Scope.
     let mut scope_ids: Option<HashSet<String>> = None;
-    let mut crown_scope: Option<String> = None;
+    let mut role_scope: Option<String> = None;
     if let Some(state_path) = &opts.state_path {
         let manifest = parse_manifest(state_path);
         let scope = manifest.get("scope").cloned().unwrap_or_default();
@@ -1079,7 +1079,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 "sources": Value::Object(sources),
             });
         }
-        crown_scope = Some(scope.clone());
+        role_scope = Some(scope.clone());
         let projects = project_map(&cwd);
         let Some(entries) = entries.as_deref() else {
             return json!({
@@ -1362,7 +1362,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         warnings,
         autonomous_merge: autonomous_merge_enabled(&cwd),
         scope_ids,
-        crown_scope,
+        role_scope,
     };
     let mut payload = build_board(&inputs);
     if let Some(obj) = payload.as_object_mut() {
@@ -1678,7 +1678,7 @@ mod tests {
             warnings: Vec::new(),
             autonomous_merge: false,
             scope_ids: None,
-            crown_scope: None,
+            role_scope: None,
         }
     }
 
@@ -2269,7 +2269,7 @@ mod tests {
                 .map(str::to_string)
                 .collect(),
         );
-        inputs.crown_scope = Some("x-epic".to_string());
+        inputs.role_scope = Some("x-epic".to_string());
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
         let unheld = queues
@@ -2763,7 +2763,7 @@ mod tests {
             {"id": "x-out", "priority": "p1", "pr_number": 1494},
         ]));
         inputs.scope_ids = Some(["x-in"].into_iter().map(str::to_string).collect());
-        inputs.crown_scope = Some("x-team".to_string());
+        inputs.role_scope = Some("x-team".to_string());
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
         let mergeable = queues.iter().find(|q| q["name"] == "mergeable_pr").unwrap();
@@ -2889,7 +2889,7 @@ mod tests {
             "age_minutes": 60,
         }]));
         inputs.scope_ids = Some(["x-in-scope"].into_iter().map(str::to_string).collect());
-        inputs.crown_scope = Some("x-team".to_string());
+        inputs.role_scope = Some("x-team".to_string());
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
         let blocked = queues

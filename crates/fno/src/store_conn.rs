@@ -20,7 +20,7 @@ pub fn open_write(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| named(parent, error))?;
     }
-    refuse_non_database(path)?;
+    refuse_truncated_database(path)?;
     let connection = Connection::open(path).map_err(|error| named(path, error))?;
     connection
         .busy_timeout(BUSY_WAIT)
@@ -34,43 +34,29 @@ pub fn open_write(path: &Path) -> Result<Connection, String> {
 
 /// A read-only handle. Never creates the file.
 pub fn open_read(path: &Path) -> Result<Connection, String> {
-    // A writer that died leaves a hot -wal, and a READ_ONLY open cannot run
-    // the recovery that reading it needs. Retry read-write, which recovers
-    // the log, before reporting the read-only error.
-    let connection = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(connection) => connection,
-        Err(read_only_error) => Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| named(path, read_only_error))?,
-    };
+    refuse_truncated_database(path)?;
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| named(path, error))?;
     connection
         .busy_timeout(BUSY_WAIT)
+        .map_err(|error| named(path, error))?;
+    connection
+        .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
         .map_err(|error| named(path, error))?;
     Ok(connection)
 }
 
-fn refuse_non_database(path: &Path) -> Result<(), String> {
-    let size = match path.metadata() {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(named(path, error)),
-    };
-    if size == 0 {
-        return Ok(());
+fn refuse_truncated_database(path: &Path) -> Result<(), String> {
+    // SQLite's header is 100 bytes. Metadata avoids a raw descriptor whose
+    // close could release this process's SQLite locks.
+    match path.metadata() {
+        Ok(meta) if meta.len() > 0 && meta.len() < 100 => {
+            Err(format!("{}: file is not a database", path.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(named(path, error)),
     }
-    let mut header = [0; 16];
-    let mut file = std::fs::File::open(path).map_err(|error| named(path, error))?;
-    use std::io::Read;
-    file.read_exact(&mut header)
-        .map_err(|error| named(path, error))?;
-    if &header != b"SQLite format 3\0" {
-        return Err(format!("{}: file is not a database", path.display()));
-    }
-    Ok(())
 }
 
 fn ensure_wal(connection: &Connection, path: &Path) -> Result<(), String> {

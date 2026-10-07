@@ -122,7 +122,7 @@ if [[ -n "$trailer_line" ]]; then
 fi
 
 # The approved Retarget line, mirroring the Rust grammar in
-# king_board/pr_closure.rs (retarget/retargeted_from): keyword case-insensitive
+# lead_board/pr_closure.rs (retarget/retargeted_from): keyword case-insensitive
 # with optional colon, then exactly three tokens - two differing node ids and
 # an approval (msg-... or d-...). Ids stay case-sensitive, so no lowercasing
 # here. The LAST well-formed line wins; prose never erases it.

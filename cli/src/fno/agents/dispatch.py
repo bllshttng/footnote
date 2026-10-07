@@ -83,12 +83,12 @@ from fno.agents.registry import (
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.agents.crown import (
+from fno.agents.role import (
     calling_agent_row,
-    crown_validation_error,
-    journal_spawn_crown,
-    plan_spawn_crown,
-    settle_spawn_crown,
+    role_validation_error,
+    journal_spawn_role,
+    plan_spawn_role,
+    settle_spawn_role,
 )
 from fno.harness_identity import (
     canonical_handle,
@@ -825,22 +825,6 @@ def _codex_create_path(
 from fno.agents.spawn_lineage import _capture_parent_edge, _parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
 
 
-def _reign_typed_message(
-    message: str,
-    crown_level: Optional[int],
-    crown_scope: Optional[str],
-    revive: bool,
-) -> tuple[str, bool]:
-    """A crowned spawn's payload opens with the plugin-qualified reign verb.
-
-    A revival keeps its own payload (the session already knows what it is);
-    the receipt names the not-typed case with the remedy.
-    """
-    if crown_level is not None and crown_scope and not revive:
-        return f"/fno:lead {crown_scope}\n{message}", True
-    return message, False
-
-
 def _capture_spawn_trigger() -> Optional[str]:
     """The CAUSE of this spawn, distinct from :func:`_capture_parent_edge`.
 
@@ -1414,10 +1398,10 @@ def _claude_create_path(
     route_provider_id: Optional[str] = None,
     model_name: Optional[str] = None,
     account_record_id: Optional[str] = None,
-    crown_level: Optional[int] = None,
-    crown_scope: Optional[str] = None,
-    crown_plan: Optional[dict] = None,
-    crown_caller_name: Optional[str] = None,
+    role_level: Optional[int] = None,
+    role_scope: Optional[str] = None,
+    role_plan: Optional[dict] = None,
+    role_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
@@ -1571,9 +1555,12 @@ def _claude_create_path(
     # _capture_spawn_trigger's own docstring for what that mislabels).
     spawn_trigger = _capture_spawn_trigger()
 
-    # A crowned spawn TYPES the reign verb as the payload's first line, so the
-    # king's first turn is the skill itself, not a hand-improvised ritual.
-    message, reign_typed = _reign_typed_message(message, crown_level, crown_scope, revive)
+    # A promoted spawn TYPES the term verb as the payload's first line, so the
+    # lead's first turn is the skill itself, not a hand-improvised ritual.
+    from fno.agents.team_thread import lead_typed_message
+
+    message, term_typed = (lead_typed_message(message, role_level, role_scope, revive)
+                            if role_level is not None else (message, False))
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -1697,11 +1684,11 @@ def _claude_create_path(
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _parent_edge(parent_edge, lineage_row)
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
-    # Crown stamp (US9), same contract as the pane path: the grantor is the
+    # Role stamp (US9), same contract as the pane path: the grantor is the
     # spawning session captured just above, or "human" for a direct human spawn
     # with no session env. Never a caller-supplied value - a row that could name
     # its own grantor proves nothing.
-    crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
+    role_grantor_val = (spawned_by_session or "human") if role_level is not None else None
 
     # Registry write. Create the file the row records (AC4): a
     # log_path pointing at nothing is a claim, not evidence, and the
@@ -1774,75 +1761,75 @@ def _claude_create_path(
         # the SPAWNING session's node.
         node=node,
         account_record_id=account_record_id,
-        crown_level=crown_level,
-        crown_scope=crown_scope,
-        crown_grantor=crown_grantor_val,
+        role_level=role_level,
+        role_scope=role_scope,
+        role_grantor=role_grantor_val,
     )
 
-    crown_declined = False
-    crown_succeeded = False
-    crown_outcome: Optional[str] = None
-    crown_cleared: list = []
-    king_loop_armed: Optional[bool] = None
-    king_unarmed_reason = ""
+    role_declined = False
+    role_succeeded = False
+    role_outcome: Optional[str] = None
+    role_cleared: list = []
+    lead_loop_armed: Optional[bool] = None
+    lead_unarmed_reason = ""
 
     # Fix 3: a revival REPLACES the existing exited same-name row in place
     # (never appends a duplicate name). The load-modify-write is atomic under
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined, crown_succeeded
-        nonlocal crown_outcome, crown_cleared
-        nonlocal king_loop_armed, king_unarmed_reason
+        nonlocal role_declined, role_succeeded
+        nonlocal role_outcome, role_cleared
+        nonlocal lead_loop_armed, lead_unarmed_reason
         entry = new_entry
-        # One-live-crown guard, inside the write lock so the check and
+        # One-live-role guard, inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
-        # already reigns over this scope, decline the crown and spawn UNCROWNED
-        # rather than refuse the spawn: an uncrowned worker can still be given the
-        # crown later, two live crowns over one scope cannot be undone.
+        # already terms over this scope, decline the role and spawn UNPROMOTED
+        # rather than refuse the spawn: an unpromoted worker can still be given the
+        # role later, two live roles over one scope cannot be undone.
         #
-        # UNLESS the sitting king is the caller, which is SUCCESSION. An
-        # abdicating king cannot hand off after it exits (a dead session spawns
-        # nothing), so the handoff has to happen while it still reigns. The crown
-        # moves in this one write: the caller's row is vacated as the heir is
-        # stamped, so no reader sees two live crowns over the scope, and none sees
+        # UNLESS the sitting lead is the caller, which is SUCCESSION. An
+        # stepping_down lead cannot hand off after it exits (a dead session spawns
+        # nothing), so the handoff has to happen while it still terms. The role
+        # moves in this one write: the caller's row is vacated as the successor is
+        # stamped, so no reader sees two live roles over the scope, and none sees
         # zero.
         #
         # A revive is checked the same way, with the row being replaced excluded:
-        # a king reviving its own exited session must not be blocked by the
+        # a lead reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
-        if crown_level is not None and crown_scope:
-            assert crown_plan is not None  # set by the pre-launch call above
-            entries, crown_outcome, crown_cleared = settle_spawn_crown(
-                entries, scope=crown_scope, plan=crown_plan,
-                exclude_name=name if revive else None, heir=name,
-                heir_harness=new_entry.harness,
-                heir_session=new_entry.harness_session_id,
-                heir_cwd=new_entry.cwd,
+        if role_level is not None and role_scope:
+            assert role_plan is not None  # set by the pre-launch call above
+            entries, role_outcome, role_cleared = settle_spawn_role(
+                entries, scope=role_scope, plan=role_plan,
+                exclude_name=name if revive else None, successor=name,
+                successor_harness=new_entry.harness,
+                successor_session=new_entry.harness_session_id,
+                successor_cwd=new_entry.cwd,
             )
-            if crown_outcome == "succeeded":
-                crown_succeeded = True
-            elif crown_outcome == "declined":
+            if role_outcome == "succeeded":
+                role_succeeded = True
+            elif role_outcome == "declined":
                 entry = replace(
-                    new_entry, crown_level=None, crown_scope=None, crown_grantor=None
+                    new_entry, role_level=None, role_scope=None, role_grantor=None
                 )
-                crown_declined = True
-        if entry.crown_level is not None and entry.crown_scope:
-            from fno.king.state import arm_king_manifest
+                role_declined = True
+        if entry.role_level is not None and entry.role_scope:
+            from fno.lead.state import arm_lead_manifest
 
             try:
-                king_loop_armed = arm_king_manifest(
-                    entry.crown_scope,
+                lead_loop_armed = arm_lead_manifest(
+                    entry.role_scope,
                     entry.harness_session_id or "",
                     row=entry,
                 ) is not None
             except ValueError as exc:
                 # Arming with a short_id/row-name fallback would write a
                 # manifest the stop hook's owner guard always rejects, so the
-                # gate arms dead. Record the crown, refuse the dead manifest,
+                # gate arms dead. Record the role, refuse the dead manifest,
                 # and tell the operator below.
-                king_loop_armed = False
-                king_unarmed_reason = str(exc)
+                lead_loop_armed = False
+                lead_unarmed_reason = str(exc)
         if revive:
             # One row per session id: the revival replaces its own row, or the
             # adopted row reached through the resumed uuid (never None here).
@@ -1856,49 +1843,49 @@ def _claude_create_path(
 
     try:
         update_registry(_write)
-        if crown_scope:
-            journal_spawn_crown(
-                crown_outcome,
-                crown_cleared,
+        if role_scope:
+            journal_spawn_role(
+                role_outcome,
+                role_cleared,
                 name=name,
-                level=crown_level,
-                scope=crown_scope,
-                grantor=crown_grantor_val,
+                level=role_level,
+                scope=role_scope,
+                grantor=role_grantor_val,
             )
-        if crown_declined:
+        if role_declined:
             print(
-                f"spawn: role declined (scope {crown_scope!r} already held by a "
-                "live row); spawned uncrowned. The worker launched without a crown.",
+                f"spawn: role declined (scope {role_scope!r} already held by a "
+                "live row); spawned unpromoted. The worker launched without a role.",
                 file=sys.stderr,
             )
-        elif crown_succeeded:
-            vacated = sorted({row.name for row, cause in crown_cleared if cause == "succession"})
-            noted = crown_caller_name in vacated
+        elif role_succeeded:
+            vacated = sorted({row.name for row, cause in role_cleared if cause == "succession"})
+            noted = role_caller_name in vacated
             print(
-                f"spawn: crown over {crown_scope!r} transferred from {', '.join(vacated)} "
+                f"spawn: role over {role_scope!r} transferred from {', '.join(vacated)} "
                 f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
                 file=sys.stderr,
             )
-        if crown_scope and not crown_declined and king_loop_armed is False:
+        if role_scope and not role_declined and lead_loop_armed is False:
             why = (
-                f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
-                if king_unarmed_reason
-                else "; king loop disabled, no scope manifest armed"
+                f": {lead_unarmed_reason}; the manifest arms when this worker self-identifies"
+                if lead_unarmed_reason
+                else "; lead loop disabled, no scope manifest armed"
             )
             print(
-                f"spawn: crown over {crown_scope!r} recorded, but the king loop "
+                f"spawn: role over {role_scope!r} recorded, but the lead loop "
                 f"manifest was NOT armed{why}",
                 file=sys.stderr,
             )
-        if crown_scope and not crown_declined:
+        if role_scope and not role_declined:
             # Typed or not rides the receipt either way, never inferred from silence.
             tail = (
-                "reign typed"
-                if reign_typed
+                "term typed"
+                if term_typed
                 else "NOT typed (revived session keeps its own payload; send "
-                f"'/fno:lead {crown_scope}' by raw mail if it should reign)"
+                f"'/fno:lead {role_scope}' by raw mail if it should term)"
             )
-            print(f"spawn: crown over {crown_scope!r} recorded; {tail}", file=sys.stderr)
+            print(f"spawn: role over {role_scope!r} recorded; {tail}", file=sys.stderr)
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
         # Birth's failure counterpart (Wave 6): the supervisor launched
         # but no registry row names it, so without this the orphan's later
@@ -2314,8 +2301,8 @@ def dispatch_spawn(
     route_provider_id: Optional[str] = None,
     model_name: Optional[str] = None,
     account_record_id: Optional[str] = None,
-    crown_level: Optional[int] = None,
-    crown_scope: Optional[str] = None,
+    role_level: Optional[int] = None,
+    role_scope: Optional[str] = None,
     succession: bool = False,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
@@ -2449,32 +2436,21 @@ def dispatch_spawn(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
-    # Crown eligibility, checked HERE rather than only at the CLI seam: this
-    # function is the in-process entry point too, and only the claude bg branch
-    # below reaches `_claude_create_path`, the one route that stamps the fields.
-    # Every other route builds its AgentEntry elsewhere and would drop the crown
-    # while reporting a successful spawn - a silently uncrowned king is the
-    # failure this refusal exists to make impossible. Fail closed before anything
-    # is created, so a refusal launches nothing and leaves the node dispatchable.
-    crown_problem = crown_validation_error(crown_level, crown_scope)
-    if crown_problem is not None:
-        raise DispatchAskError(crown_problem, exit_code=2)
-    # Bound for every path, not just the crowned one: the create call below
-    # reads it unconditionally, and an uncrowned spawn must not crash on a
-    # plan only the crown block ever assigns.
-    crown_plan: Optional[dict] = None
-    crown_caller_name: Optional[str] = None
-    if crown_level is not None:
+    # In-process callers bypass the CLI parser. Validate requested stamps
+    # before any carrier launches; an ordinary worker has no stamp to validate.
+    role_problem = role_validation_error(role_level, role_scope) if role_level is not None or role_scope is not None else None
+    if role_problem is not None:
+        raise DispatchAskError(role_problem, exit_code=2)
+    # Bound for every path, not just the promoted one: the create call below
+    # reads it unconditionally, and an unpromoted spawn must not crash on a
+    # plan only the role block ever assigns.
+    role_plan: Optional[dict] = None
+    role_caller_name: Optional[str] = None
+    if role_level is not None:
         if once or headless:
             raise DispatchAskError(
                 "--promote needs a session that outlives the grant; a one-shot "
-                "exits after one answer. Use the pane or bg substrate.",
-                exit_code=2,
-            )
-        if harness != "claude":
-            raise DispatchAskError(
-                f"--promote on the bg substrate is claude-only; got harness "
-                f"{harness!r}. Use --substrate pane, which maps every harness.",
+                "exits after one answer. Use --substrate pane or --substrate thread.",
                 exit_code=2,
             )
 
@@ -2515,6 +2491,15 @@ def dispatch_spawn(
             exit_code=2,
         )
 
+    from fno.agents.team_thread import plan_thread_promotion, settle_thread_promotion
+
+    promotion = None
+    if role_level is not None and harness != "claude":
+        promotion = plan_thread_promotion(
+            message, role_level, role_scope, succession, harness, parent_edge,
+            name=name, revive=bool(resume_session_id))
+        message = promotion["message"]
+
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
     # The spawn front door already demoted every flag the thread lane cannot
@@ -2542,7 +2527,10 @@ def dispatch_spawn(
             passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
+            role_level=role_level, role_scope=role_scope,
         )
+        if promotion is not None:
+            settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=session_id)
         _emit_ev(
             "agent_ask_done",
             stage="dispatch",
@@ -2576,6 +2564,7 @@ def dispatch_spawn(
             "deny_tools": deny_tools, "permission_mode": permission_mode,
             "resume_session_id": resume_session_id,
             "passthrough": list(passthrough) if passthrough else None,
+            "promotion": promotion,
         },
         lock_timeout=lock_timeout,
     )
@@ -2632,18 +2621,18 @@ def dispatch_spawn(
                     exit_code=2,
                 )
 
-            if crown_level is not None:
+            if role_level is not None and harness == "claude":
                 # Refuses BEFORE launch - nothing exists as a result of an
                 # authority error. caller_row is read once and its name
-                # threaded to the write as crown_caller_name, so the receipt
+                # threaded to the write as role_caller_name, so the receipt
                 # need not re-resolve it.
-                crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
-                crown_refusal, crown_plan = plan_spawn_crown(
-                    crown_scope or "", caller_row, succession,
-                    exclude_name=name if revive else None,
+                role_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
+                role_refusal, role_plan = plan_spawn_role(
+                    role_scope or "", caller_row, succession,
+                    exclude_name=name if revive else None, proposed_name=name,
                 )
-                if crown_refusal is not None:
-                    raise DispatchAskError(f"--promote: {crown_refusal}", exit_code=2)
+                if role_refusal is not None:
+                    raise DispatchAskError(f"--promote: {role_refusal}", exit_code=2)
 
             # a revive must come back on the route the row was born with
             # unless this invocation resolved one of its own; raises exit 2 when
@@ -2885,10 +2874,10 @@ def dispatch_spawn(
                         route_provider_id=route_provider_id,
                         model_name=model_name,
                         account_record_id=account_record_id,
-                        crown_level=crown_level,
-                        crown_scope=crown_scope,
-                        crown_plan=crown_plan,
-                        crown_caller_name=crown_caller_name,
+                        role_level=role_level,
+                        role_scope=role_scope,
+                        role_plan=role_plan,
+                        role_caller_name=role_caller_name,
                         route_provider=route_provider,
                         node=node,
                         route_model=route_model,
@@ -2915,7 +2904,7 @@ def dispatch_spawn(
                 # exists because node dispatch forces spawn onto the
                 # Python parser, and without the arm an opencode bg spawn died
                 # on the retired-gemini fallthrough. The resolved node is
-                # carried explicitly into the Rust serve lane; role, resume, and crown
+                # carried explicitly into the Rust serve lane; role, resume, and role
                 # have no carrier on the serve row yet, so they are refused
                 # here rather than silently lost.
                 if harness == "opencode":
@@ -2936,6 +2925,8 @@ def dispatch_spawn(
                         name=name, message=message, cwd=cwd,
                         from_name=from_name, model=model, node=node, effort=effort,
                     )
+                    if promotion is not None:
+                        settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=short_id)
                     _emit_ev(
                         "agent_ask_done",
                         stage="dispatch",
@@ -3965,6 +3956,7 @@ def reconcile_agents(
     # the false-orphan storm is the worst kind of silent failure — it
     # rewrites the registry on insufficient evidence).
     from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.codex_pane import codex_backfill_stamp_applies
 
     # Tri-state per-codex-side capability: True (readable + present),
     # False (file missing — fresh install), None (file present but
@@ -4592,17 +4584,11 @@ def reconcile_agents(
                         and other.harness_session_id == hsid
                         for other in current_entries
                     )
-                    # ONE guard, branch inside. These were two near-identical eight
-                    # conjunct conditions differing only in `duplicate`; a term added
-                    # to one and not the other would silently drop the update and
-                    # report it as a race.
-                    if (
-                        e.harness == "codex"
-                        and e.pid == expected_pid
-                        and e.pid_start_time == expected_start
-                        and e.mux == probed_mux
-                        and not e.harness_session_id
-                        and e.status not in _TERMINAL_AGENT_STATUSES
+                    # ONE guard, branch inside; the conjuncts are the shared
+                    # codex_pane.codex_backfill_stamp_applies helper the spawn-time
+                    # late-bind stamp uses, so the two stampers cannot drift.
+                    if codex_backfill_stamp_applies(
+                        e, e.name, hsid, expected_pid, expected_start, probed_mux
                     ):
                         if duplicate:
                             updates["status"] = "spawning"
@@ -7590,7 +7576,7 @@ def dispatch_send(
     # second sender addressing the SAME busy recipient serializes behind the
     # whole first attempt rather than just the identity check -- the specimen
     # measured delivering this plan's own report ("Waiting for agent
-    # 'king-footnote-g3' lock..." with no progress until killed). Narrowing
+    # 'lead-footnote-g3' lock..." with no progress until killed). Narrowing
     # this to cover only the registry mutation is a real fix but a nontrivial
     # restructuring of a concurrency-sensitive 300-line function under time
     # pressure is the wrong place to guess; filed as a carveout rather than

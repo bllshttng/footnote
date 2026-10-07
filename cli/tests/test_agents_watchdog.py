@@ -450,7 +450,7 @@ def test_stopped_row_is_wakeable():
 
 
 def test_wake_age_ceiling_buckets_old_rows_as_stale_not_wake():
-    # The king's measured case: a session stopped 87852 minutes (61 days) is
+    # The lead's measured case: a session stopped 87852 minutes (61 days) is
     # not recovery - dead node, stale branch, stale context. Past the 1d
     # ceiling the row is a needs-human bucket and never reaches an action
     # lane, not even under --apply=all.
@@ -548,7 +548,7 @@ def test_ledger_join_finds_nodes_for_manifest_less_rows(monkeypatch, tmp_path):
 
 def test_no_parseable_evidence_never_wakes():
     # A tail with no parseable timestamp is the "basis no-evidence" row the
-    # king caught marked wake: absence of evidence must never reach an action.
+    # lead caught marked wake: absence of evidence must never reach an action.
     facts = TailFacts([(None, "stopped mid turn")], None, "stopped mid turn",
                       "assistant", "stopped mid turn")
     rows = [Row("eeee6666-0000", "n1", "stopped", None, "/tmp/n1")]
@@ -2217,16 +2217,16 @@ def test_mail_digest_sends_on_change_and_skips_when_unchanged(monkeypatch, tmp_p
         return _Proc(0, stdout="msg-1 delivered (hosted)\n")
 
     payload = _payload_two_rows()
-    ok, receipt = watchdog.mail_digest(payload, "king", runner=runner)
+    ok, receipt = watchdog.mail_digest(payload, "lead", runner=runner)
     assert ok and "delivered" in receipt
-    assert sent and "mail" in " ".join(sent[0]) and "king" in sent[0]
+    assert sent and "mail" in " ".join(sent[0]) and "lead" in sent[0]
 
     # Same signature as the stored sweep: no second send, no spam.
     watchdog.write_sweep_file(
         "tick", payload["counts"], NOW_1840, watchdog.verdict_signature(payload)
     )
     sent.clear()
-    ok2, detail2 = watchdog.mail_digest(payload, "king", runner=runner)
+    ok2, detail2 = watchdog.mail_digest(payload, "lead", runner=runner)
     assert ok2 and "unchanged" in detail2
     assert sent == []
 
@@ -2309,7 +2309,7 @@ def test_terminal_harness_residue_mails_even_when_every_verdict_is_leave(
         "counts": {LEAVE: 1},
         "terminal_harness_rows": 1,
     }
-    ok, receipt = watchdog.mail_digest(payload, "king", runner=runner)
+    ok, receipt = watchdog.mail_digest(payload, "lead", runner=runner)
     assert ok and "delivered" in receipt
     assert sent and "terminal harness rows: 1" in sent[0][-1]
 
@@ -2372,14 +2372,14 @@ def test_failed_send_keeps_the_gate_open(monkeypatch, tmp_path):
     monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
 
     ok, receipt, stamp = watchdog.mail_gate(
-        _payload_two_rows(), "king", runner=lambda *a, **k: _Proc(1, stderr="boom")
+        _payload_two_rows(), "lead", runner=lambda *a, **k: _Proc(1, stderr="boom")
     )
     assert not ok
     assert stamp == "old-sig"
 
     # Delivered: the current signature advances the gate.
     ok2, _, stamp2 = watchdog.mail_gate(
-        _payload_two_rows(), "king", runner=lambda *a, **k: _Proc(0)
+        _payload_two_rows(), "lead", runner=lambda *a, **k: _Proc(0)
     )
     assert ok2 and stamp2 == watchdog.verdict_signature(_payload_two_rows())
 
@@ -2402,7 +2402,7 @@ def _refused_payload():
 
 
 def test_zero_row_roster_refuses_instead_of_sweeping_clean():
-    """King report 2026-08-17: after a binary update the roster read 0 rows
+    """Lead report 2026-08-17: after a binary update the roster read 0 rows
     against an intact registry. A sweep over that writes counts={} and a
     fresh mtime, indistinguishable from a healthy quiet fleet. Zero rows must
     refuse: the payload says why and classifies nothing."""
@@ -2429,9 +2429,9 @@ def test_refused_sweep_writes_no_file_and_advances_no_gate(monkeypatch, tmp_path
         fired.append(argv)
         return _Proc(0)
 
-    ok, receipt = watchdog.mail_digest(payload, "king", runner=runner)
+    ok, receipt = watchdog.mail_digest(payload, "lead", runner=runner)
     assert not ok and payload["refused"] in receipt
-    ok2, receipt2, stamp = watchdog.mail_gate(payload, "king", runner=runner)
+    ok2, receipt2, stamp = watchdog.mail_gate(payload, "lead", runner=runner)
     assert not ok2 and stamp == "prev"
     assert fired == []  # nothing sent: zero rows read is not zero rows found
 
@@ -4054,12 +4054,12 @@ def _receipt_row(**over):
     from types import SimpleNamespace as ns
 
     row = ns(
-        name="king-mux",
+        name="lead-mux",
         short_id="kingmux",
         harness="claude",
         harness_session_id="019cdddd-0000-7000-8000-000000000009",
-        cwd="/wt/king",
-        log_path="/tmp/king-mux.log",
+        cwd="/wt/lead",
+        log_path="/tmp/lead-mux.log",
         created_at="2026-08-30T10:00:00Z",
     )
     for k, v in over.items():
@@ -4149,7 +4149,7 @@ def test_an_attributable_no_sid_row_is_advisory_and_named(monkeypatch):
     monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
     row = SimpleNamespace(
         harness="codex", status="live", harness_session_id=None,
-        session_id=None, short_id=None, name="bp-a238-king-brief",
+        session_id=None, short_id=None, name="bp-a238-lead-brief",
         node="x-a238", cwd="/tmp/nowhere",
     )
     monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
@@ -4158,7 +4158,7 @@ def test_an_attributable_no_sid_row_is_advisory_and_named(monkeypatch):
     advisory = [w for w in warnings if "unmeasurable-row: " in w]
     assert len(advisory) == 1
     assert "node=x-a238" in advisory[0]
-    assert "name=bp-a238-king-brief" in advisory[0]
+    assert "name=bp-a238-lead-brief" in advisory[0]
     assert not any("carried no session id" in w for w in warnings)
 
 
