@@ -376,8 +376,9 @@ fn own_handover_holder(session_id: &str) -> Option<String> {
 /// keeps its previous resolution unchanged).
 fn roster_name_for_session(session_id: &str) -> Option<String> {
     let home = crate::paths::AgentsHome::from_env_opt()?;
-    let bytes = std::fs::read(home.registry_json()).ok()?;
-    let registry: crate::state::Registry = serde_json::from_slice(&bytes).ok()?;
+    let registry = crate::state::load_registry_with_counts(&home.registry_json())
+        .ok()?
+        .0;
     let mut found: Option<String> = None;
     for entry in &registry.entries {
         if entry.harness_session_id.as_deref() == Some(session_id) && !entry.name.is_empty() {

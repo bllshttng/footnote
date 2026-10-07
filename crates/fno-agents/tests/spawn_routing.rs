@@ -468,7 +468,7 @@ fn spawn_claude_receipt_byte_shape() {
         short_id
     );
     let registry: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+        serde_json::from_str(&registry_text(&home.registry_json()).unwrap()).unwrap();
     assert_eq!(
         registry["agents"][0]["harness_session_id"],
         CLAUDE_SESSION_ID
@@ -522,7 +522,7 @@ fn spawn_claude_resolves_a_record_written_under_an_account_root() {
     let v: serde_json::Value = serde_json::from_str(receipt).expect("receipt must be valid JSON");
     assert_eq!(v["status"], "live");
     let registry: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+        serde_json::from_str(&registry_text(&home.registry_json()).unwrap()).unwrap();
     assert_eq!(
         registry["agents"][0]["harness_session_id"], CLAUDE_SESSION_ID,
         "a record under the account root must resolve: {}",
@@ -577,7 +577,7 @@ fn spawn_claude_receipt_surfaces_moved_cwd() {
     assert_eq!(v["cwd"], cwd.display().to_string());
     assert_eq!(v["status"], "live");
     let registry: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+        serde_json::from_str(&registry_text(&home.registry_json()).unwrap()).unwrap();
     assert_eq!(
         registry["agents"][0]["harness_session_id"],
         CLAUDE_SESSION_ID
@@ -734,7 +734,7 @@ fn spawn_codex_once_happy_path() {
     // Registry row must be removed after teardown.
     let registry_path = home.registry_json();
     if registry_path.exists() {
-        let body = fs::read_to_string(&registry_path).unwrap();
+        let body = registry_text(&registry_path).unwrap();
         assert!(
             !body.contains("ephemeral-codex"),
             "registry row must be torn down: {}",
@@ -817,7 +817,7 @@ fn spawn_codex_once_create_failure_no_registry_entry() {
     // create failed, so no registry row should have been written.
     let registry_path = home.registry_json();
     if registry_path.exists() {
-        let body = fs::read_to_string(&registry_path).unwrap();
+        let body = registry_text(&registry_path).unwrap();
         assert!(
             !body.contains("will-fail"),
             "no registry entry should exist after create failure: {}",
@@ -884,7 +884,7 @@ fn spawn_gemini_once_happy_path() {
     // Registry row must be removed after teardown.
     let registry_path = home.registry_json();
     if registry_path.exists() {
-        let body = fs::read_to_string(&registry_path).unwrap();
+        let body = registry_text(&registry_path).unwrap();
         assert!(
             !body.contains("ephemeral-gemini"),
             "registry row must be torn down: {}",
@@ -1031,7 +1031,7 @@ fn client_ask_full_codex_session_id_resumes_named_row() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), marker);
-    let persisted = fs::read_to_string(home_dir.join("registry.json")).unwrap();
+    let persisted = registry_text(&home_dir.join("registry.json")).unwrap();
     assert!(persisted.contains("last_message_at"), "{persisted}");
     assert!(persisted.contains("\"name\": \"01a03a0e\""), "{persisted}");
 }
@@ -1668,7 +1668,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
         .as_str()
         .is_some_and(|value| value.ends_with("control.sock")));
     // And the registry row landed under the temp home.
-    let registry_raw = fs::read_to_string(home_dir.join("registry.json")).unwrap_or_default();
+    let registry_raw = registry_text(&home_dir.join("registry.json")).unwrap_or_default();
     let registry: serde_json::Value = serde_json::from_str(&registry_raw).unwrap();
     let row = &registry["agents"][0];
     assert_eq!(row["name"], "hp-agent");
@@ -1788,4 +1788,10 @@ fn client_host_retired_prints_mux_pointer() {
         !stderr.contains("lazy-starting"),
         "retired host must not reach the daemon: {stderr}"
     );
+}
+
+fn registry_text(path: &std::path::Path) -> std::io::Result<String> {
+    fno_agents::registry_store::read(path)
+        .map(|doc| serde_json::to_string_pretty(&doc).unwrap())
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }

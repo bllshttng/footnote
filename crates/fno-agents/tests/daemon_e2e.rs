@@ -1046,7 +1046,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     drop(child);
 
     assert_eq!(
-        std::fs::read_to_string(home.registry_json()).unwrap(),
+        registry_text(&home.registry_json()).unwrap(),
         body,
         "a future-schema store must not be rewritten behind the reader"
     );
@@ -2339,7 +2339,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
         std::thread::sleep(Duration::from_millis(25));
     }
     write_divergent_registry(&home);
-    let divergent = std::fs::read_to_string(home.registry_json()).unwrap();
+    let divergent = registry_text(&home.registry_json()).unwrap();
     let mut attempt = 0;
     loop {
         if attempt > 0 {
@@ -2376,7 +2376,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
             break;
         }
         attempt += 1;
-        let on_disk = std::fs::read_to_string(home.registry_json()).unwrap_or_default();
+        let on_disk = registry_text(&home.registry_json()).unwrap_or_default();
         assert_ne!(
             on_disk, divergent,
             "daemon served the divergent registry instead of refusing it"
@@ -2538,7 +2538,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
             break;
         }
         attempt += 1;
-        let on_disk = std::fs::read_to_string(home.registry_json()).unwrap_or_default();
+        let on_disk = registry_text(&home.registry_json()).unwrap_or_default();
         assert!(
             on_disk != fixture,
             "daemon served the 3-raw-row future-schema roster as complete: {}",
@@ -2760,4 +2760,10 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
             .find_map(|line| line.strip_prefix('n'))
             .map(PathBuf::from)
     }
+}
+
+fn registry_text(path: &std::path::Path) -> std::io::Result<String> {
+    fno_agents::registry_store::read(path)
+        .map(|doc| serde_json::to_string_pretty(&doc).unwrap())
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }

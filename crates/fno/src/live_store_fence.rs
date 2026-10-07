@@ -14,10 +14,25 @@
 use std::path::{Path, PathBuf};
 
 pub fn refuse_worktree_build_on_operator_store(store: &Path) -> Result<(), String> {
+    let home = passwd_home();
+    // A unit test, or any process cargo launched (its env carries
+    // CARGO_MANIFEST_DIR), never touches the operator store, checkout or not:
+    // one such run once turned the live registry.json into a directory.
+    if cfg!(test) || std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
+        if let Some(home) = &home {
+            let store = canonical_or_self(store);
+            if store.starts_with(canonical_or_self(&home.join(".fno"))) {
+                return Err(format!(
+                    "refusing to open the live store {} from a cargo-launched build: \
+                     set FNO_AGENTS_HOME and FNO_STATE_DIR to a temp directory",
+                    store.display()
+                ));
+            }
+        }
+    }
     let exe = std::env::current_exe()
         .ok()
         .and_then(|path| std::fs::canonicalize(path).ok());
-    let home = passwd_home();
     refusal(exe.as_deref(), home.as_deref(), store)
 }
 

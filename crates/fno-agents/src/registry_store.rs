@@ -193,7 +193,7 @@ fn load_document(connection: &Connection, path: &Path) -> Result<Value, StateErr
     Ok(document)
 }
 
-pub(crate) fn read(path: &Path) -> Result<Value, StateError> {
+pub fn read(path: &Path) -> Result<Value, StateError> {
     let connection = open(path)?;
     let transaction = connection
         .unchecked_transaction()
@@ -241,9 +241,8 @@ impl Write {
     }
 }
 
-/// Test seam: replace the whole registry document behind `path`.
-#[cfg(test)]
-pub(crate) fn replace_document(path: &Path, document: Value) {
+/// Replace the whole registry document behind `path`. Tests seed rows here.
+pub fn replace_document(path: &Path, document: Value) {
     begin(path).unwrap().commit(document).unwrap();
 }
 

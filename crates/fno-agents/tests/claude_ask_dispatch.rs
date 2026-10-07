@@ -159,7 +159,7 @@ fn ask_unknown_name_exits_16_not_create() {
     // No registry row written.
     assert!(
         !home.registry_json().exists()
-            || !fs::read_to_string(home.registry_json())
+            || !registry_text(&home.registry_json())
                 .unwrap()
                 .contains("alice")
     );
@@ -252,7 +252,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
 
     // Registry row is Python-readable: the claude jobId lives in short_id (v9),
     // project_root skipped when empty. Parse to be format-agnostic.
-    let reg = fs::read_to_string(home.registry_json()).unwrap();
+    let reg = registry_text(&home.registry_json()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&reg).unwrap();
     let row = &v["agents"][0];
     assert_eq!(row["short_id"], "7c5dcf5d");
@@ -323,7 +323,7 @@ fn spawn_waits_for_a_delayed_session_file_before_publishing_live() {
     let receipt: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(receipt["status"], "live", "{}", out.stdout);
     let registry: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+        serde_json::from_str(&registry_text(&home.registry_json()).unwrap()).unwrap();
     assert_eq!(
         registry["agents"][0]["harness_session_id"],
         "12345678-1234-4234-8234-123456789abc"
@@ -362,7 +362,7 @@ fn spawn_tracks_an_unresolved_identity_without_guessing_a_uuid() {
     let receipt: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(receipt["status"], "spawning", "{}", out.stdout);
     let registry: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+        serde_json::from_str(&registry_text(&home.registry_json()).unwrap()).unwrap();
     let row = &registry["agents"][0];
     assert_eq!(row["name"], "unresolved-identity");
     assert_eq!(row["short_id"], "7c5dcf5d");
@@ -479,7 +479,7 @@ fn spawn_receipt_names_the_model_it_launched_with() {
     // AC7-HP's row half: the registry row carries the same value, WITH the
     // basis marking it intended (never a bare model a reader could take for
     // an observed reading).
-    let reg = std::fs::read_to_string(home.registry_json()).unwrap();
+    let reg = registry_text(&home.registry_json()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&reg).unwrap();
     let row = &v["agents"][0];
     assert_eq!(row["model"], "opus", "row: {row}");
@@ -653,7 +653,7 @@ fn followup_accepts_full_session_id_and_stamps_named_row() {
     cleanup_sock(&sock);
     assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout, "FULL-ID-OK");
-    let registry_body = fs::read_to_string(&registry_path).unwrap();
+    let registry_body = registry_text(&registry_path).unwrap();
     assert!(registry_body.contains("last_message_at"), "{registry_body}");
     assert!(
         registry_body.contains("\"name\": \"alice\""),
@@ -677,7 +677,7 @@ fn followup_socket_null_without_truth_exit_13_preserves_status() {
     )
     .unwrap();
 
-    let reg_before = fs::read_to_string(home.registry_json()).unwrap();
+    let reg_before = registry_text(&home.registry_json()).unwrap();
     let out = dispatch_claude_ask(
         &home,
         &ch,
@@ -703,7 +703,7 @@ fn followup_socket_null_without_truth_exit_13_preserves_status() {
 
     // A refused ask never writes the registry: the row keeps its seeded
     // live status byte-for-byte, and nothing orphans it.
-    let reg_after = fs::read_to_string(home.registry_json()).unwrap();
+    let reg_after = registry_text(&home.registry_json()).unwrap();
     assert_eq!(reg_before, reg_after, "a refused ask never writes");
     assert!(!reg_after.contains("orphaned"), "{}", reg_after);
 }
@@ -985,4 +985,10 @@ fn followup_interactive_claude_row_refuses_worker_short() {
     );
     assert_eq!(out.exit_code, 12, "{}", out.stderr);
     assert!(out.stderr.contains("no short id"), "{}", out.stderr);
+}
+
+fn registry_text(path: &std::path::Path) -> std::io::Result<String> {
+    fno_agents::registry_store::read(path)
+        .map(|doc| serde_json::to_string_pretty(&doc).unwrap())
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }

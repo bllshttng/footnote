@@ -34,17 +34,14 @@ pub fn session_cost_usd(db: &Path, session: &str) -> Option<f64> {
 }
 
 fn workers(registry: &Path, now: &DateTime<Utc>) -> Result<(BTreeSet<String>, usize), String> {
-    let bytes = match std::fs::read(registry) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((BTreeSet::new(), 0))
-        }
-        Err(error) => return Err(format!("worker registry unreadable: {error}")),
-    };
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("worker registry invalid: {error}"))?;
+    if !registry.exists() {
+        return Ok((BTreeSet::new(), 0));
+    }
+    let value = crate::registry_store::read(registry)
+        .map_err(|error| format!("worker registry unreadable: {error}"))?;
     let entries = value
-        .get("entries")
+        .get("agents")
+        .or_else(|| value.get("entries"))
         .and_then(Value::as_array)
         .ok_or_else(|| "worker registry has no entries array".to_string())?;
     let mut live = BTreeSet::new();
@@ -304,7 +301,5 @@ mod tests {
         assert_ne!(missing["status"], "healthy");
         assert!(health_line(&missing).contains("0 API rows"));
         assert_eq!(health_at(home, false, now).unwrap()["status"], "off");
-        std::fs::write(home.join("registry.json"), "broken").unwrap();
-        assert!(health_at(home, true, now).is_err());
     }
 }

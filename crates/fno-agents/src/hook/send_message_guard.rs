@@ -94,8 +94,7 @@ fn registry_rows() -> Vec<Value> {
     let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
         return Vec::new();
     };
-    let text = std::fs::read_to_string(home.registry_json()).unwrap_or_default();
-    serde_json::from_str::<Value>(&text)
+    crate::registry_store::read(&home.registry_json())
         .ok()
         .and_then(|v| v.get("agents").and_then(Value::as_array).cloned())
         .unwrap_or_default()
@@ -111,8 +110,7 @@ fn mail_unhealthy() -> Option<String> {
     };
     let reg = home.registry_json();
     if reg.exists() {
-        let text = std::fs::read_to_string(&reg).unwrap_or_default();
-        match serde_json::from_str::<Value>(&text) {
+        match crate::registry_store::read(&reg) {
             Ok(v) if v.get("agents").is_some() => {}
             _ => return Some(format!("registry unreadable: {}", reg.display())),
         }
