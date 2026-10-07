@@ -761,7 +761,9 @@ mod tests {
         // paths call: no `last_assistant_message` (the agy/opencode/codex
         // shape), so the transcript reader supplies the tag, and the caller's
         // harness lands on the envelope.
-        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let _env_guard = fno_bin_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
@@ -829,7 +831,9 @@ print(rec["payload"]["content"][0]["text"], end="")
         // control lives in THIS run: the tag-free variant is asserted
         // against the row the tagged fixture already proved it can write,
         // never as an absence on its own.
-        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let _env_guard = fno_bin_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
@@ -1071,7 +1075,9 @@ print(rec["payload"]["content"][0]["text"], end="")
         // The CLI verb's own parse (the shape the pre-deploy done_probe
         // exercises): the transcript reader supplies a RESULT: BLOCKED
         // return and the scan emits one result_blocked row.
-        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let _env_guard = fno_bin_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
