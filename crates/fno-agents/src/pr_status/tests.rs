@@ -627,10 +627,11 @@ fn composer_replays_the_refusal() {
     assert_eq!(stderr, expected_lines, "error stderr");
 }
 
-/// A finished PR (ready, green, settled, mergeable) whose node claim reads
-/// positively not live gets the no-lander note; a live holder, an unreadable
-/// reading, or an unfinished PR stays silent. The note reports only - the
-/// composer never merges.
+/// A finished PR (ready, green, settled, mergeable) whose grant verdict
+/// reads `absent` over a positively-not-live claim gets the no-lander note;
+/// a live holder, a granted receipt (the grant queue is its lander), an
+/// unreadable claim, or an unfinished PR stays silent. stderr[0] is always
+/// the verdict line, so silence reads as exactly one line.
 #[test]
 fn finished_pr_with_no_live_holder_reports_no_lander() {
     let fixture = load_fixture("green_settled");
@@ -663,13 +664,21 @@ fn finished_pr_with_no_live_holder_reports_no_lander() {
         ready_receipt.clone(),
         absent_free.clone(),
     ));
-    assert_eq!(stderr.len(), 1, "exactly the no-lander note: {stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        2,
+        "verdict line + the one no-lander note: {stderr:?}"
+    );
     assert!(
-        stderr[0].contains("finished PR has no lander"),
+        stderr[1].contains("finished PR has no lander"),
         "{stderr:?}"
     );
-    assert!(stderr[0].contains("ab-l1"), "{stderr:?}");
-    assert!(stderr[0].contains("reads free"), "{stderr:?}");
+    assert!(stderr[1].contains("ab-l1"), "{stderr:?}");
+    assert!(stderr[1].contains("reads free"), "{stderr:?}");
+    assert!(
+        stderr[1].contains("fno do target start ab-l1"),
+        "{stderr:?}"
+    );
 
     // A live holder is driving: silent.
     let absent_live = json!({
@@ -680,7 +689,19 @@ fn finished_pr_with_no_live_holder_reports_no_lander() {
     });
     let (_, _, stderr) =
         crate::pr_status::compose::compose_payload(&build(ready_receipt.clone(), absent_live));
-    assert!(stderr.is_empty(), "{stderr:?}");
+    assert_eq!(stderr.len(), 1, "only the verdict line: {stderr:?}");
+
+    // A granted receipt over the same free claim has the grant queue as its
+    // lander: silent.
+    let granted_free = json!({
+        "state": "granted",
+        "reason": "newest durable grant approved, claim free, live config grants dispatch",
+        "node_id": "ab-l1",
+        "claim_state": "free",
+    });
+    let (_, _, stderr) =
+        crate::pr_status::compose::compose_payload(&build(ready_receipt.clone(), granted_free));
+    assert_eq!(stderr.len(), 1, "only the verdict line: {stderr:?}");
 
     // An unreadable claim proves no absence: silent.
     let unknown_claim = json!({
@@ -691,12 +712,12 @@ fn finished_pr_with_no_live_holder_reports_no_lander() {
     });
     let (_, _, stderr) =
         crate::pr_status::compose::compose_payload(&build(ready_receipt.clone(), unknown_claim));
-    assert!(stderr.is_empty(), "{stderr:?}");
+    assert_eq!(stderr.len(), 1, "only the verdict line: {stderr:?}");
 
     // Not finished (the fixture's own ci blocker stands): silent even at free.
     let (_, _, stderr) = crate::pr_status::compose::compose_payload(&build(
         fixture["inputs"]["receipt"].clone(),
         absent_free,
     ));
-    assert!(stderr.is_empty(), "{stderr:?}");
+    assert_eq!(stderr.len(), 1, "only the verdict line: {stderr:?}");
 }

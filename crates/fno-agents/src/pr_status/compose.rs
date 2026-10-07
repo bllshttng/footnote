@@ -413,11 +413,13 @@ pub(crate) fn verdict_line(payload: &Value) -> String {
 }
 
 /// The finished-PR-has-no-lander report: ready with zero blockers, green,
-/// settled, and mergeable, while the node's claim reads positively not live
-/// (free or stale, the pair the grant verdict's liveness step trusts). A
-/// claim in that state proves nobody is driving the node, so nothing will
-/// perform the merge. The note reports; it never merges, and an unreadable
-/// or merely-unknown claim stays silent (no absence asserted without proof).
+/// settled, and mergeable, while the grant verdict reads `absent` over a
+/// claim that is positively not live (free or stale, the pair the verdict's
+/// liveness step trusts). `absent` is the load-bearing half: a granted
+/// receipt over the same free claim has the grant queue as its lander, and
+/// a held verdict names its own holder. An unreadable or merely-unknown
+/// claim stays silent: no absence is asserted without proof. The note
+/// reports; it never merges.
 fn push_lander_note(payload: &Map<String, Value>, out: &mut Vec<String>) {
     if payload.get("ready").and_then(Value::as_bool) != Some(true)
         || payload.get("settled").and_then(Value::as_bool) != Some(true)
@@ -431,6 +433,9 @@ fn push_lander_note(payload: &Map<String, Value>, out: &mut Vec<String>) {
         .get("merge_execution")
         .cloned()
         .unwrap_or(Value::Null);
+    if execution.get("state").and_then(Value::as_str) != Some("absent") {
+        return;
+    }
     let claim = execution
         .get("claim_state")
         .and_then(Value::as_str)
@@ -445,8 +450,9 @@ fn push_lander_note(payload: &Map<String, Value>, out: &mut Vec<String>) {
     let pr = payload.get("pr").and_then(Value::as_str).unwrap_or("?");
     out.push(format!(
         "note: finished PR has no lander: ready with zero blockers, green and settled, \
-but node {node} claim reads {claim} (no live holder), so nothing will merge it. \
-Land it with `fno do pr merge {pr}` or restart the worker (`/fno:target <node>`)."
+but node {node} claim reads {claim} (no live holder) and no do row records a \
+merge grant, so nothing will merge it. Land it with `fno do pr merge {pr}` or \
+restart the worker with `fno do target start {node}`."
     ));
 }
 
