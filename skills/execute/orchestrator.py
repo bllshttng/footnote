@@ -15,7 +15,6 @@ import re
 import os
 import json
 import subprocess
-from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Collection, List, Literal, Optional, Dict, Set
@@ -35,14 +34,6 @@ if str(_CLI_SRC) not in sys.path:
 
 from fno import dispatch_flags, harness_names  # noqa: E402  (path set above)
 
-
-# ---------------------------------------------------------------------------
-# Impeccable executor constants
-# ---------------------------------------------------------------------------
-
-IMPECCABLE_DEFAULT_MAX_ITERATIONS: int = 8
-IMPECCABLE_DEFAULT_CRITIQUE_TARGET: int = 35
-IMPECCABLE_DEFAULT_CRITIQUE_FLOOR: int = 25
 
 # PRODUCT.md validation thresholds (mirrors /impeccable's loader contract)
 PRODUCT_MD_MIN_CHARS: int = 200
@@ -157,66 +148,6 @@ def check_product_md_for_dispatch(
         flush=True,
     )
     return False
-
-
-# ---------------------------------------------------------------------------
-# Impeccable stage loop - full-loop iteration ceiling (decision 5c)
-# ---------------------------------------------------------------------------
-
-class ImpeccableVerdict(Enum):
-    """Two-tier verdict for the /impeccable stage loop (decision 5a from brief)."""
-    SUCCESS = "SUCCESS"
-    DONE_WITH_CONCERNS = "DONE_WITH_CONCERNS"
-    FAILED = "FAILED"
-
-
-@dataclass
-class ImpeccableStageLoop:
-    """Tracks the shared iteration budget for a full /impeccable stage loop.
-
-    The max_iterations budget applies to the ENTIRE stage loop (craft -> critique ->
-    polish -> harden -> audit -> ...), not per-stage. A single iterations_used counter
-    increments on every stage invocation. When iterations_used >= max_iterations,
-    the ceiling is reached and the loop must exit with the two-tier verdict.
-
-    This is the canonical model per decision 5c of the frontend-executor-pipeline-
-    awareness brief: "the operator's iteration ceiling applies to the full stage loop,
-    not per-stage; the budget is total, not multiplied across stages."
-    """
-
-    max_iterations: int = IMPECCABLE_DEFAULT_MAX_ITERATIONS
-    critique_target: int = IMPECCABLE_DEFAULT_CRITIQUE_TARGET
-    critique_floor: int = IMPECCABLE_DEFAULT_CRITIQUE_FLOOR
-    iterations_used: int = field(default=0, init=False)
-
-    @property
-    def ceiling_reached(self) -> bool:
-        """Return True when the shared budget is exhausted."""
-        return self.iterations_used >= self.max_iterations
-
-    def can_dispatch(self) -> bool:
-        """Return True when the next stage invocation is within budget."""
-        return self.iterations_used < self.max_iterations
-
-    def record_stage(self, stage: str) -> None:  # noqa: ARG002
-        """Record one stage invocation against the shared budget."""
-        self.iterations_used += 1
-
-    def compute_verdict(self, final_score: int) -> ImpeccableVerdict:
-        """Compute the two-tier exit verdict from the final critique score.
-
-        Score >= critique_target  -> SUCCESS
-        Score <  critique_floor   -> FAILED
-        Otherwise (band)          -> DONE_WITH_CONCERNS
-
-        Per decision 5a: the ceiling exit is NOT a hard FAILED reflex; the
-        score determines which tier applies.
-        """
-        if final_score >= self.critique_target:
-            return ImpeccableVerdict.SUCCESS
-        if final_score < self.critique_floor:
-            return ImpeccableVerdict.FAILED
-        return ImpeccableVerdict.DONE_WITH_CONCERNS
 
 
 def _parse_scalar(value: str):

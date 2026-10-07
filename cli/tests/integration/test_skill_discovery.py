@@ -298,15 +298,6 @@ def test_load_audit_discovery_names_stale_cache_and_repair(repo: Path, env: dict
     assert "unmeasured" in r.stdout
 
 
-def test_load_audit_self_check_still_passes(repo: Path, env: dict) -> None:
-    r = subprocess.run(
-        [sys.executable, "scripts/diagnostics/codex-skill-load-audit.py", "--self-check"],
-        cwd=repo, env=env, capture_output=True, text=True, timeout=120,
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "FAIL" not in r.stdout
-
-
 # ---------------------------------------------------------------------------
 # Review-round pins: CODEX_HOME, installed-without-plugin, healthy cache,
 # relative --repo

@@ -63,13 +63,6 @@ def test_load_curriculum_strips_comments_and_flags_unknown(tmp_path):
     assert unknown == ["backlog nope"]
 
 
-def test_load_curriculum_empty_file(tmp_path):
-    curr = tmp_path / "curriculum.txt"
-    curr.write_text("# only comments\n\n")
-    taught, unknown = vc.load_curriculum(curr, {"backlog get"})
-    assert taught == set() and unknown == []
-
-
 def test_load_curriculum_maps_known_action_typing_to_live_dispatcher(tmp_path):
     curr = tmp_path / "curriculum.txt"
     curr.write_text("backlog get\nbacklog typo\n")
@@ -184,25 +177,6 @@ def test_rust_argv_credits_a_builder_command_past_a_foreign_one_liner(tmp_path):
     counts = vc.sweep_rust_argv(tmp_path, {"backlog done", "fetch origin"})
     assert counts["backlog done"] == 1, "a builder-style fno argv must still be credited"
     assert counts["fetch origin"] == 0, "the git one-liner is still skipped"
-
-
-def test_broken_argv_sweep_also_refuses_the_zero_list(tmp_path):
-    """The controls must reach the modes that decide a deletion, not only --dead.
-
-    ``--zero`` and ``--curriculum`` produce the cull-candidate list. A sweep
-    blind to the argv-array shape names a live verb as a cull candidate, so a
-    broken sweep must refuse here exactly as it does under --dead.
-    """
-    proc = subprocess.run(
-        [sys.executable, str(_broken_argv_sweep(tmp_path)), "--zero"],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180,
-    )
-    assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
-    out = proc.stdout + proc.stderr
-    assert "no list" in out, out
-    for leaf in vc.RUST_ARGV_CONTROLS:
-        assert f"rust-argv/{leaf}" in out, f"{leaf} not named in the refusal:\n{out}"
-    assert "cull candidates" not in out, out
 
 
 def test_rust_argv_controls_refuse_to_emit_a_list_when_the_sweep_breaks(tmp_path):

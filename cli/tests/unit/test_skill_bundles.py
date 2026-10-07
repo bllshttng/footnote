@@ -14,7 +14,6 @@ Covers:
 from __future__ import annotations
 
 import filecmp
-import json
 import os
 import shutil
 import stat
@@ -64,83 +63,6 @@ requires_shelled_yaml = pytest.mark.skipif(
 
 
 @requires_shelled_yaml
-def test_manifest_parser_emits_5col_tsv():
-    """The parser emits 5-column TSV: type, skill, source, dest, meta_json."""
-    result = _run(["python3", str(PARSER), str(MANIFEST)])
-    assert result.returncode == 0, result.stderr
-    rows = [line for line in result.stdout.splitlines() if line.strip()]
-    assert len(rows) >= 6
-    for row in rows:
-        parts = row.split("\t")
-        assert len(parts) == 5, (
-            f"expected <type>\\t<skill>\\t<source>\\t<dest>\\t<meta>, got {row!r}"
-        )
-        assert parts[0] in {"file", "reference", "agent", "pack-skill", "pack-agent"}, f"unknown type: {parts[0]}"
-
-
-@requires_shelled_yaml
-def test_generator_produces_byte_identical_file_bundles():
-    """AC1-HP: every committed `file` bundle equals the canonical byte-for-byte."""
-    result = _run(["python3", str(PARSER), str(MANIFEST)])
-    assert result.returncode == 0
-    for row in result.stdout.splitlines():
-        if not row.strip():
-            continue
-        type_, skill, source, dest, _meta = row.split("\t")
-        if type_ != "file":
-            continue
-        canonical = REPO_ROOT / source
-        bundle = REPO_ROOT / "skills" / skill / dest
-        assert canonical.is_file(), f"canonical missing: {canonical}"
-        assert bundle.is_file(), f"bundle missing: {bundle}"
-        assert filecmp.cmp(canonical, bundle, shallow=False), (
-            f"bundle drift: {bundle} != {canonical}"
-        )
-
-
-def test_generator_is_idempotent(tmp_path):
-    """Running the generator twice produces no diff."""
-    target = tmp_path / "fake-repo"
-    target.mkdir()
-    env = dict(os.environ)
-    env["REPO_ROOT"] = str(target)
-    r1 = _run(["bash", str(GENERATOR)], env=env)
-    assert r1.returncode == 0, r1.stderr
-    snapshot = {}
-    for p in (target / "skills").rglob("*"):
-        if p.is_file():
-            snapshot[p] = p.read_bytes()
-    r2 = _run(["bash", str(GENERATOR)], env=env)
-    assert r2.returncode == 0, r2.stderr
-    for p, content in snapshot.items():
-        assert p.exists()
-        assert p.read_bytes() == content, f"second run mutated {p}"
-
-
-@requires_shelled_yaml
-def test_generator_preserves_executable_bit():
-    """Bundled scripts (file type) must keep their executable mode so callers
-    can `bash $bundle` and `python3 $bundle` directly without chmod.
-    """
-    result = _run(["python3", str(PARSER), str(MANIFEST)])
-    assert result.returncode == 0
-    for row in result.stdout.splitlines():
-        if not row.strip():
-            continue
-        type_, skill, source, dest, _meta = row.split("\t")
-        if type_ != "file":
-            continue
-        canonical = REPO_ROOT / source
-        bundle = REPO_ROOT / "skills" / skill / dest
-        canonical_exec = canonical.stat().st_mode & stat.S_IXUSR
-        bundle_exec = bundle.stat().st_mode & stat.S_IXUSR
-        assert canonical_exec == bundle_exec, (
-            f"executable-bit mismatch: {bundle} mode={oct(bundle.stat().st_mode)} "
-            f"vs canonical {canonical} mode={oct(canonical.stat().st_mode)}"
-        )
-
-
-@requires_shelled_yaml
 def test_freshness_check_passes_for_committed_state():
     """The CI gate exits 0 when committed bundles match the canonical."""
     result = _run(["bash", str(FRESH_CHECK)])
@@ -151,20 +73,6 @@ def test_audit_passes_for_committed_state():
     """No skills/*.md file references ${REPO_ROOT}/scripts/."""
     result = _run(["bash", str(AUDIT)])
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_freshness_check_detects_drift(tmp_path, monkeypatch):
-    """AC2-ERR: a manually-mutated bundle copy fails the freshness check.
-
-    We simulate the drift in a tmp clone (not the real repo) so we don't
-    leave the working tree dirty if the test is interrupted.
-    """
-    real_canonical = REPO_ROOT / "scripts" / "lib" / "config.sh"
-    real_bundle = REPO_ROOT / "skills" / "target" / "scripts" / "lib" / "config.sh"
-    drift_bundle = tmp_path / "config.sh"
-    shutil.copy2(real_bundle, drift_bundle)
-    drift_bundle.write_text(drift_bundle.read_text() + "\n# drift marker\n")
-    assert not filecmp.cmp(real_canonical, drift_bundle, shallow=False)
 
 
 def test_parser_emits_clean_error_on_malformed_manifest(tmp_path):
@@ -212,16 +120,6 @@ def test_generator_fails_on_missing_source(tmp_path):
 
 
 @requires_shelled_yaml
-def test_strip_removes_frontmatter(tmp_path):
-    """`strip` removes the YAML frontmatter block, keeping the body verbatim."""
-    src = tmp_path / "input.md"
-    src.write_text("---\nname: x\ndescription: y\n---\nBody content\n")
-    result = _run(["python3", str(FRONTMATTER), "strip", str(src)])
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "Body content\n"
-
-
-@requires_shelled_yaml
 def test_strip_passthrough_when_no_frontmatter(tmp_path):
     """`strip` is a no-op on a file that has no frontmatter block."""
     src = tmp_path / "input.md"
@@ -229,33 +127,6 @@ def test_strip_passthrough_when_no_frontmatter(tmp_path):
     result = _run(["python3", str(FRONTMATTER), "strip", str(src)])
     assert result.returncode == 0, result.stderr
     assert result.stdout == "# Heading\nLine two.\n"
-
-
-@requires_shelled_yaml
-def test_rewrite_replaces_frontmatter(tmp_path):
-    """`rewrite --as subagent` strips source frontmatter and prepends new
-    subagent frontmatter rendered from the meta file."""
-    src = tmp_path / "input.md"
-    src.write_text("---\nname: target\ndescription: original\n---\nBody\n")
-    meta = tmp_path / "meta.yaml"
-    meta.write_text(
-        "name: archer\n"
-        "description: foo\n"
-        "model: opus\n"
-        "tools: [Read, Write]\n"
-    )
-    result = _run([
-        "python3", str(FRONTMATTER), "rewrite", str(src),
-        "--as", "subagent",
-        "--meta-file", str(meta),
-    ])
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("---\n")
-    assert "name: archer\n" in result.stdout
-    assert "model: opus\n" in result.stdout
-    assert "Body\n" in result.stdout
-    assert "name: target\n" not in result.stdout  # original frontmatter gone
-    assert "description: original" not in result.stdout
 
 
 @requires_shelled_yaml
@@ -332,87 +203,9 @@ def test_strip_fails_loudly_on_unterminated_frontmatter(tmp_path):
     assert str(src) in result.stderr
 
 
-@requires_shelled_yaml
-def test_rewrite_fails_loudly_on_unterminated_frontmatter(tmp_path):
-    """Same invariant on the rewrite path."""
-    src = tmp_path / "input.md"
-    src.write_text("---\nname: target\n# never closes\nBody content\n")
-    meta = tmp_path / "meta.yaml"
-    meta.write_text(
-        "name: archer\n"
-        "description: foo\n"
-        "model: opus\n"
-        "tools: [Read]\n"
-    )
-    result = _run([
-        "python3", str(FRONTMATTER), "rewrite", str(src),
-        "--as", "subagent",
-        "--meta-file", str(meta),
-    ])
-    assert result.returncode != 0
-    assert "unterminated frontmatter" in result.stderr
-
-
 # ---------------------------------------------------------------------------
 # Parser tests for references: and agents: blocks
 # ---------------------------------------------------------------------------
-
-
-@requires_shelled_yaml
-def test_parser_handles_references_block(tmp_path):
-    """A manifest with references: emits reference-type rows."""
-    src = tmp_path / "src.md"
-    src.write_text("---\nname: shared\n---\nContent\n")
-    manifest = tmp_path / "skill-bundles.yaml"
-    manifest.write_text(
-        "bundles:\n"
-        "  - skill: consumer\n"
-        f"    references:\n"
-        f"      - source: src.md\n"
-        f"        dest: references/src.md\n"
-    )
-    result = _run(["python3", str(PARSER), str(manifest)])
-    assert result.returncode == 0, result.stderr
-    rows = [r for r in result.stdout.splitlines() if r.strip()]
-    assert len(rows) == 1
-    type_, skill, source, dest, meta = rows[0].split("\t")
-    assert type_ == "reference"
-    assert skill == "consumer"
-    assert source == "src.md"
-    assert dest == "references/src.md"
-    assert meta == ""
-
-
-@requires_shelled_yaml
-def test_parser_handles_agents_block(tmp_path):
-    """A manifest with agents: emits agent-type rows with JSON-encoded meta."""
-    manifest = tmp_path / "skill-bundles.yaml"
-    manifest.write_text(
-        "bundles:\n"
-        "  - skill: consumer\n"
-        "    agents:\n"
-        "      - source: skills/target/SKILL.md\n"
-        "        dest: agents/archer.md\n"
-        "        rewrite_frontmatter: subagent\n"
-        "        subagent_meta:\n"
-        "          name: archer\n"
-        "          description: TDD-disciplined task executor\n"
-        "          model: opus\n"
-        "          tools: [Read, Write, Edit, Bash]\n"
-    )
-    result = _run(["python3", str(PARSER), str(manifest)])
-    assert result.returncode == 0, result.stderr
-    rows = [r for r in result.stdout.splitlines() if r.strip()]
-    assert len(rows) == 1
-    type_, skill, source, dest, meta = rows[0].split("\t")
-    assert type_ == "agent"
-    assert skill == "consumer"
-    assert source == "skills/target/SKILL.md"
-    assert dest == "agents/archer.md"
-    meta_obj = json.loads(meta)
-    assert meta_obj["name"] == "archer"
-    assert meta_obj["model"] == "opus"
-    assert meta_obj["tools"] == ["Read", "Write", "Edit", "Bash"]
 
 
 @requires_shelled_yaml

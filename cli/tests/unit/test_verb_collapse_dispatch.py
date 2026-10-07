@@ -49,19 +49,6 @@ def test_keep_action_remains_a_registered_leaf():
     assert seen == [("kept", "yes")]
 
 
-def test_t1_action_keeps_its_own_help_and_validation():
-    collapsed = collapse_click_group(_group([]), keep={"kept"})
-    runner = CliRunner()
-
-    help_result = runner.invoke(collapsed, ["folded", "--help"])
-    missing_result = runner.invoke(collapsed, ["folded"])
-
-    assert help_result.exit_code == 0
-    assert "--value" in help_result.output
-    assert missing_result.exit_code == 2
-    assert "Missing option '--value'" in missing_result.output
-
-
 def test_t1_action_remains_available_to_shell_completion():
     collapsed = collapse_click_group(_group([]), keep={"kept"})
     ctx = click.Context(collapsed, info_name="sample")

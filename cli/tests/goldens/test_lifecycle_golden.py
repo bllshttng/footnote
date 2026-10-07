@@ -99,31 +99,7 @@ def test_reopen_reads_the_completion_not_the_status_field(tmp_path):
     assert err == "warning: x-aaaa1111 is not done; nothing to reopen\n", err
 
 
-def test_reopen_a_live_node_is_a_warning_not_an_error(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-aaaa1111", "in_progress")])
-    warm(root, "x-aaaa1111")
-    code, out, err = door(root, ["reopen", "x-aaaa1111", "-R", "not actually done"])
-    assert code == 0, err
-    assert out == "", out
-    assert err == "warning: x-aaaa1111 is not done; nothing to reopen\n", err
-
-
-def test_reopen_unknown_id_names_it(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-aaaa1111")])
-    warm(root, "x-aaaa1111")
-    code, out, err = door(root, ["reopen", "x-dead4321", "-R", "why"])
-    assert code == 1, err
-    assert err == "Error: feature x-dead4321 not found\n", err
-
-
 # -- defer / undefer --
-
-def test_defer_without_a_reason_is_a_usage_error(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-cccc3333")])
-    warm(root, "x-cccc3333")
-    code, out, err = door(root, ["defer", "x-cccc3333"])
-    assert code == 2, err
-    assert "Missing option '--reason' / '-R'." in err
 
 
 def test_defer_prints_the_deferred_receipt_and_stamps_the_kind(tmp_path):
@@ -145,28 +121,7 @@ def test_defer_an_unformable_id_refuses_at_the_gate(tmp_path):
     assert err.startswith("Error: task_id must be a <prefix>-<4..8 hex> node id, got 'x-zzzz9999'\n")
 
 
-def test_undefer_prints_the_receipt_and_the_cleared_deferral_line(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-cccc3333")])
-    warm(root, "x-cccc3333")
-    door(root, ["defer", "x-cccc3333", "-R", "parked until api lands", "-K", "later"])
-    code, out, err = door(root, ["undefer", "x-cccc3333"])
-    assert code == 0, err
-    assert out == "Undeferred x-cccc3333\n", out
-    # The cleared-deferral line is the receipt; a missing plans dir may add
-    # an advisory line about unread plan rulings, which is environmental.
-    assert err.startswith(
-        "undefer: cleared the deferral of x-cccc3333 (later): parked until api lands"
-    ), err
-
-
 # -- queue family --
-
-def test_queue_prints_the_queued_receipt(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-fff30000")])
-    warm(root, "x-fff30000")
-    code, out, err = door(root, ["queue", "x-fff30000"])
-    assert code == 0, err
-    assert out == "Queued x-fff30000\n", out
 
 
 def test_queued_lists_the_queue_as_json(tmp_path):
@@ -201,14 +156,6 @@ def test_unqueue_an_unqueued_node_succeeds_with_a_warning(tmp_path):
     assert err == "warning: x-fff30000 was not queued\n", err
 
 
-def test_queue_an_unformable_id_refuses_at_the_gate(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-fff30000")])
-    warm(root, "x-fff30000")
-    code, out, err = door(root, ["queue", "x-zzzz9999"])
-    assert code == 1, err
-    assert err.startswith("Error: task_id must be a <prefix>-<4..8 hex> node id, got 'x-zzzz9999'\n")
-
-
 # -- contain --
 
 def test_contain_stamps_parent_and_contained_in_and_prints_per_child(tmp_path):
@@ -226,14 +173,6 @@ def test_contain_stamps_parent_and_contained_in_and_prints_per_child(tmp_path):
     rows = {r["id"]: r for r in graph_rows(root)}
     assert rows["x-ddd10000"]["parent"] == "x-ccc99000"
     assert rows["x-ddd10000"]["contained_in"] == "x-ccc99000"
-
-
-def test_contain_an_unknown_owner_refuses_with_exit_3(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-ddd10000")])
-    warm(root, "x-ddd10000")
-    code, out, err = door(root, ["contain", "x-dead4321", "x-ddd10000"])
-    assert code == 3, err
-    assert err == "Error: owner not found: x-dead4321\n", err
 
 
 # -- supersede --

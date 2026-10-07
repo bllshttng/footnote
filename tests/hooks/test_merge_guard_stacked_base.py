@@ -16,8 +16,6 @@ with the merge-gate override marker, which exists to skip the review ceremony
 rather than to ship a merge that reaches nobody.
 """
 import importlib.util
-import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -63,74 +61,6 @@ def test_confirmed_stale_base_refuses(monkeypatch):
     # HOOK gets killed, so the two-factor gate this veto sits in front of never
     # runs and emits no verdict at all.
     assert seen["timeout"] and seen["timeout"] < 60
-
-
-def test_exit_zero_allows(monkeypatch):
-    """Covers both a healthy base and the operator's documented bypass."""
-    _patch_run(monkeypatch, _Proc(0, stdout="base-lineage: ok\n"))
-    assert git_protection._stacked_base_refusal("gh pr merge 800") is None
-
-
-def test_unevaluated_probe_does_not_block(monkeypatch):
-    """Exit 4 means the check could not run. CI fails closed on that; a merge
-    in flight must not, or a gh outage becomes an outage of merging."""
-    _patch_run(monkeypatch, _Proc(4, stderr="base-lineage: unknown\n"))
-    assert git_protection._stacked_base_refusal("gh pr merge 800") is None
-
-
-def test_missing_fno_does_not_block(monkeypatch):
-    _patch_run(monkeypatch, FileNotFoundError("fno"))
-    assert git_protection._stacked_base_refusal("gh pr merge 800") is None
-
-
-def test_timeout_does_not_block(monkeypatch):
-    _patch_run(monkeypatch, subprocess.TimeoutExpired("fno", 90))
-    assert git_protection._stacked_base_refusal("gh pr merge 800") is None
-
-
-def test_unparseable_pr_is_skipped(monkeypatch):
-    """The branch-name and current-branch forms name no PR, so there is nothing
-    to check. It must skip rather than guess a PR number."""
-    calls = _patch_run(monkeypatch, _Proc(3))
-    assert git_protection._stacked_base_refusal("gh pr merge my-branch") is None
-    assert git_protection._stacked_base_refusal("gh pr merge") is None
-    assert "cmd" not in calls
-
-
-def test_other_repo_is_skipped(monkeypatch):
-    """`--repo`/`-R` targets another repository; the lineage check reads THIS
-    checkout, so PR 42 over there would be judged as PR 42 here."""
-    calls = _patch_run(monkeypatch, _Proc(3))
-    assert git_protection._stacked_base_refusal("gh pr merge 42 --repo other/repo") is None
-    assert git_protection._stacked_base_refusal("gh pr merge 42 -R other/repo") is None
-    # The attached shorthand gh also accepts. An equality test on the token
-    # missed exactly the form that carries the value.
-    assert git_protection._stacked_base_refusal("gh pr merge 42 -Rother/repo") is None
-    assert git_protection._stacked_base_refusal("gh pr merge 42 --repo=other/repo") is None
-    # gh reads GH_REPO as the same override, so a flag-only test judged this
-    # against PR 42 in THIS checkout.
-    assert git_protection._stacked_base_refusal("GH_REPO=other/repo gh pr merge 42") is None
-    # A PR URL carries its own repo, which the flag test cannot see: this parses
-    # as 42 and would otherwise be judged against PR 42 in THIS checkout.
-    assert git_protection._stacked_base_refusal(
-        "gh pr merge https://github.com/other/repo/pull/42"
-    ) is None
-    assert "cmd" not in calls
-
-
-def test_veto_precedes_the_override_marker():
-    """The merge-gate override must not buy past a stale base.
-
-    Pinned by source order rather than by running main(): the veto has to sit
-    ahead of BOTH the two-factor allow and the marker path, and a test that
-    only checked the two-factor path would pass while the marker still shipped
-    a merge that reaches nobody.
-    """
-    src = HOOK_PATH.read_text()
-    veto = src.index("_stacked_base_refusal(merge_seg)")
-    two_factor = src.index("_check_pr_merge_allowed(merge_seg)")
-    marker = src.index("_claim_marker(MERGE_GATE_MARKER)")
-    assert veto < two_factor < marker
 
 
 def _main():

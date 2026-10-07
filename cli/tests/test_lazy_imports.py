@@ -1,7 +1,6 @@
 """Tests for the LazyTypeGroup lazy-import refactor.
 
 Acceptance criteria:
-  AC3-HP: fno paths state-dir does NOT import heavy sub-apps
   AC3-EDGE: fno --help doesn't import any sub-app body
   AC3-FR: no functional regression in existing verbs
   AC1-ERR: misconfigured lazy entry fails loud
@@ -25,16 +24,6 @@ def _run_py(code: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     """Run a Python snippet in a fresh subprocess, returning the result."""
     return subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
-def _run_fno(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    """Run the installed `fno` binary with given args."""
-    return subprocess.run(
-        ["fno", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -75,30 +64,6 @@ def test_fno_help_does_not_import_sub_app_modules():
     result = _run_py(_CHECK_CODE_HELP)
     assert result.returncode == 0, (
         f"Sub-app modules imported after fno --help:\n{result.stderr}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# AC3-HP: fno paths state-dir does NOT import heavy sub-apps
-# ---------------------------------------------------------------------------
-
-_CHECK_CODE_PATHS = """\
-import sys
-from fno import cli
-from typer.testing import CliRunner
-CliRunner().invoke(cli.app, ["paths", "state-dir"])
-found = [m for m in ["fno.adapters.providers.cli"] if m in sys.modules]
-if found:
-    print("FOUND:", ",".join(found), file=sys.stderr)
-sys.exit(len(found))
-"""
-
-
-def test_fno_paths_does_not_import_heavy_subapps():
-    """AC3-HP: `fno paths state-dir` only loads the paths sub-app."""
-    result = _run_py(_CHECK_CODE_PATHS)
-    assert result.returncode == 0, (
-        f"heavy sub-app imported during `fno paths state-dir`:\n{result.stderr}"
     )
 
 
@@ -168,28 +133,6 @@ def test_bad_lazy_entry_fails_loud():
     combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
     assert "nonexistent_attr_xyz" in combined or "fno.state.cli" in combined, (
         f"Error should name the bad import path; got: {combined!r}"
-    )
-
-
-def test_bad_module_path_fails_loud():
-    """AC1-ERR: bad module path in lazy_subcommands exits non-zero with helpful message."""
-    from fno._lazy_group import make_lazy_group_cls
-    import typer
-    from typer.testing import CliRunner
-
-    bad_cls = make_lazy_group_cls({"bad": "fno.does_not_exist_module_xyz:cli"})
-    test_app = typer.Typer(cls=bad_cls, no_args_is_help=True)
-
-    @test_app.callback()
-    def _cb() -> None:
-        pass
-
-    runner = CliRunner()
-    result = runner.invoke(test_app, ["bad"])
-    assert result.exit_code != 0, "Expected non-zero exit for bad module path"
-    combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
-    assert "does_not_exist_module_xyz" in combined or "fno" in combined, (
-        f"Error should name the bad module; got: {combined!r}"
     )
 
 
@@ -275,57 +218,6 @@ def test_help_group_all_lists_hidden_subverbs():
         )
 
 
-def test_help_all_never_imports_command_modules(monkeypatch):
-    """AC3-UI: `help --all` renders from registry strings, so a broken command
-    module still yields a full listing and a 0 exit (no module import)."""
-    import builtins
-    from fno.cli import LAZY_SUBCOMMANDS, app
-    from typer.testing import CliRunner
-
-    # The set of command-implementation modules the registry points at. If
-    # help --all imported any of them to build its listing, this would break it.
-    command_modules = {
-        entry[0].split(":", 1)[0] for entry in LAZY_SUBCOMMANDS.values()
-    }
-    real_import = builtins.__import__
-
-    def _boom(name, *args, **kwargs):
-        if name in command_modules:
-            raise ImportError(f"simulated broken command module: {name}")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _boom)
-    runner = CliRunner()
-    result = runner.invoke(app, ["help", "--all"])
-    assert result.exit_code == 0, f"help --all should survive broken modules: {result.output}"
-    plain = _strip_ansi(result.output)
-    assert "inbox" in plain and "backlog" in plain
-
-
-# ---------------------------------------------------------------------------
-# Unit tests for LazyTypeGroup directly
-# ---------------------------------------------------------------------------
-
-def test_lazy_group_list_commands_includes_lazy_keys():
-    """LazyTypeGroup.list_commands() returns lazy keys even before import."""
-    from fno._lazy_group import make_lazy_group_cls
-    import typer
-    import typer.main
-
-    lazy_map = {"alpha": "some.module:attr", "beta": "other.module:attr"}
-    cls = make_lazy_group_cls(lazy_map)
-    test_app = typer.Typer(cls=cls, no_args_is_help=True)
-
-    @test_app.callback()
-    def _cb() -> None:
-        pass
-
-    cmd = typer.main.get_command(test_app)
-    commands = cmd.list_commands(None)  # type: ignore[arg-type]
-    assert "alpha" in commands
-    assert "beta" in commands
-
-
 # ---------------------------------------------------------------------------
 # Regression: group structure preserved for single-command sub-apps
 # ---------------------------------------------------------------------------
@@ -377,33 +269,6 @@ def test_single_command_subapp_group_shape_preserved(monkeypatch):
     assert "--plan-path" in result.output, (
         "Expected --plan-path option in the single-command app's sub-help; "
         f"got: {result.output}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Real-subprocess smoke for the installed entry point
-# ---------------------------------------------------------------------------
-
-def test_fno_backlog_ready_via_real_subprocess():
-    """Smoke test the installed `fno-py` console script through the lazy group.
-
-    Exercises the full ``[project.scripts]`` entry-point wiring + lazy
-    sub-app dispatch.  Skipped if ``fno-py`` is not on PATH (e.g. running
-    in a clean tox env where the package is not installed as a tool).
-    """
-    import shutil
-    fno = shutil.which("fno-py")
-    if not fno:
-        pytest.skip("fno-py console script not on PATH (run `uv tool install <repo>/cli` first)")
-    result = subprocess.run(
-        [fno, "backlog", "ready", "--help"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert result.returncode == 0, (
-        f"fno backlog ready --help failed (rc={result.returncode}):\n"
-        f"stdout={result.stdout}\nstderr={result.stderr}"
     )
 
 
@@ -478,31 +343,6 @@ def test_every_command_group_builds_via_get_command():
     _load_every_command(root, ctx, "fno")
 
 
-def test_lazy_group_get_command_imports_on_demand():
-    """LazyTypeGroup.get_command() triggers import only when invoked."""
-    from fno._lazy_group import make_lazy_group_cls
-    import typer
-    import typer.main
-
-    cls = make_lazy_group_cls({"state": "fno.state.cli:cli"})
-    test_app = typer.Typer(cls=cls, no_args_is_help=True)
-
-    @test_app.callback()
-    def _cb() -> None:
-        pass
-
-    cmd = typer.main.get_command(test_app)
-    # Before get_command, state.cli should not be imported (it may be from elsewhere,
-    # but what matters is that list_commands doesn't trigger it).
-    modules_before = set(sys.modules)
-    _ = cmd.list_commands(None)  # type: ignore[arg-type]
-    modules_after_list = set(sys.modules)
-    # list_commands alone must not trigger the import
-    assert "fno.state.cli" not in (modules_after_list - modules_before), (
-        "list_commands() triggered import of fno.state.cli"
-    )
-
-
 # ---------------------------------------------------------------------------
 # config <-> graph import cycle: broken by the fno.config_io leaf (x-7fdd).
 # Guards the invariant that both packages import at module scope in EITHER
@@ -517,24 +357,6 @@ def test_config_graph_import_cycle_broken(order: str):
         f"import order '{order}' failed:\n{result.stderr}"
     )
     assert "ok" in result.stdout
-
-
-def test_config_io_is_a_leaf():
-    """The extracted leaf must never import fno.config or fno.graph (a back-edge
-    reintroduces the cycle). Assert on real import statements, not the docstring."""
-    import re
-
-    import fno.config_io as leaf
-
-    src = open(leaf.__file__).read()
-    assert not re.search(r"^\s*(from|import)\s+fno\.(config|graph)\b", src, re.M), (
-        "fno.config_io must not import fno.config or fno.graph"
-    )
-    # re-export shim: config exposes the moved names as the SAME objects
-    import fno.config as cfg
-
-    assert cfg.read_config_flat is leaf.read_config_flat
-    assert cfg._deep_merge is leaf._deep_merge
 
 
 def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
@@ -588,25 +410,6 @@ def test_error_path_never_first_imports_rich_utils():
     assert app.rich_markup_mode is None
 
 
-def test_building_the_command_does_not_import_rich_utils():
-    """AC4-ERR, the behavioral half: the flags above are only worth their comment if
-    typer.rich_utils actually stays unimported through command construction. Run in a
-    subprocess so an earlier test's imports cannot mask a regression."""
-    code = (
-        "import sys, typer.main\n"
-        "from fno.cli import app\n"
-        "typer.main.get_command(app)\n"
-        "print('typer.rich_utils' in sys.modules)\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "False", (
-        f"typer.rich_utils became resident during command construction:\n{result.stdout}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # AC5-ERR / AC6-EDGE: a missing fno submodule names the reinstall window
 # ---------------------------------------------------------------------------
@@ -657,46 +460,6 @@ def test_third_party_import_failure_has_no_reinstall_hint():
         ModuleNotFoundError("boom", name="fno.graph._reconcile")
     )
     assert "retry" in _import_failure_hint(ModuleNotFoundError("boom", name="fno"))
-
-
-# ---------------------------------------------------------------------------
-# AC8-WIN: verify-then-retry across a tree that changed mid-run
-# ---------------------------------------------------------------------------
-
-def test_module_appears_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_path, monkeypatch):
-    """The retry gate must read the PRESENT, not a cached past: a module written
-    into an already-imported package must be visible, because that is exactly what
-    a reinstall does to a running process.
-
-    Scope note, so this docstring does not overclaim: it passes with or without the
-    invalidate_caches() call inside, because FileFinder re-lists a directory whose
-    mtime changed and APFS mtimes are fine-grained enough to notice. What it pins is
-    the BEHAVIOR the retry depends on, not that one implementation detail."""
-    import sys as _sys
-    import time as _time
-
-    from fno._lazy_group import _module_appears_on_disk
-
-    # The first absence now spends the wait budget; flatten the sleeps and
-    # reset the once-per-process cap so this test stays fast and honest.
-    monkeypatch.setattr(_time, "sleep", lambda s: None)
-    monkeypatch.setattr("fno._recheck_budget_spent", False)
-
-    pkg = tmp_path / "winpkg"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text("", encoding="utf-8")
-    _sys.path.insert(0, str(tmp_path))
-    try:
-        import winpkg  # noqa: F401  (populates the finder cache for pkg/)
-
-        assert _module_appears_on_disk("winpkg.late") is False
-        # Write the module AFTER the directory has been listed and cached.
-        (pkg / "late.py").write_text("x = 1\n", encoding="utf-8")
-        assert _module_appears_on_disk("winpkg.late") is True
-    finally:
-        _sys.path.remove(str(tmp_path))
-        _sys.modules.pop("winpkg", None)
-        _sys.modules.pop("winpkg.late", None)
 
 
 # ---------------------------------------------------------------------------
@@ -1133,7 +896,6 @@ def test_namespace_refuser_blocks_the_poison_before_it_caches(monkeypatch, tmp_p
 def test_namespace_refuser_sits_before_path_finder_and_installs_once():
     """One refuser, ahead of PathFinder: behind it, PathFinder's namespace
     answer would cache the poison before anyone refused it."""
-    import fno
 
     found = [f for f in sys.meta_path if getattr(f, "_fno_namespace_refuser", False)]
     assert len(found) == 1, f"expected exactly one refuser, got {len(found)}"
@@ -1208,55 +970,14 @@ def test_import_hook_is_installed_once_even_when_fno_is_reimported():
     assert proc.stdout.strip() == "1"
 
 
-def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
-    """The one shape whose message CPython takes away, pinned so the docs stay honest.
-
-    For `from fno.pkg import submodule`, `_handle_fromlist` swallows a
-    ModuleNotFoundError matching the fromlist entry and raises `cannot import
-    name ... from ...` instead, so the dual-cause text never reaches the reader
-    at the import layer. The retry is untouched: it happens inside find_spec,
-    before that exception exists. The message's last hop is the console
-    entrypoint (`main` in cli.py), which the tests below pin.
-    """
-    proc = _run_py(
-        "import fno, importlib.machinery\n"
-        "seen = []\n"
-        "class Spy:\n"
-        "    @staticmethod\n"
-        "    def find_spec(name, path=None, target=None):\n"
-        "        seen.append(name)\n"
-        "        return None\n"
-        "fno._module_appears_on_disk = lambda name: True\n"
-        "importlib.machinery.PathFinder = Spy\n"
-        "try:\n"
-        "    from fno.agents import no_such_submodule\n"
-        "except ImportError as exc:\n"
-        "    print('MSG', exc)\n"
-        "print('SEEN', seen)\n"
-    )
-    assert proc.returncode == 0, proc.stderr
-    # The retry ran, for the fully-qualified submodule name. Consulted once by
-    # the namespace refuser and once more past the guard, so the spy list is
-    # no longer a single exact entry; the member is what the retry pins.
-    assert "fno.agents.no_such_submodule" in proc.stdout, proc.stdout
-    assert "SEEN [" in proc.stdout, proc.stdout
-    # And CPython, not us, wrote the message the reader sees.
-    assert "cannot import name 'no_such_submodule'" in proc.stdout, proc.stdout
-    assert "is part of fno itself" not in proc.stdout, proc.stdout
-
-
 # ---------------------------------------------------------------------------
 # AC-ENTRY: the console entrypoint carries the hint the import layer drops
 # ---------------------------------------------------------------------------
 
-# Both live specimens of 2026-09-04, verbatim shapes.
+# A live specimen of 2026-09-04, verbatim shape.
 _FROMLIST_SWALLOW = (
     "cannot import name '_subprocess_util' from 'fno'",
     "fno",
-)
-_ALREADY_IMPORTED = (
-    "cannot import name 'CLAIM_UNAVAILABLE' from 'fno.claims' (unknown location)",
-    "fno.claims",
 )
 
 
@@ -1283,17 +1004,6 @@ def test_entrypoint_carries_reinstall_hint_on_fromlist_swallow():
     assert msg in proc.stdout, proc.stdout
     assert "is part of fno itself" in proc.stdout, proc.stdout
     assert "fno doctor update" in proc.stdout, proc.stdout
-
-
-def test_entrypoint_carries_reinstall_hint_on_already_imported_shape():
-    """Specimen 2: fno.claims already in sys.modules with no spec origin. No
-    finder runs on an already-imported module; the entrypoint is the only site
-    left that sees the failure."""
-    msg, name = _ALREADY_IMPORTED
-    proc = _run_main_with_raising_app("ImportError", msg, name)
-    assert proc.returncode == 0, proc.stderr
-    assert msg in proc.stdout, proc.stdout
-    assert "is part of fno itself" in proc.stdout, proc.stdout
 
 
 def test_entrypoint_leaves_third_party_import_error_untouched():

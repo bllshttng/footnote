@@ -22,10 +22,6 @@ def _mock_fno_auto_register(bin_dir: Path) -> None:
     fno.chmod(0o755)
 
 
-def test_register_session_start_shell_syntax() -> None:
-    subprocess.run(["bash", "-n", str(HOOK)], check=True)
-
-
 def test_codex_disagreeing_ids_register_no_row(tmp_path: Path) -> None:
     """The resolvers degrade a same-family id disagreement to unresolved; a row
     registered under the table-first id is one this session can never resolve

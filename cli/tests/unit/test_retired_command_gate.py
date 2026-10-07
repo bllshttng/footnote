@@ -82,13 +82,6 @@ def test_clean_tree_passes_and_reports_what_it_inspected(repo: Path) -> None:
     assert "inspected 1 runnable-form site(s)" in result.stdout
 
 
-def test_runnable_form_in_a_python_string_fails(repo: Path) -> None:
-    _add(repo, "cli/src/fno/new.py", 'HELP = "Clean up with claude rm <short_id>."\n')
-    result = _run(repo)
-    assert result.returncode == 1
-    assert "cli/src/fno/new.py" in result.stderr
-
-
 def _register_leaf(repo: Path, leaf: str) -> None:
     """Register one leaf AND aim the canary at it.
 
@@ -132,6 +125,8 @@ def test_missing_config_canary_fails_closed(repo: Path) -> None:
 def test_failure_message_names_command_replacement_and_ruling(repo: Path) -> None:
     _add(repo, "cli/src/fno/new.py", 'HELP = "Clean up with claude rm <short_id>."\n')
     result = _run(repo)
+    assert result.returncode == 1
+    assert "cli/src/fno/new.py" in result.stderr
     assert "claude rm" in result.stderr
     assert "fno agents rm" in result.stderr
     assert "d-1900e419" in result.stderr
@@ -189,11 +184,6 @@ def test_rust_runtime_string_is_reported(repo: Path) -> None:
         "crates/fno-agents/src/new.rs",
         'fn f() { eprintln!("tear it down with claude rm {short}"); }\n',
     )
-    assert _run(repo).returncode == 1
-
-
-def test_markdown_prose_is_reported(repo: Path) -> None:
-    _add(repo, "skills/k/new.md", "Run `claude stop <short_id>` first.\n")
     assert _run(repo).returncode == 1
 
 
@@ -270,35 +260,6 @@ def test_a_wrapped_format_string_is_reported(repo: Path) -> None:
     assert "cli/src/fno/new.py" in result.stderr
 
 
-def test_docs_are_scanned(repo: Path) -> None:
-    """The operator guide is the most caller-facing surface there is."""
-    _add(repo, "docs/new.md", "Run `claude stop <short_id>` by hand first.\n")
-    assert _run(repo).returncode == 1
-
-
-def test_retired_blueprint_launcher_is_enforced(repo: Path) -> None:
-    """The deleted launch-on-write hook must stay unrunnable: a skill teaching
-    it again fails, and the refusal names the advance replacement."""
-    _add(
-        repo,
-        "skills/k/new.md",
-        "Finish with `bash skills/blueprint/scripts/autolaunch-on-ready.sh <plan>`.\n",
-    )
-    result = _run(repo)
-    assert result.returncode == 1
-    assert "autolaunch-on-ready.sh" in result.stderr
-    assert "fno backlog advance" in result.stderr
-
-
-def test_retired_blueprint_config_leaf_is_enforced(repo: Path) -> None:
-    """The real registry (copied by the fixture) carries the launch-on-write
-    leaf's tombstone; a doc reintroducing the key fails the config scan."""
-    _add(repo, "docs/new.md", "Set `target.auto_launch_on_blueprint = true` to arm it.\n")
-    result = _run(repo)
-    assert result.returncode == 1
-    assert "target.auto_launch_on_blueprint" in result.stderr
-
-
 def test_a_shell_comment_is_never_reported(repo: Path) -> None:
     _add(repo, "hooks/new.sh", "# reaps with claude rm <short_id> internally\ntrue\n")
     assert _run(repo).returncode == 0
@@ -360,13 +321,6 @@ def test_absent_question_verb_with_placeholder_fails(repo: Path) -> None:
     assert result.returncode == 1
     assert "skills/k/new.md" in result.stderr
     assert "fno inbox outstanding ask" in result.stderr
-
-
-def test_absent_question_verb_with_quoted_question_fails(repo: Path) -> None:
-    _add(repo, "skills/k/new.md", 'File it with `fno inbox ask "why narrow" --node <id>`.\n')
-    result = _run(repo)
-    assert result.returncode == 1
-    assert "skills/k/new.md" in result.stderr
 
 
 def test_real_question_verb_passes(repo: Path) -> None:

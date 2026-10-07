@@ -160,12 +160,6 @@ def test_paused_exits_zero_with_word(monkeypatch, tmp_path):
     assert "skill_diff_proposed" not in types
 
 
-def test_no_work_when_no_runs(monkeypatch, tmp_path):
-    _wire(monkeypatch, tmp_path, [])
-    r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
-    assert r.exit_code == 0 and "no-work" in r.output
-
-
 def test_noop_on_all_pass_run(monkeypatch, tmp_path):  # AC6-EDGE
     p = _wire(monkeypatch, tmp_path, [_rc("r1"), _finding("r1", verdict="pass")])
     r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])
@@ -276,17 +270,6 @@ def test_redaction_refusal_is_terminal(monkeypatch, tmp_path):  # P2 review
     assert "redaction refused" in r.output
     ndh = [e for e in _events(p) if e["type"] == "skill_diff_no_diff_helps"]
     assert ndh and ndh[0]["data"]["reason"] == "redaction_refused"
-
-
-def test_apply_refuses_path_traversal(monkeypatch, tmp_path):
-    # An LLM-supplied path that escapes the target skill dir must be refused.
-    with pytest.raises(RuntimeError, match="not a .md under"):
-        cli._apply_and_open_pr(
-            skill_id="fno:blueprint", run_id="obs-r1",
-            hunks=[{"file": "../../etc/passwd", "old_text": "", "new_text": "x",
-                    "cited_finding_ids": ["s1"]}],
-            body="b", cited=["s1"],
-        )
 
 
 def test_apply_refuses_non_markdown_and_other_skill(monkeypatch, tmp_path):

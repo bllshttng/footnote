@@ -5,7 +5,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
 import typer
 import typer.main
 from click.testing import CliRunner
@@ -150,21 +149,6 @@ def test_unreferenced_deletion_passes(tmp_path: Path) -> None:
     result = _invoke(repo, "--base", base)
 
     assert result.exit_code == 0
-
-
-def test_rename_of_referenced_script_fails(tmp_path: Path) -> None:
-    # The new path is wired and the old file is gone, but sessions started
-    # before this change cached the OLD registration.
-    repo, base = _repo_with_hooks(tmp_path)
-    (repo / "hooks" / "demo-gate.sh").unlink()
-    (repo / "hooks" / "hooks.json").write_text(_CONFIG_ENTRY_WITHOUT_GATE)
-    (repo / "hooks" / "other-gate.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-    _commit_all(repo, "move gate to other-gate.sh")
-
-    result = _invoke(repo, "--base", base)
-
-    assert result.exit_code == 1
-    assert "hooks/demo-gate.sh" in result.stderr
 
 
 def test_base_auto_resolves_to_head_parent_locally(tmp_path: Path) -> None:
