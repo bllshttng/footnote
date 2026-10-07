@@ -6561,45 +6561,51 @@ pub(crate) fn run_reconcile_sweep(
 
 /// `agent.watch`: the subscription face of the registry.
 ///
-/// `{"since": {"mtime_nanos", "len"} | null}` in; one answer out. The first
+/// `{"since": <version> | null}` in; one answer out. The first
 /// call (`since` absent) serves the FULL document - connect, payload. Later
-/// calls serve the full document again only when the registry's (mtime, len)
-/// stamp moved - which is exactly what any write (the sweep, `agent.report`,
+/// calls serve the full document again only when the registry's version
+/// (the table revision, or the legacy file's (mtime, len) stamp) moved - which is exactly what any write (the sweep, `agent.report`,
 /// spawn, rm, a Python-side CLI verb) does to the file - and a bare version
 /// echo when it did not, so a polling reader costs one stat per tick instead
 /// of one file read. The caller keeps its read off the file entirely: the
 /// daemon is the reader now, the served rows are the served facts.
 fn handle_watch(ctx: &Ctx, req: &Request) -> Response {
-    let since = req.params.get("since").and_then(|v| {
-        let mtime = v.get("mtime_nanos")?.as_i64()?;
-        let len = v.get("len")?.as_u64()?;
-        Some((mtime, len))
-    });
     let path = ctx.home.registry_json();
-    let meta = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        // A vanished registry is a legitimate empty answer, not an error: the
-        // watcher clears (the same contract the file reader's vanish arm has).
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Response::ok(
-                req.id,
-                json!({"version": Value::Null, "doc": {"agents": []}}),
-            );
+    // After the table import the path is a fence directory whose stat never
+    // moves, so the version carries the table revision; before it, the file
+    // stamp.
+    let version = if path.is_dir() {
+        match crate::registry_store::read_versioned(&path) {
+            // The wire keeps the (mtime_nanos, len) shape the agents view
+            // already parses; the revision rides the first slot.
+            Ok((_, revision)) => json!({"mtime_nanos": revision, "len": 0}),
+            Err(e) => return registry_read_failed(req.id, e),
         }
-        Err(e) => {
-            return registry_read_failed(req.id, state::StateError::Io(e));
-        }
+    } else {
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            // A vanished registry is a legitimate empty answer, not an error:
+            // the watcher clears (the same contract the file reader's vanish
+            // arm has).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Response::ok(
+                    req.id,
+                    json!({"version": Value::Null, "doc": {"agents": []}}),
+                );
+            }
+            Err(e) => {
+                return registry_read_failed(req.id, state::StateError::Io(e));
+            }
+        };
+        let mtime_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        json!({"mtime_nanos": mtime_nanos, "len": meta.len()})
     };
-    let mtime_nanos = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0);
-    let len = meta.len();
-    let version = json!({"mtime_nanos": mtime_nanos, "len": len});
-    let unchanged = matches!(&since, Some((m, l)) if *m == mtime_nanos && *l == len);
-    if unchanged {
+    if req.params.get("since") == Some(&version) {
         return Response::ok(req.id, json!({"version": version, "doc": null}));
     }
     let registry = match load_registry_asserted(&path) {

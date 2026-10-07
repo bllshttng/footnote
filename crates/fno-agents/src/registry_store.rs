@@ -88,6 +88,8 @@ fn save_document(
         .and_then(Value::as_u64)
         .is_some_and(|v| v >= 1)
     {
+        // A wrong-typed version is a plain parse error, not an invariant.
+        serde_json::from_value::<Registry>(Value::Object(object.clone()))?;
         return Err(failure(path, "registry has no positive schema_version"));
     }
     let rows = object
@@ -257,9 +259,25 @@ pub fn replace_document(path: &Path, document: Value) {
 /// replace the table document.
 pub fn seed_raw(path: &Path, body: impl AsRef<[u8]>) {
     if path.is_dir() {
-        replace_document(path, serde_json::from_slice(body.as_ref()).unwrap());
+        let body = body.as_ref();
+        let document = if body.iter().all(u8::is_ascii_whitespace) {
+            serde_json::to_value(Registry::default()).unwrap()
+        } else {
+            serde_json::from_slice(body).unwrap()
+        };
+        replace_document(path, document);
     } else {
         std::fs::write(path, body).unwrap();
+    }
+}
+
+/// The registry at `path` as pretty JSON text: the legacy file before the
+/// import, the table document after. Tests read rows back here.
+pub fn read_raw(path: &Path) -> String {
+    if path.is_dir() {
+        serde_json::to_string_pretty(&read(path).unwrap()).unwrap()
+    } else {
+        std::fs::read_to_string(path).unwrap()
     }
 }
 
@@ -295,7 +313,9 @@ fn retire_registry(path: &Path) -> Result<Value, StateError> {
     let pending = parent.join(format!(".{filename}.table-fence"));
     let source = parent
         .join("registry-snapshots")
-        .join(format!("{filename}.legacy"));
+        // Outside the `registry.json.` snapshot prefix, so rotation never
+        // counts or prunes the import source.
+        .join(format!("legacy.{filename}"));
     if path.is_dir() {
         let marker: Value = serde_json::from_slice(&std::fs::read(path.join("migration.json"))?)?;
         if marker.get("storage") != Some(&json!("graph.db")) {
