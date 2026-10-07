@@ -394,11 +394,11 @@ fn fold_wire_line(line: &str, rep: &mut Report) {
     }
     if t.contains("FAILED") || t.contains("needs a manual finish") {
         rep.needs_human.push(format!("harness-wiring: {t}"));
-    } else if t.contains(": installed") {
+    } else if t.contains(": installed") || t.contains(": already installed") {
         rep.done.push(format!("harness-wiring: {t}"));
         // A fresh install asks for a restart; an "already installed" line
         // changed nothing, so it must not.
-        if !t.contains("already installed") {
+        if !t.contains("already") {
             rep.restart_needed = true;
         }
     } else {

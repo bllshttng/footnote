@@ -174,7 +174,7 @@ fn the_marker_line_carries_version_and_utc_stamp() {
     assert!(line.contains(env!("CARGO_PKG_VERSION")));
     // YYYY-MM-DDTHH:MM:SSZ
     assert_eq!(line.len(), 4 + env!("CARGO_PKG_VERSION").len() + 1 + 20);
-    assert_eq!(&line[line.len() - 21..line.len() - 17], "20");
+    assert_eq!(&line[line.len() - 20..line.len() - 18], "20");
     assert!(line.ends_with('Z'));
     assert_eq!(
         line.as_bytes()[4 + env!("CARGO_PKG_VERSION").len() + 11],
