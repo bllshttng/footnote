@@ -4,7 +4,7 @@
 fno agents spawn -H claude -m sonnet --effort high --name <name> '/fno:target <node>'
 ```
 
-The payload starts with `/fno:`. The default substrate is `thread`. Add `-Y` to bypass permissions (claude `bypassPermissions`). Add `--substrate pane` only when a human must watch the worker.
+The payload starts with `/fno:`. The default substrate is `thread`. Add `-Y` to bypass permissions (claude `bypassPermissions`). If a human must watch the worker, add `--substrate pane`.
 
 Efforts: `low`, `medium`, `high`, `xhigh`, `max`. Permission modes: `default`, `acceptEdits`, `auto`, `dontAsk`, `plan`, `bypassPermissions`. Models: `opus`, `sonnet`, `haiku`, `fable`, or a full model id.
 
