@@ -35,6 +35,7 @@ def test_every_live_verb_is_classified_exactly_once():
     the two positive controls (a known creation verb, a known surviving read
     verb) sit in the stated classes."""
     tracker_owned = footnote_owned = 0
+    graph_cli._classify_backlog_verbs()  # lazy: stamps the markers this reads
     for label, info in _registry_labels():
         cb = info.callback
         assert cb is not None, label

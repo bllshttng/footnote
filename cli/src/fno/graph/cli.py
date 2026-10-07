@@ -198,6 +198,8 @@ def _graph_callback(
         help="Output structured JSON to stdout. Diagnostics go to stderr.",
     ),
 ) -> None:
+    _classify_backlog_verbs()
+
     from fno.handoff.output import merge_json_flag
 
     merge_json_flag(ctx, json_output)
@@ -7359,7 +7361,16 @@ def iter_backlog_registry():
     ]
 
 
+_backlog_verbs_classified = False
+
+
 def _classify_backlog_verbs() -> None:
+    # Runs at first backlog use, not import: note_cli imports this module to
+    # register `note`, so classifying at import sees the registry before that
+    # decorator ran and reports `note` missing (circular-import race).
+    global _backlog_verbs_classified
+    if _backlog_verbs_classified:
+        return
     import functools
 
     apps = iter_backlog_registry()
@@ -7396,6 +7407,7 @@ def _classify_backlog_verbs() -> None:
             f"classified verbs missing from the live registry (renamed or "
             f"removed?): {sorted(unknown)}"
         )
+    _backlog_verbs_classified = True
 
 
 from fno.graph import note_cli  # noqa: E402,F401
@@ -7415,5 +7427,3 @@ register_lifecycle_commands(
     lambda: _graph_path(),
     lambda *a, **k: _project_plans_from_graph(*a, **k),
 )
-
-_classify_backlog_verbs()
