@@ -64,6 +64,10 @@ pub(crate) fn open_directory(dir: &Path) -> Result<Connection, String> {
     connection
         .execute_batch(DDL)
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS claim_history (id INTEGER PRIMARY KEY, retired_at INTEGER NOT NULL, record TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS claims_archive_delete BEFORE DELETE ON claims BEGIN
+            INSERT INTO claim_history(retired_at, record) VALUES (CAST((julianday('now')-2440587.5)*86400000 AS INTEGER), json_object('key',old.key,'holder',old.holder,'schema_version',old.schema_version,'acquired_at',old.acquired_at,'expires_at',old.expires_at,'pid',old.pid,'pid_unavailable',json(CASE WHEN old.pid_unavailable THEN 'true' ELSE 'false' END),'host',old.host,'machine_id',old.machine_id,'reason',old.reason,'harness',old.harness,'session_id',old.session_id,'pid_provenance',old.pid_provenance,'metadata',json(old.metadata)));
+        END;").map_err(|e| e.to_string())?;
     import_lockfiles(&mut connection, dir)?;
     Ok(connection)
 }
@@ -93,6 +97,7 @@ fn import_lockfiles(connection: &mut Connection, dir: &Path) -> Result<(), Strin
         return Ok(());
     }
     let source = retire_directory(dir)?;
+    migrate_auxiliary(dir, source.as_deref())?;
     let records = match source.as_deref() {
         Some(source) => read_legacy_directory(source),
         None => Ok(Vec::new()),
@@ -233,7 +238,34 @@ fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
     Ok(source)
 }
 
+fn migrate_auxiliary(dir: &Path, source: Option<&Path>) -> Result<(), String> {
+    if let Some(source) = source {
+        let auxiliary = crate::claims_root::auxiliary_dir(dir);
+        for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            if text.ends_with(".held-requests")
+                || text.ends_with(".queue.d")
+                || text.ends_with(".priority.d")
+                || text.ends_with(".full.d")
+                || text == "build-waiters"
+            {
+                std::fs::create_dir_all(&auxiliary).map_err(|e| e.to_string())?;
+                let target = auxiliary.join(&name);
+                if target.exists() {
+                    continue;
+                }
+                std::fs::rename(entry.path(), &target)
+                    .map_err(|e| format!("claims auxiliary migration {}: {e}", target.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn insert_record(connection: &Connection, record: &ClaimRecord) -> Result<(), String> {
+    claims::validate_record(record)?;
     connection.execute("INSERT INTO claims (key, holder, schema_version, acquired_at, expires_at, pid, pid_unavailable, host, machine_id, reason, harness, session_id, pid_provenance, metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)", params![record.key, record.holder, record.schema_version, record.acquired_at, record.expires_at, record.pid, record.pid_unavailable, record.host, record.machine_id, record.reason, record.harness, record.session_id, record.pid_provenance, serde_json::to_string(&record.metadata).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -243,7 +275,7 @@ fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimRecord> {
     let metadata = serde_json::from_str(&metadata).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, Box::new(error))
     })?;
-    Ok(ClaimRecord {
+    let record = ClaimRecord {
         key: row.get(0)?,
         holder: row.get(1)?,
         schema_version: row.get(2)?,
@@ -258,7 +290,15 @@ fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimRecord> {
         session_id: row.get(11)?,
         pid_provenance: row.get(12)?,
         metadata,
-    })
+    };
+    claims::validate_record(&record).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error).into(),
+        )
+    })?;
+    Ok(record)
 }
 
 fn record_for(connection: &Connection, key: &str) -> Result<Option<ClaimRecord>, String> {
@@ -356,6 +396,7 @@ pub(crate) fn acquire(
             && claims::classify_with_session_witness(r, witness) == ClaimState::Stale
     });
     let record = claims::make_claim(key, holder, options);
+    claims::validate_record(&record)?;
     let sql = format!("INSERT INTO claims ({COLUMNS}) VALUES (?1,?2,?3,{CLOCK},CASE WHEN ?4 IS NULL THEN NULL ELSE {CLOCK}+?4 END,?5,?6,?7,?8,?9,?10,?11,?12,?13)
         ON CONFLICT(key) DO UPDATE SET holder=excluded.holder, schema_version=excluded.schema_version,
         acquired_at=MAX(excluded.acquired_at,claims.acquired_at+1), expires_at=excluded.expires_at,
@@ -426,6 +467,7 @@ pub(crate) fn replace_observed_at(
     observed: &ClaimRecord,
     next: &ClaimRecord,
 ) -> Result<Option<ClaimRecord>, String> {
+    claims::validate_record(next)?;
     let connection = open_directory(
         path.parent()
             .ok_or_else(|| "claim locator has no parent".to_string())?,
@@ -555,6 +597,39 @@ pub fn force_release(
     )
 }
 
+pub(crate) fn force_release_observed(
+    key: &str,
+    reason: &str,
+    root: Option<&Path>,
+    expected: &ClaimRecord,
+) -> Result<Value, String> {
+    if key != expected.key || reason.trim().is_empty() {
+        return Err("expected claim key and override reason must match".into());
+    }
+    let dir = crate::claims_root::claims_dir(key, root)?;
+    force_release_observed_in_directory(&dir, key, reason, expected)
+}
+
+pub(crate) fn force_release_observed_in_directory(
+    dir: &Path,
+    key: &str,
+    reason: &str,
+    expected: &ClaimRecord,
+) -> Result<Value, String> {
+    if key != expected.key || reason.trim().is_empty() {
+        return Err("expected claim key and override reason must match".into());
+    }
+    let removed = delete_observed(dir, expected)?;
+    if removed {
+        let mut data = claims::common_event_data(expected);
+        data.insert("override_reason".into(), json!(reason));
+        claims::emit_audit_event(None, "claim_force_overridden", data);
+    }
+    Ok(
+        json!({"key":key,"path":database_path_from_directory(&dir)?,"archived":removed,"force_released":removed,"previous_holder":if removed {Some(&expected.holder)} else {None}}),
+    )
+}
+
 pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
     reap_with_session_witness(root, apply, None, None)
 }
@@ -565,8 +640,20 @@ pub(crate) fn reap_with_session_witness(
     witness: Option<SessionWitness<'_>>,
     recheck: Option<SessionWitness<'_>>,
 ) -> Result<Value, String> {
-    let dir = directory(root)?;
-    let records = records_in(&dir, None, true)?;
+    reap_in_directory(&directory(root)?, apply, witness, recheck, None)
+}
+
+pub(crate) fn reap_in_directory(
+    dir: &Path,
+    apply: bool,
+    witness: Option<SessionWitness<'_>>,
+    recheck: Option<SessionWitness<'_>>,
+    key: Option<&str>,
+) -> Result<Value, String> {
+    let records = records_in(dir, key, true)?
+        .into_iter()
+        .filter(|r| key.is_none_or(|k| r.key == k))
+        .collect::<Vec<_>>();
     let mut would_reap = 0;
     let mut reaped = 0;
     let mut failures = Vec::new();
@@ -583,14 +670,14 @@ pub(crate) fn reap_with_session_witness(
         {
             continue;
         }
-        match delete_observed(&dir, record) {
+        match delete_observed(dir, record) {
             Ok(true) => reaped += 1,
             Ok(false) => {}
             Err(e) => failures.push(e),
         }
     }
     Ok(
-        json!({"apply":apply,"scanned":would_reap,"would_reap":would_reap,"reaped":reaped,"reap_failed":failures,"root":dir}),
+        json!({"apply":apply,"scanned":records.len(),"would_reap":would_reap,"reaped":reaped,"reap_failed":failures,"root":dir}),
     )
 }
 

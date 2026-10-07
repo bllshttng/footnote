@@ -168,26 +168,9 @@ def decode_key(filename: str) -> str:
 
 
 def list_claim_keys(prefix: str | None = None, root: Path | None = None) -> list[str]:
-    """Keys present in the claims dir, by directory walk only.
-
-    Presence, never liveness: a key is listed because its ``.lock`` file
-    exists. No verdict subprocess, no file parse. For callers that only need
-    "is this key claimed" (the undispatched observer), the verdict leg of
-    :func:`fno.claims.core.list_claims` cost 33s under load and its state
-    column was discarded. Skips subdirs (the ``.expired`` archive) and any
-    non-``.lock`` name; a corrupted file still counts as claimed.
-    """
-    cdir = claims_dir(root)
-    if not cdir.is_dir():
-        return []
-    keys = [
-        decode_key(entry.name)
-        for entry in cdir.iterdir()
-        if not entry.is_dir() and entry.name.endswith(".lock")
-    ]
-    if prefix is not None:
-        keys = [key for key in keys if key.startswith(prefix)]
-    return sorted(keys)
+    """Keys in the authoritative native claim store."""
+    from .core import list_claims
+    return sorted(row["key"] for row in list_claims(prefix=prefix,include_stale=True,root=root))
 
 
 def claim_path(key: str, root: Path | None = None) -> Path:
@@ -411,48 +394,19 @@ def parse_claim_dict(raw: dict[str, Any]) -> Claim:
 
 
 def read_claim_file(path: Path) -> Claim:
-    """Read and parse a claim file.
-
-    Raises:
-        ClaimGoneAway: the file disappeared between caller-decision and read.
-        ClaimCorrupted: file is unparseable YAML or fails schema validation.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise ClaimGoneAway(str(path)) from exc
-
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise ClaimCorrupted(f"YAML parse failed for {path}: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise ClaimCorrupted(f"claim file root is not a dict: {path}")
-
-    return parse_claim_dict(data)
+    """Read a logical claim locator through the native table door."""
+    from .core import _native_claim
+    payload = _native_claim("read-path",str(path),[])
+    if payload.get("state") == "free":
+        raise ClaimGoneAway(str(path))
+    return Claim.model_validate(payload)
 
 
 def archive_claim(path: Path, ts_ms: int) -> Path:
-    """Move a (stale or force-released) claim file into the .expired/ archive.
-
-    Returns the archive path. Idempotent: a missing source file is treated
-    as already-archived. The archive name is suffixed with ts_ms so multiple
-    archives of the same key do not collide.
-    """
-    if not path.exists():
-        return path
-    key = decode_key(path.name)
-    archive = expired_archive_path(key, ts_ms, root=path.parent.parent.parent)
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.rename(str(path), str(archive))
-    except FileNotFoundError:
-        # Another process may have won the race and archived to this exact
-        # path first (harmless - report its destination), or `path` vanished
-        # for an unrelated reason and nothing landed at `archive` (report the
-        # original path so a caller's existence check doesn't trust a file
-        # that was never written).
-        if not archive.exists():
-            return path
-    return archive
+    """Retire the observed table generation and return its graph archive locator."""
+    del ts_ms
+    from fno.claims.core import _native_claim
+    claim = read_claim_file(path)
+    import json
+    receipt = _native_claim("force-release", claim.key, ["--claims-dir", str(path.parent), "--reason", "archive observed claim", "--expected-claim", json.dumps(claim.model_dump())])
+    return Path(str(receipt["path"])) if receipt.get("archived") else path

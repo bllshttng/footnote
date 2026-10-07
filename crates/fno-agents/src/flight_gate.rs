@@ -46,7 +46,7 @@ fn now_ms() -> i64 {
 fn requests_path(key: &str, root: Option<&Path>) -> Option<PathBuf> {
     let lock = claims::claim_path(key, root).ok()?;
     Some(
-        lock.parent()?
+        crate::claims_root::auxiliary_dir(lock.parent()?)
             .join(format!("{}.held-requests", claims::encode_key(key))),
     )
 }

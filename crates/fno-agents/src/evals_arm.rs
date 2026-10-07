@@ -419,6 +419,7 @@ fn run_tick_mode(
         }
         Ok(pid) => {
             let opts = claims::AcquireOpts {
+                host: None,
                 pid: Some(pid),
                 pid_unavailable: false,
                 ttl_ms: Some((o.run_timeout_s as i64 + 600) * 1000),

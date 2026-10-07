@@ -32,7 +32,7 @@ pub use crate::claims_root::{
 /// Where the single-flight latch keeps the answers its claims protect. Beside
 /// the claims dir, under the same root, so one resolver owns both.
 const FLIGHT_DIRNAME: &str = ".fno/flight";
-const BUILD_WAITERS_DIRNAME: &str = ".fno/claims/build-waiters";
+const BUILD_WAITERS_DIRNAME: &str = ".fno/claim-aux/build-waiters";
 
 /// Classification of a key's current state (mirrors `types.ClaimState`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +168,7 @@ pub struct AcquireOpts {
     /// `--harness`/`--session-id` so the record names the session the verb
     /// promised, exactly as the Python writer did.
     pub identity: Option<(String, String)>,
+    pub host: Option<String>,
 }
 
 /// Outcome of [`acquire`] (mirrors core.py's acquire/`ClaimHeldByOther`).
@@ -694,7 +695,10 @@ pub(crate) enum ReadError {
     Corrupted(String),
 }
 
-fn validate_record(rec: &ClaimRecord) -> Result<(), String> {
+pub(crate) fn validate_record(rec: &ClaimRecord) -> Result<(), String> {
+    if rec.schema_version == 0 || rec.schema_version > MAX_SUPPORTED_SCHEMA_VERSION {
+        return Err("unsupported claim schema_version".into());
+    }
     if rec.key.is_empty() || rec.holder.is_empty() {
         return Err("claim key/holder must be non-empty".into());
     }
@@ -1516,7 +1520,7 @@ pub(crate) fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRe
         } else {
             Some(opts.pid.unwrap_or_else(std::process::id) as i32)
         },
-        host: hostname(),
+        host: opts.host.clone().unwrap_or_else(hostname),
         pid_unavailable,
         // Omitted, not backfilled with the hostname, when no stable id exists:
         // readers treat a present value as authoritative, so a substitute would

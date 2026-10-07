@@ -36,6 +36,25 @@ pub fn run_claim(args: &[String]) -> i32 {
         );
         return 2;
     };
+    if op == "read-path" {
+        let Some(path) = args.get(1) else {
+            return 2;
+        };
+        match crate::claim_store::read_at_path(std::path::Path::new(path)) {
+            Ok(Some(record)) => {
+                println!("{}", claim_status_value(&record));
+                return 0;
+            }
+            Ok(None) => {
+                println!("{}", serde_json::json!({"state":"free"}));
+                return 0;
+            }
+            Err(error) => {
+                eprintln!("claim read-path: {error}");
+                return 2;
+            }
+        }
+    }
     if op == "root" {
         return run_claim_root(&args[1..]);
     }
@@ -111,6 +130,8 @@ pub fn run_claim(args: &[String]) -> i32 {
     let mut holder: Option<String> = None;
     let mut opts = crate::claims::AcquireOpts::default();
     let mut holding_recovery_lock = false;
+    let mut expected_claim = None;
+    let mut claims_directory: Option<PathBuf> = None;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut take = |name: &str| -> Option<String> {
@@ -121,6 +142,7 @@ pub fn run_claim(args: &[String]) -> i32 {
             v
         };
         match a.as_str() {
+            "--claims-dir" => claims_directory = take("--claims-dir").map(PathBuf::from),
             "--holder" => holder = take("--holder"),
             "--pid" => match take("--pid").and_then(|v| v.parse::<u32>().ok()) {
                 Some(p) => opts.pid = Some(p),
@@ -151,6 +173,18 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(r) => opts.root = Some(PathBuf::from(r)),
                 None => return 2,
             },
+            "--expected-claim" => {
+                let Some(raw) = take("--expected-claim") else {
+                    return 2;
+                };
+                match serde_json::from_str::<crate::claims::ClaimRecord>(&raw) {
+                    Ok(record) => expected_claim = Some(record),
+                    Err(e) => {
+                        eprintln!("claim expected record: {e}");
+                        return 2;
+                    }
+                }
+            }
             "--holding-recovery-lock" => holding_recovery_lock = true,
             "--json" | "-J" => {} // output is always JSON; accepted for symmetry
             other => {
@@ -204,12 +238,27 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim force-release requires --reason");
                 return 2;
             };
-            match crate::claim_store::force_release(
-                &key,
-                reason,
-                opts.root.as_deref(),
-                holding_recovery_lock,
-            ) {
+            let result = if let Some(expected) = expected_claim.as_ref() {
+                match claims_directory.as_deref() {
+                    Some(dir) => crate::claim_store::force_release_observed_in_directory(
+                        dir, &key, reason, expected,
+                    ),
+                    None => crate::claim_store::force_release_observed(
+                        &key,
+                        reason,
+                        opts.root.as_deref(),
+                        expected,
+                    ),
+                }
+            } else {
+                crate::claim_store::force_release(
+                    &key,
+                    reason,
+                    opts.root.as_deref(),
+                    holding_recovery_lock,
+                )
+            };
+            match result {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -306,17 +355,23 @@ fn run_claim_session_pid(args: &[String]) -> i32 {
 }
 
 fn run_claim_reap(args: &[String]) -> i32 {
-    let mut root: Option<PathBuf> = None;
+    let mut dirs = Vec::new();
     let mut apply = false;
+    let mut key = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--root" => match it.next() {
-                Some(value) => root = Some(PathBuf::from(value)),
-                None => {
-                    eprintln!("fno-agents: claim reap: --root requires a value");
-                    return 2;
-                }
+                Some(v) => dirs.push(PathBuf::from(v).join(".fno/claims")),
+                None => return 2,
+            },
+            "--claims-dir" => match it.next() {
+                Some(v) => dirs.push(PathBuf::from(v)),
+                None => return 2,
+            },
+            "--key" => match it.next() {
+                Some(v) => key = Some(v.as_str()),
+                None => return 2,
             },
             "--apply" => apply = true,
             "--json" | "-J" => {}
@@ -326,26 +381,46 @@ fn run_claim_reap(args: &[String]) -> i32 {
             }
         }
     }
-    let (session_witness, _drain) = default_session_witness();
-    let recheck_witness = |record: &crate::claims::ClaimRecord| {
-        let (witness, _drain) = default_session_witness();
-        witness(record)
-    };
-    match crate::claim_store::reap_with_session_witness(
-        root.as_deref(),
-        apply,
-        Some(&session_witness),
-        Some(&recheck_witness),
-    ) {
-        Ok(payload) => {
-            println!("{payload}");
-            0
+    if dirs.is_empty() {
+        if let Some(dir) = crate::claims::global_claims_dir() {
+            dirs.push(dir);
         }
-        Err(error) => {
-            eprintln!("fno-agents: claim reap failed: {error}");
-            1
+        if let Ok(dir) = crate::claims_root::claims_dir("local-probe", None) {
+            dirs.push(dir);
         }
     }
+    dirs.sort();
+    dirs.dedup();
+    let (witness, _) = default_session_witness();
+    let recheck = |record: &crate::claims::ClaimRecord| {
+        let (witness, _) = default_session_witness();
+        witness(record)
+    };
+    let mut summary = serde_json::json!({"apply":apply,"scanned":0,"would_reap":0,"reaped":0,"reap_failed":[],"roots":dirs});
+    for dir in &dirs {
+        match crate::claim_store::reap_in_directory(dir, apply, Some(&witness), Some(&recheck), key)
+        {
+            Ok(result) => {
+                for field in ["scanned", "would_reap", "reaped"] {
+                    summary[field] = serde_json::json!(
+                        summary[field].as_u64().unwrap_or(0) + result[field].as_u64().unwrap_or(0)
+                    );
+                }
+                if let Some(errors) = result["reap_failed"].as_array() {
+                    summary["reap_failed"]
+                        .as_array_mut()
+                        .unwrap()
+                        .extend(errors.iter().cloned());
+                }
+            }
+            Err(error) => {
+                eprintln!("fno-agents: claim reap {}: {error}", dir.display());
+                return 1;
+            }
+        }
+    }
+    println!("{summary}");
+    0
 }
 
 /// `fno-agents claim list [--prefix <prefix>] [--include-stale] [--root <dir>]`
