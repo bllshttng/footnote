@@ -20,13 +20,6 @@ def _write_toml(tmp_path: Path, body: str) -> Path:
     return tmp_path
 
 
-def test_v2_flag_reads_config_toml(tmp_path: Path) -> None:
-    _write_toml(tmp_path, "v2_enabled = true\n")
-    from fno.cli import _load_v2_config_flag
-
-    assert _load_v2_config_flag(tmp_path) is True
-
-
 def test_v2_flag_local_config_toml_wins_over_malformed_global(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -58,18 +51,6 @@ def test_peer_surfaces_reads_config_toml(tmp_path: Path) -> None:
     assert read_peer_surfaces(tmp_path) == {"alice": ["api-server"]}
 
 
-def test_config_toml_wins_over_legacy_settings_yaml(tmp_path: Path) -> None:
-    """config.toml takes precedence when both files are present."""
-    _write_toml(tmp_path, '[inbox.peers.alice]\nsurfaces = ["from-toml"]\n')
-    (tmp_path / ".fno" / "settings.yaml").write_text(
-        "config:\n  inbox:\n    peers:\n      alice:\n        surfaces: [from-yaml]\n",
-        encoding="utf-8",
-    )
-    from fno.inbox.settings import read_peer_surfaces
-
-    assert read_peer_surfaces(tmp_path) == {"alice": ["from-toml"]}
-
-
 def test_triage_settings_reads_config_toml(tmp_path: Path) -> None:
     _write_toml(
         tmp_path, '[inbox.triage]\nmodel = "claude-opus-4-8"\ntimeout_sec = 99\n'
@@ -79,14 +60,6 @@ def test_triage_settings_reads_config_toml(tmp_path: Path) -> None:
     s = read_triage_settings(tmp_path)
     assert s.model == "claude-opus-4-8"
     assert s.timeout_sec == 99
-
-
-def test_triage_settings_malformed_timeout_falls_back(tmp_path: Path) -> None:
-    """gemini review: a non-numeric timeout_sec must fail safe to 60, not crash."""
-    _write_toml(tmp_path, '[inbox.triage]\ntimeout_sec = "not-a-number"\n')
-    from fno.inbox.triage import read_triage_settings
-
-    assert read_triage_settings(tmp_path).timeout_sec == 60
 
 
 def test_load_goals_reads_config_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

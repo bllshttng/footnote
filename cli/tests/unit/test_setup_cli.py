@@ -23,11 +23,9 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     from fno import config as config_mod
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
-    import fno.paths as paths_mod
     yield
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
-    import fno.paths as paths_mod2
 # ---------------------------------------------------------------------------
 # AC-E-HP: fno setup migrate-paths honors active state_dir
 # ---------------------------------------------------------------------------
@@ -61,7 +59,6 @@ def test_migrate_paths_cmd_passes_state_dir_to_run_migration(
     from fno import config as config_mod
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
-    import fno.paths as paths_mod
     captured_calls: list[dict] = []
 
     def _mock_run_migration(**kwargs: object) -> int:

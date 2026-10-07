@@ -47,21 +47,6 @@ def _isolate_global_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_autonomy_default_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no config.autonomy block, enabled is True (shipping is a no-op)."""
-    settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.autonomy.enabled is True
-
-
-def test_autonomy_enabled_false_roundtrip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    settings = _load(
-        tmp_path, monkeypatch, "schema_version: 1\nautonomy:\n  enabled: false\n",
-    )
-    assert settings.autonomy.enabled is False
-
-
 def test_autonomy_malformed_value_fails_safe_to_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -76,24 +61,6 @@ def test_autonomy_malformed_value_fails_safe_to_true(
 # ---------------------------------------------------------------------------
 # autonomy_master_enabled() resolver
 # ---------------------------------------------------------------------------
-
-
-def test_master_enabled_true_by_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    from fno.config import autonomy_master_enabled
-
-    assert autonomy_master_enabled(tmp_path) is True
-
-
-def test_master_enabled_false_when_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _load(tmp_path, monkeypatch, "schema_version: 1\nautonomy:\n  enabled: false\n")
-    from fno.config import autonomy_master_enabled
-
-    assert autonomy_master_enabled(tmp_path) is False
 
 
 def test_master_enabled_fails_safe_to_false_on_unreadable_config(

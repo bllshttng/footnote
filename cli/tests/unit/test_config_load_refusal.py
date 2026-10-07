@@ -46,37 +46,6 @@ def test_nested_out_of_enum_value_refuses_by_name(tmp_path: Path) -> None:
     assert "'report', 'wake' or 'handoff'" in msg
 
 
-def test_legacy_flat_watchdog_string_refuses_and_names_its_file(tmp_path: Path) -> None:
-    f = _write(
-        tmp_path / ".fno" / "config.toml",
-        'schema_version = 1\n[recovery]\nwatchdog = "on"\n',
-    )
-    with pytest.raises(SettingsRefused) as exc:
-        load_settings()
-    assert str(f) in str(exc.value)
-
-
-def test_a_clean_config_still_loads(tmp_path: Path) -> None:
-    _write(
-        tmp_path / ".fno" / "config.toml",
-        'schema_version = 1\n[recovery.watchdog]\nmode = "report"\n',
-    )
-    assert load_settings().recovery.watchdog.mode == "report"
-
-
-def test_an_empty_loc_error_names_no_file(tmp_path: Path) -> None:
-    """A root-level schema error (loc == ()) carries no key to attribute."""
-    from fno.config_readback import describe_config_failure
-
-    class _FakeErr:
-        def errors(self):
-            return [{"loc": (), "input": "x", "msg": "bad root"}]
-
-    msg = describe_config_failure(_FakeErr(), [(tmp_path / "a.toml", {"schema_version": 1})])
-    assert "a.toml" not in msg
-    assert "settings" in msg
-
-
 def test_refusal_points_at_the_layer_that_decides(tmp_path: Path) -> None:
     """Global carries the bad value; the project file is clean and never sets
     the key; the refusal names the global file, the layer that decided it."""

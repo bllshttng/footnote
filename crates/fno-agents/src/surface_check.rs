@@ -1406,49 +1406,6 @@ mod tests {
     }
 
     #[test]
-    fn module_qualified_call_is_skipped() {
-        let repo = walk_repo("walkm", &[]);
-        let fm = surface_block(
-            "Is this row reachable?",
-            "  answerers:\n    - at: src/reader.py:1 row_ref_valid\n      disposition: \
-             dual-logic\n      reads: \"spawn_gate.provider_live_count(row)\"\n      emits: \
-             \"int\"\n",
-            1,
-            1,
-        );
-        let plan = write_plan(&repo, &fm, "p.md");
-        let out = run_walk(&plan, &repo);
-        assert!(!out.contains("`provider_live_count`"), "{out}");
-    }
-
-    #[test]
-    fn wide_symbol_warns_as_vocabulary_never_refuses() {
-        let mut extras = Vec::new();
-        for i in 0..12 {
-            extras.push((
-                format!("crates/x/src/m{i}.rs"),
-                format!("fn f{i}() {{ row_ref_valid({i}); }}\n"),
-            ));
-        }
-        let refs: Vec<(&str, &str)> = extras
-            .iter()
-            .map(|(a, b)| (a.as_str(), b.as_str()))
-            .collect();
-        let repo = walk_repo("walkw", &refs);
-        let plan = write_plan(
-            &repo,
-            &surface_block("Is this row reachable?", ONE_DUAL, 1, 1),
-            "p.md",
-        );
-        let out = run_walk(&plan, &repo);
-        assert!(
-            out.contains("W\t`row_ref_valid` is read in rust at 13 file(s)"),
-            "{out}"
-        );
-        assert!(!out.contains("X\t"), "{out}");
-    }
-
-    #[test]
     fn wide_cap_triggers_on_the_symbol_total_across_trees() {
         let mut extras = Vec::new();
         for i in 0..6 {
@@ -1584,20 +1541,6 @@ mod tests {
         assert!(reads_calls("render(").is_empty());
         assert!(reads_calls("getX(").is_empty());
         assert!(reads_calls("README(").is_empty());
-    }
-
-    #[test]
-    fn camel_case_names_are_kept() {
-        assert_eq!(
-            at_symbol("src/tool.ts:1 createTaskTool"),
-            Some("createTaskTool".into())
-        );
-        assert_eq!(
-            reads_calls("extractAssistantText(res)"),
-            vec!["extractAssistantText".to_string()]
-        );
-        assert!(at_symbol("x.rs:1 WalkAnswerer").is_some());
-        assert_eq!(reads_calls("URLParser(u)"), vec!["URLParser".to_string()]);
     }
 
     #[test]

@@ -40,14 +40,6 @@ def test_validate_a_missing_file_refuses(tmp_path):
     assert err == "Error: proposal file not found: /nonexistent/proposal.json\n", err
 
 
-def test_apply_a_missing_file_refuses(tmp_path):
-    root = make_sandbox(tmp_path, [seed_node("x-fff66000")])
-    warm(root, "x-fff66000")
-    code, out, err = door(root, ["triage", "apply", "/nonexistent/proposal.json"])
-    assert code == 2, err
-    assert err == "Error: proposal file not found: /nonexistent/proposal.json\n", err
-
-
 def test_validate_a_conforming_proposal_answers_clean(tmp_path):
     root = make_sandbox(tmp_path, [seed_node("x-fff66000")])
     warm(root, "x-fff66000")

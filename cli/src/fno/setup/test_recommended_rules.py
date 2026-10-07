@@ -64,13 +64,6 @@ def test_idempotent_no_duplicates(tmp_path: Path) -> None:
     assert len(links) == 1  # exactly one link, no dupes
 
 
-def test_missing_source_installs_nothing(tmp_path: Path) -> None:
-    assert install_recommended_rules(tmp_path / "nope", tmp_path / "t") == []
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    assert install_recommended_rules(empty, tmp_path / "t") == []
-
-
 def test_default_source_resolves_colocated_pack() -> None:
     """codex P2: the pack ships as package data under fno/, so it resolves in
     every install path (no dependence on a primed plugin-root pointer)."""

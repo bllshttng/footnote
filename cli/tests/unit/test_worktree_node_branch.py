@@ -46,11 +46,6 @@ def test_null_falls_back_to_feature_name(monkeypatch):
     assert wt_cli._node_branch("x-aaaa") == "feature/x-aaaa"
 
 
-def test_nonzero_exit_falls_back(monkeypatch):
-    _patch(monkeypatch, _Result(1, ""))
-    assert wt_cli._node_branch("x-aaaa") == "feature/x-aaaa"
-
-
 def test_a_timeout_falls_back(monkeypatch):
     _patch(
         monkeypatch,

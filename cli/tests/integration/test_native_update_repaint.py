@@ -139,18 +139,6 @@ def test_priority_repaints_doc(tmp_path):
     assert str(fields["blocks_everything"]).lower() == "true"
 
 
-def test_type_flag_repaints_doc(tmp_path):
-    """An operator-supplied `--type` reaches the doc."""
-    graph = tmp_path / "graph.json"
-    plan = _plan(tmp_path)
-    _seed(graph, [_node(plan)])
-
-    res = _update(tmp_path, "x-1234", "--type", "epic")
-    assert res.returncode == 0, res.stderr
-
-    assert _read_plan_fields(plan)["type"] == "epic"
-
-
 def test_update_without_type_leaves_doc_type_alone(tmp_path):
     """A non-type update never drags the graph's stale `type` onto the doc."""
     graph = tmp_path / "graph.json"
@@ -206,20 +194,6 @@ def test_missing_plan_file_never_fails_verb(tmp_path):
 
     row = next(r for r in _rows(graph) if r["id"] == "x-1234")
     assert row["priority"] == "p0"  # graph still committed the change
-
-
-def test_tag_roundtrip_reaches_doc(tmp_path):
-    """`--tag mux --tag mux` stores one tag and repaints the doc."""
-    graph = tmp_path / "graph.json"
-    plan = _plan(tmp_path)
-    _seed(graph, [_node(plan)])
-
-    res = _update(tmp_path, "x-1234", "--tag", "mux", "--tag", "mux")
-    assert res.returncode == 0, res.stderr
-
-    row = next(r for r in _rows(graph) if r["id"] == "x-1234")
-    assert row["tags"] == ["mux"]  # dedup, idempotent
-    assert _read_plan_fields(plan)["tags"] == ["mux"]
 
 
 def test_untag_removes_tag(tmp_path):

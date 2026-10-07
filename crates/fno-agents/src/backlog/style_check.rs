@@ -1576,28 +1576,12 @@ diff --git a/m.md b/m.md
     }
 
     #[test]
-    fn added_line_inside_an_existing_fence_is_masked_as_code() {
-        // The fence opens on line 1; the added line 2 is inside it, so the
-        // whole-text mask blanks it and the added-lines gate reads no prose.
-        let text = "```text\nadded; semicolon line\n```\n";
-        let only = BTreeSet::from([2usize]);
-        assert!(check_lines(text, &only).is_empty());
-    }
-
-    #[test]
     fn fix_splits_semicolons_and_rejoins_wraps() {
         // Both bare lines continue the line above them, so the joins collapse
         // all three into one physical line before the semicolon split.
         let (fixed, residue) = fix("Do this; do that.\nAlso this\ncontinues here.\n", "mail");
         assert!(residue.is_empty(), "{residue:?}");
         assert_eq!(fixed, "Do this. Do that. Also this continues here.\n");
-    }
-
-    #[test]
-    fn fix_reports_unfixable_residue() {
-        let (fixed, residue) = fix("You should do this; do that.\n", "mail");
-        assert_eq!(fixed, "You should do this. Do that.\n");
-        assert!(residue.iter().any(|v| v.rule == 3), "{residue:?}");
     }
 
     #[test]

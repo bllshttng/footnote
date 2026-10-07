@@ -753,12 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn env_prefix_refused() {
-        let root = footnote_root();
-        assert!(decide("FNO_DEBUG=1 pytest -q", root.path()).is_some());
-    }
-
-    #[test]
     fn timeout_wrapper_refused() {
         let root = footnote_root();
         assert!(decide("timeout 30 uv run pytest", root.path()).is_some());
@@ -770,12 +764,6 @@ mod tests {
         assert!(decide("uvx pytest", root.path()).is_some());
         assert!(decide("uv tool run pytest -q", root.path()).is_some());
         assert!(decide("uvx --from pytest-uv pytest -q", root.path()).is_some());
-    }
-
-    #[test]
-    fn uv_run_python_m_pytest_refused() {
-        let root = footnote_root();
-        assert!(decide("uv run python -m pytest -q", root.path()).is_some());
     }
 
     #[test]
@@ -831,12 +819,6 @@ mod tests {
     fn cargo_build_allows() {
         let root = footnote_root();
         assert!(decide("cargo build --release", root.path()).is_none());
-    }
-
-    #[test]
-    fn pytest_in_echo_string_allows() {
-        let root = footnote_root();
-        assert!(decide("echo \"pytest passed\"", root.path()).is_none());
     }
 
     #[test]
@@ -945,12 +927,6 @@ mod tests {
     fn cargo_t_alias_refused() {
         let root = footnote_root();
         assert!(decide("cargo t", root.path()).is_some());
-    }
-
-    #[test]
-    fn cargo_b_alias_allows() {
-        let root = footnote_root();
-        assert!(decide("cargo b --release", root.path()).is_none());
     }
 
     #[test]

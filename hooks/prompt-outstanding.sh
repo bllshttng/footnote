@@ -15,6 +15,10 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/lib/hook-budget.sh
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
+# Overload skip: past the threshold the preamble alone can pass the harness
+# cap; the projection read re-runs next turn.
+hook_overloaded && exit 0
+
 input="$(cat 2>/dev/null || true)"
 [[ -n "$input" ]] || exit 0
 printf '%s' "$input" | hook_run_optional fno-agents hook prompt 2>/dev/null

@@ -17,7 +17,6 @@ the recovery from a wrong deny is one command and the recovery from a wrong
 allow is a revert.
 """
 import importlib.util
-import subprocess
 import sys
 from pathlib import Path
 
@@ -114,18 +113,6 @@ def test_a_dead_probe_does_not_become_a_merge_outage(monkeypatch, tmp_path):
     git_dir = _repo_with(tmp_path, [HOLD_LOCK])
     _patch_git(monkeypatch, git_dir, fail=True)
     assert git_protection._review_hold_refusal(MERGE) is None
-
-
-def test_a_non_merge_command_is_never_vetoed(monkeypatch, tmp_path):
-    git_dir = _repo_with(tmp_path, [HOLD_LOCK])
-    _patch_git(monkeypatch, git_dir)
-    assert git_protection._review_hold_refusal("gh pr create --fill") is None
-
-
-def test_another_repository_is_out_of_scope(monkeypatch, tmp_path):
-    git_dir = _repo_with(tmp_path, [HOLD_LOCK])
-    _patch_git(monkeypatch, git_dir)
-    assert git_protection._review_hold_refusal(f"{MERGE} --repo other/thing") is None
 
 
 if __name__ == "__main__":

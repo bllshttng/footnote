@@ -2180,8 +2180,12 @@ fn repaired_spawn_provenance_registry(
     if candidate.entries.len() != raw_rows {
         return None;
     }
-    for note in &notes {
-        eprintln!("fno agents: registry {note}");
+    // The heal is in memory until the next registry write, so this note
+    // would repeat on every load: a non-fatal note, said only on FNO_VERBOSE=1.
+    if std::env::var_os("FNO_VERBOSE").is_some_and(|v| v == "1") {
+        for note in &notes {
+            eprintln!("fno agents: registry {note}");
+        }
     }
     Some(candidate)
 }

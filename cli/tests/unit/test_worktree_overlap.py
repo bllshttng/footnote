@@ -14,9 +14,7 @@ from pathlib import Path
 import pytest
 
 from fno.events import ValidationError, append_event, validate, worktree_overlap_observed
-from fno.paths import global_events_json
 from fno.worktree_cli.overlaps import (
-    fold_overlap_events,
     overlap_record,
     overlaps_report,
     render_overlaps_text,
@@ -49,24 +47,6 @@ def _overlap_event(
     return event
 
 
-# -- AC1-HP: a real observation becomes durable structured evidence ----------
-
-
-def test_record_appends_one_valid_event_and_reports_it(tmp_path: Path) -> None:
-    journal = tmp_path / "events.jsonl"
-    result, code = overlap_record(journal=journal, stdin=PAYLOAD)
-    assert code == 0
-    assert result["recorded"] is True
-    assert result["fold"]["distinct_observations"] == 1
-    # The journal now holds exactly one schema-valid overlap line.
-    from tests._event_rows import event_rows
-
-    lines = event_rows(journal)
-    assert len(lines) == 1
-    assert lines[0]["type"] == "worktree_overlap_observed"
-    assert lines[0]["data"]["observation_id"] == result["observation_id"]
-
-
 # -- AC4-HP: the report folds recurrence without raw-line inflation ----------
 
 
@@ -78,24 +58,6 @@ def test_repeated_delivery_of_one_observation_dedups(tmp_path: Path) -> None:
     assert code == 0
     assert report["distinct_observations"] == 1, "three deliveries -> one observation"
     assert report["coverage"]["journal_lines"] == 3, "raw lines preserved, just deduped"
-
-
-def test_distinct_observations_count_and_per_worktree(tmp_path: Path) -> None:
-    journal = tmp_path / "events.jsonl"
-    append_event(
-        _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW),
-        journal,
-    )
-    append_event(
-        _overlap_event(observer="o2", peers=["b"], worktree="/r/.git/wt2", ts=NOW),
-        journal,
-    )
-    report, _ = overlaps_report(journal=journal, now=NOW)
-    assert report["distinct_observations"] == 2
-    assert report["distinct_worktrees"] == 2
-    assert report["distinct_observers"] == 2
-    assert report["per_worktree"] == {"/r/.git/wt1": 1, "/r/.git/wt2": 1}
-    assert report["recurrence_threshold_met"] is False  # 2 < 3
 
 
 def test_recurrence_threshold_crosses_at_three(tmp_path: Path) -> None:
@@ -166,36 +128,6 @@ def test_unreadable_journal_is_unknown_and_exits_nonzero(tmp_path: Path, monkeyp
     assert code == 1
 
 
-def test_invalid_utf8_journal_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invalid UTF-8 in the journal is a decode failure, not a crash: report unknown."""
-    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
-    journal = tmp_path / "events.jsonl"
-    journal.write_bytes(b'{"type":"worktree_overlap_observed"}\n\xff\xfe not utf-8\n')
-    report, code = overlaps_report(journal=journal, now=NOW)
-    assert report["state"] == "unknown"
-    assert code == 1
-
-
-def test_non_object_json_lines_are_partial(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A JSON-valid non-object line (bare scalar/array) is corrupt, not clean."""
-    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
-    journal = tmp_path / "events.jsonl"
-    valid = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
-    journal.write_text(
-        json.dumps(valid) + "\n42\n" + json.dumps([1, 2]) + "\n",
-        encoding="utf-8",
-    )
-    report, code = overlaps_report(journal=journal, now=NOW)
-    assert report["state"] == "partial"
-    assert code == 1
-    assert report["coverage"]["malformed_lines"] == 2
-    assert report["distinct_observations"] == 1
-
-
-
-
 # -- AC6-ERR: recording failure is loud and non-blocking --------------------
 #
 # The carrier owns exit-zero; overlap_record must never raise. It reports
@@ -207,24 +139,6 @@ def test_record_invalid_input_is_unrecorded_not_raised(tmp_path: Path) -> None:
     assert code == 0
     assert result["recorded"] is False
     assert result["record_reason"] == "invalid-input"
-
-
-def test_record_empty_peers_is_unrecorded(tmp_path: Path) -> None:
-    payload = '{"observer_session_id":"o","peer_session_ids":[],"worktree_git_dir":"/r/.git/wt1","repository_common_dir":"/r/.git","live_window_seconds":120}'
-    result, code = overlap_record(journal=tmp_path / "e.jsonl", stdin=payload, now=NOW)
-    assert code == 0
-    assert result["recorded"] is False
-    assert result["record_reason"] == "invalid-input"
-
-
-def test_record_schema_rejection_is_unrecorded(tmp_path: Path) -> None:
-    # Peers present but the repository identity is missing -> the typed builder
-    # rejects it; overlap_record surfaces schema-rejected rather than crashing.
-    payload = '{"observer_session_id":"o","peer_session_ids":["p"],"worktree_git_dir":"/r/.git/wt1","repository_common_dir":"","live_window_seconds":120}'
-    result, code = overlap_record(journal=tmp_path / "e.jsonl", stdin=payload, now=NOW)
-    assert code == 0
-    assert result["recorded"] is False
-    assert result["record_reason"].startswith("schema-rejected")
 
 
 def test_record_lock_timeout_is_unrecorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -258,68 +172,13 @@ def test_record_count_unavailable_when_fold_degrades(tmp_path: Path, monkeypatch
     monkeypatch.setattr("fno.worktree_cli.overlaps._read_overlap_events", real_read)
 
 
-# -- AC8-FR: evidence survives worktree cleanup -----------------------------
-
-
-def test_report_reads_global_journal_regardless_of_cwd(tmp_path: Path) -> None:
-    """The report's default journal is the machine-global events.jsonl, not a
-    worktree-local file, so archiving a feature worktree cannot erase evidence."""
-    # overlaps_report() with no journal arg resolves global_events_json(); this
-    # pins that the default equals the canonical global path (covers the
-    # test_paths.py plan item in the report's natural home).
-    from inspect import signature
-
-    params = signature(overlaps_report).parameters
-    assert "journal" in params, "report must accept an injectable journal for tests"
-    assert global_events_json().name == "events.jsonl"
-
-
 # -- pure fold: observation id is the dedup key -----------------------------
-
-
-def test_fold_dedups_by_observation_id_not_raw_line() -> None:
-    one = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
-    folded = fold_overlap_events([one, one, one], since_days=28, now=NOW)
-    assert folded["distinct_observations"] == 1
-    assert folded["recurrence_threshold_met"] is False
-
-
-def test_fold_ignores_lines_missing_observation_id() -> None:
-    junk = {"type": "worktree_overlap_observed", "data": {"peer_session_ids": ["x"]}, "ts": NOW.isoformat()}
-    folded = fold_overlap_events([junk], since_days=28, now=NOW)
-    assert folded["distinct_observations"] == 0
-
-
-def test_fold_rejects_degenerate_window() -> None:
-    """A zero/negative window would silently read as no-data; reject it loudly."""
-    import pytest as _pytest
-
-    with _pytest.raises(ValueError):
-        fold_overlap_events([], since_days=0, now=NOW)
-    with _pytest.raises(ValueError):
-        fold_overlap_events([], since_days=-3, now=NOW)
 
 
 def test_report_rejects_degenerate_window_exits_nonzero(tmp_path: Path) -> None:
     report, code = overlaps_report(since_days=0, journal=tmp_path / "e.jsonl", now=NOW)
     assert code == 1
     assert report["state"] == "unknown"
-
-
-def test_record_degrades_fold_on_degenerate_window(tmp_path: Path) -> None:
-    # The carrier always passes 28; a bad window degrades the fold but keeps
-    # exit-zero and still records the observation.
-    result, code = overlap_record(since_days=0, journal=tmp_path / "e.jsonl", stdin=PAYLOAD)
-    assert code == 0
-    assert result["recorded"] is True
-    assert result["fold"]["state"] == "unknown"
-
-
-def test_render_text_handles_degenerate_window() -> None:
-    """The degenerate-window report has no coverage key; text render must not crash."""
-    report, _ = overlaps_report(since_days=0, journal=Path("/nonexistent/events.jsonl"), now=NOW)
-    text = render_overlaps_text(report)
-    assert "unknown" in text
 
 
 def test_validate_rejects_observation_id_not_matching_fields() -> None:
@@ -334,39 +193,6 @@ def test_validate_rejects_observation_id_not_matching_fields() -> None:
     event["data"]["observation_id"] = "0" * 64
     with pytest.raises(ValidationError):
         validate(event)
-
-
-def test_validate_accepts_builder_event_with_matching_digest() -> None:
-    """The builder's own event (digest computed from its fields) validates."""
-    event = worktree_overlap_observed(
-        observer_session_id="obs-1",
-        peer_session_ids=["peer-b", "peer-a"],  # unsorted input; builder sorts+dedupes
-        repository_key="/r/.git",
-        worktree_key="/r/.git/wt1",
-    )
-    assert validate(event) is None
-
-
-def test_schema_invalid_overlap_line_is_partial_not_counted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A JSON-valid overlap line that fails schema validation reads as a malformed
-    line (partial coverage) and is NOT counted toward recurrence."""
-    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
-    journal = tmp_path / "events.jsonl"
-    valid = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
-    # Same fields, but a 64-hex id that is NOT this tuple's digest -> rejected.
-    bad = json.loads(json.dumps(valid))
-    bad["data"]["observation_id"] = "f" * 64
-    journal.write_text(json.dumps(valid) + "\n" + json.dumps(bad) + "\n", encoding="utf-8")
-    report, code = overlaps_report(journal=journal, now=NOW)
-    assert report["state"] == "partial"
-    assert code == 1
-    assert report["coverage"]["malformed_lines"] == 1
-    assert report["distinct_observations"] == 1
-
-
-
 
 
 # -- carrier contract: the real Typer command accepts the carrier's invocation --

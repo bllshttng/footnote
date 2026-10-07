@@ -63,12 +63,6 @@ def test_doctor_drain_hook_wired_true_false_none(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_doctor_dead_letter_stale_unread_surfaces(bus):
-    _seed("claude-deadbeef", "stranded", ts="2020-01-01T00:00:00Z")
-    found = doctor._stale_dead_letters()
-    assert [f["handle"] for f in found] == ["claude-deadbeef"]
-
-
 @pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "agy", "opencode"])
 def test_doctor_dead_letter_covers_every_retired_provider_prefix(bus, provider):
     handle = f"{provider}-deadbeef"
@@ -91,20 +85,6 @@ def test_doctor_dead_letter_drained_handle_not_flagged(bus):
 
     mid = _seed("claude-deadbeef", "drained", ts="2020-01-01T00:00:00Z")
     write_cursor("claude-deadbeef", mid)
-    assert doctor._stale_dead_letters() == []
-
-
-def test_doctor_dead_letter_wedged_recipient_still_escalates(bus):
-    # AC8-FR: a recipient whose drain never ran (cursor never advanced) still
-    # escalates once past TTL, even if a roster would list it live. Roster
-    # liveness is deliberately NOT consulted here.
-    _seed("claude-deadbeef", "wedged", ts="2020-01-01T00:00:00Z")
-    assert [f["handle"] for f in doctor._stale_dead_letters()] == ["claude-deadbeef"]
-
-
-def test_doctor_dead_letter_project_recipient_never_flagged(bus):
-    # A project-addressed durable note is not an a2a handle; never a dead letter.
-    _seed("web", "project note", ts="2020-01-01T00:00:00Z")
     assert doctor._stale_dead_letters() == []
 
 

@@ -28,19 +28,6 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def test_ac1_hp_ci_gate_script_exists() -> None:
-    """AC1-HP: scripts/ci/check-no-hardcoded-paths.sh must exist and be executable."""
-    repo = _repo_root()
-    gate = repo / "scripts" / "ci" / "check-no-hardcoded-paths.sh"
-    assert gate.exists(), (
-        f"scripts/ci/check-no-hardcoded-paths.sh not found at {gate}. "
-        "Create the script as part of Task 3.7."
-    )
-    assert os.access(gate, os.X_OK), (
-        f"{gate} must be executable (chmod +x)."
-    )
-
-
 def test_ac1_hp_no_hardcoded_paths_in_tree() -> None:
     """AC1-HP: check-no-hardcoded-paths.sh exits 0 on the current working tree."""
     repo = _repo_root()

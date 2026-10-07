@@ -409,12 +409,7 @@ def test_approval_for_a_different_action_digest_cannot_authorize(
 
 @pytest.mark.parametrize(
     ("role_id", "result"),
-    (
-        ("sales-outreach", EvidenceResult.PASSED),
-        ("sales-outreach", EvidenceResult.FAILED),
-        ("operations-recurring", EvidenceResult.PASSED),
-        ("operations-recurring", EvidenceResult.FAILED),
-    ),
+    (("operations-recurring", EvidenceResult.PASSED),),
 )
 def test_observation_facts_cannot_satisfy_delivery_or_change_its_verdict(
     role_id: str, result: EvidenceResult

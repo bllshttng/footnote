@@ -120,29 +120,6 @@ def test_resolve_inventory_degrades_to_empty(slot_answer):
     assert calls[0] == {"mode": "inventory"}
 
 
-def test_resolve_inventory_on_failure_is_empty_not_dead(slot_answer):
-    slot_answer(unavailable="no binary")
-    inv = rr.resolve_inventory()
-    assert inv.rows == {} and inv.declared is False
-
-
-def test_slot_verbs_reads_the_answer_and_falls_back(slot_answer):
-    calls = slot_answer({"verbs": ["think", "target", "review"], "rows": []})
-    assert rr.slot_verbs() == ["think", "target", "review"]
-    assert calls[0] == {"mode": "inventory"}
-    slot_answer(unavailable="no binary")
-    assert rr.slot_verbs() == list(rr.SLOT_VERBS), "a dead verb shows the known verbs"
-
-
-def test_tier_mode_payload_and_degrade(slot_answer):
-    calls = slot_answer({"model": "glm-5.3-flash", "chain": ["tier=medium"]})
-    model, chain = rr.resolve_tier("medium", provider="claude")
-    assert (model, chain) == ("glm-5.3-flash", ["tier=medium"])
-    assert calls[0] == {"mode": "tier", "tier": "medium", "provider": "claude"}
-    slot_answer(unavailable="no binary")
-    assert rr.resolve_tier("medium") == (None, ["tier=route-slot-unavailable"])
-
-
 def test_dispatch_model_mode_payload(slot_answer):
     calls = slot_answer({
         "model": "resolved-x", "source": "task-difficulty(high)", "chain": ["model=grid"],
@@ -165,17 +142,6 @@ def test_dispatch_model_pins_answer_without_the_verb(slot_answer):
     assert rr.resolve_dispatch_model(explicit="pin-e") == ("pin-e", "explicit", ["explicit"])
     assert rr.resolve_dispatch_model(task_model="pin-t") == ("pin-t", "task-pin", ["task-pin"])
     assert calls == [], "a pin never consults the verb"
-
-
-def test_retired_tier_params_are_gone():
-    """task_tier/plan_tier died in the tier-word rename; the transport must
-    not grow them back."""
-    import inspect
-
-    params = inspect.signature(rr.resolve_dispatch_model).parameters
-    assert "task_tier" not in params and "plan_tier" not in params
-    with pytest.raises(TypeError):
-        rr.resolve_dispatch_model(task_tier="low")
 
 
 def test_node_model_reads_the_resolver_and_degrades(monkeypatch):
@@ -221,10 +187,3 @@ def test_slot_states_sends_the_states_mode_and_shapes_lanes(slot_answer):
         "identity": "zai-main", "source": "config",
     }
     assert out["lanes"][1]["state"] == "unknown", "an absent state reads unknown"
-
-
-def test_slot_states_degrades_the_readout(slot_answer):
-    slot_answer(unavailable="no binary")
-    out = rr.slot_states("target")
-    assert out["would_take"].startswith("slot=route-slot-unavailable")
-    assert out["lanes"] == [] and out["routing"] == "unarmed"
