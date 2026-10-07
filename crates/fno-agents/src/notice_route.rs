@@ -1096,6 +1096,72 @@ pub(crate) fn failure_tag(key: &str) -> String {
     format!("failure-key:{}", &hex[..8])
 }
 
+/// Append one encounter as the system component: the daemon holds no
+/// session identity, so the voter key names the component instead. One
+/// locked write, the creation vote's same shape and same-voter refusal.
+fn record_system_encounter(node: &str, evidence: &str) -> bool {
+    let graph = crate::backlog::settings::graph_path();
+    let run = || -> Result<(), String> {
+        let base_version = crate::graph_store::base_version(&graph).map_err(|e| e.to_string())?;
+        let mut entries = crate::graph_store::read_rows(&graph).map_err(|e| e.to_string())?;
+        let Some(row) = entries
+            .iter_mut()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some(node))
+        else {
+            return Err(format!("no node resolves to '{node}'"));
+        };
+        let key = "system:notice-router";
+        let Some(obj) = row.as_object_mut() else {
+            return Err(format!("node {node} is not an object"));
+        };
+        let existing = obj
+            .get("encounters")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if existing
+            .iter()
+            .any(|p| p.get("voter_key").and_then(Value::as_str) == Some(key))
+        {
+            return Err(format!(
+                "voter {key} already recorded an encounter on {node}"
+            ));
+        }
+        let mut record = serde_json::Map::new();
+        record.insert(
+            "created_at".into(),
+            Value::String(crate::graph_store::now_isoformat()),
+        );
+        record.insert("evidence".into(), Value::String(evidence.to_string()));
+        record.insert("voter_key".into(), Value::String(key.into()));
+        record.insert("voter_kind".into(), Value::String("agent".into()));
+        record.insert("harness".into(), Value::String("daemon".into()));
+        let encounters = obj
+            .entry("encounters".to_string())
+            .or_insert_with(|| Value::Array(vec![]));
+        if !encounters.is_array() {
+            *encounters = Value::Array(vec![]);
+        }
+        encounters
+            .as_array_mut()
+            .expect("just made an array")
+            .push(Value::Object(record));
+        crate::graph_store::locked_mutate(
+            &graph,
+            crate::graph_store::MutateInput {
+                entries,
+                canonical_path: None,
+                base_version,
+                plan_rungs: None,
+            },
+            crate::graph_store::DEFAULT_LOCK_TIMEOUT,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    };
+    run().is_ok()
+}
+
 /// Run the fold's actions through the backlog doors. Each action mails its
 /// owner one `fno/notice-router` mail naming the node. Best-effort: a
 /// failed door costs the tick row a detail line, never the pass.
@@ -1144,17 +1210,11 @@ fn execute_fold(
             }
             FoldAction::Encounter { key, node, count } => {
                 let evidence = format!("notice_route fold: {count} more rows of the key in 24h");
-                let mut cmd = crate::loop_dispatch::fno_cmd("fno");
-                // The daemon holds no session identity, so the ambient
+                // The daemon holds no session identity, so the encounter
                 // verb's identity gate would refuse (or misattribute the
-                // vote to a launcher session): vote as the system component.
-                cmd.args([
-                    "backlog", "encounter", &node, "-e", &evidence, "--system", "notice-router",
-                ]);
-                let ok = crate::bounded_cmd::output_with_timeout_result(cmd, 30)
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if ok {
+                // vote to a launcher session): append as the system
+                // component through the locked write instead.
+                if record_system_encounter(&node, &evidence) {
                     state.keys.get_mut(&key).map(|e| e.last_encounter_ts = now);
                     if mail_node_owner(w, Some(&node), &format!("The repeated failure keeps recurring: {count} rows in 24h (node {node})."), now) {
                         acted += 1;

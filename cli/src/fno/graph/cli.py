@@ -2058,12 +2058,6 @@ def cmd_encounter(
         "--operator",
         help="Record this as the operator's vote under the stable 'operator' voter key. A declaration, not proof; one per node, and the casting session's id is kept on the record when provable.",
     ),
-    system_voter: Optional[str] = typer.Option(
-        None,
-        "--system",
-        hidden=True,
-        help="Record this as an automated vote from a named system component under the stable 'system:<name>' voter key. No session identity: the component name is the provenance.",
-    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended record as JSON."),
 ) -> None:
     """Record ONE encounter with this node, from this session, with evidence.
@@ -2094,10 +2088,8 @@ def cmd_encounter(
     session_id = session_id if isinstance(session_id, str) else None
     harness = getattr(identity, "harness", None)
     harness = harness if isinstance(harness, str) else None
-    # `--operator` is a declaration, not proof; see the contract doc. A
-    # `--system` vote carries its component name as the provenance and
-    # needs no session either.
-    if not as_operator and not system_voter and (not session_id or not harness):
+    # `--operator` is a declaration, not proof; see the contract doc.
+    if not as_operator and (not session_id or not harness):
         typer.echo(
             "Error: no provable session identity, so this encounter would not be "
             "readable back to a transcript. Run `fno whoami` to see what this "
@@ -2121,15 +2113,7 @@ def cmd_encounter(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "evidence": evidence,
     }
-    if system_voter:
-        record.update(
-            {
-                "voter_key": f"system:{system_voter}",
-                "voter_kind": "agent",
-                "harness": "daemon",
-            }
-        )
-    elif as_operator:
+    if as_operator:
         record.update({"voter_key": "operator", "voter_kind": "operator"})
         # The canonical provenance keys every encounter carries, so a reader
         # keyed on `session_id` (the falsifiability contract, and every
