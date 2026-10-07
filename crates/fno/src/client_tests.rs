@@ -177,8 +177,7 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
         pane_state(Some(AgentBadge::Done), true, None),
         PaneState::Idle
     );
-    // 2026-10-06 shell ruling supersedes the marked-absence ruling: an
-    // unbadged shell tab is live.
+    // 2026-10-06 shell ruling: an unbadged shell tab is live.
     let shell = |act: Option<ShellActivity>| pane_state(None, false, act);
     assert_eq!(shell(None), PaneState::Idle);
     assert_eq!(shell(Some(ShellActivity::Empty)), PaneState::Idle);
@@ -7696,8 +7695,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     );
     let (word, dim) = probe("z-fnolive");
     assert!(
-        word.trim_start().starts_with("Idle") && dim,
-        "fno-live: Idle + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && !dim,
+        "fno-live: Idle, live and undimmed now the mark is gone: {word:?}"
     );
     // AC1-UI: external + Blocked renders `Input` in the amber accent,
     // BOLD, and NOT dimmed even though it is external - the accent beats the
