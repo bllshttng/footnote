@@ -5,7 +5,7 @@ default ``fno agents <verb> [args]`` execs the installed ``fno-agents`` client
 binary for every Rust-backed verb (``AUTO_ROUTE_VERBS`` = the client verbs
 minus ``PYTHON_AGENT_VERBS``). Python implementations stay registered as the
 ``FNO_AGENTS_RUNTIME=python`` fallback and serve when no installed binary is
-present; ``crown`` is Python-owned (it mutates the shared registry without a
+present; ``role`` is Python-owned (it mutates the shared registry without a
 daemon RPC).
 
 ``FNO_AGENTS_RUNTIME``: ``rust`` forces the binary (missing = hard 127);
@@ -101,13 +101,13 @@ RUST_CLIENT_VERBS = frozenset(
         "rm",
         "reconcile",
         "worked-nodes",
-        # The court/king/reign spellings are aliases the dispatch lane rewrites
+        # The team/lead/term spellings are aliases the dispatch lane rewrites
         # to the org/lead verbs; client.rs routes them directly.
-        "court-fold",
-        "court-orphans",
-        "king-checkin",
-        "king-history",
-        "reign-ledger",
+        "team-fold",
+        "team-orphans",
+        "lead-checkin",
+        "lead-history",
+        "term-ledger",
         # Daemon binary-version drift restart: a Rust-only verb
         # dispatched directly in client.rs before build_request (no daemon RPC).
         # SIGTERMs a stale daemon and lazy-starts a fresh one from the current
@@ -254,25 +254,25 @@ RUST_CLIENT_VERBS = frozenset(
         "bash-census",
         "session-start-bytes",
         "judge",
-        # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
+        # Orphan-role sweep for `fno agents team`: daemon-free read, never `fno agents`.
         "org-vacancies",
-        # Crown scope fold for `fno agents court --nodes`: daemon-free read;
-        # graph.json and claims in, per-scope fold out; Python passes the crowns.
+        # Role scope fold for `fno agents team --nodes`: daemon-free read;
+        # graph.json and claims in, per-scope fold out; Python passes the roles.
         "org-fold",
-        # Crown-scope checkin readback for `fno agents king history`:
-        # daemon-free read; Python resolves the caller's crown scope, passes
+        # Role-scope checkin readback for `fno agents lead history`:
+        # daemon-free read; Python resolves the caller's role scope, passes
         # every journal paths.event_journals resolves, and invokes the binary.
         "lead-history",
         # Failure-pattern leaderboard fold for `fno doctor evals macro`:
         # daemon-free read; Python resolves the journal list and forwards
         # the flags, then invokes the binary (not via `fno agents` routing).
         "evals-macro",
-        # The check-in beat for `fno agents king checkin`: daemon-free
-        # read; Python resolves the caller's crown scope and the paths
+        # The check-in beat for `fno agents lead checkin`: daemon-free
+        # read; Python resolves the caller's role scope and the paths
         # Python owns, then invokes the binary (not via `fno agents`).
         "lead-checkin",
-        # Rundown page renderer for `fno agents king ledger`: court JSON and
-        # the graph in, one HTML page out; Python resolves the court and the
+        # Rundown page renderer for `fno agents lead ledger`: team JSON and
+        # the graph in, one HTML page out; Python resolves the team and the
         # paths, then invokes the binary (not via `fno agents` routing).
         "lead-rundown",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
@@ -328,7 +328,7 @@ RUST_CLIENT_VERBS = frozenset(
 
 #: One-release dispatch aliases the binary answers beside the registered names.
 RUST_VERB_ALIASES = frozenset({
-    "court-orphans", "court-fold", "king-history", "king-checkin", "reign-ledger"})
+    "team-orphans", "team-fold", "lead-history", "lead-checkin", "term-ledger"})
 
 #: Verbs the Python ``agents`` app implements that do NOT auto-route to the
 #: Rust client.
@@ -351,13 +351,13 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # under agents. It still invokes the Rust daemon restart internally, then
     # applies the existing mux/revival policy in Python.
     "restart",
-    # Human-attended in-place crown grant. Pure shared-registry transaction;
+    # Human-attended in-place role grant. Pure shared-registry transaction;
     # spawn-time grant and succession remain on the Rust-backed spawn path.
-    "crown",
-    #: the whole-court read (every live crown + registry/graph
-    # agreement). Pure Python (fno.agents.court reads the registry and the
+    "role",
+    #: the whole-team read (every live role + registry/graph
+    # agreement). Pure Python (fno.agents.team reads the registry and the
     # graph); no Rust client port, so it must never auto-route to the daemon.
-    "court",
+    "team",
     # G2 Task 2.3: injection gate management; uses Python _daemon_rpc; no Rust port planned.
     "gate",
     # Messaging verbs are not direct agents actions. They live below the
@@ -481,7 +481,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
 #: MINUS the verbs Python still owns. Every Rust-backed verb (including ``ask``
 #: for all providers) auto-routes when an installed binary is present; an
-#: attended ``crown`` always stays in Python. A forced
+#: attended ``role`` always stays in Python. A forced
 #: ``FNO_AGENTS_RUNTIME=rust`` still routes every verb; a forced ``=python`` (or
 #: no installed binary) keeps the mature Python dispatch.
 AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS
@@ -502,14 +502,12 @@ AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS
 #: future Rust-only verb cannot land without a help entry and re-introduce the
 #: gap.
 RUST_ONLY_VERB_HELP: dict[str, str] = {
-    "worked-nodes": "The worked-overlay join: one JSON rows payload on stdin (--rows-file -); reads the graph, registry, and claims itself and answers the node-to-live-workers map with the crown and provenance gate.",
-    # The court/king/reign spellings are aliases the dispatch lane rewrites to
+    "worked-nodes": "The worked-overlay join: one JSON rows payload on stdin (--rows-file -); reads the graph, registry, and claims itself and answers the node-to-live-workers map with the role and provenance gate.",
+    # The team/lead/term spellings are aliases the dispatch lane rewrites to
     # the org/lead verbs; the help names the alias target so a reader finds it.
-    "court-fold": "Alias of org-fold: --graph PATH [--cwd PATH] [--claims-dir PATH] --teams-json JSON [--format json].",
-    "court-orphans": "Alias of org-vacancies: --root PATH [--held SCOPE]... reads the unfilled org seats.",
-    "king-checkin": "Alias of lead-checkin: --scope SCOPE --events-path PATH [...] --graph PATH [--handoffs-dir PATH] [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] [--json].",
-    "king-history": "Alias of lead-history: [--scope SCOPE] --events-path PATH [...] [--json].",
-    "reign-ledger": "Alias of lead-rundown: --org-json PATH|- --graph PATH --generated TS --out PATH.",
+    "team-fold": "Alias of org-fold: --graph PATH [--cwd PATH] [--claims-dir PATH] --teams-json JSON [--format json].",
+    "team-orphans": "Alias of org-vacancies: --root PATH [--held SCOPE]... reads the unfilled org seats.",
+    "term-ledger": "Alias of lead-rundown: --org-json PATH|- --graph PATH --generated TS --out PATH.",
     # "spawn" is now Python-registered (Task 1.2): a Python cmd_spawn command
     # provides the --once / ephemeral lifecycle path and the claude plain-spawn
     # path. The daemon PTY worker path (codex/gemini without --once) still
@@ -526,8 +524,8 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno do phase kill-check`.",
     "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
     "probe-run": "Evaluate a plan's named probe list (done_probes/close_probes); exit 0 only when every row is PASS - exit 0 with no output reads SKIP, not pass. Rows carry verdict (PASS FAIL BLOCKED SKIP), an optional ` # claim` comment from the declaration, and bounded captured output. Shelled by the close verbs for close_probes and by prove-it for runtime evidence.",
-    "honesty-sweep": "Declared-vs-measured sweep over declared populations: --population harness-capabilities (the default) sweeps the compiled capability table, --population king-manifests sweeps the space's king manifests, --rows-json <path|-> [--rows-key <key>] [--name <label>] sweeps piped or filed JSON rows. Four passes: uniform fields, uniform among declarers, negative-claim counts, and (harness-capabilities only) negative claims paired with harness-named exported definitions plus hardcoded harness-name lists. Exit 2 unmeasured (unreadable source, <2 rows, invalid JSON), 0 otherwise - a finding is a candidate, never a verdict.",
-    "prove-it-verdicts": "Read terminal prove-it records: walks every node's `<plan>.artifacts/` tree, takes each report's LAST non-empty line when it carries the `fno-prove-it:` JSON record, and emits one row per unretired FAIL plus the newest PASS/FAIL record as the node's headline (a PASS retires a FAIL only when its claim states the FAIL claim, optionally scoped by a `retires` report path; SKIP/BLOCKED retire nothing). --json emits {read_at, rows, unreadable}; --route writes the one progress note per open, unrouted FAIL (never changes node status - a king rules). Retire a FAIL with a newer PASS whose claim states the FAIL claim, or a decision naming the report.",
+    "honesty-sweep": "Declared-vs-measured sweep over declared populations: --population harness-capabilities (the default) sweeps the compiled capability table, --population lead-manifests sweeps the space's lead manifests, --rows-json <path|-> [--rows-key <key>] [--name <label>] sweeps piped or filed JSON rows. Four passes: uniform fields, uniform among declarers, negative-claim counts, and (harness-capabilities only) negative claims paired with harness-named exported definitions plus hardcoded harness-name lists. Exit 2 unmeasured (unreadable source, <2 rows, invalid JSON), 0 otherwise - a finding is a candidate, never a verdict.",
+    "prove-it-verdicts": "Read terminal prove-it records: walks every node's `<plan>.artifacts/` tree, takes each report's LAST non-empty line when it carries the `fno-prove-it:` JSON record, and emits one row per unretired FAIL plus the newest PASS/FAIL record as the node's headline (a PASS retires a FAIL only when its claim states the FAIL claim, optionally scoped by a `retires` report path; SKIP/BLOCKED retire nothing). --json emits {read_at, rows, unreadable}; --route writes the one progress note per open, unrouted FAIL (never changes node status - a lead rules). Retire a FAIL with a newer PASS whose claim states the FAIL claim, or a decision naming the report.",
     "test-run": "Native test-suite process-group owner: --timeout SECS [--claims-root PATH] -- ARGV...; admits under the machine-wide test:suite claim, spawns ARGV as the leader of a fresh session, and always kills the group after. Invoked directly by cli/src/fno/test_runner.py's run_suite_bounded, not `fno agents` routing.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
@@ -546,12 +544,12 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
     "judge": "Blueprint judge: grade a plan against the five product questions, --budget <secs> to bound the whole pass (default 600s), or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
-    "org-vacancies": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
-    "org-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json; invoked directly by `fno agents court`, not `fno agents` routing.",
-    "lead-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; --verdict selects the reign tenure verdict read (assembles its own inputs natively: crown, manifest, config, graph scope, window, delivery split); invoked directly by `fno agents king history` and `fno agents king verdict`, which pass every journal paths.event_journals resolves.",
+    "org-vacancies": "Roles whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents team`, not `fno agents` routing.",
+    "org-fold": "The role scope fold: --graph <graph.json> --promotes-json <roles> --claims-dir <dir> --format json; invoked directly by `fno agents team`, not `fno agents` routing.",
+    "lead-history": "The role-scope lead_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; --verdict selects the term tenure verdict read (assembles its own inputs natively: role, manifest, config, graph scope, window, delivery split); invoked directly by `fno agents lead history` and `fno agents lead verdict`, which pass every journal paths.event_journals resolves.",
     "evals-macro": "The macro-eval failure-pattern leaderboard fold: --events <journal.jsonl> [--events ...] [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json]; invoked directly by `fno doctor evals macro`, which resolves the journal defaults.",
-    "lead-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
-    "lead-rundown": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
+    "lead-checkin": "One verb runs the term check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents lead checkin`, which resolves the role and the paths.",
+    "lead-rundown": "The term ledger page renderer: --team-json <team.json> --graph <graph.json> --generated <ts> --out <term.html>; invoked directly by `fno agents lead ledger`, which resolves the team and the paths.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-gate": "The ONE spawn gate: reads one stdin JSON payload, writes one {status: admitted, gate/worker keys} or {status: refused, exit_code, receipt, event} answer; gate and probe modes; invoked by the fno.agents.spawn_gate transport.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
@@ -560,7 +558,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict; invoked by the native updater (crates/fno/src/doctor_update.rs), not `fno agents` routing.",
     "fleet-incident": "Durable fleet incident breaker: stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it with its typed holds/admits reach (exit 0 clear, 1 stopped or unavailable); check [--scope spawns|tests|merges] is one scope's admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches, and the merge primitive refuses while merges are held. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
-    "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts. The public surface is `fno agents mail team`; hooks call the binary directly.",
+    "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or promoted agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts. The public surface is `fno agents mail team`; hooks call the binary directly.",
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
     "capabilities": "One harness's config-independent capability contract: <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",
     "target-family": "Merge-posture family test: --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
@@ -753,7 +751,7 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
         substrate,
         _seed_of(toks),
         resume=_spawn_flag_value(toks, "--resume"),
-        crown=_has_flag(toks, "-k", ("--crown", "--promote")),
+        role=_has_flag(toks, "-k", ("--promote", "--promote")),
         name=_spawn_flag_value(toks, "--name"),
         node=_spawn_flag_value(toks, "--node"),
     )
@@ -778,7 +776,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         try:
             answer = verb_call("spawn-axes", {"node_seed": {
                 "family": list(_TARGET_FAMILY_VERBS),
-                "crown": _is_crown_bearing_spawn("spawn", args),
+                "role": _is_promotion_bearing_spawn("spawn", args),
                 "resume": _is_resume_bearing_spawn("spawn", args),
                 "argv": list(args),
             }}, VerbUnavailable)
@@ -822,7 +820,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         "derive_error": derive_error,
         "node_source": node_source,
         "family": list(_TARGET_FAMILY_VERBS),
-        "crown": _is_crown_bearing_spawn("spawn", args),
+        "role": _is_promotion_bearing_spawn("spawn", args),
         "resume": _is_resume_bearing_spawn("spawn", args),
         "argv": list(args),
         "seed_index": (slot[0] + 1) if slot else None,
@@ -1136,20 +1134,9 @@ def _gate_rm_at_seam(args: Sequence[str]) -> bool:
         return True
 
 
-def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` carrying ``--promote`` (bestow-at-spawn).
-
-    Implemented only in the Python spawn path; the Rust client parses no
-    spelling, so a promote-bearing spawn routed to the binary would exit
-    ``unknown flag``. EVERY spelling must be listed: the docs teach ``-k etl
-    -k web`` for a portfolio, and Click accepts the attached ``-kVAL`` form,
-    so a detector missing either routes exactly that spawn into the binary.
-    Load-bearing on ``--substrate bg``, where bg spawns otherwise exec the
-    binary; the pane substrate diverts on its own.
-    """
-    if verb != "spawn":
-        return False
-    return _has_flag(args, "-k", ("--crown", "--promote"))
+def _is_promotion_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """Keep grant-at-spawn on the Python path that owns promotion."""
+    return verb == "spawn" and _has_flag(args, longs=("--promote",))
 
 
 def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -1784,7 +1771,7 @@ def make_agents_group_cls() -> type:
                 py_spawn = (
                     existing_pane is not None
                     or _is_role_bearing_spawn(verb, args)
-                    or _is_crown_bearing_spawn(verb, args)
+                    or _is_promotion_bearing_spawn(verb, args)
                     or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)

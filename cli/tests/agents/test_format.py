@@ -193,9 +193,9 @@ def test_serialize_entry_emits_identity_and_hosting_fields() -> None:
     entry = _claude_entry(
         harness_session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
         mux={"session": "main", "pane_id": 10},
-        crown_level=1,
-        crown_scope="epic-x",
-        crown_grantor="king",
+        role_level=1,
+        role_scope="epic-x",
+        role_grantor="lead",
     )
 
     row = serialize_entry(entry, live_status=None)
@@ -203,7 +203,7 @@ def test_serialize_entry_emits_identity_and_hosting_fields() -> None:
     assert row["harness"] == "claude"
     assert row["harness_session_id"] == "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
     assert row["mux"] == {"session": "main", "pane_id": 10}
-    assert row["crown"] == "L1 epic-x"
+    assert row["role"] == "L1 epic-x"
 
 
 def test_serialize_entry_emits_thread_identity_without_a_mux_pane() -> None:

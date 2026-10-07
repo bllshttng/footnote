@@ -1,6 +1,6 @@
 """The pr-watch merge arm refuses an off-list PR under the scoped merge freeze.
 
-The crown writes one record (subject + allow-list) through the
+The role writes one record (subject + allow-list) through the
 authorized-merge verb's freeze ops; the Rust gate is the authoritative
 reader, and the arm's executor asks it through one thin receipt call. The
 verdict mapping lives here; the record read is the Rust tests'.
@@ -25,7 +25,7 @@ def _door(monkeypatch, receipt=None, error=None):
 
 
 CLEAR = {"outcome": "clear", "exit_code": 0, "detail": ""}
-FROZEN = {"outcome": "frozen", "exit_code": 0, "detail": "rc freeze crown"}
+FROZEN = {"outcome": "frozen", "exit_code": 0, "detail": "rc freeze role"}
 
 
 def test_the_freeze_verdict_contract(monkeypatch):

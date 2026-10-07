@@ -14,8 +14,8 @@ fn card_view(agents: Vec<AgentRow>) -> View {
 fn lead_and_worker() -> Vec<AgentRow> {
     let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
     lead.harness = Some("claude".into());
-    lead.crown_level = Some(2);
-    lead.crown_scope = Some("fno".into());
+    lead.role_level = Some(2);
+    lead.role_scope = Some("fno".into());
     lead.harness_session_id = Some("sess-lead".into());
     let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
     w1.harness = Some("claude".into());
@@ -120,8 +120,8 @@ fn card_age_sort_orders_workers_inside_a_lead_group() {
     let ages = [("w-old", 720u64), ("w-new", 60), ("w-mid", 600)];
     let mut agents = Vec::new();
     let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
-    lead.crown_level = Some(2);
-    lead.crown_scope = Some("fno".into());
+    lead.role_level = Some(2);
+    lead.role_scope = Some("fno".into());
     lead.harness_session_id = Some("sess-lead".into());
     lead.last_activity_age_s = Some(10);
     agents.push(lead);
@@ -187,7 +187,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     // scales to the card's own max (8) and grades one warn, one error.
     agents[1].activity = Some(vec![(2, 0), (4, 1), (8, 4), (0, 0)]);
     agents[0].model = Some("claude-opus-5-5".into());
-    agents[0].crown_title = Some("Lead of mux".into());
+    agents[0].role_title = Some("Lead of mux".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
@@ -321,7 +321,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     bare.harness = Some("claude".into());
     bare.harness_session_id = Some("sess-w9".into());
-    bare.crown_level = Some(2);
+    bare.role_level = Some(2);
     bare.context_used_pct = Some(26);
     bare.session_tokens = Some(999);
     bare.session_cost_cents = Some(77);
@@ -331,7 +331,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
         "activity stays blank until two intervals land, it never fakes a line"
     );
     assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
-    // Cost left the metrics line (it rides line 2, served-only): a crowned
+    // Cost left the metrics line (it rides line 2, served-only): a promoted
     // lead's session_cost_cents never reach this line at all.
     // A codex row keeps the populated-paint contract off its unreportable
     // fields: context and compactions hide even when the wire carries them,
@@ -481,29 +481,6 @@ fn card_detail_click_routes_to_the_agent_above() {
 }
 
 #[test]
-fn hovering_line_two_or_selecting_line_one_bands_both_card_lines() {
-    for select in [false, true] {
-        let mut v = card_view(lead_and_worker());
-        v.term = (30, 140);
-        v.sideline_width = 80;
-        let (agent_i, detail_i) = card_rows_for(&v, "w1");
-        if select {
-            v.selector = Some(agent_i);
-        } else {
-            v.hover_row = Some(detail_i);
-        }
-        let frame = v.compose();
-        let width = v.sideline_paint_w().saturating_sub(1);
-        let line = "#".repeat(width);
-        assert_eq!(
-            card_highlight_snapshot(&v, &frame, agent_i, detail_i),
-            format!("{line}\n{line}\n{line}"),
-            "select={select}: the snapshot covers every cell and column boundary on both lines"
-        );
-    }
-}
-
-#[test]
 fn hover_and_selection_share_the_same_card_cell_snapshot() {
     let mut hover = card_view(lead_and_worker());
     hover.term = (30, 140);
@@ -529,6 +506,36 @@ fn hover_and_selection_share_the_same_card_cell_snapshot() {
     assert_eq!(
         hover_cells, selected_cells,
         "hover and click use one paint path"
+    );
+    // The pairing bands all three lines for both gestures, every cell and
+    // column boundary included; the metrics line's hover is covered by its
+    // own test below.
+    assert!(
+        hover_cells.iter().all(|cell| cell.bg != Color::Default),
+        "hover bands every cell of all three lines"
+    );
+    assert!(
+        selected_cells.iter().all(|cell| cell.bg != Color::Default),
+        "selection bands every cell of all three lines"
+    );
+}
+
+#[test]
+fn hovering_line_three_bands_the_whole_card() {
+    // A card shades as one unit from any of its lines. Hovering the
+    // metrics line must reach back up to the detail line, not skip it.
+    let mut v = card_view(lead_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    v.hover_row = Some(detail_i + 1);
+    let frame = v.compose();
+    let width = v.sideline_paint_w().saturating_sub(1);
+    let line = "#".repeat(width);
+    assert_eq!(
+        card_highlight_snapshot(&v, &frame, agent_i, detail_i),
+        format!("{line}\n{line}\n{line}"),
+        "hover on the metrics line bands all three card lines"
     );
 }
 
@@ -641,6 +648,34 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
             );
         }
     }
+}
+
+#[test]
+fn a_teamed_rows_node_worktree_cwd_never_tags_the_name_with_its_node() {
+    // A node-backed codex thread inherits its spawner's workspace, so its
+    // own node worktree reads as a FOREIGN cwd and the card rendered
+    // `t-<node> (x-<node>)` - the node twice on one line. The parenthetical
+    // drops whenever the cwd base repeats the row's node, teamed or not; a
+    // genuinely foreign directory still tags.
+    let mut leak = agent_row("t-x64d4", 11, Some(AgentBadge::Working), false);
+    leak.harness = Some("codex".into());
+    leak.node = Some("x-64d4".into());
+    leak.cwd_base = Some("x-64d4".into());
+    let mut foreign = agent_row("t-else", 12, Some(AgentBadge::Working), false);
+    foreign.harness = Some("codex".into());
+    foreign.cwd_base = Some("elsewhere".into());
+    let mut v = card_view(vec![leak, foreign]);
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !text.contains("(x-64d4)"),
+        "a cwd base that repeats the node id tags no teamed name: {text}"
+    );
+    assert!(
+        text.contains("t-else (elsewhere)"),
+        "a real foreign directory keeps its context: {text}"
+    );
 }
 
 #[test]

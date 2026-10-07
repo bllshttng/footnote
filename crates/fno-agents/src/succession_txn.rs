@@ -19,24 +19,31 @@ fn emitter() -> Option<crate::events::EventEmitter> {
         .map(|home| crate::events::EventEmitter::new(home.events_jsonl(), "agents"))
 }
 
-/// The announce step: one fleet announcement from the heir's name, then one
+pub fn render_announcement(scope: &str, pending: &PendingSuccession) -> String {
+    let successor_session = pending
+        .successor_session
+        .as_deref()
+        .unwrap_or("session pending its first beat");
+    format!(
+        "Succession over {scope}: {} promotes {} as the new lead ({successor_session}). The transfer is committed; the successor's first beat verifies it.",
+        pending.predecessor_name, pending.successor_name
+    )
+}
+
+/// The announce step: one fleet announcement from the successor's name, then one
 /// `team_succession_announced` (or `_failed`) row. A failed announce prints
 /// one stderr line; it never undoes the transfer.
 pub(crate) fn announce(scope: &str, pending: &PendingSuccession) {
-    let heir_session = pending
-        .heir_session
-        .as_deref()
-        .unwrap_or("session pending its first beat");
-    let body = format!(
-        "Succession over {scope}: {} hands the crown to {} ({heir_session}). The transfer is committed; the heir's first beat verifies it.",
-        pending.predecessor_name, pending.heir_name
+    let body = render_announcement(scope, pending);
+    let sent = crate::announce::announce_all(
+        &pending.successor_name,
+        &format!("succession: {scope}"),
+        &body,
     );
-    let sent =
-        crate::announce::announce_all(&pending.heir_name, &format!("succession: {scope}"), &body);
     let payload = json!({
         "succession_id": succession_id(pending, scope),
         "scope": scope,
-        "heir_name": pending.heir_name,
+        "successor_name": pending.successor_name,
         "predecessor_name": pending.predecessor_name,
     });
     match sent {
@@ -63,14 +70,14 @@ pub(crate) fn transferred(scope: &str, pending: &PendingSuccession) {
             &json!({
                 "succession_id": succession_id(pending, scope),
                 "scope": scope,
-                "heir_name": pending.heir_name,
+                "successor_name": pending.successor_name,
                 "predecessor_name": pending.predecessor_name,
             }),
         );
     }
 }
 
-/// Verify, release, retro, from the heir's first beat: `cleared` is the
+/// Verify, release, retro, from the successor's first beat: `cleared` is the
 /// pending record `bind_and_refresh` just took. The release readback reads
 /// the live registry rows: a predecessor still seated over the scope names
 /// itself in `team_succession_release_unproven`. The retro launches the
@@ -85,12 +92,12 @@ pub(crate) fn verified(scope: &str, cwd: &Path, cleared: &PendingSuccession) {
             &json!({
                 "succession_id": id,
                 "scope": scope,
-                "heir_name": cleared.heir_name,
+                "successor_name": cleared.successor_name,
                 "predecessor_name": cleared.predecessor_name,
             }),
         );
     }
-    // Release readback: crown.py vacates the predecessor at spawn; this is
+    // Release readback: role.py vacates the predecessor at spawn; this is
     // the readback proving it happened. No live row over the scope, or a
     // seated session that is not the predecessor's, is the release proof.
     let canon = crate::territory::canonical_scope(scope);
@@ -108,7 +115,7 @@ pub(crate) fn verified(scope: &str, cwd: &Path, cleared: &PendingSuccession) {
                         &json!({
                             "succession_id": id,
                             "scope": scope,
-                            "heir_name": cleared.heir_name,
+                            "successor_name": cleared.successor_name,
                         }),
                     );
                 }
@@ -150,7 +157,7 @@ fn retro(scope: &str, cwd: &Path, cleared: &PendingSuccession, id: &str) {
     };
     let short = session.get(..8).unwrap_or(&session);
     // The same default dir shape lead_eval's --write resolves: the scope's
-    // first tag under the evals' kings dir, so the hand-filed and the
+    // first tag under the evals' leads dir, so the hand-filed and the
     // auto-filed retro land in one place.
     let tag = scope
         .split(',')
@@ -163,7 +170,7 @@ fn retro(scope: &str, cwd: &Path, cleared: &PendingSuccession, id: &str) {
     let dir = plans
         .join("..")
         .join("evals")
-        .join("kings")
+        .join("leads")
         .join(format!("lead-{tag}-{short}"));
     let spawned = std::env::current_exe().ok().and_then(|exe| {
         let home = crate::paths::AgentsHome::from_env_opt()?;
@@ -210,16 +217,16 @@ fn retro_unmeasured(scope: &str, id: &str, reason: &str) {
     }
 }
 
-/// The rollback step's announcement, from the predecessor's name: the heir
+/// The rollback step's announcement, from the predecessor's name: the successor
 /// never bound, the reap sweep restored the predecessor, and the fleet
-/// reads one line saying the crown moved back.
+/// reads one line saying the role moved back.
 pub(crate) fn rolled_back(reverted: &RevertedSuccession) {
     let body = format!(
-        "Succession over {} rolled back: {} never bound within the window; {} resumes the crown.",
-        reverted.scope, reverted.heir_name, reverted.predecessor_name,
+        "Succession over {} rolled back: {} never bound within the window; {} resumes the role.",
+        reverted.scope, reverted.successor_name, reverted.predecessor_name,
     );
     let from = if reverted.predecessor_name.is_empty() {
-        &reverted.heir_name
+        &reverted.successor_name
     } else {
         &reverted.predecessor_name
     };
@@ -230,7 +237,7 @@ pub(crate) fn rolled_back(reverted: &RevertedSuccession) {
     );
     let payload = json!({
         "scope": reverted.scope,
-        "heir_name": reverted.heir_name,
+        "successor_name": reverted.successor_name,
         "predecessor_name": reverted.predecessor_name,
         "evidence": reverted.evidence,
     });
@@ -255,8 +262,8 @@ mod tests {
 
     fn pending() -> PendingSuccession {
         PendingSuccession {
-            heir_name: "lead-heir".into(),
-            heir_session: Some("sess-new".into()),
+            successor_name: "lead-successor".into(),
+            successor_session: Some("sess-new".into()),
             predecessor_name: "lead-old".into(),
             predecessor_session: Some("sess-old".into()),
             ts: "2026-10-04T00:00:00Z".into(),
@@ -281,8 +288,8 @@ mod tests {
             serde_json::to_string(&json!({
                 "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
                 "agents": [{
-                    "name": session, "status": "live", "crown_scope": "x-aaaa",
-                    "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                    "name": session, "status": "live", "role_scope": "x-aaaa",
+                    "role_level": 2, "cwd": "/repo", "harness": "claude",
                     "harness_session_id": session,
                     "created_at": "2026-10-04T00:00:00Z",
                 }],
@@ -304,11 +311,11 @@ mod tests {
         std::fs::read_to_string(&journal).unwrap_or_default()
     }
 
-    /// AC3-HP: the heir's first beat verifies, releases and files the retro
+    /// AC3-HP: the successor's first beat verifies, releases and files the retro
     /// once each under one succession id; the release readback passes when
-    /// the heir (not the predecessor) holds the scope.
+    /// the successor (not the predecessor) holds the scope.
     #[test]
-    fn the_heirs_beat_verifies_releases_and_reports_the_retro_once() {
+    fn the_successors_beat_verifies_releases_and_reports_the_retro_once() {
         let (_guard, home) = pin_txn_home();
         registry_seeded(home.path(), "sess-new");
         // The plans chain falls back to the space dir, so the filed branch

@@ -834,7 +834,7 @@ pub fn run_org_fold(args: &[String]) -> i32 {
                 claims_dir = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
-            "--teams-json" | "--crowns-json" if i + 1 < args.len() => {
+            "--teams-json" | "--promotes-json" if i + 1 < args.len() => {
                 match serde_json::from_str::<Value>(&args[i + 1]) {
                     Ok(Value::Array(list)) => teams = list,
                     Ok(_) => {
@@ -1602,7 +1602,7 @@ mod tests {
 
     fn team_row(name: &str, scope: &str, level: i64, status: &str) -> Value {
         json!({
-            "name": name, "status": status, "crown_scope": scope, "crown_level": level,
+            "name": name, "status": status, "role_scope": scope, "role_level": level,
             "cwd": "/repo/p", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"
         })
     }

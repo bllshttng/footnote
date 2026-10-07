@@ -463,9 +463,10 @@ impl super::Core {
                     "substrate": req.substrate,
                 }
             });
-            let _ = crate::pane_send_audit::append_agents_event(
+            crate::pane_send_audit::queue_agents_event(
                 &crate::pane_send_audit::pane_send_audit_events_path(),
-                &row,
+                row,
+                None,
             );
         }
         self.launch_desk.mark_started(

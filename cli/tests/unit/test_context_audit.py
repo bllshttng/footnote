@@ -665,7 +665,7 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         )
 
 
-def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path) -> None:
+def test_lead_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     home = tmp_path / "home"
@@ -673,9 +673,9 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
     bus = tmp_path / "bus"
     for root in (home, state, bus):
         root.mkdir()
-    manifest = tmp_path / "king.md"
+    manifest = tmp_path / "lead.md"
     manifest.write_text(
-        "shape: epic\nharness_session_id: king-session\n", encoding="utf-8"
+        "shape: epic\nharness_session_id: lead-session\n", encoding="utf-8"
     )
     transcript = tmp_path / "summary.jsonl"
     transcript.write_text(
@@ -686,9 +686,9 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
     fno.write_text(
         "#!/bin/sh\n"
         "case \"${1-}:${2-}:${3-}\" in\n"
-        "  agents:registry-json:*) printf '%s\\n' '{\"agents\":[{\"session_id\":\"king-session\",\"harness_session_id\":\"king-session\",\"crown_level\":\"epic\",\"crown_scope\":\"xd863\"}]}' ;;\n"
+        "  agents:registry-json:*) printf '%s\\n' '{\"agents\":[{\"session_id\":\"lead-session\",\"harness_session_id\":\"lead-session\",\"role_level\":\"epic\",\"role_scope\":\"xd863\"}]}' ;;\n"
         "  agents:lead:faq) exit 0 ;;\n"
-        "  agents:lead:manifest-path) printf '%s\\n' \"$KING_MANIFEST_PATH\" ;;\n"
+        "  agents:lead:manifest-path) printf '%s\\n' \"$LEAD_MANIFEST_PATH\" ;;\n"
         "  backlog:get:xd863) printf '%s\\n' '[{\"id\":\"xd863\",\"status\":\"in_progress\"}]' ;;\n"
         "  *) exit 1 ;;\n"
         "esac\n",
@@ -704,7 +704,7 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
         "FNO_BUS_DIR": str(bus),
         "FNO_PLATFORM": "codex",
         "CODEX_PLUGIN_ROOT": str(ROOT),
-        "KING_MANIFEST_PATH": str(manifest),
+        "LEAD_MANIFEST_PATH": str(manifest),
         "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
     }
 
@@ -712,7 +712,7 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
         [str(ROOT / "hooks" / "lead-postcompact-reinject.sh")],
         cwd=tmp_path,
         env=env,
-        input=json.dumps({"session_id": "king-session", "transcript_path": str(transcript)}),
+        input=json.dumps({"session_id": "lead-session", "transcript_path": str(transcript)}),
         text=True,
         capture_output=True,
         check=False,

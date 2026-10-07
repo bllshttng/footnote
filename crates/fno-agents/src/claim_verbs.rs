@@ -548,6 +548,10 @@ fn claim_status_value_with_witness(
     if !metadata.is_empty() {
         out.insert("metadata".into(), Value::Object(metadata));
     }
+    let (caller, harness) = crate::claims::resolve_identity();
+    if crate::first_check::lead_can_delegate(rec, caller.as_deref(), harness.as_deref()) {
+        out.insert("dispatch_occupied".into(), Value::Bool(false));
+    }
     Value::Object(out)
 }
 
@@ -2184,7 +2188,7 @@ mod tests {
             || {
                 let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
                     std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:f-worker", "s-king");
+                let rec = witness_rec("spawn-handover:f-worker", "s-lead");
                 assert_eq!(
                     resolve_subject_session(&rec, &index).as_deref(),
                     Some("s-worker")
@@ -2201,7 +2205,7 @@ mod tests {
             || {
                 let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
                     std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:w-legacy", "s-king");
+                let rec = witness_rec("spawn-handover:w-legacy", "s-lead");
                 assert_eq!(
                     resolve_subject_session(&rec, &index).as_deref(),
                     Some("s-legacy")
@@ -2258,7 +2262,7 @@ mod tests {
                 let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
                     std::cell::RefCell::new(None);
                 load_session_registry_index(&index);
-                let rec = witness_rec("spawn-gate:1:twin", "s-king");
+                let rec = witness_rec("spawn-gate:1:twin", "s-lead");
                 assert!(resolve_subject_session(&rec, &index).is_none());
             },
         );

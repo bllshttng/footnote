@@ -928,16 +928,11 @@ impl View {
                     Some(TabContext::Ordinal(ord)) => suffix.push_str(&format!(" \u{b7}{ord}")),
                     None => {
                         // A squad-less row's cwd base disambiguates paneless
-                        // agents launched from arbitrary directories - unless
-                        // the worktree IS the agent's own node worktree, where
-                        // the basename repeats the node id and prints noise.
+                        // agents launched from arbitrary directories, minus
+                        // the node-repeat noise (`cwd_base_repeats_node`).
                         // Squad members never read cwd here.
-                        if a.squad.is_none() {
-                            if let Some(base) = a
-                                .cwd_base
-                                .as_deref()
-                                .filter(|b| Some(*b) != a.node.as_deref())
-                            {
+                        if a.squad.is_none() && !cwd_base_repeats_node(a) {
+                            if let Some(base) = a.cwd_base.as_deref() {
                                 suffix.push_str(&format!(" ({base})"));
                             }
                         }
@@ -1277,7 +1272,7 @@ impl View {
     }
 
     /// Line 2 keeps model, lead and cost left, with created and activity
-    /// ages right. Cost is served-only: a crowned lead never prices, and an
+    /// ages right. Cost is served-only: a promoted lead never prices, and an
     /// unserved cost renders nothing rather than a placeholder.
     pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
         let mut segments: Vec<String> = Vec::new();
@@ -1319,13 +1314,20 @@ impl View {
         base: bool,
     ) -> bool {
         match display.get(i) {
-            Some(DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)) => {
+            Some(row @ (DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..))) => {
                 base || self.list_selector() == Some(i)
                     || self.hover_row == Some(i)
                     || self.list_selector() == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
                     || self.list_selector() == Some(i.saturating_sub(2))
                     || self.hover_row == Some(i.saturating_sub(2))
+                    // The detail line is the metrics line's upper half too:
+                    // a hover or selection on the card's last line bands it.
+                    // The metrics line never has a card row below.
+                    || matches!(row, DisplayRow::CardDetail(..))
+                        && matches!(display.get(i + 1), Some(DisplayRow::CardMetrics(..)))
+                        && (self.list_selector() == Some(i + 1)
+                            || self.hover_row == Some(i + 1))
             }
             Some(DisplayRow::Agent(_)) => {
                 base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(..)))
@@ -1340,7 +1342,13 @@ impl View {
     /// (US3, inline) The foreign-cwd base an agent shows inline in parens:
     /// `Some` only when the agent's cwd basename differs from its squad's
     /// project basename. The dim `Sub` row's join, moved into the label.
+    /// A base that repeats the row's own node id never tags: a node-backed
+    /// thread lives in its node's worktree, and the node is already painted
+    /// on the card's right edge.
     pub(super) fn foreign_base<'a>(&self, a: &'a AgentRow) -> Option<&'a str> {
+        if cwd_base_repeats_node(a) {
+            return None;
+        }
         let squad_id = a.squad?;
         let squad = self.layout.squads.iter().find(|s| s.id == squad_id)?;
         let base = super::section_project_base(&squad.canonical_cwd);
@@ -1357,11 +1365,11 @@ impl View {
     /// ancestor, or a lineage cycle (capped at one step per agent), labels
     /// nothing.
     pub(super) fn lead_label(&self, a: &AgentRow) -> Option<String> {
-        if a.crown_level.is_some() {
-            if let Some(title) = a.crown_title.as_deref().filter(|t| !t.is_empty()) {
+        if a.role_level.is_some() {
+            if let Some(title) = a.role_title.as_deref().filter(|t| !t.is_empty()) {
                 return Some(title.to_string());
             }
-            return a.crown_scope.clone();
+            return a.role_scope.clone();
         }
         let mut parent = lineage_parent(a);
         let mut steps = 0;
@@ -1374,7 +1382,7 @@ impl View {
                 .agents
                 .iter()
                 .find(|r| r.harness_session_id.as_deref() == Some(pid))?;
-            if row.crown_level.is_some() {
+            if row.role_level.is_some() {
                 return Some(team_display_name(row).to_string());
             }
             parent = lineage_parent(row);
@@ -1399,6 +1407,13 @@ fn row_age(a: &AgentRow, now: u64) -> String {
 /// handle; the team's own name replaces it when the wire carries one.
 fn team_display_name(lead: &AgentRow) -> &str {
     &lead.name
+}
+
+/// The one cwd-base noise rule, shared by both tag sites: a worktree named
+/// for the row's own node repeats the id the card already paints, so its
+/// basename tags nothing.
+fn cwd_base_repeats_node(a: &AgentRow) -> bool {
+    a.node.is_some() && a.cwd_base == a.node
 }
 
 /// The message text an agent's row shows: the markup-stripped tail, or the

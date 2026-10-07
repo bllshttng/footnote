@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# test-context-nudge.sh - Stop hook: context nudge for EVERY session + crown-only
+# test-context-nudge.sh - Stop hook: context nudge for EVERY session + role-only
 # orphan check.
 #
 # Drives the REAL hook against the REAL worktree fno (PATH wrapper, like
 # test-handoff's FNO_PYTHON discovery) with isolated state, a REAL fixture
 # transcript the probe reads, and a real-shape Claude Stop payload. Covers:
-#   AC5  crowned real fire path -> decision:block whose reason carries the pct
+#   AC5  promoted real fire path -> decision:block whose reason carries the pct
 #   AC7  negative controls (below trigger, same-band latch, next band)
 #   AC9  no kill -0 / owner_pid / target-state read in the hook
 #   AC14 orphan block names both workers + the three resolutions
 #   AC15 a carveout carrying the scope suppresses the orphan block (field match)
 #   AC16 both checks fire in one output; orphan resolution does not suppress ctx
-#   AC17 every-session nudge: uncrowned past the general trigger blocks + emits
+#   AC17 every-session nudge: unpromoted past the general trigger blocks + emits
 #        session_context_nudge; below the general trigger does not
 #   AC18 latch holds across CWD: the per-session latch lives in the global state
 #        dir, so a cwd move between fires does not re-nudge within a band
@@ -21,7 +21,7 @@
 #        refusal latches separately so it never eats the nudge
 #   compact gate: the compact advice matches a MEASURED injection path, all THREE
 #        answers (injectable / not-injectable / could-not-measure), plus source
-#        sweeps for the dead crown verb and the raw transport name, each with a
+#        sweeps for the dead role verb and the raw transport name, each with a
 #        positive control so a passing absent-assertion proves the file was read
 #
 # No python that can import fno.cli is a HARD FAIL here, not a skip. This file is
@@ -33,7 +33,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$REPO_ROOT/hooks/context-nudge.sh"
 SCOPE="x-test-epic"
-KING_SID="king-test-session-id"
+LEAD_SID="lead-test-session-id"
 
 pass=0
 fail=0
@@ -138,7 +138,7 @@ printf 'schema_version: 1\nconfig:\n  state_dir: %s/.fno/\n' "$SBX" > "$SBX/.fno
 touch "$SBX/.fno/.path-migration-done"   # prevent [setup] state_dir re-migration
 LATCHES="$SBX/.fno/latches"               # latches live in a subdir, not the root
 mkdir -p "$LATCHES"
-printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
+printf '[target.handoff]\nlead_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
 export FNO_REPO_ROOT="$SBX"
@@ -152,7 +152,7 @@ export FNO_REPO_ROOT="$SBX"
 _SESSION_HARNESS="$(PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c \
   'from fno.claims.session_pid import resolve_session_harness; print(resolve_session_harness() or "")')"
 unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID
-export CLAUDE_CODE_SESSION_ID="$KING_SID"
+export CLAUDE_CODE_SESSION_ID="$LEAD_SID"
 cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events all land under $SBX
 
 # Clear the carveouts ledger through the accessor that owns it (the repo's
@@ -168,30 +168,30 @@ clear_carveouts() {
 # is 120, so a hardcoded stamp would age past the window and the suite would
 # turn red on a clock, not on a defect.
 write_registry() {
-  local king_crown="$1" has_children="$2" has_peer="${3:-no}"
+  local lead_role="$1" has_children="$2" has_peer="${3:-no}"
   local ts children='[]' peers='[]'
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [ "$has_children" = "yes" ]; then
-    children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$KING_SID"'","liveness":"alive","liveness_measured_at":"'"$ts"'"},
-               {"name":"kfad-b","harness":"claude","cwd":"/tmp","log_path":"/tmp/b","status":"live","short_id":"b","spawned_by_session":"'"$KING_SID"'","liveness":"alive","liveness_measured_at":"'"$ts"'"}]'
+    children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$LEAD_SID"'","liveness":"alive","liveness_measured_at":"'"$ts"'"},
+               {"name":"kfad-b","harness":"claude","cwd":"/tmp","log_path":"/tmp/b","status":"live","short_id":"b","spawned_by_session":"'"$LEAD_SID"'","liveness":"alive","liveness_measured_at":"'"$ts"'"}]'
   fi
-  # A peer king: a DIFFERENT crowned session with a disjoint scope, for the
-  # king roll-up (peers / king-above) test.
+  # A peer lead: a DIFFERENT promoted session with a disjoint scope, for the
+  # lead roll-up (peers / lead-above) test.
   if [ "$has_peer" = "yes" ]; then
-    peers='[{"name":"peer-king","harness":"claude","cwd":"/tmp","log_path":"/tmp/p","status":"live","short_id":"p","harness_session_id":"peer-sid","crown_level":1,"crown_scope":"peer-scope","crown_grantor":"human"}]'
+    peers='[{"name":"peer-lead","harness":"claude","cwd":"/tmp","log_path":"/tmp/p","status":"live","short_id":"p","harness_session_id":"peer-sid","role_level":1,"role_scope":"peer-scope","role_grantor":"human"}]'
   fi
-  local crown_level='null' crown_scope='null' crown_grantor='null'
-  if [ "$king_crown" = "yes" ]; then
-    crown_level='1'; crown_scope="\"$SCOPE\""; crown_grantor='"human"'
+  local role_level='null' role_scope='null' role_grantor='null'
+  if [ "$lead_role" = "yes" ]; then
+    role_level='1'; role_scope="\"$SCOPE\""; role_grantor='"human"'
   fi
   jq -n --argjson children "$children" --argjson peers "$peers" \
-    --argjson cl "$crown_level" --argjson cs "$crown_scope" --argjson cg "$crown_grantor" '{
+    --argjson cl "$role_level" --argjson cs "$role_scope" --argjson cg "$role_grantor" '{
     schema_version: 13,
     agents: ( [{
-      name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
-      status:"live", short_id:"'"$KING_SID"'",
-      harness_session_id:"'"$KING_SID"'",
-      crown_level:$cl, crown_scope:$cs, crown_grantor:$cg
+      name:"lead-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
+      status:"live", short_id:"'"$LEAD_SID"'",
+      harness_session_id:"'"$LEAD_SID"'",
+      role_level:$cl, role_scope:$cs, role_grantor:$cg
     }] + $children + $peers )
   }' > "$SBX/.fno/agents/registry.json"
 }
@@ -203,7 +203,7 @@ write_registry_without_self() {
   jq -n '{schema_version: 13, agents: [{
     name:"someone-else", harness:"claude", cwd:"/tmp", log_path:"/tmp/x",
     status:"live", short_id:"other", harness_session_id:"other-sid",
-    crown_level:null, crown_scope:null, crown_grantor:null
+    role_level:null, role_scope:null, role_grantor:null
   }]}' > "$SBX/.fno/agents/registry.json"
 }
 
@@ -212,21 +212,21 @@ write_registry_with_unlinked_child() {
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   jq -n --arg ts "$ts" '{schema_version: 13, agents: [
     {
-      name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
-      status:"live", short_id:"king-test-session-id",
-      harness_session_id:"king-test-session-id",
-      crown_level:1, crown_scope:"x-test-epic", crown_grantor:"human"
+      name:"lead-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
+      status:"live", short_id:"lead-test-session-id",
+      harness_session_id:"lead-test-session-id",
+      role_level:1, role_scope:"x-test-epic", role_grantor:"human"
     },
     {
       name:"unlinked-worker", harness:"claude", cwd:"/tmp", log_path:"/tmp/u",
       status:"live", short_id:"unlinked", spawned_by_session:null,
-      crown_level:null, crown_scope:null,
+      role_level:null, role_scope:null,
       liveness:"alive", liveness_measured_at:$ts
     },
     {
       name:"operator-peer", harness:"claude", cwd:"/tmp", log_path:"/tmp/o",
       status:"live", short_id:"operator-peer", spawned_by_session:null,
-      crown_level:null, crown_scope:null, origin:"operator",
+      role_level:null, role_scope:null, origin:"operator",
       liveness:"alive", liveness_measured_at:$ts
     }
   ]}' > "$SBX/.fno/agents/registry.json"
@@ -241,14 +241,14 @@ write_transcript() {  # write_transcript <path> <input_tokens> [model]
 
 # Build a real-shape Stop payload pointing at a sandbox transcript + the session.
 payload() {  # payload <transcript-path>
-  jq -nc --arg t "$1" --arg s "$KING_SID" \
+  jq -nc --arg t "$1" --arg s "$LEAD_SID" \
     '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:false}'
 }
 
 # A Stop that re-fires after a previous block (mid-compaction): stop_hook_active
 # is the one continuation signal the payload carries, and the hook must exit on it.
 payload_compact() {  # payload_compact <transcript-path>
-  jq -nc --arg t "$1" --arg s "$KING_SID" \
+  jq -nc --arg t "$1" --arg s "$LEAD_SID" \
     '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:true}'
 }
 
@@ -294,36 +294,36 @@ assert_absent "AC9: no kill -0"        "$(cat "$HOOK")" "kill -0"
 assert_absent "AC9: no owner_pid"      "$(cat "$HOOK")" "owner_pid"
 assert_absent "AC9: no target-state"   "$(cat "$HOOK")" "target-state"
 
-# === AC5: crowned king past trigger -> block with the measured pct ============
+# === AC5: promoted lead past trigger -> block with the measured pct ============
 write_registry yes no
 write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_eq     "AC5: exits 0 (block decision in JSON, not exit 2)" "$RC" "0"
 assert_contains "AC5: decision block" "$OUT" '"decision":"block"'
 assert_contains "AC5: reason carries measured 50%" "$OUT" '50% used'
-assert_contains "AC5: reason names the crowned scope" "$OUT" "$SCOPE"
-assert_contains "AC5: canon ask names the scope-keyed rolling doc" "$OUT" "crown-${SCOPE}.md"
+assert_contains "AC5: reason names the promoted scope" "$OUT" "$SCOPE"
+assert_contains "AC5: canon ask names the scope-keyed rolling doc" "$OUT" "role-${SCOPE}.md"
 events_has lead_context_nudge && ok "AC5: lead_context_nudge event emitted" || bad "AC5: no lead_context_nudge event"
 
-# A crown survives a compact, so this percentage asks a king to COMPACT and keep
+# A role survives a compact, so this percentage asks a lead to COMPACT and keep
 # ruling. It is not a handoff threshold, and the branch must not read as one: the
-# old wording pointed a king at the more expensive move on a number that measures
+# old wording pointed a lead at the more expensive move on a number that measures
 # nothing about ruling quality.
-assert_contains "crown: compact is the default, not handoff" "$OUT" 'COMPACT AND KEEP RULING'
-assert_contains "crown: crown survives a compact" "$OUT" 'maintained across a compact'
-assert_absent   "crown: no handoff threshold claim" "$OUT" 'handoff trigger'
-assert_contains "crown: handoff is a quality judgement" "$OUT" 'ORCHESTRATION is visibly degrading'
-assert_contains "crown: names the successor-handle cost" "$OUT" 'NEW mail handle'
-# The stored rung is stale for any king crowned before succession moved into
+assert_contains "role: compact is the default, not handoff" "$OUT" 'COMPACT AND KEEP RULING'
+assert_contains "role: role survives a compact" "$OUT" 'maintained across a compact'
+assert_absent   "role: no handoff threshold claim" "$OUT" 'handoff trigger'
+assert_contains "role: handoff is a quality judgement" "$OUT" 'ORCHESTRATION is visibly degrading'
+assert_contains "role: names the successor-handle cost" "$OUT" 'NEW mail handle'
+# The stored rung is stale for any lead promoted before succession moved into
 # spawn, and those rows were never migrated, so the nudge must not print one.
-assert_absent   "crown: does not print a stale rung" "$OUT" 'level 1'
+assert_absent   "role: does not print a stale rung" "$OUT" 'level 1'
 
 # === AC7: negative controls ===================================================
 # same band fires once -> second fire is latched, no block
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_absent "AC7: second fire same band is latched" "$OUT" '"decision":"block"'
 
-# crowned but BELOW trigger -> exit 0, no block, no output
+# promoted but BELOW trigger -> exit 0, no block, no output
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/low.jsonl" 300000   # 30% < 40
 run_hook "$(payload "$SBX/low.jsonl")"
@@ -335,41 +335,41 @@ write_transcript "$SBX/t.jsonl" 600000
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC7: next band blocks again" "$OUT" '60% used'
 
-# === AC17: every-session context nudge (uncrowned) ============================
-# The probe ran for every session at the old crown gate and was discarded; now
-# an uncrowned session past the GENERAL trigger (50) blocks with its own message
+# === AC17: every-session context nudge (unpromoted) ============================
+# The probe ran for every session at the old role gate and was discarded; now
+# an unpromoted session past the GENERAL trigger (50) blocks with its own message
 # + session_context_nudge event. Clear latches + registry first.
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry no no
 write_transcript "$SBX/t.jsonl" 500000   # 50% >= general trigger 50
 run_hook "$(payload "$SBX/t.jsonl")"
-assert_eq     "AC17: uncrowned past trigger exits 0" "$RC" "0"
-assert_contains "AC17: uncrowned decision block" "$OUT" '"decision":"block"'
+assert_eq     "AC17: unpromoted past trigger exits 0" "$RC" "0"
+assert_contains "AC17: unpromoted decision block" "$OUT" '"decision":"block"'
 assert_contains "AC17: reason carries measured 50%" "$OUT" '50% used'
 assert_contains "AC17: reason names the general trigger" "$OUT" 'session compact trigger (50%)'
 events_has session_context_nudge && ok "AC17: session_context_nudge event emitted" || bad "AC17: no session_context_nudge event"
 
-# uncrowned BELOW the general trigger -> exit 0, no block
+# unpromoted BELOW the general trigger -> exit 0, no block
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/low.jsonl" 300000   # 30% < 50
 run_hook "$(payload "$SBX/low.jsonl")"
-assert_eq     "AC17: uncrowned below trigger exits 0" "$RC" "0"
-assert_absent "AC17: uncrowned below trigger no block" "$OUT" '"decision":"block"'
+assert_eq     "AC17: unpromoted below trigger exits 0" "$RC" "0"
+assert_absent "AC17: unpromoted below trigger no block" "$OUT" '"decision":"block"'
 
 # === AC14: orphan block names both workers + the three resolutions ============
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-write_registry yes yes                       # crowned king + 2 live children
+write_registry yes yes                       # promoted lead + 2 live children
 write_transcript "$SBX/low.jsonl" 300000     # below trigger -> isolate orphan check
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_contains "AC14: orphan decision block" "$OUT" '"decision":"block"'
 assert_contains "AC14: names worker kfad-a" "$OUT" 'kfad-a'
 assert_contains "AC14: names worker kfad-b" "$OUT" 'kfad-b'
-assert_contains "AC14: names resolution 1 (court)" "$OUT" 'stay as court'
-# Succession moved into spawn: a sitting king spawning its heir over its own scope
-# transfers the crown in the write that vacates its own. The verb this line used to
+assert_contains "AC14: names resolution 1 (team)" "$OUT" 'stay as team'
+# Succession moved into spawn: a sitting lead spawning its successor over its own scope
+# transfers the role in the write that vacates its own. The verb this line used to
 # name, and the flag it used to pass, were both deleted; an assertion pinning them
 # passed while documenting a command that no longer exists.
-assert_contains "AC14: names resolution 2 (spawn the heir)" "$OUT" 'fno agents spawn -k'
+assert_contains "AC14: names resolution 2 (spawn the successor)" "$OUT" 'fno agents spawn -k'
 assert_contains "AC14: names resolution 3 (carveout)" "$OUT" 'carveout add'
 events_has lead_orphan_block && ok "AC14: lead_orphan_block event emitted" || bad "AC14: no lead_orphan_block event"
 
@@ -401,7 +401,7 @@ assert_contains "AC15: wrong-scope carveout does not suppress" "$OUT" 'cannot be
 
 # === AC16: both checks fire in one output; orphan resolved does not kill ctx ===
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-# remove the matching carveout so orphans are unresolved again; keep king + children
+# remove the matching carveout so orphans are unresolved again; keep lead + children
 clear_carveouts
 write_transcript "$SBX/t.jsonl" 500000     # past trigger AND has orphans
 run_hook "$(payload "$SBX/t.jsonl")"
@@ -456,7 +456,7 @@ if ! printf '%s' "$OUT" | grep -q '"decision":"block"'; then
   # >&2 LAST: `2>/dev/null >&2` would send stdout to wherever stderr now
   # points, and the first dump round's evidence landed in /dev/null.
   cat "$SBX/hook-stderr.log" >&2
-  "$AGENTS_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$KING_SID" --json 2>&1 | head -3 >&2
+  "$AGENTS_BIN" context-run --probe --transcript "$SBX/small.jsonl" --session "$LEAD_SID" --json 2>&1 | head -3 >&2
   # Fire #1 died between the latch touch and the emit (fire #2 is
   # latch-silent, so OUT above cannot show it). Re-run its exact payload
   # under bash -x with the latch cleared: the trace names the exit line.
@@ -522,7 +522,7 @@ cd "$SBX"
 
 # === AC26: flush refusal - a foreign live writer rooted in the checkout =======
 # (x-299b) The flush nudge counts dirty files and never asks who wrote them:
-# twice in one night two kings were urged to commit 351 mid-flight lines that
+# twice in one night two leads were urged to commit 351 mid-flight lines that
 # belonged to a live codex worker rooted in the same canonical checkout. Now
 # the fire is gated on foreign_rooted_writers. Every arm asserts a string the
 # outcome ALONE produces: the refusal NAMES the pid, because absence of a
@@ -541,7 +541,7 @@ FPID=$!
 jq -n --argjson pid "$FPID" '{schema_version: 13, agents: [{
   name:"t-foreign-probe", harness:"codex", cwd:"/tmp", log_path:"/tmp/fp",
   status:"busy", short_id:"fp", harness_session_id:"foreign-probe-sid",
-  pid:$pid, crown_level:null, crown_scope:null, crown_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
 write_transcript "$SBX/low.jsonl" 300000
 run_hook "$(payload "$SBX/low.jsonl")"                 # stop 1: static=1
 assert_absent "AC26: stop 1 no block yet" "$OUT" '"decision":"block"'
@@ -577,8 +577,8 @@ assert_contains "AC26: control arm still advises the commit" "$OUT" 'commit it n
 # proved by the nudge appearing, not by a refusal failing to appear.
 jq -n --argjson pid "$$" '{schema_version: 13, agents: [{
   name:"t-self-probe", harness:"claude", cwd:"/tmp", log_path:"/tmp/sp",
-  status:"live", short_id:"sp", harness_session_id:"'"$KING_SID"'",
-  pid:$pid, crown_level:null, crown_scope:null, crown_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+  status:"live", short_id:"sp", harness_session_id:"'"$LEAD_SID"'",
+  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
 rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null
 run_hook "$(payload "$SBX/low.jsonl")"
 run_hook "$(payload "$SBX/low.jsonl")"
@@ -603,7 +603,7 @@ cd "$SBX"
 
 # === AC24: delta-by-shape - plan_path sets the wording ========================
 # A /target session (plan_path bound) gets the flush wording; a bare session
-# (no plan, no crown) gets the write-a-canon-doc wording. Same pressure, only
+# (no plan, no role) gets the write-a-canon-doc wording. Same pressure, only
 # the ask changes. plan_path comes from the target manifest, read best-effort.
 rm -f "$LATCHES"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
 write_registry no no
@@ -617,12 +617,12 @@ rm -f "$LATCHES"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC24: no plan -> full-doc (canon doc) wording" "$OUT" 'canon doc'
 
-# === AC25: king roll-up names peers (computed, not asked for) =================
-# The king message states the neighbourhood roll-up from the same registry read.
-# A peer king (disjoint scope) surfaces in the message; an isolated king gets no
+# === AC25: lead roll-up names peers (computed, not asked for) =================
+# The lead message states the neighbourhood roll-up from the same registry read.
+# A peer lead (disjoint scope) surfaces in the message; an isolated lead gets no
 # roll-up clutter (existing AC5/AC14 cover the zero-peer case unchanged).
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-write_registry yes no yes                              # crowned king + 1 peer king
+write_registry yes no yes                              # promoted lead + 1 peer lead
 write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC25: lead roll-up names the peer lead" "$OUT" 'peer lead'
@@ -638,7 +638,7 @@ assert_contains "AC25: lead roll-up names the peer lead" "$OUT" 'peer lead'
 # contradicted Claude marker to `--to-self`.
 if [ "$_SESSION_HARNESS" = "codex" ]; then
   unset CLAUDE_CODE_SESSION_ID
-  export CODEX_THREAD_ID="$KING_SID"
+  export CODEX_THREAD_ID="$LEAD_SID"
 fi
 #
 # not-injectable: a session with NO registry row of its own, which is the
@@ -709,7 +709,7 @@ assert_absent   "gate: unmeasured -> claims a path"           "$OUT" 'HAS an inj
 # Neither branch may name the plumbing under the front door, nor a deleted verb.
 HOOK_SRC="$(cat "$HOOK")"
 assert_absent "hook: no raw mail-inject prescription" "$HOOK_SRC" 'mail-inject'
-assert_absent "hook: no deleted crown verb"           "$HOOK_SRC" 'agents crown'
+assert_absent "hook: no deleted role verb"           "$HOOK_SRC" 'agents role'
 assert_absent "hook: no deleted succession flag"      "$HOOK_SRC" '--succeed'
 
 # === Latch location + lifetime =================================================
@@ -790,9 +790,9 @@ chmod +x "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
 
 # Configure BOTH triggers away from their defaults (50/40) so a stale-value bug
 # (e.g. a fold that reads the block but keeps hardcoded defaults) cannot pass.
-printf '[target.handoff]\nking_used_pct_trigger = 41\nused_pct_trigger = 55\n' > "$SBX/.fno/config.toml"
+printf '[target.handoff]\nlead_used_pct_trigger = 41\nused_pct_trigger = 55\n' > "$SBX/.fno/config.toml"
 
-# uncrowned, 54% (below the configured 55): the OLD default (50) would have
+# unpromoted, 54% (below the configured 55): the OLD default (50) would have
 # blocked here, so a no-block proves the new value reached the hook, not just
 # that some value did.
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
@@ -802,41 +802,41 @@ write_transcript "$SBX/ac2-below.jsonl" 540000
 OUT=$(printf '%s' "$(payload "$SBX/ac2-below.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
 assert_absent "AC1-HP: 54% stays below the configured 55% trigger" "$OUT" '"decision":"block"'
 
-# uncrowned, 55%: blocks, and the reason names the configured value.
+# unpromoted, 55%: blocks, and the reason names the configured value.
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/ac2-gen.jsonl" 550000
 : > "$COUNTER"
 OUT=$(printf '%s' "$(payload "$SBX/ac2-gen.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
-assert_eq     "AC1-HP: uncrowned at 55% exits 0" "$RC" "0"
+assert_eq     "AC1-HP: unpromoted at 55% exits 0" "$RC" "0"
 assert_contains "AC1-HP: reason names the configured general trigger (55%)" "$OUT" 'session compact trigger (55%)'
 cfg_calls=$(grep -c 'config get' "$COUNTER"); cfg_calls="${cfg_calls:-0}"
-assert_eq     "AC2-HP: exactly one config get invocation (uncrowned fire)" "$cfg_calls" "1"
+assert_eq     "AC2-HP: exactly one config get invocation (unpromoted fire)" "$cfg_calls" "1"
 assert_contains "AC2-HP: the one call names the block" "$(cat "$COUNTER")" 'config get target.handoff'
 assert_absent "AC2-EDGE: no separate used_pct_trigger scalar read" "$(cat "$COUNTER")" 'target.handoff.used_pct_trigger'
-assert_absent "AC2-EDGE: no separate king_used_pct_trigger scalar read" "$(cat "$COUNTER")" 'target.handoff.king_used_pct_trigger'
+assert_absent "AC2-EDGE: no separate lead_used_pct_trigger scalar read" "$(cat "$COUNTER")" 'target.handoff.lead_used_pct_trigger'
 
-# crowned, 40% (below the configured king trigger of 41): the OLD default (40)
-# would have blocked here too, so no-block proves the new king value landed.
+# promoted, 40% (below the configured lead trigger of 41): the OLD default (40)
+# would have blocked here too, so no-block proves the new lead value landed.
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry yes no
-write_transcript "$SBX/ac2-king-below.jsonl" 400000
+write_transcript "$SBX/ac2-lead-below.jsonl" 400000
 : > "$COUNTER"
-OUT=$(printf '%s' "$(payload "$SBX/ac2-king-below.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
-assert_absent "AC1-HP: crowned 40% stays below the configured 41% king trigger" "$OUT" '"decision":"block"'
+OUT=$(printf '%s' "$(payload "$SBX/ac2-lead-below.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
+assert_absent "AC1-HP: promoted 40% stays below the configured 41% lead trigger" "$OUT" '"decision":"block"'
 
-# crowned, 41%: blocks, one boot.
+# promoted, 41%: blocks, one boot.
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
-write_transcript "$SBX/ac2-king.jsonl" 410000
+write_transcript "$SBX/ac2-lead.jsonl" 410000
 : > "$COUNTER"
-OUT=$(printf '%s' "$(payload "$SBX/ac2-king.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
-assert_contains "AC1-HP: crowned at 41% blocks" "$OUT" '"decision":"block"'
+OUT=$(printf '%s' "$(payload "$SBX/ac2-lead.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
+assert_contains "AC1-HP: promoted at 41% blocks" "$OUT" '"decision":"block"'
 cfg_calls=$(grep -c 'config get' "$COUNTER"); cfg_calls="${cfg_calls:-0}"
-assert_eq     "AC2-HP: exactly one config get invocation (crowned fire)" "$cfg_calls" "1"
+assert_eq     "AC2-HP: exactly one config get invocation (promoted fire)" "$cfg_calls" "1"
 
 # AC2-EDGE (the regression the count exists to catch): a re-added second scalar
 # read must fail the count assertion and the failure message names both lines.
 FAKE_COUNTER="$SBX/fake-two-boots.txt"
-printf 'config get target.handoff.used_pct_trigger\nconfig get target.handoff.king_used_pct_trigger\n' > "$FAKE_COUNTER"
+printf 'config get target.handoff.used_pct_trigger\nconfig get target.handoff.lead_used_pct_trigger\n' > "$FAKE_COUNTER"
 fake_calls=$(grep -c 'config get' "$FAKE_COUNTER")
 if [ "$fake_calls" != "1" ]; then
   ok "AC2-EDGE: a reintroduced second scalar read fails the count (got $fake_calls: $(cat "$FAKE_COUNTER" | tr '\n' ';'))"
@@ -848,7 +848,7 @@ rm -rf "$COUNT_BINDIR"
 
 # === The liveness-primary partition, six cases each asserting the EXACT ====
 # === printed alive number - "fewer than the total" is not enough. ==========
-# A synthetic registry: the king row is fixed, the children carry whatever
+# A synthetic registry: the lead row is fixed, the children carry whatever
 # liveness shape the case needs. No case names bp-a238/bp-1939 (reaped from
 # the real registry days ago) or any other live specimen - every row here is
 # invented. Stamps are generated at call time: SERVED_LIVENESS_MAX_AGE_SECS is
@@ -862,17 +862,17 @@ write_registry_liveness() {  # write_registry_liveness '<jq children array>'
   jq -n --argjson children "$1" '{
     schema_version: 13,
     agents: ( [{
-      name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
-      status:"live", short_id:"'"$KING_SID"'",
-      harness_session_id:"'"$KING_SID"'",
-      crown_level:1, crown_scope:"'"$SCOPE"'", crown_grantor:"human"
+      name:"lead-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
+      status:"live", short_id:"'"$LEAD_SID"'",
+      harness_session_id:"'"$LEAD_SID"'",
+      role_level:1, role_scope:"'"$SCOPE"'", role_grantor:"human"
     }] + $children )
   }' > "$SBX/.fno/agents/registry.json"
 }
 
 # --- Mixed: 2 alive + 2 dead, both fresh. Prints 2; neither dead name shows. -
 FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+CHILDREN=$(jq -nc --arg sid "$LEAD_SID" --arg ts "$FRESH_TS" '[
   {name:"live-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
   {name:"live-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
   {name:"dead-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts},
@@ -889,7 +889,7 @@ assert_absent   "x-1b75 mixed: dead-b never named" "$OUT" 'dead-b'
 # --- All alive control: 3 alive, fresh. Prints 3 - forbids a blanket ---------
 # --- subtraction, a hardcoded cap, or an off-by-one. -------------------------
 FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+CHILDREN=$(jq -nc --arg sid "$LEAD_SID" --arg ts "$FRESH_TS" '[
   {name:"alive-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
   {name:"alive-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
   {name:"alive-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts}
@@ -902,7 +902,7 @@ assert_contains "x-1b75 all-alive control: prints 3, not a subtraction or a cap"
 # --- All dead: 3 dead, fresh. A confident negative is not an obligation, so --
 # --- no orphan block and no event - a real, decidable outcome, not a gap. ---
 FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+CHILDREN=$(jq -nc --arg sid "$LEAD_SID" --arg ts "$FRESH_TS" '[
   {name:"dead-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts},
   {name:"dead-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts},
   {name:"dead-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
@@ -917,7 +917,7 @@ events_has lead_orphan_block && bad "x-1b75 all-dead: lead_orphan_block fired an
 # --- Unresolved: no liveness field at all. Reported as unknown, excluded ----
 # --- from the alive count, and the nudge still fires (a broken reader must --
 # --- never silently clear this guard). ---------------------------------------
-CHILDREN=$(jq -nc --arg sid "$KING_SID" '[
+CHILDREN=$(jq -nc --arg sid "$LEAD_SID" '[
   {name:"unmeasured-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid},
   {name:"unmeasured-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid}
 ]')
@@ -934,7 +934,7 @@ assert_contains "x-1b75 unresolved: a broken reader never clears the guard" "$OU
 # --- null case above, never silently pass a `== null` check that only -------
 # --- catches the no-measurement case. ----------------------------------------
 FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+CHILDREN=$(jq -nc --arg sid "$LEAD_SID" --arg ts "$FRESH_TS" '[
   {name:"unmeasured-word-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"unmeasured", liveness_measured_at:$ts}
 ]')
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
@@ -947,7 +947,7 @@ assert_contains "x-1b75 unmeasured word: lands in unresolved, not silently dropp
 # --- 120s window - reads unknown, never alive. The republished-word trap. ---
 STALE_TS=$(date -u -v-200S '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
   || date -u -d '200 seconds ago' '+%Y-%m-%dT%H:%M:%SZ')
-CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$STALE_TS" '[
+CHILDREN=$(jq -nc --arg sid "$LEAD_SID" --arg ts "$STALE_TS" '[
   {name:"stale-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts}
 ]')
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null

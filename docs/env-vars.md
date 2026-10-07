@@ -103,7 +103,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_GH_FACTS_DIR` | rs | Overrides the directory the `gh-cache` verb reads and writes its permanent fact rows from; default `<state_dir>/cache/gh-facts`. |
 | `FNO_GLOBAL_SETTINGS_PATH` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:48 |
 | `FNO_GRAPH_JSON` | rs | Names the stable graph store anchor; the SQLite store is the `.db` sibling. |
-| `FNO_GUARD_TRACE` | rs | unclear: crates/fno-agents/src/hook/king_guard.rs:25 |
+| `FNO_GUARD_TRACE` | rs | unclear: crates/fno-agents/src/hook/lead_guard.rs:25 |
 | `FNO_HARNESS` | py+rs | unclear: cli/src/fno/lead/state.py:268 |
 | `FNO_HARNESS_NAME` | rs | The caller's harness name in the canonical identity stamp; the hold gate's direct read pairs it with FNO_HARNESS_SESSION_ID to answer whether the caller is the recipient. |
 | `FNO_HARNESS_SESSION_ID` | rs | The normalized full harness session id; native context hooks use it when the provider-specific id is absent. |
@@ -166,7 +166,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PI_MODEL` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:127 |
 | `FNO_PI_PROVIDER` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:122 |
 | `FNO_PLANS_DIRS_CACHE_DIR` | rs | Overrides the plans-dirs cache directory the `state plans-dirs` verb reads and writes; default `<state_dir>/cache/plans-dirs-v1.txt`. |
-| `FNO_PLATFORM` | rs | unclear: crates/fno-agents/src/hook/king_guard.rs:400 |
+| `FNO_PLATFORM` | rs | unclear: crates/fno-agents/src/hook/lead_guard.rs:400 |
 | `FNO_PROBE_FNO` | rs | Names the fno porcelain the isolated live journey drives; the default is the PATH `fno`, and the override exists so a probe run can exercise a specific checkout. |
 | `FNO_PROCESS_ADMISSION` | rs | unclear: crates/fno/src/bootstrap.rs:1721 |
 | `FNO_PROCESS_ADMISSION_MAX` | py+rs | unclear: cli/src/fno/agents/mux_spawn.py:1914 |
@@ -184,7 +184,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_REVIEW_ROUND` | py | The verified round a --verify-fixes pass declares, carried to the disposition comment when the shell producer emits; the attest flow's function argument outranks it. Set by skills/review/scripts/emit-attestation.sh, read in cli/src/fno/review/cli.py `post_dispositions`. |
 | `FNO_ROLES_ROOT` | py | unclear: cli/src/fno/agents/model_routing.py:1644 |
 | `FNO_ROUTE_MODEL` | rs | Fallback model a thread row stamps when the caller named no model and the writer session's observed model is absent (comment_create, api.rs). |
-| `FNO_ROUTE_PROVIDER` | py+rs | unclear: cli/src/fno/agent/cli.py:303; the lead check-in's blueprint reading also reads it (crates/fno-agents/src/king_checkin.rs r_blueprint) to pick the blueprint-subagent ceiling. |
+| `FNO_ROUTE_PROVIDER` | py+rs | unclear: cli/src/fno/agent/cli.py:303; the lead check-in's blueprint reading also reads it (crates/fno-agents/src/lead_checkin.rs r_blueprint) to pick the blueprint-subagent ceiling. |
 | `FNO_ROUTE_SETTINGS_DIR` | rs | unclear: crates/fno-agents/src/claude_adopt.rs:112 |
 | `FNO_ROUTE_SLOT_DEBUG` | py | unclear: cli/src/fno/rust_binary.py:224 |
 | `FNO_RUNTIME_STATE_PATH` | py+rs | Overrides the provider runtime-state file (quota locks, usage); the default is ~/.fno/runtime-state.json. |

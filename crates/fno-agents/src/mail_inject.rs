@@ -1636,10 +1636,10 @@ fn sender_team_at(registry_path: &Path, from_session: Option<&str>) -> Vec<Strin
     if matches.next().is_some() {
         return Vec::new();
     }
-    let Some(level) = row.crown_level else {
+    let Some(level) = row.role_level else {
         return Vec::new();
     };
-    let scope = row.crown_scope.as_deref().unwrap_or("?");
+    let scope = row.role_scope.as_deref().unwrap_or("?");
     let theme =
         crate::team_names::theme_for(&registry_path.with_file_name("team_names.json"), scope);
     let mut accepted = vec![
@@ -3021,8 +3021,8 @@ mod tests {
                 harness_session_id: Some("session-primary".into()),
                 related_session_id: Some("session-lead".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(1),
-                crown_scope: Some("fno".into()),
+                role_level: Some(1),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3046,8 +3046,8 @@ mod tests {
                 harness: Some("codex".into()),
                 harness_session_id: Some("session-lead".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(1),
-                crown_scope: Some("fno".into()),
+                role_level: Some(1),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3087,8 +3087,8 @@ mod tests {
                 harness: Some("claude".into()),
                 harness_session_id: Some("246866bd-1111-2222-3333-444455556666".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(2),
-                crown_scope: Some("fno".into()),
+                role_level: Some(2),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3113,8 +3113,8 @@ mod tests {
                 harness: Some("codex".into()),
                 harness_session_id: Some("aaaa1111-2222-3333-4444-555566667777".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(2),
-                crown_scope: Some("x-dddd,x-eeee,x-ffff".into()),
+                role_level: Some(2),
+                role_scope: Some("x-dddd,x-eeee,x-ffff".into()),
                 ..default_row()
             });
         })
@@ -3122,7 +3122,7 @@ mod tests {
         let store = serde_json::json!({
             "version": 1,
             "teams": {"x-dddd,x-eeee,x-ffff": {
-                "name": "kestrel", "regnal": 1, "holder_session": null,
+                "name": "kestrel", "generation": 1, "holder_session": null,
                 "nodes": [], "updated_at": "2026-09-29T00:00:00Z",
                 "theme": "native backlog", "title": "Lead of native backlog"
             }}
@@ -3160,8 +3160,8 @@ mod tests {
                 harness: Some("claude".into()),
                 harness_session_id: Some("246866bd-1111-2222-3333-444455556666".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(2),
-                crown_scope: Some("fno".into()),
+                role_level: Some(2),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
             registry.entries.push(crate::state::RegistryEntry {
@@ -3169,8 +3169,8 @@ mod tests {
                 harness: Some("claude".into()),
                 harness_session_id: Some("246866bd-9999-8888-7777-666655554444".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(1),
-                crown_scope: Some("fno".into()),
+                role_level: Some(1),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3199,8 +3199,8 @@ mod tests {
                 short_id: "lead".into(),
                 harness_session_id: Some("246866bd-1111-2222-3333-444455556666".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(2),
-                crown_scope: Some("fno".into()),
+                role_level: Some(2),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3225,8 +3225,8 @@ mod tests {
                 harness: Some("codex".into()),
                 harness_session_id: Some("session-lead".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(1),
-                crown_scope: Some("fno".into()),
+                role_level: Some(1),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3263,8 +3263,8 @@ mod tests {
                 harness: Some("codex".into()),
                 harness_session_id: Some("session-lead".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(1),
-                crown_scope: Some("fno".into()),
+                role_level: Some(1),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -3293,8 +3293,8 @@ mod tests {
                 harness: Some("codex".into()),
                 harness_session_id: Some("session-lead".into()),
                 status: crate::AgentStatus::Live,
-                crown_level: Some(1),
-                crown_scope: Some("fno".into()),
+                role_level: Some(1),
+                role_scope: Some("fno".into()),
                 ..default_row()
             });
         })
@@ -4298,9 +4298,9 @@ mod tests {
             exited_at: None,
             mux: None,
             screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
+            role_level: None,
+            role_scope: None,
+            role_grantor: None,
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,

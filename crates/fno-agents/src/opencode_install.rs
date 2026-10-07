@@ -63,12 +63,21 @@ pub(crate) fn config_dir_resolved() -> (PathBuf, &'static str) {
 }
 
 /// The opencode binary an install targets: `FNO_OPENCODE_BIN` when set and
-/// nonempty (the wrapper/seam seam), else `opencode` on PATH.
+/// nonempty (the wrapper/seam seam), else the official installer's
+/// `~/.opencode/bin/opencode` when it exists (that dir is often off the PATH
+/// of a spawning shell), else `opencode` on PATH.
 pub(crate) fn opencode_bin() -> String {
-    std::env::var("FNO_OPENCODE_BIN")
+    if let Some(p) = std::env::var("FNO_OPENCODE_BIN")
         .ok()
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "opencode".to_string())
+    {
+        return p;
+    }
+    let home_bin = dirs_home().join(".opencode/bin/opencode");
+    if home_bin.is_file() {
+        return home_bin.display().to_string();
+    }
+    "opencode".to_string()
 }
 
 /// The `config` row of `<bin> debug paths`: the first line whose leading
@@ -856,10 +865,11 @@ pub fn status_json() -> serde_json::Value {
     let source = source_version();
     let behind = matches!((&manifest, &source), (Some(m), Some(sv)) if sv.as_str() != m.version);
     let bin = opencode_bin();
-    let (current_contract, _reported) = classify_contract(&bin);
-    let contract_changed = manifest.as_ref().is_some_and(|m| {
-        !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label()
-    });
+    let (current_contract, reported) = classify_contract(&bin);
+    let contract_changed = reported.is_some()
+        && manifest.as_ref().is_some_and(|m| {
+            !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label()
+        });
     let status = match &manifest {
         None => "absent",
         Some(_) => {
@@ -971,7 +981,7 @@ pub fn status_json() -> serde_json::Value {
                 .as_ref()
                 .map(|m| m.opencode_contract.as_str())
                 .unwrap_or("?"),
-            _reported.as_deref().unwrap_or("an unknown version")
+            reported.as_deref().unwrap_or("an unknown version")
         ),
     );
     }
@@ -1072,9 +1082,10 @@ pub fn installed_status() -> serde_json::Value {
         Some(m) => {
             let complete = m.files.keys().all(|rel| conf.join(rel).is_file());
             let behind = source.as_deref().is_some_and(|sv| sv != m.version);
-            let (current_contract, _) = classify_contract(&opencode_bin());
-            let contract_changed =
-                !m.opencode_contract.is_empty() && m.opencode_contract != current_contract.label();
+            let (current_contract, reported) = classify_contract(&opencode_bin());
+            let contract_changed = reported.is_some()
+                && !m.opencode_contract.is_empty()
+                && m.opencode_contract != current_contract.label();
             let stale = complete && (behind || contract_changed);
             json!({
                 "action": "installed",
@@ -1089,6 +1100,8 @@ pub fn installed_status() -> serde_json::Value {
                 "version": m.version,
                 "source_version": source,
                 "bridge_present": conf.join("plugins/footnote.js").is_file(),
+                "binary_missing": reported.is_none(),
+                "contract_changed": contract_changed,
             })
         }
     }

@@ -195,7 +195,7 @@ fn display_slots_grouped(items: &[FeedItem]) -> Vec<Slot> {
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     let mut other: Vec<usize> = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        if in_teams_band(&item.kind, &item.crown) {
+        if in_teams_band(&item.kind, &item.role) {
             teams.push(i);
             continue;
         }
@@ -266,7 +266,7 @@ pub(crate) fn display_kind(kind: &str) -> &str {
 fn bold_kind(item: &FeedItem) -> bool {
     item.kind == "question_asked"
         || item.kind == "team_vacated"
-        || (item.kind == "session_reaped" && item.crown.is_some())
+        || (item.kind == "session_reaped" && item.role.is_some())
 }
 
 /// The panel body: one header line, up to `visible_rows - 2` item rows, then

@@ -93,7 +93,7 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     it came from a peer, whichever transport typed it. Mail never sends as bare
     `fno`, so the lane names its sender.
 
-    Crowned topology, because x-2dfa gates the trailer on the crown: the
+    Promoted topology, because x-2dfa gates the trailer on the role: the
     subject here is that the PANE transport carries whatever the single
     renderer produced, not which topology produces a trailer (that pair is
     asserted in ``test_mail_origin.py``).
@@ -166,13 +166,13 @@ def test_read_receipt_identity_gate_matches_on_uuid_not_the_name(monkeypatch, ca
     assert not any(call["argv"][1:4] == ["mux", "pane", "send"] for call in calls)
     assert "identity mismatch" in capsys.readouterr().err
 
-    # Only the name differs: the renamed worker (bob, ex-kestrel-heir)
+    # Only the name differs: the renamed worker (bob, ex-kestrel-successor)
     # still receives, because the uuid names the same live session.
     receipt = (
-        '{"pane_id":7,"text":"$ ","pane_name":"kestrel-heir",'
+        '{"pane_id":7,"text":"$ ","pane_name":"kestrel-successor",'
         '"registry_fno_id":"worker-session"}'
     )
-    pane_ls = '[{"pane_id":7,"name":"kestrel-heir","fno_id":"worker-session"}]'
+    pane_ls = '[{"pane_id":7,"name":"kestrel-successor","fno_id":"worker-session"}]'
     calls.clear()
     capsys.readouterr()
 
@@ -287,7 +287,7 @@ def test_raw_send_skips_the_read_back(monkeypatch):
 
 def test_a_showing_option_prompt_refuses_and_types_nothing(monkeypatch, capsys):
     """A submit against a showing prompt dismisses the payload and selects the
-    highlighted default. Verified specimen: a king's option-3 ruling was typed,
+    highlighted default. Verified specimen: a lead's option-3 ruling was typed,
     discarded, and the worker took option 1."""
     calls: list[dict] = []
     monkeypatch.setattr(

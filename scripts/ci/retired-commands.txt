@@ -66,12 +66,10 @@ fno mux block annotate|fno mux block annotate still shells note --blocking (inte
 # alias release). thread is the only spelling of the persistent lane.
 --substrate bg|--substrate thread|the bg alias retirement (user 2026-10-02)
 # The people-word rename: the spawn door answers --promote (the titled-role
-# grant) and --hand-off (the succession transfer). --crown/-k and --succeed
+# grant) and --hand-off (the succession transfer). --promote/-k and --succeed
 # still answer as hidden one-release aliases, but no caller-facing string may
 # teach them.
---crown|--promote <scope>, the titled-role grant|the people-word rename
 --succeed|--hand-off, the succession transfer|the people-word rename
 
-# The crown-role group is org on both fronts; the pre-rename spelling is what
+# The role-role group is org on both fronts; the pre-rename spelling is what
 # the beat callers kept emitting after the rename, one refused reader per beat.
-fno agents lead|fno agents org (the canonical group on both fronts)|the lead-to-org rename

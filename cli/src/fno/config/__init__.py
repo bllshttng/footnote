@@ -63,8 +63,8 @@ from fno.config._auto_heal import AutoHealBlock
 from fno.config._dispatch_verbs import DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPATCH_VERBS
 from fno.config._dispatch_verbs import DispatchVerbDescriptor as DispatchVerbDescriptor
 from fno.config._dispatch_verbs import resolvable_verbs as resolvable_verbs
-from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
-from fno.config._king import KingBlock
+from fno.config._lead import LEAD_CHECKIN_TEXT as LEAD_CHECKIN_TEXT
+from fno.config._lead import LeadBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
@@ -1741,7 +1741,7 @@ class HandoffBlock(BaseModel):
 
     enabled: bool = True
     used_pct_trigger: int = 50
-    king_used_pct_trigger: int = 40
+    lead_used_pct_trigger: int = 40
 
     @field_validator("used_pct_trigger")
     @classmethod
@@ -1754,26 +1754,26 @@ class HandoffBlock(BaseModel):
             )
         return v
 
-    @field_validator("king_used_pct_trigger")
+    @field_validator("lead_used_pct_trigger")
     @classmethod
-    def king_used_pct_trigger_range(cls, v: int) -> int:
+    def lead_used_pct_trigger_range(cls, v: int) -> int:
         """Percentage must be 1-100; the cross-field upper bound is below."""
         if not (1 <= v <= 100):
             raise ValueError(
-                "config.target.handoff.king_used_pct_trigger must be in range 1-100; "
+                "config.target.handoff.lead_used_pct_trigger must be in range 1-100; "
                 f"got {v}"
             )
         return v
 
     @model_validator(mode="after")
-    def king_trigger_below_teammate_trigger(self) -> "HandoffBlock":
+    def lead_trigger_below_teammate_trigger(self) -> "HandoffBlock":
         """A lead compacts EARLIER than a teammate, so an EXPLICITLY-set
-        king_used_pct_trigger must stay strictly below used_pct_trigger. The
+        lead_used_pct_trigger must stay strictly below used_pct_trigger. The
         refusal MESSAGE is the deliverable: the failure mode this prevents is a
         future reader "tidying" 40 up to 50, and the rationale lands in front of
         the exact person trying to delete it.
 
-        The rule fires only when king_used_pct_trigger was EXPLICITLY set. A
+        The rule fires only when lead_used_pct_trigger was EXPLICITLY set. A
         DEFAULT silently invalidating an otherwise-valid explicit setting is a
         trap: a user who sets used_pct_trigger low and never touches the lead
         knob would be refused for a value they never wrote. So a defaulted lead
@@ -1781,13 +1781,13 @@ class HandoffBlock(BaseModel):
         it; the user who wants lead < teammate sets lead explicitly.
         """
         if (
-            "king_used_pct_trigger" in self.model_fields_set
-            and self.king_used_pct_trigger >= self.used_pct_trigger
+            "lead_used_pct_trigger" in self.model_fields_set
+            and self.lead_used_pct_trigger >= self.used_pct_trigger
         ):
             raise ValueError(
-                "config.target.handoff.king_used_pct_trigger must be BELOW "
+                "config.target.handoff.lead_used_pct_trigger must be BELOW "
                 "used_pct_trigger "
-                f"(got {self.king_used_pct_trigger}, teammate trigger "
+                f"(got {self.lead_used_pct_trigger}, teammate trigger "
                 f"{self.used_pct_trigger}). A lead compacts earlier than a "
                 "teammate on purpose: a worker's degradation costs one node, "
                 "a lead's propagates into every ruling it issues and every "
@@ -2285,11 +2285,9 @@ class AgentsBlock(SweepKeys):
     auto_register_sessions: bool = False
     # Only routed Claude panes use this machine-local integration.
     happy_routed_panes: bool = False
-    # Row-retirement grace in SECONDS. Full contract: FIELD_META.
+    first_check_minutes: int = Field(default=10, ge=1, le=60)
     retire_grace_s: int = Field(default=900, ge=0)
-    # Sweep cadence in SECONDS; clamped under a third of the grace. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
-    # Reaper-hold escalation in SECONDS. Full contract: FIELD_META.
     hold_escalate_after_s: int = Field(default=5400, ge=0)
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     reap: ReapBlock = Field(default_factory=ReapBlock)
@@ -3973,7 +3971,7 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
-    king: KingBlock = Field(default_factory=KingBlock)
+    lead: LeadBlock = Field(default_factory=LeadBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
 
     @model_validator(mode="before")

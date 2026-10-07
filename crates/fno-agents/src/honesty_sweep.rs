@@ -215,7 +215,7 @@ fn manifest_field(line: &str) -> Option<(String, String)> {
 
 fn read_lead_rows() -> Result<Vec<Row>, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let leads = crate::paths::space_dir(&cwd).join("kings");
+    let leads = crate::paths::space_dir(&cwd).join("leads");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&leads)
         .map_err(|e| format!("cannot read leads dir {}: {e}", leads.display()))?
         .flatten()

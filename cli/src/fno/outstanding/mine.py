@@ -1,6 +1,6 @@
 """Grouped CLI for the operator-owned ``my-priorities.md`` lane.
 
-Parsing stays in :mod:`fno.king.lane`. This module only serializes mutations,
+Parsing stays in :mod:`fno.lead.lane`. This module only serializes mutations,
 holding the lane's sidecar lock across the read/modify/replace transaction so
 two writers cannot lose each other's changes.
 """
@@ -18,7 +18,7 @@ import filelock
 import typer
 
 from fno.graph._constants import NODE_ID_BODY
-from fno.king.lane import LaneItem, LaneRead, read_lane
+from fno.lead.lane import LaneItem, LaneRead, read_lane
 
 
 mine_app = typer.Typer(

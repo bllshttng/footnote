@@ -212,7 +212,7 @@ def test_plan_dispatch_hold_refuses_direct_remediation_merge(
     monkeypatch.setattr(_merge, "run", fake)
     monkeypatch.setattr(
         "fno.pr._hold.merge_hold_reason",
-        lambda pr, cwd: "dispatch-hold:x-5a5c: blocking finding; set_by=king",
+        lambda pr, cwd: "dispatch-hold:x-5a5c: blocking finding; set_by=lead",
     )
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     assert not any(call[:3] == ["gh", "pr", "merge"] for call in fake.calls)

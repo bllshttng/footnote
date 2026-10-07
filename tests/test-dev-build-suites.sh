@@ -14,7 +14,7 @@ if ! uv run python -c 'import sys; from fno.rust_binary import find_dev_binary; 
 fi
 
 # Two door tests journal through the native event store, whose client resolves
-# FNO_BIN or the checkout's own crates/fno build (store_client.py). The court
+# FNO_BIN or the checkout's own crates/fno build (store_client.py). The team
 # fixture pins PATH to a fake bin, so a PATH fno cannot answer at test time.
 if [ -z "${FNO_BIN:-}" ] && [ ! -x "../crates/fno/target/debug/fno" ] \
    && [ ! -x "../crates/fno/target/release/fno" ]; then

@@ -133,7 +133,7 @@ def test_seed_bank_loads() -> None:
 
 
 def test_seed_bank_new_eval_tasks_load() -> None:
-    """The king-reign-hygiene and growth-launch-bundle tasks load at capability
+    """The lead-term-hygiene and growth-launch-bundle tasks load at capability
     tier. A malformed YAML in either surfaces here, not at run time; this is also
     the load proof for the growth-launch assertions moved out of the deleted
     skill-local evals directory."""
@@ -142,10 +142,10 @@ def test_seed_bank_new_eval_tasks_load() -> None:
     if not seed.is_dir():
         pytest.skip("seed bank not present in this checkout")
     by_id = {t.id: t for t in bank.discover_bank(seed)}
-    king = by_id.get("capability-king-reign-hygiene")
-    assert king is not None, "king-reign-hygiene task missing from bank"
-    assert king.tier == "capability"
-    assert king.prompt is None  # grade-only; no live worker spawn
+    lead = by_id.get("capability-lead-term-hygiene")
+    assert lead is not None, "lead-term-hygiene task missing from bank"
+    assert lead.tier == "capability"
+    assert lead.prompt is None  # grade-only; no live worker spawn
     growth = by_id.get("capability-growth-launch-bundle")
     assert growth is not None, "growth-launch-bundle task missing from bank"
     assert growth.tier == "capability"

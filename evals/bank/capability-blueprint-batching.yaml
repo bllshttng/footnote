@@ -8,7 +8,7 @@
 # worker that received the rule groups by file+defect and writes three lines.
 #
 # KNOWN LIMIT (stated, not hidden). This fixture proves the rule reached one
-# harness on one shape pair. It does not prove a king generalizes shape
+# harness on one shape pair. It does not prove a lead generalizes shape
 # detection to a pair with less textual overlap, and no mechanical proxy for
 # that generalization is built here - a vacuous check that reports the
 # unproven case as covered would be worse than no check.
@@ -48,4 +48,4 @@ grade:
     command: "test -f dispatch-plan.md && cd cli && uv run pytest tests/unit/test_blueprint_batching_rule.py -q -k behavioral"
     expect: 0
 timeout_minutes: 15
-tags: [reign, blueprint, batching]
+tags: [term, blueprint, batching]

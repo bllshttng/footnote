@@ -1,6 +1,6 @@
 """``fno inbox user`` (old spelling ``fno inbox operator`` still works) - the user conversation queue.
 
-A king records from the direction it is pushed: worker mail arrives as a
+A lead records from the direction it is pushed: worker mail arrives as a
 discrete event with an id and a queue, and it gets recorded, while operator
 conversation is a stream with no event boundary and no receipt, so it does
 not. This sub-app gives the operator turn the shape mail already has: an id,
@@ -76,7 +76,7 @@ def _capture_dir() -> Path:
 def _resolve_session(require_transcript: bool = True) -> tuple[str, Optional[Path]]:
     """``(session_id, transcript_path)``, named on failure, never an empty queue.
 
-    The ambient identity is not crown-gated: the queue depth is state the
+    The ambient identity is not role-gated: the queue depth is state the
     code derives for itself. ``require_transcript=False`` (the ack ledger)
     needs only the session id - the ledger outlives transcripts.
     """

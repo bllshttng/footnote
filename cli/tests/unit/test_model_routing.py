@@ -613,7 +613,7 @@ def test_config_defaults_match_module_constants() -> None:
 
 def test_compact_window_rows() -> None:
     # 800000, not 1000000: the [1m] variant already selects 1M context, so a 1M
-    # threshold is a no-op; 800000 is the ~80% backstop above the king nudge.
+    # threshold is a no-op; 800000 is the ~80% backstop above the lead nudge.
     route = mr.resolve_route(
         "tidy",
         settings=_settings(roles={"tidy": "zai,glm-5.2[1m]"}),
