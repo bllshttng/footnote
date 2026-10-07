@@ -674,6 +674,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install strace
+        # Bounded: apt-get update can hang on the hosted runner for the whole
+        # job budget. A stall now fails here in minutes, named.
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y strace
       - name: Build release binary
         # The copy onto PATH installs the build for the freshness step below:
@@ -803,7 +806,8 @@ jobs:
         # context when the tool is missing; the sibling_callers test pins that
         # wiring with a real grep over a temp tree, so the runner needs the
         # tool on PATH. The ubuntu image does not ship it.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        timeout-minutes: 3
+        run: bash scripts/ci/install-ripgrep.sh
 
       - name: Set up Python (for flock_interop.rs cross-language test)
         # flock_interop.rs spawns a real python3 subprocess to verify that
@@ -1030,7 +1034,8 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install ripgrep (gather_context's sibling-caller grep)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        timeout-minutes: 3
+        run: bash scripts/ci/install-ripgrep.sh
 
       - name: Set up Python (for flock_interop.rs cross-language test)
         uses: actions/setup-python@v6

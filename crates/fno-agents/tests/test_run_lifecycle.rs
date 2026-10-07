@@ -1030,6 +1030,38 @@ fn a_second_cargo_waits_until_the_building_cargo_exits() {
         waiter.try_wait().unwrap().is_none(),
         "the agent waiter must still hold after the user walk-through"
     );
+    // Cargo asks once per crate; the beside line is said once per cargo.
+    let again = build_admit(&root, cargo_user.id(), &tree_a)
+        .env_remove("FNO_AGENT_SELF")
+        .output()
+        .expect("run the user-origin build-admit again");
+    assert!(again.status.success());
+    assert!(
+        !String::from_utf8_lossy(&again.stderr).contains("cargo admission"),
+        "the second crate of the same cargo stays quiet: {:?}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    // `fno update`'s install build takes the user lane even from an agent
+    // session: it never queues behind the agent holder.
+    let mut cargo_install = Command::new("sleep").arg("60").spawn().unwrap();
+    let start = Instant::now();
+    let out = build_admit(&root, cargo_install.id(), &tree_b)
+        .env("FNO_INSTALL_BUILD", "1")
+        .output()
+        .expect("run the install build-admit");
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the install build must not queue, took {:?}",
+        start.elapsed()
+    );
+    let _ = cargo_install.kill();
+    let _ = cargo_install.wait();
 
     let _ = cargo_a.kill();
     let _ = cargo_a.wait();
