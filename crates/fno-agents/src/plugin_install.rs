@@ -2201,14 +2201,24 @@ pub(crate) fn loop_install_probe(
 ) -> Option<Result<(), String>> {
     match harness {
         "opencode" => {
-            let status = crate::opencode_install::installed_status()["status"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
+            let v = crate::opencode_install::installed_status();
+            let status = v["status"].as_str().unwrap_or_default();
             Some(if status == "installed" {
                 Ok(())
             } else {
-                Err(format!("opencode install status reads {status}"))
+                let field = |k: &str| v[k].as_str().unwrap_or("unknown").to_string();
+                let why = if v["binary_missing"] == true {
+                    "the opencode binary was not found; set FNO_OPENCODE_BIN or install it at ~/.opencode/bin/opencode"
+                } else if v["contract_changed"] == true {
+                    "the opencode contract changed since install"
+                } else {
+                    "the installed extension differs from source"
+                };
+                Err(format!(
+                    "opencode install status reads {status}: {why}; installed {} vs source {}",
+                    field("version"),
+                    field("source_version")
+                ))
             })
         }
         "pi" => {
