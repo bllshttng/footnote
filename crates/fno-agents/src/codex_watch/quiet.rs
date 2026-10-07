@@ -66,6 +66,7 @@ fn tail(path: &Path, marker: Option<&str>) -> Option<Tail> {
         if matches!(kind, "response_item" | "assistant" | "user" | "tool")
             || matches!(event, "item_completed")
         {
+            out.failed = false;
             if let Some(at) = timestamp {
                 out.activity = out.activity.max(at);
             }
@@ -626,10 +627,16 @@ mod tests {
         std::fs::write(&path, concat!(
             "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
             "{\"timestamp\":\"2026-01-01T00:15:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
-            "{\"timestamp\":\"2026-01-01T00:15:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"marker\"}}\n"
+            "{\"timestamp\":\"2026-01-01T00:15:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"marker\"}}\n",
+            "{\"timestamp\":\"2026-01-01T00:15:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"error\":{\"message\":\"routing timeout\"}}}\n",
+            "{\"timestamp\":\"2026-01-01T00:15:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"retry started\"}}\n"
         )).unwrap();
         let evidence = tail(&path, Some("marker")).unwrap();
-        assert_eq!(evidence.activity, 1767225600);
+        assert_eq!(evidence.activity, 1767226503);
+        assert!(
+            !evidence.failed,
+            "new transcript work clears stale failure state"
+        );
         assert!(
             evidence.read,
             "receipt bytes in the recipient transcript confirm the nudge"
