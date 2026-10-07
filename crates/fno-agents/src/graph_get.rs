@@ -235,7 +235,9 @@ mod tests {
 
     #[test]
     fn the_state_dir_carrier_outranks_fno_home_for_the_default_graph() {
-        let _guard = crate::claims::test_env_lock();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior_state = std::env::var_os("FNO_STATE_DIR");
         let prior_home = std::env::var_os("FNO_HOME");
         std::env::set_var("FNO_STATE_DIR", "/pinned-state");
@@ -258,7 +260,9 @@ mod tests {
 
     #[test]
     fn without_the_state_dir_carrier_fno_home_still_wins() {
-        let _guard = crate::claims::test_env_lock();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior_state = std::env::var_os("FNO_STATE_DIR");
         let prior_home = std::env::var_os("FNO_HOME");
         std::env::remove_var("FNO_STATE_DIR");
@@ -385,7 +389,9 @@ mod tests {
         // The shared env lock, not a private one: lead_verdict_inputs' tests
         // read FNO_TRACKER_BACKEND under `claims::test_env_lock`, and two
         // locks would let this flip land mid-read there.
-        let _guard = crate::claims::test_env_lock();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FNO_TRACKER_BACKEND", "github");
         let refused = run_graph_get(&["x-aaaa".to_string()]);
         let dir = write_graph(&[node("x-aaaa", "fewer-gated")]);
