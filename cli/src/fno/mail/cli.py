@@ -4727,8 +4727,6 @@ def cmd_drain_self(
     # address outlives any session, so this is where a successor picks up mail
     # the prior holder never read (part 2). Per-address cursor, so this is
     # independent of the handle/form cursors -- no double-delivery across them.
-    from fno.mail.hold_cli import _scan_held_job_mail
-
     job_addr, job_msgs = _scan_held_job_mail(ident)
 
     # W2 cross-delivery dedup: a message whose id already landed in THIS
