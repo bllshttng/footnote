@@ -905,13 +905,8 @@ pub(crate) fn check_registry_schema(
     warnings: &mut Vec<String>,
 ) -> Result<(), crate::spawn_gate::Refusal> {
     use crate::spawn_gate::{Refusal, EXIT_REGISTRY_SCHEMA};
-    let raw = match std::fs::read_to_string(registry_path) {
-        Ok(raw) => raw,
-        Err(_) => return Ok(()), // fresh machine / unreadable: skip
-    };
-    let doc: Value = match serde_json::from_str(&raw) {
-        Ok(doc) => doc,
-        Err(_) => return Ok(()), // a torn registry is not a spawn-time verdict
+    let Ok(doc) = crate::registry_store::read(registry_path) else {
+        return Ok(()); // fresh machine / unreadable: skip
     };
     let Some(on_disk) = doc.get("schema_version").and_then(Value::as_u64) else {
         return Ok(());

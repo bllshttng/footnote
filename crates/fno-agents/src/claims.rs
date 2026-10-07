@@ -1676,8 +1676,7 @@ fn registry_session_pid(session_id: Option<&str>) -> Option<i32> {
     // consistent snapshot; a parse failure degrades to None and the legacy
     // anchor path, never to a wedged renewal.
     let home = crate::paths::AgentsHome::from_env_opt()?;
-    let bytes = std::fs::read(home.registry_json()).ok()?;
-    let registry: crate::state::Registry = serde_json::from_slice(&bytes).ok()?;
+    let registry = crate::state::load_registry(&home.registry_json()).ok()?;
     let pid = registry.entries.iter().find_map(|e| {
         match (e.harness_session_id.as_deref(), e.pid, e.pid_start_time) {
             (Some(sid), Some(pid), Some(start)) if sid == session => Some((pid, start)),

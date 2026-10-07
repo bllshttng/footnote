@@ -103,7 +103,7 @@ fn owned_registry_effort(harness: &str, session_id: &str) -> Option<String> {
         return None;
     }
     let path = crate::paths::AgentsHome::shared_registry_json();
-    let raw: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let raw = crate::registry_store::read(&path).ok()?;
     let rows = raw.get("agents")?.as_array()?;
     let legacy_key = match harness {
         "claude" => Some("claude_session_uuid"),

@@ -408,19 +408,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// duck-typed `getattr`/`row.get` so extra/missing optional fields behave the
 /// same across the two implementations.
 pub(crate) fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
-    let bytes = match fs::read(registry_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("registry read failed: {e}")),
-    };
-    // Strict UTF-8: Python reads the registry with encoding="utf-8" (no
-    // replacement), so invalid bytes are a registry error, not silently mangled
-    // content the verbs then operate on (codex P2). (The trace events.jsonl read
-    // stays lossy on purpose -- Python uses errors="replace" there.)
-    let text =
-        std::str::from_utf8(&bytes).map_err(|e| format!("registry is not valid UTF-8: {e}"))?;
-    let raw: Value =
-        serde_json::from_str(text).map_err(|e| format!("registry is malformed JSON: {e}"))?;
+    let raw = crate::registry_store::read(registry_path).map_err(|e| e.to_string())?;
     let obj = raw
         .as_object()
         .ok_or_else(|| "registry top-level is not a JSON object".to_string())?;

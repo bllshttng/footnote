@@ -25,8 +25,7 @@ fn is_hold_sender(sender: &str) -> bool {
 
 /// The registry's rows, tolerant: a missing or malformed file reads as none.
 fn registry_rows() -> Vec<Value> {
-    let text = std::fs::read_to_string(AgentsHome::from_env().registry_json()).unwrap_or_default();
-    serde_json::from_str::<Value>(&text)
+    crate::registry_store::read(&AgentsHome::from_env().registry_json())
         .ok()
         .and_then(|v| v.get("agents").and_then(Value::as_array).cloned())
         .unwrap_or_default()
