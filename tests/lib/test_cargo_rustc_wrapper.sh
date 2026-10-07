@@ -377,7 +377,48 @@ STUB
   done
   [[ "$found" -eq 1 ]] \
     || { fail "T13: no run_admission_unavailable event with reason verb_missing: $(cat "$fno_calls" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
-  pass "T13 the run door names a missing run-admit and journals the event"
+  pass "T13 the run door names the missing run-admit and journals the event"
+  rm -rf "$stub_dir"
+}
+
+# T14/T15: a slot-busy refusal (exit 86) is policy, not breakage. The wrapper
+# exits with it at both doors: the compile or run stops, the door's answer
+# reaches the worker, and the fail-open "admission unavailable" path never
+# fires - building or running unadmitted under the very saturation the gate
+# exists to cap is the one wrong answer here.
+t14_slot_busy_refuses_the_compile() {
+  local stub_dir out_file err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\necho "[cargo slots] every run slot is busy: commit, push, CI runs it." >&2\nexit 86\n' > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 86 ]] || { fail "T14: expected rc=86, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "compiling" "$out_file" && { fail "T14: a slot-busy refusal still compiled"; rm -rf "$stub_dir"; return; }
+  grep -q "commit, push, CI runs it" "$err_file" \
+    || { fail "T14: stderr does not carry the door's answer: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  pass "T14 a slot-busy refusal stops the compile and carries the door's answer"
+  rm -rf "$stub_dir"
+}
+
+t15_slot_busy_refuses_the_run() {
+  local stub_dir out_file err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\necho "[cargo slots] every run slot is busy: commit, push, CI runs it." >&2\nexit 86\n' > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/echo running >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 86 ]] || { fail "T15: expected rc=86, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "running" "$out_file" && { fail "T15: a slot-busy refusal still ran the binary"; rm -rf "$stub_dir"; return; }
+  grep -q "commit, push, CI runs it" "$err_file" \
+    || { fail "T15: stderr does not carry the door's answer: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  pass "T15 a slot-busy refusal stops the run and carries the door's answer"
   rm -rf "$stub_dir"
 }
 
@@ -394,6 +435,8 @@ t10_joined_runner_arrays_run_the_binary_once
 t11_build_script_probe_never_asks
 t12_missing_verb_is_named_and_journaled
 t13_run_door_missing_verb_is_named
+t14_slot_busy_refuses_the_compile
+t15_slot_busy_refuses_the_run
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
