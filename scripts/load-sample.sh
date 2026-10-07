@@ -22,12 +22,11 @@ Darwin)
 $loadavg
 EOF
     # iostat -c 2: the first sample is since-boot; the second is a real
-    # delta. Columns end `us sy id`; busy is 100 - idle.
+    # delta. Device columns (variable in count) sit before the CPU fields,
+    # and the line ends `us sy id` followed by three load averages, so the
+    # CPU fields are read from the END, never by position from the front.
     iostat_line=$(iostat -c 2 | tail -1)
-    read -r _ _ us sy id _ <<EOF
-$iostat_line
-EOF
-    busy_pct=$(awk -v us="$us" -v sy="$sy" 'BEGIN {printf "%.1f", us + sy}')
+    busy_pct=$(printf '%s\n' "$iostat_line" | awk '{ printf "%.1f", $(NF - 5) + $(NF - 4) }')
     ;;
 Linux)
     cores=$(nproc)

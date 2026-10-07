@@ -1439,10 +1439,19 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<
         )
     {
         for (i, key) in keys.iter().enumerate() {
-            if let crate::claims::AcquireOutcome::Acquired(_) =
-                crate::claims::acquire(key, &holder, opts(i))
-            {
-                return Ok(());
+            match crate::claims::acquire(key, &holder, opts(i)) {
+                crate::claims::AcquireOutcome::Acquired(_) => return Ok(()),
+                crate::claims::AcquireOutcome::HeldByOther { .. } => {}
+                // A claim-store failure is breakage, not saturation: refusing
+                // it as slot-busy would park every agent build behind a
+                // broken store. Fail open, named, the way the user lane
+                // reads its own Error at the build claim.
+                crate::claims::AcquireOutcome::Error(e) => {
+                    eprintln!(
+                        "cargo admission: slot try-lock unreadable ({e}); proceeding unadmitted"
+                    );
+                    return Ok(());
+                }
             }
         }
         eprintln!("{SLOT_BUSY_LINE}");
