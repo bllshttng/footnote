@@ -409,8 +409,7 @@ def is_deliverable(env: Envelope) -> bool:
     a delivery that already succeeded and exists only for sender/operator audit.
     A typed row records bytes already written into the recipient's pane, so it
     is audit-only too -- draining it would hand the recipient a second copy of
-    text already sitting at its prompt. A cross-session row is historical
-    traffic the archive already holds.
+    text already sitting at its prompt. A cross-session row is archived history.
     """
     if getattr(env, "kind", None) in CONTROL_KINDS:
         return False
