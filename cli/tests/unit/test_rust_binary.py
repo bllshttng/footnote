@@ -384,3 +384,20 @@ def test_delivered_terminals_reads_once_and_refuses_closed(monkeypatch) -> None:
     with pytest.raises(VerbUnavailable, match="fno doctor update"):
         rust_binary.delivered_terminals()
     rust_binary.delivered_terminals.cache_clear()
+
+
+def test_a_silent_law_door_raises_a_named_timeout_not_a_raw_one(monkeypatch):
+    import subprocess
+
+    import pytest
+
+    monkeypatch.setattr(rust_binary, "resolve_front_binary", lambda: "/bin/fno")
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", hang)
+    with pytest.raises(rust_binary.FrontTimeout) as caught:
+        rust_binary.call_front_json({"mode": "decisions"}, timeout=60)
+    assert isinstance(caught.value, rust_binary.VerbUnavailable)
+    assert "gave no answer in 60s (machine load" in str(caught.value)

@@ -726,7 +726,7 @@ fn boundary_event_line(payload: &Value) -> Result<String, String> {
 
 /// One locked O_APPEND write, mirroring the Python journal writer's lock
 /// convention: a `<file>.lock.d` mkdir mutex, an owner file, one atomic append.
-fn append_row(path: &Path, line: &str) -> Result<(), String> {
+pub(crate) fn append_row(path: &Path, line: &str) -> Result<(), String> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())

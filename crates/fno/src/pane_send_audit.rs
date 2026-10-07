@@ -215,9 +215,17 @@ pub(crate) fn pane_send_audit_events_path() -> PathBuf {
     if let Some(home) = std::env::var_os("FNO_AGENTS_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(&home).join("events.jsonl");
     }
-    let base = match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join(".fno").join("agents"),
-        _ => PathBuf::from(".fno").join("agents"),
+    let base = if cfg!(test) {
+        // Under test, never resolve the operator's live journal: redirect to a
+        // per-process temp dir (fno-agents' refuse_undeclared_home_fallback is
+        // the panicking twin). ponytail: one shared temp dir per test process;
+        // pin FNO_AGENTS_HOME in a test that reads its own rows.
+        std::env::temp_dir().join(format!("fno-unit-agents-{}", std::process::id()))
+    } else {
+        match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(".fno").join("agents"),
+            _ => PathBuf::from(".fno").join("agents"),
+        }
     };
     base.join("events.jsonl")
 }
@@ -409,6 +417,22 @@ mod tests {
         );
 
         std::env::remove_var("FNO_AGENTS_HOME");
+        // With the home pin removed, the resolver must fence the live journal:
+        // the resolved path lands in per-process temp, never under ~/.fno.
+        let resolved = pane_send_audit_events_path();
+        assert!(
+            resolved.starts_with(std::env::temp_dir()),
+            "the under-test fence must resolve under temp: {}",
+            resolved.display()
+        );
+        let live_home = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".fno"))
+            .unwrap_or_default();
+        assert!(
+            !resolved.starts_with(&live_home),
+            "the under-test fence must never resolve the live ~/.fno journal: {}",
+            resolved.display()
+        );
         drop(agents_guard);
         let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_dir_all(&dir);
