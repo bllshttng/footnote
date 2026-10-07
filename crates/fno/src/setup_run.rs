@@ -382,13 +382,6 @@ fn config_set(exe: &Path, key: &str, value: &str, local: bool) -> Result<PathBuf
     }
 }
 
-/// One step's outcome.
-enum Verdict {
-    Done(String),
-    Skipped(String),
-    NeedsHuman(String),
-}
-
 /// Fold one auto-wire outcome line into the report. The verb's lines are
 /// stable human text pinned by its own tests: `Label: installed`,
 /// `Label: already installed`, `needs a manual finish`, `FAILED`.
@@ -401,7 +394,11 @@ fn fold_wire_line(line: &str, rep: &mut Report) {
         rep.needs_human.push(format!("harness-wiring: {t}"));
     } else if t.contains(": installed") {
         rep.done.push(format!("harness-wiring: {t}"));
-        rep.restart_needed = true;
+        // A fresh install asks for a restart; an "already installed" line
+        // changed nothing, so it must not.
+        if !t.contains("already installed") {
+            rep.restart_needed = true;
+        }
     } else {
         rep.skipped.push(format!("harness-wiring: {t}"));
     }
@@ -448,14 +445,12 @@ fn step_concurrency_band(exe: &Path, rep: &mut Report) {
     let text = out
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-    let band = text
-        .as_deref()
-        .and_then(|t| t.find("budget max_live "))
-        .and_then(|i| {
-            let rest = &t.as_deref().unwrap()[i + "budget max_live ".len()..];
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<i64>().ok()
-        });
+    let band = text.as_deref().and_then(|t| {
+        let i = t.find("budget max_live ")?;
+        let rest = &t[i + "budget max_live ".len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<i64>().ok()
+    });
     match band {
         None => rep.skipped.push(
             "concurrency-band: no machine sample yet; the daemon files the band question within five minutes".into(),
@@ -611,8 +606,19 @@ fn kind_name(k: Kind) -> &'static str {
 
 /// Whether every layer this scope covers already carries its done marker.
 fn all_markers_present(scope: Scope, root: &Path) -> bool {
-    let global_ok = scope != Scope::Project || global_marker().exists();
-    let project_ok = scope == Scope::Global || project_marker(root).exists();
+    all_markers_present_in(
+        scope,
+        global_marker().exists(),
+        project_marker(root).exists(),
+    )
+}
+
+/// The pure core of [`all_markers_present`], so the per-layer conditions are
+/// unit-testable without touching a real state dir: a layer outside this
+/// scope never blocks, a covered layer needs its own marker.
+fn all_markers_present_in(scope: Scope, global_done: bool, project_done: bool) -> bool {
+    let global_ok = scope == Scope::Project || global_done;
+    let project_ok = scope == Scope::Global || project_done;
     global_ok && project_ok
 }
 
@@ -658,22 +664,7 @@ pub fn run(tail: &[OsString]) -> i32 {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root = repo_root();
-    if opts.once && all_markers_present(opts.scope, &root) {
-        let msg = format!("setup: already done ({})", global_marker().display());
-        if opts.json {
-            println!(
-                "{}",
-                Report {
-                    restart_needed: false,
-                    ..Default::default()
-                }
-                .to_json()
-            );
-        } else {
-            println!("{msg}");
-        }
-        return 0;
-    }
+    // Validate the argv (including --only) before --once can return early.
     let steps = match select_steps(&opts, &cwd) {
         Ok(s) => s,
         Err(e) => {
@@ -681,13 +672,38 @@ pub fn run(tail: &[OsString]) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let prompting = !no_prompt(opts.yes, std::io::stdin().is_terminal(), agent_env());
+    if opts.once && all_markers_present(opts.scope, &root) {
+        let msg = format!("setup: already done ({})", global_marker().display());
+        if opts.json {
+            let mut rep = Report::default();
+            rep.skipped.push(msg);
+            println!("{}", rep.to_json());
+        } else {
+            println!("{msg}");
+        }
+        return 0;
+    }
+    // The project and contributor layers answer only inside a git repo:
+    // repo_root() falls back to the cwd, and setup must not litter an
+    // arbitrary directory with .fno/.
+    let in_repo = root.join(".git").exists();
+    // A JSON stdout must stay pure: an interactive TTY never prompts into it.
+    let prompting = !opts.json && !no_prompt(opts.yes, std::io::stdin().is_terminal(), agent_env());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno"));
     let mut rep = Report::default();
+    if !in_repo && opts.scope != Scope::Global {
+        rep.skipped.push(
+            "project layer: not a git repo; the project and contributor steps need one".into(),
+        );
+    }
     if prompting && !opts.json {
         println!("fno config setup run - Enter accepts each recommended default.");
     }
+    let mut declined = 0usize;
     for step in &steps {
+        if !in_repo && step.layer != Layer::Global {
+            continue;
+        }
         let go = match step.kind {
             Kind::Act if prompting => {
                 let q = format!("Install {}? It will {}. [Y/n]", step.id, step.effect);
@@ -698,6 +714,7 @@ pub fn run(tail: &[OsString]) -> i32 {
         };
         if !go {
             rep.skipped.push(format!("{}: declined", step.id));
+            declined += 1;
             continue;
         }
         match (step.layer, step.id) {
@@ -760,18 +777,16 @@ pub fn run(tail: &[OsString]) -> i32 {
                         .into()
                 });
             }
-            _ => {}
+            _ => rep.skipped.push(format!("{}: no runner", step.id)),
         }
     }
 
     let global_ran = steps.iter().any(|s| s.layer == Layer::Global);
-    let project_ran = steps
-        .iter()
-        .any(|s| s.layer == Layer::Project || s.layer == Layer::Contributor);
-    // A layer's marker waits until nothing needs a human: `--once` never
-    // papers over a blocked step. Step runners are idempotent and
-    // differ-guarded, so the blocked rerun is cheap.
-    if rep.needs_human.is_empty() {
+    let project_ran = steps.iter().any(|s| s.layer != Layer::Global && in_repo);
+    // A layer's marker waits until nothing needs a human and nothing was
+    // declined: `--once` never papers over a blocked or refused run. Step
+    // runners are idempotent and differ-guarded, so the rerun is cheap.
+    if rep.needs_human.is_empty() && declined == 0 {
         if global_ran {
             write_marker(&global_marker());
         }

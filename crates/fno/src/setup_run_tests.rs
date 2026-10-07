@@ -228,3 +228,15 @@ fn the_declined_and_report_steps_never_write_outside_their_roots() {
     assert!(rep.needs_human.is_empty());
     assert!(!rep.restart_needed);
 }
+
+#[test]
+fn once_needs_every_covered_layers_marker() {
+    // A layer outside the scope never blocks --once; a covered layer
+    // needs its own marker. This pins the inverted-condition fix.
+    assert!(all_markers_present_in(Scope::Global, true, false));
+    assert!(!all_markers_present_in(Scope::Global, false, true));
+    assert!(all_markers_present_in(Scope::Project, false, true));
+    assert!(!all_markers_present_in(Scope::Project, true, false));
+    assert!(all_markers_present_in(Scope::Both, true, true));
+    assert!(!all_markers_present_in(Scope::Both, true, false));
+}

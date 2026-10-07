@@ -409,7 +409,9 @@ run_setup_once() {
   [[ -n "${FNO_YES:-}" ]] && yes="--yes"
   local out
   if out="$("$cand" config setup run --once $yes --json 2>&1)"; then
-    printf '%s\n' "$out"
+    # stderr, not stdout: the report contract keeps stdout a single JSON
+    # object, so the setup receipt rides the human stream.
+    printf '%s\n' "$out" >&2
   fi
 }
 
