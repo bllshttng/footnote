@@ -1667,16 +1667,13 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         return 1;
     };
     let resolved = PathBuf::from(path_str);
-    if let Err(refusal) = sync_source_checkout(&resolved, flags.dry_run) {
-        eprintln!("{refusal}");
-        return 1;
-    }
     println!("Reinstalling fno from {}", resolved.display());
 
     let mut failed: Vec<String> = Vec::new();
-    let rev = source_rev(&resolved);
+    let mut rev = source_rev(&resolved);
 
     if flags.dry_run {
+        let _ = sync_source_checkout(&resolved, true);
         // The rust leg still prints its plan here (a dry run states
         // everything an update would do); it EXECUTES only below, under the
         // claim. A dry run writes NOTHING.
@@ -1717,6 +1714,14 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     if let Err(code) = acquire_update_claim(rev.as_deref()) {
         return code;
     }
+    // Under the claim: a second update must never move the tree that the
+    // claim holder's cargo is building from.
+    if let Err(refusal) = sync_source_checkout(&resolved, false) {
+        release_update_claim();
+        eprintln!("{refusal}");
+        return 1;
+    }
+    rev = source_rev(&resolved);
 
     // The lifecycle journal opens here, matching the deleted Python leg:
     // started after the claim, built on the rust leg's own verdict,
@@ -1810,10 +1815,8 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     release_update_claim();
 
     let verdict = daemon_verdict();
-    if verdict.is_err() {
-        failed.push("daemon on the new build".into());
-    }
 
+    // The journal records the install; the daemon verdict only sets the exit.
     let code = if failed.is_empty() {
         let installed_fields: Vec<(&str, String)> = {
             let mut f: Vec<(&str, String)> = Vec::new();
@@ -1838,11 +1841,16 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     // One summary line, always last: the daemon verdict, then any failed step.
     match &verdict {
         Ok(line) if failed.is_empty() => println!("fno update: done; {line}."),
+        Err(line) if failed.is_empty() => eprintln!("fno update: FAILED: installed, but {line}."),
         Ok(line) | Err(line) => {
             eprintln!("fno update: FAILED step(s): {}; {line}.", failed.join(", "))
         }
     }
-    code
+    if verdict.is_err() {
+        1
+    } else {
+        code
+    }
 }
 
 fn which_uv() -> Option<PathBuf> {

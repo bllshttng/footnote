@@ -376,7 +376,7 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 if current != name {
                     let target = path.with_file_name(current);
                     if target.exists() {
-                        supersede(&path, &target)?;
+                        merge_dir(&path, &target)?;
                         continue;
                     }
                     std::fs::rename(&path, target).map_err(|e| e.to_string())?;
@@ -423,6 +423,25 @@ fn supersede(legacy: &Path, current: &Path) -> Result<(), String> {
         backup.display()
     );
     Ok(())
+}
+
+/// Both directories exist: each legacy child the current directory lacks
+/// moves into it, and only the clashing rest is superseded. A whole-directory
+/// backup hid legacy-only state from every live reader.
+fn merge_dir(legacy: &Path, current: &Path) -> Result<(), String> {
+    let read = |dir: &Path| std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()));
+    for entry in read(legacy)? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let dest = current.join(entry.file_name());
+        if !dest.exists() {
+            std::fs::rename(entry.path(), dest).map_err(|e| e.to_string())?;
+        }
+    }
+    if read(legacy)?.next().is_some() {
+        supersede(legacy, current)
+    } else {
+        std::fs::remove_dir(legacy).map_err(|e| e.to_string())
+    }
 }
 
 fn superseded_backup(path: &Path) -> PathBuf {
@@ -700,6 +719,10 @@ mod tests {
         let legacy = r#"{"crown_scope":"x"}"#;
         std::fs::write(kings.join("king-a.json"), legacy).unwrap();
         std::fs::write(kings.join("lead-a.json"), "{}").unwrap();
+        std::fs::write(kings.join("king-b.json"), "{}").unwrap();
+        let leads = tmp.path().join("leads");
+        std::fs::create_dir(&leads).unwrap();
+        std::fs::write(leads.join("lead-c.json"), "{}").unwrap();
         std::fs::write(
             tmp.path().join("config.toml"),
             "[king]\nenabled = false\nwake_enabled = true\n\n[lead]\nenabled = true\n",
@@ -725,6 +748,11 @@ mod tests {
             Some(true),
             "legacy-only key kept"
         );
+        assert!(
+            leads.join("lead-b.json").exists() && leads.join("lead-c.json").exists(),
+            "a legacy-only child joins the live directory beside its own"
+        );
+        assert!(!kings.exists(), "the emptied legacy directory is removed");
         assert!(tmp
             .path()
             .join("migrations/role-vocabulary-v1.done")

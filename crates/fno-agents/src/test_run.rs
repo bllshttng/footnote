@@ -49,14 +49,29 @@ fn install_build() -> bool {
 
 /// True the first time a door for this cargo pid asks; later asks from the
 /// same cargo find the marker and stay quiet. Each crate runs a fresh door
-/// process, so the once-ness lives in a temp-dir file, not in memory.
+/// process, so the once-ness lives in a temp-dir file, not in memory. A new
+/// marker sweeps the markers of cargos that exited, so the directory stays
+/// small and a recycled pid speaks again.
 fn first_beside_notice(cargo_pid: u32) -> bool {
-    let marker = std::env::temp_dir().join(format!("fno-cargo-beside-{cargo_pid}"));
-    std::fs::OpenOptions::new()
+    let dir = std::env::temp_dir().join("fno-cargo-beside");
+    let _ = std::fs::create_dir_all(&dir);
+    let first = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(marker)
-        .is_ok()
+        .open(dir.join(cargo_pid.to_string()))
+        .is_ok();
+    if first {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let pid = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok());
+            if pid.is_some_and(|p| !crate::claude_config_tmp::pid_alive(p)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    first
 }
 
 /// True when this cargo runs inside an unattended agent session. FNO_AGENT_SELF
