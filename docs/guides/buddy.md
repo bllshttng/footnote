@@ -29,11 +29,11 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 
 ## Only where you can see it
 
-Each live session has its own buddy, and all of them share one soul. A buddy spends a model call only when a person can see the answer. Hidden sessions stay quiet.
+Each live session has its own buddy, and all of them share one soul. If no person can see the answer, a buddy makes no model call. Hidden sessions stay quiet.
 
 - **In an fno mux pane,** the mux writes the panes on screen to `~/.fno/mux/<session>.visible.json`. A buddy whose pane is not in that list makes no model call. Its sessions on another tab or in the sideline cost nothing.
 - **Anywhere else,** the buddy counts as seen for 10 minutes after you type in that session's prompt box.
-- **Idle talk and fleet news happen once for the machine.** The first seen session past the 2-minute gap says the idle line. The first seen session to read a fleet event tells it. Two panes side by side do not say the same news twice.
+- **One voice for the machine.** Idle talk and fleet news happen once. After the 2-minute gap, the first seen session says the idle line. The first seen session to read a fleet event tells it. Two panes side by side do not say the same news twice.
 - **Reactions** stay with each session, because each one is about that session's own turn.
 
 ## Where it stands
