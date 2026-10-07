@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn human_touch_event_uses_agent_journal_inline() {
+    fn the_first_key_of_a_burst_writes_one_human_touch_row() {
         use crate::server::CoreMsg;
         let (guard, dir) = witness_env("human-touch");
         let mut core = typing_client_core();
