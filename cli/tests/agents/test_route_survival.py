@@ -833,7 +833,9 @@ def test_a_legacy_row_without_launch_account_stays_unknown(tmp_path, monkeypatch
     raw = read_registry_document(target)[0]
     del raw["agents"][0]["launch_account"]
     del raw["agents"][0]["related_session_id"]
-    target.write_text(json.dumps(raw), encoding="utf-8")
+    from tests._table_seed import seed_registry
+
+    seed_registry(raw.pop("agents"), path=target, replace=True, **raw)
     row = load_registry()[0]
     assert row.launch_account is None
     assert row.related_session_id is None

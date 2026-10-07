@@ -517,13 +517,12 @@ def _register(tmp_path, session_id, provider="codex", status="live"):
         provider=provider, session_id=session_id, cwd="/x", registry_path=reg
     )
     if status != "live":
-        import json
 
         data = read_registry_document(reg)[0]
         for row in data.get("agents", []):
             if row.get("name") == entry.name:
                 row["status"] = status
-        reg.write_text(json.dumps(data))
+        _replace_registry(reg, data)
     return entry.name, reg
 
 
@@ -606,7 +605,6 @@ def test_row_owning_session_id_walk_proven_dead_pid_row_is_self(tmp_path):
     never contention. Every self-blind shape survives: a walk that is silent
     or names another family, a row whose pid leg never resolved, and a live
     foreign pid all leave the row an owner (the round-1 P1 refusal)."""
-    import json
 
     from fno.agents.registry import row_owning_session_id
 
@@ -618,7 +616,7 @@ def test_row_owning_session_id_walk_proven_dead_pid_row_is_self(tmp_path):
         for row in data.get("agents", []):
             if row.get("harness_session_id") == sid:
                 row["pid"] = pid
-        reg.write_text(json.dumps(data))
+        _replace_registry(reg, data)
 
     _set_pid(99999999)
     assert (
@@ -1547,3 +1545,10 @@ def test_owned_name_only_stamp_without_id_or_prover_still_refuses():
     owned = resolve_owned_identity(env, prove=lambda harness, _sid: harness == "codex")
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
+
+
+def _replace_registry(path, document):
+    from tests._table_seed import seed_registry
+
+    document = dict(document)
+    seed_registry(document.pop("agents"), path=path, replace=True, **document)
