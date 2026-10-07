@@ -49,7 +49,7 @@ If you run `/statusline` again later, the buddy tells you at the next session st
 
 ## The reroll game
 
-`/buddy roll` hatches a new buddy in place of the old one. Each roll costs one reroll. You cannot undo a roll.
+`/buddy roll` hatches a new buddy in place of the old one. Each roll costs one reroll. You cannot undo a roll. All your live sessions share one buddy, so each session shows the new buddy within 2 seconds.
 
 You get rerolls in two ways:
 
