@@ -1,5 +1,4 @@
 """Which backlog verbs does the external tracker backend refuse or mark?
-
 Sets live in the sibling ``_verb_classification.txt`` (one verb per line under
 a ``[section]`` header): a new verb is one data line. This module reads the
 file into three frozensets and stamps them onto the live registry.
@@ -40,9 +39,8 @@ _classified = False
 
 def classify_backlog_verbs() -> None:
     """Stamp every live registry verb with its classification, once.
-
     Not at import: note_cli imports graph.cli to register `note`, so an
-    import-time run races that decorator (the original shard 7 failure).
+    import-time run races that decorator.
     """
     global _classified
     if _classified:

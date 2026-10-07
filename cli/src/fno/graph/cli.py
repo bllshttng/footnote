@@ -7332,10 +7332,9 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
 
 def iter_backlog_registry():
     """The (group-label, typer-app) pairs carrying every backlog verb.
-
     The ONE structural list: the verb classifier, the census, and the
-    classification tests all walk it. Register a new sub-app here, beside
-    its add_typer call.
+    classification tests all walk it; register a new sub-app beside its
+    add_typer call.
     """
     return [
         (None, cli),
