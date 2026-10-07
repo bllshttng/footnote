@@ -215,13 +215,12 @@ Every provisioning site therefore passes `--compile-bytecode`. The venv ships it
 A future refactor must preserve:
 
 1. `fno --help` does not import sub-app bodies. Test: `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
-2. `fno config paths state-dir` does not import the heavy sub-apps. Test: `test_fno_paths_does_not_import_heavy_subapps`.
-3. Single-command sub-apps keep their group shape. Test: `test_single_command_subapp_group_shape_preserved`.
-4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_single_command_subapp_group_shape_preserved` covers the group shape. The overrides themselves are exercised by the `--help` tests.
-5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
-6. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Tests: `test_error_path_never_first_imports_rich_utils`, `test_building_the_command_does_not_import_rich_utils`.
-7. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.
-8. The merge-path install reinstalls only the `fno` package. A third-party import never fails because of it. Tests: `tests/ci/test_reinstall_window_narrow.sh`, and the narrow-form assertions in `cli/tests/integration/test_update_rust_leg.py`.
-8. A plain ImportError naming an `fno` module leaves the console entrypoint carrying the dual-cause hint. `fno-py` stays wired to `main`. A third-party ImportError leaves untouched. Tests: `test_entrypoint_carries_reinstall_hint_on_fromlist_swallow`, `test_entrypoint_carries_reinstall_hint_on_already_imported_shape`, `test_entrypoint_leaves_third_party_import_error_untouched`, `test_entrypoint_never_doubles_the_finder_hint`, `test_fno_py_entrypoint_is_main`.
+2. Single-command sub-apps keep their group shape. Test: `test_single_command_subapp_group_shape_preserved`.
+3. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_single_command_subapp_group_shape_preserved` covers the group shape. The overrides themselves are exercised by the `--help` tests.
+4. Misconfigured lazy entries fail loudly with the bad path in stderr. Test: `test_bad_lazy_entry_fails_loud`.
+5. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Test: `test_error_path_never_first_imports_rich_utils`.
+6. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.
+7. The merge-path install reinstalls only the `fno` package. A third-party import never fails because of it. Test: `tests/ci/test_reinstall_window_narrow.sh`.
+8. A plain ImportError naming an `fno` module leaves the console entrypoint carrying the dual-cause hint. `fno-py` stays wired to `main`. A third-party ImportError leaves untouched. Tests: `test_entrypoint_carries_reinstall_hint_on_fromlist_swallow`, `test_entrypoint_leaves_third_party_import_error_untouched`, `test_entrypoint_never_doubles_the_finder_hint`, `test_fno_py_entrypoint_is_main`.
 
 Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py` with the import path and a short help string. Run the test suite to confirm coverage. No changes to `_lazy_group.py` are required for a normal sub-app addition.

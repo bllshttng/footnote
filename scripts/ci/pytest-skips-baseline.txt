@@ -93,7 +93,6 @@ cli/tests/integration/test_install_frontdoor_journey.py::_run_fno::pytest.skip  
 cli/tests/integration/test_install_frontdoor_journey.py::_run_native_backlog::pytest.skip  # the journey requires the compiled Rust backlog door
 cli/tests/integration/test_install_frontdoor_journey.py::clean_machine::pytest.skip  # the isolated native journey requires a development build
 cli/tests/integration/test_install_frontdoor_journey.py::test_authorized_target_init_journey::pytest.skip  # smoke-pytest builds the front; local checkouts may lack it
-cli/tests/integration/test_install_frontdoor_journey.py::test_both_command_families_usable_after_init::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_marketplace_lint.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_native_update_repaint.py::_update::pytest.skip  # CI pytest env builds no dev fno-agents binary
 cli/tests/integration/test_provider_usage_live.py::test_live_provider_usage_has_numeric_usage_and_future_resets::pytest.skip  # on main before this ratchet
@@ -135,7 +134,6 @@ cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_live_
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_unresolved_names_the_witness::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_without_session_id_keeps_legacy_stale::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_coverage_gate.py::test_attestation_chain_reads_a_row_that_rotated_out::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_doctor_lanes.py::test_live_macmon_smoke_answers_on_a_healthy_machine::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_failure_fixtures_wall_clock_bound_never_cost::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_loads::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_new_eval_tasks_load::pytest.skip  # on main before this ratchet

@@ -87,15 +87,13 @@ DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
 
 # Default secondary model for routed roles. glm-4.5-air is too weak for
 # reasoning-bearing work; a current flagship GLM does real work. Pin a cheaper
-# model per role via the roles map. Kept in lockstep with the schema default
-# (drift-guarded by test_config_defaults_match_module_constants).
+# model per role via the roles map.
 DEFAULT_SECONDARY_MODEL = "glm-5.3"
 
 # Cheaper model for the background (haiku) tier of the built-in zai provider.
 # Claude Code runs background tasks on haiku; routing the haiku tier to this
 # cheaper GLM keeps judgment-light background traffic cheap while opus/sonnet
-# stay on the role model. Kept in lockstep with the schema default
-# (drift-guarded by test_config_defaults_match_module_constants). glm-4.7 is
+# stay on the role model. glm-4.7 is
 # the vendor's recommended background model; glm-4.5-air left the coding-plan
 # supported set and now fails with a model-not-found error.
 DEFAULT_ZAI_HAIKU_MODEL = "glm-4.7"
