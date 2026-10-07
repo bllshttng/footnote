@@ -723,17 +723,36 @@ impl MessagesBoard {
             };
             if run_key.as_deref() != Some(key) {
                 push_blank(&mut lines, &mut owners);
+                // The name line is the envelope's formal structure, so it
+                // paints in the label color, distinct from the dim meta and
+                // the bold subject under it.
                 let mut label = if mine_row {
                     let pad = w.saturating_sub(1).saturating_sub(sender.chars().count());
-                    BLine::of(&[seg(format!("{}{sender}", " ".repeat(pad)), BRole::Meta)])
+                    BLine::of(&[seg(format!("{}{sender}", " ".repeat(pad)), BRole::Label)])
                 } else {
-                    BLine::of(&[seg(sender.clone(), BRole::Meta)])
+                    BLine::of(&[seg(sender.clone(), BRole::Label)])
                 };
                 label.band = selected;
                 lines.push(label);
                 owners.push(Some(index));
             }
             run_key = Some(key.to_string());
+            // The sender's --subject rides the row; a headline line under
+            // the sender, only when one was given.
+            let subject = text_of(r, "subject");
+            if !subject.is_empty() {
+                for mut line in BLine::of(&[seg(subject, BRole::Head)]).wrap(wrap_w) {
+                    if mine_row {
+                        let pad = w
+                            .saturating_sub(1)
+                            .saturating_sub(line.text.chars().count());
+                        line.text = format!("{}{}", " ".repeat(pad), line.text);
+                    }
+                    line.band = selected;
+                    lines.push(line);
+                    owners.push(Some(index));
+                }
+            }
             let wrapped = BLine::plain(text_of(r, "body")).wrap(wrap_w);
             for mut line in wrapped {
                 if mine_row {

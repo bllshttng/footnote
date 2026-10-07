@@ -435,6 +435,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::backlog::style_check::run_cli(&args[1..]);
     }
 
+    // The mail receipt renderer's hidden binary-direct door: the send receipt
+    // prose moved from Python (file budget) with Python keeping transports.
+    // Same `matches!` treatment so the parity guard never sees it.
+    if matches!(verb, "mail-receipt") {
+        return fno_agents::mail_receipt::run_mail_receipt(&args[1..]);
+    }
+
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct

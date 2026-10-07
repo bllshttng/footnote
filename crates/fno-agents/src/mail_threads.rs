@@ -24,7 +24,7 @@ fn is_hold_sender(sender: &str) -> bool {
 }
 
 /// The registry's rows, tolerant: a missing or malformed file reads as none.
-fn registry_rows() -> Vec<Value> {
+pub(crate) fn registry_rows() -> Vec<Value> {
     let text = std::fs::read_to_string(AgentsHome::from_env().registry_json()).unwrap_or_default();
     serde_json::from_str::<Value>(&text)
         .ok()
@@ -34,7 +34,7 @@ fn registry_rows() -> Vec<Value> {
 
 /// The registry row that IS this address: session id first, then name and
 /// aliases (law d-e952ed19: a name is a label, the session id is the key).
-fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
+pub(crate) fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
     if key.is_empty() {
         return None;
     }
@@ -234,6 +234,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                 "to_key": to_key,
                 "to": to,
                 "summary": crate::mail_header::summary_of(&body),
+                "subject": v.get("subject").and_then(Value::as_str),
                 "body": body,
                 "expires": expires_at(&v),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
@@ -797,13 +798,14 @@ mod tests {
             &chats,
             "chat-aaaaaaaaaaaaaaaa",
             &[
-                msg(
-                    "fmail-111111111111",
-                    "2026-10-01T09:00:00Z",
-                    "s-candor",
-                    "vellum",
-                    "Ship the auth fix. It blocks the release.",
-                ),
+                json!({
+                    "type": "message", "kind": "send", "v": 1,
+                    "id": "fmail-111111111111", "ts": "2026-10-01T09:00:00Z",
+                    "thread": "fmail-111111111111",
+                    "from": "s-candor", "to": "vellum",
+                    "subject": "release blocker",
+                    "body": "Ship the auth fix. It blocks the release.",
+                }),
                 json!({
                     "type": "message", "kind": "send", "v": 1,
                     "id": "fmail-222222222222", "ts": "2026-10-01T09:05:00Z", "thread": "fmail-111111111111",
@@ -1005,6 +1007,20 @@ mod tests {
         assert_eq!(body_of("fmail-b1b1b1b1b1b1"), "Ship it.");
         assert_eq!(body_of("fmail-b2b2b2b2b2b2"), "Ship it. Then merge.");
         assert_eq!(body_of("fmail-b3b3b3b3b3b3"), "see <fno_mail> docs");
+        // The sender's --subject rides the projected row; a row without one
+        // reads null.
+        let subject_of = |id: &str| -> Option<String> {
+            threads
+                .iter()
+                .flat_map(|t| t.get("rows").and_then(Value::as_array).unwrap())
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                .and_then(|r| r.get("subject").and_then(Value::as_str).map(str::to_string))
+        };
+        assert_eq!(
+            subject_of("fmail-111111111111").as_deref(),
+            Some("release blocker")
+        );
+        assert_eq!(subject_of("fmail-b2b2b2b2b2b2"), None);
         // AC4-HP: the registry never named s-lone; its from name shows and
         // the id stays the key.
         let lone = participants
