@@ -43,17 +43,16 @@ pub fn classify(args: &[OsString]) -> Option<Vec<String>> {
 
 const LIST_HELP: &str = "Query the node board in the shared search grammar\n\nUsage: fno backlog list [<query>] [flags]\n\nOne query answers once: the matches, the honest total, no caller-side cutting.\n`fno backlog list <action>` (next|ready|queued|worked|lanes|undispatched|\nstuck-epics) is the saved-set spelling and answers elsewhere.\n\nOptions:\n  --json     JSON: {\"total\": M, \"showing\": N, \"rows\": [...]} (exit 0 when empty)\n  --count    print only the match count (exit 0 when empty)\n  --limit N  show the first N matches; the totals stay honest\n  -h, --help print help\n\nExit codes: 0 matches (or a --json/--count answer), 1 no matches on the\npretty path or an unreadable graph, 2 usage or query parse error.";
 
-/// One output row: the card the board model derives plus the row fields the
-/// card does not carry.
-struct Hit {
+/// One output row: the card the board model derives plus a borrow of the
+/// row fields the card does not carry.
+struct Hit<'a> {
     card: crate::backlog_model::Card,
-    row: Option<Value>,
+    row: Option<&'a Value>,
 }
 
-impl Hit {
+impl Hit<'_> {
     fn field(&self, key: &str) -> Option<String> {
         self.row
-            .as_ref()
             .and_then(|r| r.get(key))
             .and_then(Value::as_str)
             .map(str::to_string)
@@ -72,7 +71,7 @@ impl Hit {
             "type": self.card.kind,
             "project": self.card.project,
             "parent": self.card.parent,
-            "pr": self.row.as_ref().and_then(|r| r.get("pr_number")).cloned().unwrap_or(Value::Null),
+            "pr": self.row.and_then(|r| r.get("pr_number")).cloned().unwrap_or(Value::Null),
             "claimed": self.card.claimed,
             "created_at": self.card.created_at,
             "updated_at": self.card.updated_at,
@@ -107,10 +106,10 @@ enum SortKey {
 }
 
 fn sort_key(page: &str) -> Option<(SortKey, bool)> {
-    let (name, desc) = match page.strip_suffix('-') {
-        // The grammar prefixes `-` for descending.
-        _ if page.starts_with('-') => (&page[1..], true),
-        _ => (page, false),
+    // The grammar prefixes `-` for descending.
+    let (name, desc) = match page.strip_prefix('-') {
+        Some(rest) => (rest, true),
+        None => (page, false),
     };
     let key = match name {
         "created_at" => SortKey::Created,
@@ -199,13 +198,21 @@ pub fn run(tail: &[String]) -> i32 {
                     }
                 }
             }
-            other => {
-                if other.starts_with('-') && other != "-" && !other.starts_with("\"-") {
-                    eprintln!("fno backlog list: unknown flag {other:?} (--help for usage)");
+            other if other.starts_with("--limit=") => match other["--limit=".len()..].parse() {
+                Ok(n) => limit = Some(n),
+                Err(_) => {
+                    eprintln!("fno backlog list: --limit needs a number");
                     return 2;
                 }
-                query_parts.push(other);
+            },
+            // Everything else is query text: the grammar's negation is a
+            // leading `-` on the term (`-s:done`, `-blocked`), so only the
+            // exact `--` spellings above are flags.
+            other if other.starts_with("--") => {
+                eprintln!("fno backlog list: unknown flag {other:?} (--help for usage)");
+                return 2;
             }
+            other => query_parts.push(other),
         }
         i += 1;
     }
@@ -257,16 +264,21 @@ pub fn run(tail: &[String]) -> i32 {
             .and_then(|r| r.get("title"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        let fields = crate::backlog_model::search_fields(
-            &inputs,
-            &by_ref,
-            &card,
-            by_ref.get(card.id.as_str()).copied(),
-        );
-        if parsed.keeps(&fields) {
-            let row = by_ref.get(card.id.as_str()).copied().cloned();
-            hits.push(Hit { card, row });
+        // An empty query keeps everything: skip the per-row field-map build
+        // it would never read.
+        if !query.is_empty() {
+            let fields = crate::backlog_model::search_fields(
+                &inputs,
+                &by_ref,
+                &card,
+                by_ref.get(card.id.as_str()).copied(),
+            );
+            if !parsed.keeps(&fields) {
+                continue;
+            }
         }
+        let row = by_ref.get(card.id.as_str()).copied();
+        hits.push(Hit { card, row });
     }
     let total = hits.len();
     if let Some(sort) = &parsed.sort {
