@@ -182,12 +182,12 @@ def _owning_node_id(repo_root: Path) -> Optional[str]:
         wanted = {f"target-session:{c}" for c in candidates}
         try:
             from fno.claims.core import list_claims
-            from fno.claims.io import claims_dir, global_claims_root
+            from fno.claims.io import global_claims_root
 
             matches = [
                 claim.get("key", "")
                 for claim in list_claims(
-                    prefix="node:", root=claims_dir(global_claims_root())
+                    prefix="node:", root=global_claims_root()
                 )
                 if (claim.get("holder") or "") in wanted
             ]
