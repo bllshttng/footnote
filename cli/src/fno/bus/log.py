@@ -38,6 +38,17 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
+#: Historical rows: an outage bypassed `fno mail send`, so agent-to-agent
+#: messages that went over the harness's native cross-session transport go
+#: back into the log with full provenance (sender session, receiver session,
+#: time, id, both transcripts). The bytes already reached their recipient -
+#: the receiver transcript itself is the proof - so the row is audit-only,
+#: exactly like `hosted` and `typed`, and the mail surfaces read it as
+#: archive. Idempotent by msg_id: the archive id is a deterministic function
+#: of the sender session and the source row, so a re-scan lands on the same
+#: id and the store skips it.
+CROSS_SESSION_DELIVERY = "cross-session"
+
 # Size-triggered rotation now lives in the Rust bus-append door
 # (fno-agents announce::append_line), which reads the same
 # FNO_BUS_MAX_BYTES / FNO_BUS_RETAIN envs. A malformed override degrades
@@ -406,11 +417,18 @@ def is_deliverable(env: Envelope) -> bool:
     a delivery that already succeeded and exists only for sender/operator audit.
     A typed row records bytes already written into the recipient's pane, so it
     is audit-only too -- draining it would hand the recipient a second copy of
-    text already sitting at its prompt.
+    text already sitting at its prompt. A cross-session row is historical: the
+    bytes already reached the recipient over the native transport (the receiver
+    transcript in its provenance is the proof), so the surfaces read it as
+    archive, never as pending mail.
     """
     if getattr(env, "kind", None) in CONTROL_KINDS:
         return False
-    return getattr(env, "delivery", None) not in (HOSTED_DELIVERY, TYPED_DELIVERY)
+    return getattr(env, "delivery", None) not in (
+        HOSTED_DELIVERY,
+        TYPED_DELIVERY,
+        CROSS_SESSION_DELIVERY,
+    )
 
 
 def record_hosted_delivery(
@@ -509,6 +527,66 @@ def record_typed_delivery(
             "transport": "pane",
             "pane_id": str(pane_id),
             **({"mux_session": mux_session} if mux_session else {}),
+        },
+    )
+    append(env)
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Reader (skips malformed lines)
+# ---------------------------------------------------------------------------
+
+def record_backfill_delivery(
+    *,
+    msg_id: str,
+    sender: str,
+    recipient: str,
+    body: str,
+    ts: str,
+    from_session: str,
+    to_session: str,
+    sender_transcript: str,
+    receiver_transcript: str,
+    subject: Optional[str] = None,
+    sender_row: Optional[str] = None,
+    backfilled_at: Optional[str] = None,
+    thread: Optional[str] = None,
+    word_count: Optional[int] = None,
+) -> Envelope:
+    """Append one audit-only historical row: an outage-era message that went
+    over the harness's native cross-session transport, backfilled from the
+    harness transcripts with full provenance.
+
+    The row never re-delivers: `delivery=cross-session` is excluded by
+    `is_deliverable` and by the Rust drain gate (`AUDIT_ONLY_DELIVERIES`), and
+    no markdown render is written - `rebuild_render` skips audit-only rows, so
+    the surfaces read the row as archive. Idempotent by msg_id: the archive id
+    is deterministic (`mail_backfill::archive_msg_id`), so a re-scan lands on
+    the same id and the caller skips an id already in the log.
+    """
+    env = Envelope.new(
+        id=msg_id,
+        thread=thread or msg_id,
+        from_=sender,
+        to=recipient,
+        kind="send",
+        body=body,
+        ts=ts,
+        from_harness="claude",
+        to_harness="claude",
+        from_session=from_session,
+        to_kind="session",
+        word_count=word_count if word_count is not None else len(body.split()),
+        origin="peer",
+        subject=subject,
+        meta={
+            "transport": "claude-cross-session",
+            "sender_transcript": sender_transcript,
+            "receiver_transcript": receiver_transcript,
+            **({"to_session": to_session} if to_session else {}),
+            **({"sender_row": sender_row} if sender_row else {}),
+            **({"backfilled_at": backfilled_at} if backfilled_at else {}),
         },
     )
     append(env)
