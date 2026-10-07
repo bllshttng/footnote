@@ -333,6 +333,19 @@ mod tests {
     }
 
     #[test]
+    fn a_help_tail_never_reads_as_a_listing() {
+        // The help text is not rows: cutting it is harmless, so the same
+        // producer shapes that refuse a listing truncation allow a help
+        // tail through.
+        allowed("fno backlog list --help | head -20");
+        allowed("fno backlog find x -h | head -5");
+        allowed("git worktree list --help | head -30");
+        // The listing itself stays guarded.
+        denied("fno backlog list | head -20");
+        denied("fno backlog find x | head -5");
+    }
+
+    #[test]
     fn parens_never_split_a_pipeline() {
         // Corpus flip: escaped parens inside a find stage used to end the
         // segment, so the producer and the cut never met in one pipeline.

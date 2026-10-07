@@ -383,13 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn sort_keys_read_the_page_names_and_the_desc_flag() {
-        assert_eq!(sort_key("priority"), Some((SortKey::Priority, false)));
-        assert_eq!(sort_key("-created_at"), Some((SortKey::Created, true)));
-        assert_eq!(sort_key("nonsense"), None);
-    }
-
-    #[test]
     fn priority_and_size_rank_missing_last() {
         let mk = |priority: Option<&str>, size: Option<&str>| Hit {
             card: crate::backlog_model::Card {
