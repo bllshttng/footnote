@@ -207,13 +207,20 @@ done < <(
 # Rule 5 only sees a literal events.jsonl in the open() call; the surviving
 # legs hid the path behind a variable. An event-named function that opens a
 # raw append is that shape, whatever the indirection, unless the line
-# carries an explicit events-discipline:allow marker.
+# carries an explicit events-discipline:allow marker. The window is 40 lines
+# (claude_ask::emit_event's open sat 23 lines below its fn) and hits at or
+# past the file's first `mod tests` are skipped so in-file fixtures stay
+# legal without new allow markers.
 while IFS= read -r hit; do
     [[ -z "$hit" ]] && continue
     file="${hit%%:*}"
     lineno="${hit#*:}"
     lineno="${lineno%%:*}"
-    window_end=$((lineno + 8))
+    window_end=$((lineno + 40))
+    test_start=$(grep -n '^mod tests' "$file" 2>/dev/null | cut -d: -f1 | head -1)
+    if [ -n "$test_start" ] && [ "$lineno" -ge "$test_start" ]; then
+        continue
+    fi
     if sed -n "${lineno},${window_end}p" "$file" 2>/dev/null | grep -q 'OpenOptions::new()'; then
         echo "event fn raw append at $file:$lineno: an event-named function must commit through the store" >&2
         remediation "use crate::event_store::append_envelope (or EventEmitter); mark events-discipline:allow only for a test fixture writer"
