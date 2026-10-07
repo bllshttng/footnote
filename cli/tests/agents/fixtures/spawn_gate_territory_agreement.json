@@ -1,9 +1,9 @@
 {
-  "note": "AC9-HP (x-e221): the per-territory team cap verdicts, pinned as scenarios. The Rust gate (crates/fno-agents/src/spawn_gate.rs::check_territory_cap) is the sole enforcement home since the Python conjunct was ported there (2026-09-13 crown ruling: cli/src/fno budget); the Rust suite reads this file. Live registry rows carry 'node' (the backlog node the row works) and crown rows carry 'crown_scope'. 'graph' is the backlog graph; 'node' names the SPAWNING node; expect.verdict is 'territory_cap' (refuse), 'territory_unknown' (refuse), or 'ok' (admit).",
+  "note": "AC9-HP (x-e221): the per-territory team cap verdicts, pinned as scenarios. The Rust gate (crates/fno-agents/src/spawn_gate.rs::check_territory_cap) is the sole enforcement home since the Python conjunct was ported there (2026-09-13 role ruling: cli/src/fno budget); the Rust suite reads this file. Live registry rows carry 'node' (the backlog node the row works) and role rows carry 'role_scope'. 'graph' is the backlog graph; 'node' names the SPAWNING node; expect.verdict is 'territory_cap' (refuse), 'territory_unknown' (refuse), or 'ok' (admit).",
   "scenarios": [
     {
       "name": "cap_refuses_fifth_in_scope_worker",
-      "crown_scope": "x-epic",
+      "role_scope": "x-epic",
       "graph": [
         {"id": "x-epic", "type": "epic", "project": "fno"},
         {"id": "x-1", "parent": "x-epic", "project": "fno"},
@@ -17,7 +17,7 @@
         {"name": "w2", "status": "busy", "pid": "self", "node": "x-2"},
         {"name": "w3", "status": "busy", "pid": "self", "node": "x-3"},
         {"name": "w4", "status": "busy", "pid": "self", "node": "x-4"},
-        {"name": "king", "status": "busy", "pid": "self", "crown_scope": "x-epic"}
+        {"name": "lead", "status": "busy", "pid": "self", "role_scope": "x-epic"}
       ],
       "node": "x-5",
       "territory_cap": 4,
@@ -25,7 +25,7 @@
     },
     {
       "name": "machinery_and_other_territory_rows_do_not_count",
-      "crown_scope": "x-epic",
+      "role_scope": "x-epic",
       "graph": [
         {"id": "x-epic", "type": "epic", "project": "fno"},
         {"id": "x-1", "parent": "x-epic", "project": "fno"},
@@ -41,15 +41,15 @@
         {"name": "w3", "status": "busy", "pid": "self", "node": "x-3"},
         {"name": "w4", "status": "busy", "pid": "self", "node": "x-out"},
         {"name": "w5", "status": "busy", "pid": "self"},
-        {"name": "king", "status": "busy", "pid": "self", "crown_scope": "x-epic"}
+        {"name": "lead", "status": "busy", "pid": "self", "role_scope": "x-epic"}
       ],
       "node": "x-5",
       "territory_cap": 4,
       "expect": {"verdict": "ok"}
     },
     {
-      "name": "uncrowned_project_loose_territory_counts_project_nodes",
-      "crown_scope": null,
+      "name": "unpromoted_project_loose_territory_counts_project_nodes",
+      "role_scope": null,
       "graph": [
         {"id": "p-1", "project": "fno"},
         {"id": "p-2", "project": "fno"},
@@ -69,7 +69,7 @@
     },
     {
       "name": "absent_node_is_unknown_and_refuses",
-      "crown_scope": null,
+      "role_scope": null,
       "graph": [
         {"id": "p-1", "project": "fno"}
       ],

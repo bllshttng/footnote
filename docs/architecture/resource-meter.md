@@ -54,9 +54,9 @@ A long fold budget costs nothing here. The fold runs off the UI loop, one at a t
 
 ## The census counts rows for people and processes for tests
 
-`census.kings` and `census.workers` are counts of registry ROWS. `census.tests` is a count of PROCESSES. The two must never be added together or folded into each other.
+`census.leads` and `census.workers` are counts of registry ROWS. `census.tests` is a count of PROCESSES. The two must never be added together or folded into each other.
 
-Kings come from `gather_court` over the same live rows list the per-lane cost divides by. So `kings` plus `workers` always equals `roster_rows`, and the two halves can never describe different fleets. The panel reports `king_conflicts` beside the count, because a bare lead number hides the case that matters. Two live rows over one scope both report agreement while the fleet has two leads.
+Leads come from `gather_team` over the same live rows list the per-lane cost divides by. So `leads` plus `workers` always equals `roster_rows`, and the two halves can never describe different fleets. The panel reports `lead_conflicts` beside the count, because a bare lead number hides the case that matters. Two live rows over one scope both report agreement while the fleet has two leads.
 
 A running test is a process whose OWN program is a test runner, matched on `argv[0]` plus the first non-flag arguments. Never on the whole command line. On the machine this was measured against, `ps | grep -i pytest` reported four running tests while two ran. One decoy was a shell wrapper whose command line happened to hold `cargo test`. The other was a leaked keeper process whose socket path sat under a `pytest-of-<user>` temp directory. The substring was in the path, never in the program.
 

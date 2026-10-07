@@ -367,7 +367,7 @@
         "op": "journal",
         "outcome": "granted",
         "vacated": [],
-        "name": "heir",
+        "name": "successor",
         "level": 2,
         "scope": "epic-a",
         "grantor": "human"
@@ -375,9 +375,9 @@
       "answer": {
         "events": [
           {
-            "kind": "agent_crowned",
+            "kind": "agent_promoted",
             "data": {
-              "name": "heir",
+              "name": "successor",
               "level": 2,
               "scope": "epic-a",
               "grantor": "human",
@@ -399,25 +399,25 @@
           [
             {
               "name": "predecessor",
-              "crown_level": 2,
-              "crown_scope": "epic-a",
+              "role_level": 2,
+              "role_scope": "epic-a",
               "harness_session_id": "predecessor-session",
-              "crown_grantor": "human"
+              "role_grantor": "human"
             },
             "succession"
           ],
           [
             {
               "name": "child",
-              "crown_level": null,
-              "crown_scope": null,
+              "role_level": null,
+              "role_scope": null,
               "harness_session_id": "predecessor-session",
-              "crown_grantor": "human"
+              "role_grantor": "human"
             },
             "reowned"
           ]
         ],
-        "name": "heir",
+        "name": "successor",
         "level": 2,
         "scope": "epic-a",
         "grantor": "human"
@@ -425,7 +425,7 @@
       "answer": {
         "events": [
           {
-            "kind": "agent_crown_vacated",
+            "kind": "agent_role_vacated",
             "data": {
               "scope": "epic-a",
               "level": 2,
@@ -433,21 +433,21 @@
               "holder_session": "predecessor-session",
               "grantor": "human",
               "cause": "succession",
-              "successor": "heir"
+              "successor": "successor"
             }
           },
           {
-            "kind": "agent_court_reowned",
+            "kind": "agent_team_reowned",
             "data": {
               "scope": "epic-a",
-              "successor": "heir",
+              "successor": "successor",
               "child": "child"
             }
           },
           {
-            "kind": "agent_crowned",
+            "kind": "agent_promoted",
             "data": {
-              "name": "heir",
+              "name": "successor",
               "level": 2,
               "scope": "epic-a",
               "grantor": "human",
@@ -469,15 +469,15 @@
           [
             {
               "name": "predecessor",
-              "crown_level": 2,
-              "crown_scope": "epic-a",
+              "role_level": 2,
+              "role_scope": "epic-a",
               "harness_session_id": "predecessor-session",
-              "crown_grantor": "human"
+              "role_grantor": "human"
             },
             "holder_terminal"
           ]
         ],
-        "name": "heir",
+        "name": "successor",
         "level": 2,
         "scope": "epic-a",
         "grantor": "human"
@@ -485,7 +485,7 @@
       "answer": {
         "events": [
           {
-            "kind": "agent_crown_vacated",
+            "kind": "agent_role_vacated",
             "data": {
               "scope": "epic-a",
               "level": 2,
@@ -506,7 +506,7 @@
         "op": "journal",
         "outcome": "declined",
         "vacated": [],
-        "name": "heir",
+        "name": "successor",
         "level": 2,
         "scope": "epic-a",
         "grantor": "human"

@@ -1,6 +1,6 @@
 # Beat by harness
 
-The lead has one push contract on every harness. When a covered PR settles green, the daemon's `king_settle` arm mails the lead. When a covered node merges and closes, it mails again. The cheap heartbeat varies by harness. An unverified cell is an explicit gap, not a claim.
+The lead has one push contract on every harness. When a covered PR settles green, the daemon's `lead_settle` arm mails the lead. When a covered node merges and closes, it mails again. The cheap heartbeat varies by harness. An unverified cell is an explicit gap, not a claim.
 
 | Harness | Heartbeat |
 |---|---|
@@ -9,6 +9,19 @@ The lead has one push contract on every harness. When a covered PR settles green
 | opencode | Mail wake lands through the fno opencode serve lane. No native timer is verified. `internal/opencode/docs/ecosystem.md:44` |
 | grok | unverified |
 | agy | Mail wake lands through the ask surface. The harness documents a recurring `schedule` tool with `CronExpression` and `Prompt`. `internal/agy/docs/Hookslink.md:135` |
+
+## Spawn by harness
+
+Each page holds the exact `fno agents spawn` line, the payload prefix (`/` or `$`), and the refusals a lead meets with their fixes.
+
+| Harness | Page | Payload |
+|---|---|---|
+| claude | [spawn-claude.md](spawn-claude.md) | `/fno:target <node>` |
+| codex | [spawn-codex.md](spawn-codex.md) | `$fno:target <node>` |
+| opencode | [spawn-opencode.md](spawn-opencode.md) | `/fno:target <node>` |
+| pi | [spawn-pi.md](spawn-pi.md) | `/fno:target <node>`, rendered `/skill:target` |
+| agy | [spawn-agy.md](spawn-agy.md) | `/fno:target <node>` |
+| deepseek | [spawn-deepseek.md](spawn-deepseek.md) | no capability row yet |
 
 ## Triage lane
 

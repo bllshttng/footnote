@@ -1,0 +1,2534 @@
+"""The pr-watch tick's lead wake phase: triggers, liveness, gate, receipts.
+
+Every assertion names a positive marker: a dispatched walk with its reason, an
+emitted event naming its word, a billed ledger line. "Nothing spawned" is only
+ever asserted beside a same-run positive that proves the phase actually ran.
+"""
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+from fno.lead.state import write_manifest
+from fno.lead.wake import bill_wake
+from fno.pr_watch._lead_wake import (
+    RoleTarget,
+    _board_digest,
+    _board_rows,
+    _promoted,
+    _holder_absent,
+    _ask_wake_ceiling,
+    _store_board_hash,
+    run_lead_wake,
+)
+
+NOW = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _settings(*, armed: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        lead=SimpleNamespace(
+            wake_enabled=armed,
+            wake_ceiling=32,
+            wake_debounce_seconds=900,
+            wake_backstop_seconds=1800,
+        )
+    )
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+        self.dispatches: list[tuple[str, str, str | None, str | None]] = []
+        self.targets: list[RoleTarget] = []
+        self.successor_flags: list[bool] = []
+        self.asks: list[tuple[str, int, int]] = []
+        self.unread_calls: list[str] = []
+
+    def emit(self, event_type: str, data: dict) -> None:
+        self.events.append((event_type, data))
+
+    def dispatch(
+        self,
+        target: RoleTarget,
+        reason: str,
+        address: str | None,
+        detail: str | None = None,
+        successor: bool = False,
+    ) -> None:
+        self.targets.append(target)
+        self.dispatches.append((target.scope, reason, address, detail))
+        self.successor_flags.append(successor)
+
+def _lead_manifest(root):
+    """The manifest path as the wake phase resolves it: the repo's space,
+    canonical-keyed (the seed must land where the reader looks)."""
+    from fno.lead.state import lead_manifest_path, lead_state_root
+
+    return lead_manifest_path("epic-x", state_root=lead_state_root(root))
+
+
+
+def _team(roles):
+    return lambda rows: {"roles": roles, "conflicts": []}
+
+
+def _rows(root, holder="lead-x", status="live", short_id="aa11bb22"):
+    return lambda: [
+        SimpleNamespace(
+            name=holder, cwd=str(root), status=status, short_id=short_id
+        )
+    ]
+
+
+def _run(
+    tmp_path,
+    *,
+    truth=None,
+    unread=None,
+    armed=True,
+    pre=None,
+    extra=None,
+    fresh_manifest=True,
+    manifest_session_id="11111111-2222-3333-4444-555555555555",
+):
+    rec = _Recorder()
+    root = tmp_path / "proj"
+    root.mkdir(exist_ok=True)
+    manifest = _lead_manifest(root)
+    if fresh_manifest or not manifest.is_file():
+        write_manifest(
+            manifest,
+            scope="epic-x",
+            harness_session_id=manifest_session_id,
+            owner_cwd=str(root),
+            force=True,
+        )
+    if pre is not None:
+        pre(manifest)
+    roles = [{"holder": "lead-x", "scope": "epic-x", "status": "live"}]
+
+    def unread_fn(address):
+        rec.unread_calls.append(address)
+        return unread(address) if unread else []
+
+    kwargs = dict(
+        emit=rec.emit,
+        now=NOW,
+        team_fn=_team(roles),
+        rows_fn=_rows(root),
+        truth_fn=truth or (lambda holder: {"state": "done"}),
+        unread_fn=unread_fn,
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda t, c, k: rec.asks.append((t.scope, c, k)),
+    )
+    if extra:
+        kwargs.update(extra)
+    summary = run_lead_wake(_settings(armed=armed), **kwargs)
+    return rec, summary, manifest
+
+
+_ROWLESS_HOLDER = "11111111-2222-3333-4444-555555555555"
+
+
+def _run_rowless(tmp_path, truth):
+    root = tmp_path / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = _lead_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    roles = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        }
+    ]
+    rec = _Recorder()
+
+    truth_calls = []
+
+    def read_truth(holder):
+        truth_calls.append(holder)
+        return truth(holder)
+
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=_team(roles),
+        rows_fn=lambda: [],
+        truth_fn=read_truth,
+        unread_fn=lambda address: [object()] if address == _ROWLESS_HOLDER else [],
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *args: None,
+    )
+    return rec, summary, manifest, root, truth_calls
+
+
+def test_manifest_only_role_is_named_but_not_rooted_at_owner_cwd(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _lead_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    roles = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        }
+    ]
+
+    targets, note = _promoted(_team(roles), lambda: [])
+
+    assert targets == []
+    assert note == "epic-x: unregistered holder"
+
+
+def test_rowless_manifest_paths_are_ignored_when_naming_drops(tmp_path, monkeypatch):
+    import fno.lead.state as state_mod
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _lead_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    roles = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        },
+        {
+            "holder": "22222222-3333-4444-5555-666666666666",
+            "scope": "epic-y",
+            "status": "manifest-only",
+            "manifest_path": str(tmp_path / "unreadable.md"),
+        },
+    ]
+
+    def fail_if_read(_path):
+        raise AssertionError("manifest-only role paths must not be read")
+
+    monkeypatch.setattr(state_mod, "parse_manifest", fail_if_read)
+    targets, note = _promoted(_team(roles), lambda: [])
+
+    assert targets == []
+    assert note == (
+        "epic-x: unregistered holder; epic-y: unregistered holder"
+    )
+
+
+def test_registered_role_keeps_its_row_root_and_rowless_role_without_manifest_is_named(
+    monkeypatch, tmp_path
+):
+    import fno.lead.state as state_mod
+
+    root = tmp_path / "registered"
+    root.mkdir()
+    manifest = _lead_manifest(root)
+    write_manifest(manifest, scope="epic-x", owner_cwd=str(root), force=True)
+
+    def fail_if_read(_path):
+        raise AssertionError("a registered holder must not read manifest_path")
+
+    monkeypatch.setattr(state_mod, "parse_manifest", fail_if_read)
+    roles = [
+        {
+            "holder": "lead-x",
+            "scope": "epic-x",
+            "status": "live",
+            "manifest_path": str(tmp_path / "must-not-read.md"),
+        }
+    ]
+    targets, note = _promoted(
+        _team(roles),
+        lambda: [SimpleNamespace(name="lead-x", cwd=str(root), short_id="aa11bb22")],
+    )
+    assert targets == [RoleTarget("lead-x", "epic-x", root, manifest, "aa11bb22")]
+    assert note == ""
+
+    targets, note = _promoted(
+        _team([{"holder": _ROWLESS_HOLDER, "scope": "epic-z"}]), lambda: []
+    )
+    assert targets == []
+    assert note == "epic-z: unregistered holder"
+
+
+def test_rowless_missing_holder_with_mail_is_named_without_waking(tmp_path):
+    rec, summary, _manifest, _root, truth_calls = _run_rowless(
+        tmp_path,
+        lambda _holder: {"state": "unknown", "reason": "not-found"},
+    )
+
+    assert rec.dispatches == []
+    assert rec.targets == []
+    assert truth_calls == []
+    assert summary["roles"] == 0
+    assert summary["note"] == "epic-x: unregistered holder"
+
+
+def test_rowless_stalled_and_parked_holders_are_never_woken(tmp_path):
+    for state in ("stalled", "done"):
+        case = tmp_path / state
+        case.mkdir()
+        rec, summary, _manifest, _root, truth_calls = _run_rowless(
+            case, lambda _holder, state=state: {"state": state}
+        )
+        assert rec.dispatches == []
+        assert rec.targets == []
+        assert truth_calls == []
+        assert summary["note"] == "epic-x: unregistered holder"
+
+
+def test_absent_holder_with_undrained_mail_wakes_and_bills(tmp_path):
+    rec, summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == "lead-x" else [],
+    )
+
+    assert rec.dispatches == [("epic-x", "mail", "lead-x", None)], f"woke: {rec.dispatches}"
+    woken = [e for e in rec.events if e[0] == "lead_woken"]
+    assert woken and woken[0][1]["reason"] == "mail"
+    assert woken[0][1]["address"] == "lead-x"
+    assert woken[0][1]["scope"] == "epic-x"
+    # The bill landed BEFORE the dispatch: the ledger names the wake.
+    text = manifest.read_text(encoding="utf-8")
+    assert "wake_times: " in text and NOW.strftime("%Y-%m-%dT%H:%M:%SZ") in text
+
+
+def test_mail_addressed_to_the_reply_handle_short_id_wakes(tmp_path):
+    # Measured on the live bus: replies carry the session short id, not the
+    # registry name. A name-only scan reads a permanent zero for them.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == "aa11bb22" else [],
+    )
+
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], (
+        f"addresses: {rec.unread_calls}"
+    )
+
+
+def test_project_broadcast_address_wakes_an_absent_holder(tmp_path):
+    # A to_kind=project broadcast carries to == <project>; the scope's project
+    # member must reach the lead through that address too, not only the name.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == "epic-x" else [],
+    )
+
+    assert rec.dispatches == [("epic-x", "mail", "epic-x", None)]
+
+
+def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path):
+    # Every dispatch_fn-injected test stops one call short of the real spawn;
+    # this pins the argv the walk process actually receives. The address must
+    # travel on the command line: the woken session is fresh and can derive
+    # neither the dead holder's name nor its reply-handle short id from any
+    # whoami of its own.
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _lead_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = RoleTarget(
+        holder="lead-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_lead_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
+
+    phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
+
+    assert argv[argv.index("--wake-address") + 1] == "aa11bb22"
+    assert argv[argv.index("--wake-reason") + 1] == "mail"
+    assert argv[argv.index("--wake-holder") + 1] == "lead-x"
+    # x-8fb2: the walk repeats the role manifest's pin, so the respawned
+    # lead (and every successor the walk mints) runs the promoted model.
+    assert argv[argv.index("--model") + 1] == "glm-5.3-flash[1m]"
+
+
+def test_a_model_less_manifest_refuses_the_walk(tmp_path):
+    # A manifest with no model pin used to spawn a lead on the account
+    # default (measured 2026-09-17: opus). The walk refuses and says so in
+    # its wake log; the successor event never fires on a refused spawn.
+    from fno.pr_watch import _lead_wake as phase_mod
+
+    target = RoleTarget(
+        holder="lead-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_lead_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    spawned = phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
+
+    assert spawned is False
+    log = target.manifest.with_suffix(".md.wake.log").read_text(encoding="utf-8")
+    assert "no model pin" in log
+
+
+def test_lead_wake_permission_mode_the_woken_session_argv_carries_bypass():
+    # The operator's 2026-08-23 report (wakes landing on an approve prompt)
+    # named a resume that repeated no permission mode. Measured 2026-09-05:
+    # the wake path holds no resume to fix - it dispatches the walk, and the
+    # session the walk launches runs THIS driver's argv, which hardcodes full
+    # bypass (a mode every spawn recording subsumes). The pin is the one edit
+    # that could bring the report back: dropping the flag from driver_invoke.
+    repo = Path(__file__).resolve().parents[3]
+    driver = repo / "scripts" / "lib" / "driver-claude-code.sh"
+    invoke = driver.read_text(encoding="utf-8").split("driver_invoke()", 1)[1]
+    assert "--dangerously-skip-permissions" in invoke
+
+
+# ── the escalation-answer trigger ──────────────────────────────────────────
+
+
+def _answered(asker, answer="ship it", closed_ts="2026-08-29T11:00:00Z", qid="q-ab12cd34"):
+    return {
+        "id": qid,
+        "asker": asker,
+        "question": "what does the operator want for epic-x?",
+        "answer": answer,
+        "closed_ts": closed_ts,
+    }
+
+
+def _seed_cursor(manifest, cursor="2026-08-29T10:00:00Z"):
+    import json as _json
+
+    _sidecar(manifest).write_text(
+        _json.dumps({"answered_cursor": cursor}), encoding="utf-8"
+    )
+
+
+def test_an_answered_lead_escalation_wakes_with_the_answer_as_the_prompt(tmp_path):
+    # The acceptance: a parked promoted holder that asked q-X, cleared with an
+    # answer, wakes on the next tick with the answer as the prompt body.
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={
+            "answered_fn": lambda: [
+                _answered(asker=None, qid="q-old"),  # unattributable: never a trigger
+                _answered(asker="aa11bb22"),
+            ]
+        },
+    )
+
+    assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "escalation_answered", None)
+    assert rec.unread_calls == [], "a decided escalation must not still scan mailboxes"
+    detail = rec.dispatches[0][3]
+    assert "q-ab12cd34" in detail and "ship it" in detail, detail
+    assert "11111111-2222-3333-4444-555555555555" in detail, (
+        f"the prompt names the delivery address so the mail row can be drained: {detail}"
+    )
+    woken = [e for e in rec.events if e[0] == "lead_woken"]
+    assert woken and woken[0][1]["reason"] == "escalation_answered"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert _json.loads(payload["answered_cursor"])["ts"] == "2026-08-29T11:00:00Z"
+
+
+def test_an_answered_codex_escalation_matches_the_manifest_session_handle(tmp_path):
+    codex_session = "019c7714-3b77-74d1-9866-e1f484aae2ab"
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        manifest_session_id=codex_session,
+        extra={"answered_fn": lambda: [_answered(asker="019c7714")]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+
+
+def test_the_answer_delivery_address_is_invisible_to_the_mail_trigger(tmp_path):
+    # Why this trigger exists: the answer's mail delivery addresses the
+    # holder's FULL session id (outstanding/deliver.py), and the mail scan
+    # covers name, short id, and scope projects only - so the mail trigger
+    # reads a permanent zero on an answer while the question journal fires.
+    full_id = "11111111-2222-3333-4444-555555555555"
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == full_id else [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: []},
+    )
+
+    assert full_id not in rec.unread_calls, "the full id is not a scanned address"
+    assert rec.dispatches == [], "no mail spelling matched, nothing wakes"
+
+
+def test_the_answer_trigger_fires_despite_the_debounce(tmp_path):
+    # "Ahead of the debounce, since the lead asked for it": a wake billed two
+    # minutes ago still refuses mail, board, and backstop, but not an answer.
+    def prime(manifest):
+        _seed_cursor(manifest)
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [object()],
+        pre=prime,
+        extra={"answered_fn": lambda: [_answered(asker="lead-x")]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+    assert rec.dispatches[0][1] != "mail", "mail must stay debounced"
+
+
+def test_a_fresh_arm_seeds_the_answer_cursor_at_the_terms_birth(tmp_path):
+    # The seed is the manifest's created_at (the term's birth), never the
+    # journal's max ts: a max seed would swallow an answer that closed between
+    # the question and the first armed tick - the acceptance case itself.
+    from fno.lead.state import parse_manifest
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"answered_fn": lambda: [_answered(asker="lead-x")]},
+    )
+
+    assert rec.dispatches == [], "a first observation is not a trigger"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    created = parse_manifest(manifest)["created_at"]
+    birth = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+    assert payload["answered_cursor"] == birth.isoformat()
+
+
+def test_an_answer_that_closed_after_the_first_observation_still_fires(tmp_path):
+    # The regression the birth seed exists for: the lead asks, the operator
+    # answers, and only THEN does the first armed tick observe the journal.
+    # The seed must not swallow that answer, so the fixture answer closes
+    # AFTER the manifest's created_at (stamped at real now).
+    fresh = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    answered = lambda: [_answered(asker="lead-x", answer="ship it", closed_ts=fresh)]  # noqa: E731
+    _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"answered_fn": answered},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+        extra={"answered_fn": answered},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+    assert "ship it" in rec.dispatches[0][3]
+
+
+def test_two_answers_between_ticks_deliver_one_per_tick_in_order(tmp_path):
+    older = _answered(
+        asker="lead-x",
+        answer="first ruling",
+        closed_ts=datetime(2026, 8, 29, 11, 0, 0, tzinfo=timezone.utc).isoformat(),
+        qid="q-a",
+    )
+    newer = _answered(
+        asker="lead-x",
+        answer="second ruling",
+        closed_ts=datetime(2026, 8, 29, 11, 0, 0, tzinfo=timezone.utc).isoformat(),
+        qid="q-b",
+    )
+    _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: []},
+    )
+
+    first, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+        extra={"answered_fn": lambda: [older, newer]},
+    )
+    assert first.dispatches and "first ruling" in first.dispatches[0][3], (
+        "the OLDEST answer rides the first wake, not only the newest"
+    )
+
+    second, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+        extra={"answered_fn": lambda: [older, newer]},
+    )
+    assert second.dispatches and "second ruling" in second.dispatches[0][3], (
+        "the cursor advanced one answer, so the next tick delivers the next"
+    )
+
+
+def test_an_answer_to_another_asker_wakes_nothing(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: [_answered(asker="somebody-else")]},
+    )
+
+    assert rec.dispatches == []
+    assert [e for e in rec.events if e[0] == "lead_woken"] == []
+
+
+def test_a_ceiling_refused_answer_keeps_the_cursor_so_it_stays_a_trigger(tmp_path):
+    # The debounce cannot refuse an answer (the lead asked for it), so the
+    # one refusal left is the ceiling - and it must not consume the answer.
+    def prime(manifest):
+        _seed_cursor(manifest)
+        for _ in range(32):
+            bill_wake(manifest, now=NOW - timedelta(hours=1))
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=prime,
+        extra={"answered_fn": lambda: [_answered(asker="lead-x")]},
+    )
+
+    assert rec.dispatches == [], "the ceiling refuses the 33rd wake"
+    refused = [e for e in rec.events if e[0] == "lead_wake_refused"]
+    assert refused and refused[0][1]["reason"] == "escalation_answered"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["answered_cursor"] == "2026-08-29T10:00:00Z", (
+        "a refused answer must stay a trigger"
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,  # same ledger: the roll is what frees the wake
+        extra={
+            "answered_fn": lambda: [_answered(asker="lead-x")],
+            "now": NOW + timedelta(hours=25),  # the window rolled; the answer waits
+        },
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+
+
+# ── the successor path for a dead holder ───────────────────────────────────
+
+
+def _spent_respawn_budget(manifest):
+    """Rewrite the manifest with its respawn budget spent (4 of 4)."""
+    manifest.write_text(
+        "---\n"
+        "fno_id: k-1\n"
+        "scope: epic-x\n"
+        "harness_session_id: 11111111-2222-3333-4444-555555555555\n"
+        "respawn_count: 4\n"
+        "respawn_ceiling: 4\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_dead_holder_wakes_a_successor_under_the_recorded_role(tmp_path):
+    # Acceptance 5.4: the holder's session is gone (not-found), a trigger is
+    # live, so the dispatch is a NEW lead generation, not an ordinary wake.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "lead-x" else [],
+    )
+
+    assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "mail", "lead-x")
+    assert rec.successor_flags == [True]
+    spawned = [e for e in rec.events if e[0] == "lead_spawned_successor"]
+    assert spawned and spawned[0][1]["old_session_id"] == (
+        "11111111-2222-3333-4444-555555555555"
+    )
+    assert spawned[0][1]["trigger"] == "mail"
+    woken = [e for e in rec.events if e[0] == "lead_woken"]
+    assert woken and woken[0][1]["successor"] is True
+
+
+def test_a_parked_holder_wakes_without_the_successor_flag(tmp_path):
+    # "done" is a parked holder (a transcript that ended), not a gone one:
+    # its wake is ordinary and journals no successor.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [object()] if a == "lead-x" else [],
+    )
+
+    assert rec.dispatches and rec.successor_flags == [False]
+    assert [e for e in rec.events if e[0] == "lead_spawned_successor"] == []
+
+
+def test_a_dead_holder_at_the_respawn_ceiling_spawns_nothing_and_escalates(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "lead-x" else [],
+        pre=_spent_respawn_budget,
+    )
+
+    assert rec.dispatches == [], "no spawn happens at the respawn ceiling"
+    refused = [e for e in rec.events if e[0] == "lead_wake_refused"]
+    assert refused and refused[0][1]["refusal"] == "respawn-ceiling"
+    assert refused[0][1]["reason"] == "mail"
+    assert [e for e in rec.events if e[0] == "lead_spawned_successor"] == []
+    # The bill never landed: the refusal spends no wake slot.
+    assert [e for e in rec.events if e[0] == "lead_woken"] == []
+
+
+def test_a_dead_holder_with_an_absent_ceiling_asks_with_the_default(tmp_path):
+    def spent_legacy(manifest):
+        manifest.write_text(
+            "---\n"
+            "fno_id: k-1\n"
+            "scope: epic-x\n"
+            "harness_session_id: 11111111-2222-3333-4444-555555555555\n"
+            "respawn_count: 4\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "lead-x" else [],
+        pre=spent_legacy,
+    )
+
+    assert rec.dispatches == []
+    assert rec.asks == [("epic-x", 4, 4)]
+
+
+def test_the_spawned_walk_argv_carries_the_successor_flag(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _lead_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = RoleTarget(
+        holder="lead-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_lead_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
+
+    phase_mod._dispatch_walk(target, "mail", "fno-agents", "lead-x", None, True)
+
+    assert "--wake-successor" in argv
+    assert argv[argv.index("--wake-holder") + 1] == "lead-x"
+
+
+def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):
+    for n, truth in enumerate(
+        (
+            {"state": "working"},
+            {"state": "watching"},
+            {"state": "your-move"},
+            {"state": "stalled"},
+            {"state": "unknown", "reason": "no-records"},
+            {"state": "unknown", "reason": "resolver-error"},
+        )
+    ):
+        case = tmp_path / f"case-{n}"
+        case.mkdir()
+        rec, summary, _ = _run(
+            case,
+            truth=lambda h, t=truth: t,
+            unread=lambda address: [object()],
+        )
+        assert rec.dispatches == [], f"{truth} spawned a lead"
+        assert summary["refused"] == [
+            {"scope": "epic-x", "refusal": _holder_absent(truth)}
+        ], f"{truth} must name its state in the refusal"
+
+
+def test_unknown_not_found_is_absence_and_wakes(tmp_path):
+    rec, _summary, _ = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda address: [object()],
+    )
+
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)]
+
+
+def test_unarmed_phase_reads_no_bus_and_emits_nothing(tmp_path):
+    rec, summary, _ = _run(tmp_path, armed=False, unread=lambda a: [object()])
+
+    assert summary == {"armed": False}
+    assert rec.unread_calls == [], "an unarmed tick must not read the bus"
+    assert rec.events == []
+    assert rec.dispatches == []
+
+
+def test_a_fresh_wake_is_debounced_and_bills_nothing(tmp_path):
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda address: [object()],
+        # Pre-bill a wake 5 minutes ago: inside the 900s debounce.
+        pre=lambda m: bill_wake(m, now=NOW - timedelta(minutes=5)),
+    )
+
+    assert rec.dispatches == [], "a debounced trigger must not spawn"
+    refused = [e for e in rec.events if e[0] == "lead_wake_refused"]
+    assert refused and refused[0][1]["refusal"] == "debounce"
+    assert rec.asks == [], "a debounce refusal is routine and stays an event"
+    # The refused wake was not billed: no stamp at NOW, only the 11:55 one.
+    text = manifest.read_text(encoding="utf-8")
+    assert "2026-08-29T12:00:00Z" not in text, "a refusal must not bill"
+    assert "2026-08-29T11:55:00Z" in text, "the prior bill survives"
+    # Nothing advanced any cursor: the waking mail is still undrained, so the
+    # next allowed wake still carries it.
+
+
+def test_the_33rd_wake_is_refused_naming_ceiling_and_asks_once(tmp_path):
+    def fill(manifest):
+        # 32 real bills, ages 30m..1270m at 40m spacing: all inside 24h, all
+        # past the 15m debounce.
+        for i in range(32):
+            bill_wake(manifest, now=NOW - timedelta(minutes=30 + 40 * i))
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda address: [object()],
+        pre=fill,
+    )
+
+    assert rec.dispatches == [], "wake 33 in the same window must not spawn"
+    refused = [e for e in rec.events if e[0] == "lead_wake_refused"]
+    assert refused and refused[0][1]["refusal"] == "ceiling"
+    assert refused[0][1]["ceiling"] == 32
+    assert refused[0][1]["window_count"] == 32
+    assert len(rec.asks) == 1, "the ceiling question is raised once per window"
+
+
+def test_the_ceiling_question_dedupes_on_its_marker(tmp_path):
+    target = RoleTarget(
+        holder="lead-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_lead_manifest(tmp_path),
+    )
+
+    first = _ask_wake_ceiling(target, 32, 32)
+    second = _ask_wake_ceiling(target, 32, 32)
+
+    assert first == second, "an open question must not be re-asked each tick"
+
+
+def test_no_mail_and_no_trigger_spawns_nothing_but_ran(tmp_path):
+    rec, summary, _ = _run(
+        tmp_path,
+        unread=lambda address: [],
+        extra={"entries_fn": lambda: []},
+    )
+
+    assert rec.dispatches == []
+    assert rec.events == []
+    assert summary["roles"] == 1, "the phase ran and considered the role"
+
+
+def test_a_conflicted_scope_is_skipped(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        _lead_manifest(root),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+    )
+    rec = _Recorder()
+    roles = [
+        {"holder": "lead-a", "scope": "epic-x", "status": "live"},
+        {"holder": "lead-b", "scope": "epic-x", "status": "live"},
+    ]
+
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=_team(roles),
+        rows_fn=lambda: [
+            SimpleNamespace(name="lead-a", cwd=str(root), status="live"),
+            SimpleNamespace(name="lead-b", cwd=str(root), status="live"),
+        ],
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=lambda a: [object()],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec.dispatches == [], "never wake into a disputed territory"
+    assert summary["note"] == "epic-x: conflicting holders lead-a, lead-b"
+
+
+def test_the_receipt_names_refusals_and_dropped_roles(tmp_path):
+    # A role the pass cannot see must be named: epic-y has a team entry
+    # and a registered holder but no manifest on disk, and epic-x is live
+    # and refuses as working. Both words belong in the receipt.
+    from fno.lead.state import lead_manifest_path, lead_state_root, write_manifest
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        lead_manifest_path("epic-x", state_root=lead_state_root(root)),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    rec = _Recorder()
+    roles = [
+        {"holder": "lead-x", "scope": "epic-x", "status": "live"},
+        {"holder": "lead-y", "scope": "epic-y", "status": "live"},
+        # A manifest-only role: the holder is a session uuid with no
+        # registry row, the production shape the per-scope note must name.
+        {
+            "holder": "88888888-9999-aaaa-bbbb-cccccccccccc",
+            "scope": "epic-z",
+            "status": "manifest-only",
+            "manifest_path": str(
+                lead_manifest_path("epic-z", state_root=lead_state_root(root))
+            ),
+        },
+        {"holder": "", "scope": "epic-w", "status": "live"},
+        {"holder": "lead-empty", "scope": "", "status": "live"},
+    ]
+
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=lambda _rows: {"roles": roles, "conflicts": []},
+        rows_fn=lambda: [
+            SimpleNamespace(name="lead-x", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="lead-y", cwd=str(root), status="live", short_id="cc33dd44"),
+        ],
+        truth_fn=lambda h: {"state": "working"},
+        unread_fn=lambda a: [object()] if a == "lead-x" else [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert summary["roles"] == 1, "only epic-x has both row and manifest"
+    assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
+    note = summary["note"] or ""
+    expected_missing = lead_manifest_path("epic-y", state_root=lead_state_root(root))
+    assert note == "; ".join(
+        (
+            f"epic-y: manifest missing at {expected_missing}",
+            "epic-z: unregistered holder",
+            "epic-w: holderless role",
+            "(no scope): empty scope",
+        )
+    )
+    assert "(s)" not in note
+
+
+def test_an_unreadable_registry_wakes_nothing(tmp_path):
+    rec = _Recorder()
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=lambda rows: {"roles": None, "summary": {"reason": "registry unreadable"}},
+        rows_fn=lambda: [],
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=lambda a: [object()],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec.dispatches == []
+    assert rec.events == []
+    assert summary["roles"] == 0
+
+
+# ── the board-change trigger ──────────────────────────────────────────────
+
+#: Fixture rung: a level-1 project role over "proj", so no machine config
+#: or graph shape is load-bearing in these tests.
+_PROJECT_RESOLVER = lambda parts: (1, "proj")  # noqa: E731
+
+_BOARD_A = [
+    {
+        "id": "x-1",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    }
+]
+#: Same row closed done: hash-visible but drained, so these fixtures isolate
+#: the board lane without the timer backstop firing on them. Priority no
+#: longer quiets a scope - a p2 row is undelivered until it ships.
+_BOARD_A_QUIET = [
+    dict(
+        _BOARD_A[0],
+        priority="p2",
+        status="done",
+        completed_at="2026-09-06T00:00:00Z",
+    )
+]
+#: Same row, priority moved: a change the hash must see.
+_BOARD_A_REPRIORITIZED = [dict(_BOARD_A[0], priority="p0")]
+#: One row added: the refill case this trigger exists for.
+_BOARD_B = _BOARD_A + [
+    {
+        "id": "x-2",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    }
+]
+#: Two rows added: the acceptance case for the diff-as-prompt change.
+_BOARD_C = _BOARD_A + [
+    {
+        "id": "x-2",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    },
+    {
+        "id": "x-3",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    },
+]
+
+
+class _SidecarTarget:
+    """The narrow slice of RoleTarget the sidecar writer needs."""
+
+    def __init__(self, manifest, scope="epic-x"):
+        self.manifest = manifest
+        self.scope = scope
+
+
+def _sidecar(manifest):
+    return manifest.parent / "epic-x.wake.json"
+
+
+def _stored(manifest) -> str:
+    import json
+
+    return str(json.loads(_sidecar(manifest).read_text())["board_hash"])
+
+
+def test_first_observation_stores_the_hash_and_wakes_nothing(tmp_path):
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={
+            "entries_fn": lambda: _BOARD_A_QUIET,
+            "scope_resolver": _PROJECT_RESOLVER,
+        },
+    )
+
+    assert rec.dispatches == [], "a first observation is not a change"
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
+
+
+def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
+    # First pass: first observation only stores. The sidecar persists beside
+    # the manifest across passes in the same root, exactly as across ticks.
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert ("epic-x", "board", None) == rec.dispatches[0][:3], "the refill wakes"
+    woken = [e for e in rec.events if e[0] == "lead_woken"]
+    assert woken and woken[0][1]["reason"] == "board"
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_B, _PROJECT_RESOLVER)
+
+
+def test_the_board_diff_names_the_two_added_rows_and_nothing_unchanged(tmp_path):
+    # Acceptance 5.2: a board that gained two rows wakes with a prompt that
+    # names those two and omits the unchanged row. The woken session is
+    # fresh; without the diff on the command line it re-reads the whole board.
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_C, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][3], "the diff is the wake payload"
+    detail = rec.dispatches[0][3]
+    assert "added: x-2" in detail and "added: x-3" in detail, detail
+    assert "x-1" not in detail, f"an unchanged row is noise: {detail}"
+
+
+def test_a_refused_board_change_keeps_the_old_rows_so_the_diff_survives(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
+
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        fresh_manifest=False,  # same ledger: the lapsed debounce frees the retry
+        # outside the debounce now, so the retry dispatches
+        extra={
+            "entries_fn": lambda: _BOARD_B,
+            "scope_resolver": _PROJECT_RESOLVER,
+            "now": NOW + timedelta(minutes=20),
+        },
+    )
+
+    assert rec.dispatches, "the retry wakes once the debounce lapses"
+    assert "added: x-2" in (rec.dispatches[0][3] or ""), rec.dispatches[0][3]
+
+
+def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path):
+    # A legacy sidecar carries a hash with no rows beside it. An honest diff
+    # needs the prior rows, so that one transition records them and wakes
+    # nothing rather than naming every row "added". The rows sit at p2 so the
+    # backstop lane stays out of the case (quiet priority, no fresh terminal).
+    quiet_b = _BOARD_A_QUIET + [
+        {
+            "id": "x-2",
+            "project": "proj",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+            "_kanban_column": "done",
+            "priority": "p2",
+        }
+    ]
+
+    def prime(manifest):
+        # A legacy sidecar is written directly: the hash with no rows beside
+        # it is a shape the production writer can no longer produce.
+        import json as _json
+
+        _sidecar(manifest).write_text(
+            _json.dumps(
+                {"board_hash": _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)}
+            ),
+            encoding="utf-8",
+        )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: quiet_b, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    sidecar = _sidecar(manifest)
+    sidecar_contents = sidecar.read_text(encoding="utf-8") if sidecar.is_file() else "<missing>"
+    assert rec.dispatches == [], (
+        "no honest diff, no board wake; "
+        f"cwd={Path.cwd()} FNO_SPACES_DIR={os.environ.get('FNO_SPACES_DIR', '<unset>')} "
+        f"FNO_REPO_ROOT={os.environ.get('FNO_REPO_ROOT', '<unset>')} "
+        f"FNO_CONFIG={os.environ.get('FNO_CONFIG', '<unset>')} "
+        f"manifest={manifest} sidecar={sidecar} sidecar_contents={sidecar_contents!r} "
+        f"events={rec.events!r}"
+    )
+    import json as json_mod
+
+    payload = json_mod.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["board_rows"], "the pass records the rows it could not diff"
+
+
+def test_an_empty_board_stores_an_observation_so_its_first_node_is_a_change(tmp_path):
+    # A scope compiling to zero rows stores board_rows: []; the reader must
+    # call that an observation. Reading it as none kept first_observation
+    # True forever, so the scope's first real node was swallowed as a seed
+    # that is not a trigger, on every pass.
+    elsewhere = [
+        {
+            "id": "o-1",
+            "project": "elsewhere",
+            "status": "ready",
+            "_kanban_column": "ready",
+            "priority": "p1",
+        }
+    ]
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: elsewhere, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    quiet_refill = _BOARD_A_QUIET + [
+        {
+            "id": "x-2",
+            "project": "proj",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+            "_kanban_column": "done",
+            "priority": "p2",
+        }
+    ]
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: quiet_refill, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "board", rec.dispatches
+
+
+def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _lead_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = RoleTarget(
+        holder="lead-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_lead_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
+
+    phase_mod._dispatch_walk(
+        target, "board", "fno-agents", None, "added: x-2 (ready/p1)"
+    )
+
+    assert argv[argv.index("--wake-detail") + 1] == "added: x-2 (ready/p1)"
+
+
+def test_render_board_diff_covers_removed_changed_and_caps():
+    from fno.pr_watch._lead_wake import MAX_DETAIL_CHARS, render_board_diff
+
+    old = [("x-1", "ready", "ready", "p1")]
+    new = [("x-1", "next", "next", "p0"), ("x-2", "ready", "ready", "p1")]
+    text = render_board_diff(old, new)
+    assert "changed: x-1" in text and "ready/ready/p1 -> next/next/p0" in text, text
+    assert "added: x-2" in text, text
+
+    removed = render_board_diff(old + [("x-9", "done", "done", "p2")], old)
+    assert "removed: x-9" in removed, removed
+    assert render_board_diff(old, old) == ""
+
+    wide = render_board_diff([], [(f"x-{n}", "ready", "ready", "p1") for n in range(500)])
+    assert len(wide) <= MAX_DETAIL_CHARS + 32, len(wide)
+    assert "more rows elided" in wide, "a capped diff names what it cut"
+
+
+def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
+        )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={
+            "entries_fn": lambda: _BOARD_A_QUIET,
+            "scope_resolver": _PROJECT_RESOLVER,
+        },
+    )
+
+    assert rec.dispatches == [], "no mail and no change means no wake"
+    assert rec.events == []
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
+
+
+def test_a_refused_board_change_keeps_the_old_hash_so_it_stays_a_trigger(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "the debounce refuses the spawn"
+    refused = [e for e in rec.events if e[0] == "lead_wake_refused"]
+    assert refused and refused[0][1]["reason"] == "board"
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER), (
+        "a refused change must not consume the trigger"
+    )
+
+
+def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={
+            "entries_fn": lambda: _BOARD_A_REPRIORITIZED,
+            "scope_resolver": _PROJECT_RESOLVER,
+        },
+    )
+
+    assert [d[:3] for d in rec.dispatches] == [("epic-x", "board", None)]
+
+
+def test_an_empty_graph_read_is_not_a_board_emptied(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: [], "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == []
+    assert rec.events == []
+
+
+# ── the timer backstop ────────────────────────────────────────────────────
+
+_BOARD_QUIET = [
+    {
+        "id": "x-1",
+        "project": "proj",
+        "status": "done",
+        "_kanban_column": "done",
+        "priority": "p1",
+    }
+]
+
+
+def _primed_unchanged(manifest):
+    """Store the current board's hash: mail empty, board unchanged."""
+    _store_board_hash(
+        _SidecarTarget(manifest),
+        _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+    )
+
+
+def test_the_backstop_fires_when_no_event_did(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=_primed_unchanged,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [("epic-x", "backstop", None, None)], (
+        "actionable work, no event, no recent wake: the re-check fires"
+    )
+    woken = [e for e in rec.events if e[0] == "lead_woken"]
+    assert woken and woken[0][1]["reason"] == "backstop"
+
+
+def test_the_backstop_waits_out_its_window(tmp_path):
+    def prime(manifest):
+        _primed_unchanged(manifest)
+        bill_wake(manifest, now=NOW - timedelta(minutes=10))
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a wake 10m ago is inside the 1800s window"
+    assert rec.events == []
+
+
+def test_the_backstop_skips_a_scope_with_nothing_actionable(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER),
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_QUIET, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a quiet board is a NoWork lead, not a wake"
+    assert rec.events == []
+
+
+def test_an_unsafe_role_scope_is_skipped_not_joined(tmp_path):
+    # A corrupted registry row can carry a traversal or an absolute path as
+    # its role_scope. The phase must skip the scope, not build a manifest
+    # path outside .fno/leads that the ledger would rewrite.
+    from fno.pr_watch._lead_wake import _promoted
+
+    for bad_scope in ("../evil", "/tmp/absolute", "a/b"):
+        roles = [{"holder": "lead-x", "scope": bad_scope, "status": "live"}]
+        targets, _note = _promoted(
+            _team(roles),
+            lambda: [SimpleNamespace(name="lead-x", cwd=str(tmp_path), status="live")],
+        )
+        assert targets == [], f"{bad_scope!r} must not become a target"
+
+
+def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
+    # `or 32` would coerce the operator's explicit 0 back to the default and
+    # silently refuse the unbounded spelling. 33 stamps - past the default
+    # ceiling - must still wake.
+    def fill(manifest):
+        for i in range(33):
+            bill_wake(manifest, now=NOW - timedelta(minutes=20 + 40 * i))
+
+    settings = SimpleNamespace(
+        lead=SimpleNamespace(
+            wake_enabled=True,
+            wake_ceiling=0,
+            wake_debounce_seconds=900,
+            wake_backstop_seconds=1800,
+        )
+    )
+    rec = _Recorder()
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        _lead_manifest(root),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+    )
+    fill(_lead_manifest(root))
+
+    run_lead_wake(
+        settings,
+        emit=rec.emit,
+        now=NOW,
+        team_fn=_team([{"holder": "lead-x", "scope": "epic-x", "status": "live"}]),
+        rows_fn=_rows(root),
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=lambda a: [object()],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], "ceiling 0 is unbounded"
+
+
+def test_a_recent_lead_terminal_suppresses_the_backstop(tmp_path):
+    import json as _json
+
+    def prime(manifest):
+        _primed_unchanged(manifest)
+        # A lead walk terminated 10 minutes ago: the journal answers "a walk
+        # ran recently", so the proxy's over-count must not re-fire it.
+        events = manifest.parent.parent / "events.jsonl"
+        events.write_text(
+            _json.dumps(
+                {
+                    "ts": "2026-08-29T11:50:00Z",
+                    "type": "loop_terminated",
+                    "source": "walk",
+                    "data": {"driver": "lead", "reason": "NoWork", "scope": "epic-x"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a walk that answered inside the window suffices"
+    assert rec.events == []
+
+
+# ── the peer-review fixes ─────────────────────────────────────────────────
+
+
+def test_an_absent_respawn_ceiling_defaults_to_four_like_the_walk(tmp_path):
+    # Parity with LeadQueue (loop_lead.rs): Rust's parse_lead_manifest
+    # defaults an absent respawn_ceiling to 4, so Python reading 0 here
+    # would call a spent budget unbounded while the walk refuses the spawn.
+    from fno.lead.state import at_respawn_ceiling
+
+    spent = tmp_path / "spent.md"
+    spent.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 4\n---\n",
+        encoding="utf-8",
+    )
+    assert at_respawn_ceiling(spent) is True, "absent ceiling defaults to 4"
+
+    under = tmp_path / "under.md"
+    under.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\n---\n",
+        encoding="utf-8",
+    )
+    assert at_respawn_ceiling(under) is False
+
+    unbounded = tmp_path / "unbounded.md"
+    unbounded.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 9\nrespawn_ceiling: 0\n---\n",
+        encoding="utf-8",
+    )
+    assert at_respawn_ceiling(unbounded) is False, "explicit 0 stays unbounded"
+
+
+def test_a_corrupt_board_rows_reads_as_first_observation_not_a_raise(tmp_path):
+    # A truncated sidecar write (ints where rows belong) must not raise out
+    # of the tick pass - that strands every scope ordered after this one -
+    # and the pass must rewrite the sidecar with honest rows.
+    import json as _json
+
+    def prime(manifest):
+        _sidecar(manifest).write_text(
+            _json.dumps({"board_hash": "deadbeef", "board_rows": [1, 2, 3]}),
+            encoding="utf-8",
+        )
+
+    rec, summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A_QUIET, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "no honest diff, no board wake"
+    assert summary["roles"] == 1, "the pass survived the corrupt sidecar"
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["board_rows"], "the pass rewrote the rows it could not diff"
+
+
+def test_the_answer_prompt_is_capped_like_the_board_diff(tmp_path):
+    # The prompt rides one argv element: a pasted log in an operator answer
+    # must not push past ARG_MAX and abort the whole pass.
+    from fno.pr_watch._lead_wake import MAX_DETAIL_CHARS
+
+    long_answer = "x" * (MAX_DETAIL_CHARS * 2)
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: [_answered(asker="lead-x", answer=long_answer)]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][3], "the capped prompt still wakes"
+    assert len(rec.dispatches[0][3]) <= MAX_DETAIL_CHARS + 32, len(rec.dispatches[0][3])
+    assert rec.dispatches[0][3].endswith("...(truncated)")
+
+
+# ── the drain loop on the real bus machinery ──────────────────────────────
+#
+# The seams above prove the phase logic; this proves the loop on the real
+# bus, cursor, and ledger: a message lands for an absent lead, the phase
+# wakes, the respawned session's drain verb advances the cursor, and the
+# next phase pass finds no mail and wakes nothing. No fake readers.
+
+
+def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeypatch):
+    from fno.bus.cursor import advance_cursor, read_cursor, scan_unread
+    from fno.bus.log import Envelope, append
+
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    rec = _Recorder()
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _lead_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    roles = [{"holder": "lead-x", "scope": "epic-x", "status": "live"}]
+
+    # A worker mails the absent lead: addressed to its reply handle.
+    waking = Envelope.new(
+        from_="worker-a",
+        to="aa11bb22",
+        kind="note",
+        body="merge landed for x-1, board refilled",
+        to_kind="name",
+    )
+    append(waking)
+
+    # Positive control inside the same run: the reader sees the row.
+    assert len(scan_unread("aa11bb22")) == 1, "the reader must see the waking row"
+
+    run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc),
+        team_fn=_team(roles),
+        rows_fn=_rows(root),
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=scan_unread,
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], f"woke: {rec.dispatches}"
+
+    # The respawned session drains: the ack verb advances the cursor.
+    assert advance_cursor("aa11bb22", waking.id) is True
+    assert read_cursor("aa11bb22") == waking.id, "the cursor names the waking id"
+
+    # Next tick: no undrained mail, no board, nothing actionable -> no wake.
+    rec2 = _Recorder()
+    run_lead_wake(
+        _settings(),
+        emit=rec2.emit,
+        now=datetime(2026, 8, 29, 12, 30, 0, tzinfo=timezone.utc),
+        team_fn=_team(roles),
+        rows_fn=_rows(root),
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=scan_unread,
+        entries_fn=lambda: [],
+        dispatch_fn=rec2.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec2.dispatches == [], "a drained inbox must not wake again"
+    assert rec2.events == []
+
+
+def test_backstop_fires_when_every_row_is_driven_but_unshipped(tmp_path):
+    # The 2026-09-06 incident: the actionable board read empty because every
+    # row had a driver, while nothing had shipped. Assignment is not
+    # delivery, so the backstop still fires.
+    from fno.pr_watch._lead_wake import RoleTarget, _backstop_due
+
+    entries = [
+        {"id": "x-root", "type": "epic"},
+        {"id": "x-a", "parent": "x-root", "status": "in_progress", "pr": 1497},
+    ]
+    target = RoleTarget(
+        holder="holder-1",
+        scope="x-root",
+        root=tmp_path,
+        manifest=tmp_path / "k.md",
+    )
+    assert _backstop_due(
+        target,
+        entries,
+        now=datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc),
+        backstop_s=1800,
+        resolver=lambda _: (2, "x-root"),
+    )
+
+
+def _run_roles(tmp_path, count, *, truth, mail=None, seconds=None, now=None):
+    """`count` promoted scopes epic-0..N with a seeded cursor sidecar each.
+    `mail` is None, "all", or one holder name; `seconds` is an optional
+    seconds_left_fn; every holder probe lands in the returned list."""
+    from fno.lead.state import lead_manifest_path, lead_state_root, write_manifest
+
+    rec = _Recorder()
+    roles = []
+    rows = []
+    for i in range(count):
+        root = tmp_path / f"proj-{i}"
+        root.mkdir(exist_ok=True)
+        manifest = lead_manifest_path(f"epic-{i}", state_root=lead_state_root(root))
+        write_manifest(
+            manifest,
+            scope=f"epic-{i}",
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+        # The sidecar name follows the scope, unlike the single-role helper.
+        manifest.parent.joinpath(f"epic-{i}.wake.json").write_text(
+            json.dumps({"answered_cursor": "2026-08-29T10:00:00Z"}), encoding="utf-8"
+        )
+        holder = f"lead-{i}"
+        roles.append({"holder": holder, "scope": f"epic-{i}", "status": "live"})
+        rows.append(
+            SimpleNamespace(name=holder, cwd=str(root), status="live", short_id=f"aaaa{i:04d}")
+        )
+
+    probes: list[str] = []
+
+    def truth_fn(holder):
+        probes.append(holder)
+        return truth(holder)
+
+    def unread_fn(address):
+        rec.unread_calls.append(address)
+        hit = mail == "all" or (mail and address == mail)
+        return [object()] if hit else []
+
+    kwargs = dict(
+        emit=rec.emit,
+        now=now or NOW,
+        team_fn=lambda _rows: {"roles": roles, "conflicts": []},
+        rows_fn=lambda: rows,
+        truth_fn=truth_fn,
+        unread_fn=unread_fn,
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda t, c, k: rec.asks.append((t.scope, c, k)),
+    )
+    if seconds is not None:
+        kwargs["seconds_left_fn"] = seconds
+    summary = run_lead_wake(_settings(), **kwargs)
+    return rec, summary, probes
+
+
+def test_five_quiet_roles_skip_the_truth_read_one_mail_role_pays_it(tmp_path):
+    # AC1: a role that cannot wake costs zero truth reads. Five seeded,
+    # quiet roles are never probed; the sixth has undrained mail and is
+    # the only holder the pass reads truth for.
+    rec, summary, probes = _run_roles(
+        tmp_path, 6, truth=lambda h: {"state": "done"}, mail="lead-3"
+    )
+
+    assert probes == ["lead-3"], f"quiet roles must not be probed: {probes}"
+    assert summary["truth_reads"] == 1
+    assert summary["refused"] == [], "a skipped role is not a refusal"
+    woken = [e for e in rec.events if e[0] == "lead_woken"]
+    assert woken and woken[0][1]["scope"] == "epic-3"
+    assert [d[0] for d in rec.dispatches] == ["epic-3"]
+
+
+def test_a_working_holder_seeds_the_sidecar_so_the_next_pass_reads_nothing(tmp_path):
+    # The production case for every live lead: truth says working, the seeds
+    # still land, and the next pass costs no truth read. Gating the seeds on
+    # the liveness refusal closed a loop: the read existed to gate the seed,
+    # and the refusal skipped the seed that would have retired the read.
+    _run(tmp_path, truth=lambda h: {"state": "working"}, unread=lambda a: [])
+
+    rec, summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "working"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+    )
+
+    payload = json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert "answered_cursor" in payload, "a live holder seeds"
+    assert summary["truth_reads"] == 0, f"the seeded pass still paid a read: {summary}"
+
+
+def test_a_working_holder_seeds_a_first_observation_and_pays_no_read(tmp_path):
+    # AC1-EDGE, reordered: seeds record what this pass observed, so they do
+    # not depend on the holder. The truth-first order this test used to pin
+    # was the defect: an unwritten seed re-fires next pass, so the read
+    # meant to be conditional ran for every live lead on every tick.
+    rec, summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "working"},
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A_QUIET, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert summary["truth_reads"] == 0, "a role that cannot wake is not read"
+    payload = json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert "answered_cursor" in payload and payload["board_rows"], "a live holder seeds"
+    assert summary["refused"] == [], "a skipped role is not a refusal"
+    assert rec.dispatches == []
+
+
+def test_the_pass_stops_under_its_floor_and_names_what_it_evaluated(tmp_path):
+    # AC2: under 15s left, stop BEFORE the next truth read, so the alarm
+    # never cuts a pass mid-role and discards the roles it already woke.
+    # The bounded team and answers reads consume the first two clock readings.
+    budget = [100.0, 100.0, 100.0, 100.0, 14.0]
+
+    def seconds():
+        return budget.pop(0) if budget else 0.0
+
+    rec, summary, probes = _run_roles(
+        tmp_path, 5, truth=lambda h: {"state": "done"}, mail="all", seconds=seconds
+    )
+
+    first = int(NOW.timestamp()) // 900 % 5
+    assert [d[0] for d in rec.dispatches] == [
+        f"epic-{(first + k) % 5}" for k in range(2)
+    ]
+    assert summary["evaluated"] == 2 and summary["truth_reads"] == 2
+    assert summary["budget_spent"] is True
+    assert "budget spent after 2 of 5 roles" in summary["note"]
+
+
+def test_a_stopped_pass_rotates_its_starting_role_per_debounce_window(tmp_path):
+    # AC2-EDGE: the role a stopping pass evaluates first moves one slot per
+    # debounce window, so a fleet that always overruns still wakes everyone
+    # in turn.
+    def seconds():
+        # The bounded team and answers reads consume the first two clock readings.
+        budget = [100.0, 100.0, 100.0, 14.0]
+        return lambda: budget.pop(0) if budget else 0.0
+
+    _rec1, s1, _p1 = _run_roles(
+        tmp_path, 5, truth=lambda h: {"state": "done"}, mail="all",
+        seconds=seconds(), now=NOW,
+    )
+    first = int(NOW.timestamp()) // 900 % 5
+    assert [d[0] for d in _rec1.dispatches] == [f"epic-{first}"], s1
+
+    rec2, s2, _p2 = _run_roles(
+        tmp_path, 5, truth=lambda h: {"state": "done"}, mail="all",
+        seconds=seconds(), now=NOW + timedelta(seconds=900),
+    )
+    assert [d[0] for d in rec2.dispatches] == [f"epic-{(first + 1) % 5}"], (
+        f"the pass must start one role later: {s2}"
+    )
+
+
+def test_arm_writes_the_row_model_pin_onto_the_manifest(tmp_path, monkeypatch):
+    # x-8fb2: the role manifest is the wake's only model source, so arming
+    # folds the promoted row's requested_model into the manifest. The refuse
+    # side of this contract is test_a_model_less_manifest_refuses_the_walk.
+    from types import SimpleNamespace
+
+    from fno.lead import state as lead_state
+
+    monkeypatch.setattr(lead_state, "lead_loop_enabled", lambda: True)
+    parse_manifest = lead_state.parse_manifest
+    path = lead_state.arm_lead_manifest(
+        "epic-x",
+        "0de85539-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        state_root=tmp_path,
+        row=SimpleNamespace(
+            pid=1,
+            cwd=str(tmp_path),
+            role_level=1,
+            role_scope="epic-x",
+            role_grantor="human",
+            requested_model="glm-5.3-flash[1m]",
+        ),
+    )
+    assert path is not None
+    assert parse_manifest(path)["model"] == "glm-5.3-flash[1m]"
+
+
+def test_a_refused_spawn_says_so_in_the_feed(tmp_path):
+    # The refusal must not be wake-log-only: the trigger still spent a bill,
+    # so the activity feed carries the same lead_wake_refused row the other
+    # refusal paths emit.
+    rec, summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == "lead-x" else [],
+        extra={"dispatch_fn": None},
+    )
+
+    refusals = [e for e in rec.events if e[0] == "lead_wake_refused"]
+    assert refusals and refusals[0][1]["refusal"] == "manifest-carries-no-model-pin"
+    assert summary["refused"] == [
+        {"scope": "epic-x", "refusal": "manifest-carries-no-model-pin"}
+    ]
+
+
+def _manifest_for(root, scope):
+    from fno.lead.state import lead_manifest_path, lead_state_root
+
+    return lead_manifest_path(scope, state_root=lead_state_root(root))
+
+
+def test_one_bus_read_serves_every_address_in_a_pass(tmp_path, monkeypatch):
+    # AC1-HP: the default mail reader holds ONE bus read per pass; nine
+    # addresses across two roles must not re-read it.
+    from fno.bus import log as bus_log
+
+    calls = []
+    real_iter = bus_log.iter_messages
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real_iter(*a, **k)
+
+    monkeypatch.setattr(bus_log, "iter_messages", counted)
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    rec = _Recorder()
+    roles = [
+        {"holder": "lead-a", "scope": "epic-a1,epic-a2,epic-a3", "status": "live"},
+        {"holder": "lead-b", "scope": "epic-b1,epic-b2", "status": "live"},
+    ]
+    for scope in ("epic-a1,epic-a2,epic-a3", "epic-b1,epic-b2"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+
+    def rows():
+        return [
+            SimpleNamespace(
+                name="lead-a", cwd=str(root), status="live", short_id="aa11bb22"
+            ),
+            SimpleNamespace(
+                name="lead-b", cwd=str(root), status="live", short_id="cc22dd33"
+            ),
+        ]
+
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=lambda _rows: {"roles": roles, "conflicts": []},
+        rows_fn=rows,
+        truth_fn=lambda h: {"state": "done"},
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+        answered_fn=lambda: [],
+    )
+
+    assert summary["evaluated"] == 2, summary
+    assert rec.dispatches == [], "a held empty bus is no trigger"
+    assert len(calls) == 1, f"one bus read per pass, saw {len(calls)}"
+
+
+def test_the_default_team_reads_no_agreement(tmp_path, monkeypatch):
+    # The default team_fn binds agree=False and reports the rowless holder.
+    from fno.agents import team as team_mod
+
+    received = {}
+
+    def spy(rows, **kwargs):
+        received.update(kwargs)
+        return {
+            "roles": [
+                {
+                    "holder": "ghost",
+                    "scope": "epic-x",
+                    "level": 2,
+                    "grantor": "human",
+                    "status": "manifest-only",
+                    "agree": None,
+                    "reason": "role lives on the manifest",
+                    "manifest_path": str(_lead_manifest(tmp_path / "proj")),
+                }
+            ],
+            "conflicts": [],
+        }
+
+    monkeypatch.setattr(team_mod, "gather_team", spy)
+    rec, summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"team_fn": None},
+    )
+
+    assert received == {"agree": False}
+    assert summary["note"] == "epic-x: unregistered holder"
+    assert summary["evaluated"] == 0
+    assert rec.dispatches == []
+
+
+def test_a_cut_inside_the_compile_reports_the_board_step(tmp_path, monkeypatch):
+    # AC5-HP: the board compile and backstop run under a `board` label - it
+    # follows `graph` for the first role and `mail` for every later one, so a
+    # cut inside a compile reads lead_wake:board, not the step before it.
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles = [
+        {"holder": "lead-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "lead-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    rec = _Recorder()
+    steps: list[str] = []
+
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=lambda _rows: {"roles": roles, "conflicts": []},
+        rows_fn=lambda: [
+            SimpleNamespace(name="lead-a", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="lead-b", cwd=str(root), status="live", short_id="cc22dd33"),
+        ],
+        truth_fn=lambda h: {"state": "done"},
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+        answered_fn=lambda: [],
+        on_step=steps.append,
+    )
+
+    assert summary["evaluated"] == 2
+    assert steps == ["team", "answers", "mail", "graph", "board", "mail", "board"], steps
+
+
+def test_a_blocked_truth_read_yields_the_role_and_still_wakes_the_next(
+    tmp_path, monkeypatch
+):
+    # One role's hung truth read used to spend the whole phase slice: the
+    # alarm cut the pass mid-read and the clock-keyed rotation reopened on
+    # the same role every tick, so 0 of 5 roles were ever evaluated. The
+    # read now runs under a wait bound and the timed-out role yields to the
+    # rest of the pass.
+    import threading
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles = [
+        {"holder": "lead-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "lead-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    rec = _Recorder()
+    blocked = threading.Event()
+
+    def truth(holder):
+        if holder == "lead-a":
+            blocked.wait(timeout=60)
+        return {"state": "done"}
+
+    try:
+        summary = run_lead_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            team_fn=lambda _rows: {"roles": roles, "conflicts": []},
+            rows_fn=lambda: [
+                SimpleNamespace(name="lead-a", cwd=str(root), status="live", short_id="aa11bb22"),
+                SimpleNamespace(name="lead-b", cwd=str(root), status="live", short_id="cc22dd33"),
+            ],
+            truth_fn=truth,
+            unread_fn=lambda address: [object()],
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+            answered_fn=lambda: [],
+        )
+    finally:
+        blocked.set()
+
+    assert {"scope": "epic-a1", "refusal": "truth-timeout"} in summary["refused"]
+    assert sorted(scope for scope, *_ in rec.dispatches) == ["epic-b1"]
+    assert summary["evaluated"] >= 1
+    assert summary["truth_reads"] == 1
+
+
+def _two_role_setup(root):
+    roles = [
+        {"holder": "lead-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "lead-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    def rows():
+        return [
+            SimpleNamespace(name="lead-a", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="lead-b", cwd=str(root), status="live", short_id="cc22dd33"),
+        ]
+    return roles, rows
+
+
+def test_a_blocked_graph_read_degrades_and_mail_still_wakes(tmp_path, monkeypatch):
+    # The graph read's timeout used to stop the whole pass: one slow read on
+    # a thrashing machine zeroed every role, mail triggers included (the
+    # 2026-09-27 16:40Z tick read evaluated=0/5). The pass now degrades to no
+    # board signal and the cheaper triggers still wake.
+    import threading
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles, rows = _two_role_setup(root)
+    rec = _Recorder()
+    blocked = threading.Event()
+
+    def slow_graph():
+        blocked.wait(timeout=60)
+        return []
+
+    b_addresses = {"lead-b", "cc22dd33", "epic-b1"}
+    try:
+        summary = run_lead_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            team_fn=_team(roles),
+            rows_fn=rows,
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [object()] if address in b_addresses else [],
+            entries_fn=slow_graph,
+            answered_fn=lambda: [],
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert [scope for scope, *_ in rec.dispatches] == ["epic-b1"]
+    assert "graph read timed out" in summary["note"]
+    assert not summary.get("budget_spent")
+    assert summary["evaluated"] == 2
+
+
+def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
+    tmp_path, monkeypatch
+):
+    # The stop note used to clobber the graph-timeout note, so the tick row
+    # read as an unexplained budget stop. The stop now appends.
+    import threading
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles, rows = _two_role_setup(root)
+    # The rotation starts on targets[offset]; the quiet (board-lane) role
+    # must be evaluated first so its degraded read precedes the stop.
+    offset = int(NOW.timestamp() // 900) % 2
+    loud = roles[1 - offset]
+    short_ids = {"lead-a": "aa11bb22", "lead-b": "cc22dd33"}
+    loud_addresses = {loud["holder"], short_ids[loud["holder"]], loud["scope"]}
+    rec = _Recorder()
+    blocked = threading.Event()
+
+    def slow_graph():
+        blocked.wait(timeout=60)
+        return []
+
+    # Clock cadence: the bounded team and answers reads, the quiet role's
+    # pre-graph check, then the loud role's pre-truth check stops the pass.
+    seconds_values = iter([44.0, 44.0, 44.0, 14.0])
+    seconds = lambda: next(seconds_values, 14.0)  # noqa: E731
+    try:
+        summary = run_lead_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            team_fn=_team(roles),
+            rows_fn=rows,
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [object()] if address in loud_addresses else [],
+            entries_fn=slow_graph,
+            answered_fn=lambda: [],
+            seconds_left_fn=seconds,
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert summary["budget_spent"] is True
+    assert "graph read timed out" in summary["note"]
+    assert "budget spent after 1 of 2 roles" in summary["note"]
+    assert "before truth:epic-" in summary["note"]
+
+
+def test_default_truth_builds_one_batch_resolver_for_every_role(tmp_path, monkeypatch):
+    # The default truth read paid one discovery scan per role (five scans,
+    # each near the 10s bound under load). The pass now builds one batch
+    # resolver inside the first bounded read and serves every role from it.
+    import fno.agents.cli as agents_cli
+    import fno.agents.session_truth as truth_mod
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles, rows = _two_role_setup(root)
+    builds: list = []
+    resolved: list = []
+
+    def fake_batch_resolver():
+        builds.append(1)
+
+        def resolve(handle):
+            resolved.append(handle)
+            return (None, [])
+
+        return resolve
+
+    monkeypatch.setattr(agents_cli, "_batch_resolver", fake_batch_resolver)
+
+    def fake_resolve_session_truth(handle, *, resolve=None, **_kw):
+        assert resolve is not None
+        resolve(handle)  # the batch pays the scan; the verdict itself is stubbed
+        return {"state": "working"}
+
+    monkeypatch.setattr(truth_mod, "resolve_session_truth", fake_resolve_session_truth)
+
+    addresses = {"lead-a", "aa11bb22", "epic-a1", "lead-b", "cc22dd33", "epic-b1"}
+    rec = _Recorder()
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=_team(roles),
+        rows_fn=rows,
+        unread_fn=lambda address: [object()] if address in addresses else [],
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert len(builds) == 1
+    assert sorted(resolved) == ["lead-a", "lead-b"]
+    assert summary["evaluated"] == 2
+    assert sorted(r["refusal"] for r in summary["refused"]) == ["working", "working"]
+
+
+def test_default_truth_not_found_takes_the_successor_path(tmp_path, monkeypatch):
+    # A holder the batch resolver cannot find reads state unknown, reason
+    # not-found, and the pass takes the successor path exactly as the
+    # per-call resolver did.
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setattr(
+        agents_cli, "_batch_resolver", lambda: (lambda handle: (None, ["other-lead"]))
+    )
+    rec, summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [object()] if a == "lead-x" else [],
+        extra={"truth_fn": None},
+    )
+
+    assert rec.successor_flags == [True]
+    spawned = [e for e in rec.events if e[0] == "lead_spawned_successor"]
+    assert spawned and spawned[0][1]["trigger"] == "mail"
+    assert summary["truth_reads"] == 1
+
+
+def test_graph_read_overlapping_setup_lands_in_the_first_wait(tmp_path, monkeypatch):
+    # A graph read slower than the per-read wait but faster than the setup
+    # reads plus that wait: it starts with the pass, so the first board-lane
+    # role still gets entries and no timeout note is written.
+    import time
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.8)
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles = [{"holder": "lead-x", "scope": "epic-x", "status": "live"}]
+    write_manifest(
+        _manifest_for(root, "epic-x"),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    sentinel = [{"id": "board-row"}]
+
+    def slow_graph():
+        time.sleep(1.0)
+        return sentinel
+
+    def slow_team(rows):
+        time.sleep(0.5)
+        return {"roles": roles, "conflicts": []}
+
+    board_entries: list = []
+    monkeypatch.setattr(
+        wake_mod,
+        "_board_rows",
+        lambda scope, entries, resolver=None: board_entries.append(entries) or None,
+    )
+    rec = _Recorder()
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=slow_team,
+        rows_fn=_rows(root),
+        truth_fn=lambda holder: {"state": "working"},
+        unread_fn=lambda address: [],
+        answered_fn=lambda: [],
+        entries_fn=slow_graph,
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert board_entries == [sentinel]
+    assert "graph read timed out" not in str(summary["note"])
+    assert summary["evaluated"] == 1
+
+
+def test_a_graph_cut_poll_serves_a_later_role_without_blocking(tmp_path, monkeypatch):
+    # The read misses role 1's wait, so role 1 is evaluated with no board
+    # signal. Later roles poll the same future with timeout=0: once the read
+    # lands, one of them picks it up, the note appears once, and the pass
+    # never blocks on the read a second time.
+    import time
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles, rows = _two_role_setup(root)
+    sentinel = [{"id": "board-row"}]
+
+    def slow_graph():
+        time.sleep(0.9)
+        return sentinel
+
+    def slow_unread(address):
+        # Three addresses per role at 0.15s each: role 1 reaches its graph
+        # step at ~0.45s and cuts at ~0.65s, role 2 polls at ~1.1s, after
+        # the read has landed.
+        time.sleep(0.15)
+        return []
+
+    board_entries: list = []
+    monkeypatch.setattr(
+        wake_mod,
+        "_board_rows",
+        lambda scope, entries, resolver=None: board_entries.append(entries) or None,
+    )
+    rec = _Recorder()
+    summary = run_lead_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        team_fn=_team(roles),
+        rows_fn=rows,
+        truth_fn=lambda holder: {"state": "working"},
+        unread_fn=slow_unread,
+        answered_fn=lambda: [],
+        entries_fn=slow_graph,
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert board_entries == [sentinel]
+    assert summary["note"].count("graph read timed out") == 1
+    assert summary["evaluated"] == 2
+    assert not summary.get("budget_spent")
+
+
+def test_a_graph_cut_skips_the_pre_graph_budget_stop(tmp_path, monkeypatch):
+    # A zero-wait poll spends nothing, so once the read is cut the pre-graph
+    # budget stop no longer fires: the role is evaluated on the poll instead.
+    import threading
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    roles, rows = _two_role_setup(root)
+    blocked = threading.Event()
+
+    def slow_graph():
+        blocked.wait(timeout=60)
+        return []
+
+    seconds_values = iter([30.0, 30.0, 20.0, 5.0])
+    seconds = lambda: next(seconds_values, 5.0)  # noqa: E731
+    rec = _Recorder()
+    try:
+        summary = run_lead_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            team_fn=_team(roles),
+            rows_fn=rows,
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [],
+            answered_fn=lambda: [],
+            entries_fn=slow_graph,
+            seconds_left_fn=seconds,
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert summary["evaluated"] == 2
+    assert not summary.get("budget_spent")
+    assert summary["note"].count("graph read timed out") == 1
+
+
+def test_a_blocked_team_read_ends_the_pass_with_its_note(tmp_path, monkeypatch):
+    # The team read used to run unbounded: under machine thrash it ate the
+    # phase slice and the alarm cut the tick mid-phase. The read now runs
+    # under the slice's discipline and the pass ends with a note.
+    import threading
+
+    from fno.pr_watch import _lead_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_LEAD_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        _lead_manifest(root),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    blocked = threading.Event()
+    rec = _Recorder()
+
+    def slow_team(_rows):
+        blocked.wait(timeout=60)
+        return {"roles": None, "conflicts": []}
+
+    try:
+        summary = run_lead_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            team_fn=slow_team,
+            rows_fn=lambda: [],
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [],
+            entries_fn=lambda: [],
+            answered_fn=lambda: [],
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert summary["roles"] == 0
+    assert "team read did not complete" in summary["note"]
+    assert summary["team_incomplete"] is True
+    assert rec.dispatches == []

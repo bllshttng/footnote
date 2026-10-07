@@ -1,6 +1,6 @@
 """Python-seam tests for the worked overlay: the fleet read, the
 reachability pass, and the degradation contracts. The join itself (seat
-records, crown exclusion, provenance, ship rows, closed receipts) is the
+records, role exclusion, provenance, ship rows, closed receipts) is the
 Rust `fno-agents worked-nodes` verb; its contracts are tested in Rust
 (crates/fno-agents/src/worked_nodes.rs)."""
 from __future__ import annotations
@@ -136,8 +136,8 @@ def test_a_registry_only_fallback_answers_the_overlay(monkeypatch):
     assert live_worked_node_ids(strict=True) == {}
 
 
-def _crown_entry(node_id: str) -> dict:
-    """The crown's own dispatch stamp: an open execute row naming the lead."""
+def _role_entry(node_id: str) -> dict:
+    """The role's own dispatch stamp: an open execute row naming the lead."""
     return {
         "id": node_id,
         "status": "in_progress",
@@ -145,7 +145,7 @@ def _crown_entry(node_id: str) -> dict:
             {
                 "phase": "execute",
                 "harness": "claude",
-                "session_id": "crown-session",
+                "session_id": "role-session",
                 "started_at": "2026-10-04T22:27:02Z",
             }
         ],
@@ -161,7 +161,7 @@ def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
         "fno.agents.watchdog.fleet_rows",
         lambda **_kw: ([], [
             "roster advisory: unmeasurable-row: "
-            "harness=codex node=x-a238 name=bp-a238-king-brief",
+            "harness=codex node=x-a238 name=bp-a238-lead-brief",
         ]),
     )
 
@@ -170,7 +170,7 @@ def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
     reading = read_roster()
 
     assert reading.consulted is True
-    assert reading.unmeasurable_by_node == {"x-a238": ["bp-a238-king-brief"]}
+    assert reading.unmeasurable_by_node == {"x-a238": ["bp-a238-lead-brief"]}
 
 
 

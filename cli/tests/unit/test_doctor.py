@@ -1735,7 +1735,7 @@ def test_doctor_falls_back_to_unobserved_wording_for_an_unobserved_row(
     monkeypatch.setattr(
         doctor,
         "_control_plane_arms_report",
-        lambda: {"red": [{"arm": "king_wake", "stale": False, "age_s": None,
+        lambda: {"red": [{"arm": "lead_wake", "stale": False, "age_s": None,
                           "interval_s": 900, "skip_reason": "never",
                           "producer_evidence": "unobserved"}],
                  "unknown_reason": None},
@@ -1743,7 +1743,7 @@ def test_doctor_falls_back_to_unobserved_wording_for_an_unobserved_row(
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
     combined = result.stdout + result.stderr
-    assert "control-plane arm king_wake is UNOBSERVED" in combined, f"Got:\n{combined}"
+    assert "control-plane arm lead_wake is UNOBSERVED" in combined, f"Got:\n{combined}"
     assert "no producer receipt in the journals" in combined, f"Got:\n{combined}"
     assert "is STALE" not in combined, f"Got:\n{combined}"
 
@@ -1762,9 +1762,9 @@ def test_control_plane_arms_report_consumes_the_rust_attention_set(
                       "producer_evidence": "observed", "line": "watchdog ok"}
     stale_left_out = {"arm": "reap", "stale": True, "failing": False,
                       "producer_evidence": "observed"}
-    unobserved = {"arm": "king_wake", "stale": False, "failing": False,
+    unobserved = {"arm": "lead_wake", "stale": False, "failing": False,
                   "producer_evidence": "unobserved",
-                  "line": "king_wake         UNOBSERVED     never via=launchd"}
+                  "line": "lead_wake         UNOBSERVED     never via=launchd"}
     payload = json.dumps({"arms": [observed_fresh, stale_left_out, unobserved],
                           "arms_attention": [unobserved]})
 
@@ -1815,12 +1815,12 @@ def test_doctor_prints_the_unobserved_row_the_reader_rendered(
         capture_present="present",
     )
     unobserved_line = (
-        "king_wake         UNOBSERVED     never via=launchd:sh.fno.pr-watcher"
+        "lead_wake         UNOBSERVED     never via=launchd:sh.fno.pr-watcher"
     )
     monkeypatch.setattr(
         doctor,
         "_control_plane_arms_report",
-        lambda: {"red": [{"arm": "king_wake", "stale": False, "failing": False,
+        lambda: {"red": [{"arm": "lead_wake", "stale": False, "failing": False,
                           "producer_evidence": "unobserved", "line": unobserved_line}],
                  "unknown_reason": None},
     )
@@ -2597,7 +2597,7 @@ def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypat
                         "stale",
                         False,
                         differing_count=1422,
-                        sample=["hooks/king-delegation-guard.sh"],
+                        sample=["hooks/lead-delegation-guard.sh"],
                     ),
                 ]
             ),
@@ -2615,7 +2615,7 @@ def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypat
     assert "fno config plugin install claude" in report["remedy"]
     blockers = doctor._blockers({"plugin_cache": report})
     assert any("second copy" in b and "1422 file(s)" in b for b in blockers)
-    assert any("hooks/king-delegation-guard.sh" in b for b in blockers)
+    assert any("hooks/lead-delegation-guard.sh" in b for b in blockers)
 
 
 def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeypatch):

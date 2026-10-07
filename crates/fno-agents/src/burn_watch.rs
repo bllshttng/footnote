@@ -1444,7 +1444,7 @@ mod tests {
             0.01,
         );
         assert!(matches!(d, Decision::Wake(r) if r.contains("node untouched 2h")));
-        // Regression shape: the crown was woken twice over a node whose PR
+        // Regression shape: the role was woken twice over a node whose PR
         // branch took a commit 30 minutes earlier. The node row's touched_at
         // is not the branch: it moves on backlog commands, never on a push.
         // A flat sample whose newest commit is younger than the idle ceiling
@@ -2165,8 +2165,8 @@ mod tests {
         team.status = crate::AgentStatus::Live;
         team.pid = Some(std::process::id());
         team.harness = Some("claude".into());
-        team.crown_scope = Some("proj-a".into());
-        team.crown_level = Some(1);
+        team.role_scope = Some("proj-a".into());
+        team.role_level = Some(1);
         team.harness_session_id = Some("5e5c-aaaa-bbbb-cccc-000000000001".into());
         team.cwd = workdir.to_string_lossy().into_owned();
         team.model = Some("glm-5.3-flash".into());

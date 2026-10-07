@@ -62,11 +62,11 @@ def test_wait_retries_a_waitable_reason_until_the_deadline(monkeypatch):
 
 def test_wait_exits_at_once_on_an_unrelated_reason(monkeypatch):
     calls: list = []
-    monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "king_share"))
+    monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "lead_share"))
     result = _spawn("spawn", "-H", "claude", "--substrate", "thread", "--wait", "5m", "hi")
     assert result.exit_code == EXIT_LOAD_REFUSED
     assert len(calls) == 1, "a policy refusal is not waitable; retrying it is a hang"
-    assert '"king_share"' not in result.output, "a refusal prints once; the receipt rides the native route only"
+    assert '"lead_share"' not in result.output, "a refusal prints once; the receipt rides the native route only"
 
 
 def test_wait_with_no_wait_refuses_usage(monkeypatch):

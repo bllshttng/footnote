@@ -55,7 +55,7 @@ def test_a_patchy_roster_that_names_nobody_reads_free_but_degraded(cwd_tmp, rost
     the wedge the general form caused measured 68 unresolved of 133 scanned,
     a majority, and it stopped a warm worker from implementing. A ratio arm
     was proposed for this exact reader, measured against those numbers, and
-    refused by the crown on 2026-09-11: a verdict about node N turns on
+    refused by the role on 2026-09-11: a verdict about node N turns on
     evidence about node N, never on a count of rows that implicate no node.
     """
     unresolved = [_unresolved(f"t-other-{i}", f"/wt/other-{i}") for i in range(64)]

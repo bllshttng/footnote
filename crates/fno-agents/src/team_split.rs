@@ -21,7 +21,7 @@ pub struct ScopeSplit {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct StaleCrown {
+pub struct StaleRole {
     pub row: String,
     /// The row's session id, so a reading joins on identity; `None` on a
     /// legacy split read keeps the name join.
@@ -31,11 +31,11 @@ pub struct StaleCrown {
 }
 
 /// The stale row's registry read, id-first: a split read after the id
-/// change joins through `StaleCrown::session`; a legacy reading (no
+/// change joins through `StaleRole::session`; a legacy reading (no
 /// session recorded) falls back to the name join.
 pub(crate) fn terminal_join<'a>(
     rows: &'a [crate::state::RegistryEntry],
-    stale: &StaleCrown,
+    stale: &StaleRole,
 ) -> crate::lead_state::NameJoin<'a> {
     match stale.session.as_deref() {
         Some(session) => crate::agent_ref::resolve(
@@ -50,7 +50,7 @@ pub(crate) fn terminal_join<'a>(
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct TeamSplits {
     pub double_ruled: Vec<ScopeSplit>,
-    pub stale: Vec<StaleCrown>,
+    pub stale: Vec<StaleRole>,
 }
 
 /// Group teamed rows by normalized territory key over ALL rows, live and
@@ -62,10 +62,10 @@ pub struct TeamSplits {
 /// which is the legitimate portfolio-and-org arrangement.
 pub(crate) fn read_team_splits(rows: &[RegistryEntry]) -> TeamSplits {
     let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut stale: Vec<StaleCrown> = Vec::new();
+    let mut stale: Vec<StaleRole> = Vec::new();
     for row in rows {
         let Some(scope) = row
-            .crown_scope
+            .role_scope
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -84,7 +84,7 @@ pub(crate) fn read_team_splits(rows: &[RegistryEntry]) -> TeamSplits {
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string))
                 .unwrap_or_default();
-            stale.push(StaleCrown {
+            stale.push(StaleRole {
                 row: row.name.clone(),
                 session: row.harness_session_id.clone(),
                 scope: key,
@@ -189,7 +189,7 @@ mod tests {
     fn row(name: &str, scope: Option<&str>, status: AgentStatus) -> RegistryEntry {
         RegistryEntry {
             name: name.to_string(),
-            crown_scope: scope.map(str::to_string),
+            role_scope: scope.map(str::to_string),
             status,
             ..Default::default()
         }
@@ -270,7 +270,7 @@ mod tests {
     fn claude_row(name: &str, sid: &str) -> RegistryEntry {
         RegistryEntry {
             name: name.to_string(),
-            crown_scope: Some("fno".to_string()),
+            role_scope: Some("fno".to_string()),
             status: AgentStatus::Exited,
             harness: Some("claude".to_string()),
             harness_session_id: Some(sid.to_string()),
@@ -323,7 +323,7 @@ mod tests {
     fn dead_call_is_unread_off_the_claude_path() {
         let row = RegistryEntry {
             name: "codex-lead".to_string(),
-            crown_scope: Some("fno".to_string()),
+            role_scope: Some("fno".to_string()),
             status: AgentStatus::Exited,
             harness: Some("codex".to_string()),
             harness_session_id: Some("deadbeef-dead-4ead-8ead-deadbeefdead".to_string()),

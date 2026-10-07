@@ -85,8 +85,8 @@ REG_RC=$?
 MY_ROW="$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SID" \
     '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)"
 [[ -n "$MY_ROW" ]] || exit 0
-TEAM_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)"
-TEAM_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)"
+TEAM_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.role_level // empty' 2>/dev/null)"
+TEAM_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.role_scope // empty' 2>/dev/null)"
 [[ -n "$TEAM_LEVEL" || -n "$TEAM_SCOPE" ]] || exit 0
 
 # Never truncate: a brief that outgrew its budget fails the byte-budget test
@@ -117,7 +117,7 @@ import sys
 sys.stdout.write(sys.stdin.buffer.read(${FAQ_MAX_BYTES}).decode('utf-8', errors='ignore'))
 ")
 
-_(truncated at ${FAQ_MAX_BYTES}B; \`fno agents king faq list --scope \"${TEAM_SCOPE}\"\` has the rest)_"
+_(truncated at ${FAQ_MAX_BYTES}B; \`fno agents lead faq list --scope \"${TEAM_SCOPE}\"\` has the rest)_"
     fi
     if [[ -n "$(printf '%s' "$FAQ_ENTRIES" | tr -d '[:space:]')" ]]; then
         CONTEXT="$CONTEXT
@@ -291,7 +291,7 @@ fi
 # after a compact. Reads the same manifest every lead arm resolves; a missing
 # manifest or a foreign session id means the brief above is the
 # whole teaching, so nothing is appended (fail to the narrower rule).
-LEAD_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
+LEAD_MANIFEST="$(fno agents lead manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
 if [[ -n "$LEAD_MANIFEST" && -f "$LEAD_MANIFEST" ]]; then
     LEAD_SHAPE="$(sed -n 's/^shape:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')"
     LEAD_SID="$(sed -n 's/^harness_session_id:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')"

@@ -1,5 +1,5 @@
 {
-  "_reading": "The one corpus both legs read: the Rust parser in king_board/pr_closure.rs, the Python tests that pin the forwarder, and the bash loop in check-pr-node-closure-selftest.sh. claims is the exact list parse() must return for body. A case may carry retargeted_from: the exact list retargeted_from() must return, empty when absent. A case may also carry head_ref and gate: the selftest replays every gate row and expects exit 0 on pass, 1 on fail. Node ids are hex after the hyphen, per the id grammar. Writers emit only the Fixes spelling; readers accept Backlog-Closure: during the transition.",
+  "_reading": "The one corpus both legs read: the Rust parser in lead_board/pr_closure.rs, the Python tests that pin the forwarder, and the bash loop in check-pr-node-closure-selftest.sh. claims is the exact list parse() must return for body. A case may carry retargeted_from: the exact list retargeted_from() must return, empty when absent. A case may also carry head_ref and gate: the selftest replays every gate row and expects exit 0 on pass, 1 on fail. Node ids are hex after the hyphen, per the id grammar. Writers emit only the Fixes spelling; readers accept Backlog-Closure: during the transition.",
   "cases": [
     { "body": "Fixes x-aaaa, x-bbbb", "claims": ["x-aaaa", "x-bbbb"] },
     { "body": "fixes: x-aaaa x-bbbb", "claims": ["x-aaaa", "x-bbbb"] },

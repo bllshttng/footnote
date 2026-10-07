@@ -35,7 +35,7 @@ When every id succeeds, clear exits 0. An unknown id exits 4, a different-answer
 
 Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and role authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
 
-`--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a lead ruling inside its own role scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Leads wrote them because no correct value existed. The scope belongs on the role row, so the value carries no suffix.
+`--authority` takes exactly four values: `operator`, `role`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `role` for a lead ruling inside its own role scope. That value exists because three rows on disk carry invented `role-l1` and `role-l2-<node>` spellings. Leads wrote them because no correct value existed. The scope belongs on the role row, so the value carries no suffix.
 
 The closed set is NOT in `schema.yaml`. The index already holds those invented spellings. A schema enum makes `fno backlog decide-reindex` reject them, which drops recall for real rulings.
 
@@ -107,7 +107,7 @@ A failed PROJECTION does not fail the command at all. Both durable stores alread
 
 Agents answer by default (ruling of 2026-09-14): an agent session records coordination decisions with `fno backlog decide`. Only the `operator` authority refuses an agent session there, because the superuser lane is not an agent's to claim. An agent that rules out another node's work records the verdict where that node's readers already look.
 
-The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A role can clear only a question it asked itself, with `--authority crown`. The question board is the user's answer lane, and the refusal names it.
+The one exception is the question clear door. `fno inbox outstanding clear` refuses every agent session on a question asked of the user. A role can clear only a question it asked itself, with `--authority role`. The question board is the user's answer lane, and the refusal names it.
 
 The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
 
