@@ -544,15 +544,16 @@ pub(crate) fn base_move_paths_between<P: Probes>(
     Some(paths)
 }
 
-/// The PR's own changed file paths, or None (HOLD). An EMPTY list is a real
-/// answer: a PR with no diff cannot overlap anything.
+/// The PR's own changed file paths, the old name of a rename included, or
+/// None (HOLD). An EMPTY list is a real answer: a PR with no diff cannot
+/// overlap anything.
 pub(crate) fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/pulls/{pr}/files"),
         "--paginate".to_string(),
         "--jq".to_string(),
-        ".[] | .filename // empty".to_string(),
+        ".[] | (.filename // empty), (.previous_filename // empty)".to_string(),
     ];
     let (ok, stdout) = probes.run_gh(cwd, &args).ok()?;
     if !ok {
@@ -571,7 +572,7 @@ pub(crate) fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Optio
 
 /// Sorted intersection of two changed-file lists, documentation paths dropped
 /// from both sides first. Empty: no semantic conflict the merge could carry.
-pub(crate) fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
+fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
     let base: std::collections::BTreeSet<&str> = base_paths
         .iter()
         .map(String::as_str)

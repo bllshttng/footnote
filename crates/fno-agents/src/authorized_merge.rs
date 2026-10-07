@@ -1633,7 +1633,13 @@ impl Probes for RealProbes {
             &facts.head_sha,
         )
         .zip(crate::merge_gates::pr_file_paths(self, cwd, facts.number))
-        .map(|(base, pr)| crate::merge_gates::overlaps(&base, &pr));
+        // Every path counts, docs included: the stacked-base-guard CI check
+        // reads the same unfiltered set, so the two never disagree.
+        .map(|(base, pr)| {
+            let base: std::collections::BTreeSet<String> = base.into_iter().collect();
+            let pr: std::collections::BTreeSet<String> = pr.into_iter().collect();
+            base.intersection(&pr).cloned().collect::<Vec<_>>()
+        });
         ci_base_verdict(compare, overlap.as_deref())
     }
 
