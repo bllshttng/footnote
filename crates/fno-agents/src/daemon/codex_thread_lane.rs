@@ -51,13 +51,13 @@ pub(super) async fn spawn_codex_thread_lane(
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
     let node = req.params.get("node").and_then(Value::as_str);
-    // The crown rides the request so the row is crowned AT MINT: the seed
-    // turn below enqueues inside this lane, and a crown settled by the
+    // The role rides the request so the row is promoted AT MINT: the seed
+    // turn below enqueues inside this lane, and a role settled by the
     // Python caller only after the receipt lets the actor run its first
-    // turn uncrowned. Both halves or neither; the territory and
+    // turn unpromoted. Both halves or neither; the territory and
     // succession policy stays at the Python seam.
-    let crown = match crown_from_params(&req.params) {
-        Ok(crown) => crown,
+    let role = match role_from_params(&req.params) {
+        Ok(role) => role,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
     // Hop 2 of the state-root grant. Read the roots from the REQUEST,
@@ -161,8 +161,8 @@ pub(super) async fn spawn_codex_thread_lane(
         &harness_args,
         &req.params,
         provenance,
-        crown.as_ref().map(|(level, _)| *level),
-        crown.as_ref().map(|(_, scope)| scope.as_str()),
+        role.as_ref().map(|(level, _)| *level),
+        role.as_ref().map(|(_, scope)| scope.as_str()),
     );
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
@@ -180,23 +180,23 @@ pub(super) async fn spawn_codex_thread_lane(
         }) {
             return false;
         }
-        // One-live-crown guard at mint, the same invariant the Python
+        // One-live-role guard at mint, the same invariant the Python
         // settle keeps in its write lock: a scope a non-terminal row
-        // already reigns is not ours to crown. Succession - the sitting
-        // king being this spawn's own caller - is the settle's write, so
-        // the mint declines to uncrowned rather than ever landing a
-        // second live crown over the scope.
-        if entry.crown_level.is_some() {
-            if let Some(scope) = entry.crown_scope.as_deref() {
+        // already terms is not ours to role. Succession - the sitting
+        // lead being this spawn's own caller - is the settle's write, so
+        // the mint declines to unpromoted rather than ever landing a
+        // second live role over the scope.
+        if entry.role_level.is_some() {
+            if let Some(scope) = entry.role_scope.as_deref() {
                 let held = registry.entries.iter().any(|existing| {
-                    existing.crown_level.is_some()
-                        && existing.crown_scope.as_deref() == Some(scope)
+                    existing.role_level.is_some()
+                        && existing.role_scope.as_deref() == Some(scope)
                         && is_non_terminal(existing.status)
                 });
                 if held {
-                    entry.crown_level = None;
-                    entry.crown_scope = None;
-                    entry.crown_grantor = None;
+                    entry.role_level = None;
+                    entry.role_scope = None;
+                    entry.role_grantor = None;
                 }
             }
         }
@@ -301,14 +301,14 @@ pub(super) async fn spawn_codex_thread_lane(
     )
 }
 
-/// The crown a spawn request carries: `Some((level, scope))` or None, both
+/// The role a spawn request carries: `Some((level, scope))` or None, both
 /// halves required. This door bounds the TYPE the registry row stores (a
 /// u32 level 0..=2, a nonblank scope); the territory, succession and
 /// canonical-scope policy is the Python seam's pre-launch gate.
-fn crown_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
-    let level = params.get("crown_level");
+fn role_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
+    let level = params.get("role_level");
     let scope = params
-        .get("crown_scope")
+        .get("role_scope")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -318,14 +318,14 @@ fn crown_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
             let level = level
                 .as_u64()
                 .filter(|l| *l <= 2)
-                .ok_or_else(|| "crown_level must be an integer 0..=2".to_string())?;
+                .ok_or_else(|| "role_level must be an integer 0..=2".to_string())?;
             Ok(Some((level as u32, scope.to_string())))
         }
         (Some(_), None) => {
-            Err("a crown needs both crown_level and crown_scope; got a level with no scope".into())
+            Err("a role needs both role_level and role_scope; got a level with no scope".into())
         }
         (None, Some(_)) => {
-            Err("a crown needs both crown_level and crown_scope; got a scope with no level".into())
+            Err("a role needs both role_level and role_scope; got a scope with no level".into())
         }
     }
 }

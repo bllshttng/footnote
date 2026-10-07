@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 /// The repo's unfilled eval part4 files: `status: pending` under
-/// `<plans>/../evals/kings/*/part4-reforms.md`. The eval writer stamps
+/// `<plans>/../evals/leads/*/part4-reforms.md`. The eval writer stamps
 /// pending and the lead flips the status when the reforms are filed, so a
 /// beat can name what a predecessor left open. Best effort: an unreadable
 /// eval tree names nothing.
@@ -13,8 +13,8 @@ pub fn unfilled_part4s(cwd: &Path) -> Vec<PathBuf> {
     let Some(plans) = crate::plans_path::plans_content_dir(cwd) else {
         return Vec::new();
     };
-    let kings = plans.join("..").join("evals").join("kings");
-    let Ok(entries) = std::fs::read_dir(&kings) else {
+    let leads = plans.join("..").join("evals").join("leads");
+    let Ok(entries) = std::fs::read_dir(&leads) else {
         return Vec::new();
     };
     let mut unfilled = Vec::new();
@@ -49,17 +49,17 @@ mod tests {
             format!(r#"{{"plansDirectory": "{}"}}"#, plans.display()),
         )
         .unwrap();
-        let kings = plans.join("..").join("evals").join("kings");
-        std::fs::create_dir_all(kings.join("lead-a-11111111")).unwrap();
-        std::fs::create_dir_all(kings.join("lead-b-22222222")).unwrap();
-        std::fs::create_dir_all(kings.join("lead-c-33333333")).unwrap();
+        let leads = plans.join("..").join("evals").join("leads");
+        std::fs::create_dir_all(leads.join("lead-a-11111111")).unwrap();
+        std::fs::create_dir_all(leads.join("lead-b-22222222")).unwrap();
+        std::fs::create_dir_all(leads.join("lead-c-33333333")).unwrap();
         std::fs::write(
-            kings.join("lead-a-11111111/part4-reforms.md"),
+            leads.join("lead-a-11111111/part4-reforms.md"),
             "---\nstatus: pending\n---\n\n# Part 4: reforms\n",
         )
         .unwrap();
         std::fs::write(
-            kings.join("lead-b-22222222/part4-reforms.md"),
+            leads.join("lead-b-22222222/part4-reforms.md"),
             "---\nstatus: done\n---\n\n# Part 4: reforms\n",
         )
         .unwrap();
@@ -67,12 +67,12 @@ mod tests {
         // ASCII): reading the head must not panic and must still find the
         // status line.
         let straddle = format!("---\nstatus: pending\n---\n\n# {}部after\n", "a".repeat(36));
-        std::fs::write(kings.join("lead-c-33333333/part4-reforms.md"), straddle).unwrap();
+        std::fs::write(leads.join("lead-c-33333333/part4-reforms.md"), straddle).unwrap();
         assert_eq!(
             unfilled_part4s(&repo),
             vec![
-                kings.join("lead-a-11111111/part4-reforms.md"),
-                kings.join("lead-c-33333333/part4-reforms.md"),
+                leads.join("lead-a-11111111/part4-reforms.md"),
+                leads.join("lead-c-33333333/part4-reforms.md"),
             ]
         );
     }

@@ -265,13 +265,13 @@ def serialize_entry(
         "delivery_policy": entry.delivery_policy,
         "dnd": _dnd_label(entry),
         "log_path": entry.log_path,
-        # Crown (US9): a compact "L1 epic-x" descriptor + the raw fields, so a
-        # minion can resolve who to escalate to and a second live crown over the
-        # same scope is detectable. null for an uncrowned row.
-        "crown": entry.crown_label,
-        "crown_level": entry.crown_level,
-        "crown_scope": entry.crown_scope,
-        "crown_grantor": entry.crown_grantor,
+        # Role (US9): a compact "L1 epic-x" descriptor + the raw fields, so a
+        # minion can resolve who to escalate to and a second live role over the
+        # same scope is detectable. null for an unpromoted row.
+        "role": entry.role_label,
+        "role_level": entry.role_level,
+        "role_scope": entry.role_scope,
+        "role_grantor": entry.role_grantor,
         # The parent edge the orphan check keys on. Null is a real answer (an
         # ambiguous identity resolve records no lineage rather than a wrong
         # one): this worker is invisible to its spawner's orphan check.

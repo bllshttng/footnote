@@ -4,7 +4,7 @@
 # Unit tests for hooks/lead-postcompact-reinject.sh: the post-compaction
 # re-injection of the lead's operating brief. Verifies: the teamed claude case
 # delivers the brief through hookSpecificOutput.additionalContext; the teamed
-# codex case delivers through systemMessage; uncrowned rows, unknown sessions,
+# codex case delivers through systemMessage; unpromoted rows, unknown sessions,
 # non-compact sources, and a missing fno all degrade to empty output with exit 0;
 # and the brief stays inside its byte budget (it is paid on every compaction).
 
@@ -29,7 +29,7 @@ TMP="$(mktemp -d -t lead-reinject-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Stub `fno` answering `agents registry-json` from a per-case fixture file, and
-# `agents king faq list --scope X` from a second fixture keyed by scope, so no
+# `agents lead faq list --scope X` from a second fixture keyed by scope, so no
 # real registry, daemon, or FAQ store is involved. $LEAD_REG_FIXTURE and
 # $LEAD_FAQ_FIXTURE select the payloads; the FAQ fixture is empty (no output)
 # unless a test overwrites it.
@@ -45,7 +45,7 @@ if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
     exit 127
   fi
   cat "$LEAD_REG_FIXTURE"
-elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
+elif [ "$1" = "agents" ] && [ "$2" = "lead" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
   cat "$LEAD_FAQ_FIXTURE" 2>/dev/null || true
 elif [ "$1" = "agents" ] && [ "$2" = "org" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
   # The canonical org spelling forwards the same action.
@@ -81,9 +81,9 @@ registry_fixture() {
   printf '{"agents":[%s]}\n' "$1" > "$LEAD_REG_FIXTURE"
 }
 
-TEAMED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"lead","status":"live","crown_level":1,"crown_scope":"fno"}'
-TEAMED_HARNESS_ROW='{"session_id":"short-lead","harness_session_id":"'"$SID"'","name":"lead","status":"live","crown_level":1,"crown_scope":"fno"}'
-UNCROWNED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"worker","status":"live","crown_level":null,"crown_scope":null}'
+TEAMED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"lead","status":"live","role_level":1,"role_scope":"fno"}'
+TEAMED_HARNESS_ROW='{"session_id":"short-lead","harness_session_id":"'"$SID"'","name":"lead","status":"live","role_level":1,"role_scope":"fno"}'
+UNPROMOTED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"worker","status":"live","role_level":null,"role_scope":null}'
 
 run_lead() { # $1 = event JSON ; FNO_PLATFORM env selects the lane
   printf '%s' "$1" | FNO_PLATFORM="$FNO_PLATFORM" bash "$LEAD" 2>/dev/null
@@ -96,7 +96,7 @@ FNO_PLATFORM=claude
 OUT="$(run_lead "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
 RC=$?
 [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
-    | contains("level 1 over fno") and contains("Encode, then abdicate")
+    | contains("level 1 over fno") and contains("Encode, then step_down")
       and contains("--substrate thread") and contains("glm-5.3-flash[1m]")
       and contains("status=retasked") and contains("spawn_required")
       and (contains("retier: ") | not)' >/dev/null 2>&1 \
@@ -117,12 +117,12 @@ RC=$?
   && pass "teamed codex via CODEX_THREAD_ID: systemMessage carrier" \
   || fail "teamed codex rc=$RC payload=$OUT"
 
-# 3. Uncrowned row (both team fields null): nothing to re-teach, silence.
-registry_fixture "$UNCROWNED_ROW"
+# 3. Unpromoted row (both team fields null): nothing to re-teach, silence.
+registry_fixture "$UNPROMOTED_ROW"
 FNO_PLATFORM=claude
 OUT="$(run_lead "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"; RC=$?
-[[ $RC -eq 0 && -z "$OUT" ]] && pass "uncrowned row: empty stdout, exit 0" \
-  || fail "uncrowned row rc=$RC out=$OUT"
+[[ $RC -eq 0 && -z "$OUT" ]] && pass "unpromoted row: empty stdout, exit 0" \
+  || fail "unpromoted row rc=$RC out=$OUT"
 
 # 4. No row for this session id: the hook is not for this session, silence.
 registry_fixture "$TEAMED_ROW"

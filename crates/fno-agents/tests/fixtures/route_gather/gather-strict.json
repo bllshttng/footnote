@@ -310,7 +310,7 @@
         },
         "rung_base": "agents.profiles.blueprint"
       },
-      "crown": {
+      "role": {
         "has_overlay": false,
         "lanes_raw": null,
         "profile": {
@@ -319,7 +319,7 @@
           "on_low": "",
           "on_unknown": ""
         },
-        "rung_base": "agents.profiles.crown"
+        "rung_base": "agents.profiles.role"
       },
       "review": {
         "has_overlay": false,

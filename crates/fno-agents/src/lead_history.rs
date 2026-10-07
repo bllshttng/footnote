@@ -14,7 +14,7 @@
 //! a second normalizer here could only disagree with it; a stored row whose
 //! `data.scope` was not canonical carries `scope IS NULL` and reaches the
 //! legacy classifier through the same query. Legacy rows (the refused
-//! `crown_scope`/`team`/`result` aliases, or a missing canonical key)
+//! `role_scope`/`team`/`result` aliases, or a missing canonical key)
 //! stay byte-preserved evidence: counted in `rejected`, listed in
 //! `rejected_legacy` by store and `ts`, because a line number does not
 //! survive rotation. The output is read-back, never a generated summary; a
@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub(crate) const LEAD_CHECKIN: &str = "lead_checkin";
-pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
+pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["role", "role_scope", "result"];
 
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
@@ -854,7 +854,7 @@ fn scan_readings(
                         });
                     }
                 }
-                LEAD_CONTEXT_NUDGE if s_str(&data, "crown_scope") == Some(scope) => {
+                LEAD_CONTEXT_NUDGE if s_str(&data, "role_scope") == Some(scope) => {
                     r.nudges += 1;
                 }
                 _ => {}
@@ -1020,7 +1020,7 @@ pub fn run_lead_verdict(args: &[String]) -> i32 {
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
     readings.checkins_expected =
-        matches!(manifest.shape.as_str(), "org" | "court") && team_age_secs > checkin_interval_secs;
+        matches!(manifest.shape.as_str(), "org" | "team") && team_age_secs > checkin_interval_secs;
     readings.checkins_stale = checkins_stale(
         &readings,
         now.timestamp(),
@@ -1216,7 +1216,7 @@ fn hygiene_reading(
             "applicable": 0,
             "declared": 5,
             "violations": [],
-            "crown": team,
+            "role": team,
         });
     };
     let entries = match crate::lead_hygiene::entries_from_transcript(harness, transcript) {
@@ -1229,7 +1229,7 @@ fn hygiene_reading(
                 "applicable": 0,
                 "declared": 5,
                 "violations": [],
-                "crown": team,
+                "role": team,
             });
         }
     };
@@ -1253,7 +1253,7 @@ fn hygiene_reading(
         "applicable": applicable,
         "declared": checks.len(),
         "violations": violations,
-        "crown": team,
+        "role": team,
     })
 }
 
@@ -1293,9 +1293,9 @@ fn render_hygiene_line(hygiene: &Value) -> String {
             .join(", ");
         line.push_str(&format!(" ({details})"));
     }
-    match hygiene["crown"]["inherited"].as_bool() {
+    match hygiene["role"]["inherited"].as_bool() {
         Some(true) => {
-            if let Some(session) = hygiene["crown"]["from_session"].as_str() {
+            if let Some(session) = hygiene["role"]["from_session"].as_str() {
                 line.push_str(&format!("; team inherited from {session}"));
             } else {
                 line.push_str("; team inherited");
@@ -1681,7 +1681,7 @@ mod verdict_tests {
             json!({"ts": "2026-09-10T10:05:00Z", "type": "loop_check_config", "source": "loop",
                    "data": {"session_id": "kg1", "block_cap": 9, "block_cap_source": "default"}}),
             json!({"ts": "2026-09-10T10:06:00Z", "type": "lead_context_nudge", "source": "hook",
-                   "data": {"used_pct": 60, "trigger": 40, "crown_level": 0, "crown_scope": "x-bbbb"}}),
+                   "data": {"used_pct": 60, "trigger": 40, "role_level": 0, "role_scope": "x-bbbb"}}),
         ];
         for row in rows {
             writeln!(fh, "{row}").unwrap();
@@ -1870,7 +1870,7 @@ mod verdict_tests {
             ],
         )
         .unwrap();
-        let manifest = root.join("kings/x-bbbb.md");
+        let manifest = root.join("leads/x-bbbb.md");
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             &manifest,
@@ -1923,7 +1923,7 @@ mod verdict_tests {
         std::fs::write(
             &store,
             json!({"version": 1, "teams": {"x-bbbb": {
-                "name": "warden", "regnal": 1, "holder_session": "hs1",
+                "name": "warden", "generation": 1, "holder_session": "hs1",
                 "nodes": [], "updated_at": "2026-09-05T00:00:00Z",
                 "lead": {"session": "hs1", "scope": "x-old",
                           "armed_at": "2026-09-10T00:00:00Z",
@@ -2140,7 +2140,7 @@ mod tests {
             ),
             checkin(
                 "2026-09-10T10:00:00Z",
-                json!({"crown": "fno", "change": "legacy"}),
+                json!({"role": "fno", "change": "legacy"}),
             ),
         ]);
         let payload = scan_scopes(std::slice::from_ref(&path), None).unwrap();
@@ -2208,7 +2208,7 @@ mod tests {
         let (_dir, path) = journal(&[
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"crown_scope": "x-aaaa", "change": "old"}),
+                json!({"role_scope": "x-aaaa", "change": "old"}),
             ),
             checkin(
                 "2026-09-10T08:30:00Z",
@@ -2221,7 +2221,7 @@ mod tests {
         assert_eq!(payload["rejected"], json!(3));
         let legacy = payload["rejected_legacy"].as_array().unwrap();
         assert_eq!(legacy.len(), 2);
-        assert_eq!(legacy[0]["forbidden"], json!(["crown_scope"]));
+        assert_eq!(legacy[0]["forbidden"], json!(["role_scope"]));
         assert_eq!(legacy[0]["missing"], json!(["scope"]));
         assert_eq!(legacy[1]["forbidden"], json!(["result"]));
     }
@@ -2346,7 +2346,7 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"crown_scope": "x-aaaa", "change": "old"}),
+                json!({"role_scope": "x-aaaa", "change": "old"}),
             )
         )
         .unwrap();
@@ -2645,8 +2645,8 @@ mod tests {
         assert_eq!(hygiene["applicable"], 4);
         assert_eq!(hygiene["declared"], 5);
         assert!(hygiene["violations"].as_array().unwrap().is_empty());
-        assert_eq!(hygiene["crown"]["inherited"], true);
-        assert_eq!(hygiene["crown"]["from_session"], "grantor-session");
+        assert_eq!(hygiene["role"]["inherited"], true);
+        assert_eq!(hygiene["role"]["from_session"], "grantor-session");
 
         let rendered = render_verdict(&verdict_payload(hygiene));
         let term_at = rendered.find("term:").expect("term line present");

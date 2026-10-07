@@ -2,7 +2,7 @@
 //!
 //! Four event rows (started, built, installed, failed) append to the global
 //! journal through `event_store::append_envelope`, and the installed and
-//! failed rows mail the crowns through the front binary's own mail verb. The
+//! failed rows mail the roles through the front binary's own mail verb. The
 //! Python side composes nothing: one argv per step, one exit code back, and
 //! the fail trap passes `--rc` instead of a JSON template.
 
@@ -67,14 +67,14 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 /// One bounded mail subprocess: the front binary's mail verb is local, but a
 /// wedged front door must not hang a failed install's exit past the minute
 /// the old Python wrapper allowed.
-fn mail_crowns(fno_bin: &str, body: &str) {
+fn mail_roles(fno_bin: &str, body: &str) {
     let child = Command::new(fno_bin)
         .args([
             "agents",
             "mail",
             "team",
             "--scope",
-            "kings",
+            "leads",
             "--subject",
             "fno-update",
             body,
@@ -85,7 +85,7 @@ fn mail_crowns(fno_bin: &str, body: &str) {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fno doctor update: WARNING: crown mail not sent: {e}");
+            eprintln!("fno doctor update: WARNING: role mail not sent: {e}");
             return;
         }
     };
@@ -99,7 +99,7 @@ fn mail_crowns(fno_bin: &str, body: &str) {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("fno doctor update: WARNING: crown mail timed out");
+                eprintln!("fno doctor update: WARNING: role mail timed out");
                 return;
             }
         }
@@ -188,7 +188,7 @@ pub fn run_update_journal(args: &[String]) -> i32 {
                 format!("fno doctor update FAILED: {reason}.")
             }
         };
-        mail_crowns(bin, &body);
+        mail_roles(bin, &body);
     }
     0
 }

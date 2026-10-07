@@ -35,7 +35,7 @@
    "kind": "tool_use"
   },
   {
-   "text": "One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates.",
+   "text": "One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and steps_down.",
    "index": 5,
    "kind": "user_text"
   },
@@ -95,7 +95,7 @@
    "kind": "user_text"
   },
   {
-   "text": "**Team: level 0, Director altitude, scope epic `x-d7e4`, bestowed by the human (attended). Shape: pass** (brief says \"plan the next wave, then abdicate\", no monitoring language). Mail handle `<handle>`.",
+   "text": "**Team: level 0, Director altitude, scope epic `x-d7e4`, granted by the human (attended). Shape: pass** (brief says \"plan the next wave, then step_down\", no monitoring language). Mail handle `<handle>`.",
    "index": 17,
    "kind": "assistant_text"
   },
@@ -297,7 +297,7 @@
    "kind": "tool_use"
   },
   {
-   "text": "Abdicating. Team expired.",
+   "text": "SteppingDown. Team expired.",
    "index": 51,
    "kind": "assistant_text"
   },
@@ -897,17 +897,17 @@
    "kind": "tool_use"
   },
   {
-   "text": "**This needs a live lead.** A worker with no lead \u2014 or one whose lead abdicated, which is the *default* for a pass-shape lead like the one I ran this morning \u2014 has no trigger source and falls back to advisory self-review. Documenting it as though the lead is always there would be the same over-claim I made twice today.",
+   "text": "**This needs a live lead.** A worker with no lead \u2014 or one whose lead stepped_down, which is the *default* for a pass-shape lead like the one I ran this morning \u2014 has no trigger source and falls back to advisory self-review. Documenting it as though the lead is always there would be the same over-claim I made twice today.",
    "index": 156,
    "kind": "assistant_text"
   },
   {
-   "text": "Worth thinking about separately: that makes org mode load-bearing for review in a way it wasn't before. A pass abdicates at kickoff, so every worker it spawned is review-orphaned by construction.",
+   "text": "Worth thinking about separately: that makes org mode load-bearing for review in a way it wasn't before. A pass steps_down at kickoff, so every worker it spawned is review-orphaned by construction.",
    "index": 157,
    "kind": "assistant_text"
   },
   {
-   "text": "yes very true. we should never abdicate without handing it off, this is why it's crucial for you to be aware of your context used. Let's test, how much context have you used?",
+   "text": "yes very true. we should never step_down without handing it off, this is why it's crucial for you to be aware of your context used. Let's test, how much context have you used?",
    "index": 158,
    "kind": "user_text"
   },
@@ -936,12 +936,12 @@
    "kind": "tool_use"
   },
   {
-   "text": "I ran a **pass-shape** lead this morning: encoded the wave, kicked off, abdicated. Two workers are still alive right now \u2014 `<handle>` (x-2388) and `<handle>` (x-9963) \u2014 and by the pattern we just designed, both need a lead to trigger their review. I abdicated at kickoff, so I orphaned them by construction, then spent the rest of the session informally acting as their lead anyway.",
+   "text": "I ran a **pass-shape** lead this morning: encoded the wave, kicked off, stepped_down. Two workers are still alive right now \u2014 `<handle>` (x-2388) and `<handle>` (x-9963) \u2014 and by the pattern we just designed, both need a lead to trigger their review. I stepped_down at kickoff, so I orphaned them by construction, then spent the rest of the session informally acting as their lead anyway.",
    "index": 163,
    "kind": "assistant_text"
   },
   {
-   "text": "That's the hole: **the pass shape and the lead-mediated review pattern are incompatible.** A pass is gone before any worker reaches its review point. Either the review trigger has to survive abdication, or a lead that spawns workers can't be a pass.",
+   "text": "That's the hole: **the pass shape and the lead-mediated review pattern are incompatible.** A pass is gone before any worker reaches its review point. Either the review trigger has to survive departure, or a lead that spawns workers can't be a pass.",
    "index": 164,
    "kind": "assistant_text"
   },
@@ -1028,7 +1028,7 @@
    "kind": "assistant_text"
   },
   {
-   "text": "The lead-mediated review pattern **requires** a live lead when the worker reaches review. A pass abdicates at kickoff, before any worker gets there. So \"never abdicate without handing off\" depends on the lead seeing its own context in time to hand off \u2014 which makes this node a *prerequisite* for the pattern we just designed, not a convenience.",
+   "text": "The lead-mediated review pattern **requires** a live lead when the worker reaches review. A pass steps_down at kickoff, before any worker gets there. So \"never step_down without handing off\" depends on the lead seeing its own context in time to hand off \u2014 which makes this node a *prerequisite* for the pattern we just designed, not a convenience.",
    "index": 179,
    "kind": "assistant_text"
   },
@@ -1166,13 +1166,13 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== FOLDED IN FROM x-f605 (operator decision 2026-08-05): PART B, THE LEAD-SHAPE HALF ===\n\nPart A of x-f605 (a lead watches its own context, hands off at 40%, probe named explicitly in the skill) is the lead-scoped application of AXIS 1 above and is already covered by this node's recommended fix. Part B is a distinct deliverable that travels with it and must not be dropped in the fold.\n\nTHE PASS SHAPE AND LEAD-MEDIATED REVIEW ARE INCOMPATIBLE. Specimen: the operator's own session 2026-08-05 ran a pass over epic x-d7e4, abdicated at kickoff exactly as skills/lead/SK",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== FOLDED IN FROM x-f605 (operator decision 2026-08-05): PART B, THE LEAD-SHAPE HALF ===\n\nPart A of x-f605 (a lead watches its own context, hands off at 40%, probe named explicitly in the skill) is the lead-scoped application of AXIS 1 above and is already covered by this node's recommended fix. Part B is a distinct deliverable that travels with it and must not be dropped in the fold.\n\nTHE PASS SHAPE AND LEAD-MEDIATED REVIEW ARE INCOMPATIBLE. Specimen: the operator's own session 2026-08-05 ran a pass over epic x-d7e4, stepped_down at kickoff exactly as skills/lead/SK",
    "index": 203,
    "kind": "tool_use"
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno mail send <handle> \"SCOPE CHANGE on x-7685, operator decision. Re-read the node details - I extended them after you started, and there is a new section at the end marked 'FOLDED IN FROM x-f605'.\n\nWHAT CHANGED: node x-f605 has been superseded INTO x-7685. Its Part A (a lead watches its own context, hands off at 40 percent, probe named explicitly in the skill) was already in your brief. Its PART B is NEW to your scope and is now an explicit deliverable, not the background rationale I gave you at spawn.\n\nPART B, restated so you do not have to reconstruct it: the pass lead shape and lead-mediated review are INCOMPATIBLE. A pass abdicates at kickoff; a worker reaches its review point later and mails a lead that is already gone. So the rule to design to",
+   "target": "cd .\nfno mail send <handle> \"SCOPE CHANGE on x-7685, operator decision. Re-read the node details - I extended them after you started, and there is a new section at the end marked 'FOLDED IN FROM x-f605'.\n\nWHAT CHANGED: node x-f605 has been superseded INTO x-7685. Its Part A (a lead watches its own context, hands off at 40 percent, probe named explicitly in the skill) was already in your brief. Its PART B is NEW to your scope and is now an explicit deliverable, not the background rationale I gave you at spawn.\n\nPART B, restated so you do not have to reconstruct it: the pass lead shape and lead-mediated review are INCOMPATIBLE. A pass steps_down at kickoff; a worker reaches its review point later and mails a lead that is already gone. So the rule to design to",
    "index": 204,
    "kind": "tool_use"
   },
@@ -1294,7 +1294,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\ncat >> ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md <<'EOF'\n\n### Session handoff 2026-08-05\n\nThe lead over this epic abdicated at 38% context after the epic closed (x-2388 merged as PR #738).\nFull state, verified-vs-inherited claims, and four corrections live in\n[20260805-session-handoff-lead-x-d7e4.md](20260805-session-handoff-lead-x-d7e4.md).\n\n- [ ] PR #741 (x-5c43, the boundary burn-down) is OPEN with `smoke` + `changed-smoke` RED and has no owner #jc \ud83d\udcc5 2026-08-06\n- [ ] PR #741 title says \"9 to 2\": confirm what the two surviving violations are before x-5c43 is marked done #jc \ud83d\udcc5 2026-08-06\n- [ ] File the `<fno_mail>` envelope node (spawn payloads unwrapped, leading-verb constraint, queued-means-human-typing) #jc \ud83d\udcc5 2026-08-",
+   "target": "cd .\ncat >> ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md <<'EOF'\n\n### Session handoff 2026-08-05\n\nThe lead over this epic stepped_down at 38% context after the epic closed (x-2388 merged as PR #738).\nFull state, verified-vs-inherited claims, and four corrections live in\n[20260805-session-handoff-lead-x-d7e4.md](20260805-session-handoff-lead-x-d7e4.md).\n\n- [ ] PR #741 (x-5c43, the boundary burn-down) is OPEN with `smoke` + `changed-smoke` RED and has no owner #jc \ud83d\udcc5 2026-08-06\n- [ ] PR #741 title says \"9 to 2\": confirm what the two surviving violations are before x-5c43 is marked done #jc \ud83d\udcc5 2026-08-06\n- [ ] File the `<fno_mail>` envelope node (spawn payloads unwrapped, leading-verb constraint, queued-means-human-typing) #jc \ud83d\udcc5 2026-08-",
    "index": 226,
    "kind": "tool_use"
   },
@@ -1317,7 +1317,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\necho \"=== do I hold a registry team? ===\"\nfno whoami 2>&1 | rg -i \"team|scope|level\" || echo \"  no team line printed\"\necho \"=== any live team over x-d7e4 or fno? ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nn=0\nfor r in rows:\n    if r.get('crown_scope'): print('  ',r.get('name'),'L'+str(r.get('crown_level')),r.get('crown_scope'),r.get('status'),'grantor:',r.get('crown_grantor')); n+=1\nprint('  (none)' if not n else '')\"",
+   "target": "cd .\necho \"=== do I hold a registry team? ===\"\nfno whoami 2>&1 | rg -i \"team|scope|level\" || echo \"  no team line printed\"\necho \"=== any live team over x-d7e4 or fno? ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nn=0\nfor r in rows:\n    if r.get('role_scope'): print('  ',r.get('name'),'L'+str(r.get('role_level')),r.get('role_scope'),r.get('status'),'grantor:',r.get('role_grantor')); n+=1\nprint('  (none)' if not n else '')\"",
    "index": 230,
    "kind": "tool_use"
   },
@@ -1338,24 +1338,24 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno agents spawn --name lead-fno-platform \"You are teamed lead over the fno project. Level 0 (VP altitude), scope: fno, grantor: the human operator, via the outgoing lead of epic x-d7e4 who is abdicating now. State your level, altitude, scope, mission workspace, and mail handle in your opening line.\n\nREAD FIRST, before anything else: ~/c3po/internal/fno/plans/20260805-session-handoff-lead-x-d7e4.md\n\nThat is the outgoing lead's handoff. It carries what the graph cannot: which claims are VERIFIED versus inherited, four claims the outgoing lead got WRONG and why, and three findings that are still unfiled. Read it fully before you touch a node. Its 'What I got wrong' section is not self-flagellation, it is a warning about which inherited asserti",
+   "target": "cd .\nfno agents spawn --name lead-fno-platform \"You are teamed lead over the fno project. Level 0 (VP altitude), scope: fno, grantor: the human operator, via the outgoing lead of epic x-d7e4 who is stepping_down now. State your level, altitude, scope, mission workspace, and mail handle in your opening line.\n\nREAD FIRST, before anything else: ~/c3po/internal/fno/plans/20260805-session-handoff-lead-x-d7e4.md\n\nThat is the outgoing lead's handoff. It carries what the graph cannot: which claims are VERIFIED versus inherited, four claims the outgoing lead got WRONG and why, and three findings that are still unfiled. Read it fully before you touch a node. Its 'What I got wrong' section is not self-flagellation, it is a warning about which inherited asserti",
    "index": 234,
    "kind": "tool_use"
   },
   {
-   "text": "`--team` is rejected by the `fno-agents` binary even though the skill documents it \u2014 doc/implementation drift, same class as everything else today. Spawning, then coronating in place via the Python path whose code I actually read.",
+   "text": "`--team` is rejected by the `fno-agents` binary even though the skill documents it \u2014 doc/implementation drift, same class as everything else today. Spawning, then promoting in place via the Python path whose code I actually read.",
    "index": 235,
    "kind": "assistant_text"
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno agents spawn --name lead-fno-platform \"You are teamed lead over the fno project. Level 0 (VP altitude), scope: fno, grantor: the human operator via the outgoing lead of epic x-d7e4, who is abdicating. Your team is stamped separately by 'fno agents team' immediately after this spawn - confirm it with 'fno whoami' before acting as lead. State your level, altitude, scope and mail handle in your opening line.\n\nREAD FIRST: ~/c3po/internal/fno/plans/20260805-session-handoff-lead-x-d7e4.md\n\nThat is the outgoing lead's handoff. It carries what the graph cannot: which claims are VERIFIED versus inherited, four claims the outgoing lead got WRONG, and three findings still unfiled. Read it fully before touching a node. Its 'What I got wrong' secti",
+   "target": "cd .\nfno agents spawn --name lead-fno-platform \"You are teamed lead over the fno project. Level 0 (VP altitude), scope: fno, grantor: the human operator via the outgoing lead of epic x-d7e4, who is stepping_down. Your team is stamped separately by 'fno agents team' immediately after this spawn - confirm it with 'fno whoami' before acting as lead. State your level, altitude, scope and mail handle in your opening line.\n\nREAD FIRST: ~/c3po/internal/fno/plans/20260805-session-handoff-lead-x-d7e4.md\n\nThat is the outgoing lead's handoff. It carries what the graph cannot: which claims are VERIFIED versus inherited, four claims the outgoing lead got WRONG, and three findings still unfiled. Read it fully before touching a node. Its 'What I got wrong' secti",
    "index": 236,
    "kind": "tool_use"
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno agents team lead-fno-platform --scope fno --level 0 2>&1 | tail -4\necho \"=== verify stamped ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if r.get('crown_scope'): print('  TEAMED:',r.get('name'),'L'+str(r.get('crown_level')),'scope='+str(r.get('crown_scope')),r.get('status'),'grantor='+str(r.get('crown_grantor')))\n\"",
+   "target": "cd .\nfno agents team lead-fno-platform --scope fno --level 0 2>&1 | tail -4\necho \"=== verify stamped ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if r.get('role_scope'): print('  TEAMED:',r.get('name'),'L'+str(r.get('role_level')),'scope='+str(r.get('role_scope')),r.get('status'),'grantor='+str(r.get('role_grantor')))\n\"",
    "index": 237,
    "kind": "tool_use"
   },
@@ -1376,17 +1376,17 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\npython3 - <<'PYEOF'\np='~/c3po/internal/fno/plans/20260805-session-handoff-lead-x-d7e4.md'\ns=open(p).read()\nanchor=\"I asserted the opposite earlier today\"\nadd = \"\"\"### Two further team findings, measured at abdication\n\n**The outgoing lead never held a stamped team at all.**\n`fno whoami` printed no team line and `fno agents list` showed zero teamed rows for the entire lead.\nThe team was conversational - the operator said \"you are /fno:lead x-d7e4\" and the session declared level 0 in its opening line - but nothing was ever written by the verb.\nThe skill is explicit that \"a team is stamped by a grantor, never self-declared\", so the whole lead ran outside its own provenance discipline and nothing detected it.\nThe practical upside",
+   "target": "cd .\npython3 - <<'PYEOF'\np='~/c3po/internal/fno/plans/20260805-session-handoff-lead-x-d7e4.md'\ns=open(p).read()\nanchor=\"I asserted the opposite earlier today\"\nadd = \"\"\"### Two further team findings, measured at departure\n\n**The outgoing lead never held a stamped team at all.**\n`fno whoami` printed no team line and `fno agents list` showed zero teamed rows for the entire lead.\nThe team was conversational - the operator said \"you are /fno:lead x-d7e4\" and the session declared level 0 in its opening line - but nothing was ever written by the verb.\nThe skill is explicit that \"a team is stamped by a grantor, never self-declared\", so the whole lead ran outside its own provenance discipline and nothing detected it.\nThe practical upside",
    "index": 241,
    "kind": "tool_use"
   },
   {
-   "text": "**Abdicated.** `lead-fno-platform` (`<handle>`) holds a real stamped team \u2014 `{\"level\":0,\"scope\":\"fno\",\"grantor\":\"human\"}` \u2014 which is more than I ever had.",
+   "text": "**SteppedDown.** `lead-fno-platform` (`<handle>`) holds a real stamped team \u2014 `{\"level\":0,\"scope\":\"fno\",\"grantor\":\"human\"}` \u2014 which is more than I ever had.",
    "index": 242,
    "kind": "assistant_text"
   },
   {
-   "text": "## Two findings the abdication itself produced",
+   "text": "## Two findings the departure itself produced",
    "index": 243,
    "kind": "assistant_text"
   },
@@ -1401,7 +1401,7 @@
    "kind": "assistant_text"
   },
   {
-   "text": "**`fno agents spawn --team` is documented but not implemented** \u2014 `fno-agents: unknown flag: --team`. Spawn-then-coronate worked. Same doc-vs-implementation drift as the succession gap; handed to the new lead to file.",
+   "text": "**`fno agents spawn --team` is documented but not implemented** \u2014 `fno-agents: unknown flag: --team`. Spawn-then-promote worked. Same doc-vs-implementation drift as the succession gap; handed to the new lead to file.",
    "index": 246,
    "kind": "assistant_text"
   },
@@ -1416,19 +1416,19 @@
    "kind": "assistant_text"
   },
   {
-   "text": "One correction to something I implied: the whoami team line *is* implemented (`team_label` in `registry.py` is the shared formatter for whoami and `agents list`). It printed nothing because I genuinely had no team, which is correct behavior. The defect isn't a missing line \u2014 it's that nothing objects to an uncrowned session acting as lead.",
+   "text": "One correction to something I implied: the whoami team line *is* implemented (`team_label` in `registry.py` is the shared formatter for whoami and `agents list`). It printed nothing because I genuinely had no team, which is correct behavior. The defect isn't a missing line \u2014 it's that nothing objects to an unpromoted session acting as lead.",
    "index": 249,
    "kind": "assistant_text"
   },
   {
    "tool": "Bash",
-   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== TEAM-PLUMBING FINDINGS, measured 2026-08-05 at an actual abdication ===\n\nFolded here rather than filed beside because this node's design already adds a team verb (`fno agents team --succeed`, the succession transfer). Same verb family, same design doc, same PR. Do not file these separately.\n\n1. `fno agents spawn --team` IS DOCUMENTED AND NOT IMPLEMENTED. skills/lead/SKILL.md instructs bestow-at-spawn via `fno agents spawn ... --team level=N,scope=<scope>`. The fno-agents binary rejects it outright: `fno-agents: unknown flag: --team`. The working path is sp",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== TEAM-PLUMBING FINDINGS, measured 2026-08-05 at an actual departure ===\n\nFolded here rather than filed beside because this node's design already adds a team verb (`fno agents team --succeed`, the succession transfer). Same verb family, same design doc, same PR. Do not file these separately.\n\n1. `fno agents spawn --team` IS DOCUMENTED AND NOT IMPLEMENTED. skills/lead/SKILL.md instructs grant-at-spawn via `fno agents spawn ... --team level=N,scope=<scope>`. The fno-agents binary rejects it outright: `fno-agents: unknown flag: --team`. The working path is sp",
    "index": 250,
    "kind": "tool_use"
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno backlog update x-7685 --size L 2>&1 | tail -1\nfno mail send <handle> \"AMENDMENT to your brief, from the outgoing lead. Two items, both to prevent duplicate work.\n\n1. DO NOT FILE the 'fno agents spawn --team is documented but unimplemented' drift. I told you to file it; I have instead folded it into x-7685, along with a second team finding. Reason: x-7685's design already adds a team verb (fno agents team --succeed, the succession transfer), so the team-plumbing work is one PR, not three nodes. Re-read x-7685's details - there is a new section at the end marked 'TEAM-PLUMBING FINDINGS'. x-7685 is now size L and status ready.\n\nThe second finding in that section is the one that should bother you most: AN UNCROWNED SESSION ACTING AS LEAD IS UNDET",
+   "target": "cd .\nfno backlog update x-7685 --size L 2>&1 | tail -1\nfno mail send <handle> \"AMENDMENT to your brief, from the outgoing lead. Two items, both to prevent duplicate work.\n\n1. DO NOT FILE the 'fno agents spawn --team is documented but unimplemented' drift. I told you to file it; I have instead folded it into x-7685, along with a second team finding. Reason: x-7685's design already adds a team verb (fno agents team --succeed, the succession transfer), so the team-plumbing work is one PR, not three nodes. Re-read x-7685's details - there is a new section at the end marked 'TEAM-PLUMBING FINDINGS'. x-7685 is now size L and status ready.\n\nThe second finding in that section is the one that should bother you most: AN UNPROMOTED SESSION ACTING AS LEAD IS UNDET",
    "index": 251,
    "kind": "tool_use"
   },
@@ -1440,18 +1440,18 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno agents peek lead-fno-platform --lines 6 2>&1 | tail -8\necho \"=== registry row ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if r.get('name')=='lead-fno-platform':\n        print({k:r.get(k) for k in ('name','short_id','harness_session_id','status','crown_level','crown_scope')})\"",
+   "target": "cd .\nfno agents peek lead-fno-platform --lines 6 2>&1 | tail -8\necho \"=== registry row ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if r.get('name')=='lead-fno-platform':\n        print({k:r.get(k) for k in ('name','short_id','harness_session_id','status','role_level','role_scope')})\"",
    "index": 253,
    "kind": "tool_use"
   },
   {
-   "text": "Lead is **live**, team stamped (`crown_level: 0, crown_scope: fno`), and hasn't started its first turn yet \u2014 peek shows the seed still unprocessed. That's why the inject had nowhere to land. Re-sending by name.",
+   "text": "Lead is **live**, team stamped (`role_level: 0, role_scope: fno`), and hasn't started its first turn yet \u2014 peek shows the seed still unprocessed. That's why the inject had nowhere to land. Re-sending by name.",
    "index": 254,
    "kind": "assistant_text"
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno mail send lead-fno-platform \"AMENDMENT to your brief, from the outgoing lead. Two items, both to prevent duplicate work.\n\n1. DO NOT FILE the 'fno agents spawn --team is documented but unimplemented' drift. Your brief told you to; I have instead folded it into x-7685 along with a second team finding. Reason: x-7685's design already adds a team verb (fno agents team --succeed, the succession transfer), so team plumbing is one PR rather than three nodes. Re-read x-7685 - there is a new section at the end marked 'TEAM-PLUMBING FINDINGS'. The node is now size L, status ready.\n\nThe second finding there should bother you most: AN UNCROWNED SESSION ACTING AS LEAD IS UNDETECTABLE. My entire lead ran with no teamed registry row - fno whoami printed n",
+   "target": "cd .\nfno mail send lead-fno-platform \"AMENDMENT to your brief, from the outgoing lead. Two items, both to prevent duplicate work.\n\n1. DO NOT FILE the 'fno agents spawn --team is documented but unimplemented' drift. Your brief told you to; I have instead folded it into x-7685 along with a second team finding. Reason: x-7685's design already adds a team verb (fno agents team --succeed, the succession transfer), so team plumbing is one PR rather than three nodes. Re-read x-7685 - there is a new section at the end marked 'TEAM-PLUMBING FINDINGS'. The node is now size L, status ready.\n\nThe second finding there should bother you most: AN UNPROMOTED SESSION ACTING AS LEAD IS UNDETECTABLE. My entire lead ran with no teamed registry row - fno whoami printed n",
    "index": 255,
    "kind": "tool_use"
   },
@@ -1619,12 +1619,12 @@
    "kind": "tool_use"
   },
   {
-   "text": "2. **Chose `pass` shape, then didn't abdicate** \u2014 spawned workers, abdicated at kickoff per the skill, then acted as lead for four more hours. Checkable: workers spawned + abdication declared + subsequent rulings issued.",
+   "text": "2. **Chose `pass` shape, then didn't step_down** \u2014 spawned workers, stepped_down at kickoff per the skill, then acted as lead for four more hours. Checkable: workers spawned + departure declared + subsequent rulings issued.",
    "index": 285,
    "kind": "assistant_text"
   },
   {
-   "text": "3. **Never verified it held a team** \u2014 ran an entire lead uncrowned. Checkable: any `team` read in the transcript.",
+   "text": "3. **Never verified it held a team** \u2014 ran an entire lead unpromoted. Checkable: any `team` read in the transcript.",
    "index": 286,
    "kind": "assistant_text"
   },

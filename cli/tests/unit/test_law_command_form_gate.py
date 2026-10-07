@@ -16,18 +16,18 @@ GATE = REPO_ROOT / "scripts/ci/check-law-command-forms.sh"
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     (tmp_path / "scripts/ci/fixtures").mkdir(parents=True)
-    (tmp_path / "skills/reign").mkdir(parents=True)
+    (tmp_path / "skills/term").mkdir(parents=True)
     shutil.copy(GATE, tmp_path / "scripts/ci/check-law-command-forms.sh")
     (tmp_path / "scripts/ci/law-command-forms.txt").write_text(
         "# form|law ids|skill paths\n"
-        "--substrate thread|d-b1a7afe2|skills/reign/court.md\n"
-        "glm-5.3-flash[1m]|d-20293d74 d-94853e86|skills/reign/court.md\n"
+        "--substrate thread|d-b1a7afe2|skills/term/team.md\n"
+        "glm-5.3-flash[1m]|d-20293d74 d-94853e86|skills/term/team.md\n"
         "-|d-f2d9cfa7|exempt: no reusable form\n"
     )
     (tmp_path / "scripts/ci/fixtures/law-command-form-canary.md").write_text(
         "--substrate thread\n"
     )
-    (tmp_path / "skills/reign/court.md").write_text(
+    (tmp_path / "skills/term/team.md").write_text(
         "fno agents spawn --substrate thread\n"
         "glm-5.3-flash[1m]\n"
     )
@@ -54,12 +54,12 @@ def test_all_registered_forms_pass(repo: Path) -> None:
 
 
 def test_missing_form_names_laws_and_path(repo: Path) -> None:
-    (repo / "skills/reign/court.md").write_text("fno agents spawn --substrate thread\n")
+    (repo / "skills/term/team.md").write_text("fno agents spawn --substrate thread\n")
     result = _run(repo)
     assert result.returncode == 1
     assert "glm-5.3-flash[1m]" in result.stderr
     assert "d-20293d74 d-94853e86" in result.stderr
-    assert "skills/reign/court.md" in result.stderr
+    assert "skills/term/team.md" in result.stderr
 
 
 def test_malformed_registry_row_fails_closed(repo: Path) -> None:

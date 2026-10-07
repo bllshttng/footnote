@@ -24,3 +24,4 @@ docs/configuration-guide.md	SettingsModel and cli/src/fno/config/registry.py	cd 
 docs/config.example.toml	SettingsModel and cli/src/fno/config/registry.py	cd cli && uv run fno-py config schema --toml --write
 *Cargo.lock	the sibling Cargo.toml	cargo build in that crate
 docs/loops.md	crates/fno-agents/src/tick_ledger.rs KNOWN_ARMS	cargo run --manifest-path crates/fno-agents/Cargo.toml -- loops table --markdown > docs/loops.md
+crates/fno/src/role_migration.rs	crates/fno-agents/src/role_migration.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml

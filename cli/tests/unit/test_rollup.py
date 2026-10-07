@@ -1,6 +1,6 @@
 """Rollup visibility: the orphan predicate and the ancestor walk it leans on.
 
-The filing-time ladder (resolve, receipts, crown override) is native now; its
+The filing-time ladder (resolve, receipts, role override) is native now; its
 behavior is pinned by the autolink unit tests and the create-surface golden
 replays beside the Rust owner.
 """

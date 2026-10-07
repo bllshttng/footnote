@@ -124,7 +124,7 @@ pub fn run(args: &[String]) -> i32 {
     );
 
     // Event rules run before the ownership evaluation: a session with no
-    // target or king manifest still owes its chat asks to the board
+    // target or lead manifest still owes its chat asks to the board
     // (docs/architecture/event-rules.md). A notify leaves through the
     // operator chokepoint; the first block or nudge speaks the same
     // harness-shaped block the stop gate prints, and the stop returns.
@@ -250,7 +250,7 @@ fn run_owned(
     // claude_transcript_id, then harness_session_id) must name THIS
     // transcript. Codex rollout suffixes count. The guard's allow now
     // journals a correlated stop_decision first: lead admission reads one
-    // after the newest snapshot for EVERY session, and a fresh heir resolves
+    // after the newest snapshot for EVERY session, and a fresh successor resolves
     // HERE - to its predecessor's manifest - until init, the very thing the
     // silent allow starved, writes its own.
     if !state_is_pending
@@ -1098,7 +1098,7 @@ fn lead_manifest_in(
         return None;
     }
     let scope = row
-        .crown_scope
+        .role_scope
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
@@ -1350,8 +1350,8 @@ mod tests {
     }
 
     /// The foreign-session guard's allow journals a correlated
-    /// stop_decision, so a fresh heir's stops stay observable before init
-    /// writes the heir's own manifest.
+    /// stop_decision, so a fresh successor's stops stay observable before init
+    /// writes the successor's own manifest.
     #[test]
     fn a_foreign_manifest_stop_still_journals_a_correlated_stop_decision() {
         let _env = crate::claims::test_env_lock()
@@ -1787,7 +1787,7 @@ mod tests {
             "positive control: the row cwd and the payload cwd must key different spaces"
         );
         let scope = "x-test-epic";
-        let leads = crate::hook::events_space(&repo).join("kings");
+        let leads = crate::hook::events_space(&repo).join("leads");
         std::fs::create_dir_all(&leads).unwrap();
         let manifest = leads.join(format!("{scope}.md"));
         std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: org\n---\n").unwrap();
@@ -1795,7 +1795,7 @@ mod tests {
         let teamed = RegistryEntry {
             cwd: repo.to_string_lossy().into_owned(),
             harness_session_id: Some(sid.into()),
-            crown_scope: Some(scope.into()),
+            role_scope: Some(scope.into()),
             ..Default::default()
         };
         let rows = vec![teamed];
@@ -1808,26 +1808,26 @@ mod tests {
             status: crate::AgentStatus::Exited,
             cwd: repo.to_string_lossy().into_owned(),
             harness_session_id: Some("gone-session".into()),
-            crown_scope: Some(scope.into()),
+            role_scope: Some(scope.into()),
             ..Default::default()
         };
         assert_eq!(
             super::lead_manifest_in(&[terminal], "gone-session", None, &elsewhere),
             None
         );
-        let uncrowned = RegistryEntry {
+        let unpromoted = RegistryEntry {
             cwd: repo.to_string_lossy().into_owned(),
             harness_session_id: Some("plain-session".into()),
             ..Default::default()
         };
         assert_eq!(
-            super::lead_manifest_in(&[uncrowned], "plain-session", None, &elsewhere),
+            super::lead_manifest_in(&[unpromoted], "plain-session", None, &elsewhere),
             None
         );
         let unsafe_scope = RegistryEntry {
             cwd: repo.to_string_lossy().into_owned(),
             harness_session_id: Some("sneaky-session".into()),
-            crown_scope: Some("../escape".into()),
+            role_scope: Some("../escape".into()),
             ..Default::default()
         };
         assert_eq!(
@@ -1837,7 +1837,7 @@ mod tests {
         let no_file = RegistryEntry {
             cwd: repo.to_string_lossy().into_owned(),
             harness_session_id: Some("bare-session".into()),
-            crown_scope: Some("x-no-file".into()),
+            role_scope: Some("x-no-file".into()),
             ..Default::default()
         };
         assert_eq!(
@@ -1852,7 +1852,7 @@ mod tests {
         // A row whose cwd names a removed directory (a deleted linked
         // worktree keys its own dead slug) falls back to the payload cwd's
         // space before answering None.
-        let payload_leads = crate::hook::events_space(&elsewhere).join("kings");
+        let payload_leads = crate::hook::events_space(&elsewhere).join("leads");
         std::fs::create_dir_all(&payload_leads).unwrap();
         std::fs::write(payload_leads.join(format!("{scope}.md")), "fallback").unwrap();
         let dead_cwd = RegistryEntry {
@@ -1863,7 +1863,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             harness_session_id: Some("ghost-session".into()),
-            crown_scope: Some(scope.into()),
+            role_scope: Some(scope.into()),
             ..Default::default()
         };
         assert_eq!(

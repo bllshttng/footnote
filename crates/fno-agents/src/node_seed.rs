@@ -256,7 +256,7 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
 
     // 1. Team and resume spawns pass unchanged: their flags already name
     //    the work profile, and the payload carries them as facts.
-    if payload.get("crown").and_then(Value::as_bool) == Some(true)
+    if payload.get("role").and_then(Value::as_bool) == Some(true)
         || payload.get("resume").and_then(Value::as_bool) == Some(true)
     {
         return json!({"action": "pass"});
@@ -558,7 +558,7 @@ mod tests {
         json!({
             "node": "x-1", "row_found": true, "effective_verb": "/blueprint",
             "stored_verb": "/blueprint", "derive_error": null,
-            "family": ["/target", "/blueprint"], "crown": false, "resume": false,
+            "family": ["/target", "/blueprint"], "role": false, "resume": false,
         })
     }
 
@@ -647,9 +647,9 @@ mod tests {
     #[test]
     fn team_and_resume_spawns_pass_unchanged() {
         let mut p = base().clone();
-        p["crown"] = json!(true);
+        p["role"] = json!(true);
         assert_eq!(decide_map(p.clone())["action"], "pass");
-        p["crown"] = json!(false);
+        p["role"] = json!(false);
         p["resume"] = json!(true);
         assert_eq!(decide_map(p)["action"], "pass");
     }
@@ -721,7 +721,7 @@ mod tests {
             "seed_index": index,
             "seed_form": "positional",
             "family": ["/target", "/blueprint"],
-            "crown": false, "resume": false,
+            "role": false, "resume": false,
         })
     }
 
@@ -869,9 +869,9 @@ mod tests {
     #[test]
     fn team_and_resume_never_derive() {
         let mut p = base_derive("/fno:target x-1", 1);
-        p["crown"] = json!(true);
+        p["role"] = json!(true);
         assert_eq!(decide_map(p.clone())["action"], "pass");
-        p["crown"] = json!(false);
+        p["role"] = json!(false);
         p["resume"] = json!(true);
         assert_eq!(decide_map(p)["action"], "pass");
     }

@@ -37,7 +37,7 @@ The fixed match lives in `event_rules.rs::predicate`. A row names any of these, 
 
 | Predicate | Holds when |
 |---|---|
-| `crowned` | The session holds a live team in the registry. |
+| `promoted` | The session holds a live team in the registry. |
 | `last_message_decision_ask` | The last assistant message carries an `Approval:` line, or an ask sentence plus a numbered list of two or more options. |
 | `turn_filed_question` | The journal holds an `operator_question` this session asked, or a route span it acted on, since the transcript's last user turn (30 minutes when unreadable). |
 | `route_self` | The matched route span answered the ask itself. |
@@ -74,18 +74,18 @@ The source prose carried 55 if-then rules across skills/lead, using-fno, target 
 |---|---|---|
 | 1 | Split, conflict or unknown role stops the skill (lead:32) | stays prose (start-up read of `fno agents org`) |
 | 2 | Read settled findings before the first check-in (lead:39) | stays prose |
-| 3 | Declare `shape court` the moment the first worker spawns (lead:42) | guard: lead Stop nudge on an undeclared org |
+| 3 | Declare `shape team` the moment the first worker spawns (lead:42) | guard: lead Stop nudge on an undeclared org |
 | 4 | Term reached: hand off or extend with a reason (lead:43) | guard: Stop term report + `org term` refuses without `--reason` |
 | 5 | `--once`: no `/goal` or `/loop` through raw mail (lead:47) | row (later): PreToolUse Bash, titled, `mail send --raw "/goal` |
-| 6 | Journal `reign_armed` with the loop receipt (lead:63) | stays prose |
+| 6 | Journal `lead_armed` with the loop receipt (lead:63) | stays prose |
 | 7 | Canon doc older than 24h past the compaction ceiling blocks Stop (lead:75) | guard: stop gate |
 | 8 | Repeated ask: file it; reversible + recommended: decide it and tell the user (lead:86) | rows: chat_ask_unfiled (the chat half), decided_ask_fyi, why_user_escape |
 | 9 | A role member reads done: drop it (lead:94) | row (later): event node done, condition role member, action nudge |
-| 10 | refusal_rate RISING: hand off (lead:95) | row (later): event reign_checkin, action nudge |
+| 10 | refusal_rate RISING: hand off (lead:95) | row (later): event lead_checkin, action nudge |
 | 11 | wake_ratio over 3 to 1: journal attention (lead:96) | guard: check-in journals the attention item |
 | 12 | Overdue escalation: take the recommendation or wait (lead:100) | stays prose (check-in reader; timer, not a turn boundary) |
 | 13 | Control-plane attention: tell the user (lead:101) | stays prose |
-| 14 | `pr status` ready: merge it yourself (lead:106) | guard: king_decide blocks Stop while actionable rows exist |
+| 14 | `pr status` ready: merge it yourself (lead:106) | guard: lead_decide blocks Stop while actionable rows exist |
 | 15 | Run merge verbs from the row's project cwd (lead:106) | stays prose |
 | 16 | Lever order 1-5 (lead:108-113) | stays prose (judgment) |
 | 17 | Start only nodes the check-in lists (lead:115) | guard: blueprint ceiling + spawn gate |
@@ -93,7 +93,7 @@ The source prose carried 55 if-then rules across skills/lead, using-fno, target 
 | 19 | Never steer a worker with `fno agents stop` (lead:117) | row (later): PreToolUse Bash, titled |
 | 20 | Never parent new work into a running epic (lead:121) | guard: `epic_max_open_children` + role-linked rollup |
 | 21 | Rank is the user's (lead:123) | guard: `fno backlog rank` refuses agent sessions |
-| 22 | Verdict stalled, degraded or unknown: escalate (lead:131) | row (later): event reign_checkin verdict, action nudge |
+| 22 | Verdict stalled, degraded or unknown: escalate (lead:131) | row (later): event lead_checkin verdict, action nudge |
 | 23 | A role clears only its own question (lead:137) | guard: clear refuses a role on another's question |
 | 24 | Escalate the four classes only; decide the rest (lead:138) | row: why_user_escape |
 | 25 | Silence past the deadline takes the default (lead:139) | stays prose (check-in reader) |
@@ -103,12 +103,12 @@ The source prose carried 55 if-then rules across skills/lead, using-fno, target 
 | 29 | A merge-conditioning ruling needs a hold, not a note (lead:144) | stays prose |
 | 30 | `law set` cannot supersede the user's law (lead:145) | guard: law door |
 | 31 | `faq add` needs `--exit` (lead:146) | guard: faq verb |
-| 32 | Dispatch exception journaled BEFORE the spawn (lead:152) | row (later): PreToolUse spawn, titled, no `reign_dispatch_exception` row |
+| 32 | Dispatch exception journaled BEFORE the spawn (lead:152) | row (later): PreToolUse spawn, titled, no `lead_dispatch_exception` row |
 | 33 | Dispatch brief on the node before a blueprint (lead:154) | row (later): PreToolUse Agent/spawn with blueprint, node without dispatch_brief |
-| 34 | Exit blocked while actionable rows exist (lead:163) | guard: king_decide |
+| 34 | Exit blocked while actionable rows exist (lead:163) | guard: lead_decide |
 | 35 | Arm the fleet breaker only on user order (lead:167) | row (later): PreToolUse Bash `incident stop`, titled |
 | 36 | "Don't interrupt" means `/fno:dnd` (lead:169) | stays prose (judgment) |
-| 37 | Run intel windows at abdicate (lead:173) | guard: daemon writes parts 1 and 2 |
+| 37 | Run intel windows at step_down (lead:173) | guard: daemon writes parts 1 and 2 |
 | 38 | Ask the lead by mail with `<help>` for out-of-scope calls (minion-clause:15) | stays prose (help rows carry no node or session yet) |
 | 39 | Escalate one level at a time (minion-clause:18, once:456) | stays prose: conflicts with the user-question routing rule, unsettled |
 | 40 | Rule a worker ask: approve, revise or escalate the four classes (once:506) | row: why_user_escape |

@@ -1,4 +1,4 @@
-//! A team's term: the bound a lead declares at coronation so a healthy
+//! A team's term: the bound a lead declares at promotion so a healthy
 //! board can no longer wait forever. Pure reading logic only; the Stop-hook
 //! gate (`loopcheck::lead_decide`) and the declaration verb
 //! (`lead_state::run_lead_term`) call into this module rather than

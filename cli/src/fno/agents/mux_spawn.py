@@ -77,12 +77,12 @@ from fno.agents.registry import (
     mint_agent_entry,
     update_registry,
 )
-from fno.agents.crown import (
+from fno.agents.role import (
     calling_agent_row,
-    crown_validation_error,
-    journal_spawn_crown,
-    plan_spawn_crown,
-    settle_spawn_crown,
+    role_validation_error,
+    journal_spawn_role,
+    plan_spawn_role,
+    settle_spawn_role,
 )
 
 
@@ -3301,8 +3301,8 @@ def dispatch_spawn_pane(
     # selected the tab itself. Not a user flag - the user surface is --tab.
     tab_id: Optional[str] = None,
     enforce_tab_capacity: bool = False,
-    crown_level: Optional[int] = None,
-    crown_scope: Optional[str] = None,
+    role_level: Optional[int] = None,
+    role_scope: Optional[str] = None,
     succession: bool = False,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
@@ -3333,26 +3333,26 @@ def dispatch_spawn_pane(
        names the mux session; never a daemon-PTY fallback (AC1-ERR).
     5. registry row with ``mux: {session, pane_id}`` (create-after-spawn).
     """
-    # Crown values, validated on the way in for the same reason the tier-remap
-    # check below is: `cmd_spawn` parses `--crown` before it gets here, but an
+    # Role values, validated on the way in for the same reason the tier-remap
+    # check below is: `cmd_spawn` parses `--role-level` before it gets here, but an
     # in-process caller hands (level, scope) straight to this signature, and a
     # value that skipped validation is written to the SHARED registry. Fail
     # closed before the pane exists, so a refusal leaves no worker behind.
-    crown_problem = crown_validation_error(crown_level, crown_scope) if crown_level is not None or crown_scope is not None else None
-    if crown_problem is not None:
-        raise DispatchAskError(crown_problem, exit_code=2)
-    crown_plan: Optional[dict] = None
-    crown_caller_name: Optional[str] = None
-    if crown_level is not None:
+    role_problem = role_validation_error(role_level, role_scope) if role_level is not None or role_scope is not None else None
+    if role_problem is not None:
+        raise DispatchAskError(role_problem, exit_code=2)
+    role_plan: Optional[dict] = None
+    role_caller_name: Optional[str] = None
+    if role_level is not None:
         # Same authorization + occupancy rule as the bg seam: a grant must be a
         # strict subset of what the grantor holds, and a live holder blocks an
-        # heir from launching uncrowned. Both doors check, either is a door.
-        crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
-        crown_refusal, crown_plan = plan_spawn_crown(
-            crown_scope or "", caller_row, succession,
+        # successor from launching unpromoted. Both doors check, either is a door.
+        role_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
+        role_refusal, role_plan = plan_spawn_role(
+            role_scope or "", caller_row, succession, proposed_name=name,
         )
-        if crown_refusal is not None:
-            raise DispatchAskError(f"--promote: {crown_refusal}", exit_code=2)
+        if role_refusal is not None:
+            raise DispatchAskError(f"--promote: {role_refusal}", exit_code=2)
 
     conflict = pane_placement_conflict(
         pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,
@@ -3360,11 +3360,11 @@ def dispatch_spawn_pane(
     if conflict:
         raise DispatchAskError(conflict, exit_code=2)
 
-    # The pane half of the crowned-spawn typing: `pane` is the DEFAULT
+    # The pane half of the promoted-spawn typing: `pane` is the DEFAULT
     # substrate, so typing only on the bg lane left the common case improvising.
-    message, reign_typed = (
-        lead_typed_message(message, crown_level, crown_scope, revive=False, harness=provider)
-        if crown_level is not None else (message, False)
+    message, term_typed = (
+        lead_typed_message(message, role_level, role_scope, revive=False, harness=provider)
+        if role_level is not None else (message, False)
     )
 
     # Launch-time headroom picking: `pane` is the DEFAULT substrate and
@@ -3834,7 +3834,7 @@ def dispatch_spawn_pane(
             #
             # A fresh uuid4 makes a collision unlikely on THIS path; the claim
             # is here because the id is not always fresh. A retry, a watchdog
-            # wake, or a king re-dispatching a stalled node is a create on an id
+            # wake, or a lead re-dispatching a stalled node is a create on an id
             # that may already exist, and this fleet does all three.
             from fno.agents.harnesses.pi import (
                 await_session_created as _pi_await,
@@ -4347,11 +4347,11 @@ def dispatch_spawn_pane(
                 exit_code=1,
             )
 
-        # Crown stamp (US9): the grantor is the spawning session (the parent edge
+        # Role stamp (US9): the grantor is the spawning session (the parent edge
         # captured above), or "human" for a direct human spawn with no session
-        # env - never a caller-supplied value. Only stamped when a crown was
-        # actually requested (crown_level is not None).
-        crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
+        # env - never a caller-supplied value. Only stamped when a role was
+        # actually requested (role_level is not None).
+        role_grantor_val = (spawned_by_session or "human") if role_level is not None else None
 
         # record WHICH route this pane launched with, so a later relaunch
         # (which re-launches a process rather than attaching to this live one) can
@@ -4385,21 +4385,21 @@ def dispatch_spawn_pane(
         stored_session_uuid: Optional[str] = None
         stamp_failure: Optional[str] = None
         row_status: AgentStatus = "live"
-        crown_declined = False
-        crown_succeeded = False
-        # The spawn's crown INTENT, captured before the write: a declined or
+        role_declined = False
+        role_succeeded = False
+        # The spawn's role INTENT, captured before the write: a declined or
         # terminal-row write nulls the live variables, and the journal call
         # after the commit still needs what the spawn asked for.
-        crown_asked_level = crown_level
-        crown_asked_scope = crown_scope
-        crown_asked_grantor = crown_grantor_val
-        crown_outcome: Optional[str] = None
-        crown_cleared: list = []
-        king_loop_armed: Optional[bool] = None
-        king_unarmed_reason = ""
+        role_asked_level = role_level
+        role_asked_scope = role_scope
+        role_asked_grantor = role_grantor_val
+        role_outcome: Optional[str] = None
+        role_cleared: list = []
+        lead_loop_armed: Optional[bool] = None
+        lead_unarmed_reason = ""
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, crown_outcome, crown_cleared, king_loop_armed, king_unarmed_reason
+            nonlocal stored_session_uuid, row_status, role_level, role_scope, role_grantor_val, role_declined, role_succeeded, role_outcome, role_cleared, lead_loop_armed, lead_unarmed_reason
             # Reclaiming a dead row's name: drop the corpse in the SAME
             # transaction that appends its replacement, so the registry never
             # holds two rows under one name. Re-checked here, under the write
@@ -4437,40 +4437,40 @@ def dispatch_spawn_pane(
                 r.harness_session_id == session_uuid for r in rows
             )
             stored_session_uuid = None if claimed else session_uuid
-            # One-live-crown guard: if another non-terminal row already
-            # holds this scope, decline the crown and spawn uncrowned. Same lock,
+            # One-live-role guard: if another non-terminal row already
+            # holds this scope, decline the role and spawn unpromoted. Same lock,
             # same rows, same idiom as the claim check above. A worker without a
-            # crown is recoverable; a duplicate crown over one scope is not.
+            # role is recoverable; a duplicate role over one scope is not.
             #
             # UNLESS the holder is the caller: that is SUCCESSION, and it is the
-            # only way an abdicating king hands off, since a session that has
-            # already exited cannot spawn its heir. The vacate and the stamp land
+            # only way an stepping_down lead hands off, since a session that has
+            # already exited cannot spawn its successor. The vacate and the stamp land
             # in this one write, so the scope is never doubly nor un-ruled.
             # A spawn that already knows it is writing a TERMINAL row must not
-            # touch the crown at all. Succession vacates the caller's own row in
-            # this same transaction, so crowning a corpse would move the scope
-            # off a live king onto a row that will never act, leaving the scope
+            # touch the role at all. Succession vacates the caller's own row in
+            # this same transaction, so promoting a corpse would move the scope
+            # off a live lead onto a row that will never act, leaving the scope
             # unruled and the caller silently stripped - and the codex death
             # path raises exit 13 immediately afterwards, so nothing would put
             # it back.
             if forced_row_status in TERMINAL_STATUSES:
-                crown_level = None
-                crown_scope = None
-                crown_grantor_val = None
-            if crown_level is not None and crown_scope:
-                assert crown_plan is not None  # set by the pre-launch call above
-                rows, crown_outcome, crown_cleared = settle_spawn_crown(
-                    rows, scope=crown_scope, plan=crown_plan, heir=name,
-                    heir_harness=provider, heir_session=stored_session_uuid,
-                    heir_cwd=str(cwd),
+                role_level = None
+                role_scope = None
+                role_grantor_val = None
+            if role_level is not None and role_scope:
+                assert role_plan is not None  # set by the pre-launch call above
+                rows, role_outcome, role_cleared = settle_spawn_role(
+                    rows, scope=role_scope, plan=role_plan, successor=name,
+                    successor_harness=provider, successor_session=stored_session_uuid,
+                    successor_cwd=str(cwd),
                 )
-                if crown_outcome == "succeeded":
-                    crown_succeeded = True
-                elif crown_outcome == "declined":
-                    crown_level = None
-                    crown_scope = None
-                    crown_grantor_val = None
-                    crown_declined = True
+                if role_outcome == "succeeded":
+                    role_succeeded = True
+                elif role_outcome == "declined":
+                    role_level = None
+                    role_scope = None
+                    role_grantor_val = None
+                    role_declined = True
             # A pane with no identified session is created but not addressable.
             # Keep that transition explicit instead of calling it live - for the
             # happy-hosted claude route as much as for codex, where an id-less
@@ -4552,9 +4552,9 @@ def dispatch_spawn_pane(
                     # The mux pane back half: this row's PTY is a pane in
                     # mux.session (the mux ref stamped below).
                     substrate="pane",
-                    crown_level=crown_level,
-                    crown_scope=crown_scope,
-                    crown_grantor=crown_grantor_val,
+                    role_level=role_level,
+                    role_scope=role_scope,
+                    role_grantor=role_grantor_val,
                     route_settings_path=route_settings_path,
                     # this seam positively knows whether an account was
                     # pinned, so a claude row always carries "default" or the
@@ -4572,12 +4572,12 @@ def dispatch_spawn_pane(
                     model_name=model_name,
                     account_record_id=account_record_id,
                 )
-            if entry.crown_level is not None and entry.crown_scope:
-                from fno.king.state import arm_king_manifest
+            if entry.role_level is not None and entry.role_scope:
+                from fno.lead.state import arm_lead_manifest
 
                 try:
-                    king_loop_armed = arm_king_manifest(
-                        entry.crown_scope,
+                    lead_loop_armed = arm_lead_manifest(
+                        entry.role_scope,
                         entry.harness_session_id or "",
                         row=entry,
                     ) is not None
@@ -4585,8 +4585,8 @@ def dispatch_spawn_pane(
                     # Same contract as dispatch.py: a short_id/name fallback
                     # arms a manifest the owner guard always rejects, so the
                     # gate would arm dead. Refuse it and say so below.
-                    king_loop_armed = False
-                    king_unarmed_reason = str(exc)
+                    lead_loop_armed = False
+                    lead_unarmed_reason = str(exc)
             rows.append(entry)
             return rows
 
@@ -4601,47 +4601,47 @@ def dispatch_spawn_pane(
             # account's pinned env.
             if provider == "claude" and route_env:
                 route_settings_path = route_settings_path_for(route_env, account_env)
-            _declined_scope = crown_scope if crown_level is not None else None
+            _declined_scope = role_scope if role_level is not None else None
             update_registry(_append, path=registry_path)
-            journal_spawn_crown(
-                crown_outcome,
-                crown_cleared,
+            journal_spawn_role(
+                role_outcome,
+                role_cleared,
                 name=name,
-                level=crown_asked_level,
-                scope=crown_asked_scope,
-                grantor=crown_asked_grantor,
+                level=role_asked_level,
+                scope=role_asked_scope,
+                grantor=role_asked_grantor,
             )
-            if crown_declined and _declined_scope:
+            if role_declined and _declined_scope:
                 print(
                     f"spawn: role declined (scope {_declined_scope!r} already held "
-                    "by a live row); spawned uncrowned. The worker launched without a crown.",
+                    "by a live row); spawned unpromoted. The worker launched without a role.",
                     file=sys.stderr,
                 )
-            if crown_succeeded and _declined_scope:
-                vacated_names = {row.name for row, cause in crown_cleared if cause == "succession"}
+            if role_succeeded and _declined_scope:
+                vacated_names = {row.name for row, cause in role_cleared if cause == "succession"}
                 vacated = sorted(vacated_names)
-                noted = crown_caller_name in vacated
+                noted = role_caller_name in vacated
                 print(
-                    f"spawn: crown over {_declined_scope!r} transferred from {', '.join(vacated)} "
+                    f"spawn: role over {_declined_scope!r} transferred from {', '.join(vacated)} "
                     f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
                     file=sys.stderr,
                 )
-            if _declined_scope and king_loop_armed is False:
+            if _declined_scope and lead_loop_armed is False:
                 why = (
-                    f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
-                    if king_unarmed_reason
-                    else "; king loop disabled, no scope manifest armed"
+                    f": {lead_unarmed_reason}; the manifest arms when this worker self-identifies"
+                    if lead_unarmed_reason
+                    else "; lead loop disabled, no scope manifest armed"
                 )
                 print(
-                    f"spawn: crown over {_declined_scope!r} recorded, but the king "
+                    f"spawn: role over {_declined_scope!r} recorded, but the lead "
                     f"loop manifest was NOT armed{why}",
                     file=sys.stderr,
                 )
-            if _declined_scope and not crown_declined:
-                # No NOT-typed case here: typing is unconditional when a crown
+            if _declined_scope and not role_declined:
+                # No NOT-typed case here: typing is unconditional when a role
                 # is carried (no revive path on this lane).
                 print(
-                    f"spawn: crown over {_declined_scope!r} recorded; reign typed",
+                    f"spawn: role over {_declined_scope!r} recorded; term typed",
                     file=sys.stderr,
                 )
             # Birth (Wave 6): the row is written, so the pane worker now

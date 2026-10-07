@@ -1,6 +1,6 @@
 # Beat by harness
 
-The lead has one push contract on every harness. When a covered PR settles green, the daemon's `king_settle` arm mails the lead. When a covered node merges and closes, it mails again. The cheap heartbeat varies by harness. An unverified cell is an explicit gap, not a claim.
+The lead has one push contract on every harness. When a covered PR settles green, the daemon's `lead_settle` arm mails the lead. When a covered node merges and closes, it mails again. The cheap heartbeat varies by harness. An unverified cell is an explicit gap, not a claim.
 
 | Harness | Heartbeat |
 |---|---|

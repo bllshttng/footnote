@@ -88,14 +88,14 @@ def test_hold_for_pr_returns_attributable_plan_hold(tmp_path, monkeypatch):
         plan_body=(
             "---\nstatus: ready\ndispatch_hold:\n"
             "  reason: Blocking finding\n  release_when: Finding fixed\n"
-            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+            "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
         ),
     )
     verdict = _hold.hold_for_pr(42, str(tmp_path))
     assert verdict is not None
     assert verdict.owner_id == "x-5a5c"
     assert verdict.hold.state is DispatchHoldState.HELD
-    assert verdict.hold.set_by == "king:119e3c52"
+    assert verdict.hold.set_by == "lead:119e3c52"
 
 
 def test_hold_for_pr_fails_closed_when_bound_plan_is_unreadable(tmp_path, monkeypatch):
@@ -122,7 +122,7 @@ def test_hold_for_pr_catches_a_held_node_named_only_on_the_trailer(tmp_path, mon
     held_plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Blocking finding\n  release_when: Finding fixed\n"
-        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
     )
     _graph(
         tmp_path,
@@ -319,7 +319,7 @@ def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Blocking finding\n  release_when: Finding fixed\n"
-        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
     )
     graph = tmp_path / "graph.json"
     seed_graph(graph, json.dumps({"entries": [
@@ -369,7 +369,7 @@ def test_hold_for_pr_falls_back_to_show_toplevel_when_canonical_worktree_is_none
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Blocking finding\n  release_when: Finding fixed\n"
-        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
     )
     graph = tmp_path / "graph.json"
     seed_graph(graph, json.dumps({"entries": [
@@ -412,7 +412,7 @@ def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Blocking finding\n  release_when: Finding fixed\n"
-        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
     )
     graph = tmp_path / "graph.json"
     seed_graph(graph, json.dumps({"entries": [
@@ -458,13 +458,13 @@ def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):
         plan_body=(
             "---\nstatus: ready\ndispatch_hold:\n"
             "  reason: Blocking finding\n  release_when: Finding fixed\n"
-            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+            "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
         ),
     )
     result = CliRunner().invoke(app, ["do", "pr", "hold-check", "42", "--repo", str(tmp_path)])
     assert result.exit_code == 3, result.output
     assert "dispatch-hold:x-5a5c" in result.output
-    assert "set_by=king:119e3c52" in result.output
+    assert "set_by=lead:119e3c52" in result.output
 
 
 def test_hold_for_pr_refuses_on_ambiguous_pr_to_node_match(tmp_path, monkeypatch):
@@ -475,7 +475,7 @@ def test_hold_for_pr_refuses_on_ambiguous_pr_to_node_match(tmp_path, monkeypatch
     held_plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Blocking finding\n  release_when: Finding fixed\n"
-        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
     )
     unheld_plan = tmp_path / "unheld.md"
     unheld_plan.write_text("---\nstatus: ready\n---\n")
@@ -511,7 +511,7 @@ def test_a_hold_verdict_disarms_the_queued_auto_merge(tmp_path, monkeypatch, cap
         plan_body=(
             "---\nstatus: ready\ndispatch_hold:\n"
             "  reason: Blocking finding\n  release_when: Finding fixed\n"
-            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+            "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
         ),
     )
     reason = _hold.merge_hold_reason(42, str(tmp_path))
@@ -545,7 +545,7 @@ def test_a_failed_disarm_is_surfaced_not_silenced(tmp_path, monkeypatch, capsys)
         plan_body=(
             "---\nstatus: ready\ndispatch_hold:\n"
             "  reason: Blocking finding\n  release_when: Finding fixed\n"
-            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+            "  review_on: 2099-08-20\n  set_by: lead:119e3c52\n---\n"
         ),
     )
     monkeypatch.setattr(
@@ -567,9 +567,9 @@ def test_a_failed_disarm_is_surfaced_not_silenced(tmp_path, monkeypatch, capsys)
 
 _NODE_HOLD = {
     "reason": "rc merge freeze",
-    "release_when": "king lifts the freeze",
+    "release_when": "lead lifts the freeze",
     "review_on": "2099-08-20",
-    "set_by": "king:candor",
+    "set_by": "lead:candor",
 }
 
 
@@ -592,7 +592,7 @@ def test_hold_for_pr_refuses_a_plan_less_node_hold(tmp_path, monkeypatch):
     assert verdict is not None
     assert verdict.owner_id == "x-5a5c"
     assert verdict.hold.state is DispatchHoldState.HELD
-    assert verdict.hold.set_by == "king:candor"
+    assert verdict.hold.set_by == "lead:candor"
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold:x-5a5c" in reason
     _malformed_node_hold_refuses(tmp_path, monkeypatch)

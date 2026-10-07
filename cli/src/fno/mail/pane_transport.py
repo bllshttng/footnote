@@ -232,7 +232,7 @@ def prompt_refusal(
     """Read the pane and return a refusal reason when it is showing an option prompt.
 
     A ``--submit`` against a showing prompt dismisses the payload and selects the
-    highlighted default. Measured specimen: a king's option-3 ruling was typed,
+    highlighted default. Measured specimen: a lead's option-3 ruling was typed,
     discarded, and the worker took option 1 and filed a node an operator freeze
     forbade. So an enveloped send that skipped this check would gain the ability
     to invert a ruling while every surface reads normal.
