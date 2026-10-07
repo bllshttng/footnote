@@ -491,7 +491,7 @@ mod tests {
             out,
             Some("pr-hold: disabled an armed auto-merge on bllshttng/footnote#7".to_string())
         );
-        assert!(after_record_with(&gh, "pr-hold:o/r#7", HOLD_DECISION, Some("crown")).is_none());
+        assert!(after_record_with(&gh, "pr-hold:o/r#7", HOLD_DECISION, Some("role")).is_none());
         assert!(after_record_with(&gh, "pr-hold:o/r#7", "release", Some("operator")).is_none());
         assert!(after_record_with(
             &gh,
