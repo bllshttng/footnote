@@ -56,10 +56,10 @@ fn open(path: &Path) -> Result<Connection, StateError> {
                 |r| r.get(0),
             )
             .map_err(|e| failure(path, e))?;
+        // No registry flock here: Python's update_registry holds it across
+        // this child's read, so taking it again deadlocks. The IMMEDIATE
+        // transaction already serializes importers.
         if !migrated {
-            let lock_path = path.parent().unwrap().join("locks/_registry.lock");
-            std::fs::create_dir_all(lock_path.parent().unwrap())?;
-            let lock = crate::state::acquire_exclusive(&lock_path)?;
             let raw = retire_registry(path)?;
             save_document(&transaction, path, raw)?;
             transaction
@@ -69,7 +69,6 @@ fn open(path: &Path) -> Result<Connection, StateError> {
                 )
                 .map_err(|e| failure(path, e))?;
             transaction.commit().map_err(|e| failure(path, e))?;
-            let _ = lock.unlock();
             return Ok(connection);
         }
     }
