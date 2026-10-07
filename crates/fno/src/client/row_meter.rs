@@ -126,8 +126,14 @@ impl View {
         let (rows, depths) = self.tree_rows_with_depths();
         let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
         let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
-        rows.insert(0, DisplayRow::TableHead);
-        depths.insert(0, 0);
+        // The card layout's head is the `node · PR` caption: it answers the
+        // persisted toggle (prefix+Y). The list head names the sort columns
+        // and stays unconditional.
+        let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
+        if !card || self.show_card_head {
+            rows.insert(0, DisplayRow::TableHead);
+            depths.insert(0, 0);
+        }
         if !has_agent {
             rows.insert(1, DisplayRow::TableEmpty);
             depths.insert(1, 0);

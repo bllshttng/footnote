@@ -31,6 +31,8 @@ impl View {
             SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
             SectionKey::Squad(_) => SectionView::Collapsed,
             SectionKey::Elsewhere => self.expanded_or_live_only(key),
+            // A group band defaults open; the click cycle persists from there.
+            SectionKey::Group(_) => self.expanded_or_live_only(key),
         }
     }
 

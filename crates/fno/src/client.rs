@@ -76,7 +76,8 @@ use crate::sideline_color;
 use crate::theme::{cell_style, Theme};
 use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{
-    self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
+    self, next_view, AgentGroup, AgentSort, AgentSortColumn, Density, SectionKey, SectionView,
+    SortDirection,
 };
 use crate::vt::ShellActivity;
 use crate::wordmark;
@@ -807,6 +808,15 @@ pub(crate) struct View {
     /// Extended-table row order, persisted alongside the density.
     /// Inert in the other two densities (they render no table).
     agent_sort: AgentSort,
+    /// The agents view's group-by axis (prefix+G), persisted like the density.
+    agent_group: AgentGroup,
+    /// The card's `node · PR` header row switch (prefix+Y), persisted.
+    show_card_head: bool,
+    /// The manual reorder sequence (agent names in display order) behind the
+    /// Manual sort column, persisted.
+    manual_order: Vec<String>,
+    /// Pinned agent names in pin order; they lead every sort.
+    pinned_agents: Vec<String>,
     /// Manual status-row toggle (prefix+s). Client-local and deliberately
     /// unpersisted: a reattach resets to on (AC4-FR).
     status_on: bool,
@@ -1669,6 +1679,7 @@ impl MenuAction {
             MenuAction::Resume => Some("resume-row"),
             MenuAction::ClosePortal => Some("close-portal"),
             MenuAction::PortalPicker => Some("open-in-portal"),
+            MenuAction::ReleaseHold => Some("release-hold"),
             _ => None,
         }
     }
@@ -1912,6 +1923,10 @@ impl View {
         // safe to resolve against the empty placeholder layout a real attach
         // constructs with. A missing or corrupt store reads as the defaults.
         let (density, agent_sort, stored_width) = view_store::load_prefs();
+        let agent_group = view_store::load_agent_group();
+        let show_card_head = view_store::load_card_head();
+        let manual_order = view_store::load_manual_order();
+        let pinned_agents = view_store::load_pinned();
         // The stored intent, resolved once. Deliberately NOT clamped to
         // the current terminal here: `panel_w` clamps transiently on every paint,
         // and pre-clamping the stored value would let a small startup terminal
@@ -1930,6 +1945,10 @@ impl View {
             density,
             sideline_width,
             agent_sort,
+            agent_group,
+            show_card_head,
+            manual_order,
+            pinned_agents,
             status_on: true,
             resource_meter_on: false,
             confirm_lifecycle: view_store::load_confirm_lifecycle(),
@@ -2687,7 +2706,7 @@ impl View {
                     Pick::Section(key, label, Some(row.squad))
                 }),
             Some(DisplayRow::Header { key, label, .. }) => {
-                Some(Pick::Section(key.clone(), (*label).to_string(), None))
+                Some(Pick::Section(key.clone(), label.clone(), None))
             }
             _ => None,
         };
@@ -4639,6 +4658,9 @@ impl View {
                     .collect()
             }
             SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
+            // A group-by band keeps no dead-row middle state: the cycle is
+            // Expanded <-> Collapsed (next_view skips LiveOnly on has_dead=false).
+            SectionKey::Group(_) => Vec::new(),
         }
     }
 
@@ -5849,6 +5871,10 @@ impl View {
     ) -> (Vec<DisplayRow<'a>>, Vec<usize>) {
         let needs = self.attention_needs();
         let now = crate::digest_overlay::now_secs();
+        let order = &AgentOrder {
+            manual: &self.manual_order,
+            pinned: &self.pinned_agents,
+        };
         let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len());
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
@@ -5865,16 +5891,24 @@ impl View {
                             self.agent_sort,
                             &needs,
                             now,
+                            order,
                         );
                     }
                 }
                 row => {
-                    append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+                    append_sorted_agent_group(
+                        &mut out,
+                        &mut group,
+                        self.agent_sort,
+                        &needs,
+                        now,
+                        order,
+                    );
                     out.push((row, depth));
                 }
             }
         }
-        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now, order);
         out.into_iter().unzip()
     }
 
@@ -5895,6 +5929,9 @@ impl View {
     /// [`Self::display_rows_with_depths`]). The depth is computed over the
     /// EMITTED set after every display filter, never re-derived in the painter.
     fn tree_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        if self.agent_group != AgentGroup::Workspace {
+            return agent_group::grouped_rows_with_depths(self);
+        }
         let mut out = Vec::new();
         // Display index -> lineage depth for agent rows, filled at emit time.
         let mut agent_depth_at: HashMap<usize, usize> = HashMap::new();
@@ -6014,7 +6051,7 @@ impl View {
             let rollup = section_rollup(orphans.iter().map(|&a| agent_lattice_state(a)));
             let view = self.section_view(&SectionKey::Elsewhere);
             out.push(DisplayRow::Header {
-                label: "~ elsewhere",
+                label: "~ elsewhere".to_string(),
                 rollup,
                 key: SectionKey::Elsewhere,
                 view,
@@ -6124,7 +6161,7 @@ enum DisplayRow<'a> {
     /// `display_rows` time from the section's own rows (orphans / cards), so the
     /// painter renders it without re-deriving section membership.
     Header {
-        label: &'static str,
+        label: String,
         rollup: Vec<(LatticeState, usize)>,
         /// Which section this header owns, so a click cycles it
         /// without the action path re-deriving the section from `label`.
@@ -6218,7 +6255,7 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
-        SectionKey::Elsewhere => false,
+        SectionKey::Elsewhere | SectionKey::Group(_) => false,
     }
 }
 
@@ -6229,7 +6266,7 @@ fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(_) => layout.squads.iter().any(|s| squad_matches(s, key)),
         // The pull-sections are always considered live (their rows come and go).
-        SectionKey::Elsewhere => true,
+        SectionKey::Elsewhere | SectionKey::Group(_) => true,
     }
 }
 
@@ -7174,130 +7211,7 @@ fn agent_lane_fg(a: &AgentRow, st: LatticeState, fallback: Color) -> Color {
     .unwrap_or(fallback)
 }
 
-/// (US2) Severity order for the header rollup strip: most-severe first,
-/// so the strip reads `▲ ✓ ● ○ ∅ ✗ ?` and narrow-panel truncation drops from
-/// the least-severe (`?`) end. `Unmeasured` sits after `Exited`: it is a
-/// sub-case of the same terminal bucket, just less certain, so it never
-/// outranks a live state. `Empty` sits after `Idle` and before the
-/// terminal pair: a pristine shell is less severe than any worker state but
-/// still a live pane, not a terminal one. The one ordering the fold and the
-/// truncation share.
-///
-/// NOT the same ordering as [`PaneState`]'s derive, and this comment used to
-/// claim to be "the single ordering authority" beside a sibling claiming the
-/// same thing, which cannot both be true. They answer different questions and
-/// have disagreed since before, on `Working` versus `DoneUnseen`. This
-/// one answers IN WHAT ORDER A SECTION'S COUNTS ARE LISTED AND TRUNCATED;
-/// `PaneState` answers WHICH ROW IS WORST for a `min()` rollup. A known
-/// consequence of the split, left as is: `Unmeasured` is now reachable for
-/// LIVE rows, and truncation drops from that end, so a narrow panel can keep
-/// a dead `✗` count and drop live `?` rows. Changing that is a display-policy
-/// decision, not a correctness fix - do not "align" the two lists to make it
-/// go away.
-const SEVERITY_ORDER: [LatticeState; 7] = [
-    LatticeState::Blocked,
-    LatticeState::DoneUnseen,
-    LatticeState::Working,
-    LatticeState::Idle,
-    LatticeState::Empty,
-    LatticeState::Exited,
-    LatticeState::Unmeasured,
-];
-
-/// (US2) Fold a section's rows into per-state counts, nonzero only, in
-/// severity order. Exhaustive over `LatticeState` (the lock-3 posture):
-/// a new state is a compile error here, never a silently uncounted glyph.
-fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeState, usize)> {
-    let mut counts = [0usize; SEVERITY_ORDER.len()];
-    for st in states {
-        let idx = match st {
-            LatticeState::Blocked => 0,
-            LatticeState::DoneUnseen => 1,
-            LatticeState::Working => 2,
-            LatticeState::Idle => 3,
-            LatticeState::Empty => 4,
-            LatticeState::Exited => 5,
-            LatticeState::Unmeasured => 6,
-        };
-        // The match is exhaustive (a new state breaks the build), but the index
-        // mapping is coupled by hand to SEVERITY_ORDER's order; this catches a
-        // reorder that would silently miscount (gemini review).
-        debug_assert_eq!(
-            SEVERITY_ORDER[idx], st,
-            "SEVERITY_ORDER and section_rollup indices are out of sync"
-        );
-        counts[idx] += 1;
-    }
-    SEVERITY_ORDER
-        .iter()
-        .zip(counts)
-        .filter(|&(_, n)| n > 0)
-        .map(|(&s, n)| (s, n))
-        .collect()
-}
-
-/// The flag set for a section header, demoted from the old always-on
-/// INVERSE band: the full-width INVERSE is now the focused-row signal, not the
-/// header's, so a header carries zero standing INVERSE cells. The rollup counts
-/// (`header_band_text`) are unchanged and still fill the full width.
-///
-/// EVERY header is BOLD, active or not: the earlier split left an inactive
-/// header at exactly the weight of the agent rows beneath it. Active stays
-/// legible through the `*` marker and the accented caret. Weight alone does not
-/// separate a section though - see [`section_rule`].
-fn header_band_flags(_active: bool) -> u8 {
-    cell_flags::BOLD
-}
-
-/// (US1+US2) Compose one section header band: the label at the left, the
-/// rollup counts right-aligned, spaces between so the whole string is exactly
-/// the panel width `w` (the caller paints it as one INVERSE band). Counts are
-/// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
-/// from the least-severe (`✗`) end - a glyph never renders without its count
-/// (AC11) - and the label clips (via `chrome::clip`, no marker) only after every pair is
-/// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
-/// painter), so a double-width char in a squad name aligns the band instead of
-/// overflowing it.
-/// The `gap` columns between a header's label and its rollup counts, drawn as a
-/// horizontal rule with a space of breathing room at each end (`gap < 3` stays
-/// blank - a one-cell dash reads as debris, not a rule).
-///
-/// The section separator, and the only one available. A terminal grid has one
-/// font at one size, and the rest of the vocabulary is already spoken for: BOLD
-/// is agent liveness (`lattice_style` bolds working, blocked and done rows, so a
-/// header cannot out-weigh a busy workspace), full-width INVERSE is the focused
-/// row, DIM is dead, amber is needs-attention. A rule spends none of them and
-/// costs no rows, filling space the header already padded with blanks.
-fn section_rule(gap: usize) -> String {
-    match gap {
-        0..=2 => " ".repeat(gap),
-        _ => format!(" {} ", "\u{2500}".repeat(gap - 2)),
-    }
-}
-
-fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> String {
-    let mut pairs: Vec<String> = rollup
-        .iter()
-        .map(|(s, n)| format!("{}{}", lattice_glyph(*s).0, n))
-        .collect();
-    loop {
-        if pairs.is_empty() {
-            let label_w: usize = label.chars().map(glyph_cols).sum();
-            return match w.checked_sub(label_w) {
-                Some(gap) => format!("{label}{}", section_rule(gap)),
-                None => crate::chrome::clip(label, w),
-            };
-        }
-        let counts = pairs.join(" ");
-        let label_w: usize = label.chars().map(glyph_cols).sum();
-        let counts_w: usize = counts.chars().map(glyph_cols).sum();
-        if label_w + 1 + counts_w <= w {
-            let gap = w - label_w - counts_w;
-            return format!("{label}{}{counts}", section_rule(gap));
-        }
-        pairs.pop(); // drop the least-severe pair and retry
-    }
-}
+use header_band::{header_band_flags, header_band_text, section_rollup, SEVERITY_ORDER};
 
 /// The sideline/nav fold state maps 1:1 onto the lattice (no `Exited` - a folded
 /// pane's exit is already flattened to `Idle` by `nav_agent_state`).
@@ -9128,6 +9042,24 @@ async fn dispatch_event(
             // the density cycle this needs no resize round trip.
             view.toggle_agent_sort();
         }
+        Event::CycleAgentGroup => {
+            // Pure local state, like the sort cycle: no geometry, no wire.
+            view.agent_group = view.agent_group.next();
+            view_store::save_agent_group(view.agent_group);
+            let word = match view.agent_group {
+                AgentGroup::Workspace => "workspace",
+                AgentGroup::Team => "lead",
+                AgentGroup::Cwd => "cwd",
+                AgentGroup::Status => "status",
+            };
+            view.set_notice(format!("grouping by {word}"));
+        }
+        Event::ToggleCardHead => {
+            // Pure local state: the head row is one display row, and the
+            // scroll math reads painted_rows() every pass.
+            view.show_card_head = !view.show_card_head;
+            view_store::save_card_head(view.show_card_head);
+        }
         Event::ToggleStatus => {
             view.status_on = !view.status_on;
             // Same accounting as the sideline: the content area grew or
@@ -10089,6 +10021,7 @@ async fn selector_keys(
     // open, never a mis-toggle. A modified Right (`ESC [ 1; 5 C`) does not
     // contain the contiguous triple, so it still drops as unmapped.
     let mut rights = 0usize;
+    let mut shifts: Vec<isize> = Vec::new();
     let mut cleaned: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -10100,7 +10033,24 @@ async fn selector_keys(
             i += 1;
         }
     }
-    let keys = fold_selector_keys(&mut esc, &cleaned);
+    let mut j = 0;
+    let mut cleaned2: Vec<u8> = Vec::with_capacity(cleaned.len());
+    while j < cleaned.len() {
+        if cleaned[j..].starts_with(&[0x1b, b'[', b'1', b';', b'2', b'A']) {
+            // Shift+Up reorders the focused agent row: the selector reads
+            // J/K as the WORKSPACE reorder, so the agent move needs its own
+            // strip (the generic fold drops a parameterised sequence whole).
+            shifts.push(-1);
+            j += 6;
+        } else if cleaned[j..].starts_with(&[0x1b, b'[', b'1', b';', b'2', b'B']) {
+            shifts.push(1);
+            j += 6;
+        } else {
+            cleaned2.push(cleaned[j]);
+            j += 1;
+        }
+    }
+    let keys = fold_selector_keys(&mut esc, &cleaned2);
     view.sel_esc = esc;
     for _ in 0..rights {
         // Same cursor as every other selector verb: pointer-follow works
@@ -10126,6 +10076,14 @@ async fn selector_keys(
             Some(key) => view.toggle_idle(key),
             None => view.set_notice("only a workspace row has a caret".into()),
         }
+    }
+    for delta in shifts.drain(..) {
+        // The agent reorder acts on the same per-key cursor the other
+        // selector verbs read, so a close mid-chunk swallows the rest.
+        let Some(cur) = view.selector else {
+            break;
+        };
+        agent_group::reorder_agent_rows(view, cur, delta);
     }
     for &k in &keys {
         // Rows are re-read per key (via the View helpers below) so a layout
@@ -10519,6 +10477,28 @@ async fn selector_keys(
                     None => view.set_notice("no other workspace to move this tab to".into()),
                 }
             }
+            b'.' => {
+                // Pin/unpin the agent row under the cursor. Pinned rows lead
+                // every sort (the operator's 2026-10-07 ask), persisted like
+                // the sort itself; a non-agent row notices why.
+                match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) => {
+                        let name = a.name.clone();
+                        let pinned =
+                            if let Some(pos) = view.pinned_agents.iter().position(|n| *n == name) {
+                                view.pinned_agents.remove(pos);
+                                false
+                            } else {
+                                view.pinned_agents.push(name.clone());
+                                true
+                            };
+                        view_store::save_pinned(&view.pinned_agents);
+                        let word = if pinned { "pinned" } else { "unpinned" };
+                        view.set_notice(format!("{word} {name}"));
+                    }
+                    _ => view.set_notice("pin works on an agent row".into()),
+                }
+            }
             0x1b | b'q' => view.selector = None,
             _ => {}
         }
@@ -10813,4 +10793,10 @@ mod sideline;
 #[path = "client/agent_sort.rs"]
 mod agent_sort;
 
-use agent_sort::append_sorted_agent_group;
+#[path = "client/agent_group.rs"]
+mod agent_group;
+
+#[path = "client/header_band.rs"]
+mod header_band;
+
+use agent_sort::{append_sorted_agent_group, AgentOrder};

@@ -1207,3 +1207,62 @@ async fn a_right_press_on_each_card_line_opens_the_agents_menu() {
     .unwrap();
     assert!(v.row_menu.is_none(), "the rule row stays inert");
 }
+
+#[test]
+fn card_row_1_carries_the_role_and_the_lead_rollup() {
+    // a lead's row 1 reads `lead · people title` and its right edge
+    // shows the team roll-up; a worker's reads `t-slug · lead`; row 2 no
+    // longer carries the lead name.
+    let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
+    lead.role_level = Some(2);
+    lead.role_title = Some("lead of fno".into());
+    lead.harness_session_id = Some("sess-lead".into());
+    let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
+    w1.pr = Some(42);
+    w1.node = Some("x-abc1".into());
+    w1.lineage_kind = Some("child".into());
+    w1.spawned_by_session = Some("sess-lead".into());
+    w1.harness_session_id = Some("sess-w1".into());
+    let v = card_view(vec![lead, w1]);
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    // Rows: 0 strip, 1 head, 2 band, 3 lead card line 1, 4 line 2, 5 line 3.
+    let row_text = |row: usize| -> String {
+        frame.cells[row * cols..row * cols + text_w]
+            .iter()
+            .map(|c| c.c)
+            .collect()
+    };
+    let lead_line = row_text(3);
+    assert!(
+        lead_line.contains("lead-a \u{b7} lead of fno"),
+        "lead row 1 names its role: {lead_line:?}"
+    );
+    assert!(
+        lead_line.contains('\u{25cf}'),
+        "lead row 1 right edge shows the team roll-up glyph: {lead_line:?}"
+    );
+    let w_line = row_text(7); // display 6 -> screen row 7 (strip owns 0)
+    assert!(
+        w_line.contains("w1 \u{b7} lead-a"),
+        "worker row 1 names its lead: {w_line:?}"
+    );
+    assert!(
+        w_line.contains("#42"),
+        "worker row 1 right edge keeps node · PR: {w_line:?}"
+    );
+    let rows = v.painted_rows();
+    let detail = rows
+        .iter()
+        .find_map(|r| match r {
+            DisplayRow::CardDetail(a) if a.name == "w1" => Some(a),
+            _ => None,
+        })
+        .expect("worker card detail row");
+    let line2 = v.card_detail_text(detail, 0, 80);
+    assert!(
+        !line2.contains("lead-a") && !line2.contains("lead of fno"),
+        "row 2 dropped the lead name: {line2:?}"
+    );
+}
