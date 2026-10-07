@@ -27,10 +27,7 @@ Each emitted field carries `{path, type, default, tier, question, default_source
 | `/setup` | global + project (always both) | the one step table (`fno config setup run --list --json`) |
 | `/setup advanced` | both | the step table plus the advanced config tier (`fno config setup plan --advanced`) |
 
-There is no `/setup local` and no choose-one: both layers run in one pass, and
-setup writes only keys whose value differs from the default. There is also no
-hand-maintained question table: the step table lives in `fno config setup run`,
-and the advanced config tier still comes from the schema walker.
+There is no `/setup local` and no choose-one: both layers run in one pass, and setup writes only keys whose value differs from the default. There is also no hand-maintained question table: the step table lives in `fno config setup run`, and the advanced config tier still comes from the schema walker.
 
 ## Dependency matrix
 
@@ -55,11 +52,11 @@ Run `command -v fno`. A failure means the footnote CLI is not installed, and eve
 fno config setup run --list --json
 ```
 
-Each step carries `{id, layer (global|project|contributor), kind (act|report|human), question, effect}`. `act` steps may write config through `fno config set`; `report` steps only ever print a command; `human` steps need a person at a browser. Both layers are always offered: there is no global-or-project choice any more.
+Each step carries `{id, layer (global|project|contributor), kind (act|report|human), question, effect}`. `act` steps can write config through `fno config set`. `report` steps only ever print a command. `human` steps need a person at a browser. Both layers are always offered: there is no global-or-project choice any more.
 
 ## Step 1: Ask, then run
 
-For each `act` step, ask the user its `question`, naming the `effect` (an AskUserQuestion choice, `Accept` / `Keep default`). Collect every accepted id. `report` and `human` steps are never asked; their text relays as-is.
+For each `act` step, ask the user its `question`, naming the `effect` (an AskUserQuestion choice, `Accept` / `Keep default`). Collect every accepted id. `report` and `human` steps are never asked. Their text relays as-is.
 
 Then run the accepted steps in one pass, no-prompt:
 
@@ -67,7 +64,7 @@ Then run the accepted steps in one pass, no-prompt:
 fno config setup run --yes --only <accepted-ids-comma-separated> --json
 ```
 
-Relay the JSON report verbatim: `done`, `skipped`, `needs_human`, `paths` (absolute), `restart_needed`. A `needs_human` row is a real blocker for that step (gh login opens a browser); do not silently retry it, and do not summarize it away. The run writes a done marker per layer only when nothing needs a human, so a later `--once` never papers over a blocked step.
+Relay the JSON report verbatim: `done`, `skipped`, `needs_human`, `paths` (absolute), `restart_needed`. A `needs_human` row is a real blocker for that step (gh login opens a browser). Do not silently retry it. Do not summarize it away. When nothing needs a human, the run writes a done marker per layer. A later `--once` never papers over a blocked step.
 
 The config detail questions (a value, not a yes/no: the Obsidian vault name, the project vision) still come from the schema plan:
 
