@@ -2010,14 +2010,9 @@ pub(crate) mod tests {
     fn missing_session_argument_refuses() {
         assert_eq!(run_mail_hold(&[]), 2);
         assert_eq!(
-            run_mail_hold(&[
-                "--minutes".into(),
-                "0".into(),
-                "--session".into(),
-                "x-cccccccc".into()
-            ]),
+            run_mail_hold(&["--bogus".into()]),
             2,
-            "--minutes is gone; it reads as an unknown argument"
+            "an unknown argument refuses"
         );
     }
 
