@@ -315,7 +315,9 @@ fn self_review_gate_held_reason_names_code_review_and_its_verb() {
     // `<level>` placeholder, and a missing binary keeps the placeholder.
     // Without the pin the expectation would depend on whatever fno the
     // host has installed.
-    let _env_guard = crate::distress::fno_bin_env_test_lock().lock().unwrap(); // shared: distress.rs races this var too
+    let _env_guard = crate::distress::fno_bin_env_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()); // shared: distress.rs races this var too
     let var = "FNO_LOOPCHECK_FNO_BIN";
     let prior = std::env::var(var).ok();
     let mut pr = reviewers_gate_pr();

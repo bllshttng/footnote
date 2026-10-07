@@ -420,6 +420,10 @@ def resolve_front_binary() -> Optional[Path]:
             return root / profile / "fno"
     return Path(found) if (found := shutil.which("fno")) else None
 
+class FrontTimeout(VerbUnavailable):
+    """The law door gave no answer in time. A retry meets the same wait."""
+
+
 def call_front_json(payload: dict, *, timeout: float = 60) -> dict:
     """One round-trip with the front's law door, fail-closed like verb_call."""
     import json
@@ -428,8 +432,19 @@ def call_front_json(payload: dict, *, timeout: float = 60) -> dict:
     binary = resolve_front_binary()
     if binary is None:
         raise VerbUnavailable("the native fno binary was not found")
-    done = subprocess.run([str(binary), "inbox", "law", "match"],
-        input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
+    try:
+        done = subprocess.run([str(binary), "inbox", "law", "match"],
+            input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # The read needs about 3s of CPU. Measured 2026-10-06 at load 176: 18s
+        # wall for 2.7s user, so a timeout means the machine had no CPU to give.
+        try:
+            load = f"{os.getloadavg()[0]:.0f} on {os.cpu_count()} cores"
+        except OSError:
+            load = "unreadable"
+        raise FrontTimeout(
+            f"`fno inbox law match` gave no answer in {timeout:g}s (machine load {load})"
+        ) from None
     if done.returncode != 0:
         raise VerbUnavailable(f"fno inbox law match exited {done.returncode}: {done.stderr.strip()}")
     return json.loads(done.stdout)

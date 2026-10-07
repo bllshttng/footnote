@@ -279,8 +279,12 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     // v9: short_id now legitimately carries the claude jobId (asserted above),
     // so it is present, not skipped -- the old "short_id is none" check is gone.
 
-    // agent_ask_done emitted.
-    let events = fs::read_to_string(home.events_jsonl()).unwrap();
+    // agent_ask_done emitted, committed to the store (never raw journal bytes).
+    assert!(
+        !home.events_jsonl().exists(),
+        "the ask wrote raw journal bytes"
+    );
+    let events = fno_agents::event_store::journal_text(&home.events_jsonl(), &[]);
     assert!(events.contains("\"kind\":\"agent_ask_done\""), "{}", events);
 }
 
@@ -575,7 +579,7 @@ fn followup_socket_reply_stamps_live_and_emits() {
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, "HELLO-BACK"); // no trailing newline on follow-up
 
-    let events = fs::read_to_string(home.events_jsonl()).unwrap();
+    let events = fno_agents::event_store::journal_text(&home.events_jsonl(), &[]);
     assert!(
         events.contains("\"kind\":\"agent_followup_started\""),
         "{}",
@@ -790,7 +794,7 @@ fn followup_poll_timeout_exit_15() {
 
     assert_eq!(out.exit_code, 15);
     assert!(out.stderr.contains("no reply within"), "{}", out.stderr);
-    let events = fs::read_to_string(home.events_jsonl()).unwrap();
+    let events = fno_agents::event_store::journal_text(&home.events_jsonl(), &[]);
     assert!(events.contains("\"stage\":\"poll-timeout\""), "{}", events);
 }
 
