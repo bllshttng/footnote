@@ -1863,6 +1863,44 @@ def _reap_spawned_pane(
     return True, ""
 
 
+def _reap_and_drop_row(
+    name: str,
+    session: str,
+    pane_id: int,
+    registry_path: Optional[Path],
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> str:
+    """Reap the pane, drop its id-less row, and say exactly what happened.
+
+    Only drop the row once the pane is actually gone: removing it while the
+    pane may still live orphans a worker fno can no longer point the operator
+    at. Removal success is tracked so the message never claims "row removed"
+    when it was not.
+    """
+    reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+    if not reaped:
+        return (
+            f"pane kill failed ({cleanup_detail}); it may still "
+            f"exist in session {session!r} - remove with "
+            f"'fno mux pane kill --session {session} {pane_id}'"
+        )
+    this_mux = {"session": session, "pane_id": pane_id}
+    try:
+        update_registry(
+            lambda rows: [
+                r for r in rows if not (r.name == name and r.mux == this_mux)
+            ],
+            path=registry_path,
+        )
+    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+        return (
+            "pane reaped, but registry row removal failed; a "
+            f"`spawning` row for {name!r} may linger - remove with "
+            f"'fno agents rm {name}'"
+        )
+    return "pane reaped, registry row removed"
+
+
 def _lookup_child_pid(
     session: str,
     pane_id: int,
@@ -4735,45 +4773,7 @@ def dispatch_spawn_pane(
                 name, {"session": session, "pane_id": pane_id}, runner, registry_path
             )
             if registered_id is None:
-                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
-                # Only drop the row once the pane is actually gone: removing it
-                # while the pane may still live orphans a worker fno can no
-                # longer point the operator at. Track removal success so the
-                # error never claims "row removed" when it was not.
-                row_removed = False
-                if reaped:
-                    this_mux = {"session": session, "pane_id": pane_id}
-                    try:
-                        update_registry(
-                            lambda rows: [
-                                r
-                                for r in rows
-                                if not (r.name == name and r.mux == this_mux)
-                            ],
-                            path=registry_path,
-                        )
-                        row_removed = True
-                    except (
-                        OSError,
-                        ValueError,
-                        AgentResolutionError,
-                        RegistryVersionError,
-                    ):
-                        row_removed = False
-                if reaped and row_removed:
-                    tail = "pane reaped, registry row removed"
-                elif reaped:
-                    tail = (
-                        "pane reaped, but registry row removal failed; a "
-                        f"`spawning` row for {name!r} may linger - remove "
-                        f"with 'fno agents rm {name}'"
-                    )
-                else:
-                    tail = (
-                        f"pane kill failed ({cleanup_detail}); it may still "
-                        f"exist in session {session!r} - remove with "
-                        f"'fno mux pane kill --session {session} {pane_id}'"
-                    )
+                tail = _reap_and_drop_row(name, session, pane_id, registry_path, runner)
                 raise DispatchAskError(
                     f"agent {name!r} did not register within "
                     f"{_PANE_REGISTRATION_DEADLINE_S}s ({reg_reason}); {tail}. "
@@ -4796,6 +4796,8 @@ def dispatch_spawn_pane(
             from fno.agents import dispatch as _dispatch
 
             _dispatch.reconcile_agents()
+            # Its codex backfill and codex_pane.stamp_late_bind below apply the
+            # same compare-and-set guards; change them together.
             this_mux = {"session": session, "pane_id": pane_id}
             backfilled_row = next(
                 (
@@ -4808,42 +4810,55 @@ def dispatch_spawn_pane(
             if backfilled_row is not None and backfilled_row.harness_session_id:
                 stored_session_uuid = backfilled_row.harness_session_id
                 row_status = backfilled_row.status
-            elif binding_caps["required"]:
+            else:
+                # A bind landing just past the window left a live worker whose
+                # row was dropped; re-probe with a short bounded retry (the
+                # rollout can open seconds after the window closes), and a late
+                # bind is stamped so the row is kept under its name.
+                from fno.agents.codex_pane import stamp_late_bind
+
+                probe_failed = False
+                try:
+                    late_sid = (
+                        _backfill_codex_session_id(
+                            cwd, spawn_started_ms, child_pid=child_pid
+                        )
+                        if child_pid is not None
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 -- an unresolved probe never reaps a live pane
+                    late_sid, probe_failed = None, True
+                late_bound = False
+                if late_sid:
+                    try:
+                        late_bound = stamp_late_bind(
+                            name, late_sid, child_pid, pid_start_time, this_mux, registry_path
+                        )
+                    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+                        late_bound = False
+                if late_bound:
+                    stored_session_uuid, row_status = late_sid, "live"
+                elif late_sid or probe_failed:
+                    raise DispatchAskError(
+                        f"agent {name!r} could not be bound to a stamped row after the "
+                        "window closed (re-probe failed or the stamp raced); the pane is "
+                        "alive and kept - `fno agents reconcile` will backfill it",
+                        exit_code=1,
+                    )
+            if binding_caps["required"] and stored_session_uuid is None:
                 # Reconcile's one extra chance came up empty too: a required
                 # binding that is STILL id-less is the same unusable pane the
                 # earlier required-binding gate reaps for every other unbound
                 # reason, so it earns the same fate rather than lingering
                 # `spawning` forever.
-                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
-                if reaped:
-                    row_removed = False
-                    try:
-                        update_registry(
-                            lambda rows: [
-                                r for r in rows if not (r.name == name and r.mux == this_mux)
-                            ],
-                            path=registry_path,
-                        )
-                        row_removed = True
-                    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
-                        row_removed = False
-                    if row_removed:
-                        cleanup_detail = "pane reaped, registry row removed"
-                    else:
-                        cleanup_detail = (
-                            "pane reaped, but registry row removal failed; a "
-                            f"`spawning` row for {name!r} may linger"
-                        )
-                    raise DispatchAskError(
-                        f"agent {name!r} required {provider} session binding "
-                        f"({unbound_reason}); {cleanup_detail}. "
-                        f"{_bind_failure_diagnostic(binding, registry_path)}"
-                        f"{_HEADLESS_ESCAPE_HINT}",
-                        exit_code=1,
-                    )
+                cleanup_detail = _reap_and_drop_row(
+                    name, session, pane_id, registry_path, runner
+                )
                 raise DispatchAskError(
-                    f"agent {name!r} required {provider} session binding but cleanup "
-                    f"failed: {cleanup_detail}; pane {pane_id} may still exist",
+                    f"agent {name!r} required {provider} session binding "
+                    f"({unbound_reason}); {cleanup_detail}. "
+                    f"{_bind_failure_diagnostic(binding, registry_path)}"
+                    f"{_HEADLESS_ESCAPE_HINT}",
                     exit_code=1,
                 )
             else:

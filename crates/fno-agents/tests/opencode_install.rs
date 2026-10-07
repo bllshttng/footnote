@@ -106,6 +106,7 @@ fn scratch(name: &str) -> Scratch {
     std::env::set_var("OPENCODE_CONFIG_DIR", &conf);
     std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
     std::env::set_var("FNO_HOME", &state);
+    std::env::set_var("HOME", base.join("home"));
     Scratch {
         _guard: guard,
         root,
@@ -406,6 +407,28 @@ fn stale_reads_version_drift_and_contract_change() {
     set_path(&bin);
     assert_eq!(installed_status()["status"], "stale");
     assert_eq!(status_json()["status"], "stale");
+}
+
+/// A binary only the official installer's home dir holds still classifies,
+/// and a binary nobody can run is "missing", never a contract change.
+#[test]
+fn off_path_binary_resolves_from_home_and_a_missing_one_is_not_a_contract_change() {
+    let s = installed("binhome");
+    assert_eq!(installed_status()["status"], "installed");
+    let home_bin = s.root.parent().unwrap().join("home/.opencode/bin");
+    std::fs::create_dir_all(&home_bin).unwrap();
+    stub_opencode(&home_bin, "2.0.3");
+    assert_eq!(
+        installed_status()["status"],
+        "stale",
+        "the home binary outranks the bare name on PATH"
+    );
+    std::env::set_var("FNO_OPENCODE_BIN", s.root.join("no-such-opencode"));
+    let quick = installed_status();
+    std::env::remove_var("FNO_OPENCODE_BIN");
+    assert_eq!(quick["status"], "installed");
+    assert_eq!(quick["binary_missing"], true);
+    assert_eq!(quick["contract_changed"], false);
 }
 
 /// The restriction render contract, under both contracts: a denylist

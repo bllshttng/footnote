@@ -1,8 +1,7 @@
 //! Arm or lift a busy-mode hold for ANOTHER session (transport-only client
-//! action, registered in no client menu - the shrink law allows no new
-//! client verbs; the harness hook entries (`hook prompt`, `hook stop`) and
-//! `lead cancel` reach it through the binary path like the other early
-//! dispatches).
+//! action; the harness hook entries (`hook prompt`, `hook stop`), `lead
+//! cancel`, and the sideline menu's Release hold entry reach it through the
+//! binary path like the other early dispatches).
 //!
 //! The hold is the registry row's `delivery_policy = "bus-only"` stamp plus
 //! the sidecar clock `fno.mail.hold` reads. The conversation rules (C2-C4,
@@ -1045,6 +1044,12 @@ pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono:
 /// mail delivers normally instead of holding forever on a stamped row with
 /// no clock (the never-lapses state). No row for the session: exit 3,
 /// nothing written.
+/// `--release`: `--off` plus the standard release leg - the sideline
+/// menu's Release hold. The stamp lifts exactly as `--off`, the clock is
+/// rewritten EXPIRED, and the detached `hold-release` timer an expiring
+/// clock arms wakes once, releases, and drains what the hold kept on the
+/// bus: the same effect `fno agents mail hold --off` has inside the held
+/// session.
 /// `--gate`: the delivery gate (C15, C16). Reads the optional body on
 /// stdin, prints one JSON verdict line, exits 0. It never writes the
 /// REGISTRY: it runs inside callers that may hold the registry lock, and
@@ -1060,6 +1065,7 @@ pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono:
 pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut session: Option<&String> = None;
     let mut off = false;
+    let mut release = false;
     let mut gate_mode = false;
     let mut render_digest = false;
     let mut iter = args.iter();
@@ -1070,6 +1076,7 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
         match arg.as_str() {
             "--session" => session = iter.next(),
             "--off" => off = true,
+            "--release" => release = true,
             "--gate" => gate_mode = true,
             "--render-digest" => render_digest = true,
             "--park" => park = true,
@@ -1140,10 +1147,29 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     if run_parked_mode {
         return run_parked(session_id);
     }
-    if off {
+    if off || release {
+        // `--off` clears the clock and unstamps the policy. `--release`
+        // (the sideline menu's Release hold) is that lift plus the standard
+        // release leg: the clock is rewritten EXPIRED, so the detached
+        // timer's first wake releases at once and drains what the hold kept
+        // on the bus - the same effect `fno agents mail hold --off` has
+        // inside the held session, through the timer's own verb.
         match set_policy(session_id, None) {
             Some(matched) => {
-                let _ = std::fs::remove_file(hold_sidecar_path(&identity_key(&matched)));
+                let handle = identity_key(&matched);
+                if release {
+                    let _ = write_clock(
+                        &handle,
+                        chrono::Utc::now() - chrono::Duration::seconds(1),
+                        1,
+                        "wall",
+                        None,
+                        None,
+                    );
+                    spawn_release_timer(&handle);
+                } else {
+                    let _ = std::fs::remove_file(hold_sidecar_path(&handle));
+                }
                 0
             }
             None => {
@@ -1359,6 +1385,57 @@ pub(crate) mod tests {
             assert!(!clock_path(dir, SID).exists(), "the clock file is gone");
             let registry = crate::state::load_registry(&dir.join("registry.json")).unwrap();
             assert!(registry.entries[0].delivery_policy.is_none());
+        });
+    }
+
+    #[test]
+    fn release_lifts_the_hold_and_arms_the_standard_release_leg() {
+        with_hold_env(|dir| {
+            let _g = env_guard(&["FNO_PY", "PARK_LOG"]);
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            write_clock(
+                &identity_key(SID),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                Some(CONVERSATION_SOURCE),
+            )
+            .unwrap();
+            // The release leg is the standard detached timer; the stub FNO_PY
+            // logs its argv, so the test polls the log for the spawn.
+            let stub = write_stub_py(dir);
+            let log = dir.join("release.log");
+            std::env::set_var("FNO_PY", stub.to_string_lossy().to_string());
+            std::env::set_var("PARK_LOG", log.to_string_lossy().to_string());
+            assert_eq!(
+                run_mail_hold(&["--session".into(), SID.into(), "--release".into()]),
+                0
+            );
+            let registry = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+            assert!(registry.entries[0].delivery_policy.is_none());
+            // The clock is EXPIRED, not deleted: the timer's first wake must
+            // read a lapsed hold and release, never exit on a vanished one.
+            let row = clock(dir, SID);
+            let until = chrono::DateTime::parse_from_rfc3339(row["until"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            assert!(
+                until <= chrono::Utc::now(),
+                "the clock reads expired to the timer"
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let logged = loop {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if text.contains("hold-release") || std::time::Instant::now() > deadline {
+                    break text;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            };
+            assert!(
+                logged.contains("hold-release"),
+                "the standard release leg spawned: {logged:?}"
+            );
         });
     }
 

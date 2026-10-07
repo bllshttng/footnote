@@ -481,29 +481,6 @@ fn card_detail_click_routes_to_the_agent_above() {
 }
 
 #[test]
-fn hovering_line_two_or_selecting_line_one_bands_both_card_lines() {
-    for select in [false, true] {
-        let mut v = card_view(lead_and_worker());
-        v.term = (30, 140);
-        v.sideline_width = 80;
-        let (agent_i, detail_i) = card_rows_for(&v, "w1");
-        if select {
-            v.selector = Some(agent_i);
-        } else {
-            v.hover_row = Some(detail_i);
-        }
-        let frame = v.compose();
-        let width = v.sideline_paint_w().saturating_sub(1);
-        let line = "#".repeat(width);
-        assert_eq!(
-            card_highlight_snapshot(&v, &frame, agent_i, detail_i),
-            format!("{line}\n{line}\n{line}"),
-            "select={select}: the snapshot covers every cell and column boundary on both lines"
-        );
-    }
-}
-
-#[test]
 fn hover_and_selection_share_the_same_card_cell_snapshot() {
     let mut hover = card_view(lead_and_worker());
     hover.term = (30, 140);
@@ -529,6 +506,36 @@ fn hover_and_selection_share_the_same_card_cell_snapshot() {
     assert_eq!(
         hover_cells, selected_cells,
         "hover and click use one paint path"
+    );
+    // The pairing bands all three lines for both gestures, every cell and
+    // column boundary included; the metrics line's hover is covered by its
+    // own test below.
+    assert!(
+        hover_cells.iter().all(|cell| cell.bg != Color::Default),
+        "hover bands every cell of all three lines"
+    );
+    assert!(
+        selected_cells.iter().all(|cell| cell.bg != Color::Default),
+        "selection bands every cell of all three lines"
+    );
+}
+
+#[test]
+fn hovering_line_three_bands_the_whole_card() {
+    // A card shades as one unit from any of its lines. Hovering the
+    // metrics line must reach back up to the detail line, not skip it.
+    let mut v = card_view(lead_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    v.hover_row = Some(detail_i + 1);
+    let frame = v.compose();
+    let width = v.sideline_paint_w().saturating_sub(1);
+    let line = "#".repeat(width);
+    assert_eq!(
+        card_highlight_snapshot(&v, &frame, agent_i, detail_i),
+        format!("{line}\n{line}\n{line}"),
+        "hover on the metrics line bands all three card lines"
     );
 }
 
