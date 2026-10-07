@@ -63,6 +63,13 @@ def update_claim(key: str, root: Optional[Path] = None, **columns: Any) -> None:
     state = claims_dir(root if root is not None else native_claims_root(key)).parent
     stores = list(state.rglob("graph.db"))
     assert stores, f"no graph.db under {state}"
+    # Keep the row valid: a pid and pid_unavailable are exclusive, and each
+    # shape has its own schema version.
+    if columns.get("pid_unavailable"):
+        columns.setdefault("schema_version", 2)
+    elif columns.get("pid") is not None:
+        columns.setdefault("pid_unavailable", 0)
+        columns.setdefault("schema_version", 1)
     if "metadata" in columns and not isinstance(columns["metadata"], str):
         columns["metadata"] = json.dumps(columns["metadata"])
     sets = ", ".join(f"{name} = ?" for name in columns)
