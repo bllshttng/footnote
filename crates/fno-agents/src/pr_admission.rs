@@ -98,7 +98,7 @@ fn facts_of(pull: &Value) -> Value {
 fn pulls_of_facts(facts: &Value) -> Value {
     let head_repo = facts.get("head_repo").cloned().unwrap_or(Value::Null);
     json!({
-        "head": {"repo": head_repo},
+        "head": {"repo": {"full_name": head_repo}},
         "base": {"repo": {"full_name": facts.get("base_repo").cloned().unwrap_or(Value::Null)}},
         "author_association": facts.get("author_association").cloned().unwrap_or(Value::Null),
         "user": {"login": facts.get("login").cloned().unwrap_or(Value::Null)},
