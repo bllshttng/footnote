@@ -15,6 +15,7 @@ pub const SYSTEM_ARMS: &[&str] = &[
     "fleet-incident",
     "mail-hold",
     "questions",
+    "notice-router",
 ];
 
 /// The legacy stamps old bus rows carry, and the `fno/<arm>` name each one

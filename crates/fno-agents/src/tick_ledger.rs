@@ -135,6 +135,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "notice_route",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "watchdog",
         default_interval_s: 600,
         scheduler: SCHED_LAUNCHD,
