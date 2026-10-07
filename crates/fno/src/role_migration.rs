@@ -142,6 +142,47 @@ fn migrate_value(value: &mut Value, field: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A config that holds both `[king]` and `[lead]` folds the legacy table
+/// under the current one, the current value winning each clash. A refusal
+/// left `[king]` in place, and the loader read it over `lead.enabled`.
+fn fold_legacy_tables(value: &mut Value) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    for child in map.values_mut() {
+        fold_legacy_tables(child);
+    }
+    let legacy: Vec<String> = map
+        .keys()
+        .filter(|key| {
+            let current = vocabulary(key);
+            current != **key && map.contains_key(&current)
+        })
+        .cloned()
+        .collect();
+    for key in legacy {
+        let Some(old) = map.remove(&key) else {
+            continue;
+        };
+        if let Some(current) = map.get_mut(&vocabulary(&key)) {
+            merge_under(current, old);
+        }
+    }
+}
+
+fn merge_under(current: &mut Value, legacy: Value) {
+    if let (Value::Object(current), Value::Object(legacy)) = (current, legacy) {
+        for (key, value) in legacy {
+            match current.get_mut(&key) {
+                Some(existing) => merge_under(existing, value),
+                None => {
+                    current.insert(key, value);
+                }
+            }
+        }
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = path.with_extension(format!("role-upgrade-{}.tmp", std::process::id()));
     let result = (|| {
@@ -249,6 +290,7 @@ fn migrate_file(path: &Path) -> Result<(), String> {
                 toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let mut value = serde_json::to_value(document).map_err(|e| e.to_string())?;
             let original = value.clone();
+            fold_legacy_tables(&mut value);
             migrate_value(&mut value, "")?;
             if value == original {
                 return Ok(());
@@ -335,10 +377,8 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 if current != name {
                     let target = path.with_file_name(current);
                     if target.exists() {
-                        return Err(format!(
-                            "both role directories exist at {}; migration refused",
-                            path.display()
-                        ));
+                        supersede(&path, &target)?;
+                        continue;
                     }
                     std::fs::rename(&path, target).map_err(|e| e.to_string())?;
                 }
@@ -351,19 +391,10 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 vocabulary(name)
             };
             let target = path.with_file_name(&current);
-            // Judge the collision before rewriting: a refused rename must
-            // leave the legacy file byte-for-byte as it was found.
+            // Judge the collision before rewriting: the legacy file is kept
+            // byte-for-byte as it was found, beside the live one.
             if current != name && target.exists() {
-                if name != "crown_names.json" {
-                    return Err(format!(
-                        "both role files exist at {}; migration refused",
-                        path.display()
-                    ));
-                }
-                // The name store moved to team_names.json before this
-                // migration, so a surviving crown_names.json is an older
-                // generation. The live store wins; the old one is kept.
-                std::fs::rename(&path, superseded_backup(&path)).map_err(|e| e.to_string())?;
+                supersede(&path, &target)?;
                 continue;
             }
             if name == "events.db" {
@@ -376,6 +407,22 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// Both the legacy and the current name exist. The current one is the live
+/// store, so it wins and the legacy one moves to a `.superseded` backup. A
+/// refusal here stopped the walk before config.toml, wrote no marker, and
+/// every later process retried and printed the same refusal.
+fn supersede(legacy: &Path, current: &Path) -> Result<(), String> {
+    let backup = superseded_backup(legacy);
+    std::fs::rename(legacy, &backup).map_err(|e| e.to_string())?;
+    eprintln!(
+        "role migration: kept {}; moved the older {} to {}",
+        current.display(),
+        legacy.display(),
+        backup.display()
+    );
     Ok(())
 }
 
