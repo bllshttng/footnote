@@ -3311,11 +3311,14 @@ mod tests {
     #[test]
     fn a_slow_source_is_killed_inside_the_whole_board_budget() {
         // A scripted `fno` that sleeps 5 seconds under a
-        // 2,000ms board budget must be killed at its deadline-derived spawn
-        // bound, so the collector returns inside ~2.75s and the over-budget
+        // 4,000ms board budget must be killed at its deadline-derived spawn
+        // bound, so the collector returns inside ~4.75s and the over-budget
         // source reads as unreadable - never the measured 40,776ms-against-
         // 30,000ms overrun, and never the 4.9s the captured-slice shape
-        // accepted.
+        // accepted. The budget leaves room for the pre-spawn in-process
+        // reads on a loaded runner (measured: the sibling 2,000ms shape
+        // expired before its slow source spawned), and the cap stays under
+        // the 5s sleep so an unbounded read still trips it.
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Pins die with the body: a later test must never read a dropped
         // TempDir through a leaked env value.
@@ -3350,7 +3353,7 @@ mod tests {
         // The cwd too: from the crate dir the needs fold reads the canonical
         // checkout's live journal, which measured 20s in a debug build.
         let payload = read_board(&BoardOpts {
-            budget_ms: 2_000,
+            budget_ms: 4_000,
             cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
@@ -3368,8 +3371,8 @@ mod tests {
         // budget; the deadline-derived bound must keep the whole board under
         // budget plus the serialization reserve.
         assert!(
-            elapsed < std::time::Duration::from_millis(2_750),
-            "board took {elapsed:?} against a 2,000ms budget with a 5s sleep source"
+            elapsed < std::time::Duration::from_millis(4_750),
+            "board took {elapsed:?} against a 4,000ms budget with a 5s sleep source"
         );
         let parsed = crate::lead_termination::parse_org_board_value(&payload).expect("parses");
         // A budget kill is the board's own choice, not evidence about the
@@ -3472,7 +3475,11 @@ mod tests {
 
         let start = std::time::Instant::now();
         let payload = read_board(&BoardOpts {
-            budget_ms: 2_000,
+            // The budget must survive the pre-truth sources on a loaded
+            // runner (measured: 2,000ms expired before the batch spawned and
+            // the queues read spent, never timed out), so the batch is the
+            // thing the budget kills, at its deadline-derived bound.
+            budget_ms: 8_000,
             cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
@@ -3507,8 +3514,8 @@ mod tests {
         // reserve, and the holder must read unmeasured by the receipt word,
         // never no-evidence.
         assert!(
-            elapsed < std::time::Duration::from_millis(2_750),
-            "board took {elapsed:?} against a 2,000ms budget with a 30s truth stub"
+            elapsed < std::time::Duration::from_millis(8_750),
+            "board took {elapsed:?} against an 8,000ms budget with a 30s truth stub"
         );
         let err = payload["sources"]["holder_activity"]["error"]
             .as_str()
