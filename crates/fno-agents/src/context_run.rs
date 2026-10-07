@@ -74,6 +74,9 @@ struct CoreInput<'a> {
     /// The project directory the hook ran in: host of the native census and
     /// the space root the snapshot event appends to.
     host_dir: &'a Path,
+    /// The session's role, resolved by the caller from the payload session
+    /// id. run_core never reads the ambient home for it, so tests inject.
+    role: crate::owner_ladder::Role,
 }
 
 pub fn run_context_run(args: &[String]) -> i32 {
@@ -115,6 +118,20 @@ pub fn run_context_run(args: &[String]) -> i32 {
     let mut payload = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut payload);
     let host_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let session_id = serde_json::from_slice::<Value>(&payload)
+        .unwrap_or(Value::Null)
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // The role read fails soft: an unreadable source reads as User, which
+    // is the pre-role behavior.
+    let role = crate::owner_ladder::role_now(
+        &session_id,
+        &crate::paths::AgentsHome::from_env(),
+        &host_dir,
+    );
 
     let input = CoreInput {
         group_name,
@@ -124,6 +141,7 @@ pub fn run_context_run(args: &[String]) -> i32 {
         native_bound: native_bound(),
         native_cmd: None,
         host_dir: &host_dir,
+        role,
     };
     let out = run_core(&input);
     if !out.stdout.is_empty() {
@@ -523,14 +541,8 @@ fn run_core(input: &CoreInput) -> CoreOutput {
         .to_string();
     let entry_state = entry_state_for(group.entry.as_deref(), payload_source);
 
-    // The session's role, read once per run: a producer whose audience
-    // omits the role does not run. A role read that fails reads as User,
-    // which is today's behavior.
-    let role = crate::owner_ladder::role_now(
-        &session_id,
-        &crate::paths::AgentsHome::from_env(),
-        input.host_dir,
-    );
+    // A producer whose audience omits the session's role does not run.
+    let role = input.role;
     let selected: Vec<&Producer> = group
         .producers
         .iter()
@@ -1069,6 +1081,7 @@ mod tests {
                 native_bound: Duration::from_secs(2),
                 native_cmd: Some(self.native_cmd(json!([]))),
                 host_dir: self.dir.path(),
+                role: crate::owner_ladder::Role::User,
             })
         }
 
@@ -1086,6 +1099,7 @@ mod tests {
                 native_bound: Duration::from_secs(2),
                 native_cmd: Some(self.native_cmd(native_rows)),
                 host_dir: self.dir.path(),
+                role: crate::owner_ladder::Role::User,
             })
         }
 
