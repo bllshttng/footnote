@@ -23,6 +23,11 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 TMP="$(mktemp -d -t inject-announce-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
+# The overload skip must never fire in a suite: the stub reader must run on
+# every boundary, and a loaded runner must not read as overload. Pin past
+# any runner load (the skip tier's own contract in hook-budget.sh).
+export FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000
+
 # A fake `fno-agents` controls the reader output. FNO_ANNOUNCE_STUB_OUT is
 # what it prints; FNO_ANNOUNCE_STUB_ONCE makes it print on the first call
 # only (the real reader's cursor: unseen on the first boundary, seen on the
@@ -108,6 +113,20 @@ OUT="$(printf '%s' '{"session_id":"sess-1"}' | PATH="/usr/bin:/bin" bash "$HOOK"
 RC=$?
 [[ $RC -eq 0 && -z "$OUT" ]] && pass "binary absent: silent, exit 0" \
   || fail "binary absent: rc=$RC out=$OUT"
+
+# 8. Overload skip: threshold 0 pins the skip on, so the hook exits 0 silent
+#    and never invokes the reader — the e2e proof the check sits before any
+#    work (the subshell keeps the suite-wide pin above intact).
+ARGS_LOG5="$TMP/args5.log"
+OUT="$( export FNO_HOOK_BUDGET_SKIP_PER_CORE=0
+    printf '%s' '{"session_id":"sess-skip"}' \
+        | FNO_ANNOUNCE_ARGS_LOG="$ARGS_LOG5" run_hook prompt 2>/dev/null )"
+RC=$?
+if [[ $RC -eq 0 && -z "$OUT" && ! -s "$ARGS_LOG5" ]]; then
+  pass "overload skip: silent exit 0, reader never invoked"
+else
+  fail "overload skip: rc=$RC out=$OUT log=$(cat "$ARGS_LOG5" 2>/dev/null)"
+fi
 
 echo
 echo "announce hook: $PASS passed, $FAIL failed"
