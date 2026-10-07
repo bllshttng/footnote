@@ -74,7 +74,8 @@ fn map_pr_state(row: &Value) -> Result<String, String> {
 }
 
 /// One REST pulls listing with the detail rows the scans read:
-/// `{number, state, title, headRefName, url, mergedAt, body}`. A malformed
+/// `{number, state, title, headRefName, isCrossRepository, url, mergedAt,
+/// body}`. A malformed
 /// head/title/url fails the whole page loudly, never an absent answer.
 fn rest_pr_rows(cwd: &Path, state: &str, max_pages: usize) -> Result<Vec<Value>, PrReadError> {
     let Some(gh) = gh_executable() else {
@@ -135,11 +136,20 @@ fn rest_pr_rows(cwd: &Path, state: &str, max_pages: usize) -> Result<Vec<Value>,
                 ));
             }
             let state_word = map_pr_state(row).map_err(|e| PrReadError::new(e, "malformed"))?;
+            // The binding verdicts skip a positive true, so a fork PR raises
+            // no advisory; a null head repo (deleted fork) reads true.
+            let head_repo = row.pointer("/head/repo/full_name").and_then(Value::as_str);
+            let base_repo = row.pointer("/base/repo/full_name").and_then(Value::as_str);
+            let cross = match (head_repo, base_repo) {
+                (Some(h), Some(b)) => h != b,
+                _ => true,
+            };
             rows.push(json!({
                 "number": number,
                 "state": state_word,
                 "title": row.get("title"),
                 "headRefName": head_ref,
+                "isCrossRepository": cross,
                 "url": row.get("html_url"),
                 "mergedAt": row.get("merged_at"),
                 "body": row.get("body").and_then(Value::as_str).unwrap_or(""),
