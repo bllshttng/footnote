@@ -5,7 +5,7 @@
 //! goldens captured from the Python judge (`def validate` in
 //! cli/src/fno/events/__init__.py) BEFORE that leg was deleted. The
 //! goldens under tests/golden/event_validate/ freeze one
-//! (exit, stdout, stderr) triple per corpus row (275 of the 276 rows in
+//! (exit, stdout, stderr) triple per corpus row (284 of the 285 rows in
 //! cli/tests/events/parity_corpus.jsonl; the overflow-literals row is
 //! answered by the door's substrate refusal and stays in the Python
 //! suite). The native judge in crates/fno-agents/src/event_store/

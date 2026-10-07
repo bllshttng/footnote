@@ -687,6 +687,33 @@ def _stable_fno_py_cmd(monkeypatch):
     monkeypatch.setattr(_subprocess_util, "fno_py_cmd", lambda: ["fno-py"])
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _pinned_native_fno():
+    """Resolve the native fno binary once, before any test narrows PATH.
+
+    Tests that set PATH to a fake bin dir, or stub shutil.which, leave the
+    event store client with no binary when the checkout has no crates/fno
+    build. FNO_BIN still wins per test. No process env is set, so children
+    resolve as before.
+    """
+    from fno.events import store_client
+    import fno.events as events_pkg
+
+    try:
+        pinned = store_client.resolve_native_bin()
+    except store_client.EventStoreUnavailable:
+        yield
+        return
+    with pytest.MonkeyPatch.context() as mp:
+        def _pinned():
+            return os.environ.get("FNO_BIN") or pinned
+        mp.setattr(store_client, "resolve_native_bin", _pinned)
+        # events/__init__ re-exports the name at import; emit paths call that
+        # copy, so patching store_client alone leaves them on the real resolver.
+        mp.setattr(events_pkg, "resolve_native_bin", _pinned)
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _neutral_host_harness(monkeypatch):
     """Keep synthetic session markers independent of the pytest host harness.
