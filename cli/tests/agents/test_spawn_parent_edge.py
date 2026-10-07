@@ -848,6 +848,7 @@ def test_resume_spawn_without_markers_inherits_the_source_rows_parent_edge(
                 log_path="/tmp/source-row.log",
                 harness_session_id=source_uuid,
                 short_id="11111111",
+                model="claude-sonnet-5-5",
                 spawned_by_session="original-spawner-1",
                 spawned_by_harness="claude",
                 spawned_by_cwd="/original/spawner/dir",
