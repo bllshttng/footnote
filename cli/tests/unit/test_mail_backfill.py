@@ -71,14 +71,23 @@ def _fixture_root(tmp_path):
     return root
 
 
-def test_archive_gate_and_fixture_join_through_the_real_binary(_rust_bin, tmp_path):
-    """The archive gate (a cross-session row is never deliverable: draining
-    it would hand the recipient a second copy of its own history) and the
-    argv contract through the real binary on fixture halves."""
+def test_archive_gate_and_fixture_join_through_the_real_binary(
+    _rust_bin, tmp_path, monkeypatch
+):
+    """The archive gate (a cross-session row is never deliverable, and the
+    unclaimed nag skips it: draining either would hand the recipient a
+    second copy of its own history) and the argv contract through the real
+    binary on fixture halves."""
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
     row = Envelope.new(
         from_="a", to="b", kind="send", body="x", delivery="cross-session"
     )
     assert is_deliverable(row) is False
+    from fno.bus.log import append as bus_append
+    from fno.mail.landed import _sent_unclaimed
+
+    bus_append(row)
+    assert _sent_unclaimed("a", -1) == []
 
     root = _fixture_root(tmp_path)
     proc = subprocess.run(
