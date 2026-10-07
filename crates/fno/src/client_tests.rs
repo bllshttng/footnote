@@ -177,9 +177,11 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
         pane_state(Some(AgentBadge::Done), true, None),
         PaneState::Idle
     );
-    // (x-d401) The blind fold is gone: no badge and no activity reading is
-    // a marked absence, never a measured idle.
-    assert_eq!(pane_state(None, false, None), PaneState::Unmeasured);
+    // 2026-10-06 shell ruling supersedes x-d401: an unbadged shell tab is live.
+    let shell = |act: Option<ShellActivity>| pane_state(None, false, act);
+    assert_eq!(shell(None), PaneState::Idle);
+    assert_eq!(shell(Some(ShellActivity::Empty)), PaneState::Idle);
+    assert_eq!(shell(Some(ShellActivity::Unmeasured)), PaneState::Idle);
     // Worst-first ordering (Invariant): the squad rollup takes the `min`, so
     // the worst state must be the Ord-minimum - x-d140's `min` and the
     // navigator filter must agree on this ordering.
@@ -357,10 +359,8 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         last_activity_age_s: None,
         resumable: false,
         no_pane_reason: None,
-        // (x-d401) A badgeless LIVE row in these fixtures means "an idle
-        // worker"; under the absence predicate that must be SAID (an
-        // explicit Idle reading), not implied by badge absence - absence
-        // now renders Unmeasured.
+        // A badgeless LIVE row says "an idle worker" aloud; the fixture
+        // keeps the explicit reading under the 2026-10-06 shell ruling.
         pane_activity: if badge.is_none() && !exited {
             Some(ShellActivity::Idle)
         } else {

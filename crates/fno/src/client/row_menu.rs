@@ -145,10 +145,17 @@ pub(super) fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     add(entry("±", "Diff"), &[MenuAction::Diff]);
     // The hold lift is common to every row state too: the mark rides the
     // row, not its pane, so a worker wearing [DND] or [HELD] can sit in any
-    // of them. Only a row wearing one offers the release - no dead entry
+    // of them. The label names the mark the row wears - the user's
+    // 2026-10-06 ruling: a DND row shows Remove DND, a HELD row shows
+    // Remove hold. Only a row wearing a mark offers it - no dead entry
     // ever renders, the same rule the state branches above follow.
     if agent.dnd {
-        add(entry("⤴", "Release hold"), &[MenuAction::ReleaseHold]);
+        let label = if agent.held_conversation {
+            "Remove hold"
+        } else {
+            "Remove DND"
+        };
+        add(entry("⤴", label), &[MenuAction::ReleaseHold]);
     }
     // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
     if !agent.external {
@@ -211,28 +218,41 @@ mod tests {
     }
 
     #[test]
-    fn a_row_carrying_a_hold_mark_offers_release_hold() {
-        // The menu shows [DND] and [HELD] but offered no lift; a row wearing
-        // either mark offers Release hold, and an unmarked row does not.
+    fn a_row_carrying_a_hold_mark_offers_the_removal_named_by_its_mark() {
+        // The menu showed the marks but offered no lift; the label names the
+        // mark: a HELD row shows Remove hold, a DND row shows Remove DND,
+        // and an unmarked row offers neither.
         let mut held = focus_agent(3);
         held.dnd = true;
         held.held_conversation = true;
         let menu = build_row_menu(&held, test_anchor());
+        let label_of = |menu: &RowMenu, want: &str| {
+            menu.popup
+                .rows
+                .iter()
+                .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == want))
+        };
         assert!(
-            menu.popup.rows.iter().any(|r| matches!(
-                r,
-                PopupRow::Entry { label, .. } if label == "Release hold"
-            )),
-            "a held row offers Release hold"
+            label_of(&menu, "Remove hold"),
+            "a held row offers Remove hold"
+        );
+        assert!(
+            !label_of(&menu, "Remove DND"),
+            "a held row does not offer Remove DND"
+        );
+        let mut dnd = focus_agent(3);
+        dnd.dnd = true;
+        let menu = build_row_menu(&dnd, test_anchor());
+        assert!(label_of(&menu, "Remove DND"), "a DND row offers Remove DND");
+        assert!(
+            !label_of(&menu, "Remove hold"),
+            "a DND row does not offer Remove hold"
         );
         let plain = focus_agent(3);
         let menu = build_row_menu(&plain, test_anchor());
         assert!(
-            !menu.popup.rows.iter().any(|r| matches!(
-                r,
-                PopupRow::Entry { label, .. } if label == "Release hold"
-            )),
-            "no Release hold entry without a hold mark"
+            !label_of(&menu, "Remove hold") && !label_of(&menu, "Remove DND"),
+            "no removal entry without a hold mark"
         );
     }
 
