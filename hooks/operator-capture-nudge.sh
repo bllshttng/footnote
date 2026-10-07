@@ -51,6 +51,21 @@ source "$WT_LIB" 2>/dev/null || exit 0
 # never a verdict. No fingerprint: the verb resolves its own inputs.
 session="$(cat 2>/dev/null | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 rc=0
+# Role audience: a worker session reads as no queue. Inside
+# context-run the audience filter already dropped this producer for the
+# session's role; the probe here covers the direct runs (claude hooks.json
+# Stop, codex-hooks.json SessionStart) where no filter ran.
+if [[ "${FNO_SESSION_ROLE:-}" == "worker" ]]; then
+    exit 0
+fi
+if [[ -n "$session" ]]; then
+    source "$HOOK_DIR/lib/agents-bin.sh" 2>/dev/null || true
+    probe_bin="$(fno_agents_bin "$HOOK_DIR/.." 2>/dev/null || true)"
+    probe_word="$("$probe_bin" context-run --role "$session" 2>/dev/null || true)"
+    if [[ "$probe_word" == "worker" ]]; then
+        exit 0
+    fi
+fi
 if [[ -n "$session" ]]; then
     payload=$(hook_cache_serve "opcap-$session" 60 "" -- fno inbox operator status --json 2>/dev/null) || rc=$?
 else

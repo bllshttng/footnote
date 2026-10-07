@@ -40,6 +40,14 @@ pub fn run(_args: &[String]) -> i32 {
     if !session_id.is_empty() {
         crate::mail_hold::conversation_prompt(session_id, prompt);
     }
+    // Role audience: a worker session never sees the fleet projection. The
+    // hold armed above; a lead the user types to still reads the block.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let role =
+        crate::owner_ladder::role_now(session_id, &crate::paths::AgentsHome::from_env(), &cwd);
+    if role == crate::owner_ladder::Role::Worker {
+        return 0;
+    }
     let event_name = payload
         .get("hook_event_name")
         .and_then(Value::as_str)
