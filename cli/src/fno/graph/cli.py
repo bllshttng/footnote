@@ -7379,3 +7379,9 @@ register_lifecycle_commands(
     lambda: _graph_path(),
     lambda *a, **k: _project_plans_from_graph(*a, **k),
 )
+
+# The root loader calls this after this module is fully imported and before
+# Click builds the tree, so the verb guards hold on the first invocation.
+# The group callback classifies too: it backstops in-process dispatches that
+# never cross the loader.
+_fno_pre_dispatch = classify_backlog_verbs
