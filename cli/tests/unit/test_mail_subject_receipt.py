@@ -19,18 +19,6 @@ from fno.bus.log import Envelope, from_json_line, to_json_line
 from fno.paths_testing import use_tmpdir
 
 
-def test_json_receipt_four_keys_always() -> None:
-    from fno.mail.receipts import json_receipt
-
-    row = json.loads(json_receipt("fmail-1", to="peer", status="delivered (hosted)"))
-    assert set(row) == {"msg_id", "subject", "to", "status"}
-    assert row["subject"] is None
-    row = json.loads(
-        json_receipt("fmail-1", to="peer", status="queued (durable)", subject="s")
-    )
-    assert row["subject"] == "s"
-
-
 @pytest.fixture
 def isolated(tmp_path: Path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
@@ -90,6 +78,17 @@ def test_kind_lane_send_subject_rides_bus_row_and_receipt(isolated, runner, monk
     refused = _invoke(isolated, runner, "peer", "hi", "--raw")
     assert refused.exit_code == 2, refused.output
     assert "FNO_MAIL_SUBJECT" in refused.output
+
+    # The helper itself: four keys always, subject null without one.
+    from fno.mail.receipts import json_receipt
+
+    row = json.loads(json_receipt("fmail-1", to="peer", status="delivered (hosted)"))
+    assert set(row) == {"msg_id", "subject", "to", "status"}
+    assert row["subject"] is None
+    row = json.loads(
+        json_receipt("fmail-1", to="peer", status="queued (durable)", subject="s")
+    )
+    assert row["subject"] == "s"
 
     # The bus row serializes with the subject and parses it back; a row from
     # before the field existed parses None and re-serializes without it.
