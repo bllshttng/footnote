@@ -1627,6 +1627,10 @@ fn decide_identity(name: &str, author: &str) -> Result<(), String> {
 fn exec_real(real: &Path, args: &[OsString]) -> BootErr {
     let mut command = bootstrap_command(real);
     command.args(args);
+    // Set before the interpreter starts: Python caches the package's own
+    // __init__ bytecode before its body runs, and a .pyc written while
+    // `uv tool install` replaces the venv fails it (os error 66).
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
     let err = crate::process_admission::bootstrap_exec(&mut command);
     BootErr::new(
         126,

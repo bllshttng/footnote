@@ -83,7 +83,7 @@ test('an old buddy comes back with its name and the species its personality name
 test('/buddy statusline wraps the user status line, writes frames, and pane restores it exactly', async ($, on) => {
   const mine = { type: 'command', command: '~/bin/my-status', padding: 2 }
   const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: mine })]])
-  const { clock } = boot(on, OLD_CONFIG, new Map(), files)
+  const { clock, saved } = boot(on, OLD_CONFIG, new Map(), files)
   on('process.run', ($: any, e: any) =>
     e.argv.join(' ') === 'fno config get state_dir'
       ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
@@ -99,6 +99,11 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   await clock.advance(600)
   const frame = JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!)
   expect(frame).toMatchObject({ name: 'Quip', speech: 'Quip is back. did you miss me?' })
+
+  // A roll in another session rewrites the shared soul; this session draws the new buddy.
+  saved.set('soul', { seed: 'other-seed', name: 'Zed', personality: 'a blob', hatchedAt: 1 })
+  await clock.advance(2_000)
+  expect(JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!)).toMatchObject({ name: 'Zed', speech: '' })
 
   await $.command.run({ command: 'buddy', args: 'pane' })
   expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual(mine)

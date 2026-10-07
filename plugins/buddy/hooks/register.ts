@@ -94,6 +94,21 @@ async function load($: EngineInterface, now: number): Promise<void> {
   }
 }
 
+// The soul is shared by every session on the machine. A roll or a new personality in one
+// session rewrites it; the others take it here, so all sessions show the same buddy.
+async function syncSoul($: EngineInterface): Promise<void> {
+  const saved = (await $.store.get('soul')) as Soul | undefined
+  if (!buddy || !saved?.seed) return
+  if (saved.seed === buddy.seed && saved.name === buddy.name && saved.personality === buddy.personality) return
+  if (saved.seed !== buddy.seed) {
+    recent = []
+    lastSaid = ''
+    // Drop the old buddy's line but keep its time, so the swap does not start an idle call.
+    if (bubble) bubble = { text: '', at: bubble.at }
+  }
+  buddy = embody(saved)
+}
+
 // An fno release from before the move still loads its own copy of the buddy, which stamps fno's
 // store every few minutes. While that copy runs, this one stays off so only one buddy shows.
 async function oldCopyLive($: EngineInterface, now: number): Promise<boolean> {
@@ -617,6 +632,7 @@ export function register(on: On) {
         react($, 'idle').catch(() => {})
       }
       if (tick % 4 === 0) {
+        await syncSoul($).catch(() => {})
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
         if (wrapped && !was) await $.ui.close({ id: PANE_ID }).catch(() => {})

@@ -331,19 +331,25 @@ fn append_receipt(
     exit: i32,
     timed_out: bool,
     re_pulled: u64,
+    failure_tail: Option<&str>,
     stderr: &mut Vec<String>,
 ) {
     use std::io::Write;
     let ts = (deps.now)().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let line = json!({
+    let mut receipt = json!({
         "ts": ts,
         "pr": pr,
         "sha": sha12(sha),
         "exit": exit,
         "timed_out": timed_out,
         "re_pulled": re_pulled,
-    })
-    .to_string();
+    });
+    // A failed chain keeps its folded stderr tail: the capture dir is deleted
+    // after the run, so the receipt is the only place the reason survives.
+    if let Some(text) = failure_tail.filter(|t| !t.trim().is_empty()) {
+        receipt["stderr_tail"] = json!(tail(&crate::client::fold_repeated_lines(text)));
+    }
+    let line = receipt.to_string();
     let path = canonical.join(".fno").join("post-merge-sync-receipt.jsonl");
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new()
@@ -909,14 +915,24 @@ fn sync_under_lease(
         write_marker(&marker, stderr);
         stdout.push(format!("post-merge sync: synced {}", sha12(sha)));
         let re_pulled = drain_pending(deps, canonical, stdout, stderr);
-        append_receipt(deps, canonical, pr, sha, 0, false, re_pulled, stderr);
+        append_receipt(deps, canonical, pr, sha, 0, false, re_pulled, None, stderr);
         return 0;
     }
 
     // Surface the command and its output, not just the exit code: a real
     // failure here was a one-word typo the receipt hid for days. The marker
     // stays withheld, so retry behaviour is unchanged.
-    append_receipt(deps, canonical, pr, sha, out.code, out.timed_out, 0, stderr);
+    append_receipt(
+        deps,
+        canonical,
+        pr,
+        sha,
+        out.code,
+        out.timed_out,
+        0,
+        Some(&out.stderr),
+        stderr,
+    );
     let mut parts = vec![
         format!(
             "post-merge sync: failed (exit {}); marker withheld, will retry",
@@ -1849,7 +1865,7 @@ mod tests {
             ShellOutcome {
                 code: 124,
                 stdout: String::new(),
-                stderr: String::new(),
+                stderr: "cargo admission: holding\ncargo admission: holding\nfno update: FAILED step(s): uv install\n".into(),
                 timed_out: true,
             }
         });
@@ -1863,6 +1879,18 @@ mod tests {
         let lines = stderr.join("\n");
         assert!(lines.contains("sync_command timed out after 600s; marker withheld, will retry"));
         assert!(lines.contains("post-merge sync: failed (exit 124); marker withheld, will retry"));
+        // The capture dir is gone after the run; the receipt keeps the reason.
+        let receipt = std::fs::read_to_string(
+            tmp.path()
+                .join(".fno")
+                .join("post-merge-sync-receipt.jsonl"),
+        )
+        .unwrap();
+        let row: Value = serde_json::from_str(receipt.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            row["stderr_tail"],
+            "cargo admission: holding (x2)\nfno update: FAILED step(s): uv install"
+        );
     }
 
     #[test]
