@@ -219,6 +219,11 @@ fn judge_segment(
 /// the first stage's command position, so a wrapper the Python prefix regex
 /// never saw (`env pgrep | head`) is an intended flip of the port.
 fn is_producer(head: &str, argv: &[String]) -> bool {
+    // A help tail's output is usage text, not a listing: truncating it is
+    // harmless, so no producer shape applies while a help flag rides along.
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        return false;
+    }
     match head {
         "pgrep" | "ls" | "find" => true,
         "ps" => argv

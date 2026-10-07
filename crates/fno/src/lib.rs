@@ -12,6 +12,7 @@ pub mod agents_alias;
 pub mod agents_history;
 pub mod agents_view;
 pub mod attention_api;
+pub mod backlog_list;
 pub mod backlog_model;
 pub mod backlog_snapshot;
 pub mod backlog_view;
