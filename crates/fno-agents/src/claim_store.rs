@@ -586,8 +586,16 @@ pub(crate) fn renew(
     if observed.holder != holder || observed.expires_at.is_none() {
         return Ok(false);
     }
+    // The verdict, not the clock, refuses: an expired lease whose holder
+    // reads live or suspect extends, exactly as `claim status` reports it.
+    // The verdict runs only once expired, so a routine renewal skips its probes.
+    if observed.expires_at.is_some_and(|at| at <= claims::now_ms())
+        && crate::claim_verbs::status_verdict(&observed).0 == ClaimState::Stale
+    {
+        return Ok(false);
+    }
     let next = claims::renewed_record(&observed, ttl);
-    let sql = format!("UPDATE claims SET expires_at={CLOCK}+?4,pid=?6,host=?7,machine_id=?8,session_id=?9 WHERE key=?1 AND holder=?2 AND acquired_at=?3 AND expires_at IS ?5 AND expires_at>{CLOCK} AND pid IS ?10");
+    let sql = format!("UPDATE claims SET expires_at={CLOCK}+?4,pid=?6,host=?7,machine_id=?8,session_id=?9 WHERE key=?1 AND holder=?2 AND acquired_at=?3 AND expires_at IS ?5 AND pid IS ?10");
     Ok(connection
         .execute(
             &sql,

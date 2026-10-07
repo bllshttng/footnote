@@ -548,14 +548,16 @@ def refresh_claim(
     status = _native_claim("status", key, flags)
     if status.get("holder") and status.get("holder") != holder:
         raise HolderMismatch(holder, status["holder"], key)
+    state = status.get("state")
+    if state == "stale":
+        raise ClaimValidationError(
+            f"claim {key!r} expired and its holder reads dead; refusing to resurrect it"
+        )
     if ttl_ms is None:
-        state = status.get("state")
         if state == "free":
             raise ClaimGoneAway(str(claim_path(key, root=root)))
         if state == "corrupted":
             raise ClaimCorrupted(str(status.get("error") or key))
-        if state == "stale":
-            raise ClaimValidationError(f"claim {key!r} expired and cannot be refreshed")
         if status.get("expires_at") is None:
             return None
         ttl_ms = MIN_TTL_MS
