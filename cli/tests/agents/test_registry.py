@@ -320,6 +320,70 @@ def test_ac1_hp_schema_version_in_file(tmp_path: Path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_ac2_err_atomic_write_on_exception(tmp_path: Path, monkeypatch) -> None:
+    """AC2-ERR: exception mid-write leaves prior file intact (no corruption)."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write an initial valid registry
+    initial_entry = AgentEntry(
+        name="safe-agent",
+        harness="claude",
+        cwd="/tmp",
+        log_path="/tmp/safe.log",
+    )
+    write_registry([initial_entry], path=registry_path)
+    original_content = read_registry_document(registry_path)[0]
+
+    # Now simulate a write that dies inside the table door.
+    import fno.agents.registry_door as door_module
+
+    def _exploding_commit(*args, **kwargs):
+        raise RuntimeError("simulated kill -9 mid-write")
+
+    monkeypatch.setattr(door_module, "commit_registry_document", _exploding_commit)
+
+    new_entry = AgentEntry(
+        name="corrupt-agent",
+        harness="codex",
+        cwd="/tmp",
+        log_path="/tmp/corrupt.log",
+    )
+    with pytest.raises(RuntimeError, match="simulated kill -9"):
+        write_registry([new_entry], path=registry_path)
+
+    # The table must be intact
+    assert read_registry_document(registry_path)[0] == original_content
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].name == "safe-agent"
+
+
+def test_write_registry_failure_surfaces_and_keeps_the_table(tmp_path: Path, monkeypatch) -> None:
+    """An ``OSError`` inside the write door propagates and leaves no partial rows."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    import fno.agents.registry_door as door_module
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _explode(*args, **kwargs):
+        raise OSError("simulated disk full during commit")
+
+    monkeypatch.setattr(door_module, "commit_registry_document", _explode)
+
+    entry = AgentEntry(name="t", harness="claude", cwd="/tmp", log_path="/tmp/t.log")
+    with pytest.raises(OSError, match="simulated disk full"):
+        write_registry([entry], path=registry_path)
+
+    assert read_registry_document(registry_path)[0]["agents"] == []
+
+
 # ---------------------------------------------------------------------------
 # AC3-HP: per-agent flock serializes concurrent writes
 # ---------------------------------------------------------------------------
@@ -635,6 +699,63 @@ def test_ac4_err_malformed_row_shape_rejected(tmp_path: Path, monkeypatch) -> No
         encoding="utf-8",
     )
     with pytest.raises(RegistryVersionError, match="malformed shape"):
+        load_registry(path=registry_path)
+
+
+def test_load_registry_rejects_invalid_json(tmp_path: Path, monkeypatch) -> None:
+    """Invalid JSON surfaces as RegistryVersionError, not raw JSONDecodeError."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text("not even {valid", encoding="utf-8")
+
+    with pytest.raises(RegistryVersionError):
+        load_registry(path=registry_path)
+
+
+def test_load_registry_rejects_non_dict_top_level(tmp_path: Path, monkeypatch) -> None:
+    """A JSON array at the top level is rejected via RegistryVersionError."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(RegistryVersionError, match="not an object"):
+        load_registry(path=registry_path)
+
+
+def test_load_registry_rejects_non_list_agents_field(tmp_path: Path, monkeypatch) -> None:
+    """agents must be a list — string or object is RegistryVersionError."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps({"schema_version": 1, "agents": "oops"}), encoding="utf-8"
+    )
+
+    with pytest.raises(RegistryVersionError, match="not an array"):
+        load_registry(path=registry_path)
+
+
+def test_load_registry_rejects_non_dict_row(tmp_path: Path, monkeypatch) -> None:
+    """A non-dict element inside agents (e.g. string, null) is RegistryVersionError."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps({"schema_version": 1, "agents": ["oops", None]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RegistryVersionError, match="not an object"):
         load_registry(path=registry_path)
 
 

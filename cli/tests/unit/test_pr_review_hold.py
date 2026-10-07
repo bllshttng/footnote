@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from fno.claims.core import acquire_claim
-from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
@@ -50,9 +49,9 @@ def _worktree_list(entries):
 
 
 def _expire_claim(root: Path, key: str) -> None:
-    path = claim_path(key, root=root)
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    from tests._table_seed import update_claim
+
+    update_claim(key, root=root, expires_at=now_ms() - 1)
 
 
 NO_WORKTREE = _fake_git({"worktree": _worktree_list([])})
@@ -181,6 +180,27 @@ def test_corrupted_hold_blocks_rather_than_assuming_unheld(tmp_path: Path):
     assert activity.blocked is True
     assert activity.blocker == "review_hold_unreadable"
     assert "refusing to assume unheld" in activity.detail
+
+
+def test_expired_hold_clears_but_never_silently(tmp_path: Path, monkeypatch, capsys):
+    """AC3: a stale hold ages out WITH a receipt. Silence fails this test."""
+    acquire_claim(
+        _review_hold.review_hold_key("feature/x"),
+        "reviewer:sess-1",
+        ttl_ms=60_000,
+        pid=DEAD_PID,
+        root=tmp_path,
+    )
+    _expire_claim(tmp_path, _review_hold.review_hold_key("feature/x"))
+    emitted: list[dict] = []
+    monkeypatch.setattr(_review_hold, "_emit_expired", lambda **kw: emitted.append(kw))
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
+    )
+    assert activity.blocked is False
+    assert emitted and emitted[0]["holder"] == "reviewer:sess-1"
+    assert "expired" in capsys.readouterr().err
 
 
 def test_tracked_modifications_block_the_merge(tmp_path: Path):
@@ -476,6 +496,42 @@ def test_release_reports_whether_anything_was_there(tmp_path: Path):
         "feature/x", head="abc123", holder="r", root=tmp_path
     )
     assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
+
+
+def test_release_clears_a_corrupted_claim(tmp_path: Path):
+    """A corrupted claim has no readable holder, so no release_claim call can
+    name one. Leaving it is the worse outcome: every read classifies it
+    CORRUPTED, which BLOCKS, forever."""
+    from fno.claims.core import claim_status
+    from tests._table_seed import update_claim
+
+    key = _review_hold.review_hold_key("feature/x")
+    acquire_claim(key, "reviewer:sess-1", root=tmp_path)
+    update_claim(key, root=tmp_path, schema_version=999)
+    assert claim_status(key, root=tmp_path)["state"] == "corrupted"
+    assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
+    assert claim_status(key, root=tmp_path)["state"] == "free"
+
+
+def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
+    tmp_path: Path, capsys
+):
+    """The lapsed lockfile stops blocking HERE but still blocks the stdlib hook,
+    which cannot judge expiry and denies on the file's mere presence. One
+    crashed reviewer would deny every bare `gh pr merge` in the repo until
+    someone noticed."""
+    from fno.claims.core import claim_status
+
+    key = _review_hold.review_hold_key("feature/x")
+    acquire_claim(key, "reviewer:sess-1", ttl_ms=60_000, pid=DEAD_PID, root=tmp_path)
+    _expire_claim(tmp_path, key)
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
+    )
+    assert activity.blocked is False
+    assert "expired" in capsys.readouterr().err
+    assert claim_status(key, root=tmp_path)["state"] == "free"
 
 
 @requires_rust

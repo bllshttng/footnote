@@ -3279,6 +3279,75 @@ def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(tmp_
     assert ambiguous == [_SHARED_SID, _SHARED_SID]
 
 
+def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
+    """The registry spans providers, so its own dedup must carry harness."""
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="claude-side",
+                harness="claude",
+                cwd="/claude-cwd",
+                log_path="/tmp/c.log",
+                short_id="cafebabe",
+                harness_session_id=_SHARED_SID,
+            ),
+            AgentEntry(
+                name="codex-side",
+                harness="codex",
+                cwd="/codex-cwd",
+                log_path="/tmp/x.log",
+                harness_session_id=_SHARED_SID,
+            ),
+        ],
+        path=reg,
+    )
+
+    hits, read_ok = discover._reachable_from_registry(_SHARED_SID, reg)
+
+    assert read_ok
+    assert sorted(harness for _sid, harness, _cwd, _v, _tp in hits) == ["claude", "codex"]
+
+
+def test_discover_live_sessions_keeps_cross_harness_rows_distinct(tmp_path, monkeypatch):
+    """Candidates are the union of every harness's source; the merge must not
+    fold two of them into one row that absorbs the other's cwd."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="claude-side",
+                harness="claude",
+                cwd="/claude-cwd",
+                log_path="/tmp/c.log",
+                short_id="cafebabe",
+                harness_session_id=_SHARED_SID,
+            ),
+            AgentEntry(
+                name="codex-side",
+                harness="codex",
+                cwd="/codex-cwd",
+                log_path="/tmp/x.log",
+                harness_session_id=_SHARED_SID,
+            ),
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    sessions = discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path))
+
+    assert sorted((s.agent, s.cwd) for s in sessions) == [
+        ("claude", "/claude-cwd"),
+        ("codex", "/codex-cwd"),
+    ]
+
+
 def test_discovery_address_matches_skips_truth_classification(tmp_path, monkeypatch):
     """Address matching must not truth-classify every enumerated session.
 

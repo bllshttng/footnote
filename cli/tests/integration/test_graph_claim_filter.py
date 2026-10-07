@@ -224,3 +224,17 @@ def test_ready_excludes_live_claimed_node(tmp_path):
     assert "ab-aaaaaaaa" not in ids
     assert "ab-bbbbbbbb" in ids
 
+
+
+def test_a_released_claim_does_not_block(tmp_path):
+    """Only LIVE claims filter: a released claim leaves its node selectable."""
+    from fno.claims.core import release_claim
+
+    root = make_sandbox(tmp_path, _two_ready_entries())
+    acquire_claim(key="node:ab-aaaaaaaa", holder="h", ttl_ms=3_600_000,
+                  root=root / "claims")
+    release_claim(key="node:ab-aaaaaaaa", holder="h", root=root / "claims")
+    code, out, err = door(root, ["ready", "--all"], path_prepend=roster_stub(root, []))
+    assert code == 0, err
+    ids = [e["id"] for e in json.loads(out)]
+    assert "ab-aaaaaaaa" in ids

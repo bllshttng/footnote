@@ -21,6 +21,7 @@ import pytest
 from fno.claims.core import (
     ClaimHeldByOther,
     acquire_claim,
+    claim_status,
     release_claim,
 )
 from fno.claims.io import claim_path, serialize_claim
@@ -224,7 +225,62 @@ def test_serial_acquire_release_across_processes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_claims_resolve_to_one_root_across_linked_worktrees(tmp_path, monkeypatch):
+    """A claim taken from a linked worktree with no root is visible from the
+    canonical checkout: claims are cross-worktree coordination state."""
+    import os
+    import subprocess
+
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    subprocess.run(["git", "init", str(canonical)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(canonical), "commit", "--allow-empty", "-m", "init"],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t.com",
+             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t.com"},
+    )
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(canonical), "worktree", "add", str(linked), "--detach"],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.chdir(linked)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+
+    acquire_claim(key="worktree-test-claim", holder="test-holder", root=None)
+    try:
+        monkeypatch.chdir(canonical)
+        status = claim_status("worktree-test-claim", root=None)
+        assert status.get("state") in ("live", "stale"), status
+        assert status.get("holder") == "test-holder", status
+    finally:
+        release_claim(key="worktree-test-claim", holder="test-holder", root=None)
+
+
 # ---------------------------------------------------------------------------
 # Release -> reacquire holder-flip (T1: handoff claim seam)
 # ---------------------------------------------------------------------------
 
+
+def test_release_then_reacquire_holder_flip(tmp_path):
+    """Parent releases a node claim, the child acquires it, and the child is
+    the sole live holder."""
+    key = "node:ab-deadbeef"
+    parent = "target-session:20260605T120000Z-11111-parent"
+    child = "target-session:20260605T120001Z-22222-child"
+
+    acquire_claim(key=key, holder=parent, root=tmp_path)
+    before = claim_status(key, root=tmp_path)
+    assert (before.get("state"), before.get("holder")) == ("live", parent), before
+    release_claim(key=key, holder=parent, root=tmp_path)
+    acquire_claim(key=key, holder=child, root=tmp_path)
+    after = claim_status(key, root=tmp_path)
+    assert (after.get("state"), after.get("holder")) == ("live", child), after
+    from fno.claims.core import list_claims
+
+    assert [row["key"] for row in list_claims(root=tmp_path)] == [key]
+    release_claim(key=key, holder=child, root=tmp_path)

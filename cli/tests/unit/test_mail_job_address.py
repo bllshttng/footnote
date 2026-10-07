@@ -109,6 +109,30 @@ def test_send_refuses_when_no_holder(runner, isolated, monkeypatch):
     assert _bus_to("node:free-abcd") == []
 
 
+def test_send_refuses_when_claim_stale(runner, isolated, monkeypatch):
+    # A STALE claim (expired TTL) reads as non-live -> refuse, same path as free.
+    from fno.claims.core import acquire_claim, claim_status
+    from tests._table_seed import update_claim
+
+    acquire_claim(
+        key="node:stale-abcd",
+        holder="target-session:dead0000-0000-0000-0000-000000000000",
+        ttl_ms=60_000,
+        reason="test",
+        harness="claude",
+    )
+    update_claim("node:stale-abcd", acquired_at=1000, expires_at=1000)
+    assert claim_status("node:stale-abcd")["state"] == "stale"
+
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    res = runner.invoke(
+        app,
+        ["mail", "send", "node:stale-abcd", "hello", "--from-name", "lead"],
+    )
+    assert res.exit_code == 16, res.output
+    assert _bus_to("node:stale-abcd") == []
+
+
 # ---------------------------------------------------------------------------
 # Send: live holder -> delivered (hosted), audit-only bus copy
 # ---------------------------------------------------------------------------

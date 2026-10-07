@@ -3723,6 +3723,45 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
     assert name == f"ab-bp-{node_id}-path-glm"
 
 
+def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
+    """AC5 + AC6: refuse before spawn; the lane fails loudly, never 'launched'."""
+    node_id = "n-" + "z" * 70
+    node = {
+        "id": node_id,
+        "title": "irrelevant",
+        "project": "fno",
+        "_resolved_cwd": "/tmp/x",
+        # a real projection row: planless low dispatches straight to target
+        "difficulty": "low",
+        "dispatch_verb": "",
+        # the refusal-under-test is naming, so the node carries the pin that
+        # clears the x-8fb2 model gate
+        "model": "glm-5.3-flash[1m]",
+    }
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    # The grid consult (fno-agents route-slot) precedes the mint (x-57fe moved
+    # the mint after it); the refusal-under-test is naming, so the consult is
+    # stubbed out and the fail-closed lambda below keeps naming verbs only.
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda *a, **k: (None, None, None, None, "stubbed"),
+    )
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn"))
+    )
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.node_id == node_id
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
+    assert evs[0]["data"]["node_id"] == node_id
+    assert "64" in evs[0]["data"]["error"]
+    # Re-dispatchable: the reservation is released, not stuck holding a lane.
+    key = f"dispatch:{node_id}"
+    assert claim_status(key).get("state") == "free"
+
+
 def test_duplicate_dispatch_converges_on_one_dedup_name():
     """AC7: the name is the dedup token, so identical components must converge."""
     args = ("regready-pipeline-2c4f9a1b3d", "path consolidation wave 0 delegate")

@@ -119,6 +119,22 @@ def test_owner_reset_releases_the_opt_out_claim(tmp_path, monkeypatch):
     ).read_text(encoding="utf-8")
 
 
+def test_explicit_empty_optional_apps_requires_a_live_claim(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text("[review]\noptional_apps = []\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+
+    revoked = settings_from_files([config])
+    assert revoked.review.optional_apps is None
+
+    acquire_claim(
+        "config-optout:review.optional_apps",
+        "session-a",
+    )
+    honored = settings_from_files([config])
+    assert honored.review.optional_apps == []
+
+
 def test_unreadable_claim_instrument_revokes_and_names_instrument(
     tmp_path, monkeypatch, caplog
 ):
@@ -207,6 +223,80 @@ def test_doctor_reports_unbacked_file_residue(tmp_path, monkeypatch):
             "command": "fno config set review.self_review_required true",
         }
     ]
+
+
+def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monkeypatch):
+    from tests._table_seed import read_claim_row, update_claim
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[review]\nself_review_required = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+    optout_lease.set_config_value("review.self_review_required", "false")
+
+    key = "config-optout:review.self_review_required"
+    update_claim(key, pid=None, pid_unavailable=1, expires_at=1)
+
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
+    optout_lease.set_config_value("review.self_review_required", "false")
+
+    replacement = read_claim_row(key)
+    assert replacement["metadata"]["prior_present"] is True
+    assert replacement["metadata"]["prior_value"] is True
+
+
+def test_scope_change_takeover_restores_the_new_file_not_the_old(
+    tmp_path, monkeypatch
+):
+    # A stale lease taken over into a DIFFERENT file must not inherit the old
+    # claim's restore metadata: the reaper would edit the old file and leave
+    # the new file's opt-out value as unrestored residue.
+    global_dir = tmp_path / "global-dir"
+    global_dir.mkdir()
+    project_dir = tmp_path / "project-dir"
+    (project_dir / ".fno").mkdir(parents=True)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(global_dir / "settings.yaml"))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+    optout_lease.set_config_value("review.self_review_required", "false", scope="global")
+
+    key = "config-optout:review.self_review_required"
+    from tests._table_seed import read_claim_row, update_claim
+
+    update_claim(key, root=global_claims_root(), pid=None, pid_unavailable=1, expires_at=1)
+
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
+    optout_lease.set_config_value(
+        "review.self_review_required",
+        "false",
+        scope="project",
+        repo_root=project_dir,
+    )
+
+    taken_over = read_claim_row(key, root=global_claims_root())
+    assert (
+        taken_over["metadata"]["config_path"]
+        == str(project_dir / ".fno" / "config.toml")
+    )
+
+    update_claim(key, root=global_claims_root(), expires_at=1)
+
+    optout_sink: list = []
+    summary = reap_dead_claims(
+        roots=[global_claims_root()], apply=True, optout_sink=optout_sink
+    )
+    from fno.claims.optout_lease import restore_reaped_optouts
+
+    assert summary["reaped"] == 1
+    assert restore_reaped_optouts(optout_sink) == []
+    project_text = (project_dir / ".fno" / "config.toml").read_text(encoding="utf-8")
+    global_text = (global_dir / "config.toml").read_text(encoding="utf-8")
+    assert "self_review_required" not in project_text
+    assert "self_review_required = false" in global_text
 
 
 def test_rust_optout_keys_are_registered_in_python_membership():

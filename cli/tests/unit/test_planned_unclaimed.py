@@ -110,6 +110,38 @@ def test_ac3_observer_miss_is_prepended_to_normal_selection():
     assert [row["id"] for row in merged] == ["x-p0-missed", "x-p2-normal"]
 
 
+def test_ac1_hp_claim_snapshot_lists_node_keys_only(tmp_path, monkeypatch):
+    from fno.backlog.undispatched import read_claim_snapshot
+    from tests._table_seed import seed_claim
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    for key, holder in (("node:x-held", "a"), ("node:x-other", "b"), ("other:key", "c")):
+        seed_claim(key, holder, root=tmp_path)
+
+    rows = read_claim_snapshot()
+
+    assert sorted(row["key"] for row in rows) == ["node:x-held", "node:x-other"]
+    assert all(row["state"] is None for row in rows)
+
+
+def test_ac1_hp_keys_only_rows_classify_identically_to_verdict_rows(
+    tmp_path, monkeypatch
+):
+    from fno.backlog.undispatched import classify_planned_unclaimed, read_claim_snapshot
+    from tests._table_seed import seed_claim
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    seed_claim("node:x-held", "a", root=tmp_path)
+    entries = [_node("x-open"), _node("x-held")]
+
+    from_keys = classify_planned_unclaimed(entries, read_claim_snapshot())
+    from_verdict = classify_planned_unclaimed(
+        entries, [{"key": "node:x-held", "state": "live"}]
+    )
+
+    assert from_keys == from_verdict
+
+
 def test_ac1_edge_missing_claims_dir_is_empty_not_error(tmp_path, monkeypatch):
     from fno.backlog.undispatched import read_claim_snapshot
 

@@ -3212,6 +3212,26 @@ def test_do_merge_defers_close_only_on_the_durable_grant_path(
     assert seen["defer_close"] is False
 
 
+def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_path):
+    """AC2-ERR: after the early fire, a successor takes the lock, and the
+    with-block's finally release (the same holder-checked call) leaves the
+    successor's claim on disk untouched - the double-release is release_claim's
+    own documented silent-success contract."""
+    from fno.claims.core import acquire_claim, claim_status, release_claim
+
+    with _merge._merge_lock(42) as (state, release_now, held_detail):
+        assert state == "acquired" and release_now is not None
+        assert held_detail is None
+        release_now()
+        # the freed lock is takeable right now, before the merge verb returns
+        acquire_claim(_lock_key(), "pr-merge:successor", reason="next merger")
+    assert claim_status(_lock_key()).get("holder") == "pr-merge:successor", (
+        "the finally release must not free the successor's claim"
+    )
+    release_claim(_lock_key(), "pr-merge:successor")
+    assert claim_status(_lock_key())["state"] == "free"
+
+
 def test_merge_lock_released_when_outcome_is_not_merged(enabled, monkeypatch, tmp_path):
     """AC2-ERR: a non-merged authorized outcome releases via the with-block's
     finally; the next merger takes the lock immediately."""
