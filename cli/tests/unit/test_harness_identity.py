@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.agents.registry_door import read_registry_document
 from fno.harness_identity import (
     AMBIENT_IDENTITY_ENV,
     HARNESS_SESSION_MARKERS,
@@ -518,7 +519,7 @@ def _register(tmp_path, session_id, provider="codex", status="live"):
     if status != "live":
         import json
 
-        data = json.loads(reg.read_text())
+        data = read_registry_document(reg)[0]
         for row in data.get("agents", []):
             if row.get("name") == entry.name:
                 row["status"] = status
@@ -613,7 +614,7 @@ def test_row_owning_session_id_walk_proven_dead_pid_row_is_self(tmp_path):
     name, reg = _register(tmp_path, sid, provider="claude")
 
     def _set_pid(pid):
-        data = json.loads(reg.read_text())
+        data = read_registry_document(reg)[0]
         for row in data.get("agents", []):
             if row.get("harness_session_id") == sid:
                 row["pid"] = pid

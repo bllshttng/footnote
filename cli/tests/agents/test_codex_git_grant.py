@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fno.agents.harnesses import codex
 from fno.agents.registry import AgentEntry, load_registry, write_registry
+from fno.agents.registry_door import read_registry_document
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -61,6 +62,6 @@ def test_registry_row_round_trip_preserves_the_git_grant(tmp_path: Path, monkeyp
         ]
     )
 
-    raw = json.loads(registry.read_text(encoding="utf-8"))
+    raw = read_registry_document(registry)[0]
     assert raw["agents"][0]["git_grant"] == common
     assert load_registry()[0].git_grant == common

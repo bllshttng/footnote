@@ -165,10 +165,7 @@ fn recipient_key(to: &str) -> String {
         return to.to_string();
     }
     let home = crate::paths::AgentsHome::from_env();
-    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
-        return to.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = crate::registry_store::read(&home.registry_json()) else {
         return to.to_string();
     };
     for row in parsed
@@ -198,10 +195,7 @@ fn sender_key(from: &str, from_session: &str) -> String {
         return from.to_string();
     }
     let home = crate::paths::AgentsHome::from_env();
-    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
-        return from_session.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = crate::registry_store::read(&home.registry_json()) else {
         return from_session.to_string();
     };
     for row in parsed

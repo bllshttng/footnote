@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.agents.registry_door import read_registry_document
 
 
 def _events(tmp_path: Path) -> list[dict]:
@@ -1009,11 +1010,11 @@ def test_observation_of_a_recorded_id_is_a_no_op(tmp_path: Path, monkeypatch) ->
     from fno.agents.registry import load_registry
 
     _spawned_row()
-    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    before = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     entry, outcome = _observe("target-x-f0c2", BIRTH)
     assert outcome == "no-op"
     assert entry.harness_session_id == BIRTH
-    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    after = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     assert after == before, "a no-op observation must not rewrite the file"
 
 
@@ -1070,12 +1071,12 @@ def test_observation_refuses_a_third_distinct_id_and_names_both(
 
     _spawned_row()
     _observe("target-x-f0c2", FORK)
-    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    before = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     entry, outcome = _observe("target-x-f0c2", THIRD)
     assert outcome == "refused-cap"
     assert entry.harness_session_id == BIRTH
     assert entry.related_session_id == FORK, "the refusal carries both ids"
-    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    after = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     assert after == before, "a refused observation changes nothing on disk"
 
 

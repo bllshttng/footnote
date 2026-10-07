@@ -4723,7 +4723,10 @@ mod tests {
         assert!(!claim.exists());
         assert_eq!(summary.expired_claims.deleted, 1);
         assert_eq!(summary.totals.deleted, 1);
-        assert_eq!(std::fs::read(home.registry_json()).unwrap(), registry);
+        assert_eq!(
+            crate::registry_store::read(&home.registry_json()).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(registry.as_ref()).unwrap()
+        );
         assert!(summary.applied);
         assert!(!summary.dry_run);
         std::fs::remove_dir_all(&base).ok();

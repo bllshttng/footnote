@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.agents.registry_door import read_registry_document
 
 ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -831,7 +832,7 @@ def test_a_legacy_row_without_launch_account_stays_unknown(tmp_path, monkeypatch
         ]
     )
     target = paths.agents_registry_path()
-    raw = json.loads(target.read_text(encoding="utf-8"))
+    raw = read_registry_document(target)[0]
     del raw["agents"][0]["launch_account"]
     del raw["agents"][0]["related_session_id"]
     target.write_text(json.dumps(raw), encoding="utf-8")

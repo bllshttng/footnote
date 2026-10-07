@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.agents.registry_door import read_registry_document
 
 BIRTH = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
 REMINT = "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e"
@@ -269,10 +270,10 @@ def test_observation_succession_replay_is_idempotent_and_byte_stable(
 
     _spawned_row()
     _observe("target-x-f0c2", REMINT, predecessor_reachable=False)
-    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    before = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     entry, outcome = _observe("target-x-f0c2", REMINT, predecessor_reachable=False)
     assert outcome == "no-op"
-    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    after = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     assert after == before, "a replay must not rewrite the file"
     row = load_registry()[0]
     assert row.predecessor_session_ids == [BIRTH], "A appears exactly once"

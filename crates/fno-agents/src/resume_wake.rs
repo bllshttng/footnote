@@ -2349,7 +2349,7 @@ mod tests {
         };
         let home = AgentsHome::at(temp.path().join("agents-home"));
         seed_exited_row(&home, "w1", "sess-uuid");
-        let reg_before = std::fs::read(home.registry_json()).unwrap();
+        let reg_before = crate::registry_store::read(&home.registry_json()).unwrap();
         let code = run_and_confirm_respawn_with_truth(
             &plan,
             "w1",
@@ -2370,7 +2370,7 @@ mod tests {
         assert_eq!(code, crate::reentry::REENTRY_REFUSED_EXIT);
         let stops = std::fs::read_to_string(&stop_log).unwrap();
         assert!(stops.contains("stop 660e758a"), "{stops}");
-        let reg_after = std::fs::read(home.registry_json()).unwrap();
+        let reg_after = crate::registry_store::read(&home.registry_json()).unwrap();
         assert_eq!(reg_before, reg_after);
         std::fs::remove_dir_all(temp.path()).ok();
     }
