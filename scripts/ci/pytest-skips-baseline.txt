@@ -169,6 +169,7 @@ cli/tests/unit/test_skill_bundles.py::<module>::mark.skipif  # on main before th
 cli/tests/unit/test_skill_bundles.py::test_freshness_check_passes_for_committed_state::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_generator_fails_on_missing_source::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_generator_handles_mixed_manifest::marker.requires_shelled_yaml  # on main before this ratchet
+cli/tests/unit/test_skill_bundles.py::test_generator_preserves_executable_bit::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_parser_rejects_agent_missing_rewrite_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_rewrite_rejects_missing_required_fields::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_rewrite_rejects_non_string_tools_entries::marker.requires_shelled_yaml  # on main before this ratchet

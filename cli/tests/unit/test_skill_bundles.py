@@ -63,6 +63,29 @@ requires_shelled_yaml = pytest.mark.skipif(
 
 
 @requires_shelled_yaml
+def test_generator_preserves_executable_bit():
+    """Bundled scripts (file type) must keep their executable mode so callers
+    can `bash $bundle` and `python3 $bundle` directly without chmod.
+    """
+    result = _run(["python3", str(PARSER), str(MANIFEST)])
+    assert result.returncode == 0
+    for row in result.stdout.splitlines():
+        if not row.strip():
+            continue
+        type_, skill, source, dest, _meta = row.split("\t")
+        if type_ != "file":
+            continue
+        canonical = REPO_ROOT / source
+        bundle = REPO_ROOT / "skills" / skill / dest
+        canonical_exec = canonical.stat().st_mode & stat.S_IXUSR
+        bundle_exec = bundle.stat().st_mode & stat.S_IXUSR
+        assert canonical_exec == bundle_exec, (
+            f"executable-bit mismatch: {bundle} mode={oct(bundle.stat().st_mode)} "
+            f"vs canonical {canonical} mode={oct(canonical.stat().st_mode)}"
+        )
+
+
+@requires_shelled_yaml
 def test_freshness_check_passes_for_committed_state():
     """The CI gate exits 0 when committed bundles match the canonical."""
     result = _run(["bash", str(FRESH_CHECK)])
