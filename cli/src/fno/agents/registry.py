@@ -1229,7 +1229,8 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
     compare, which shared resolver to compare the target against, and the
     remedy to name. Read that module before changing either.
     """
-    if raw is None:
+    # An empty table is the old absent file: no reader to strand yet.
+    if raw is None or not raw.get("agents"):
         return
     try:
         shared = paths.agents_registry_path()
