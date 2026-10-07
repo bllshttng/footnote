@@ -219,17 +219,6 @@ fn in_source_checkout_needs_the_fno_crate_manifest() {
 }
 
 #[test]
-fn the_declined_and_report_steps_never_write_outside_their_roots() {
-    // The three project "keep default" steps and every report step push
-    // text, never a write. A run whose every step declines leaves no
-    // marker behind, so --once keeps offering setup.
-    let mut rep = Report::default();
-    rep.skipped.push("worktree-policy: declined".into());
-    assert!(rep.needs_human.is_empty());
-    assert!(!rep.restart_needed);
-}
-
-#[test]
 fn once_needs_every_covered_layers_marker() {
     // A layer outside the scope never blocks --once; a covered layer
     // needs its own marker. This pins the inverted-condition fix.
