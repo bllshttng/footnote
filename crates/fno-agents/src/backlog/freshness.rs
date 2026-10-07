@@ -252,7 +252,9 @@ fn frontmatter_main_sha(text: &str) -> Option<String> {
         if line == "---" {
             break;
         }
-        if let Some(v) = line.strip_prefix("main_sha:") {
+        // The key nests under `code_index:` in every real plan, so match the
+        // trimmed line, not the raw indentation.
+        if let Some(v) = line.trim().strip_prefix("main_sha:") {
             let v = v.trim().trim_matches('"').trim_matches('\'');
             if !v.is_empty() {
                 return Some(v.to_string());
@@ -560,7 +562,7 @@ mod tests {
         let plan_path = repo_dir.path().join("plan.md");
         std::fs::write(
             &plan_path,
-            format!("---\nmain_sha: {plan_sha}\n---\n\nedit `src/a.rs` now\n"),
+            format!("---\ncode_index:\n  main_sha: {plan_sha}\n---\n\nedit `src/a.rs` now\n"),
         )
         .unwrap();
         commit(
@@ -616,7 +618,7 @@ mod tests {
         let plan_path = repo_dir.path().join("plan.md");
         std::fs::write(
             &plan_path,
-            format!("---\nmain_sha: {plan_sha}\n---\n\nedit `src/gone.rs`\n"),
+            format!("---\ncode_index:\n  main_sha: {plan_sha}\n---\n\nedit `src/gone.rs`\n"),
         )
         .unwrap();
         git(repo_dir.path(), &["rm", "-q", "src/gone.rs"], None);
@@ -723,5 +725,33 @@ mod tests {
         let report = freshness_report(&graph, bare.path(), "x-3", None).unwrap();
         assert_eq!(report["premise"]["verdict"], "shipped");
         assert_eq!(run_report(&graph, bare.path(), "x-3", None, false, None), 0);
+    }
+
+    #[test]
+    fn a_cited_path_untouched_since_created_at_reads_holds() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_repo(repo_dir.path());
+        commit(
+            repo_dir.path(),
+            "src/keep.rs",
+            "one\n",
+            "base",
+            "2026-01-01T00:00:00Z",
+        );
+        advance_main(repo_dir.path());
+
+        let store = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(store.path());
+        let graph = graph_with(
+            store.path(),
+            json!({
+                "id": "x-4", "status": "triage",
+                "created_at": "2026-01-15T00:00:00Z",
+                "title": "keep working",
+                "details": "the defect sits in src/keep.rs",
+            }),
+        );
+        let report = freshness_report(&graph, repo_dir.path(), "x-4", None).unwrap();
+        assert_eq!(report["premise"]["verdict"], "holds");
     }
 }
