@@ -335,12 +335,20 @@ struct OwnerGroup {
 
 /// Route the warnings: group by owner, one deduped mail per live lead
 /// (the cause text rides word for word), one question page when the rung
-/// is the user.
-fn route_groups(groups: Vec<OwnerGroup>, now: i64, detail: &mut Vec<String>) -> u64 {
+/// is the user. Returns the acted count plus the group keys whose
+/// outcome is terminal: delivered now, or already delivered inside the
+/// dedupe window. Only terminal groups may consume their source files.
+fn route_groups(
+    groups: BTreeMap<String, OwnerGroup>,
+    now: i64,
+    detail: &mut Vec<String>,
+) -> (u64, std::collections::BTreeSet<String>) {
     let mut acted = 0u64;
-    for group in groups {
+    let mut terminal = std::collections::BTreeSet::new();
+    for (key, group) in groups {
         let fingerprint = fingerprint_of(&group.warnings);
         if sent_recently(&fingerprint) {
+            terminal.insert(key);
             continue;
         }
         let delivered = match group.owner.session.as_deref() {
@@ -349,6 +357,7 @@ fn route_groups(groups: Vec<OwnerGroup>, now: i64, detail: &mut Vec<String>) -> 
         };
         if delivered {
             acted += 1;
+            terminal.insert(key);
             // A least-loaded pick is a ruling: record it once per
             // delivered group, naming the scope and the load (AC3).
             if group.owner.rung == crate::owner_ladder::Rung::LeastLoaded {
@@ -371,7 +380,7 @@ fn route_groups(groups: Vec<OwnerGroup>, now: i64, detail: &mut Vec<String>) -> 
             ));
         }
     }
-    acted
+    (acted, terminal)
 }
 
 /// The dedupe key: sha256 over the sorted kind:node pairs. A repeat inside
@@ -497,7 +506,7 @@ pub(crate) fn run_pass(
     let now = w.now;
     let mut groups: BTreeMap<String, OwnerGroup> = BTreeMap::new();
     let mut detail: Vec<String> = Vec::new();
-    let mut consumed: Vec<std::path::PathBuf> = Vec::new();
+    let mut consumed: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
     let paths = crate::territory::workspace_paths(config_cwd);
     // Every workspace project root, plus the config root itself: a repo
     // outside the workspace map still sweeps, and its result must reach an
@@ -510,23 +519,33 @@ pub(crate) fn run_pass(
         if !seen.insert(fno_dir.clone()) {
             continue;
         }
-        consumed.extend(consume_file(
+        if let Some((path, fed)) = consume_file(
             &fno_dir.join(".reconcile-result.json"),
             &w,
             &mut groups,
             ReconcileReader,
-        ));
-        consumed.extend(consume_file(
+        ) {
+            consumed.push((path, fed));
+        }
+        if let Some((path, fed)) = consume_file(
             &fno_dir.join(".orphan-plans-result.json"),
             &w,
             &mut groups,
             OrphanReader,
-        ));
+        ) {
+            consumed.push((path, fed));
+        }
     }
-    let acted = route_groups(groups.into_values().collect(), now, &mut detail);
-    for path in consumed {
-        let shown = path.with_extension("json.shown");
-        let _ = std::fs::rename(&path, shown);
+    let (acted, terminal) = route_groups(groups, now, &mut detail);
+    // A result file is consumed only when every owner group it fed is
+    // terminal (delivered now, or inside the dedupe window): one
+    // undelivered group keeps the file on disk for the next tick, and the
+    // groups that did deliver dedupe through sent_recently.
+    for (path, fed) in consumed {
+        if fed.iter().all(|k| terminal.contains(k)) {
+            let shown = path.with_extension("json.shown");
+            let _ = std::fs::rename(&path, shown);
+        }
     }
     if acted == 0 && detail.is_empty() {
         return Ok(crate::lead_wake::Outcome {
@@ -564,19 +583,21 @@ impl ResultReader for OrphanReader {
 }
 
 /// Read one result file, group its warnings under their owners, and return
-/// the path for the caller to rename. A file that does not exist, or that
+/// the path plus the group keys it fed, for the caller to rename once
+/// every fed group is terminal. A file that does not exist, or that
 /// parses to nothing, contributes nothing.
 fn consume_file(
     path: &Path,
     w: &crate::owner_ladder::World,
     groups: &mut BTreeMap<String, OwnerGroup>,
     reader: impl ResultReader,
-) -> Option<std::path::PathBuf> {
+) -> Option<(std::path::PathBuf, Vec<String>)> {
     let raw = std::fs::read_to_string(path).ok()?;
     let warnings = reader.read(&raw);
     if warnings.is_empty() {
         return None;
     }
+    let mut fed: Vec<String> = Vec::new();
     for warning in warnings {
         let owner = crate::owner_ladder::resolve(
             &crate::owner_ladder::Ask {
@@ -591,6 +612,9 @@ fn consume_file(
             w,
         );
         let key = owner.scope.clone().unwrap_or_else(|| "user".to_string());
+        if !fed.contains(&key) {
+            fed.push(key.clone());
+        }
         groups
             .entry(key)
             .or_insert(OwnerGroup {
@@ -600,7 +624,7 @@ fn consume_file(
             .warnings
             .push(warning);
     }
-    Some(path.to_path_buf())
+    Some((path.to_path_buf(), fed))
 }
 
 // --- repeat-failure and banner fold (change 4) -----------------------------
@@ -689,9 +713,13 @@ pub(crate) fn normalize_error(error: &str) -> String {
 }
 
 /// True when the type is allowlisted: `*_failed` or `*_dropped`. Banner
-/// keys (`banner_repeated:<id>`) count as failures too (AC17).
+/// keys (`banner_repeated:<id>`) count as failures too (AC17), and the
+/// steady-noise types enter here so their own 3x-average gate can run.
 pub(crate) fn foldable(etype: &str) -> bool {
-    etype == "banner" || etype.ends_with("_failed") || etype.ends_with("_dropped")
+    etype == "banner"
+        || steady_noise(etype)
+        || etype.ends_with("_failed")
+        || etype.ends_with("_dropped")
 }
 
 /// The steady-noise types: they file only when the 24h count exceeds three
@@ -961,11 +989,13 @@ pub(crate) fn scan_banners(
     }
     for ((id, _hash), sids) in seen {
         let distinct: std::collections::HashSet<&String> = sids.iter().collect();
-        if distinct.len() >= 3 {
+        // One row per distinct session: fold_pass counts rows, so the
+        // group's real occurrence count is what crosses the 3-row bar.
+        for _ in 0..distinct.len() {
             out.push(FoldRow {
                 ts: now,
                 etype: "banner".to_string(),
-                error: id,
+                error: id.clone(),
                 node: None,
             });
         }
@@ -1090,6 +1120,9 @@ fn execute_fold(
                     "backlog", "idea", &title, "--type", "bug", "--difficulty", "low",
                     "--tag", &tag, "--source-kind", "from_observation",
                     "--origin-evidence", key.split(':').next().unwrap_or("event"),
+                    // A daemon cannot answer the fold-or-separate choice
+                    // prompt: --separate always mints its own node.
+                    "--separate",
                     "-J", "--details", &details,
                 ]);
                 let new_node = crate::bounded_cmd::output_with_timeout_result(cmd, 30)
@@ -1112,7 +1145,12 @@ fn execute_fold(
             FoldAction::Encounter { key, node, count } => {
                 let evidence = format!("notice_route fold: {count} more rows of the key in 24h");
                 let mut cmd = crate::loop_dispatch::fno_cmd("fno");
-                cmd.args(["backlog", "encounter", &node, "-e", &evidence]);
+                // The daemon holds no session identity, so the ambient
+                // verb's identity gate would refuse (or misattribute the
+                // vote to a launcher session): vote as the system component.
+                cmd.args([
+                    "backlog", "encounter", &node, "-e", &evidence, "--system", "notice-router",
+                ]);
                 let ok = crate::bounded_cmd::output_with_timeout_result(cmd, 30)
                     .map(|o| o.status.success())
                     .unwrap_or(false);
@@ -1212,10 +1250,43 @@ fn mail_node_owner(
     sent
 }
 
+/// Pull each key's filed node's live status back into the state before the
+/// pass decides: a node closed (or reopened) by another actor must flip
+/// the key to the Reopen (or Encounter) branch the graph implies, never
+/// the stale one the fold ledger cached. Best-effort: an unreadable store
+/// leaves the cached state standing.
+fn refresh_completion(state: &mut FoldState, now: i64) {
+    let graph = crate::backlog::settings::graph_path();
+    let Ok(rows) = crate::graph_store::read_rows(&graph) else {
+        return;
+    };
+    for ks in state.keys.values_mut() {
+        let Some(node) = &ks.node else { continue };
+        let Some(row) = rows
+            .iter()
+            .find(|r| crate::graph_store::entry_id(r) == Some(node.as_str()))
+        else {
+            continue;
+        };
+        if row.get("status").and_then(Value::as_str) == Some("done") {
+            if ks.completed_at.is_none() {
+                ks.completed_at = row
+                    .get("completed_at")
+                    .and_then(Value::as_str)
+                    .and_then(parse_iso)
+                    .or(Some(now));
+            }
+        } else {
+            ks.completed_at = None;
+        }
+    }
+}
+
 /// The hourly fold: scan, decide, execute, persist. Returns (acted, skip).
 pub(crate) fn fold_tick(w: &crate::owner_ladder::World) -> (u64, Option<String>) {
     let now = now_epoch();
     let mut state = load_fold_state();
+    refresh_completion(&mut state, now);
     let mut rows = scan_rows(now);
     let warnings = warning_producer_ids();
     rows.extend(scan_banners(now, &warnings));
@@ -1334,9 +1405,17 @@ mod tests {
         }
 
         // AC14: the key now has an open node; two more rows add ONE
-        // Encounter and never a second node.
-        state.keys.get_mut(&k).unwrap().node = Some("fno-abcd".to_string());
-        state.keys.get_mut(&k).unwrap().created_at = Some(now - day);
+        // Encounter and never a second node. The pass is pure and never
+        // touches state, so the test plays the shell layer: persist the
+        // KeyState the executed FileNode would have written back.
+        state.keys.insert(
+            k.clone(),
+            KeyState {
+                node: Some("fno-abcd".to_string()),
+                created_at: Some(now - day),
+                ..Default::default()
+            },
+        );
         let rows = vec![
             row(100, "advance_failed", "substrate pane 4"),
             row(200, "advance_failed", "substrate pane 5"),
@@ -1362,6 +1441,8 @@ mod tests {
 
         // AC16: steady noise stays silent at its average and files past
         // three times it. week = 70 rows, so the bar is 3 * (70 / 7) = 30.
+        // The spike must out-run a bar that grows with the week: 36 fresh
+        // rows put n24 at 46 against a week of 106, bar 3 * 15 = 45.
         let mut steady: Vec<FoldRow> = Vec::new();
         for i in 0..10 {
             steady.push(row(3_600 + i as i64, "transition_rejected", "stale"));
@@ -1376,7 +1457,7 @@ mod tests {
             "steady noise at its average: {actions:?}"
         );
         let mut spike: Vec<FoldRow> = steady;
-        for i in 0..25 {
+        for i in 0..36 {
             spike.push(row(100 + i as i64, "transition_rejected", "stale"));
         }
         let actions = fold_pass(&spike, &mut fresh, now);
@@ -1384,7 +1465,7 @@ mod tests {
             actions
                 .iter()
                 .any(|a| matches!(a, FoldAction::FileNode { .. })),
-            "a 3.1x spike files: {actions:?}"
+            "a spike past three times the 7-day average files: {actions:?}"
         );
     }
 }
