@@ -6591,8 +6591,8 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool, activity: Option<ShellActiv
             Some(ShellActivity::Idle) => PaneState::Idle,
             // The user's 2026-10-06 ruling: a user's shell tab is live. The
             // `empty` and unmeasured marks are dropped - a quiet shell reads
-            // `Idle` like any live row, superseding the x-d401 marked
-            // absence (a shell tab is not a mystery to measure).
+            // `Idle` like any live row, superseding the marked-absence
+            // ruling (a shell tab is not a mystery to measure).
             Some(ShellActivity::Empty) => PaneState::Idle,
             Some(ShellActivity::Unmeasured) | None => PaneState::Idle,
         },

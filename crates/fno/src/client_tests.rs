@@ -177,7 +177,8 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
         pane_state(Some(AgentBadge::Done), true, None),
         PaneState::Idle
     );
-    // 2026-10-06 shell ruling supersedes x-d401: an unbadged shell tab is live.
+    // 2026-10-06 shell ruling supersedes the marked-absence ruling: an
+    // unbadged shell tab is live.
     let shell = |act: Option<ShellActivity>| pane_state(None, false, act);
     assert_eq!(shell(None), PaneState::Idle);
     assert_eq!(shell(Some(ShellActivity::Empty)), PaneState::Idle);
@@ -4753,10 +4754,9 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
             harness_session_id: None,
             name: "w1".into(),
             pane_id: None,
-            // The paneless bg row is Unmeasured (no badge, no activity
-            // reading), so the flag rides along (x-b5d1, x-a33f): the
-            // server no longer reads it, but the wire shape is pinned.
-            measure: true,
+            // The 2026-10-06 shell ruling reads an unbadged row as a live
+            // shell: no measure prompt rides; the wire shape is pinned.
+            measure: false,
         }],
         "the remove byte removed the live row in one gesture"
     );
