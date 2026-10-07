@@ -25,12 +25,9 @@ import typer
 
 from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
-# the external-backend verb classification: the sets and the runner that
-# stamps them onto the live registry live beside the data they classify
+# the external-backend verb classification lives beside its data
 from fno.graph._verb_classification import (
-    _FOOTNOTE_OWNED_VERBS,
     _NO_GRAIN_ON_EXTERNAL_BACKEND,
-    _TRACKER_OWNED_VERBS,
     classify_backlog_verbs,
 )
 from fno.graph.api import wire_rows  # noqa: F401 - re-export for lazy importers
@@ -84,10 +81,7 @@ cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
-# `fno agents mail` (cross-project messaging).
-# `inbox` was a SECOND registration of this same app, so all nine of its
-# subcommands were duplicates and the surface paid for them twice. It is gone;
-# `fno.tombstones` keeps the name reachable as a signpost.
+# `fno agents mail`. The retired `inbox` spelling lives in fno.tombstones.
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
 cli.add_typer(_capture_cli, name="capture", hidden=True)
@@ -198,8 +192,6 @@ def _graph_callback(
         help="Output structured JSON to stdout. Diagnostics go to stderr.",
     ),
 ) -> None:
-    classify_backlog_verbs()
-
     from fno.handoff.output import merge_json_flag
 
     merge_json_flag(ctx, json_output)
@@ -669,11 +661,9 @@ def cmd_epic_status(
     from fno.graph.store import entries_with_archive
 
     # Read through the archive for the METRIC only (the same read-only fallback
-    # `get` uses). Without it a swept child stops counting and the epic's
-    # realized cost and follow-up set shrink as grooming runs - a number that
-    # quietly changes with unrelated maintenance is the failure this metric is
-    # supposed to be immune to. The children table above stays working-graph
-    # only, as it was before.
+    # `get` uses): without it a swept child stops counting and the number
+    # quietly changes with unrelated grooming. The children table stays
+    # working-graph only.
     growth = scope_growth(entries_with_archive(entries), epic_id)
 
     if json_mode(ctx):
@@ -7343,12 +7333,9 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
 def iter_backlog_registry():
     """The (group-label, typer-app) pairs carrying every backlog verb.
 
-    The ONE structural list: the verb classifier in
-    graph/_verb_classification.py, the consumer census
-    (scripts/diagnostics/tracker-consumers.py), and the classification tests
-    all walk it, so a new sub-app is registered exactly here, beside its
-    add_typer call - never re-copied into an instrument that would then
-    certify a registry it never saw.
+    The ONE structural list: the verb classifier, the census, and the
+    classification tests all walk it. Register a new sub-app here, beside
+    its add_typer call.
     """
     return [
         (None, cli),
@@ -7380,8 +7367,5 @@ register_lifecycle_commands(
     lambda *a, **k: _project_plans_from_graph(*a, **k),
 )
 
-# The root loader calls this after this module is fully imported and before
-# Click builds the tree, so the verb guards hold on the first invocation.
-# The group callback classifies too: it backstops in-process dispatches that
-# never cross the loader.
+# The root loader runs this before Click builds the tree.
 _fno_pre_dispatch = classify_backlog_verbs

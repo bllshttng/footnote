@@ -285,9 +285,7 @@ class _LazyStub(click.Group):
                 f"Module {module_path!r} has no attribute {attr_name!r} "
                 f"(lazy entry for {self.name!r})"
             )
-        # A module may pin a pre-tree hook: it runs after the module is fully
-        # imported but before Click builds the command tree, so guards that
-        # wrap callbacks hold on the FIRST invocation, not only the second.
+        # Module-pinned hook: guards must be on before Click builds the tree.
         pre = getattr(module, "_fno_pre_dispatch", None)
         if callable(pre):
             pre()
