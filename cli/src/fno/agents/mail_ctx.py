@@ -25,7 +25,7 @@ class _MailCtx:
     # harness_for_provider) and the bus row's from_harness alike, so a durable
     # write reusing this ctx does not resolve a second time.
     harness: Optional[str] = None
-    # The RECIPIENT's full session id, rendering its own live crown into
+    # The RECIPIENT's full session id, rendering its own live role into
     # the envelope header as to_rank. Live delivery only; None omits it.
     to_session: Optional[str] = None
 

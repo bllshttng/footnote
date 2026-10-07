@@ -765,7 +765,7 @@ fn operator_and_teamed_rows_never_retire_and_tree_buckets_only_keep_trees() {
         k.short_id = "rowk".into();
         k.harness_session_id = Some("sess-k".into());
         k.origin = Some("spawn".into());
-        k.crown_level = Some(1);
+        k.role_level = Some(1);
         r.entries.push(k);
         let mut t = ask_row("row-t", None);
         t.short_id = "rowt".into();
@@ -2240,9 +2240,9 @@ fn recovery_emits_drive_crashed_before_clearing_window() {
             exited_at: None,
             mux: None,
             screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
+            role_level: None,
+            role_scope: None,
+            role_grantor: None,
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
@@ -2335,9 +2335,9 @@ fn recovery_marks_missing_state_inconsistent() {
             exited_at: None,
             mux: None,
             screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
+            role_level: None,
+            role_scope: None,
+            role_grantor: None,
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
@@ -2502,9 +2502,9 @@ fn recovery_reaps_dead_pid() {
             exited_at: None,
             mux: None,
             screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
+            role_level: None,
+            role_scope: None,
+            role_grantor: None,
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
@@ -2982,9 +2982,9 @@ fn recovery_reaps_recycled_pid() {
             exited_at: None,
             mux: None,
             screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
+            role_level: None,
+            role_scope: None,
+            role_grantor: None,
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
@@ -3200,9 +3200,9 @@ fn short_id_derivation_dedups() {
         exited_at: None,
         mux: None,
         screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
+        role_level: None,
+        role_scope: None,
+        role_grantor: None,
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,

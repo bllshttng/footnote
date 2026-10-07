@@ -242,10 +242,10 @@ export default function (pi: {
   // the lead's rules again (the same carrier claude runs at SessionStart
   // source=compact). One message per compact; the mark clears on delivery
   // or on a failed carrier - never re-armed mid-turn.
-  const crownPending = new Set<string>()
+  const rolePending = new Set<string>()
   pi.on("session_compact", (_event: unknown, ctx: unknown) => {
     const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.()
-    if (sid) crownPending.add(sid)
+    if (sid) rolePending.add(sid)
   })
 
   pi.on("before_agent_start", async (_event: unknown, ctx: unknown) => {
@@ -253,15 +253,15 @@ export default function (pi: {
       const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.() || ""
       const sessionKey = process.env.FNO_AGENT_SESSION_ID || sid || `pi:${process.cwd()}`
       const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
-      // Crown re-inject first: fresh operating rules outrank an announce.
+      // Role re-inject first: fresh operating rules outrank an announce.
       // Fail-open: no root, a failed run, or an empty payload injects
       // nothing and drops the mark.
-      if (sid && crownPending.delete(sid)) {
+      if (sid && rolePending.delete(sid)) {
         const root = pluginRoot()
         if (root) {
           const out = await runBounded(
             "bash",
-            [join(root, "hooks", "king-postcompact-reinject.sh")],
+            [join(root, "hooks", "lead-postcompact-reinject.sh")],
             5000,
             JSON.stringify({
               hook_event_name: "SessionStart",
@@ -274,7 +274,7 @@ export default function (pi: {
           if (text) {
             return {
               message: {
-                customType: "fno-crown",
+                customType: "fno-role",
                 content: [{ type: "text", text }],
                 display: false,
               },
@@ -315,12 +315,12 @@ export default function (pi: {
     }
   })
 
-  // LEAD GUARD: a crowned pi session does not write repo source. The tool
+  // LEAD GUARD: a promoted pi session does not write repo source. The tool
   // call becomes a claude-shaped PreToolUse payload and the Rust guard
   // answers; its deny vetoed with `block: true` and the guard's reason.
   // Fail-open: no binary, an unreadable answer, or a failed run returns
   // nothing and the tool proceeds - the never-block contract
-  // hooks/king-delegation-guard.sh ships under.
+  // hooks/lead-delegation-guard.sh ships under.
   pi.on("tool_call", async (event: unknown, ctx: unknown) => {
     try {
       const ev = event as { toolName?: string; input?: Record<string, unknown> }
@@ -345,7 +345,7 @@ export default function (pi: {
         session_id: (ctx as Ctx)?.sessionManager?.getSessionId?.() || "",
       }
       const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
-      const out = await runBounded(bin, ["hook", "king-guard"], 5000, JSON.stringify(payload))
+      const out = await runBounded(bin, ["hook", "lead-guard"], 5000, JSON.stringify(payload))
       if (!out.trim()) return
       let decision: { permissionDecision?: string; reason?: string } | null = null
       try {
@@ -356,7 +356,7 @@ export default function (pi: {
       if (decision?.permissionDecision === "deny") {
         return {
           block: true,
-          reason: decision.reason || "crowned sessions do not write repo source",
+          reason: decision.reason || "promoted sessions do not write repo source",
         }
       }
     } catch {

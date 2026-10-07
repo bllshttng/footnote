@@ -310,7 +310,7 @@ def _state_root_denied(path: Path) -> ClaimStateRootDenied:
     cannot report its own condition through any of them - it reports into its
     own transcript, which nothing reads. It is not voiceless, though: the same
     sandbox that took the state root left the repo writable, so the refusal is
-    written there and the king reads it from outside the sandbox. That is the
+    written there and the lead reads it from outside the sandbox. That is the
     difference between a failure that is visible and one that is not.
 
     Best effort throughout. A breadcrumb that cannot be written must never

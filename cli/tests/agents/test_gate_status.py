@@ -1,7 +1,7 @@
 """The read-only capacity probe behind `fno agents gate-status`.
 
 The probe's verdict mapping (lanes at cap, the RAM floor, the CPU axis, the
-king share) is decided inside the ONE Rust gate and pinned by its tests
+lead share) is decided inside the ONE Rust gate and pinned by its tests
 (`crates/fno-agents/src/spawn_gate_verb.rs`). What stays Python-side is the
 transport: the answer comes from the verb verbatim, and an unanswered gate is
 ``verdict: unknown``, never saturation and never a raise."""

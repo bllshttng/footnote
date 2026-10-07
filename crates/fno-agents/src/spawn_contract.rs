@@ -102,7 +102,7 @@ pub enum SpawnOwner {
     },
     /// The wire tag stays at the pre-rename spelling until the python seam
     /// moves in the cutover PR; both sides must read what the other writes.
-    #[serde(rename = "crown")]
+    #[serde(rename = "role")]
     Team {
         project: String,
         scope: String,
@@ -736,7 +736,7 @@ mod tests {
                 },
             },
             "owner": {
-                "kind": "crown",
+                "kind": "role",
                 "project": "fno",
                 "scope": "epic-x",
             },

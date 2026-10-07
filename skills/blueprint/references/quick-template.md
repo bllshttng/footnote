@@ -87,10 +87,10 @@ consolidation:
 surface:
   question: "Which nodes need dispatch?"   # ONE line, phrased as a question
   ruling: d-XXXXXXXX                       # optional: the live law the question is quoted from
-  sweep: "rg -n 'plan_path' crates/fno-agents/src/king_board.rs"  # the exact command run; must return the control below
-  control: crates/fno-agents/src/king_board.rs build_board  # an answerer known BEFORE the sweep ran
+  sweep: "rg -n 'plan_path' crates/fno-agents/src/lead_board.rs"  # the exact command run; must return the control below
+  control: crates/fno-agents/src/lead_board.rs build_board  # an answerer known BEFORE the sweep ran
   answerers:
-    - at: crates/fno-agents/src/king_board.rs build_board (undispatched filter)
+    - at: crates/fno-agents/src/lead_board.rs build_board (undispatched filter)
       # ^ `at:` is `path[:lines] symbol (note)`: the validator greps that symbol,
       #   and each free `name(` call in `reads:`, in every language tree at the
       #   merge base; a reader in another tree that no answerer names is
@@ -100,7 +100,7 @@ surface:
       reads: "inputs.undispatched.rows()"   # the expression the site evaluates, quoted
       feed: "fno backlog undispatched --json"         # the command believed to supply the site
       emits: "31 rows, 31 with plan_path, 0 without (measured 2026-09-02)"
-    - at: crates/fno-agents/src/king_board.rs build_board (unplanned filter)
+    - at: crates/fno-agents/src/lead_board.rs build_board (unplanned filter)
       disposition: out-of-scope
       reason: "already correct; its feed is SRC_READY, measured above"
   count: 2                                 # the PR estimate, stated

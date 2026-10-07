@@ -491,7 +491,7 @@ pub(crate) struct BoardInputs {
     pub(crate) warnings: Vec<String>,
     pub(crate) autonomous_merge: bool,
     pub(crate) scope_ids: Option<HashSet<String>>,
-    pub(crate) crown_scope: Option<String>,
+    pub(crate) role_scope: Option<String>,
 }
 
 /// True when any non-done descendant under `parent_id` is being driven: a
@@ -1725,7 +1725,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
     ];
 
-    if let Some(scope) = &inputs.crown_scope {
+    if let Some(scope) = &inputs.role_scope {
         if scope_ids.is_some() {
             queues.push(queue(
                 "out_of_scope",
@@ -1812,7 +1812,7 @@ mod tests {
             warnings: Vec::new(),
             autonomous_merge: true,
             scope_ids: Some(HashSet::from(["x-in".to_string()])),
-            crown_scope: Some("x-in".to_string()),
+            role_scope: Some("x-in".to_string()),
         }
     }
 
@@ -1936,7 +1936,7 @@ mod tests {
             }]),
         );
         inputs.scope_ids = None;
-        inputs.crown_scope = None;
+        inputs.role_scope = None;
         // What read_driver_rows emits after the graph join: the unstamped
         // live registry row resolved through the PR-bound entry's closed do
         // row.
@@ -1969,7 +1969,7 @@ mod tests {
             ]),
         );
         inputs.scope_ids = None;
-        inputs.crown_scope = None;
+        inputs.role_scope = None;
         inputs.entries = Some(vec![
             json!({
                 "id": "x-aaaa", "status": "in_progress", "pr_number": 2187,
@@ -2007,7 +2007,7 @@ mod tests {
             ]),
         );
         inputs.scope_ids = None;
-        inputs.crown_scope = None;
+        inputs.role_scope = None;
         inputs.entries = Some(vec![
             json!({
                 "id": "x-aaaa", "status": "in_progress", "pr_number": 2188,

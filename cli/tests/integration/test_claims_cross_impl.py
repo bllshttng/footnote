@@ -452,7 +452,7 @@ def test_recovery_mutex_corpse_stolen_by_rust(tmp_path: Path) -> None:
     mutex = _plant_recovery_corpse(tmp_path, "session:rec-c")
 
     r = rust("acquire", "session:rec-c", tmp_path, tmp_path,
-             "--holder", "pty:heir", "--pid", str(os.getpid()))
+             "--holder", "pty:successor", "--pid", str(os.getpid()))
 
     assert r.returncode == 0, f"rust never recovered past the corpse: {r.stderr}"
     assert not mutex.exists()
@@ -463,9 +463,9 @@ def test_recovery_mutex_corpse_stolen_by_python(tmp_path: Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
     mutex = _plant_recovery_corpse(tmp_path, "session:rec-d")
 
-    claim = acquire_claim("session:rec-d", "pty:heir", pid=os.getpid(), root=tmp_path)
+    claim = acquire_claim("session:rec-d", "pty:successor", pid=os.getpid(), root=tmp_path)
 
-    assert claim.holder == "pty:heir"
+    assert claim.holder == "pty:successor"
     assert not mutex.exists()
 
 

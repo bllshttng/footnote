@@ -433,11 +433,11 @@ def test_plan_dispatch_hold_refuses_sanctioned_merge(
     """The dispatch hold is the owner's read now (`fno do pr hold-check`), so
     this pins that its refusal still reaches the operator through this verb."""
     monkeypatch.setattr(_merge, "run", FakeRun(toplevel=str(tmp_path)))
-    _held_owner(monkeypatch, "dispatch-hold:x-5a5c: blocking finding; set_by=king")
+    _held_owner(monkeypatch, "dispatch-hold:x-5a5c: blocking finding; set_by=lead")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys)
     assert obj["outcome"] == "held"
-    assert "set_by=king" in obj["reason"]
+    assert "set_by=lead" in obj["reason"]
 
 
 # ---- config + gh gates ----

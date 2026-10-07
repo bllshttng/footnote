@@ -259,8 +259,8 @@ mod tests {
     fn merge_preserves_unknown_disk_fields_and_refuses_floor_ahead() {
         assert!(super::absolute_path("registry.json").unwrap().is_absolute());
         let disk = json!({
-            "schema_version": 41,
-            "min_writer_version": 39,
+            "schema_version": 42,
+            "min_writer_version": 40,
             "writer_rev": "future-writer",
             "future_top": "preserved",
             "agents": [
@@ -269,7 +269,7 @@ mod tests {
             ]
         });
         let payload = json!({
-            "schema_version": 39,
+            "schema_version": 40,
             "agents": [
                 {"name": "renamed", "harness_session_id": "sid", "status": "idle"},
                 {"name": "by-name", "status": "busy"}
@@ -278,59 +278,59 @@ mod tests {
         let merged = merge(
             disk.clone(),
             &payload,
-            39,
+            40,
             payload["agents"].as_array().unwrap(),
         )
         .unwrap();
-        assert_eq!(merged["schema_version"], 41);
+        assert_eq!(merged["schema_version"], 42);
         assert_eq!(merged["future_top"], "preserved");
         assert_eq!(merged["agents"][0]["future_row"], "preserved");
         assert_eq!(merged["agents"][0]["status"], "idle");
         assert_eq!(merged["agents"][1]["future_name_row"], "preserved");
-        assert_eq!(merged["min_writer_version"], 39);
+        assert_eq!(merged["min_writer_version"], 40);
         assert!(merged["writer_rev"]
             .as_str()
             .unwrap()
             .ends_with("/registry-commit"));
 
         let mut breaking = disk;
-        breaking["min_writer_version"] = json!(40);
+        breaking["min_writer_version"] = json!(41);
         let error = merge(
             breaking,
             &payload,
-            39,
+            40,
             payload["agents"].as_array().unwrap(),
         )
         .unwrap_err();
         assert_eq!(error.0, "writer_too_old");
 
         let incomplete = json!({
-            "schema_version": 41,
-            "min_writer_version": 39,
+            "schema_version": 42,
+            "min_writer_version": 40,
             "agents": [{"name": "worker", "harness_session_id": "sid"}, {"name": "unreadable-to-old-writer"}]
         });
         let error = merge(
             incomplete,
             &payload,
-            39,
+            40,
             payload["agents"].as_array().unwrap(),
         )
         .unwrap_err();
         assert_eq!(error.0, "row_loss_under_skew");
 
         let conflicting_identity = json!({
-            "schema_version": 41,
-            "min_writer_version": 39,
+            "schema_version": 42,
+            "min_writer_version": 40,
             "agents": [{"name": "worker-2", "harness_session_id": "old-session", "future": "kept"}]
         });
         let new_session = json!({
-            "schema_version": 39,
+            "schema_version": 40,
             "agents": [{"name": "worker-2", "harness_session_id": "new-session", "status": "idle"}]
         });
         let error = merge(
             conflicting_identity,
             &new_session,
-            39,
+            40,
             new_session["agents"].as_array().unwrap(),
         )
         .unwrap_err();

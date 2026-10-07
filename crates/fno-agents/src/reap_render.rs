@@ -225,7 +225,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "settled_do_rows": settled,
                 "settle_refused": pair(&summary.settle_refused),
                 "kept_operator": summary.kept_operator,
-                "kept_crowned": summary.kept_teamed,
+                "kept_promoted": summary.kept_teamed,
                 "kept_not_spawn": pair(&summary.kept_not_spawn),
                 "kept_no_provenance": summary.kept_no_provenance,
                 "kept_node_conflict": triples(&summary.kept_node_conflict),
@@ -258,7 +258,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "open_pr_rows": summary.open_pr_rows,
                 "dead_work_rows": summary.dead_work_rows,
                 "open_pr_nudge": nudge_json,
-                "crowns": summary.teams,
+                "roles": summary.teams,
                 "schema_skew": match summary.schema_skew {
                     Some((on_disk, understood)) => json!({
                         "on_disk": on_disk,
@@ -500,8 +500,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         let revert_verb = if dry_run { "would revert" } else { "reverted" };
         for r in &teams.successions_reverted {
             out.push_str(&format!(
-                "  {revert_verb} succession on {} (heir {} {}: predecessor session restored)\n",
-                r.scope, r.heir_name, r.evidence
+                "  {revert_verb} succession on {} (successor {} {}: predecessor session restored)\n",
+                r.scope, r.successor_name, r.evidence
             ));
         }
         for reason in &teams.successions_kept {
@@ -795,7 +795,7 @@ mod tests {
     fn teams_rows() {
         let mut s = summary(&[]);
         s.teams = Some(crate::team_reap::TeamReap {
-            vacated: vec![crate::team_reap::VacatedCrown {
+            vacated: vec![crate::team_reap::VacatedRole {
                 scope: "zed".to_string(),
                 level: Some(2),
                 manifest_path: "/tmp/zed.md".to_string(),
@@ -805,7 +805,7 @@ mod tests {
                 inheritor: "operator".to_string(),
                 cleared_rows: vec!["stale-row".to_string()],
             }],
-            kept: vec![crate::team_reap::KeptCrown {
+            kept: vec![crate::team_reap::KeptRole {
                 scope: "x-live".to_string(),
                 reason: "roster blocked".to_string(),
             }],
@@ -813,12 +813,12 @@ mod tests {
             names_pruned: Vec::new(),
             successions_reverted: vec![crate::team_names::RevertedSuccession {
                 scope: "x-gone".to_string(),
-                heir_name: "gone-heir".to_string(),
+                successor_name: "gone-successor".to_string(),
                 predecessor_name: "lead-old".to_string(),
                 predecessor_session: Some("sess-old".to_string()),
-                evidence: "heir row removed".to_string(),
+                evidence: "successor row removed".to_string(),
             }],
-            successions_kept: vec!["x-live: heir row heir-live still busy".to_string()],
+            successions_kept: vec!["x-live: successor row successor-live still busy".to_string()],
         });
         let text = render_reap(&s, false, false);
         assert!(
@@ -830,30 +830,30 @@ mod tests {
         assert!(text.contains("kept team x-live (roster blocked)"), "{text}");
         assert!(
             text.contains(
-                "reverted succession on x-gone (heir gone-heir heir row removed: predecessor session restored)",
+                "reverted succession on x-gone (successor gone-successor successor row removed: predecessor session restored)",
             ),
             "{text}"
         );
         assert!(
-            text.contains("kept succession (x-live: heir row heir-live still busy)"),
+            text.contains("kept succession (x-live: successor row successor-live still busy)"),
             "{text}"
         );
         let json = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
-        assert_eq!(v["crowns"]["vacated"][0]["scope"], "zed");
-        assert_eq!(v["crowns"]["kept"][0]["reason"], "roster blocked");
+        assert_eq!(v["roles"]["vacated"][0]["scope"], "zed");
+        assert_eq!(v["roles"]["kept"][0]["reason"], "roster blocked");
         assert_eq!(
-            v["crowns"]["successions_reverted"][0]["heir_name"],
-            "gone-heir"
+            v["roles"]["successions_reverted"][0]["successor_name"],
+            "gone-successor"
         );
-        // A pass that ran no crown sweep renders null, never a missing key.
+        // A pass that ran no role sweep renders null, never a missing key.
         let json = render_reap(&summary(&[]), true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
-        assert!(v["crowns"].is_null());
+        assert!(v["roles"].is_null());
 
         let mut s = summary(&[]);
         s.teams = Some(crate::team_reap::TeamReap {
-            vacated: vec![crate::team_reap::VacatedCrown {
+            vacated: vec![crate::team_reap::VacatedRole {
                 scope: "zed".to_string(),
                 level: None,
                 manifest_path: "/tmp/zed.md".to_string(),
@@ -867,10 +867,10 @@ mod tests {
             names_pruned: Vec::new(),
             successions_reverted: vec![crate::team_names::RevertedSuccession {
                 scope: "x-gone".to_string(),
-                heir_name: "gone-heir".to_string(),
+                successor_name: "gone-successor".to_string(),
                 predecessor_name: "lead-old".to_string(),
                 predecessor_session: Some("sess-old".to_string()),
-                evidence: "heir row removed".to_string(),
+                evidence: "successor row removed".to_string(),
             }],
             successions_kept: Vec::new(),
         });

@@ -2,7 +2,7 @@
 
 `_progress_map` (now ``_row_truth``) called ``resolve_session_truth`` and
 ``classify_reachability`` and returned only the progress verdict, so the row
-that made a king mail an unreachable session rendered no reachability word and
+that made a lead mail an unreachable session rendered no reachability word and
 no transcript age. These tests pin the row contract: reachability verdict,
 transcript age, the foreign-row split (the age needs no harness context, the
 progress verdict does), the JSON mirror, and the one-read-per-row budget.
@@ -133,7 +133,7 @@ def test_foreign_row_progress_joins_registry_through_session_id(
 ):
     """AC4-HP (x-1379): a foreign claude row is labelled by the FIRST 8 hex of
     the session uuid while the registry entry is keyed by the handle, so the
-    PROGRESS axis joins through the session uuid - the same bridge the crown
+    PROGRESS axis joins through the session uuid - the same bridge the role
     join already uses - instead of rendering `-` on every such row."""
     from fno.agents import registry
     from fno.agents.registry import AgentEntry

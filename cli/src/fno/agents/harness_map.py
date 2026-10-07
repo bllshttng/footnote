@@ -1394,7 +1394,7 @@ def resolve_dispatch(
         # (`/target`) before the allowlist check. The allowlist and the stored
         # command are canonical; the per-harness command_surface re-adds the
         # `/fno:` prefix at render (opencode) or leaves it bare (claude/agy). So a
-        # court that follows the "every dispatched verb is plugin-qualified"
+        # team that follows the "every dispatched verb is plugin-qualified"
         # contract can set `--dispatch-verb /fno:target` without tripping the
         # bare-only allowlist and breaking the encode-before-exit tail (US7 review).
         if parse_verb_token(chosen_verb):

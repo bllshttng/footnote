@@ -2274,7 +2274,7 @@ mod tests {
             || {
                 let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
                     std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:f-worker", "s-king");
+                let rec = witness_rec("spawn-handover:f-worker", "s-lead");
                 assert_eq!(
                     resolve_subject_session(&rec, &index).as_deref(),
                     Some("s-worker")
@@ -2291,7 +2291,7 @@ mod tests {
             || {
                 let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
                     std::cell::RefCell::new(None);
-                let rec = witness_rec("spawn-handover:w-legacy", "s-king");
+                let rec = witness_rec("spawn-handover:w-legacy", "s-lead");
                 assert_eq!(
                     resolve_subject_session(&rec, &index).as_deref(),
                     Some("s-legacy")
@@ -2348,7 +2348,7 @@ mod tests {
                 let index: std::cell::RefCell<Option<SessionRegistryIndex>> =
                     std::cell::RefCell::new(None);
                 load_session_registry_index(&index);
-                let rec = witness_rec("spawn-gate:1:twin", "s-king");
+                let rec = witness_rec("spawn-gate:1:twin", "s-lead");
                 assert!(resolve_subject_session(&rec, &index).is_none());
             },
         );

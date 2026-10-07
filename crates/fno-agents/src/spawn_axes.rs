@@ -649,11 +649,11 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         }
     };
     // A `dispatch_credit` field answers who answers for a node dispatch:
-    // the covering crown owner plus, when the crown row carries a live
+    // the covering role owner plus, when the role row carries a live
     // session, the lead to mail at launch (same field-on-a-verb shape as
     // node_seed).
     if let Some(ask) = parsed.get("dispatch_credit") {
-        println!("{}", crate::dispatch_credit::covering_crown(ask));
+        println!("{}", crate::dispatch_credit::covering_role(ask));
         return 0;
     }
     // A `launch_credit_mail` ask delivers the one launch notice to the
@@ -819,54 +819,29 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     0
 }
 
-/// One crown flag the client parses into spawn params: typed here
-/// so a crowned codex thread row is crowned AT MINT - the seed turn
-/// enqueues inside the lane and must never submit to an uncrowned row.
+/// One role flag the client parses into spawn params: typed here
+/// so a promoted codex thread row is promoted AT MINT - the seed turn
+/// enqueues inside the lane and must never submit to an unpromoted row.
 /// The level bound is the type the registry row stores (a u32 0..=2);
 /// territory and succession policy live at the Python seam.
-pub fn insert_crown_flag(
-    flag: &str,
-    args: &mut impl Iterator<Item = String>,
-    params: &mut serde_json::Map<String, Value>,
-) -> Result<(), String> {
-    match flag {
-        "--crown" => {
-            let raw = args.next().ok_or("--crown needs a value")?;
-            let level = raw
-                .parse::<u32>()
-                .ok()
-                .filter(|l| *l <= 2)
-                .ok_or("--crown takes an integer level 0-2")?;
-            params.insert("crown_level".into(), Value::from(level));
-        }
-        "--crown-scope" => {
-            let scope = args.next().ok_or("--crown-scope needs a value")?;
-            params.insert("crown_scope".into(), Value::from(scope));
-        }
-        other => return Err(format!("unknown crown flag: {other}")),
-    }
-    Ok(())
-}
-
-/// The role spelling of the same two halves. The thread carrier emits only
-/// this spelling; the older flags above stay for existing callers.
 pub fn insert_role_flag(
     flag: &str,
     args: &mut impl Iterator<Item = String>,
     params: &mut serde_json::Map<String, Value>,
 ) -> Result<(), String> {
-    let raw = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
     match flag {
         "--role-level" => {
+            let raw = args.next().ok_or("--role-level needs a value")?;
             let level = raw
                 .parse::<u32>()
                 .ok()
                 .filter(|l| *l <= 2)
                 .ok_or("--role-level takes an integer level 0-2")?;
-            params.insert("crown_level".into(), Value::from(level));
+            params.insert("role_level".into(), Value::from(level));
         }
         "--role-scope" => {
-            params.insert("crown_scope".into(), Value::from(raw));
+            let scope = args.next().ok_or("--role-scope needs a value")?;
+            params.insert("role_scope".into(), Value::from(scope));
         }
         other => return Err(format!("unknown role flag: {other}")),
     }

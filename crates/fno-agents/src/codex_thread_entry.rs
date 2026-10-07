@@ -41,8 +41,8 @@ pub(crate) fn build_codex_thread_entry(
     harness_args: &[String],
     spawn_params: &serde_json::Value,
     provenance: Option<&crate::spawn_contract::SpawnProvenance>,
-    crown_level: Option<u32>,
-    crown_scope: Option<&str>,
+    role_level: Option<u32>,
+    role_scope: Option<&str>,
 ) -> RegistryEntry {
     // The typed posture the lane resolved and the driver carries. Reading it
     // off the driver (not a parallel param) means the row can never disagree
@@ -130,14 +130,14 @@ pub(crate) fn build_codex_thread_entry(
         exited_at: None,
         mux: None,
         screen_state: None,
-        // The crown rides the lane request and lands at mint, so
-        // the seed turn submits to an already-crowned row. The grantor is
+        // The role rides the lane request and lands at mint, so
+        // the seed turn submits to an already-promoted row. The grantor is
         // the parent edge the request carried - the same ambient fact the
         // Python settle stamps, never a caller-supplied value - and reads
         // "human" when the spawn had no agent parent.
-        crown_level,
-        crown_scope: crown_scope.map(str::to_string),
-        crown_grantor: crown_level
+        role_level,
+        role_scope: role_scope.map(str::to_string),
+        role_grantor: role_level
             .map(|_| spawned_by.session.clone().unwrap_or_else(|| "human".into())),
         route_settings_path: None,
         delivery_policy: None,

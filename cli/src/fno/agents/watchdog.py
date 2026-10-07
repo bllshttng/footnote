@@ -86,7 +86,7 @@ KEEPER = "keeper"
 #: MERGED or CLOSED). Neither acts at any apply level.
 CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
-#: Open node, spawn row, no crown, quiet past the drive threshold. Driven like WAKE.
+#: Open node, spawn row, no role, quiet past the drive threshold. Driven like WAKE.
 SILENCE = "silence"
 #: Report-only: a past-ceiling row whose evidence says FINISHED work (node
 #: shipped, or tail reads done) never enters the needs-human ask it can
@@ -477,7 +477,7 @@ ROSTER_TIMEOUT_S = 30.0
 #: Fraction of the roster budget that may be spent before the sweep warns.
 ROSTER_HEADROOM = 0.5
 
-#: Hard age ceiling on the wake lane (king ruling 2026-08-17): past it the
+#: Hard age ceiling on the wake lane (lead ruling 2026-08-17): past it the
 #: row reads ``stale`` and NEVER reaches an action lane - the 429 reset
 #: stamp carries no date, so an old tail's time-of-day reading is garbage,
 #: which would also poison reroute. Twelve hours, not twenty-four:
@@ -1491,7 +1491,7 @@ def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
         return [], [f"registry unreadable, silence sweep refused: {exc!r}"]
     for e in entries:
         live = getattr(e, "status", None) in LIVE_STATUSES
-        spawn = getattr(e, "origin", None) == "spawn" and getattr(e, "crown_level", None) is None
+        spawn = getattr(e, "origin", None) == "spawn" and getattr(e, "role_level", None) is None
         node = getattr(e, "node", None)
         scope = str(getattr(e, "project_root", "") or getattr(e, "cwd", "") or "")
         if not (live and spawn and node and scope):
@@ -1653,7 +1653,7 @@ def _graph_index() -> dict[str, dict] | _Unreadable:
 
 
 #: A sweep over ZERO rows is an unreadable instrument, never an empty fleet
-#: (king report 2026-08-17, node : after a binary update the roster read
+#: (lead report 2026-08-17, node : after a binary update the roster read
 #: 0 registered rows against an intact 19-row registry file). A zero-row sweep
 #: would write ``counts={}`` and a fresh sweep-file mtime, which reads as a
 #: healthy quiet fleet - an empty fleet and a broken instrument must never
@@ -2163,7 +2163,7 @@ def fresh_non_leave(payload: dict, prev_events_signature: str) -> set:
 
 #: The pr_watch launchd cadence, in seconds. A sweep older than two intervals
 #: means the cadence is dead, and a dead cadence is indistinguishable from a
-#: healthy fleet unless the staleness itself is published (the king's required
+#: healthy fleet unless the staleness itself is published (the lead's required
 #: ship condition: absence is never evidence, so status reads loud, not clean).
 SWEEP_INTERVAL_S = 600
 SWEEP_STALE_AFTER_S = 2 * SWEEP_INTERVAL_S
@@ -2257,7 +2257,7 @@ def union_signature(*signatures: str) -> str:
 
 
 def digest_text(payload: dict, limit: int = 8) -> str:
-    """One-screen digest of a sweep, basis riding along so the king can
+    """One-screen digest of a sweep, basis riding along so the lead can
     falsify each call. The verdict rows are LIST ITEMS, not bare lines: the
     mail style gate reads a bare line under a paragraph as an illegal
     mid-paragraph wrap (rule 6) - the first tick's digest was refused by
@@ -2361,7 +2361,7 @@ def _send_machine_report(
 def mail_digest(
     payload: dict, to: str, *, runner: Callable | None = None
 ) -> tuple[bool, str]:
-    """Push the verdict to a mail handle (push, not pull: a verdict the king
+    """Push the verdict to a mail handle (push, not pull: a verdict the lead
     has to remember to fetch goes unread). Skipped without comment when the
     non-leave set is unchanged since the last sweep. A ``project:<slug>``
     recipient addresses the project mailbox instead of one agent."""

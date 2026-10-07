@@ -579,7 +579,7 @@ fn rebind_locked(
     }
     // A handover with no pinned harness resolves one from ambient markers,
     // exactly as the ordinary acquire path does; preserving the spawner's tag
-    // left a claude worker under a codex king reading as codex for the life
+    // left a claude worker under a codex lead reading as codex for the life
     // of the claim.
     let effective_harness = if handover_allowed {
         resolved_harness.clone()

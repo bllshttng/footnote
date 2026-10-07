@@ -101,7 +101,7 @@ def test_pinned_miss_does_not_fire():
 # no cardinal past "one".
 NARRATIVE_TITLE = (
     "a contained subtask still appears in the undispatched queue, whose own "
-    "note tells a king to put one worker on each row"
+    "note tells a lead to put one worker on each row"
 )
 NARRATIVE_DETAILS = (
     "MEASURED on the board, one beat after containing the node. x-b7f8 and "
