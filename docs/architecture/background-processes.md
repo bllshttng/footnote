@@ -83,6 +83,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `lead_eval` | `daemon` | `fno-agents-daemon` | writes missing eval parts for ended Claude leads | 600 s |
 | `fleet_page` | `daemon` | `fno-agents-daemon` | renders fleet.html | 1800 s |
 | `attention` | `daemon` | `fno-agents-daemon` | selects attention rows into the status payload | 30 s |
+| `notice_route` | `daemon` | `fno-agents-daemon` | routes reconcile warnings to the owning lead and folds repeated failures into one node | 300 s |
 | `heal` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the PR auto-heal drive, gated on `auto_heal.enabled` | 600 s |
 | `evals` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the eval bank's demand leg | per `evals.schedule_days` |
 | `stranded` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the stranded-session sweep | one tick in three |
