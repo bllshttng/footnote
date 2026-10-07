@@ -2,7 +2,7 @@
 //! against current main before a worker spends on it?
 //!
 //! Read-only and advisory: every verdict exits 0, nothing blocks, and the
-//! one write is the best-effort `backlog.freshness.verdict` event the
+//! one write is the best-effort `backlog_freshness_verdict` event the
 //! false-positive rate is measured from (d-44800d59). v1 warns; turning a
 //! verdict into a refusal is a measured follow-up, never this verb.
 use crate::events::EventEmitter;
@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-pub(crate) const EVENT_KIND: &str = "backlog.freshness.verdict";
+pub(crate) const EVENT_KIND: &str = "backlog_freshness_verdict";
 
 fn parse_ts(raw: &str) -> Option<String> {
     let t = raw.trim();

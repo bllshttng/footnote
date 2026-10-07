@@ -1254,6 +1254,26 @@ event_types:
           description: "The refusing session's id, when ambient identity is present. Pairs a refusal with a later passing send for the retry-rate query."
     consumers: [operator]
 
+  - name: backlog_freshness_verdict
+    description: "One row per fno backlog freshness run: the premise and plan verdicts it read against current main, so the false-positive rate is measurable before any verdict is ever allowed to block (v1 warns only)."
+    sources: [backlog]
+    data:
+      required: [node, main_sha, premise, plan]
+      properties:
+        node:
+          type: string
+          description: "The node id the verb resolved and read."
+        main_sha:
+          type: string
+          description: "The origin/main commit the verdicts were measured against (empty when main was unresolvable)."
+        premise:
+          type: string
+          description: "The premise verdict: shipped, partly_shipped, changed, holds, or unmeasured:<why>."
+        plan:
+          type: [string, "null"]
+          description: "The plan verdict: void, drifted, fresh, or unmeasured:<why>; null when the run read no plan."
+    consumers: [operator, fno backlog]
+
   - name: backlog_reopened
     description: "fno backlog reopen cleared a node's completion. Every reopen carries a reason: a node that was done and now is not needs a why, or the graph records a state change nobody can account for."
     sources: [backlog]
