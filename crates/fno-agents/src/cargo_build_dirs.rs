@@ -119,15 +119,17 @@ pub fn fill_sccache_env(root: &Path) {
 /// caller: a machine without sccache, or one where the start fails, keeps
 /// every current behavior.
 pub fn ensure_sccache_server() {
-    if sccache_bin().is_none() {
+    ensure_sccache_server_unless(sccache_server_pid().is_some());
+}
+
+/// The rows-taking form: a caller holding a process table (the census verb,
+/// the machine-watch tick) answers the probe without a second table walk.
+pub fn ensure_sccache_server_unless(live_server: bool) {
+    if live_server || sccache_bin().is_none() {
         return;
     }
-    if sccache_server_pid().is_some() {
+    let Some(bin) = sccache_bin() else {
         return;
-    }
-    let bin = match sccache_bin() {
-        Some(bin) => bin,
-        None => return,
     };
     let _ = std::process::Command::new(bin)
         .arg("--start-server")
@@ -142,21 +144,20 @@ pub fn ensure_sccache_server() {
 /// renamed title `(sccache)` or `sccache --start-server`. The client form
 /// (`sccache <rustc-path> ...`) never matches.
 pub fn sccache_server_pid() -> Option<u32> {
-    let out = std::process::Command::new("ps")
-        .arg("-axo")
-        .args(["pid=", "command="])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let mut fields = line.trim_start().splitn(2, char::is_whitespace);
-        let pid = fields.next()?.parse::<u32>().ok()?;
-        let command = fields.next().unwrap_or("").trim();
-        if command == "(sccache)" || command.ends_with("sccache --start-server") {
-            return Some(pid);
-        }
-    }
-    None
+    let (rows, _) = crate::census::process_table();
+    sccache_row_pid(&rows)
+}
+
+/// The rows-taking probe: same match, no process walk of its own. The
+/// renamed title reaches the command field through the argv fallback to
+/// `pbi_comm`, so both the libproc and the ps table answer.
+pub fn sccache_row_pid(rows: &[crate::census::ProcRow]) -> Option<u32> {
+    rows.iter()
+        .find(|row| {
+            let command = row.command.trim();
+            command == "(sccache)" || command.ends_with("sccache --start-server")
+        })
+        .map(|row| row.pid)
 }
 
 fn expand_home(path: &Path) -> PathBuf {

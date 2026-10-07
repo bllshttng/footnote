@@ -715,6 +715,10 @@ def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | 
     the table in memory, so a seatbelt that refuses the setuid `ps` exec
     still gets a reading, and a read-only sandbox needs no temp file."""
     global _LAST_SCCACHE
+    # A failed fetch answers "unknown" below, never yesterday's server: the
+    # stash resets before the read, so a dead census door cannot print a
+    # stale pid as live.
+    _LAST_SCCACHE = (None, None)
     error, payload = call_binary_json("census", ["--ps"], timeout=timeout)
     if error is not None or not isinstance(payload, dict):
         return None, f"process table unavailable: {error or 'census --ps returned no table'}"

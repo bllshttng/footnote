@@ -932,7 +932,7 @@ pub async fn run_verb(args: &[String]) -> i32 {
             json!({
                 "ps": ps_text(&rows),
                 "unreadable": unreadable,
-                "sccache_server_pid": crate::cargo_build_dirs::sccache_server_pid(),
+                "sccache_server_pid": crate::cargo_build_dirs::sccache_row_pid(&rows),
                 "sccache_restarts_1h": crate::machine_watch::sccache_restarts_1h(),
             })
         );

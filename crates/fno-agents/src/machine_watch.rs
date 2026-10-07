@@ -793,9 +793,11 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         }
         // One long-lived sccache server per machine: a server that died under
         // load is revived within a tick, and the pid change feeds the restart
-        // counter the footprint verb reads.
-        crate::cargo_build_dirs::ensure_sccache_server();
-        observe_sccache_pid(crate::cargo_build_dirs::sccache_server_pid());
+        // counter the footprint verb reads. The sample's own table answers the
+        // probe, so the tick spends no extra process walk.
+        let sccache_pid = crate::cargo_build_dirs::sccache_row_pid(&sample.procs);
+        crate::cargo_build_dirs::ensure_sccache_server_unless(sccache_pid.is_some());
+        observe_sccache_pid(sccache_pid);
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
