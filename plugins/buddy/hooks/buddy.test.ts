@@ -56,8 +56,12 @@ function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), 
   })
   on('ui.open', () => ({ value: undefined }))
   on('ui.close', () => ({ value: undefined }))
+  on('prompt.edit', ($: any, e: any) => ({ text: e.text, cursor: e.cursor }))
   return { clock, saved, files }
 }
+
+// A key the person typed in this session's prompt box.
+const typed = { origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'f' } as const
 
 test('a seed always rolls the same buddy', () => {
   expect(rollBones('seed-1')).toEqual(rollBones('seed-1'))
@@ -118,7 +122,15 @@ test('a finished turn shows the model reaction, with no canned line first', asyn
   on('turn.complete', () => ({ text: '' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
-  const ui = await $.ui.mount(band(8))
+  // Nobody typed here, as in a hidden worker pane: the turn costs no model call.
+  let ui = await $.ui.mount(band(8))
+  await $.turn.complete({ turnId: 't0', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
+  await clock.advance(1)
+  await ui.unmount()
+  expect(await (await $.ui.mount(band(8))).find({ type: 'Text', text: /null check/ })).toBeUndefined()
+
+  await $.prompt.edit(typed)
+  ui = await $.ui.mount(band(8))
   await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
   await clock.advance(1)
   await ui.unmount()
@@ -133,6 +145,8 @@ test('a shipped node in the fleet feed is told in the buddy voice', async ($, on
   const row = { ts: new Date(60_000).toISOString(), kind: 'node_shipped', node: 'parser-fix', ref: '42', title: 'PR 42' }
   on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify([row]), stderr: '' } }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // The session typed in last tells the news.
+  await $.prompt.edit(typed)
 
   await clock.advance(118_000)
   const ui = await $.ui.mount(band(8))

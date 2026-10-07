@@ -17,6 +17,11 @@ const FEED_WINDOW_S = 600
 const FLEET_MS = 300_000
 // A buddy that drew within this window has someone looking at it.
 const SEEN_MS = 5_000
+// The status line runs in every live session, hidden mux panes too, so a draw does not mean a
+// person is there. A key typed in a session's prompt box does: for this long after one, the
+// session reacts to its turns, and the session typed in last speaks for the machine.
+const TYPED_MS = 600_000
+const SPEAKER_STAMP_MS = 30_000
 // The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
 const FRAME_REFRESH_MS = 10_000
 const PANE_ID = 'buddy'
@@ -34,6 +39,8 @@ let tick = 0
 let bubble: { text: string; at: number } | null = null
 let pettedAt = -Infinity
 let drawnAt = -Infinity
+let typedAt = -Infinity
+let stampedAt = -Infinity
 let paneDrawnAt = -Infinity
 let paneAsked = false
 let reactedAt = -Infinity
@@ -107,6 +114,13 @@ async function syncSoul($: EngineInterface): Promise<void> {
     if (bubble) bubble = { text: '', at: bubble.at }
   }
   buddy = embody(saved)
+}
+
+// Idle talk and fleet news cost a model call each. Only the session typed in last makes them,
+// and only while someone typed there lately, so hidden sessions and an empty desk stay quiet.
+async function speaking($: EngineInterface, now: number): Promise<boolean> {
+  if (now - typedAt >= TYPED_MS) return false
+  return (await $.store.get('speaker')) === sessionId
 }
 
 // An fno release from before the move still loads its own copy of the buddy, which stamps fno's
@@ -452,6 +466,14 @@ async function remember($: EngineInterface, c: Companion, why: string, line: str
   try {
     old = (await $.fs.read(path)).split('\n').filter(Boolean)
   } catch {}
+  // Two writes that cross can leave a torn row; drop it here so it does not stay in the file.
+  old = old.filter(row => {
+    try {
+      return JSON.parse(row) && true
+    } catch {
+      return false
+    }
+  })
   const rows = [...old, JSON.stringify({ at: new Date(now).toISOString(), name: c.name, why, line })].slice(-OBSERVATIONS_KEPT)
   await $.fs.write(path, rows.join('\n') + '\n').catch(() => {})
 }
@@ -495,6 +517,8 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
     feedSince = Math.max(feedSince, at + 1)
     line = newsFact(row) ?? line
   }
+  // Every session counts ships, so none is missed; only the speaker tells them.
+  if (!(await speaking($, now))) return
   const earned = after.bank > before ? `+1 reroll (${after.bank}/${REROLL_BANK})` : ''
   if (line && buddy) {
     const c = buddy
@@ -626,12 +650,12 @@ export function register(on: On) {
       tick += 1
       if (!buddy || muted) return
       const at = await $.clock.now()
-      if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS) {
-        // Stamp first so a slow call is not asked twice; the line shows when it arrives.
-        bubble = { text: '', at }
-        react($, 'idle').catch(() => {})
-      }
       if (tick % 4 === 0) {
+        if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS && (await speaking($, at))) {
+          // Stamp first so a slow call is not asked twice; the line shows when it arrives.
+          bubble = { text: '', at }
+          react($, 'idle').catch(() => {})
+        }
         await syncSoul($).catch(() => {})
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
@@ -738,10 +762,19 @@ export function register(on: On) {
     }
   })
 
+  on('prompt.edit', async ($, e, next) => {
+    typedAt = await $.clock.now()
+    if (typedAt - stampedAt >= SPEAKER_STAMP_MS) {
+      stampedAt = typedAt
+      await $.store.set('speaker', sessionId).catch(() => {})
+    }
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (buddy && !muted && !e.agentId && !e.isAborted) {
       const now = await $.clock.now()
-      if (now - drawnAt < SEEN_MS) {
+      if (now - drawnAt < SEEN_MS && now - typedAt < TYPED_MS) {
         const messages = await $.session.messages()
         const why: Reason = addressedBy(lastPrompt(messages), buddy.name) ? 'addressed' : loudReason(turnOutput(messages)) ?? 'turn'
         if (why !== 'turn' || now - reactedAt >= REACT_GAP_MS) {
