@@ -553,19 +553,19 @@ def test_render_states():
 def test_truth_line_reads_exited_for_a_resumable_exit_and_dead_without_a_session():
     from fno.agents.cli import _truth_line
 
-    result = {"handle": "king-4d9b-delivery", "state": "working", "reason": None,
+    result = {"handle": "lead-4d9b-delivery", "state": "working", "reason": None,
               "last_activity_age_s": 600, "last_activity_basis": "last-entry",
               "observed_model": {"kind": "observed", "model": "gpt-6-astra", "samples": 2},
               "session_id": "01a09bcd", "suggestions": []}
     exited = _truth_line(result, "pane-gone")
-    assert exited.startswith("truth king-4d9b-delivery: exited")
+    assert exited.startswith("truth lead-4d9b-delivery: exited")
     assert "resumable" in exited
     assert "working" not in exited and "active" not in exited
     assert exited.endswith("[unreachable: pane-gone]")
-    assert _truth_line(result, "exit-recorded").startswith("truth king-4d9b-delivery: exited")
+    assert _truth_line(result, "exit-recorded").startswith("truth lead-4d9b-delivery: exited")
     orphan = {**result, "session_id": None}
-    assert _truth_line(orphan, "pane-gone").startswith("truth king-4d9b-delivery: dead")
-    assert _truth_line(result, None).startswith("truth king-4d9b-delivery: working")
+    assert _truth_line(orphan, "pane-gone").startswith("truth lead-4d9b-delivery: dead")
+    assert _truth_line(result, None).startswith("truth lead-4d9b-delivery: working")
 
 
 def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):

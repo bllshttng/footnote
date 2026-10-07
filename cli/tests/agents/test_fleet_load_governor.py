@@ -299,7 +299,7 @@ class TestCauseMainProbeEntry:
             "exit_code": 4,
         }
 
-# The gate-side king share, schema and fleet-load cases decided inside the
+# The gate-side lead share, schema and fleet-load cases decided inside the
 # ONE Rust gate now (crates/fno-agents/src/spawn_gate.rs and
 # spawn_gate_lanes.rs tests). The transport contract lives in
 # tests/agents/test_spawn_gate.py::TestTransport.

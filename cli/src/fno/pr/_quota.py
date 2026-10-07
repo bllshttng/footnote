@@ -303,7 +303,7 @@ def _malformed_argv_refusal(first: str) -> str:
     Everything after ``--`` becomes gh's argv, command words first. Flags with
     no command word make gh print its root command list, which reads as
     unrelated output rather than an error, so the caller cannot tell the route
-    failed (a king lost a merge-precondition read this way).
+    failed (a lead lost a merge-precondition read this way).
     """
     return (
         "graphql-exec passes everything after -- to gh as its full argv, "

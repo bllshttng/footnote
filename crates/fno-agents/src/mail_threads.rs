@@ -264,10 +264,10 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                         system.entry(to_key.clone()).or_default().push(row.clone());
                     } else {
                         let receiver_scope = reg_to
-                            .and_then(|r| r.get("crown_scope"))
+                            .and_then(|r| r.get("role_scope"))
                             .and_then(Value::as_str);
                         let sender_scope = reg_from
-                            .and_then(|r| r.get("crown_scope"))
+                            .and_then(|r| r.get("role_scope"))
                             .and_then(Value::as_str);
                         let ts = v.get("ts").and_then(Value::as_str).unwrap_or("");
                         if let Some(scope) = sender_scope.filter(|_| !system_row) {
@@ -309,7 +309,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
     for (key, p) in participants.iter_mut() {
         let reg = registry_lookup(registry, key);
         let held = reg
-            .and_then(|r| r.get("crown_scope"))
+            .and_then(|r| r.get("role_scope"))
             .and_then(Value::as_str)
             .filter(|_| {
                 reg.and_then(|r| r.get("liveness")).and_then(Value::as_str) != Some("alive")
@@ -407,8 +407,8 @@ fn participant_row(key: &str, reg: Option<&Value>, extra: Option<&str>) -> Value
             r.get("liveness").and_then(Value::as_str) == Some("alive")
                 || r.get("status").and_then(Value::as_str) == Some("live")
         }),
-        "crown_scope": reg.and_then(|r| r.get("crown_scope")).and_then(Value::as_str),
-        "crown_level": reg.and_then(|r| r.get("crown_level")).and_then(Value::as_u64),
+        "role_scope": reg.and_then(|r| r.get("role_scope")).and_then(Value::as_str),
+        "role_level": reg.and_then(|r| r.get("role_level")).and_then(Value::as_u64),
         "created_at": reg.and_then(|r| r.get("created_at")).and_then(Value::as_str),
         "exited_at": reg.and_then(|r| r.get("exited_at")).and_then(Value::as_str),
         "system": crate::system_sender::is_system_sender(key),
@@ -475,7 +475,7 @@ fn best_scope(votes: &BTreeMap<String, (usize, String)>) -> Option<String> {
 /// The hidden `fno-agents mail-threads` verb: `--format json` (the only
 /// form) prints the projection; `details --session <id>` prints that
 /// session's token counters and ledger cost. Hidden from help, like
-/// `court-fold` (ruling d-aef0ed7b).
+/// `team-fold` (ruling d-aef0ed7b).
 pub fn run_mail_threads(args: &[String]) -> i32 {
     let Some(sub) = args.first() else {
         return run_mail_threads(&["--format".into(), "json".to_string()]);
@@ -776,11 +776,11 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let now = crate::state::rfc3339_like_to_secs("2026-10-02T12:00:00Z").unwrap();
         // The registry: a lead, its live worker, an exited worker, and the
-        // crowned successor over the same scope (AC2-HP).
+        // promoted successor over the same scope (AC2-HP).
         let registry = vec![
             json!({"name": "vellum", "fno_id": "s-vellum", "harness_session_id": "s-vellum",
                    "harness": "claude", "liveness": "alive", "status": "live",
-                   "crown_level": 1, "crown_scope": "fno"}),
+                   "role_level": 1, "role_scope": "fno"}),
             json!({"name": "candor", "fno_id": "s-candor", "harness_session_id": "s-candor",
                    "harness": "codex", "liveness": "alive", "status": "live"}),
             json!({"name": "quill", "fno_id": "s-quill", "harness_session_id": "s-quill",
@@ -892,7 +892,7 @@ mod tests {
             )],
         );
         // An unresolvable leaked fixture reads as Archive, not live-list. It
-        // mails candor, whose registry row holds no crown scope, so no
+        // mails candor, whose registry row holds no role scope, so no
         // scope vote ever names it and the unresolved bucket takes it.
         write_chat(
             &chats,
@@ -924,7 +924,7 @@ mod tests {
             &[msg(
                 "fmail-444444444444",
                 "2026-10-01T09:10:00Z",
-                "king-settle",
+                "lead-settle",
                 "candor",
                 "Settle point reached.",
             )],
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].get("from").and_then(Value::as_str),
-            Some("fno/king-settle")
+            Some("fno/lead-settle")
         );
         // Channels and announcements (AC4-HP, R12).
         let channels = projection

@@ -820,7 +820,7 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
 
 def _territory_stamp(node_id: str) -> dict:
     """The territory stamp: three values, never two. ``kingless`` is False on
-    a crowned territory, True on a kingless one, None when nothing could read
+    a promoted territory, True on a kingless one, None when nothing could read
     the attribution. Reads the territory-verdict door; its unknown receipt
     omits both fields, so ``.get`` is the whole fold and an absence stamps
     null. Any read failure degrades to nulls with one warning.
@@ -2329,7 +2329,7 @@ def _join_node(
             f"# Joiner brief: {node_id}\n\n"
             f"lead and mail hub: {lead}\n\n"
             f"Route findings and questions through {lead}, not to the node "
-            f"holder or a king. The lead talks up; everyone else talks to the "
+            f"holder or a lead. The lead talks up; everyone else talks to the "
             f"lead. That is what keeps one session from being addressed by "
             f"every joiner at once, and it is why two joiners relaying the "
             f"same finding separately is a defect rather than diligence. If "

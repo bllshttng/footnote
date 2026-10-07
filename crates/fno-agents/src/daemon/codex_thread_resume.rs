@@ -109,7 +109,7 @@ pub(super) async fn ensure_codex_thread_handle(
     let mut resolved_sandbox = Some(resolved_sandbox);
     let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if let Some(row) = registry.find_mut(&resumed_name) {
-            // First resolution wins: the column is the crowning-time
+            // First resolution wins: the column is the promoting-time
             // baseline the check-in's drift judge reads, so a later resume
             // never moves it (a narrowed resolution would mask the drift it
             // caused). `unknown` is no baseline; a real name may replace it.

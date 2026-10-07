@@ -941,8 +941,8 @@ pub(crate) fn create_node(
                             e.model.clone(),
                             e.effort.clone(),
                             e.spawned_by_session.clone(),
-                            e.crown_level
-                                .zip(e.crown_scope.clone())
+                            e.role_level
+                                .zip(e.role_scope.clone())
                                 .map(|(level, scope)| format!("L{level} {scope}")),
                         )
                     })

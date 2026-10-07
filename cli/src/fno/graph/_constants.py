@@ -138,7 +138,7 @@ _MINT_MAX_ATTEMPTS = 10_000
 # Where a node came from, shared by every writer of ``source_kind``. The four
 # original values map to their push channel: organic is the unset default,
 # from_inbox is mail, from_observation is an agent noticing, from_supervisor is
-# a crown filing. operator_request marks a node the OPERATOR asked for - no
+# a role filing. operator_request marks a node the OPERATOR asked for - no
 # pre-existing value meant that, so an operator ask landed as organic and read
 # the same as a worker filing its own idea.
 SOURCE_KINDS = frozenset(

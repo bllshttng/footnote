@@ -367,7 +367,7 @@ fn fold_transcript(
                         "org term",
                         "org done",
                         "--team",
-                        "--crown",
+                        "--promote",
                         "--promote",
                         "--succeed",
                     ]
@@ -717,7 +717,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         let flag = args[i].as_str();
         match flag {
             // The pre-rename spelling rides one release: python still sends it.
-            "--session" | "--team" | "--crown" | "--since" | "--until" => {
+            "--session" | "--team" | "--promote" | "--since" | "--until" => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -725,7 +725,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .ok_or_else(|| format!("{flag} requires a value"))?;
                 match flag {
                     "--session" => parsed.session = Some(value),
-                    "--team" | "--crown" => parsed.team = Some(value),
+                    "--team" | "--promote" => parsed.team = Some(value),
                     "--since" => parsed.since = Some(parse_date(&value)?),
                     _ => parsed.until = Some(parse_date(&value)?),
                 }
@@ -938,7 +938,7 @@ fn default_eval_dir_for(session: &str, checkins: &[Value], cwd: &Path) -> Result
     Ok(plans
         .join("..")
         .join("evals")
-        .join("kings")
+        .join("leads")
         .join(format!("lead-{tag}-{}", &session[..session.len().min(8)])))
 }
 
@@ -1258,7 +1258,7 @@ fn run_arm(home: &AgentsHome) -> (u64, Option<String>, String) {
             .entries
             .into_iter()
             .filter(|entry| {
-                entry.crown_scope.is_some()
+                entry.role_scope.is_some()
                     && !matches!(
                         entry.status,
                         crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
@@ -1391,7 +1391,7 @@ fn session_has_eval(session: &str) -> Result<bool, String> {
             cwd.display()
         ));
     };
-    let evals = plans.join("..").join("evals").join("kings");
+    let evals = plans.join("..").join("evals").join("leads");
     let sid8 = &session[..session.len().min(8)];
     let entries = match std::fs::read_dir(evals) {
         Ok(entries) => entries,
@@ -1748,7 +1748,7 @@ mod tests {
             reg.entries.push(crate::state::RegistryEntry {
                 name: "lead-one".into(),
                 cwd: repo.display().to_string(),
-                // crown_scope stays unset, so the live-session filter
+                // role_scope stays unset, so the live-session filter
                 // still excludes the row: the seeded holder is ended.
                 harness: Some("claude".into()),
                 harness_session_id: Some("99998888-7777-4666-8555-444433332222".into()),

@@ -10,7 +10,7 @@
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-const CROWN_VERBS: [&str; 3] = ["lead", "reign", "fno-me"];
+const ROLE_VERBS: [&str; 3] = ["lead", "term", "fno-me"];
 /// Keep the old spelling on the canonical profile key for one release.
 const VERB_ALIASES: [(&str, &str); 1] = [("do", "execute")];
 /// A lane is a COMPLETE coordinate: route/model stop at the lane.
@@ -196,19 +196,19 @@ fn known_verb_keys(inputs: &Inputs) -> (Vec<String>, bool) {
 }
 
 /// The seed's profile key (Python `_profile_key`): a resolvable verb token
-/// names its canonical profile; a king verb or no token names `crown`; an
+/// names its canonical profile; a lead verb or no token names `role`; an
 /// unknown `fno:`-namespaced token refuses (None).
 fn profile_key(seed: Option<&str>, known: Option<&[String]>) -> Option<String> {
     let Some(tok) = verb_token(seed) else {
-        return Some("crown".to_string());
+        return Some("role".to_string());
     };
     let key = VERB_ALIASES
         .iter()
         .find(|(old, _)| *old == tok)
         .map(|(_, new)| new.to_string())
         .unwrap_or_else(|| tok.clone());
-    if CROWN_VERBS.contains(&key.as_str()) {
-        return Some("crown".to_string());
+    if ROLE_VERBS.contains(&key.as_str()) {
+        return Some("role".to_string());
     }
     match known {
         None => Some(key),
@@ -219,7 +219,7 @@ fn profile_key(seed: Option<&str>, known: Option<&[String]>) -> Option<String> {
             if carries_namespace(seed, &tok) {
                 return None;
             }
-            Some("crown".to_string())
+            Some("role".to_string())
         }
     }
 }
@@ -878,8 +878,8 @@ fn is_seed_verb(seed: &Option<String>) -> bool {
         .is_some_and(|tok| crate::provider::parse_verb_token(tok).is_some())
 }
 
-/// Whether the argv names a crown (`-k` in all three Click spellings, or
-/// `--crown`) before the `--argv` boundary or a bare `--` fence (fenced
+/// Whether the argv names a role (`-k` in all three Click spellings, or
+/// `--promote`) before the `--argv` boundary or a bare `--` fence (fenced
 /// tokens are prompt text) - the same boundary rule Python's
 /// `_has_permission_mode` applies, and the same short-form spellings the
 /// Python routing detector accepts.
@@ -889,8 +889,8 @@ fn argv_has_team(argv: &[String]) -> bool {
         .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
         .any(|t| {
             // retired-ok: the daemon accepts the retired alias for one release
-            t == "--crown"
-                || t.starts_with("--crown=")
+            t == "--promote"
+                || t.starts_with("--promote=")
                 || t == "-k"
                 || t.starts_with("-k=")
                 || (t.starts_with("-k") && t.len() > 2 && !t.starts_with("--"))
@@ -1332,10 +1332,10 @@ fn mechanical_axes(stage: &mut Stage, seam: &mut Seam) {
     // Python's prov: explicit -H, then the config field read, then ambient
     // inference - the cached resolved_harness, never the grid pick.
     let prov = resolved_harness(stage).unwrap_or_default();
-    // A crowned codex spawn is a lead, and a lead must write the state root
+    // A promoted codex spawn is a lead, and a lead must write the state root
     // (~/.fno) to spawn, claim and journal. The builtin and the config rungs
-    // name claude words codex maps to workspace-write, so the crown widens
-    // the default to yolo; a crowned codex spawn that names a bounded mode
+    // name claude words codex maps to workspace-write, so the role widens
+    // the default to yolo; a promoted codex spawn that names a bounded mode
     // refuses before launch.
     if prov == "codex" && argv_has_team(&stage.inputs.argv) {
         if !has_permission {
@@ -1343,13 +1343,13 @@ fn mechanical_axes(stage: &mut Stage, seam: &mut Seam) {
                 .map(|p| p.is_full_access())
                 .unwrap_or(false);
             if !full {
-                permission = Field("yolo".into(), Some("builtin.crown".into()));
+                permission = Field("yolo".into(), Some("builtin.role".into()));
             }
         } else if let Some(mode) = stage.scan.permission_value.as_deref() {
             if let Ok(posture) = crate::codex_posture::resolve_thread_posture(None, Some(mode)) {
                 if !posture.is_full_access() {
                     seam.refuse(format!(
-                        "fno agents spawn: a codex lead needs danger-full-access: a crowned \
+                        "fno agents spawn: a codex lead needs danger-full-access: a promoted \
                          session must write the state root (~/.fno) to spawn, claim and \
                          journal, and {mode} cannot. Pass -Y/--yolo or drop --permission-mode."
                     ));

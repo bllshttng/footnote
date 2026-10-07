@@ -110,17 +110,17 @@ def _render_lane_lines(rows: list[dict]) -> list[str]:
     return lines
 
 
-def _crown_map() -> dict[str, str]:
-    """name -> crown label for crowned registry rows (US9), sourced from
-    :func:`crown_reading` so this view and ``fno whoami`` cannot drift.
-    Best-effort: a read failure degrades to no crowns."""
+def _role_map() -> dict[str, str]:
+    """name -> role label for promoted registry rows (US9), sourced from
+    :func:`role_reading` so this view and ``fno whoami`` cannot drift.
+    Best-effort: a read failure degrades to no roles."""
     try:
-        from fno.agents.crown import crown_reading
+        from fno.agents.role import role_reading
         from fno.agents.registry import load_registry
 
         out: dict[str, str] = {}
         for e in load_registry():
-            reading = crown_reading(e)
+            reading = role_reading(e)
             if reading is not None:
                 out[e.name] = reading["label"]
         return out
@@ -134,7 +134,7 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
     the FIRST 8 hex of that uuid, the registry handle is the LAST 8 - the
     mismatch that once read as "all agents are dead"), ``nodes`` is the
     handle -> node map the retirement verdict resolves through. Best-effort,
-    like :func:`_crown_map`: a read failure degrades to empty maps."""
+    like :func:`_role_map`: a read failure degrades to empty maps."""
     try:
         from fno.agents.registry import load_registry
 
@@ -235,7 +235,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     return out
 
 
-def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
+def _rows(workers: list[LiveWorker], roles: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
     session_nodes = _session_node_map()
@@ -284,9 +284,9 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # HARNESS, not PROVIDER (the CLI, never the model vendor).
                 "harness": w.harness,
                 "substrate": w.substrate,
-                # The king that spawned this worker (W4): which king
+                # The lead that spawned this worker (W4): which lead
                 # owns the cost; None for operator-run / legacy rows.
-                "king": (w.spawned_by or "")[:8] or None,
+                "lead": (w.spawned_by or "")[:8] or None,
                 # The process that IS the session (W2): a bg row's
                 # recorded pid names the PTY HOST, not the worker.
                 "pid": pid,
@@ -315,7 +315,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "pr_basis": pr_basis,
                 "retire": v.retire if v else False,
                 "retire_reason": v.reason if v else None,
-                "crown": crowns.get(reg_name),  # US9: null when uncrowned
+                "role": roles.get(reg_name),  # US9: null when unpromoted
             }
         )
     # Heaviest first: the row the operator is looking for when RAM is tight.
@@ -323,7 +323,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     return rows
 
 
-def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
+def _run_ended_rows(roles: dict[str, str]) -> list[dict]:
     """Registry rows whose RUN ended but whose session still answers.
 
     census() counts runs holding a process, so a parked row drops out of the
@@ -361,7 +361,7 @@ def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
                 "name": e.name,
                 "harness": e.harness,
                 "substrate": getattr(e, "substrate", None) or "-",
-                "king": (getattr(e, "spawned_by", None) or "")[:8] or None,
+                "lead": (getattr(e, "spawned_by", None) or "")[:8] or None,
                 "pid": None,
                 "reach": reach.verdict,
                 "reach_basis": reach.basis,
@@ -369,7 +369,7 @@ def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
                 "status_age_s": reach.age_s,
                 "stored_status": e.status,
                 "status_basis": reach.basis,
-                "crown": crowns.get(e.name),
+                "role": roles.get(e.name),
             }
         )
     return rows
@@ -660,9 +660,9 @@ def render_top(
     ``include_subagents`` appends the sidechain section ;
     ``include_pane_stats`` appends the per-pane mux counter deltas."""
     c = census()
-    crowns = _crown_map()
-    rows = _rows(c.workers, crowns)
-    run_ended = _run_ended_rows(crowns)
+    roles = _role_map()
+    rows = _rows(c.workers, roles)
+    run_ended = _run_ended_rows(roles)
     lanes = lane_rows()
     subagents = _subagent_section() if include_subagents else None
     pane_stats = pane_counter_rows() if include_pane_stats else None
@@ -715,25 +715,25 @@ def render_top(
         out.append("")
     header = (
         f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
-        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'NODE':<8} {'PROGRESS':<17} "
+        f"{'LEAD':<9} {'PID':>7} {'RSS_MB':>7} {'NODE':<8} {'PROGRESS':<17} "
         f"{'REACH':<11} STATUS"
     )
     out.append(header)
     if not rows:
         out.append("no live workers (runs holding a process; a run-ended session is not missing)")
     for r in [*rows, *run_ended]:
-        # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
+        # US9: mark a promoted worker in the name cell (ASCII, alignment-safe).
         # The registry handle rides along when it differs from this view's own
         # label, so `top` and `list` can be joined by eye instead of by guessing
         # which end of the uuid each one truncated.
-        name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
+        name_cell = r["name"] + (f" [{r['role']}]" if r["role"] else "")
         if r.get("handle"):
             name_cell += f" ={r['handle']}"
         age_s = r.get("status_age_s")
         activity = r["status"] + (f" {_fmt_age(age_s)}" if age_s is not None else "")
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
-            f"{r['substrate']:<10} {r['king'] or '-':<9} {r.get('pid') or '-':>7} "
+            f"{r['substrate']:<10} {r['lead'] or '-':<9} {r.get('pid') or '-':>7} "
             f"{r['rss_mb'] if r.get('rss_mb') is not None else '-':>7} "
             f"{r.get('node') or '-':<8} "
             f"{r.get('progress') or '-':<17} {r['reach'] or '-':<11} {activity}"

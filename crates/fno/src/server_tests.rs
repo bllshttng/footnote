@@ -542,8 +542,8 @@ fn agent_in(sess: &str, pane: u64, badge: Option<AgentBadge>, exited: bool) -> R
         claude_session_uuid: None,
         log_path: None,
         updated_at: None,
-        crown_level: None,
-        crown_scope: None,
+        role_level: None,
+        role_scope: None,
         liveness: if exited {
             agents_view::Liveness::Dead
         } else {
@@ -3784,8 +3784,8 @@ pub(super) fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent
         claude_session_uuid: uuid.map(str::to_owned),
         log_path: None,
         updated_at: None,
-        crown_level: None,
-        crown_scope: None,
+        role_level: None,
+        role_scope: None,
         harness: None,
         ..Default::default()
     }
@@ -6257,8 +6257,8 @@ pub(super) fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAge
         claude_session_uuid: None,
         log_path: None,
         updated_at: None,
-        crown_level: None,
-        crown_scope: None,
+        role_level: None,
+        role_scope: None,
         harness: None,
         ..Default::default()
     }

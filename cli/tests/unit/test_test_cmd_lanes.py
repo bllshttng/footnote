@@ -88,15 +88,15 @@ def test_marker_breached_ceiling_caps_threads_at_one(tmp_path, monkeypatch, caps
     _reset_lanes(monkeypatch)
     cmds = _capture_rust_cmds(monkeypatch)
 
-    import fno.agents.court as court
+    import fno.agents.team as team
     import fno.agents.spawn_gate as spawn_gate
     import fno.config as fno_config
     import fno.doctor_footprint as footprint
     import fno.doctor_lanes as lanes
 
     # subprocess is a shared singleton: anything real that shells out would
-    # land in the capture. The court census is one such caller.
-    monkeypatch.setattr(court, "gather_court", lambda rows=None: {})
+    # land in the capture. The team census is one such caller.
+    monkeypatch.setattr(team, "gather_team", lambda rows=None: {})
     # The census now also carries the caller's own spawn-gate share
     # (x-5283), patched here like every sensor: gate_census and
     # load_settings both reach the repo-root resolution, and a cold cache

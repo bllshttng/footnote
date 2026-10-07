@@ -14,6 +14,9 @@ use std::path::PathBuf;
 #[path = "state_recovery.rs"]
 mod recovery;
 
+#[path = "event_store_recovery.rs"]
+mod copy_recovery;
+
 /// The verbs the native surface serves. `find` joins natively only when the
 /// caller names stores explicitly (`--events`); a bare `find` keeps
 /// forwarding to Python, whose front door resolves the journals and calls
@@ -62,6 +65,9 @@ pub fn run(args: &[OsString]) -> i32 {
         "rows" => run_rows(rest),
         "prune" => run_prune(rest),
         "find" => run_find(rest),
+        "recover" if rest.first().and_then(|arg| arg.to_str()) == Some("--copy-store") => {
+            copy_recovery::run(&rest[1..])
+        }
         "recover" => recovery::run(rest),
         _ => {
             eprintln!(

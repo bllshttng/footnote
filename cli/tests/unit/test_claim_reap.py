@@ -988,7 +988,7 @@ class TestCliProbeWiring:
 
 
 class TestExternalDeathEvidence:
-    """The king's two 2026-08-23 specimens, replayed. Both held a claim whose
+    """The lead's two 2026-08-23 specimens, replayed. Both held a claim whose
     holder was dead to every outside instrument - process table, registry row,
     mux pane - yet the reaper answered "I cannot tell" (suspect) and a manual
     --force release was the only way through. The fix feeds the reaper those
@@ -1017,7 +1017,7 @@ class TestExternalDeathEvidence:
         )
 
     def test_specimen_2_absent_pane_and_dead_pid_reaps(self, tmp_path, monkeypatch):
-        """x-c272: the king killed the holder's pane and removed its registry
+        """x-c272: the lead killed the holder's pane and removed its registry
         row; the spawn-handover claim survived both and the next dispatch
         refused. Pane positively absent from the mux listing AND the recorded
         spawner pid dead is the launch window OVER - a positive finding."""
@@ -1069,7 +1069,7 @@ class TestExternalDeathEvidence:
     def test_specimen_1_degraded_then_recovered_roster_reaps(
         self, tmp_path, monkeypatch
     ):
-        """x-3f84: the king killed the holder's whole tree and verified five
+        """x-3f84: the lead killed the holder's whole tree and verified five
         pids gone; `claim reap` still reported `kept: 1 suspect (roster not
         consulted)` because one degraded roster read answered None for the
         whole pass. One retry on a degraded reading resolves it here."""

@@ -147,6 +147,10 @@ fn main() {
     // it BEFORE the chdir below, or the daemon would bind its socket under
     // the anchor while the client still waits under the launch dir.
     home = AgentsHome::at(absolutize_home(launch_dir.as_deref(), home.root()));
+    if let Err(error) = fno_agents::role_migration::run() {
+        eprintln!("role migration: {error}");
+        std::process::exit(2);
+    }
     let _ = home.ensure_root();
     let anchor = daemon_anchor(launch_dir.as_deref(), home.root());
     match std::env::set_current_dir(&anchor) {
@@ -174,8 +178,6 @@ fn main() {
     // subfolders BEFORE the daemon opens a store. Best effort; a refusal
     // retries on the daemon's reclaim lane.
     fno_agents::state_layout::run_at_daemon_start(&home);
-    // One-shot role-rename file move: crown_names.json -> team_names.json.
-    fno_agents::team_names::move_legacy_store(home.root());
 
     let outcome = rt.block_on(run(home, opts));
 

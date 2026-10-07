@@ -354,7 +354,7 @@ pub(crate) fn lead_can_delegate(
     };
     registry
         .find_by_session(harness, session)
-        .is_some_and(|row| row.crown_level.is_some() && row.status.is_drive_eligible())
+        .is_some_and(|row| row.role_level.is_some() && row.status.is_drive_eligible())
 }
 
 pub(crate) fn run_pass(
@@ -604,8 +604,8 @@ mod tests {
         lead.name = "lead".into();
         lead.harness = Some("claude".into());
         lead.status = crate::AgentStatus::Busy;
-        lead.crown_level = Some(1);
-        lead.crown_scope = Some("first-check-node".into());
+        lead.role_level = Some(1);
+        lead.role_scope = Some("first-check-node".into());
         state::update_registry(&home.registry_json(), |r| r.entries.push(lead)).unwrap();
         assert!(
             matches!(
