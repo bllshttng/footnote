@@ -11,9 +11,10 @@ def _status(receipt: str) -> dict:
     return row
 
 
-def test_transcript_reason_carries_the_age_suffix() -> None:
+def test_demotion_receipt_carries_the_age_suffix() -> None:
     """AC2-ERR: a transcript- reason rides the age suffix; an unreadable
-    transcript reads unknown, never 0s."""
+    transcript reads unknown, never 0s. The bare live-miss keeps the same
+    suffix behavior."""
     receipt = demotion_receipt(
         "msg-1", reason="transcript-done", owner=None, age_target="nobody-here"
     )
@@ -22,9 +23,6 @@ def test_transcript_reason_carries_the_age_suffix() -> None:
     assert "transcript-done, transcript age unknown" in row["status"]
     assert "0s" not in receipt
 
-
-def test_bare_live_miss_keeps_its_suffix() -> None:
-    """The original live-miss suffix behavior is unchanged."""
     receipt = demotion_receipt(
         "msg-1", reason=None, owner=None, age_target="nobody-here"
     )

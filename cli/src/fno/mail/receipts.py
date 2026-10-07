@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
-import time
 from typing import Optional
 
 # The exit a NOT LANDED receipt leaves `mail send` with : a last-line
@@ -406,12 +404,9 @@ def _recipient_is_attended(recipient: str) -> bool:
     an unresolved recipient escalates nothing, so the send still succeeds.
     """
     try:
-        from fno.agents.registry import load_registry, resolve_agent_in
-
-        entry = resolve_agent_in(load_registry(), recipient).entry
-    except Exception:  # noqa: BLE001 - a registry read failure never breaks the send
+        return _render(["attended", "--recipient", recipient]) == "true"
+    except Exception:  # noqa: BLE001 - a door failure escalates nothing
         return False
-    return getattr(entry, "origin", None) == "operator"
 
 
 def _escalate_to_human(
@@ -450,33 +445,23 @@ def _escalate_to_human(
     from fno.paths import state_dir
 
     pair = hashlib.sha256(f"{sender}\x00{recipient}".encode()).hexdigest()[:16]
-    marker_dir = state_dir() / "mail-escalations"
-    marker = marker_dir / pair
+    # The debounce marker state machine lives behind the mail-receipt verb
+    # (file budget): O_CREAT|O_EXCL claims the window atomically - exactly
+    # one concurrent sender wins a fresh escalation, the rest see the marker
+    # and debounce; a stale marker refreshes so the next window runs from now.
     try:
-        marker_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    # Atomically claim the debounce window via O_CREAT|O_EXCL: exactly one
-    # concurrent sender wins a fresh escalation, the rest see the marker and
-    # debounce. A check-then-touch here would let a concurrent burst from one
-    # pair all notify at once, defeating the debounce during the exact spike it
-    # exists to damp.
-    try:
-        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.close(fd)
-    except FileExistsError:
-        try:
-            last = marker.stat().st_mtime
-        except OSError:
-            last = 0.0
-        if time.time() - last < _ESCALATION_DEBOUNCE_S:
-            return "debounced"
-        try:
-            os.utime(marker, None)  # stale window: refresh so the next runs from now
-        except OSError:
-            pass
-    except OSError:
-        pass  # a missing marker just re-notifies; it never suppresses the durable write
+        verdict = _render(
+            [
+                "debounce",
+                "--marker-dir", str(state_dir() / "mail-escalations"),
+                "--pair", pair,
+                "--window-secs", str(_ESCALATION_DEBOUNCE_S),
+            ]
+        )
+    except Exception:  # noqa: BLE001 - a marker failure just re-notifies
+        verdict = "claim"
+    if verdict == "debounced":
+        return "debounced"
     # Debounce gate passed: this is a real escalation. Emit the overlay event
     # BEFORE the notifier verdict - the overlay is an independent surface that
     # must render even on a headless host where the notifier is unavailable (the

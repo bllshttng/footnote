@@ -283,6 +283,29 @@ pub fn run_mail_receipt(args: &[String]) -> i32 {
             get("reason"),
             get("head"),
         ),
+        "attended" => {
+            // The recipient's registry row was stamped origin=operator at a
+            // hand-start. Fail toward silence: an unreadable registry or an
+            // unresolved recipient reads as not-attended, never an error.
+            let recipient = get("recipient").unwrap_or_default();
+            let rows = crate::mail_threads::registry_rows();
+            let attended = crate::mail_threads::registry_lookup(&rows, recipient)
+                .and_then(|row| row.get("origin").and_then(serde_json::Value::as_str))
+                == Some("operator");
+            println!("{attended}");
+            return 0;
+        }
+        "debounce" => {
+            let dir = std::path::Path::new(get("marker-dir").unwrap_or_default());
+            let window: u64 = get("window-secs")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300);
+            println!(
+                "{}",
+                escalate_debounce(dir, get("pair").unwrap_or_default(), window)
+            );
+            return 0;
+        }
         other => {
             eprintln!("mail-receipt: unknown subcommand {other:?}");
             return 2;
@@ -290,4 +313,80 @@ pub fn run_mail_receipt(args: &[String]) -> i32 {
     };
     println!("{out}");
     0
+}
+
+/// utime refresh for a stale marker: the next window runs from now.
+fn filetime_refresh(marker: &std::path::Path) -> std::io::Result<()> {
+    let new_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let file = std::fs::OpenOptions::new().write(true).open(marker)?;
+    let (s, ns) = (new_time.as_secs(), new_time.subsec_nanos());
+    // utimensat via libc-free path: rewrite the mtime through set_times.
+    file.set_times(
+        std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(s, ns)),
+    )?;
+    Ok(())
+}
+
+/// The escalation debounce marker state machine: atomically claim the window
+/// via O_CREAT|O_EXCL (exactly one concurrent sender wins a fresh
+/// escalation); an existing marker inside the window reads debounced, a
+/// stale one refreshes and claims. The window runs from the last claim, not
+/// the first send. A marker create failure just re-notifies; it never
+/// suppresses the durable write.
+fn escalate_debounce(dir: &std::path::Path, pair: &str, window: u64) -> &'static str {
+    if std::fs::create_dir_all(dir).is_err() {
+        return "claim";
+    }
+    let marker = dir.join(pair);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => "claim",
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let age = marker
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(u64::MAX);
+            if age < window {
+                "debounced"
+            } else {
+                let _ = filetime_refresh(&marker);
+                "claim"
+            }
+        }
+        Err(_) => "claim",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debounce_claims_then_debounces_then_refreshes_a_stale_marker() {
+        let dir = std::env::temp_dir().join(format!("fno-dbg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(escalate_debounce(&dir, "p1", 300), "claim");
+        assert_eq!(escalate_debounce(&dir, "p1", 300), "debounced");
+        // A stale marker refreshes so the next window runs from now.
+        let marker = dir.join("p1");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10_000);
+        let file = std::fs::File::options().write(true).open(&marker).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(file);
+        assert_eq!(escalate_debounce(&dir, "p1", 300), "claim");
+        assert_eq!(escalate_debounce(&dir, "p1", 300), "debounced");
+        // A different pair never shares the window.
+        assert_eq!(escalate_debounce(&dir, "p2", 300), "claim");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
