@@ -316,6 +316,37 @@ def test_tick_rotation_drains_dot1_before_active(tmp_path):
     assert res.sinks[0].dispatched == 2
 
 
+def test_tick_store_backed_reads_only_rows_past_scan_seq(tmp_path):
+    # The daemon ticks every few seconds over a store of a million rows: an
+    # unchanged store must cost a tick zero rows, a new row must still land,
+    # and a fresh sink must not replay store history the journal never held.
+    from fno import status_fanout as sf
+    from fno.events.store_client import emit_envelope
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    sinks = [_text_sink(), _text_sink(name="f")]
+    emit_envelope(_ev("2026-07-12T00:00:05Z", "blocked"), journal)
+    rec = _Recorder()
+
+    first = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
+    assert first.rows_read == 1
+    assert rec.calls == [("s", "2026-07-12T00:00:05Z")]
+
+    idle = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
+    assert idle.rows_read == 0
+    assert len(rec.calls) == 1
+
+    emit_envelope(_ev("2026-07-12T00:00:09Z", "blocked"), journal)
+    later = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
+    assert later.rows_read == 1
+    assert sorted(rec.calls[1:]) == [("f", "2026-07-12T00:00:09Z"), ("s", "2026-07-12T00:00:09Z")]
+
+
 def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):
     from fno import status_fanout as sf
 
@@ -1313,8 +1344,8 @@ def test_stream_since_rotation_between_stats_triggers_one_retry(tmp_path, monkey
     real_pass = sf._stream_pass
     passes = {"n": 0}
     monkeypatch.setattr(sf, "_stream_pass",
-                        lambda a, s: (passes.__setitem__("n", passes["n"] + 1) or real_pass(a, s)))
-    events, _ = sf._stream_since(active, None)
+                        lambda a, s, q=None: (passes.__setitem__("n", passes["n"] + 1) or real_pass(a, s, q)))
+    events, _, _ = sf._stream_since(active, None)
     assert passes["n"] == 2  # exactly one retry
     assert [e["ts"] for e in events] == ["2026-07-12T00:00:05Z"]
 
@@ -1328,7 +1359,7 @@ def test_stream_since_persistent_rotation_bounded_at_two_passes(tmp_path, monkey
     real_pass = sf._stream_pass
     passes = {"n": 0}
     monkeypatch.setattr(sf, "_stream_pass",
-                        lambda a, s: (passes.__setitem__("n", passes["n"] + 1) or real_pass(a, s)))
+                        lambda a, s, q=None: (passes.__setitem__("n", passes["n"] + 1) or real_pass(a, s, q)))
     sf._stream_since(active, None)
     assert passes["n"] == 2  # never more than 2 passes; second pass returned anyway
 
@@ -1342,13 +1373,13 @@ def test_stream_since_discards_inflated_pass_no_same_ts_overcount(tmp_path, monk
     active = tmp_path / "events.jsonl"
     active.write_text("")
     T = "2026-07-12T00:00:05Z"
-    inflated = ([_ev(T, "blocked"), _ev(T, "blocked"), _ev(T, "blocked")], 0)
-    clean = ([_ev(T, "blocked")], 0)
+    inflated = ([_ev(T, "blocked"), _ev(T, "blocked"), _ev(T, "blocked")], 0, None)
+    clean = ([_ev(T, "blocked")], 0, None)
     results = iter([inflated, clean])
-    monkeypatch.setattr(sf, "_stream_pass", lambda a, s: next(results))
+    monkeypatch.setattr(sf, "_stream_pass", lambda a, s, q=None: next(results))
     seq = iter([1, 2, 3, 3])  # pass1 rotated, pass2 stable
     monkeypatch.setattr(sf, "_active_inode", lambda p: next(seq))
-    events, _ = sf._stream_since(active, None)
+    events, _, _ = sf._stream_since(active, None)
     assert len(events) == 1  # the clean pass won; n not inflated
 
 

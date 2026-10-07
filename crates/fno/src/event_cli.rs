@@ -442,7 +442,18 @@ fn read_projection(
             serde_json::json!([])
         });
     }
+    // The status stream reads incrementally: rows past the caller's
+    // `after_seq` up to the high-water mark it gets back as its next cursor.
+    // A cursor past the high-water mark means the store was replaced, so the
+    // pass reads everything and the caller's ts cursors dedupe.
+    let high = if mode == "status" {
+        Some(crate::event_store::max_seq(journal)?)
+    } else {
+        None
+    };
     let query = EventQuery {
+        after_seq: high.and_then(|h| input["after_seq"].as_i64().filter(|s| *s <= h)),
+        until_seq: high,
         types: input["types"]
             .as_array()
             .map(|a| {
@@ -503,7 +514,7 @@ fn read_projection(
                     .is_some_and(|t| since.is_none_or(|s| t >= s))
             })
             .collect();
-        Ok(serde_json::json!([values, 0]))
+        Ok(serde_json::json!([values, 0, high]))
     } else {
         Ok(serde_json::json!(values))
     }

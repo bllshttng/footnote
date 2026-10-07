@@ -738,13 +738,6 @@ fn import_file(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FileTally::default()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // Offsets are BYTE offsets into the raw file, never into a lossy string:
-    // a conversion that resizes bytes would desync the stored cursor.
-    let head_hash: Vec<u8> = {
-        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
-        Sha256::digest(first).to_vec()
-    };
     let (dev, ino, len) = (meta.dev() as i64, meta.ino() as i64, meta.len());
     let resume: Option<(Vec<u8>, i64)> = tx
         .query_row(
@@ -754,6 +747,28 @@ fn import_file(
         )
         .optional()
         .map_err(|e| sql_error(&e))?;
+    // A frozen journal is read on every import. When the cursor already sits
+    // at EOF under the same head line, a bounded head read proves there is
+    // nothing new; only the cursor's age is refreshed so prune keeps it.
+    if let Some((head, offset)) = &resume {
+        if u64::try_from(*offset).is_ok_and(|o| o == len)
+            && read_head_hash(path).as_ref() == Some(head)
+        {
+            tx.execute(
+                "UPDATE ingest_cursor SET updated_ms = ?3 WHERE dev = ?1 AND ino = ?2",
+                params![dev, ino, now_ms],
+            )
+            .map_err(|e| sql_error(&e))?;
+            return Ok(FileTally::default());
+        }
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Offsets are BYTE offsets into the raw file, never into a lossy string:
+    // a conversion that resizes bytes would desync the stored cursor.
+    let head_hash: Vec<u8> = {
+        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
+        Sha256::digest(first).to_vec()
+    };
     // Resume only when the head line still hashes equal AND the file has not
     // shrunk under the cursor; anything else re-reads from zero and lets
     // row_hash dedupe the overlap.
@@ -1247,6 +1262,10 @@ pub struct EventQuery {
     /// asked for by name; a gate never satisfies itself on one.
     pub include_rejected: bool,
     pub limit: Option<u32>,
+    /// Commit-order window `after_seq < seq <= until_seq`: an incremental
+    /// reader keeps `after_seq` as its cursor and reads only newer rows.
+    pub after_seq: Option<i64>,
+    pub until_seq: Option<i64>,
 }
 
 impl EventQuery {
@@ -1288,6 +1307,12 @@ impl EventQuery {
         }
         if let Some(v) = self.until_ms {
             push("ts_ms <= ?".into(), Box::new(v));
+        }
+        if let Some(v) = self.after_seq {
+            push("seq > ?".into(), Box::new(v));
+        }
+        if let Some(v) = self.until_seq {
+            push("seq <= ?".into(), Box::new(v));
         }
         if let Some(v) = self.scope.clone() {
             push("(scope = ? OR scope IS NULL)".into(), Box::new(v));
@@ -1382,6 +1407,14 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// The newest committed seq, or 0 for an empty store: the high-water mark an
+/// incremental reader bounds one pass by and stores as its next cursor.
+pub fn max_seq(journal: &Path) -> Result<i64, String> {
+    let conn = open_read(&store_path(journal))?;
+    conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))
         .map_err(|e| e.to_string())
 }
 
