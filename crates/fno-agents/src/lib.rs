@@ -452,6 +452,7 @@ pub mod team_names;
 pub mod team_reap;
 pub mod team_rescope;
 pub mod team_settle;
+pub mod team_spawn;
 pub mod team_split;
 pub mod team_widen;
 pub mod terminal_stop;

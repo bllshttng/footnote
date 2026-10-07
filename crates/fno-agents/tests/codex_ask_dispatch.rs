@@ -687,7 +687,11 @@ fn codex_create_emits_agent_ask_done_event() {
         ],
     );
 
-    let events = fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    assert!(
+        !home.events_jsonl().exists(),
+        "the ask wrote raw journal bytes"
+    );
+    let events = fno_agents::event_store::journal_text(&home.events_jsonl(), &[]);
     assert!(
         events.contains("agent_ask_done"),
         "events.jsonl should contain agent_ask_done: {}",
@@ -727,7 +731,7 @@ fn codex_resume_emits_followup_events() {
         &[("FAKE_CODEX_REPLY", "followed")],
     );
 
-    let events = fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = fno_agents::event_store::journal_text(&home.events_jsonl(), &[]);
     assert!(
         events.contains("agent_followup_started"),
         "should emit followup_started: {}",
