@@ -131,9 +131,10 @@ pub fn ensure_sccache_server_unless(live_server: bool) {
     let Some(bin) = sccache_bin() else {
         return;
     };
+    // The child inherits this process's env, where fill_sccache_env already
+    // resolved the idle timeout with the operator's override preserved.
     let _ = std::process::Command::new(bin)
         .arg("--start-server")
-        .env("SCCACHE_IDLE_TIMEOUT", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -149,13 +150,17 @@ pub fn sccache_server_pid() -> Option<u32> {
 }
 
 /// The rows-taking probe: same match, no process walk of its own. The
-/// renamed title reaches the command field through the argv fallback to
-/// `pbi_comm`, so both the libproc and the ps table answer.
+/// daemonized server runs argument-free, so its census row is a bare
+/// executable path (or the `pbi_comm` fallback `sccache`); a client row
+/// always names its compiler, so whitespace never matches.
 pub fn sccache_row_pid(rows: &[crate::census::ProcRow]) -> Option<u32> {
     rows.iter()
         .find(|row| {
             let command = row.command.trim();
-            command == "(sccache)" || command.ends_with("sccache --start-server")
+            command == "(sccache)"
+                || command.ends_with("sccache --start-server")
+                || (command.rsplit('/').next() == Some("sccache")
+                    && !command.contains(char::is_whitespace))
         })
         .map(|row| row.pid)
 }
@@ -1790,6 +1795,32 @@ mod tests {
         assert!(empty.is_empty());
         std::env::remove_var("FNO_CARGO_TARGETS_BASE");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The daemonized server's census row is a bare argument-free path; a
+    // client row always names its compiler. Measured live 2026-10-07:
+    // "/opt/homebrew/bin/sccache" with no rename and no args.
+    #[test]
+    fn sccache_row_pid_matches_the_bare_daemon_and_skips_clients() {
+        let row = |pid: u32, command: &str| crate::census::ProcRow {
+            pid,
+            ppid: 1,
+            state: 'S',
+            elapsed_s: 60,
+            cpu_pct: 0.0,
+            rss_kb: 100,
+            command: command.into(),
+        };
+        let rows = vec![
+            row(10, "sccache /usr/bin/rustc --crate-name a"),
+            row(20, "/opt/homebrew/bin/sccache"),
+            row(30, "sccache"),
+            row(40, "(sccache)"),
+            row(50, "/opt/homebrew/bin/sccache --start-server"),
+        ];
+        assert_eq!(sccache_row_pid(&rows), Some(20));
+        let clients = vec![row(10, "sccache /usr/bin/rustc --crate-name a")];
+        assert_eq!(sccache_row_pid(&clients), None);
     }
     fn seven_h() -> u64 {
         7 * 3600
