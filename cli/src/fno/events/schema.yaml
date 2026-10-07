@@ -7783,8 +7783,8 @@ event_types:
     consumers: [operator]
 
   - name: lead_goal_resumed
-    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
-    sources: [loop]
+    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch. The wake-mode loop emits it on its dispatch-side resume, and the daemon's check-in beat arm emits it with reason beat."
+    sources: [loop, daemon]
     data:
       required: [session_id, scope, resumed, successor, provider_receipt]
       properties:
