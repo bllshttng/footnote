@@ -10,9 +10,12 @@ A hook that waits blocks a turn. Context that arrives late is worth less than a 
 |---|---|---|
 | Idle: load1 <= cores | 3s | the generous read |
 | Loaded: load1 > cores | 1s | shorten, do not lengthen |
+| Overloaded: load1 >= 8x cores | skip | `hook_overloaded` is true; the hook exits 0 before its preamble |
 | Load unreadable | 3s | fail open; the wall-clock bound still caps |
 
-There is no skip tier. CI runners proved why: under shard load, a zero budget silenced hooks whose contracts require the read to run, and five suites caught it. The busy tier's 1s bound is the floor. A fired bound reads as silence: exit 0 with empty output. A turn never inherits an error from optional context. The bound rides `with_timeout` from `scripts/lib/with-timeout.sh`, which needs no coreutils `timeout` and works on stock macOS.
+There is no zero-budget tier. CI runners proved why: under shard load, a zero budget silenced hooks whose contracts require the read to run, and five suites caught it. The busy tier's 1s bound is the floor, and unreadable load always runs.
+
+The overloaded tier is the one skip, and only for a readable load. At 8+ waiting jobs per core the hook's own preamble can pass the harness's 4s outer cap on its own. Running the read then guarantees a killed hook, discarded output, a red warning, and a delayed turn. Skipping leaves every cursor untouched: mail stays pending, an announcement is re-seen, an offer is re-scanned next turn. The 2026-10-06 screenshots showed five prompt hooks timing out on every prompt at 16 to 60 waiting jobs per core. A suite that runs a real hook pins `FNO_HOOK_BUDGET_SKIP_PER_CORE` past any runner load, so CI never trips the tier. Production leaves it unset. A fired bound still reads as silence: exit 0 with empty output. A turn never inherits an error from optional context. The bound rides `with_timeout` from `scripts/lib/with-timeout.sh`, which needs no coreutils `timeout` and works on stock macOS.
 
 Three probes sit outside the budget because their EXIT CODE is the data. `frontdoor-nudge-session-start`: 2 means fno-py, 124 means a wedged socket that still proves the Rust door. `worktree-peers-session-start`: 124 reads as staleness-unknown. `inject-fno-agent-whoami`: the suite pins the cap's duration. Each keeps its fixed `with_timeout` bound from before the budget existed. A fired bound can land on a loaded runner's fork latency. A probe whose answer rides the exit code must not shorten its bound with the load.
 
@@ -36,11 +39,12 @@ set -uo pipefail
 # Point this at the plugin's copy, or vendor scripts/lib/with-timeout.sh
 # and scripts/lib/hook-budget.sh into your project.
 source /path/to/footnote/scripts/lib/hook-budget.sh 2>/dev/null || exit 0
+hook_overloaded && exit 0
 hook_run_optional your-command --with args
 exit 0
 ```
 
-`hook_run_optional` applies the tier table and turns a skip or a fired bound into silence. Then set a small `timeout` backstop for that hook in `settings.json`, just above the 3s idle budget. The backstop exists for the day the wrapper does not finish in milliseconds.
+`hook_overloaded` skips the whole hook past the overloaded tier. `hook_run_optional` applies the tier table and turns a fired bound into silence. Then set a small `timeout` backstop for that hook in `settings.json`, just above the 3s idle budget. The backstop exists for the day the wrapper does not finish in milliseconds.
 
 ```json
 {
