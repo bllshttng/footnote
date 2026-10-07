@@ -490,11 +490,21 @@ fn behind_by<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> u64 {
 
 /// Files the BASE branch gained since the PR head diverged, or None (HOLD).
 /// Truncation is a miss: an under-reported move fails in the merging direction.
-pub(crate) fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
     let Some((base, head)) = pr_base_head_refs(probes, cwd, pr) else {
         breadcrumb("overlap probe unavailable (pr refs unreadable); holding for a rebase");
         return None;
     };
+    base_move_paths_between(probes, cwd, &base, &head)
+}
+
+/// [`base_move_paths`] for a caller that already holds the base ref and head.
+pub(crate) fn base_move_paths_between<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    base: &str,
+    head: &str,
+) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/compare/{head}...{base}"),

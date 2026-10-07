@@ -1626,9 +1626,14 @@ impl Probes for RealProbes {
         if compare == 0 {
             return ProbeOutcome::Clear;
         }
-        let overlap = crate::merge_gates::base_move_paths(self, cwd, facts.number)
-            .zip(crate::merge_gates::pr_file_paths(self, cwd, facts.number))
-            .map(|(base, pr)| crate::merge_gates::overlaps(&base, &pr));
+        let overlap = crate::merge_gates::base_move_paths_between(
+            self,
+            cwd,
+            &facts.base_ref,
+            &facts.head_sha,
+        )
+        .zip(crate::merge_gates::pr_file_paths(self, cwd, facts.number))
+        .map(|(base, pr)| crate::merge_gates::overlaps(&base, &pr));
         ci_base_verdict(compare, overlap.as_deref())
     }
 
@@ -3352,7 +3357,7 @@ mod tests {
 
     #[test]
     fn a_green_pr_whose_ci_predates_main_merges_main_in_and_waits_for_the_retest() {
-        // The replay: one PR lands, then a second PR shares no file with it
+        // The replay: one PR lands, then a second PR shares a file with it
         // and is green on a run created before that landing. It holds, takes
         // the slot, and has main merged into its branch; once the rerun is
         // green against the current main it merges.
