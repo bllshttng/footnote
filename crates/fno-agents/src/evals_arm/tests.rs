@@ -323,6 +323,7 @@ fn acquire_with(tmp: &TempDir, pid: u32) {
         CLAIM_KEY,
         &pid.to_string(),
         claims::AcquireOpts {
+            host: None,
             pid: Some(pid),
             pid_unavailable: false,
             ttl_ms: Some(3_600_000),

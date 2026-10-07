@@ -141,7 +141,6 @@ def _reclaim_if_provably_dead(
     side effect is a blast radius nobody asked for.
     """
     from fno.claims.core import (
-        RECOVERY_LOCK_SUFFIX,
         force_release_claim,
         sweep_verdict,
     )
@@ -149,89 +148,75 @@ def _reclaim_if_provably_dead(
     from fno.claims.core import native_claims_root
     from fno.claims.io import claim_path, read_claim_file
     from fno.claims.verdict import claim_verdicts
-    from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
     try:
         path = claim_path(key, root=native_claims_root(key))
     except Exception:  # noqa: BLE001 - an unmeasurable store clears nothing
         return None, "unreadable"
-    # Take the SAME per-key recovery mutex the reaper holds while it re-verifies
-    # and archives, and re-read INSIDE it. Reading, deciding, and releasing
-    # outside the lock is a TOCTOU window: force_release_claim drops a claim
-    # whatever its holder, so a worker that respawns and re-acquires between the
-    # read and the release loses a claim it legitimately owns. timeout_s=0
-    # because a dispatch must not block on a peer mid-recovery; losing the race
-    # just leaves the refusal standing, which is the safe direction.
-    lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
-    token = acquire_dir_mutex(lock, 0)
-    if token is None:
-        return None, "contended"
     try:
-        try:
-            claim = read_claim_file(path)
-        except Exception:  # noqa: BLE001 - unreadable is unproven
-            return None, "unreadable"
-        native = claim_verdicts([key]).get(key)
-        if native is None:
-            return None, "unreadable"
-        if key.startswith("dispatch:"):
-            # The reservation's own predicate, deliberately NOT in the shared
-            # sweep classifier. `spawn-cli:<pid>` launches a worker and exits, so
-            # a dead pid means no launch is in flight from that process (the TTL
-            # is the boot window; see the native classify_for_sweep decision),
-            # but THIS caller is the next dispatcher, standing at the moment of
-            # launch: the node claim it takes covers the window the reservation
-            # protected. ONLY this dispatcher's own holder shape. `fno backlog
-            # advance` reserves the same key as `advance:<pid>` and spawns
-            # WITHOUT --node, so that reservation is the only barrier its
-            # booting worker has; its pid is dead by design too, so a predicate
-            # reading dead-pid-and-same-host alone cleared it and launched a
-            # second worker onto the node advance had just staffed. LIVENESS
-            # FIRST. A live holder is benign dedup whoever wrote it: answering
-            # `foreign-reservation` there would print force-release advice
-            # against a reservation somebody is actively launching under.
-            if native.get("state") == "live":
-                if (
-                    native.get("session_basis") != "registry-served-live"
-                    or _pid_is_alive(claim.pid)
-                ):
-                    return None, _HOLDER_ALIVE
-                # A registry-served live verdict names the DISPATCHER's session
-                # (the subprocess stamps its caller's session id), which
-                # outlives the holder by design. Only the spawn-cli shape may
-                # clear on the holder pid: an advance:<pid> reservation stays
-                # the only barrier its booting worker has, and its pid is dead
-                # by design too.
-                if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
-                    return None, "foreign-reservation"
-            elif native.get("bucket") == "offhost":
-                return None, "offhost"
+        claim = read_claim_file(path)
+    except Exception:  # noqa: BLE001 - unreadable is unproven
+        return None, "unreadable"
+    native = claim_verdicts([key]).get(key)
+    if native is None:
+        return None, "unreadable"
+    if key.startswith("dispatch:"):
+        # The reservation's own predicate, deliberately NOT in the shared
+        # sweep classifier. `spawn-cli:<pid>` launches a worker and exits, so
+        # a dead pid means no launch is in flight from that process (the TTL
+        # is the boot window; see the native classify_for_sweep decision),
+        # but THIS caller is the next dispatcher, standing at the moment of
+        # launch: the node claim it takes covers the window the reservation
+        # protected. ONLY this dispatcher's own holder shape. `fno backlog
+        # advance` reserves the same key as `advance:<pid>` and spawns
+        # WITHOUT --node, so that reservation is the only barrier its
+        # booting worker has; its pid is dead by design too, so a predicate
+        # reading dead-pid-and-same-host alone cleared it and launched a
+        # second worker onto the node advance had just staffed. LIVENESS
+        # FIRST. A live holder is benign dedup whoever wrote it: answering
+        # `foreign-reservation` there would print force-release advice
+        # against a reservation somebody is actively launching under.
+        if native.get("state") == "live":
+            if (
+                native.get("session_basis") != "registry-served-live"
+                or _pid_is_alive(claim.pid)
+            ):
+                return None, _HOLDER_ALIVE
+            # A registry-served live verdict names the DISPATCHER's session
+            # (the subprocess stamps its caller's session id), which
+            # outlives the holder by design. Only the spawn-cli shape may
+            # clear on the holder pid: an advance:<pid> reservation stays
+            # the only barrier its booting worker has, and its pid is dead
+            # by design too.
             if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
                 return None, "foreign-reservation"
-            provably_dead, bucket = True, ""
-        else:
-            try:
-                provably_dead, bucket = sweep_verdict(
-                    claim,
-                    abandonment_probe=probe,
-                    node_settlement=settlement,
-                    native_verdict=native,
-                )
-            except Exception:  # noqa: BLE001 - a probe blowing up clears nothing
-                return None, "unprobed"
-        if not provably_dead:
-            return None, bucket
+        elif native.get("bucket") == "offhost":
+            return None, "offhost"
+        if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
+            return None, "foreign-reservation"
+        provably_dead, bucket = True, ""
+    else:
         try:
-            force_release_claim(
-                key=key,
-                reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
-                holding_recovery_lock=True,
+            provably_dead, bucket = sweep_verdict(
+                claim,
+                abandonment_probe=probe,
+                node_settlement=settlement,
+                native_verdict=native,
             )
-        except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
-            return None, "release-failed"
-        return claim.holder, ""
-    finally:
-        release_dir_mutex(lock, token)
+        except Exception:  # noqa: BLE001 - a probe blowing up clears nothing
+            return None, "unprobed"
+    if not provably_dead:
+        return None, bucket
+    try:
+        outcome = force_release_claim(
+            key=key,
+            reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
+            expected_claim=claim,
+        )
+    except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
+        return None, "release-failed"
+    return (claim.holder, "") if outcome.archived else (None, "contended")
+
 
 
 def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:

@@ -257,7 +257,11 @@ pub(super) fn renew_cause(
         Err(crate::claims::ReadError::Corrupted(_)) => RenewCause::Contended,
         Ok(rec) if rec.holder != holder => RenewCause::HeldByOther(rec.holder),
         Ok(rec) => {
-            if crate::claim_verbs::status_verdict(&rec).0 == crate::claims::ClaimState::Stale {
+            if rec
+                .expires_at
+                .is_some_and(|expires| expires <= crate::claims::now_ms())
+                || crate::claim_verbs::status_verdict(&rec).0 == crate::claims::ClaimState::Stale
+            {
                 RenewCause::Stale
             } else {
                 RenewCause::Contended
@@ -367,29 +371,12 @@ mod tests {
 
     #[test]
     fn contended_lease_keeps_the_arm_hint() {
-        // AC3-EDGE: holder matches and the verdict reads live, but a peer held
-        // the recovery mutex when renew ran, so renewal declined: keep the
-        // generic text (the next stop can succeed).
-        let td = tempfile::TempDir::new().unwrap();
+        let td = tempfile::tempdir().unwrap();
         let _ = crate::claims::acquire(
             "node:x-b445t",
             "target-session:me",
             live_claim_opts(td.path()),
         );
-        // A peer "holds" the recovery mutex: a fresh (non-stale) lock dir.
-        let path = crate::claims::claim_path("node:x-b445t", Some(td.path())).unwrap();
-        let recovery = path.with_file_name(format!(
-            "{}.recovery.d",
-            path.file_name().unwrap().to_string_lossy()
-        ));
-        std::fs::create_dir(&recovery).unwrap();
-        let renewed = crate::claims::renew(
-            "node:x-b445t",
-            "target-session:me",
-            120_000,
-            Some(td.path()),
-        );
-        assert_eq!(renewed, Ok(false));
         let cause = renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
         assert!(matches!(cause, RenewCause::Contended), "{cause:?}");
         assert!(renewal_refusal(&cause).is_none());
@@ -410,8 +397,13 @@ mod tests {
         let mut rec = crate::claims::read_claim_file(&claim_path).unwrap();
         rec.session_id = None;
         rec.expires_at = Some(crate::claims::now_ms() - 1);
-        crate::claims::atomic_replace(&claim_path, &crate::claims::serialize_claim(&rec).unwrap())
-            .unwrap();
+        crate::claim_store::replace_observed_at(
+            &claim_path,
+            &crate::claims::read_claim_file(&claim_path).unwrap(),
+            &rec,
+        )
+        .unwrap()
+        .unwrap();
         let cause = renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
         assert!(matches!(cause, RenewCause::Stale), "{cause:?}");
         let refusal = renewal_refusal(&cause).unwrap();
@@ -483,8 +475,13 @@ mod tests {
         let mut rec = crate::claims::read_claim_file(&path).unwrap();
         rec.session_id = Some("t-3227-bgjob-session".into());
         rec.expires_at = Some(crate::claims::now_ms() - 1);
-        crate::claims::atomic_replace(&path, &crate::claims::serialize_claim(&rec).unwrap())
-            .unwrap();
+        crate::claim_store::replace_observed_at(
+            &path,
+            &crate::claims::read_claim_file(&path).unwrap(),
+            &rec,
+        )
+        .unwrap()
+        .unwrap();
 
         let live_rec = crate::claims::read_claim_file(&path).unwrap();
         let (state, basis) = crate::claim_verbs::status_verdict(&live_rec);

@@ -4920,7 +4920,7 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
     };
     std::fs::write(
         claims_root.join("node:x-dddd.lock"),
-        crate::claims::serialize_claim(&rec).unwrap(),
+        serde_yaml_ng::to_string(&rec).unwrap(),
     )
     .unwrap();
 

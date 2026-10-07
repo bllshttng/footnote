@@ -38,6 +38,10 @@ struct LeafArgs {
     handover_from: Option<String>,
     ttl_ms_flag: Option<i64>,
     root: Option<PathBuf>,
+    bind_only: bool,
+    session_id: Option<String>,
+    provenance: Option<String>,
+    host: Option<String>,
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -57,6 +61,10 @@ pub fn run(args: &[String]) -> i32 {
         handover_from: None,
         ttl_ms_flag: None,
         root: None,
+        bind_only: false,
+        session_id: None,
+        provenance: None,
+        host: None,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -114,6 +122,19 @@ pub fn run(args: &[String]) -> i32 {
             "--root" => match it.next() {
                 Some(v) => a.root = Some(PathBuf::from(v)),
                 None => return usage_flag("--root"),
+            },
+            "--bind-only" => a.bind_only = true,
+            "--session-id" => match it.next() {
+                Some(v) => a.session_id = Some(v.clone()),
+                None => return usage_flag("--session-id"),
+            },
+            "--pid-provenance" => match it.next() {
+                Some(v) => a.provenance = Some(v.clone()),
+                None => return usage_flag("--pid-provenance"),
+            },
+            "--host" => match it.next() {
+                Some(v) => a.host = Some(v.clone()),
+                None => return usage_flag("--host"),
             },
             "--holding-recovery-lock" => {}
             other => {
@@ -215,12 +236,14 @@ fn run_parsed(a: LeafArgs) -> i32 {
             Ok(m) => m,
             Err(msg) => return bad_parameter("--metadata", &msg),
         };
-        let rebind_root = node_aware_root(&key);
+        let rebind_root = a.root.clone().or_else(|| node_aware_root(&key));
         match compare_and_rebind(
             &key,
             &expected,
             &a.holder,
             a.harness.as_deref(),
+            a.session_id.as_deref(),
+            a.provenance.as_deref(),
             &a.reason,
             metadata,
             pid,
@@ -228,21 +251,33 @@ fn run_parsed(a: LeafArgs) -> i32 {
             ttl_ms,
             rebind_root.as_deref(),
         ) {
-            Ok(Some(claim)) => {
-                if key.starts_with("node:") {
-                    stamp_do_on_acquire(&key, &claim, &a.holder);
+            Ok(binding) => {
+                if a.bind_only {
+                    println!(
+                        "{}",
+                        serde_json::json!({"claim": binding.claim, "mode": binding.mode})
+                    );
+                    return 0;
                 }
-                if a.json_output {
-                    println!("{}", claim_json_string(&claim));
-                } else {
-                    println!("acquired {key} (handover from {expected})");
+                if binding.mode == "handover" {
+                    let claim = binding.claim;
+                    if key.starts_with("node:") {
+                        stamp_do_on_acquire(&key, &claim, &a.holder);
+                    }
+                    if a.json_output {
+                        println!("{}", claim_json_string(&claim));
+                    } else {
+                        println!("acquired {key} (handover from {expected})");
+                    }
+                    return 0;
                 }
-                return 0;
             }
-            // Idempotent refresh or dead-owner rebound under the SAME holder:
-            // fall through, the ordinary acquire applies its own rules.
-            Ok(None) => {}
-            Err(reason) => eprintln!("handover declined: {reason}"),
+            Err(reason) => {
+                eprintln!("handover declined: {reason}");
+                if a.bind_only {
+                    return 3;
+                }
+            }
         }
     }
     ordinary_acquire(&a, &key, pid, pid_unavailable, ttl_ms)
@@ -303,18 +338,29 @@ fn ordinary_acquire(
         // The provenance stamp mirrors core._resolve_pid_provenance: ambient
         // unless the pid IS this process's own session walk's answer on a
         // TTL claim under a harness that dies with its sessions.
-        pid_provenance: Some(resolve_pid_provenance(
-            pid.map(|p| p as i32),
-            ttl_ms,
-            claims::resolve_identity().1.as_deref(),
-        )),
+        pid_provenance: Some(a.provenance.clone().unwrap_or_else(|| {
+            resolve_pid_provenance(
+                pid.map(|p| p as i32),
+                ttl_ms,
+                claims::resolve_identity().1.as_deref(),
+            )
+        })),
         root,
+        host: a.host.clone(),
         events_dir: None,
-        identity: None,
+        identity: a.session_id.as_ref().map(|sid| {
+            (
+                sid.clone(),
+                a.harness
+                    .clone()
+                    .or_else(claims::resolve_harness)
+                    .unwrap_or_default(),
+            )
+        }),
     };
     // task: leases keep the lazy session witness the old engine arm gave
     // them: a pid-less thread claim is assessed through it on contention.
-    let outcome = if key.starts_with("task:") {
+    let outcome = if key.starts_with("task:") || key.starts_with("node:") {
         let witness = |record: &ClaimRecord| {
             let (witness, _drain) = crate::claim_verbs::default_session_witness();
             witness(record)
@@ -393,19 +439,26 @@ fn bad_parameter(flag: &str, msg: &str) -> i32 {
 /// `Ok(None)` = idempotent refresh or same-holder rebound - the ordinary
 /// acquire falls through and applies its own rules; `Err` = declined, the
 /// reason is the frozen Python text.
+struct BoundClaim {
+    claim: ClaimRecord,
+    mode: &'static str,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compare_and_rebind(
     key: &str,
     expected_holder: &str,
     holder_flag: &str,
     harness_flag: Option<&str>,
+    session_flag: Option<&str>,
+    provenance_flag: Option<&str>,
     reason_flag: &str,
     metadata: Map<String, Value>,
     new_pid: Option<u32>,
     pid_unavailable: bool,
     ttl_ms: Option<i64>,
     root: Option<&Path>,
-) -> Result<Option<ClaimRecord>, String> {
+) -> Result<BoundClaim, String> {
     // The leaf has already validated key/holder/ttl range; what the rebind's
     // own _validate_inputs could still add (encoded-key length) lands on the
     // ordinary acquire right behind it, so no second pass here.
@@ -417,20 +470,16 @@ fn compare_and_rebind(
     // a critical section other acquirers poll on.
     let (amb_session, amb_harness) = claims::resolve_identity();
     let resolved_harness = harness_flag.map(str::to_string).or(amb_harness);
-    let resolved_session = amb_session;
-    let resolved_provenance = resolve_pid_provenance(
-        new_pid.map(|p| p as i32),
-        ttl_ms,
-        resolved_harness.as_deref(),
-    );
+    let resolved_session = session_flag.map(str::to_string).or(amb_session);
+    let resolved_provenance = provenance_flag.map(str::to_string).unwrap_or_else(|| {
+        resolve_pid_provenance(
+            new_pid.map(|p| p as i32),
+            ttl_ms,
+            resolved_harness.as_deref(),
+        )
+    });
     let path = claims::claim_path(key, root).map_err(|e| e.to_string())?;
-    let recovery_lock = claims::recovery_lock_path(&path);
-    let Some(token) =
-        claims::acquire_dir_mutex(&recovery_lock, std::time::Duration::from_secs(5), true)
-    else {
-        return Err("claim recovery mutex busy; retry the resume bind".into());
-    };
-    let outcome = rebind_locked(
+    rebind_locked(
         path.as_path(),
         key,
         expected_holder,
@@ -443,9 +492,7 @@ fn compare_and_rebind(
         resolved_harness,
         resolved_session,
         resolved_provenance,
-    );
-    claims::release_dir_mutex(&recovery_lock, &token);
-    outcome
+    )
 }
 
 /// The critical section: re-read + re-classify under the recovery mutex,
@@ -464,7 +511,7 @@ fn rebind_locked(
     resolved_harness: Option<String>,
     resolved_session: Option<String>,
     resolved_provenance: String,
-) -> Result<Option<ClaimRecord>, String> {
+) -> Result<BoundClaim, String> {
     let _ = key;
     let existing = match claims::read_claim_file(path) {
         Ok(r) => r,
@@ -554,10 +601,15 @@ fn rebind_locked(
             npid_unavailable,
             resolved_session.clone(),
         );
-        let payload = claims::serialize_claim(&rebound)?;
-        claims::atomic_replace(path, &payload).map_err(|e| e.to_string())?;
+        let Some(rebound) = crate::claim_store::replace_observed_at(path, &existing, &rebound)?
+        else {
+            return Err("claim changed during resume bind; retry".into());
+        };
         emit_rebound(&rebound, existing.pid, state.as_str(), "handover");
-        return Ok(Some(rebound));
+        return Ok(BoundClaim {
+            claim: rebound,
+            mode: "handover",
+        });
     }
     if state == claims::ClaimState::Live {
         if existing.pid == Some(npid) {
@@ -579,10 +631,15 @@ fn rebind_locked(
                 npid_unavailable,
                 keep_session,
             );
-            let payload = claims::serialize_claim(&rebound)?;
-            claims::atomic_replace(path, &payload).map_err(|e| e.to_string())?;
+            let Some(rebound) = crate::claim_store::replace_observed_at(path, &existing, &rebound)?
+            else {
+                return Err("claim changed during resume bind; retry".into());
+            };
             emit_rebound(&rebound, existing.pid, state.as_str(), "idempotent");
-            return Ok(None);
+            return Ok(BoundClaim {
+                claim: rebound,
+                mode: "idempotent",
+            });
         }
         let pid_s = existing
             .pid
@@ -621,19 +678,19 @@ fn rebind_locked(
         npid_unavailable,
         session_for_row,
     );
-    let payload = claims::serialize_claim(&rebound)?;
-    claims::atomic_replace(path, &payload).map_err(|e| e.to_string())?;
+    let Some(rebound) = crate::claim_store::replace_observed_at(path, &existing, &rebound)? else {
+        return Err("claim changed during resume bind; retry".into());
+    };
     let mode = if handover_allowed {
         "handover"
     } else {
         "rebound"
     };
     emit_rebound(&rebound, existing.pid, state.as_str(), mode);
-    if handover_allowed {
-        Ok(Some(rebound))
-    } else {
-        Ok(None)
-    }
+    Ok(BoundClaim {
+        claim: rebound,
+        mode,
+    })
 }
 
 /// A rebound claim: identity fields preserved, process anchor + lease fresh.

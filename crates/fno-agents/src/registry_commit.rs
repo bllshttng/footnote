@@ -1,10 +1,9 @@
 //! Atomic read-forward registry write door for Python registry callers.
 //!
-//! The caller holds the shared `locks/_registry.lock` flock across its read,
-//! mutation, and this door call. This leaf takes no lock so it cannot deadlock
-//! the cross-language transaction.
+//! Reads return a table revision. Writes compare it in an immediate transaction,
+//! preserving unknown fields and refusing a stale callback result.
 
-use crate::state::{write_json_atomic, REGISTRY_SCHEMA_VERSION};
+use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -40,6 +39,21 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+    if payload.get("op").and_then(Value::as_str) == Some("read") {
+        return match crate::registry_store::read_versioned(&path) {
+            Ok((document, revision)) => {
+                println!(
+                    "{}",
+                    json!({"status":"read","document":document,"revision":revision})
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("registry-commit read: {error}");
+                1
+            }
+        };
+    }
     let schema_version = match payload.get("schema_version").and_then(Value::as_u64) {
         Some(version) => version,
         None => {
@@ -54,34 +68,61 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let raw = match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("registry-commit: cannot parse {}: {error}", path.display());
-                return 1;
-            }
-        },
+    let expected = match payload.get("revision").and_then(Value::as_i64) {
+        Some(revision) => revision,
+        None => {
+            eprintln!("registry-commit: read the table revision before writing");
+            return 2;
+        }
+    };
+    let transaction = match crate::registry_store::begin(&path) {
+        Ok(transaction) => transaction,
         Err(error) => {
-            eprintln!("registry-commit: cannot read {}: {error}", path.display());
+            eprintln!("registry-commit: {error}");
             return 1;
         }
     };
-    match merge(raw, &payload, schema_version, agents) {
-        Ok(value) => match write_json_atomic(&path, &value) {
-            Ok(()) => {
-                println!("{{\"status\":\"written\"}}");
-                0
+    if transaction.revision != expected {
+        eprintln!(
+            "{}",
+            json!({"status":"refused","reason":"revision_conflict","message":"registry changed since read. Reload before applying the mutation again."})
+        );
+        return 3;
+    }
+    let before = transaction.document.clone();
+    match merge(before.clone(), &payload, schema_version, agents) {
+        Ok(value) => {
+            if let Err(error) =
+                crate::state::validate_registry_document_change(&path, &before, &value)
+            {
+                eprintln!("registry-commit: {error}");
+                return 3;
             }
-            Err(error) => {
-                eprintln!("registry-commit: write failed: {error}");
-                1
+            match transaction.commit(value.clone()) {
+                Ok(()) => {
+                    if let (Ok(before), Ok(after)) = (
+                        serde_json::from_value::<crate::state::Registry>(before),
+                        serde_json::from_value::<crate::state::Registry>(value),
+                    ) {
+                        crate::state::account_for_removed_rows(
+                            &path,
+                            &before.entries,
+                            &after.entries,
+                        );
+                    }
+                    println!("{}", json!({"status":"written","revision":expected+1}));
+                    0
+                }
+                Err(error) => {
+                    eprintln!("registry-commit: write failed: {error}");
+                    1
+                }
             }
-        },
+        }
         Err((reason, message)) => {
             eprintln!(
                 "{}",
-                json!({"status": "refused", "reason": reason, "message": message})
+                json!({"status":"refused","reason":reason,"message":message})
             );
             3
         }
