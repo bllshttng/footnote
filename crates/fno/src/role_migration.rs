@@ -344,30 +344,55 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 }
             }
         } else if kind.is_file() && selected(&path) {
-            if path.file_name().and_then(|s| s.to_str()) == Some("events.db") {
-                crate::event_store::upgrade_role_store(&path)?;
-            } else {
-                migrate_file(&path)?;
-            }
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             let current = if name == "crown_names.json" {
                 "team_names.json".to_string()
             } else {
                 vocabulary(name)
             };
-            if current != name {
-                let target = path.with_file_name(current);
-                if target.exists() {
+            let target = path.with_file_name(&current);
+            // Judge the collision before rewriting: a refused rename must
+            // leave the legacy file byte-for-byte as it was found.
+            if current != name && target.exists() {
+                if name != "crown_names.json" {
                     return Err(format!(
                         "both role files exist at {}; migration refused",
                         path.display()
                     ));
                 }
+                // The name store moved to team_names.json before this
+                // migration, so a surviving crown_names.json is an older
+                // generation. The live store wins; the old one is kept.
+                std::fs::rename(&path, superseded_backup(&path))
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            if name == "events.db" {
+                crate::event_store::upgrade_role_store(&path)?;
+            } else {
+                migrate_file(&path)?;
+            }
+            if current != name {
                 std::fs::rename(&path, target).map_err(|e| e.to_string())?;
             }
         }
     }
     Ok(())
+}
+
+fn superseded_backup(path: &Path) -> PathBuf {
+    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("store");
+    let mut n = 0;
+    loop {
+        let candidate = path.with_file_name(match n {
+            0 => format!("{stem}.superseded"),
+            _ => format!("{stem}.superseded.{n}"),
+        });
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 pub fn run_at(root: &Path) -> Result<(), String> {
