@@ -42,6 +42,8 @@ class FakeRun:
         base_still_on_remote: bool = False,
         git_missing: bool = False,
         pr_head: str = "abc123dddddddddddddddddddddddddddddd",
+        pr_files: str = "cli/src/fno/pr/_merge.py",
+        moved_files: str = "cli/src/fno/pr/_merge.py",
     ) -> None:
         self.default = default
         self.base = base
@@ -57,6 +59,8 @@ class FakeRun:
         self.base_still_on_remote = base_still_on_remote
         self.git_missing = git_missing
         self.pr_head = pr_head
+        self.pr_files = pr_files
+        self.moved_files = moved_files
         self.calls: list[list[str]] = []
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
@@ -132,6 +136,9 @@ class FakeRun:
                 if not self.base_tip:
                     return Result(128, "", "unknown revision")
                 return Result(0, self.base_tip + "\n", "")
+            if cmd[1] == "diff":
+                side = self.pr_files if cmd[-1].endswith(self.pr_head) else self.moved_files
+                return Result(0, side + "\n", "")
             if cmd[1] == "merge-base":
                 if not self.base_tip:
                     return Result(128, "", "Not a valid object name")
@@ -154,11 +161,12 @@ def patch_run(monkeypatch):
         ({"pr_head": ""}, "unknown", "head sha"),
         ({"contained": True}, "ok", "contains"),
         ({"contained": False}, "stale", "merge origin/main into the branch"),
+        ({"contained": False, "moved_files": "docs/other.md"}, "ok", "no newer commit touches"),
         ({"fetch_fails": True}, "unknown", "could not refresh"),
     ],
 )
 def test_default_base_lineage_table(patch_run, kwargs, verdict, fragment):
-    """A base that IS the default branch: ancestry decides, probes stay humble.
+    """A base that IS the default branch: ancestry and file overlap decide.
 
     The stale row asserts the remedy, not just the fault: a refusal that
     closes the door without pointing at the key invites improvisation.
