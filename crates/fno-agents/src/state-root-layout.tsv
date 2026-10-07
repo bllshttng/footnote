@@ -76,6 +76,7 @@ plugin-root	install/plugin-root	marker	daemon
 notify-signals.json	state/notify-signals.json	overwrite	daemon
 git-protection.json	state/git-protection.json	overwrite	daemon
 machine-brake.json	state/machine-brake.json	overwrite	daemon
+sccache-watch.json	state/sccache-watch.json	overwrite	daemon
 .worktree-stranded-cache.json	state/.worktree-stranded-cache.json	overwrite	daemon
 .worktree-stranded-refresh-stamp	state/.worktree-stranded-refresh-stamp	overwrite	daemon
 # mux/ - the mux server owns these; it moves them at its own start.

@@ -929,7 +929,12 @@ pub async fn run_verb(args: &[String]) -> i32 {
         let (rows, unreadable) = process_table();
         println!(
             "{}",
-            json!({"ps": ps_text(&rows), "unreadable": unreadable})
+            json!({
+                "ps": ps_text(&rows),
+                "unreadable": unreadable,
+                "sccache_server_pid": crate::cargo_build_dirs::sccache_server_pid(),
+                "sccache_restarts_1h": crate::machine_watch::sccache_restarts_1h(),
+            })
         );
         return 0;
     }

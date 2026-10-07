@@ -2866,3 +2866,29 @@ def test_parse_reads_the_linux_state_header():
 
 
 # ---------------------------------------------------------------------------
+
+
+def test_sccache_reading_rides_the_process_table_fetch(monkeypatch) -> None:
+    """The process-table fetch also stashes the daemon's sccache answer (pid
+    and trailing-hour restarts); a payload without the fields degrades to
+    (None, None) instead of failing the verb."""
+    def door(verb, args=(), **kwargs):
+        return (
+            None,
+            {"ps": "  1  0 10:00 0.0 1024 /bin/x", "unreadable": 0,
+             "sccache_server_pid": 4242, "sccache_restarts_1h": 3},
+        )
+
+    monkeypatch.setattr(doctor_footprint, "call_binary_json", door)
+    table, error = doctor_footprint._read_ps(timeout=5.0)
+    assert error is None and table
+    assert doctor_footprint._LAST_SCCACHE == (4242, 3)
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "call_binary_json",
+        lambda *args, **kwargs: (None, {"ps": "  1  0 10:00 0.0 1024 /bin/x", "unreadable": 0}),
+    )
+    table, error = doctor_footprint._read_ps(timeout=5.0)
+    assert error is None
+    assert doctor_footprint._LAST_SCCACHE == (None, None)

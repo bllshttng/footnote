@@ -97,7 +97,10 @@ pub fn sccache_bin() -> Option<PathBuf> {
 }
 
 /// Set SCCACHE_DIR when the process has none and sccache is installed. A
-/// preset wins. Env mutation: call only while the process is single-threaded.
+/// preset wins. SCCACHE_IDLE_TIMEOUT gets the same never-stop default the
+/// rustc wrapper exports: a server that exits on idle mid-build falls compiles
+/// back to local rustc under fleet load. Env mutation: call only while the
+/// process is single-threaded.
 pub fn fill_sccache_env(root: &Path) {
     if sccache_bin().is_none() {
         return;
@@ -105,6 +108,55 @@ pub fn fill_sccache_env(root: &Path) {
     if std::env::var_os("SCCACHE_DIR").is_none() {
         std::env::set_var("SCCACHE_DIR", sccache_dir(root));
     }
+    if std::env::var_os("SCCACHE_IDLE_TIMEOUT").is_none() {
+        std::env::set_var("SCCACHE_IDLE_TIMEOUT", "0");
+    }
+}
+
+/// Best-effort: one long-lived sccache server per machine. Probes for a live
+/// server and, when none answers and sccache is installed, starts one
+/// detached with the never-stop idle timeout. Never blocks or fails the
+/// caller: a machine without sccache, or one where the start fails, keeps
+/// every current behavior.
+pub fn ensure_sccache_server() {
+    if sccache_bin().is_none() {
+        return;
+    }
+    if sccache_server_pid().is_some() {
+        return;
+    }
+    let bin = match sccache_bin() {
+        Some(bin) => bin,
+        None => return,
+    };
+    let _ = std::process::Command::new(bin)
+        .arg("--start-server")
+        .env("SCCACHE_IDLE_TIMEOUT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// The live sccache server's pid, by the forms the server itself takes: the
+/// renamed title `(sccache)` or `sccache --start-server`. The client form
+/// (`sccache <rustc-path> ...`) never matches.
+pub fn sccache_server_pid() -> Option<u32> {
+    let out = std::process::Command::new("ps")
+        .arg("-axo")
+        .args(["pid=", "command="])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut fields = line.trim_start().splitn(2, char::is_whitespace);
+        let pid = fields.next()?.parse::<u32>().ok()?;
+        let command = fields.next().unwrap_or("").trim();
+        if command == "(sccache)" || command.ends_with("sccache --start-server") {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 fn expand_home(path: &Path) -> PathBuf {
