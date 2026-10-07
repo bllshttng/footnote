@@ -194,7 +194,8 @@ fn warn_deferred(target: &str, arm: &str, reason: Option<&str>, head: Option<&st
             "mail: live delivery to {target} was not attempted (another verb held {target}'s agent lock past the wait); queued durably. That holder is any verb on this agent - a send, an ask, a spawn, a stop, an rm - so the token proves nothing about the recipient in either direction. Do not resurrect it on this evidence, and do not read it as healthy either: check it.\n\n\x20 a busy peer may not drain soon, so the rungs that stay open,\n\x20 in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n\x20 copy still lands at the recipient's next drain:\n\x20   fno agents peek {target}     # still taking turns, or just stopped?\n\x20   fno agents mail withdraw <id>      # retract the queued copy FIRST\n\x20   fno agents mail send {target} '<message>'  # then retry live\n\x20 a withdraw that refuses because the recipient already claimed\n\x20 the message is telling you it LANDED. Stop there: re-sending on\n\x20 top of that is the double delivery this ladder exists to avoid."
         ),
         "live" => format!(
-            "mail: live delivery to {target} not confirmed ({reason}); queued durably as recovery only - the recipient was live and reachable, so the message may still land past the confirm window or sit until the recipient drains its inbox\n{ladder}"
+            "mail: live delivery to {target} not confirmed ({reason}); queued durably as recovery only - the recipient was live and reachable, so the message may still land past the confirm window or sit until the recipient drains its inbox\n{ladder}",
+            reason = reason.unwrap_or_default(),
         ),
         _ => format!("{}{ladder}", head.unwrap_or_default()),
     }
@@ -223,7 +224,7 @@ pub fn run_mail_receipt(args: &[String]) -> i32 {
         }
     }
     let get = |k: &str| flags.get(k).map(String::as_str);
-    let sub = positional.first().map(String::as_str).unwrap_or("");
+    let sub = positional.first().map(|s| s.as_str()).unwrap_or("");
     let out = match sub {
         "json" => json_line(
             get("msg-id").unwrap_or_default(),
