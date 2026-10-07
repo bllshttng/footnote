@@ -17,7 +17,9 @@ import time
 
 # An installed fno never writes bytecode into its tool venv: `fno update`
 # ships compiled .pyc, and a live process writing one while uv replaces the
-# venv fails the reinstall (os error 66, "Directory not empty").
+# venv fails the reinstall (os error 66, "Directory not empty"). This covers
+# every module after this one; the front door sets PYTHONDONTWRITEBYTECODE
+# so this file's own .pyc is never written either.
 if "site-packages" in __file__:
     sys.dont_write_bytecode = True
 
