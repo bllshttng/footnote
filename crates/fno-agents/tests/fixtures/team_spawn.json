@@ -90,7 +90,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "a crown needs both level and scope; got level=None scope='epic-a'"
+        "refusal": "a role needs both level and scope; got level=None scope='epic-a'"
       }
     },
     {
@@ -106,7 +106,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "a crown needs both level and scope; got level=2 scope=None"
+        "refusal": "a role needs both level and scope; got level=2 scope=None"
       }
     },
     {
@@ -122,7 +122,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown level must be 0..2 (0 several projects, 1 one project, 2 one epic); got -1"
+        "refusal": "role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got -1"
       }
     },
     {
@@ -138,7 +138,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown level must be 0..2 (0 several projects, 1 one project, 2 one epic); got 3"
+        "refusal": "role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got 3"
       }
     },
     {
@@ -154,7 +154,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown level must be 0..2 (0 several projects, 1 one project, 2 one epic); got 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "refusal": "role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
       }
     },
     {
@@ -170,7 +170,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown level must be an int 0..2; got True"
+        "refusal": "role level must be an int 0..2; got True"
       }
     },
     {
@@ -186,7 +186,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown level must be an int 0..2; got '1'"
+        "refusal": "role level must be an int 0..2; got '1'"
       }
     },
     {
@@ -202,7 +202,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown level must be an int 0..2; got 1.5"
+        "refusal": "role level must be an int 0..2; got 1.5"
       }
     },
     {
@@ -218,7 +218,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown scope must be a nonblank id; got ''"
+        "refusal": "role scope must be a nonblank id; got ''"
       }
     },
     {
@@ -234,7 +234,7 @@
         "projects": []
       },
       "answer": {
-        "refusal": "crown scope must be a nonblank id; got {'bad': 1}"
+        "refusal": "role scope must be a nonblank id; got {'bad': 1}"
       }
     },
     {
@@ -253,7 +253,7 @@
         ]
       },
       "answer": {
-        "refusal": "crown scope must be canonical (sorted, deduped, no blank members); got 'beta,alpha', want 'alpha,beta'"
+        "refusal": "role scope must be canonical (sorted, deduped, no blank members); got 'beta,alpha', want 'alpha,beta'"
       }
     },
     {
