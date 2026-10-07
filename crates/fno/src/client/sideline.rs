@@ -1435,24 +1435,9 @@ impl View {
             }
             return a.role_scope.clone();
         }
-        let mut parent = lineage_parent(a);
-        let mut steps = 0;
-        while let Some(pid) = parent {
-            if steps >= self.layout.agents.len() {
-                return None;
-            }
-            let row = self
-                .layout
-                .agents
-                .iter()
-                .find(|r| r.harness_session_id.as_deref() == Some(pid))?;
-            if row.role_level.is_some() {
-                return Some(team_display_name(row).to_string());
-            }
-            parent = lineage_parent(row);
-            steps += 1;
-        }
-        None
+        // A worker's lead name: the same walk the group bands run, so a
+        // row-1 label and its band can never disagree on the lead.
+        super::agent_group::team_lead_name(self, a)
     }
 }
 

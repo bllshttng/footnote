@@ -169,12 +169,14 @@ pub(super) fn reorder_agent_rows(view: &mut View, cur: usize, delta: isize) {
     };
     let dir = delta.signum();
     let mut j = cur as isize + dir;
+    let mut neighbor_at = cur;
     let neighbor = loop {
         if j < 0 || j as usize >= rows.len() {
             view.set_notice("no agent row that way".into());
             return;
         }
         if let DisplayRow::Agent(n) = &rows[j as usize] {
+            neighbor_at = j as usize;
             break n.name.clone();
         }
         j += dir;
@@ -192,9 +194,28 @@ pub(super) fn reorder_agent_rows(view: &mut View, cur: usize, delta: isize) {
             _ => None,
         })
         .collect();
+    // Same-named rows resolve by occurrence, not by first match, so a
+    // name-collision pair swaps the pair under the cursor.
+    let occurrence = |at: usize| -> usize {
+        let Some(DisplayRow::Agent(a)) = rows.get(at) else {
+            return 0;
+        };
+        let label = a.name.as_str();
+        rows[..at]
+            .iter()
+            .filter(|r| matches!(r, DisplayRow::Agent(x) if x.name == label))
+            .count()
+    };
+    let nth_of = |list: &[String], label: &str, nth: usize| -> Option<usize> {
+        list.iter()
+            .enumerate()
+            .filter(|(_, n)| *n == label)
+            .nth(nth)
+            .map(|(i, _)| i)
+    };
     let (Some(i), Some(k)) = (
-        order.iter().position(|n| *n == name),
-        order.iter().position(|n| *n == neighbor),
+        nth_of(&order, &name, occurrence(cur)),
+        nth_of(&order, &neighbor, occurrence(neighbor_at)),
     ) else {
         view.set_notice("row is not in the manual order yet".into());
         return;
