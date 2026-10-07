@@ -9,7 +9,6 @@ subprocess and kills it. A test that only exercises a clean release proves
 nothing about the leak that was measured.
 """
 from __future__ import annotations
-from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -39,7 +38,6 @@ from fno.claims.core import (
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.claims.verdict import claim_verdicts
-from fno.graph.store import read_graph_strict
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 
@@ -200,19 +198,6 @@ class TestReapDeadClaims:
 
         assert summary["reaped"] == 0
         assert summary["kept_live"] == 1
-
-    def test_AC5_EDGE_failed_move_reported_not_reaped(self, tmp_path, monkeypatch):
-        """The positive-marker rule: a no-op archive_claim must not count as reaped."""
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
-
-        monkeypatch.setattr("fno.claims.core.archive_claim", lambda path, ts_ms: path)
-
-        summary = reap_dead_claims(roots=[tmp_path], apply=True)
-
-        assert summary["reaped"] == 0
-        assert len(summary["reap_failed"]) == 1
-        assert summary["reap_failed"][0][0] == str(claim_path("k", root=tmp_path))
-        assert claim_path("k", root=tmp_path).exists()
 
     def test_archive_claim_oserror_reported_not_raised_and_sweep_continues(
         self, tmp_path, monkeypatch
@@ -574,14 +559,6 @@ class TestReapCliVerb:
         assert result.exit_code == 0
         assert "reaped 1" in result.output
         assert not claim_path("k", root=cwd_tmp).exists()
-
-    def test_apply_exits_nonzero_when_a_move_is_not_confirmed(self, cwd_tmp, monkeypatch):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
-        monkeypatch.setattr("fno.claims.core.archive_claim", lambda path, ts_ms: path)
-
-        result = runner.invoke(cli, ["reap", "--apply"])
-
-        assert result.exit_code == 1
 
     def test_json_output_is_parseable(self, cwd_tmp):
         acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)

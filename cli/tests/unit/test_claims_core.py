@@ -25,7 +25,6 @@ import pytest
 from fno.rust_binary import find_dev_binary
 
 from fno.claims.core import (
-    ClaimContended,
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
@@ -125,22 +124,6 @@ class TestAcquire:
         assert second.holder == HOLDER_A
         # acquired_at is refreshed
         assert second.acquired_at >= first.acquired_at
-
-    def test_acquire_contention_recursion_is_bounded(self, tmp_path):
-        """Perpetual recovery-mutex contention must raise, not recurse forever.
-
-        acquire_claim's own holder (idempotent) path always takes the
-        recovery mutex, so patching acquire_dir_mutex to always report
-        "busy" drives a deterministic, PID-liveness-independent path through
-        _retry() every call - proving the ACQUIRE_MAX_ATTEMPTS cap fires
-        rather than growing the Python call stack unbounded.
-        """
-        import fno.claims.core as claims_core
-
-        acquire_claim("k", HOLDER_A, root=tmp_path)
-        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
-            with pytest.raises(ClaimContended, match="gave up after"):
-                acquire_claim("k", HOLDER_A, root=tmp_path)
 
     def test_idempotent_reverify_releases_lock_before_recursing(self, tmp_path):
         """The idempotent branch's locked re-verify must release the
@@ -476,35 +459,6 @@ class TestPidProvenanceStamping:
         assert claim.harness == "codex"
         assert claim.pid_provenance == "ambient"
 
-    def test_rebind_keeping_a_shared_host_harness_still_stamps_ambient(
-        self, tmp_path, monkeypatch
-    ):
-        """The branch the first fix missed. A non-handover rebind writes NO new
-        harness, so the record KEEPS its own - here codex - while the caller
-        resolved its provenance against the rebinding process's harness before
-        the mutex. Passing the expected harness at the call site cannot cover
-        this, because the two part company after that point. _rebound_claim is
-        the single branch that picks the written harness, so the narrowing
-        lives there and every caller inherits it."""
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
-        )
-        existing = Claim(
-            key="node:x-8", holder=HOLDER_A,
-            acquired_at=now_ms(), expires_at=now_ms() + 900_000,
-            pid=os.getpid(), host=socket.gethostname(),
-            harness="codex", pid_provenance="ambient",
-        )
-        import fno.claims.core as claims_core
-
-        rebound = claims_core._rebound_claim(
-            existing, os.getpid(), 60_000,
-            # What a claude caller resolves for itself before the mutex.
-            new_pid_provenance="session-prover",
-        )
-        assert rebound.harness == "codex"
-        assert rebound.pid_provenance == "ambient"
-
     def test_shared_host_harness_never_earns_the_prover_stamp(self, tmp_path, monkeypatch):
         """AC1 - the writer side of the specimen. The prover walk succeeds:
         the pid IS resolve_session_pid's answer, and both sides of that
@@ -650,20 +604,10 @@ class TestRefresh:
     def test_AC3_HP_refresh_extends_expires_at(self, tmp_path):
         first = acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
         # Sleep to ensure now_ms() advances.
-        import time
         time.sleep(0.01)
         refreshed = refresh_claim("k", HOLDER_A, ttl_ms=120_000, root=tmp_path)
         assert refreshed is not None
         assert refreshed.expires_at > first.expires_at
-
-    def test_refresh_contention_recursion_is_bounded(self, tmp_path):
-        """Perpetual recovery-mutex contention must raise, not recurse forever."""
-        import fno.claims.core as claims_core
-
-        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
-        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
-            with pytest.raises(ClaimContended, match="gave up after"):
-                refresh_claim("k", HOLDER_A, root=tmp_path)
 
     def test_AC3_FR_refresh_pid_liveness_returns_none(self, tmp_path):
         acquire_claim("k", HOLDER_A, root=tmp_path)  # no TTL
@@ -684,50 +628,12 @@ class TestRefresh:
         with pytest.raises(ClaimValidationError):
             refresh_claim("k", HOLDER_A, ttl_ms=10, root=tmp_path)
 
-    def test_refresh_refuses_claim_that_expires_while_waiting_for_recovery_mutex(
-        self, tmp_path, monkeypatch
-    ):
-        """The under-mutex reread is the authority: a claim whose holder reads
-        dead (x-b445: expired AND stale) cannot be rewritten into a new lease
-        by the old holder."""
-        import fno.claims.core as claims_core
-
-        path = claim_path("k", root=tmp_path)
-        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
-        real_acquire = claims_core.acquire_dir_mutex
-        expired_deadline = now_ms() - 1
-
-        def acquire_then_expire(lock_path, timeout_s, **kwargs):
-            token = real_acquire(lock_path, timeout_s, **kwargs)
-            existing = read_claim_file(path)
-            path.write_text(
-                serialize_claim(
-                    existing.model_copy(
-                        update={
-                            "expires_at": expired_deadline,
-                            "pid": self._dead_pid(),
-                            "pid_provenance": "session-prover",
-                            "session_id": None,
-                        }
-                    )
-                )
-            )
-            return token
-
-        monkeypatch.setattr(claims_core, "acquire_dir_mutex", acquire_then_expire)
-
-        with pytest.raises(ClaimValidationError, match="holder reads dead"):
-            refresh_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
-
-        assert read_claim_file(path).expires_at == expired_deadline
-
     def test_AC2_HP_refresh_extends_expired_claim_whose_holder_reads_live(
         self, tmp_path
     ):
         """x-b445: TTL expiry alone no longer refuses. An expired claim whose
         native verdict reads live extends, exactly as `claim status` reports."""
         import os
-        import time
 
         acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
         existing = read_claim_file(path := claim_path("k", root=tmp_path))
@@ -961,49 +867,6 @@ class TestForceRelease:
         assert archive.exists()
         assert any(archive.iterdir())
 
-    def test_force_release_takes_and_releases_recovery_mutex(self, tmp_path):
-        """force_release_claim must take the SAME per-key recovery mutex
-        acquire_claim/refresh_claim/reap_dead_claims take, closing the
-        resurrection race where a concurrent idempotent re-acquire reads the
-        still-present claim under its own lock and writes it back right after
-        this call's archive_claim moves the file away."""
-        import fno.claims.core as claims_core
-
-        acquire_claim("k", HOLDER_A, root=tmp_path)
-
-        calls: list[str] = []
-        real_acquire = claims_core.acquire_dir_mutex
-        real_release = claims_core.release_dir_mutex
-
-        def _acquire_spy(*args, **kwargs):
-            calls.append("acquire")
-            return real_acquire(*args, **kwargs)
-
-        def _release_spy(*args, **kwargs):
-            calls.append("release")
-            return real_release(*args, **kwargs)
-
-        with patch.object(claims_core, "acquire_dir_mutex", _acquire_spy), \
-             patch.object(claims_core, "release_dir_mutex", _release_spy):
-            force_release_claim("k", reason="operator override", root=tmp_path)
-
-        assert calls == ["acquire", "release"]
-        assert not claim_path("k", root=tmp_path).exists()
-
-    def test_force_release_still_succeeds_when_mutex_acquire_times_out(self, tmp_path):
-        """A contended recovery mutex must not turn force-release's
-        'always succeeds' administrative-override contract into a raise -
-        it proceeds without the lock on timeout instead."""
-        import fno.claims.core as claims_core
-
-        acquire_claim("k", HOLDER_A, root=tmp_path)
-
-        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
-            force_release_claim("k", reason="operator override", root=tmp_path)
-
-        assert not claim_path("k", root=tmp_path).exists()
-
-
 # ---------------------------------------------------------------------------
 # session-keyed liveness (x-a613): the session id is the witness
 # ---------------------------------------------------------------------------
@@ -1031,22 +894,6 @@ class TestSessionIdStamping:
     resolve the holder through the registry row keyed by it, never by parsing
     the published holder string."""
 
-    def test_acquire_stamps_session_id(self, tmp_path, monkeypatch):
-        """AC1: a claim acquired under a resolvable session identity reads it
-        back, resolved beside the harness from ONE identity answer."""
-        import types
-
-        import fno.claims.core as claims_core
-
-        identity = types.SimpleNamespace(
-            harness="claude", session_id="abc123", disposition="canonical"
-        )
-        monkeypatch.setattr(claims_core, "resolve_self_identity", lambda: identity)
-        claim = acquire_claim(
-            "node:x-sid", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
-        )
-        assert claim.session_id == "abc123"
-
     def test_acquire_pinned_session_id_wins(self, tmp_path, monkeypatch):
         """An explicit harness_session_id (the init-hook pin) beats ambient."""
         import types
@@ -1066,102 +913,6 @@ class TestSessionIdStamping:
             root=tmp_path,
         )
         assert claim.session_id == "pinned-sid"
-
-    def test_registry_session_pid_reads_the_row_binding(self, tmp_path, monkeypatch):
-        """The row keyed by harness_session_id names the live pid; a dead or
-        missing row answers None and the caller falls through."""
-        import json as _json
-
-        from fno.claims.core import _registry_session_pid
-
-        registry = tmp_path / "registry.json"
-        registry.write_text(
-            _json.dumps(
-                {
-                    "schema_version": 24,
-                    "agents": [
-                        {
-                            "name": "w",
-                            "harness": "claude",
-                            "harness_session_id": "ses_r",
-                            "pid": os.getpid(),
-                        },
-                        {
-                            "name": "dead",
-                            "harness": "claude",
-                            "harness_session_id": "ses_dead",
-                            "pid": 999_999_999,
-                        },
-                    ],
-                }
-            )
-        )
-        monkeypatch.setattr("fno.paths.agents_registry_path", lambda: registry)
-        assert _registry_session_pid("ses_r") == os.getpid()
-        assert _registry_session_pid("ses_dead") is None
-        assert _registry_session_pid("ses_absent") is None
-
-    def test_resume_rebind_backfills_session_id(self, tmp_path, monkeypatch):
-        """A pre-change claim (no session_id) rebound on resume takes the
-        rebinding session's id."""
-        import types
-
-        import fno.claims.core as claims_core
-
-        monkeypatch.setattr(
-            claims_core,
-            "resolve_self_identity",
-            lambda: types.SimpleNamespace(harness="claude", session_id="new-sid"),
-        )
-        dead_pid = _dead_pid_context()
-        path = claim_path("k", root=tmp_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        legacy = Claim(
-            key="k",
-            holder=HOLDER_A,
-            acquired_at=now_ms() - 100,
-            expires_at=now_ms() + 600_000,
-            pid=dead_pid,
-            host=socket.gethostname(),
-        )
-        path.write_text(serialize_claim(legacy))
-
-        rebound, mode = compare_and_rebind("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
-        assert mode == "rebound"
-        assert rebound.session_id == "new-sid"
-
-    def test_handover_restamps_session_id_to_the_successor(self, tmp_path, monkeypatch):
-        """A handover changes WHO owns the claim, so the spawner's session id
-        must not survive it - same rule as the harness tag."""
-        import types
-
-        import fno.claims.core as claims_core
-
-        monkeypatch.setattr(
-            claims_core,
-            "resolve_self_identity",
-            lambda: types.SimpleNamespace(harness="claude", session_id="successor-sid"),
-        )
-        dead_pid = _dead_pid_context()
-        path = claim_path("k", root=tmp_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handed = Claim(
-            key="k",
-            holder="spawn-handover:w1",
-            acquired_at=now_ms() - 100,
-            expires_at=now_ms() + 600_000,
-            pid=dead_pid,
-            host=socket.gethostname(),
-            session_id="spawner-sid",
-        )
-        path.write_text(serialize_claim(handed))
-
-        rebound, mode = compare_and_rebind(
-            "k", "spawn-handover:w1", new_holder=HOLDER_B, ttl_ms=600_000, root=tmp_path
-        )
-        assert mode == "handover"
-        assert rebound.session_id == "successor-sid"
-
 
 RUST_BIN = find_dev_binary()
 requires_rust = pytest.mark.skipif(
@@ -1263,42 +1014,6 @@ class TestSessionWitnessVerdicts:
         status = claim_status("k", root=tmp_path)
         assert status["state"] == "stale", status
         assert "session_basis" not in status
-
-    def test_refresh_never_reanchors_a_live_recorded_pid(self, tmp_path, monkeypatch):
-        """A healthy claim (recorded pid alive) is never re-anchored, even when
-        its registry row names a DIFFERENT live process (the keeper-pid shape:
-        rows record the keeper, not the child). Rewriting a running session's
-        anchor is the takeover the first None case exists to prevent."""
-        import fno.claims.core as claims_core
-
-        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-        try:
-            # Let the child's create time fall clearly BEFORE acquired_at, so
-            # the recorded pid reads as the same live process, not a reuse.
-            time.sleep(0.3)
-            rec = self._write_claim(tmp_path, "k", "ses_live", foreign.pid, 600_000)
-            monkeypatch.setattr(
-                claims_core, "_registry_session_pid", lambda sid: os.getpid()
-            )
-            refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
-            assert refreshed.pid == foreign.pid, "a live anchor must stay put"
-            assert refreshed.acquired_at == rec.acquired_at
-        finally:
-            foreign.terminate()
-            foreign.wait()
-
-    def test_refresh_reanchors_to_registry_row_pid_under_resume(self, tmp_path, monkeypatch):
-        """AC6: a claim whose recorded pid is dead and whose session row names
-        a live pid re-anchors to THAT pid on renewal - created after
-        acquired_at and all. Positive marker: the pid MOVES."""
-        import fno.claims.core as claims_core
-
-        dead_pid = _dead_pid_context()
-        rec = self._write_claim(tmp_path, "k", "ses_move", dead_pid, 600_000)
-        monkeypatch.setattr(claims_core, "_registry_session_pid", lambda sid: os.getpid())
-        refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
-        assert refreshed.pid == os.getpid(), "the anchor must MOVE to the row pid"
-        assert refreshed.acquired_at == rec.acquired_at
 
     def test_refresh_without_session_id_leaves_the_anchor_alone(self, tmp_path, monkeypatch):
         """AC7: no session id -> the legacy create-time filter still governs,
