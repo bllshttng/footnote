@@ -322,9 +322,10 @@ fn ordinary_acquire(
         return 2;
     }
     let root = a.root.clone().or_else(|| node_aware_root(key));
-    // The Python forward drops --harness on the native path (acquire_claim
-    // deletes it before building flags), so the record's identity stays the
-    // ambient walk; --harness reaches the rebind only.
+    // A pinned --harness is the harness the record stores, and the provenance
+    // stamp is gated on that same value so the two never disagree.
+    let (ambient_session, ambient_harness) = claims::resolve_identity();
+    let written_harness = a.harness.clone().or(ambient_harness);
     let opts = AcquireOpts {
         pid,
         pid_unavailable,
@@ -339,22 +340,15 @@ fn ordinary_acquire(
         // unless the pid IS this process's own session walk's answer on a
         // TTL claim under a harness that dies with its sessions.
         pid_provenance: Some(a.provenance.clone().unwrap_or_else(|| {
-            resolve_pid_provenance(
-                pid.map(|p| p as i32),
-                ttl_ms,
-                claims::resolve_identity().1.as_deref(),
-            )
+            resolve_pid_provenance(pid.map(|p| p as i32), ttl_ms, written_harness.as_deref())
         })),
         root,
         host: a.host.clone(),
         events_dir: None,
-        identity: a.session_id.as_ref().map(|sid| {
+        identity: (a.session_id.is_some() || a.harness.is_some()).then(|| {
             (
-                sid.clone(),
-                a.harness
-                    .clone()
-                    .or_else(claims::resolve_harness)
-                    .unwrap_or_default(),
+                a.session_id.clone().or(ambient_session).unwrap_or_default(),
+                written_harness.clone().unwrap_or_default(),
             )
         }),
     };

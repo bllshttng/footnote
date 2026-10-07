@@ -360,7 +360,7 @@ pub(crate) fn read_at_path(path: &Path) -> Result<Option<ClaimRecord>, String> {
     if claims::encode_key(&key) != name {
         return Err("claim locator key is not canonical".into());
     }
-    record_for(&open_directory(dir)?, &key)
+    record_for(&open_directory(dir)?, &key).map_err(|e| format!("Corrupted({e})"))
 }
 
 pub(crate) fn records_in(
@@ -375,7 +375,11 @@ pub(crate) fn records_in(
     let rows = statement.query_map([], decode).map_err(|e| e.to_string())?;
     let mut records = Vec::new();
     for row in rows {
-        let record = row.map_err(|e| e.to_string())?;
+        // One unreadable row must not blind the whole scan; `claim status`
+        // on its key still reports it corrupted.
+        let Ok(record) = row else {
+            continue;
+        };
         if prefix.is_some_and(|p| !record.key.starts_with(p)) {
             continue;
         }

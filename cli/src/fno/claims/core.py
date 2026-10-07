@@ -31,7 +31,7 @@ from .verdict import (
     ClaimVerdictUnavailable,
     claim_verdicts,
 )
-from .types import (MAX_ENCODED_FILENAME_BYTES, MAX_KEY_LENGTH, MAX_TTL_MS, MIN_TTL_MS, Claim, ClaimState)
+from .types import (MAX_ENCODED_FILENAME_BYTES, MAX_KEY_LENGTH, MAX_TTL_MS, MIN_TTL_MS, Claim, ClaimState, now_ms)
 
 
 class ClaimHeldByOther(Exception):
@@ -209,7 +209,14 @@ def compare_and_rebind(
     try:
         payload = _native_claim("acquire",key,flags)
     except ClaimVerdictError as exc:
-        raise RebindRefused(str(exc)) from exc
+        # The refusal names its reason; the observed row is the status read.
+        try:
+            seen = claim_status(key, root=root)
+        except Exception:  # noqa: BLE001 - the refusal stands without detail
+            seen = {}
+        raise RebindRefused(
+            str(exc), state=seen.get("state"), holder=seen.get("holder"), pid=seen.get("pid")
+        ) from exc
     return _native_claim_model(payload), str(payload["mode"])
 
 
@@ -434,6 +441,10 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
             str(payload.get("host") or "unknown"),
             key,
         )
+    # A corrupted row is an answer, not a failure: status prints its verdict
+    # and exits 2 so shell callers notice.
+    if operation == "status" and isinstance(payload, dict) and payload.get("state") == "corrupted":
+        return payload
     if result.returncode != 0:
         detail = stderr.strip() or stdout.strip() or f"exit {result.returncode}"
         raise ClaimVerdictError(f"fno-agents claim {operation} failed: {detail}")
@@ -656,45 +667,107 @@ def reap_dead_claims(
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
-    """Apply caller policy to native verdicts and retire only the observed row."""
+    """Archive claims proven dead; unknown or degraded evidence stays protected.
+
+    The native verdict batch enumerates each claims table, so every scanned
+    key has a verdict. The apply pass re-reads the row and asks again before
+    retiring exactly the observed row, so a claim recreated since the scan is
+    never archived.
+    """
     import json
+
+    from .events import emit_claim_reap_swept, emit_claim_reaped
+
     directories = _default_reap_roots() if roots is None else _dedup_roots(roots)
-    summary: dict[str, Any] = dict.fromkeys(("scanned", "reaped", "would_reap", "kept_offhost", "kept_suspect", "kept_live", "kept_suspect_alive", "kept_suspect_unprobed", "kept_unclassified", "corrupted", "vanished", "contended"), 0)
-    summary.update(roots=[str(d) for d in directories], reap_failed=[], unclassified_dirs={}, kept_suspect_unprobed_by={})
+    summary: dict[str, Any] = dict.fromkeys(
+        ("scanned", "reaped", "would_reap", "kept_offhost", "kept_suspect", "kept_live",
+         "kept_suspect_alive", "kept_suspect_unprobed", "kept_unclassified", "corrupted",
+         "vanished", "contended"),
+        0,
+    )
+    summary.update(
+        roots=[str(d) for d in directories], reap_failed=[], unclassified_dirs={},
+        kept_suspect_unprobed_by={}, apply=apply,
+    )
+    probe_reasons = getattr(abandonment_probe, "reasons", {})
+    ts = now_ms()
+    # A pid shared across holders stays shared for this sweep once one member
+    # is archived; otherwise the survivor's fresh read turns exclusive and the
+    # apply pass drains only the first member.
+    archived_shared_pids: set[tuple[str, int]] = set()
+
+    def _judge(claim: Claim, verdict: dict[str, Any]) -> tuple[bool, str]:
+        dead, bucket = sweep_verdict(
+            claim, abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement, native_verdict=verdict,
+        )
+        if not dead and bucket == "suspect_unprobed":
+            token = probe_reasons.get(claim.key) if isinstance(probe_reasons, dict) else None
+            if token:
+                counts = summary["kept_suspect_unprobed_by"]
+                counts[token] = counts.get(token, 0) + 1
+        return dead, bucket
+
     for directory in directories:
         verdicts = claim_verdicts(claims_dir_path=directory)
         for key, verdict in verdicts.items():
             if verdict.get("state") == "free":
                 continue
             summary["scanned"] += 1
+            locator = directory / f"{encode_key(key)}.lock"
             try:
-                claim = read_claim_file(directory / f"{encode_key(key)}.lock")
-                dead, bucket = sweep_verdict(claim, abandonment_probe=abandonment_probe, node_settlement=node_settlement, native_verdict=verdict)
+                claim = read_claim_file(locator)
+                dead, bucket = _judge(claim, verdict)
                 if not dead:
                     summary["kept_" + bucket] = summary.get("kept_" + bucket, 0) + 1
-                    if bucket == "suspect_unprobed":
-                        token = verdict.get("probe_basis") or "probe-unanswered"
-                        counts = summary["kept_suspect_unprobed_by"]
-                        counts[token] = counts.get(token, 0) + 1
                     continue
-                summary["would_reap"] += 1
                 if not apply:
+                    summary["would_reap"] += 1
                     continue
-                fresh = claim_verdicts([key], claims_dir_path=directory).get(key)
-                if fresh is None or not sweep_verdict(claim, abandonment_probe=abandonment_probe, node_settlement=node_settlement, native_verdict=fresh)[0]:
+                fresh = read_claim_file(locator)
+                fresh_verdict = claim_verdicts([key], claims_dir_path=directory).get(key)
+                if fresh_verdict is None:
+                    summary["kept_unclassified"] += 1
+                    dirs = summary["unclassified_dirs"]
+                    dirs[str(directory)] = dirs.get(str(directory), 0) + 1
+                    continue
+                pid_key = (fresh.machine_id or fresh.host, fresh.pid) if fresh.pid is not None else None
+                if (
+                    pid_key in archived_shared_pids
+                    and verdict.get("basis") == "pid-shared"
+                    and fresh_verdict.get("basis") == "live"
+                ):
+                    fresh_verdict = {
+                        **fresh_verdict, "state": "suspect", "basis": "pid-shared",
+                        "bucket": "suspect", "provably_dead": False,
+                    }
+                fresh_dead, fresh_bucket = _judge(fresh, fresh_verdict)
+                if not fresh_dead:
+                    summary["kept_" + fresh_bucket] = summary.get("kept_" + fresh_bucket, 0) + 1
+                    continue
+                result = _native_claim(
+                    "force-release", key,
+                    ["--claims-dir", str(directory), "--reason", "reap proven-dead claim",
+                     "--expected-claim", json.dumps(fresh.model_dump())],
+                )
+                if not result.get("archived"):
                     summary["contended"] += 1
                     continue
-                result = _native_claim("force-release", key, ["--claims-dir", str(directory), "--reason", "reap proven-dead claim", "--expected-claim", json.dumps(claim.model_dump())])
-                if result.get("archived"):
-                    summary["reaped"] += 1
-                    if optout_sink is not None and key.startswith("config-optout:"):
-                        optout_sink.append(claim)
-                else:
-                    summary["contended"] += 1
+                summary["reaped"] += 1
+                if pid_key is not None and verdict.get("basis") == "pid-shared":
+                    archived_shared_pids.add(pid_key)
+                if optout_sink is not None and key.startswith("config-optout:"):
+                    optout_sink.append(fresh)
+                emit_claim_reaped(
+                    fresh, root=str(directory), age_ms=max(0, ts - fresh.acquired_at),
+                    basis=fresh_verdict.get("basis"),
+                )
             except ClaimGoneAway:
                 summary["vanished"] += 1
             except ClaimCorrupted:
                 summary["corrupted"] += 1
-            except Exception as exc:
-                summary["reap_failed"].append((str(directory / f"{encode_key(key)}.lock"), str(exc)))
+            except Exception as exc:  # noqa: BLE001 - one bad row never aborts the sweep
+                summary["reap_failed"].append((str(locator), str(exc)))
+    if apply:
+        emit_claim_reap_swept(summary)
     return summary

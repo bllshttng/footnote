@@ -396,7 +396,13 @@ def parse_claim_dict(raw: dict[str, Any]) -> Claim:
 def read_claim_file(path: Path) -> Claim:
     """Read a logical claim locator through the native table door."""
     from .core import _native_claim
-    payload = _native_claim("read-path",str(path),[])
+    from .verdict import ClaimVerdictError
+    try:
+        payload = _native_claim("read-path", str(path), [])
+    except ClaimVerdictError as exc:
+        if "Corrupted" in str(exc):
+            raise ClaimCorrupted(str(exc)) from exc
+        raise
     if payload.get("state") == "free":
         raise ClaimGoneAway(str(path))
     return Claim.model_validate(payload)
@@ -406,7 +412,10 @@ def archive_claim(path: Path, ts_ms: int) -> Path:
     """Retire the observed table generation and return its graph archive locator."""
     del ts_ms
     from fno.claims.core import _native_claim
-    claim = read_claim_file(path)
+    try:
+        claim = read_claim_file(path)
+    except ClaimGoneAway:
+        return path
     import json
     receipt = _native_claim("force-release", claim.key, ["--claims-dir", str(path.parent), "--reason", "archive observed claim", "--expected-claim", json.dumps(claim.model_dump())])
     return Path(str(receipt["path"])) if receipt.get("archived") else path

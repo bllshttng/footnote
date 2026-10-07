@@ -40,8 +40,11 @@ pub fn run_claim(args: &[String]) -> i32 {
             return 2;
         };
         match crate::claim_store::read_at_path(std::path::Path::new(path)) {
+            // The raw record, not the status view: callers hand it back as
+            // --expected-claim, and the observed-row delete compares every
+            // column, so a derived session_id or metadata key never matches.
             Ok(Some(record)) => {
-                println!("{}", claim_status_value(&record));
+                println!("{}", serde_json::to_value(&record).unwrap_or_default());
                 return 0;
             }
             Ok(None) => {
@@ -455,7 +458,17 @@ fn run_claim_list(args: &[String]) -> i32 {
             }
         }
     }
-    let rows = match crate::claims::list(prefix.as_deref(), root.as_deref(), include_stale) {
+    // An explicit --root names the one store to read; only the bare form
+    // also folds in the global root.
+    let listed = match root.as_deref() {
+        Some(root) => crate::claims::list_in(
+            &[root.join(crate::claims::CLAIMS_DIRNAME)],
+            prefix.as_deref(),
+            include_stale,
+        ),
+        None => crate::claims::list(prefix.as_deref(), None, include_stale),
+    };
+    let rows = match listed {
         Ok(rows) => rows,
         Err(error) => {
             eprintln!("fno-agents: claim list: {error}");
