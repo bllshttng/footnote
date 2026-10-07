@@ -416,7 +416,9 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     if !root.is_dir() {
         return Ok(());
     }
-    let marker = root.join("migrations/role-vocabulary-v1.done");
+    // v1 receipts were stamped by a walk that skipped a symlinked spaces
+    // root, so they cannot vouch for it; a re-walk is idempotent.
+    let marker = root.join("migrations/role-vocabulary-v2.done");
     if marker.exists() {
         return Ok(());
     }

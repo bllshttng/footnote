@@ -415,7 +415,9 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     if !root.is_dir() {
         return Ok(());
     }
-    let marker = root.join("migrations/role-vocabulary-v1.done");
+    // v1 receipts were stamped by a walk that skipped a symlinked spaces
+    // root, so they cannot vouch for it; a re-walk is idempotent.
+    let marker = root.join("migrations/role-vocabulary-v2.done");
     if marker.exists() {
         return Ok(());
     }
@@ -712,7 +714,8 @@ mod tests {
         let state = tmp.path().join("linked");
         let moved = tmp.path().join("moved-spaces");
         std::fs::create_dir_all(moved.join("repo").join("kings")).unwrap();
-        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(state.join("migrations")).unwrap();
+        std::fs::write(state.join("migrations/role-vocabulary-v1.done"), "1\n").unwrap();
         std::os::unix::fs::symlink(&moved, state.join("spaces")).unwrap();
         run_at(&state).unwrap();
         assert!(moved.join("repo").join("leads").is_dir());
