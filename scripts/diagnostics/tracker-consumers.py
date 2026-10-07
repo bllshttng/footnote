@@ -95,7 +95,7 @@ def _registry():
     # The classifier's own structural list, never a copy: the census must
     # enumerate the registry the guard actually walked. Classification is
     # lazy (first backlog use), so the census triggers it explicitly.
-    graph_cli._classify_backlog_verbs()
+    graph_cli.classify_backlog_verbs()
     return list(graph_cli.iter_backlog_registry())
 
 

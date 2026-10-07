@@ -25,13 +25,13 @@ import typer
 
 from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
-# the external-backend verb classification: the sets live beside the data
-# they classify (the classification runner below fails the import when a
-# verb is missing from both lists)
+# the external-backend verb classification: the sets and the runner that
+# stamps them onto the live registry live beside the data they classify
 from fno.graph._verb_classification import (
     _FOOTNOTE_OWNED_VERBS,
     _NO_GRAIN_ON_EXTERNAL_BACKEND,
     _TRACKER_OWNED_VERBS,
+    classify_backlog_verbs,
 )
 from fno.graph.api import wire_rows  # noqa: F401 - re-export for lazy importers
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
@@ -198,7 +198,7 @@ def _graph_callback(
         help="Output structured JSON to stdout. Diagnostics go to stderr.",
     ),
 ) -> None:
-    _classify_backlog_verbs()
+    classify_backlog_verbs()
 
     from fno.handoff.output import merge_json_flag
 
@@ -7343,7 +7343,8 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
 def iter_backlog_registry():
     """The (group-label, typer-app) pairs carrying every backlog verb.
 
-    The ONE structural list: the verb classifier below, the consumer census
+    The ONE structural list: the verb classifier in
+    graph/_verb_classification.py, the consumer census
     (scripts/diagnostics/tracker-consumers.py), and the classification tests
     all walk it, so a new sub-app is registered exactly here, beside its
     add_typer call - never re-copied into an instrument that would then
@@ -7359,55 +7360,6 @@ def iter_backlog_registry():
         ("task", task_app),
         ("collisions", collisions_app),
     ]
-
-
-_backlog_verbs_classified = False
-
-
-def _classify_backlog_verbs() -> None:
-    # Runs at first backlog use, not import: note_cli imports this module to
-    # register `note`, so classifying at import sees the registry before that
-    # decorator ran and reports `note` missing (circular-import race).
-    global _backlog_verbs_classified
-    if _backlog_verbs_classified:
-        return
-    import functools
-
-    apps = iter_backlog_registry()
-    seen: set[str] = set()
-    for group, app in apps:
-        for info in app.registered_commands:
-            name = info.name or ""
-            label = f"{group} {name}" if group else name
-            seen.add(label)
-            callback = info.callback
-            if callback is None:
-                raise RuntimeError(f"backlog verb {label!r} has no callback")
-            if label in _TRACKER_OWNED_VERBS:
-
-                @functools.wraps(callback)
-                def _guarded(*args, _orig=callback, _label=label, **kwargs):
-                    _refuse_tracker_owned_on_external_backend(_label)
-                    return _orig(*args, **kwargs)
-
-                setattr(_guarded, "_fno_tracker_owned", True)
-                info.callback = _guarded
-            elif label in _FOOTNOTE_OWNED_VERBS:
-                setattr(callback, "_fno_footnote_owned", True)
-            else:
-                raise RuntimeError(
-                    f"unclassified backlog verb {label!r}: classify it in "
-                    "_TRACKER_OWNED_VERBS or _FOOTNOTE_OWNED_VERBS "
-                    "(graph/_verb_classification.py) so the external-backend "
-                    "census holds"
-                )
-    unknown = (_TRACKER_OWNED_VERBS | _FOOTNOTE_OWNED_VERBS) - seen
-    if unknown:
-        raise RuntimeError(
-            f"classified verbs missing from the live registry (renamed or "
-            f"removed?): {sorted(unknown)}"
-        )
-    _backlog_verbs_classified = True
 
 
 from fno.graph import note_cli  # noqa: E402,F401
