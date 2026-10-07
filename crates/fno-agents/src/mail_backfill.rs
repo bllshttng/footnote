@@ -571,11 +571,11 @@ mod engine_tests {
             body,
             sender_transcript: "s.jsonl".into(),
         };
-        let mk_block = |body: &str, session: &str| BlockRow {
+        let mk_block = |body: &str, session: &str, transcript: &str| BlockRow {
             from_name: Some("worker-1".into()),
             body: body.to_string(),
             receiver_session: session.into(),
-            receiver_transcript: "r.jsonl".into(),
+            receiver_transcript: transcript.into(),
         };
         let long = "PR 3147 holds until the other lane merges its wave".to_string();
         // A matching head pairs; a different body on the same socket does not
@@ -584,20 +584,23 @@ mod engine_tests {
         let (pairs, _skipped) = join(
             &[mk_send(long.clone())],
             &[
-                mk_block("an entirely different report from another lane", "b1"),
-                mk_block(&long, "b1"),
-                mk_block(&long, "b1"),
+                mk_block("an entirely different report from another lane", "b1", "r1"),
+                mk_block(&long, "b1", "r1"),
+                mk_block(&long, "b1", "r1"),
             ],
         );
         assert_eq!(pairs, vec![(0, 1)]);
         // Under the attribution floor: never paired.
-        let (pairs, skipped) = join(&[mk_send("continue".into())], &[mk_block("continue", "b")]);
+        let (pairs, skipped) = join(
+            &[mk_send("continue".into())],
+            &[mk_block("continue", "b", "r1")],
+        );
         assert!(pairs.is_empty());
         assert_eq!(skipped, 1);
         // The same head in two transcripts is ambiguous: never paired.
         let (pairs, skipped) = join(
             &[mk_send(long.clone())],
-            &[mk_block(&long, "b1"), mk_block(&long, "b2")],
+            &[mk_block(&long, "b1", "r1"), mk_block(&long, "b2", "r2")],
         );
         assert!(pairs.is_empty());
         assert_eq!(skipped, 1);
