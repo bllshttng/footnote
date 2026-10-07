@@ -15,7 +15,7 @@ def render(root):
         for _, name, kind, required, _, primary in conn.execute(f'PRAGMA table_info("{table}")'):
             lines.append(f"| `{name}` | `{kind}` | {'no' if required else 'yes'} | {'yes' if primary else 'no'} |")
         lines.append("")
-    lines += ["## Data policy", "", "`api_requests` is the typed cost projection. `otel_events` retains event names, timestamps, session/prompt IDs, attribute JSON and resource JSON. Retries are deduplicated. Raw retention and cost projection commit in one transaction.", "", "Prompt and response text, tool input, command text, API bodies, hook definitions and managed settings content are redacted before persistence. Safe attribution names inside tool parameters remain. The receiver never enables prompt or tool-content export. The exporter can emit tool arguments with `OTEL_LOG_TOOL_DETAILS=1`, so the receiver redacts them even when a sender enables that flag.", ""]
+    lines += ["## Data policy", "", "`api_requests` is the typed cost projection. `otel_events` retains event names, timestamps, session/prompt IDs, attribute JSON and resource JSON. Retries are deduplicated. Raw retention and cost projection commit in one transaction.", "", "Prompt and response text, tool input, command text, API bodies, hook definitions and managed settings content are redacted before persistence. Safe attribution names inside tool parameters remain. The receiver never enables prompt or tool-content export. With `OTEL_LOG_TOOL_DETAILS=1`, the exporter can emit tool arguments. The receiver redacts these arguments before persistence.", ""]
     conn.close()
     return "\n".join(lines)
 

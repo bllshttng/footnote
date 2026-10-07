@@ -126,7 +126,7 @@ With `[telemetry] claude_otel = true` (the default), the daemon serves OTLP/http
 
 The database retains every log event in `otel_events`, including unknown future event names. `api_requests` supplies typed cost and token columns. Both tables are defined in one canonical SQL file. The generated [schema reference](../reference/otel-schema.md) lists every table and column. A batch commits raw retention and typed projection together. Failed storage returns HTTP 503 so the exporter can retry. Invalid payloads return HTTP 400.
 
-Content is redacted before storage. `OTEL_LOG_TOOL_DETAILS=1` provides real skill/plugin attribution but also exports command text and tool arguments. The receiver masks those values and keeps safe tool/skill/MCP names. It masks prompt/response text, API bodies, hook definitions and managed settings content even if a sender enables them. fno does not set `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_CONTENT`. Metrics and traces remain off. Nothing is forwarded outside this machine.
+Content is redacted before storage. `OTEL_LOG_TOOL_DETAILS=1` provides real skill/plugin attribution but also exports command text and tool arguments. The receiver masks those values and keeps safe tool/skill/MCP names. Even if a sender enables content export, the receiver masks prompt/response text, API bodies, hook definitions and managed settings content. fno does not set `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_CONTENT`. Metrics and traces remain off. Nothing is forwarded outside this machine.
 
 ### Health and coverage
 
@@ -148,9 +148,9 @@ fno doctor cost export --csv > request-costs.csv
 fno doctor cost export --csv --output request-costs.csv
 ```
 
-Export groups by UTC day, session, model and skill. It includes request counts, unpriced request counts, reported USD cost and token totals. Missing cost stays blank when the group has no priced requests. A partial cost sum is accompanied by its unpriced count. An absent database produces a header and an explicit empty-data diagnostic. An incompatible or unreadable database fails before output. CSV text is escaped.
+Export groups by UTC day, session, model and skill. It includes request counts, unpriced request counts, reported USD cost and token totals. When the group has no priced requests, cost stays blank. A partial cost sum is accompanied by its unpriced count. An absent database produces a header and an explicit empty-data diagnostic. An incompatible or unreadable database fails before output. CSV text is escaped.
 
-These costs are provider-reported estimates, not billing statements. Burn watch prefers the stored per-session sum and falls back to the transcript ledger when no priced telemetry exists. The finalize handoff retains its existing ledger source.
+These costs are provider-reported estimates, not billing statements. When priced telemetry is available, burn watch uses its per-session sum. Otherwise, it reads the transcript ledger. The finalize handoff retains its existing ledger source.
 
 To inspect events that have no typed cost projection:
 
