@@ -265,11 +265,11 @@ fn source_sync_fast_forwards_or_refuses_naming_the_gap() {
     let path = |p: &PathBuf| p.to_string_lossy().into_owned();
     git_ok(
         tmp.path(),
-        &["init", "-q", "--bare", "-b", "main", &path(&remote)],
+        &["init", "-q", "--bare", "-b", "trunk", &path(&remote)],
     );
     git_ok(tmp.path(), &["clone", "-q", &path(&remote), &path(&peer)]);
     git_ok(&peer, &["commit", "-q", "--allow-empty", "-m", "base"]);
-    git_ok(&peer, &["push", "-q", "origin", "HEAD:main"]);
+    git_ok(&peer, &["push", "-q", "origin", "HEAD:trunk"]);
     git_ok(
         tmp.path(),
         &["clone", "-q", &path(&remote), &path(&canonical)],
@@ -280,7 +280,7 @@ fn source_sync_fast_forwards_or_refuses_naming_the_gap() {
             &["commit", "-q", "--allow-empty", "-m", &format!("ahead {n}")],
         );
     }
-    git_ok(&peer, &["push", "-q", "origin", "HEAD:main"]);
+    git_ok(&peer, &["push", "-q", "origin", "HEAD:trunk"]);
 
     sync_source_checkout(&canonical, false).expect("a clean behind checkout fast-forwards");
     assert_eq!(
@@ -296,11 +296,11 @@ fn source_sync_fast_forwards_or_refuses_naming_the_gap() {
         &peer,
         &["commit", "-q", "--allow-empty", "-m", "ahead again"],
     );
-    git_ok(&peer, &["push", "-q", "origin", "HEAD:main"]);
+    git_ok(&peer, &["push", "-q", "origin", "HEAD:trunk"]);
     let refusal =
         sync_source_checkout(&canonical, false).expect_err("diverged cannot fast-forward");
     assert!(
-        refusal.contains("is 1 commit(s) behind origin/main"),
+        refusal.contains("is 1 commit(s) behind origin/trunk"),
         "{refusal}"
     );
 }
