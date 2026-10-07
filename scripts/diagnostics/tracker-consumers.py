@@ -96,7 +96,9 @@ def _registry():
     from fno.graph import cli as graph_cli
 
     # The classifier's own structural list, never a copy: the census must
-    # enumerate the registry the guard actually walked.
+    # enumerate the registry the guard actually walked. Classification is
+    # lazy (first backlog use), so the census triggers it explicitly.
+    graph_cli.classify_backlog_verbs()
     return list(graph_cli.iter_backlog_registry())
 
 

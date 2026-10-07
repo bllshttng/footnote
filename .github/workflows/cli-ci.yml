@@ -677,7 +677,11 @@ jobs:
         # Bounded: apt-get update can hang on the hosted runner for the whole
         # job budget. A stall now fails here in minutes, named.
         timeout-minutes: 5
-        run: sudo apt-get update && sudo apt-get install -y strace
+        # The azure mirror can answer nothing; drop it so apt goes straight
+        # to archive.ubuntu.com.
+        run: |
+          sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+          sudo apt-get update && sudo apt-get install -y strace
       - name: Build release binary
         # The copy onto PATH installs the build for the freshness step below:
         # `fno doctor harness-matrix` execs the *installed* binary by design
