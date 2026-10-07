@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn outside_reason_reads_fork_deleted_fork_association_and_base_errors() {
+    fn the_outside_predicate_tables_fork_association_cache_and_fails_closed() {
         let base = "bllshttng/footnote";
         // Same repo plus OWNER reads inside.
         assert_eq!(
@@ -329,26 +329,91 @@ mod tests {
             Ok(None)
         );
         // A fork reads outside, naming the head repo.
-        assert!(outside_reason(&pull(
-            json!("stranger/footnote"),
-            base,
-            "OWNER"
-        )))
-        .unwrap()
-        .is_some();
+        let fork = outside_reason(&pull(json!("stranger/footnote"), base, "OWNER")).unwrap();
+        assert!(fork.is_some());
         // A deleted fork (null head repo) reads outside.
-        assert!(outside_reason(&pull(Value::Null, base, "OWNER")))
-            .unwrap()
-            .is_some();
+        let deleted = outside_reason(&pull(Value::Null, base, "OWNER")).unwrap();
+        assert!(deleted.is_some());
         // A same-repo non-member reads outside.
-        assert!(outside_reason(&pull(json!(base), base, "NONE")))
-            .unwrap()
-            .is_some();
+        let nonmember = outside_reason(&pull(json!(base), base, "NONE")).unwrap();
+        assert!(nonmember.is_some());
         // No base repo is an unreadable pull, not an outside one.
         let no_base = json!({"head": {"repo": json!(base)}, "author_association": "OWNER"});
-        assert!(outside_reason(&no_base).is_err());
-    }
 
+        // A cache hit answers with no fetch; a corrupt file reads as a miss.
+        let tmp = std::env::temp_dir().join(format!("pr-admission-test-{}", std::process::id()));
+        let dir = tmp.join("cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pr7 = facts(7);
+        // A cache hit: the counting fetch must stay at zero.
+        cache_fixture(
+            &dir,
+            7,
+            Some(&json!({
+                "head_repo": "stranger/footnote",
+                "base_repo": "bllshttng/footnote",
+                "author_association": "OWNER",
+                "login": "stranger",
+            })),
+        );
+        let calls = std::cell::RefCell::new(0usize);
+        let count = |_: &str, _: u64| -> Result<Value, String> {
+            *calls.borrow_mut() += 1;
+            Ok(Value::Null)
+        };
+        let out = outside_pr_in(Some(dir.as_path()), &pr7, &count);
+        assert_eq!(calls.into_inner(), 0);
+        assert!(
+            matches!(out, ProbeOutcome::Refused(reason) if reason.contains("stranger/footnote"))
+        );
+        // A corrupt file reads as a miss: one fetch, then the facts are cached.
+        std::fs::write(
+            cache_path(&dir, "bllshttng/footnote", 7).unwrap(),
+            "{not json",
+        )
+        .unwrap();
+        let fork = pull(
+            json!("stranger/footnote"),
+            "bllshttng/footnote",
+            "FIRST_TIMER",
+        );
+        let out = outside_pr_in(Some(dir.as_path()), &pr7, &|_, _| Ok(fork.clone()));
+        assert!(matches!(out, ProbeOutcome::Refused(_)));
+        let cached = read_cached(&dir, "bllshttng/footnote", 7);
+        assert_eq!(
+            cached.and_then(|c| c.get("author_association").cloned()),
+            Some(json!("FIRST_TIMER"))
+        );
+
+        // Outside reads Refused whatever the law rows say; unreadable is Inconclusive.
+        let tmp = std::env::temp_dir().join(format!("pr-admission-nc-{}", std::process::id()));
+        let dir = tmp.join("cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Any law rows at all admit nothing: outside is final.
+        let out = outside_pr_in(Some(dir.as_path()), &facts(8), &|_, _| {
+            Ok(pull(
+                json!("stranger/footnote"),
+                "bllshttng/footnote",
+                "OWNER",
+            ))
+        });
+        assert!(matches!(out, ProbeOutcome::Refused(reason) if reason.contains("never merges")));
+        // A fetch that fails reads Inconclusive, never Clear.
+        let out = outside_pr_in(Some(dir.as_path()), &facts(9), &|_, _| {
+            Err("gh down".to_string())
+        });
+        assert!(matches!(out, ProbeOutcome::Inconclusive(e) if e.contains("gh down")));
+        // A URL with no repository is Inconclusive.
+        let no_slug = PrFacts {
+            number: 10,
+            url: "not-a-pr-url".to_string(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            outside_pr_in(Some(dir.as_path()), &no_slug, &|_, _| Ok(Value::Null)),
+            ProbeOutcome::Inconclusive(_)
+        ));
+    }
     fn decisions(rows: Vec<Value>) -> Vec<u8> {
         json!({"decisions": rows}).to_string().into_bytes()
     }
@@ -357,8 +422,26 @@ mod tests {
         json!({"decision": decision, "authority_source": authority, "decision_id": id})
     }
 
+    fn cache_fixture(dir: &Path, pr: u64, body: Option<&Value>) -> PathBuf {
+        let slug = "bllshttng/footnote";
+        let path = cache_path(dir, slug, pr).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if let Some(v) = body {
+            std::fs::write(&path, v.to_string()).unwrap();
+        }
+        path
+    }
+
+    fn facts(pr: u64) -> PrFacts {
+        PrFacts {
+            number: pr,
+            url: format!("https://github.com/bllshttng/footnote/pull/{pr}"),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn held_reads_only_a_live_operator_hold_row() {
+    fn the_pr_hold_row_reads_held_and_disarms_on_record() {
         assert_eq!(
             held(None),
             Err("the decisions read did not answer".to_string())
@@ -388,130 +471,29 @@ mod tests {
             )]))),
             Ok(Some("d-3".to_string()))
         );
-    }
 
-    fn cache_fixture(dir: &Path, pr: u64, body: Option<&Value>) -> PathBuf {
-        let slug = "bllshttng/footnote";
-        let path = cache_path(dir, slug, pr).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        if let Some(v) = body {
-            std::fs::write(&path, v.to_string()).unwrap();
-        }
-        path
-    }
-
-    fn facts(pr: u64) -> PrFacts {
-        PrFacts {
-            number: pr,
-            url: format!("https://github.com/bllshttng/footnote/pull/{pr}"),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn outside_pr_cache_hit_answers_with_no_fetch_and_corrupt_reads_as_miss() {
-        let tmp = std::env::temp_dir().join(format!("pr-admission-test-{}", std::process::id()));
-        let dir = tmp.join("cache");
-        let _ = std::fs::remove_dir_all(&dir);
-        let facts = facts(7);
-        // A cache hit: the counting fetch must stay at zero.
-        cache_fixture(
-            &dir,
-            7,
-            Some(&json!({
-                "head_repo": "stranger/footnote",
-                "base_repo": "bllshttng/footnote",
-                "author_association": "OWNER",
-                "login": "stranger",
-            })),
-        );
-        let calls = std::cell::RefCell::new(0usize);
-        let count = |_: &str, _: u64| -> Result<Value, String> {
-            *calls.borrow_mut() += 1;
-            Ok(Value::Null)
-        };
-        let out = outside_pr_in(Some(dir.as_path()), &facts, &count);
-        assert_eq!(calls.into_inner(), 0);
-        assert!(
-            matches!(out, ProbeOutcome::Refused(reason) if reason.contains("stranger/footnote"))
-        );
-        // A corrupt file reads as a miss: one fetch, then the facts are cached.
-        std::fs::write(
-            cache_path(&dir, "bllshttng/footnote", 7).unwrap(),
-            "{not json",
-        )
-        .unwrap();
-        let fork = pull(
-            json!("stranger/footnote"),
-            "bllshttng/footnote",
-            "FIRST_TIMER",
-        );
-        let out = outside_pr_in(Some(dir.as_path()), &facts, &|_, _| Ok(fork.clone()));
-        assert!(matches!(out, ProbeOutcome::Refused(_)));
-        let cached = read_cached(&dir, "bllshttng/footnote", 7);
-        assert_eq!(
-            cached.and_then(|c| c.get("author_association").cloned()),
-            Some(json!("FIRST_TIMER"))
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn outside_pr_never_reads_clear_when_refused_and_fails_closed_unreadable() {
-        let tmp = std::env::temp_dir().join(format!("pr-admission-nc-{}", std::process::id()));
-        let dir = tmp.join("cache");
-        let _ = std::fs::remove_dir_all(&dir);
-        // Any law rows at all admit nothing: outside is final.
-        let out = outside_pr_in(Some(dir.as_path()), &facts(8), &|_, _| {
-            Ok(pull(
-                json!("stranger/footnote"),
-                "bllshttng/footnote",
-                "OWNER",
-            ))
-        });
-        assert!(matches!(out, ProbeOutcome::Refused(reason) if reason.contains("never merges")));
-        // A fetch that fails reads Inconclusive, never Clear.
-        let out = outside_pr_in(Some(dir.as_path()), &facts(9), &|_, _| {
-            Err("gh down".to_string())
-        });
-        assert!(matches!(out, ProbeOutcome::Inconclusive(e) if e.contains("gh down")));
-        // A URL with no repository is Inconclusive.
-        let no_slug = PrFacts {
-            number: 10,
-            url: "not-a-pr-url".to_string(),
-            ..Default::default()
-        };
-        assert!(matches!(
-            outside_pr_in(Some(dir.as_path()), &no_slug, &|_, _| Ok(Value::Null)),
-            ProbeOutcome::Inconclusive(_)
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn after_record_disarms_only_an_operator_pr_hold_row() {
+        // Recording an operator pr-hold row disarms exactly once; every
+        // other authority, decision or subject runs no gh call.
         let seen = std::cell::RefCell::new(0usize);
         let gh = |_: &[&str]| -> Result<(bool, String), String> {
             *seen.borrow_mut() += 1;
             Ok((true, String::new()))
         };
-        // An operator pr-hold row runs exactly one disable-auto.
         let out = after_record_with(
             &gh,
             "pr-hold:bllshttng/footnote#7",
             HOLD_DECISION,
             Some("operator"),
         );
-        assert_eq!(seen.into_inner(), 1);
+        assert_eq!(*seen.borrow(), 1);
         assert_eq!(
             out,
             Some("pr-hold: disabled an armed auto-merge on bllshttng/footnote#7".to_string())
         );
-        // A crown row, a release decision, another subject: no gh call.
         assert!(after_record_with(&gh, "pr-hold:o/r#7", HOLD_DECISION, Some("crown")).is_none());
         assert!(after_record_with(&gh, "pr-hold:o/r#7", "release", Some("operator")).is_none());
         assert!(after_record_with(&gh, "node:x-abcd", HOLD_DECISION, Some("operator")).is_none());
-        assert_eq!(seen.into_inner(), 1);
+        assert_eq!(*seen.borrow(), 1);
         // A gh failure still returns the manual-disarm line.
         let out = after_record_with(
             &|_| Err("spawn failed".to_string()),
