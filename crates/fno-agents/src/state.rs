@@ -755,7 +755,11 @@ pub fn rfc3339_like_to_secs(s: &str) -> Option<u64> {
 /// Python's `AgentEntry` as `mux: Optional[dict]` (X3 rule).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MuxRef {
+    /// Defaulted so a structurally impossible `{}` ref still decodes; the
+    /// reconcile pass is what clears it.
+    #[serde(default)]
     pub session: String,
+    #[serde(default)]
     pub pane_id: u64,
 }
 
@@ -1032,6 +1036,8 @@ pub struct RegistryEntry {
     pub status: AgentStatus,
     #[serde(default)]
     pub last_message_at: Option<String>,
+    /// Python's `AgentEntry` defaults it, so a hand-seeded row may omit it.
+    #[serde(default)]
     pub created_at: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `pid: Optional[int]`: skip when absent so a round-tripped
