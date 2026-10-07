@@ -43,9 +43,9 @@ Base ddb2ecc7ff (origin/main at the start of the pass). The pass rebuilt the cam
 
 | Measure | Before | After | Ratio |
 |---|---:|---:|---:|
-| Python declarations | 2,126 | 1,364 | 0.64 |
+| Python declarations | 2,126 | 1,365 | 0.64 |
 | Rust declarations | 451 | 423 | 0.94 |
-| All declarations | 2,577 | 1,787 | 0.69 |
+| All declarations | 2,577 | 1,788 | 0.69 |
 | Python collected cases | 2,549 | 1,718 | 0.67 |
 | Rust collected cases | unmeasured | unmeasured | none |
 
@@ -64,9 +64,13 @@ Each deletion had no caller outside its own tests. The proof is an `rg` over cli
 
 Four Python functions are dead but still imported by tests outside K1: `FailoverController`, `spawn_with_provider_snapshot`, `compute_per_provider_cost` and `check_per_provider_caps`. The campaign that owns test_failover.py, test_dispatch.py and test_cost.py can retire them with those tests.
 
-### A cut the lead reversed
+### Cuts the lead reversed
 
 One audit cut tests/hooks/test_merge_guard_stacked_base.py from eight tests to one. That removed the only test proving the stale-base veto runs ahead of the override marker, which is a fail-closed path. The lead restored the file and cut only the missing-binary case, which takes the same exception branch as the timeout case.
+
+The same audit cut `test_generator_preserves_executable_bit` from cli/tests/unit/test_skill_bundles.py. The bundle freshness gate compares content only, so that test was the one check that a committed bundled script keeps its executable bit. The lead restored it.
+
+The review pass also found references to deleted tests. Two skip-baseline rows, the lazy-imports contract list and two model-routing comments named them. Those references are gone.
 
 ### Preservation spot-check
 
@@ -218,7 +222,7 @@ One row per K1 file. A "Kept:" cell lists the surviving tests by name where the 
 | `cli/tests/unit/test_setup_id.py` | 4 | 2 | A bad prefix and a bad width are each refused with nothing written. |
 | `cli/tests/unit/test_setup_integration.py` | 34 | 16 | One failure never aborts the rest, installed CLI not reinstalled, failures map to failed, pi and agy through Rust. |
 | `cli/tests/unit/test_setup_wizard.py` | 17 | 10 | Defaults validate, re-prompt, project key lands in the project file, cancel keeps earlier writes, a raising doctor is contained. |
-| `cli/tests/unit/test_skill_bundles.py` | 21 | 11 | Kept: freshness check passes for committed state, audit passes for committed state, parser emits clean error on malformed manifest, generator fails on missing source, strip passthrough when no frontmatter, rewrite rejects missing required fields, rewrite rejects scalar tools, rewrite rejects non string tools entries, strip fails loudly on unterminated frontmatter, parser rejects agent missing rewrite frontmatter, generator handles mixed manifest. |
+| `cli/tests/unit/test_skill_bundles.py` | 21 | 12 | Kept: generator preserves executable bit, freshness check passes for committed state, audit passes for committed state, parser emits clean error on malformed manifest, generator fails on missing source, strip passthrough when no frontmatter, rewrite rejects missing required fields, rewrite rejects scalar tools, rewrite rejects non string tools entries, strip fails loudly on unterminated frontmatter, parser rejects agent missing rewrite frontmatter, generator handles mixed manifest. |
 | `cli/tests/unit/test_verb_collapse_dispatch.py` | 5 | 4 | Kept: t1 action is an argument that reaches the original typed command, keep action remains a registered leaf, t1 action remains available to shell completion, collapsed group exposes the full catalog to scoped help. |
 | `cli/tests/unit/test_verb_collapse_map.py` | 11 | 11 | Kept: map covers current surface once, map matches the uncollapsed click action inventory, t1 preserves the pre collapse typing string, every non t1 row carries a reason and reference cost, all preamble named leaves are t1 or keep, allocation projects no more than 99 registered leaves, live baseline matches the projected allocation, runtime keep registry matches the checked in allocation, each python group dispatcher reaches the original action command, map refusal carries a parseable template row, flags refusal says what to do about each side. |
 | `cli/tests/unit/test_verb_moves.py` | 27 | 15 | Kept: deprecated entry announces the bare destination, flag first argument announces the bare destination, alias kind never prints, missing destination serves old registration without false announcement, registered destination forwards byte identical, hot leaf forwards silently through the destination, post expiry dispatch forwards hot leaf and rejects cold leaf, post expiry rejects cold leaf when destination is missing, real pr hot leaf help stays silent, real pr cold leaf help names registered destination, every moved spelling is hidden, restored root spellings stay hidden so menu caps hold, help all renders no moved spellings block, help all classifies a moved eager command too, deleted verb refuses naming its replacement. |
