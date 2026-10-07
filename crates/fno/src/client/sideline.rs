@@ -171,16 +171,19 @@ impl View {
     /// click map, so the gestures never disagree on the footer's row: when
     /// the rows overflow, the footer pins directly above the org block, and
     /// the row there is the footer's even though its display row has
-    /// scrolled away. The pinned test reads the same raw region
-    /// `sideline_visible_rows` starts from, so a list that exactly fits
-    /// never reads as pinned here.
+    /// scrolled away. The pinned copy paints at the absolute row `list_rows`
+    /// names in both compositions: a `top +` form held only full-screen and
+    /// read one row up when docked, so hover and click landed on the list
+    /// row behind the buttons. The pinned test reads the
+    /// same raw region `sideline_visible_rows` starts from, so a list that
+    /// exactly fits never reads as pinned here.
     pub(super) fn pinned_footer_row_index(&self, row: u16, top: usize) -> Option<usize> {
         let list_rows = (self.term.0 as usize)
             .saturating_sub(1) // the strip row
             .saturating_sub(self.org_block_rows());
         let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
         let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
-        if !pinned || row < top as u16 || row as usize != top + list_rows.saturating_sub(2) {
+        if !pinned || row < top as u16 || row as usize != list_rows {
             return None;
         }
         self.painted_rows()
