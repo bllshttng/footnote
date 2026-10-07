@@ -139,7 +139,7 @@ mod tests {
             .provenance
             .as_object_mut()
             .expect("provenance is an object")
-            .insert("authority_source".into(), json!("crown"));
+            .insert("authority_source".into(), json!("role"));
         seed_question(
             &agent_req,
             &ask("q-open2", "which lane?", None, Some("x-1")),
@@ -684,9 +684,9 @@ mod tests {
 
         // (e) The same answer without a live team: refused.
         let tmp = tempfile::tempdir().unwrap();
-        let mut req = request(&tmp, "q-uncrowned", Some("C: do as asked"));
+        let mut req = request(&tmp, "q-unpromoted", Some("C: do as asked"));
         req.provenance = json!({"decided_by": "01a0cbdd", "authority_source": "team"});
-        seed_question(&req, &ask_from("q-uncrowned", "01a0cbdd", "which lane?"));
+        seed_question(&req, &ask_from("q-unpromoted", "01a0cbdd", "which lane?"));
         let result = run_clear(&req);
         assert_eq!(result.exit_code, 3, "{:?}", result.lines);
         assert!(

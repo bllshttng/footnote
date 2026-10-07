@@ -28,6 +28,7 @@ fn main() {
     sync_harness_capabilities();
     sync_event_store();
     sync_module_copy("live_store_fence");
+    sync_module_copy("role_migration");
     sync_module_copy("store_conn");
     sync_module_copy("otel_read");
     sync_merge_posture();
@@ -305,7 +306,7 @@ fn sync_module_copy(name: &str) {
     };
     let Some(root) = repo_root() else { return };
     let copy = root.join(format!("crates/fno/src/{name}.rs"));
-    if !copy.is_file() && name != "otel_read" {
+    if !copy.parent().is_some_and(Path::is_dir) {
         return;
     }
     let marker = "\n#[cfg(test)]\nmod tests {";
@@ -358,7 +359,7 @@ fn sync_merge_posture() {
 
 /// PRODUCE the downstream copy of the operator-page reload script.
 ///
-/// The crate owns `src/page_reload.js` (`king_ledger.rs` `include_str!`s it),
+/// The crate owns `src/page_reload.js` (`lead_ledger.rs` `include_str!`s it),
 /// and the board renderer reads the byte copy
 /// `cli/src/fno/graph/page_reload.js` as package data. The cli-ci
 /// generated-copies step is the tripwire for a hand edit to the copy.

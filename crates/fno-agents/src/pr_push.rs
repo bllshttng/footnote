@@ -455,7 +455,7 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
     }
     let (ok, _, err) =
         crate::pr_push::run_labeled("pr-push", &ctx.git_bin, &push_args, &ctx.cwd, READ_TIMEOUT)
-            .unwrap_or((false, String::new(), "push spawn failed".to_string()));
+            .unwrap_or_else(|error| (false, String::new(), error));
     if !ok {
         return PushOutcome::PushFailed(err);
     }

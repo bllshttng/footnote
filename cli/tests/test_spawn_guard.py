@@ -452,7 +452,7 @@ def test_a_held_claim_with_no_target_init_reads_unproven(claims_tmp):
 
     `fno backlog next --claim <holder> --external` and a bare `fno agents claim
     acquire` both write this key with nobody launched. Calling that a live
-    worker tells a king the opposite of the truth at the moment it decides
+    worker tells a lead the opposite of the truth at the moment it decides
     whether to staff the node.
     """
     import os
@@ -581,18 +581,18 @@ def test_a_worker_row_block_with_no_claim_names_the_row(
     exist and dropped the only actionable field."""
     monkeypatch.setattr(
         "fno.graph.statuses.live_worked_node_ids",
-        lambda **_kw: {"x-8888": ["king-a792-control"]},
+        lambda **_kw: {"x-8888": ["lead-a792-control"]},
     )
     res = _invoke("x-8888", "--holder", "probe:1", "--no-reserve", "--json")
     assert res.exit_code == 0
     obj = json.loads(res.output)
     assert obj["verdict"] == "already-running"
     assert obj["reason"] == "worker-row"
-    assert obj["worker"] == "king-a792-control"
+    assert obj["worker"] == "lead-a792-control"
     assert "holder" not in obj
     assert obj["remedy"] == (
-        "fno agents peek king-a792-control; if its run is finished, "
-        "fno agents stop king-a792-control"
+        "fno agents peek lead-a792-control; if its run is finished, "
+        "fno agents stop lead-a792-control"
     )
 
 

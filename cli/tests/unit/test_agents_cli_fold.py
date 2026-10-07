@@ -27,7 +27,7 @@ def test_agents_registers_the_eight_folded_roots() -> None:
     assert {
         "autonomy",
         "claim",
-        "king",
+        "lead",
         "mail",
         "mcp",
         "restart",
@@ -36,11 +36,11 @@ def test_agents_registers_the_eight_folded_roots() -> None:
     } <= _commands(agents_app)
 
 
-def test_agents_king_excludes_board_while_inbox_keeps_it() -> None:
+def test_agents_lead_excludes_board_while_inbox_keeps_it() -> None:
     from fno.inbox.cli import inbox_app
-    from fno.king.cli import agents_king_app
+    from fno.lead.cli import agents_lead_app
 
-    assert "board" not in _commands(agents_king_app)
+    assert "board" not in _commands(agents_lead_app)
     assert "board" in _commands(inbox_app)
 
 
@@ -50,7 +50,7 @@ def test_old_agents_fold_spellings_forward_and_teach() -> None:
     for old, destination in (
         ("autonomy", "agents autonomy"),
         ("claim", "agents claim"),
-        ("king", "agents king"),
+        ("lead", "agents lead"),
         ("mcp", "agents mcp"),
         ("roles", "agents roles"),
         ("worker", "agents worker"),
@@ -77,12 +77,12 @@ def test_restored_mail_stays_folded_at_agents_as_a_silent_alias() -> None:
     assert "is now" not in (result.stderr or "")
 
 
-def test_old_king_board_forwards_to_inbox_not_agents() -> None:
+def test_old_lead_board_forwards_to_inbox_not_agents() -> None:
     from fno.cli import app
 
-    result = runner.invoke(app, ["king", "board", "--help"])
+    result = runner.invoke(app, ["lead", "board", "--help"])
     assert result.exit_code == 0, result.output
-    assert "fno king board is now fno inbox board" in (result.stderr or "")
+    assert "fno lead board is now fno inbox board" in (result.stderr or "")
 
 
 def test_rust_shellouts_use_the_folded_mcp_and_board_paths() -> None:
@@ -90,7 +90,7 @@ def test_rust_shellouts_use_the_folded_mcp_and_board_paths() -> None:
     termination = (REPO_ROOT / "crates/fno-agents/src/lead_termination.rs").read_text()
 
     assert '.args(["agents", "mcp", "send", "--session-id", channel_id])' in daemon
-    # The king's board read is IN PROCESS since x-25b8: the stop gate calls the
+    # The lead's board read is IN PROCESS since x-25b8: the stop gate calls the
     # collector as a library. The pinned invariant is the library call with the
     # stop-gate budget handed in, never a subprocess spelling.
     assert "crate::org_board::read_board(&opts)" in termination
@@ -108,7 +108,7 @@ def test_folded_groups_do_not_consume_agents_leaf_cap() -> None:
     from fno.cli import COLLAPSE_KEEP
 
     assert COLLAPSE_KEEP["agents"].isdisjoint(
-        {"autonomy", "claim", "dispatch", "king", "mail", "mcp", "roles", "worker"}
+        {"autonomy", "claim", "dispatch", "lead", "mail", "mcp", "roles", "worker"}
     )
 
 
@@ -117,7 +117,7 @@ def test_importing_agents_cli_does_not_import_folded_subgroups() -> None:
         "fno.autonomy_cli",
         "fno.claims.cli",
         "fno.dispatch",
-        "fno.king.cli",
+        "fno.lead.cli",
         "fno.mail.cli",
         "fno.mcp.cli",
         "fno.restart",

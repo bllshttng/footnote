@@ -153,12 +153,12 @@ def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     worked map renders as worked_by and flips an unheld node's verdict to
     unknown."""
     s1 = {
-        "name": "king-a792-control",
+        "name": "lead-a792-control",
         "state": "working",
         "cwd": "/Users/bb16/code/footnote/footnote",
         "row_id": "s-1",
         "node": None,
-        "crowned": False,
+        "promoted": False,
     }
     unresolved = tuple(
         {**s1, "row_id": f"s-other-{i}", "cwd": f"/wt/other-{i}"}
@@ -169,7 +169,7 @@ def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     _graph_entry(monkeypatch, session_id="s-1")
     monkeypatch.setattr(
         "fno.graph.statuses._worked_nodes_reply",
-        lambda rows: {"ac1-node": ["king-a792-control"]},
+        lambda rows: {"ac1-node": ["lead-a792-control"]},
     )
     monkeypatch.setattr(
         "fno.claims.cli._claims_core.claim_status",
@@ -181,7 +181,7 @@ def test_ac1_hp_join_resolves_an_unresolved_row_through_the_graph(monkeypatch):
     assert result.exit_code == 0, result.output
     info = json.loads(result.stdout)
     assert info["state"] == "unknown"
-    assert info["worked_by"] == ["king-a792-control"]
+    assert info["worked_by"] == ["lead-a792-control"]
     assert info["basis"] == "live-worker-degraded-coverage"
 
 

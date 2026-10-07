@@ -7,7 +7,7 @@
 //! But a row with no harness session identity is refused a receipt
 //! (`receipt.rs` builds none), so its removal exists ONLY as the
 //! `registry_row_removed` event the registry choke point emits. Measured
-//! 2026-09-28: a teamed heir dropped out of the feed in exactly that
+//! 2026-09-28: a teamed successor dropped out of the feed in exactly that
 //! shape - the event sat in the store, the projection never read it.
 //!
 //! The fold reads the receipts AND the registry events, keys every cause by
@@ -486,7 +486,7 @@ mod tests {
     fn a_team_vacated_before_the_removal_is_not_reported() {
         let global = lines(&[
             r#"{"ts":"2026-09-28T10:00:00Z","type":"agent_teamed","source":"python","data":{"level":1,"name":"quill","scope":"fno"}}"#,
-            r#"{"ts":"2026-09-28T11:00:00Z","type":"agent_team_vacated","source":"python","data":{"cause":"abdicated","holder":"quill","level":1,"scope":"fno"}}"#,
+            r#"{"ts":"2026-09-28T11:00:00Z","type":"agent_team_vacated","source":"python","data":{"cause":"stepped_down","holder":"quill","level":1,"scope":"fno"}}"#,
         ]);
         let agent = r#"{"ts":"2026-09-28T12:00:00Z","type":"registry_row_removed","source":"python","data":{"name":"quill","receipt_staged":false,"remover":"daemon"}}"#;
         let out = fold(&[], agent, &global);

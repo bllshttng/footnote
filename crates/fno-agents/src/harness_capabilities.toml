@@ -1831,35 +1831,35 @@ proof = "goal-active"
 
 [harness.claude.hooks.lead_guard]
 state = "supported"
-via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/lead_guard.rs"]
+via = ["hooks/hooks.json", "hooks/lead-delegation-guard.sh", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.claude.hooks.lead_reinject]
 state = "supported"
-via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
+via = ["hooks/context-hooks.json", "hooks/lead-postcompact-reinject.sh"]
 
 [harness.codex.hooks.lead_guard]
 state = "supported"
-via = ["hooks/codex-hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/hook/lead_guard.rs"]
+via = ["hooks/codex-hooks.json", "hooks/lead-delegation-guard.sh", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.codex.hooks.lead_reinject]
 state = "supported"
-via = ["hooks/context-hooks.json", "hooks/king-postcompact-reinject.sh"]
+via = ["hooks/context-hooks.json", "hooks/lead-postcompact-reinject.sh"]
 
 [harness.agy.hooks.lead_guard]
 state = "supported"
-via = ["hooks/agy-king-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/fno-agents/src/hook/lead_guard.rs"]
+via = ["hooks/agy-lead-guard.sh", "crates/fno-agents/src/agy_hooks.rs", "crates/fno-agents/src/hook/lead_guard.rs"]
 
 [harness.agy.hooks.lead_reinject]
 state = "impossible"
-reason = "agy exposes no compaction event (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop); the crown line lands at invocationNum 0 in hooks/agy-team-inject.sh"
+reason = "agy exposes no compaction event (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop); the role line lands at invocationNum 0 in hooks/agy-team-inject.sh"
 
 [harness.opencode.hooks.lead_guard]
 state = "supported"
-via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-delegation-guard.sh"]
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/lead-delegation-guard.sh"]
 
 [harness.opencode.hooks.lead_reinject]
 state = "supported"
-via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/king-postcompact-reinject.sh", "hooks/target-postcompact-reinject.sh"]
+via = ["cli/src/fno/setup/assets/opencode/footnote.js", "hooks/lead-postcompact-reinject.sh", "hooks/target-postcompact-reinject.sh"]
 
 [harness.pi.hooks.lead_guard]
 state = "supported"
@@ -1867,11 +1867,11 @@ via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/hook/le
 
 [harness.pi.hooks.lead_reinject]
 state = "supported"
-via = ["cli/src/fno/setup/assets/pi/footnote.ts", "hooks/king-postcompact-reinject.sh"]
+via = ["cli/src/fno/setup/assets/pi/footnote.ts", "hooks/lead-postcompact-reinject.sh"]
 
 [harness.footnote.hooks.lead_guard]
 state = "supported"
-via = ["hooks/hooks.json", "hooks/king-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/hooks.rs"]
+via = ["hooks/hooks.json", "hooks/lead-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/hooks.rs"]
 
 [harness.footnote.hooks.lead_reinject]
 state = "impossible"

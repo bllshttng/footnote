@@ -219,6 +219,11 @@ fn judge_segment(
 /// the first stage's command position, so a wrapper the Python prefix regex
 /// never saw (`env pgrep | head`) is an intended flip of the port.
 fn is_producer(head: &str, argv: &[String]) -> bool {
+    // A help tail's output is usage text, not a listing: truncating it is
+    // harmless, so no producer shape applies while a help flag rides along.
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        return false;
+    }
     match head {
         "pgrep" | "ls" | "find" => true,
         "ps" => argv
@@ -325,6 +330,19 @@ mod tests {
         allowed("cat README.md | head -20");
         allowed("pgrep -fl fno-agents | tail -F");
         allowed("ls | head -20 | wc -l");
+    }
+
+    #[test]
+    fn a_help_tail_never_reads_as_a_listing() {
+        // The help text is not rows: cutting it is harmless, so the same
+        // producer shapes that refuse a listing truncation allow a help
+        // tail through.
+        allowed("fno backlog list --help | head -20");
+        allowed("fno backlog find x -h | head -5");
+        allowed("git worktree list --help | head -30");
+        // The listing itself stays guarded.
+        denied("fno backlog list | head -20");
+        denied("fno backlog find x | head -5");
     }
 
     #[test]

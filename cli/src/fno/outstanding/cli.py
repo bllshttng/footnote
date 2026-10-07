@@ -13,7 +13,7 @@ from typing import List
 
 import typer
 
-from fno.king.lane import read_lane
+from fno.lead.lane import read_lane
 from fno.outstanding.core import OutstandingError, collect, render
 from fno.outstanding.mine import mine_app
 from fno.user import display_name
@@ -87,13 +87,13 @@ def _session_id() -> "str | None":
     return env_session.strip() if env_session and env_session.strip() else None
 
 
-def _is_crowned() -> bool:
-    """True only when this session's registry row carries a crown.
+def _is_promoted() -> bool:
+    """True only when this session's registry row carries a role.
 
     ``FNO_AGENT_SELF`` (tier 1 of ``resolve_self``) answers with no
-    session-id dependency, which is what lets a spawned king resolve this at
+    session-id dependency, which is what lets a spawned lead resolve this at
     session start before the harness has written anything else. Any
-    exception degrades to "not crowned" and never fails the command:
+    exception degrades to "not promoted" and never fails the command:
     `fno outstanding` runs on the session-start path under a bound, and
     degrading this way costs one missing action line, not a missing lane.
     """
@@ -107,7 +107,7 @@ def _is_crowned() -> bool:
             registry = load_registry()
         except RegistryVersionError:
             pass
-        # READ-ONLY (LD5): resolves the crown holder to display it.
+        # READ-ONLY (LD5): resolves the role holder to display it.
         ident = resolve_harness_identity()
         result = resolve_self(
             env=os.environ,
@@ -115,9 +115,9 @@ def _is_crowned() -> bool:
             session_uuid=ident.session_id,
             harness=ident.harness,
         )
-    except Exception:  # noqa: BLE001 - an unresolved crown is not an error here
+    except Exception:  # noqa: BLE001 - an unresolved role is not an error here
         return False
-    return result.crown is not None
+    return result.role is not None
 
 
 @outstanding_app.callback(invoke_without_command=True)
@@ -148,7 +148,7 @@ def report(
         typer.echo(json.dumps(outstanding.as_dict(), separators=(",", ":")))
         return
 
-    block = render(outstanding, session_id=_session_id(), crowned=_is_crowned())
+    block = render(outstanding, session_id=_session_id(), promoted=_is_promoted())
     if block:
         typer.echo(block, nl=False)
 
@@ -296,7 +296,7 @@ def clear(
     authority: str = typer.Option(
         None,
         "--authority",
-        help="How the answerer was entitled to answer: 'operator', 'crown', "
+        help="How the answerer was entitled to answer: 'operator', 'role', "
         "'agent', or 'beastmode'. Omit to claim none.",
     ),
     origin: str = typer.Option(
@@ -311,7 +311,7 @@ def clear(
     from fno.outstanding.deliver import deliver_answer
     from types import SimpleNamespace
 
-    authority_sources = ("operator", "crown", "agent", "beastmode")
+    authority_sources = ("operator", "role", "agent", "beastmode")
     if authority is not None and authority not in authority_sources:
         typer.echo(f"outstanding: --authority '{authority}' is not one of {', '.join(authority_sources)}. Nothing was closed.", err=True)
         raise typer.Exit(2)
@@ -340,7 +340,7 @@ def clear(
             remedy = {
                 "unknown-origin": "",
                 "unattributed": "This process has no session identity and no terminal, so it is not an agent and has no chat to compose in. Run it from an attended terminal, or from a real agent session, and answer again.",
-                "authority": "An agent answers as agent or crown. The superuser lane is not an agent's to claim. Drop --authority operator and answer again.",
+                "authority": "An agent answers as agent or role. The superuser lane is not an agent's to claim. Drop --authority operator and answer again.",
                 "origin-authority": f"The refusal is about the claimed --origin {answer_meta.get('origin')!r}, not about who you are. Drop --origin (or drop --authority operator) and answer again.",
             }.get(kind, "")
             typer.echo(f"outstanding: refused: {refusal}. Nothing was closed; all {len(question_ids)} question(s) stay open." + (f"\n{remedy}" if remedy else ""), err=True)

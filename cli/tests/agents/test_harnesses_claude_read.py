@@ -42,7 +42,7 @@ def test_claude_agents_json_accepts_the_current_claude_row_shape(monkeypatch):
             {
                 "id": "907fc8c5",
                 "sessionId": "907fc8c5-137e-44ff-95a0-f02b038ffefe",
-                "name": "king-crown-agents",
+                "name": "lead-role-agents",
                 "state": "working",
                 "kind": "background",
                 "cwd": "/repo",
@@ -111,7 +111,7 @@ def test_claude_agents_json_prefers_state_over_status_on_live_rows(monkeypatch):
             "kind": "background",
             "startedAt": 1786107224171,
             "sessionId": "6500bad9-7fe4-4303-acfe-16270c12333c",
-            "name": "king-x-b917-wave16",
+            "name": "lead-x-b917-wave16",
             "status": "idle",
             "state": "working",
         },

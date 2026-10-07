@@ -29,7 +29,7 @@ def _hermetic_top(monkeypatch, entries=(), workers=()):
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: list(entries))
     monkeypatch.setattr("fno.agents.top.census", lambda: LiveCensus(workers=list(workers)))
     monkeypatch.setattr("fno.agents.top.lane_rows", lambda: [])
-    monkeypatch.setattr("fno.agents.top._crown_map", lambda: {})
+    monkeypatch.setattr("fno.agents.top._role_map", lambda: {})
     monkeypatch.setattr(
         "fno.agents.session_truth.resolve_session_truth",
         lambda handle, **kw: {"state": "working", "last_activity_age_s": 30},

@@ -119,10 +119,10 @@ fn auto_wire_pure_contracts_hold() {
     // The agy adapter paths parse three lines; "-" is an absent adapter, not
     // a missing engine, and fewer than three lines refuse.
     assert_eq!(
-        parse_agy_paths("/a/stop.sh\n/crown.sh\n/guard.sh"),
+        parse_agy_paths("/a/stop.sh\n/role.sh\n/guard.sh"),
         Some([
             "/a/stop.sh".to_string(),
-            "/crown.sh".to_string(),
+            "/role.sh".to_string(),
             "/guard.sh".to_string()
         ])
     );

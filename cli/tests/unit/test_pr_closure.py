@@ -561,7 +561,7 @@ def test_bind_skips_already_done_node_without_refusing_batch():
 
 # ---- Open-PR binding classification (x-d3c6) ----
 #
-# The pure projection the reconcile heal, `fno do pr list`, and the king board
+# The pure projection the reconcile heal, `fno do pr list`, and the lead board
 # all share: one open-PR row -> bound / missing / untracked / ambiguous, with a
 # node id only when exactly one real node resolves.
 

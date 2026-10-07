@@ -2,15 +2,15 @@ id: replay-x-a8f3
 tier: capability
 repo_fixture: 3b12743738da7c98f9da631343b77e35837572ae
 prompt: |
-  Port the king wake pass from cli/src/fno/pr_watch/_king_wake.py into crates/fno-agents and delete the Python leg
+  Port the lead wake pass from cli/src/fno/pr_watch/_lead_wake.py into crates/fno-agents and delete the Python leg
 
-  Crown vellum asked for this in ruling d-f092f044 (2026-09-28), which granted x-e2e3 a 28-line Python repair to the king wake pass and asked that the port be filed as its own node.
+  Role vellum asked for this in ruling d-f092f044 (2026-09-28), which granted x-e2e3 a 28-line Python repair to the lead wake pass and asked that the port be filed as its own node.
 
-  The king wake pass is Python: run_king_wake in cli/src/fno/pr_watch/_king_wake.py (825 lines), called from _phase_king_wake in cli/src/fno/pr_watch/cli.py. It has broken four times as a starved arm (x-fecb, x-c9e8, x-3170, x-7862, x-e69d, x-e2e3). Each fix was a Python repair under the file budget. Law d-b6cc1a2a says new code lands in crates/, and d-1d474a79 says Rust-adjacent Python converts.
+  The lead wake pass is Python: run_lead_wake in cli/src/fno/pr_watch/_lead_wake.py (825 lines), called from _phase_lead_wake in cli/src/fno/pr_watch/cli.py. It has broken four times as a starved arm (x-fecb, x-c9e8, x-3170, x-7862, x-e69d, x-e2e3). Each fix was a Python repair under the file budget. Law d-b6cc1a2a says new code lands in crates/, and d-1d474a79 says Rust-adjacent Python converts.
 
-  Scope: move the pass into crates/fno-agents (the daemon already runs the king_settle arm in arm_watch.rs and reads the court in court_fold.rs, and graph_store::read_rows reads the graph without the Python pydantic pass). Keep the session truth read in Python through the `fno agents truth --handles` batch verb, as crates/fno-agents/src/truth_probe.rs:1-6 requires. Carry over: the court and answers reads, the bus mail trigger, the escalation-answer trigger, the board hash sidecar, the backstop, the admit-and-bill ledger (cli/src/fno/king/wake.py admit_wake, which shares a flock with the Rust arming path), the successor respawn and its ceiling question, and the dispatch walk. Delete the Python leg and its tests in the same PR, and retire the king_wake phase from the pr-watch tick.
+  Scope: move the pass into crates/fno-agents (the daemon already runs the lead_settle arm in arm_watch.rs and reads the team in team_fold.rs, and graph_store::read_rows reads the graph without the Python pydantic pass). Keep the session truth read in Python through the `fno agents truth --handles` batch verb, as crates/fno-agents/src/truth_probe.rs:1-6 requires. Carry over: the team and answers reads, the bus mail trigger, the escalation-answer trigger, the board hash sidecar, the backstop, the admit-and-bill ledger (cli/src/fno/lead/wake.py admit_wake, which shares a flock with the Rust arming path), the successor respawn and its ceiling question, and the dispatch walk. Delete the Python leg and its tests in the same PR, and retire the lead_wake phase from the pr-watch tick.
 
-  Verify: the king_wake arm row is written by the daemon and reads evaluated=K/K on three consecutive beats with 18 or more live workers; `rg -n run_king_wake cli/src` returns nothing.
+  Verify: the lead_wake arm row is written by the daemon and reads evaluated=K/K on three consecutive beats with 18 or more live workers; `rg -n run_lead_wake cli/src` returns nothing.
 grade:
   - kind: exit
     command: "git checkout 469b2356a62e39f119caba5e6e78032a844e7106 -- cli/tests/test_pr_read_budget.py cli/tests/unit/test_harness_map_roster.py && (cd cli && uv run pytest tests/test_pr_read_budget.py tests/unit/test_harness_map_roster.py -q)"
