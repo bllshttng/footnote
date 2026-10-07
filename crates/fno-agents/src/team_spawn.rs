@@ -39,25 +39,25 @@ fn validate(payload: &Value) -> Option<String> {
     }
     if level.is_null() || scope.is_null() {
         return Some(format!(
-            "a crown needs both level and scope; got level={level_repr} scope={scope_repr}"
+            "a role needs both level and scope; got level={level_repr} scope={scope_repr}"
         ));
     }
     if payload["level_is_int"] != true {
-        return Some(format!("crown level must be an int 0..2; got {level_repr}"));
+        return Some(format!("role level must be an int 0..2; got {level_repr}"));
     }
     let Some(level) = level
         .as_str()
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|l| *l <= 2)
     else {
-        return Some(format!("crown level must be 0..2 (0 several projects, 1 one project, 2 one epic); got {level_repr}"));
+        return Some(format!("role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got {level_repr}"));
     };
     let Some(scope) = scope
         .as_str()
         .filter(|s| payload["scope_is_str"] == true && !s.trim().is_empty())
     else {
         return Some(format!(
-            "crown scope must be a nonblank id; got {scope_repr}"
+            "role scope must be a nonblank id; got {scope_repr}"
         ));
     };
     let mut members: Vec<&str> = scope
@@ -69,7 +69,7 @@ fn validate(payload: &Value) -> Option<String> {
     members.dedup();
     let canonical = members.join(",");
     if canonical != scope {
-        return Some(format!("crown scope must be canonical (sorted, deduped, no blank members); got {scope_repr}, want {}", crate::claude_ask::py_repr(&canonical)));
+        return Some(format!("role scope must be canonical (sorted, deduped, no blank members); got {scope_repr}, want {}", crate::claude_ask::py_repr(&canonical)));
     }
     if members.len() > 1 && level != 0 && level != 2 {
         return Some(format!("a scope naming {} members is level 0 (a portfolio of projects) or 2 (a set of epics), not {level}", members.len()));

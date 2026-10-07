@@ -350,7 +350,7 @@ def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> Non
 
     def fake_run(*args, **kwargs):
         # The Rust lane's registry write, simulated: the row exists BEFORE the
-        # Python settlement runs, with all three crown fields unset. The fake
+        # Python settlement runs, with all three role fields unset. The fake
         # answers ONLY the lane-spawn argv: this patch rides the shared
         # subprocess module, and every other caller (the event-store writer
         # among them) must reach the real run or a retry loop spins.
@@ -367,7 +367,7 @@ def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> Non
             lambda rows: rows
             + [
                 AgentEntry(
-                    name="king-codex",
+                    name="lead-codex",
                     cwd=str(bg_home),
                     log_path="",
                     harness=harness,
@@ -402,22 +402,22 @@ def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> Non
             fake_run(["spawn", "--substrate", "thread"])
             return {"session_id": session_id, "keeper_socket": "/fake/keeper.sock"}
         def seed_submit(**kwargs):
-            assert _row("king-codex").crown_scope == "epic-x"
+            assert _row("lead-codex").crown_scope == "epic-x"
             seen["seed"] = kwargs["message"]
         monkeypatch.setattr(dispatch_mod, "_lane_b_thread_spawn", keeper_mint)
         monkeypatch.setattr(dispatch_mod, "_keeper_seed_submit", seed_submit)
 
     result = _spawn(
-        "spawn", "--name", "king-codex", "-H", harness, "reign",
+        "spawn", "--name", "lead-codex", "-H", harness, "lead",
         "--substrate", "thread", "--cwd", str(bg_home), "--promote", "epic-x",
     )
     assert result.exit_code == 0, result.output
     # Codex spells the plugin verb with $; a /fno:lead seed would hand the
-    # king's first turn a command its harness cannot invoke.
+    # lead's first turn a command its harness cannot invoke.
     verb = {"codex": "$fno:lead", "pi": "/skill:lead"}.get(harness, "/fno:lead")
     assert seen["seed"].splitlines()[0] == f"{verb} epic-x"
 
-    row = _row("king-codex")
+    row = _row("lead-codex")
     assert row.crown_level == 2, "an epic is a Director"
     assert row.crown_scope == "epic-x"
     assert row.crown_grantor == "human"
@@ -433,7 +433,7 @@ def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> Non
         assert manifest.exists(), "the lead loop manifest armed"
 
 
-def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch, native_backlog_door) -> None:
+def test_dispatch_spawn_refuses_a_one_shot_promotion(tmp_path: Path, monkeypatch, native_backlog_door) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
 

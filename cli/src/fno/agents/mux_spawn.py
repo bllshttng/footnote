@@ -42,7 +42,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
 from fno.agents import launch_provenance
-from fno.agents.team_thread import lead_typed_message as _reign_typed_message
+from fno.agents.team_thread import lead_typed_message
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
@@ -3363,7 +3363,7 @@ def dispatch_spawn_pane(
     # The pane half of the crowned-spawn typing: `pane` is the DEFAULT
     # substrate, so typing only on the bg lane left the common case improvising.
     message, reign_typed = (
-        _reign_typed_message(message, crown_level, crown_scope, revive=False, harness=provider)
+        lead_typed_message(message, crown_level, crown_scope, revive=False, harness=provider)
         if crown_level is not None else (message, False)
     )
 
