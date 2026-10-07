@@ -327,7 +327,7 @@ pub fn run(tail: &[String]) -> i32 {
 }
 
 /// The gather the snapshot door runs: a current-thread runtime over the
-/// model's async gather, the crowned roster read once beside it.
+/// model's async gather, the roster's lead rows read once beside it.
 fn gather_inputs(graph: &Path) -> Result<crate::backlog_model::Inputs, String> {
     let now = crate::search_query::now_secs();
     let agents = std::fs::read_to_string(crate::agents_view::registry_path())
@@ -335,11 +335,11 @@ fn gather_inputs(graph: &Path) -> Result<crate::backlog_model::Inputs, String> {
         .and_then(|raw| crate::agents_view::derive_rows(&raw, now as u64))
         .map(|rows: Vec<crate::agents_view::RegistryAgent>| {
             rows.iter()
-                .filter(|r| !r.exited && r.crown_scope.is_some())
+                .filter(|r| !r.exited && r.role_scope.is_some())
                 .map(|r| crate::proto::AgentRow {
                     name: r.name.clone(),
-                    crown_level: r.crown_level,
-                    crown_scope: r.crown_scope.clone(),
+                    role_level: r.role_level,
+                    role_scope: r.role_scope.clone(),
                     ..Default::default()
                 })
                 .collect()
