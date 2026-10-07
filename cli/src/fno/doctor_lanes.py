@@ -343,9 +343,9 @@ def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, 
 def _census(
     reading: Any, rows: Optional[list], rows_error: Optional[str], read_ms: int
 ) -> dict:
-    """The court census: kings, workers, tests.
+    """The team census: leads, workers, tests.
 
-    Kings and workers are ROW counts, tests is a PROCESS count, never folded
+    Leads and workers are ROW counts, tests is a PROCESS count, never folded
     together. The gap rides as its own field for the same reason.
     Full rule: docs/architecture/resource-meter.md.
     """
@@ -357,7 +357,7 @@ def _census(
         probe = {}
     share = probe.get("share")
     census: dict[str, Any] = {
-        "kings": None, "king_conflicts": None, "workers": None,
+        "leads": None, "lead_conflicts": None, "workers": None,
         "tests": None if reading is None else reading.test_process_count,
         "roster_rows": None if rows is None else len(rows),
         "gate_notes": list(probe.get("warnings") or []),
@@ -378,20 +378,20 @@ def _census(
 
         census["top_consumers"] = top_consumers(reading.top)
     try:
-        from fno.agents.court import gather_court
+        from fno.agents.team import gather_team
 
-        court = gather_court(rows) if rows is not None else {}
+        team = gather_team(rows) if rows is not None else {}
     except Exception:
         return census
-    kings = (court.get("summary") or {}).get("total")
-    if not isinstance(kings, int):
-        # An unreadable court nulls the crown counts rather than reporting a
+    leads = (team.get("summary") or {}).get("total")
+    if not isinstance(leads, int):
+        # An unreadable team nulls the role counts rather than reporting a
         # kingless fleet from a read that saw nothing.
         return census
-    conflicts = court.get("conflicts")
-    census["kings"] = kings
-    census["king_conflicts"] = len(conflicts) if isinstance(conflicts, list) else None
-    census["workers"] = len(rows or ()) - kings
+    conflicts = team.get("conflicts")
+    census["leads"] = leads
+    census["lead_conflicts"] = len(conflicts) if isinstance(conflicts, list) else None
+    census["workers"] = len(rows or ()) - leads
     return census
 
 
@@ -478,14 +478,14 @@ def _census_lines(census: dict) -> list[str]:
         return []
     n = {k: ("unknown" if v is None else v) for k, v in census.items()}
     lines = [
-        f"  court: {n['kings']} king(s), {n['workers']} worker(s), "
+        f"  team: {n['leads']} lead(s), {n['workers']} worker(s), "
         f"{n['tests']} running test(s) "
         f"({n['roster_rows']} live roster row(s), {n['read_ms']} ms)"
     ]
-    if census.get("king_conflicts"):
+    if census.get("lead_conflicts"):
         lines.append(
-            f"  court conflicts: {n['king_conflicts']} scope(s) held by more than "
-            "one live crown - a bare king count hides this"
+            f"  team conflicts: {n['lead_conflicts']} scope(s) held by more than "
+            "one live role - a bare lead count hides this"
         )
     if census.get("roster_error"):
         lines.append(f"  roster: {n['roster_error']} - the counts above are unread")

@@ -22,7 +22,7 @@ def _summary() -> dict:
         "kept_open_do_row": [{"id": "w-door", "node": "x-8"}],
         "kept_not_spawn": [{"id": "w-adopt", "reason": "adopted"}],
         "kept_operator": ["w-op"],
-        "kept_crowned": ["w-crown"],
+        "kept_promoted": ["w-role"],
         "kept_no_provenance": ["w-lost"],
         "kept_active": [{"id": "w-live", "age_s": 10}],
         "kept_transcript_unresolved": [
@@ -54,7 +54,7 @@ def test_every_keep_bucket_maps_to_named_not_retirable():
             ("w-door", None),
             ("w-adopt", None),
             ("w-op", None),
-            ("w-crown", None),
+            ("w-role", None),
             ("w-lost", None),
             ("w-live", None),
             ("w-dark", None),
@@ -79,7 +79,7 @@ def test_every_keep_bucket_maps_to_named_not_retirable():
         == "transcript unresolved for 7h0m; needs a decision: fno agents rm w-dark-done"
     )
     assert "stop refused" in out["w-stuck"].reason
-    for name in ("w-door", "w-crown", "w-dark", "w-dark-done", "w-norc"):
+    for name in ("w-door", "w-role", "w-dark", "w-dark-done", "w-norc"):
         assert out[name].retire is False
 
 

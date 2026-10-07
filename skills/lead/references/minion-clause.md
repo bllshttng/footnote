@@ -36,7 +36,7 @@ The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expan
 
 ## Field notes
 
-- **`<king-handle>`** - your own 8-hex mail handle, printed in your opening line. The teammate captures it from the spawn payload; it is how the report reaches you.
+- **`<lead-handle>`** - your own 8-hex mail handle, printed in your opening line. The teammate captures it from the spawn payload; it is how the report reaches you.
 - **`--from-self`** - stamps the teammate's reply handle so the answer comes back addressable. Without it a reply has no return address.
 - **Delivery doctrine** - this is the piece that drifted. A report is only delivered when the receipt reads `delivered (hosted)` / `delivered (woken)`; anything else (`queued (durable)`, a `--to-project` anycast, a `[live-miss]`) is voicemail nobody checks. The teammate `peek`s the lead first (a `queued (durable)` can mean a live inject whose confirmation timed out, so a blind resend duplicates the report), then re-resolves and re-sends rather than trusting the queue. This is the doctrine shipped in the epic's own PR but not practiced until it was written down.
 - **`context: NN% used`** - the teammate's own context fraction. At the configured threshold, the harness compacts the session. This field never authorizes the lead to replace the session. Fresh successors are reserved for explicit capability escalation.

@@ -142,13 +142,13 @@ pub(super) fn arbitrate_codex_continuation(
     }
     let live = crate::lead_goal::read_codex_goal_for_stop(&fire.session_id);
     // A resume can leave the bare word `resume` as the provider goal's
-    // objective; a crowned lead then spins on the refusal below instead of
+    // objective; a promoted lead then spins on the refusal below instead of
     // working (371 blocked lines over 2.5 days on one codex lead). Restore
     // the expected objective through the provider goal set, read it back,
     // and arbitrate on the re-read; the refusal names the failed repair
     // only when the restore itself failed.
     if matches!(&live, Ok(Some(goal)) if is_bare_resume_objective(&goal.objective)) {
-        let scope = first_raw_field(manifest, &["scope", "crown_scope"])
+        let scope = first_raw_field(manifest, &["scope", "role_scope"])
             .unwrap_or_default()
             .trim()
             .to_string();
@@ -181,7 +181,7 @@ pub(super) fn arbitrate_codex_continuation(
     arbitrate_codex_continuation_from_reading(driver, fire, manifest, live)
 }
 
-/// The objective a resume wrote over the crowned one: the bare word alone,
+/// The objective a resume wrote over the promoted one: the bare word alone,
 /// no scope, no verb spelling.
 pub(super) fn is_bare_resume_objective(objective: &str) -> bool {
     objective.trim() == "resume"
@@ -225,7 +225,7 @@ pub(super) fn arbitrate_codex_continuation_from_reading(
             "active Codex goal owner is not defined by the manifest".into(),
         );
     };
-    let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
+    let Some(scope) = first_raw_field(manifest, &["scope", "role_scope"]) else {
         return GoalArbitration::Refusal("active Codex goal has no team scope".into());
     };
     let expected_owner = format!("lead:{}", scope.trim());
@@ -289,7 +289,7 @@ pub(super) fn arbitrate_goal_truth(
         ));
     }
     if driver == "lead" {
-        let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
+        let Some(scope) = first_raw_field(manifest, &["scope", "role_scope"]) else {
             return GoalArbitration::Refusal(
                 "active goal truth cannot be verified: manifest scope is missing".into(),
             );
@@ -309,7 +309,7 @@ fn expected_continuation_owner(driver: &str, manifest: &str) -> Option<String> {
     if let Some(owner) = first_raw_field(manifest, &["continuation_owner"]) {
         return Some(owner);
     }
-    let scope = first_raw_field(manifest, &["scope", "crown_scope"]).unwrap_or_default();
+    let scope = first_raw_field(manifest, &["scope", "role_scope"]).unwrap_or_default();
     let node_id = first_raw_field(manifest, &["node_id", "fno_id"]).unwrap_or_default();
     match driver {
         "lead" if !scope.is_empty() => Some(format!("lead:{scope}")),
@@ -346,7 +346,7 @@ pub(super) fn emit_stop_decision(
         manifest: state
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
-        scope: first_raw_field(manifest, &["scope", "crown_scope"]).unwrap_or_default(),
+        scope: first_raw_field(manifest, &["scope", "role_scope"]).unwrap_or_default(),
         node_id: first_raw_field(manifest, &["node_id", "fno_id"]).unwrap_or_default(),
         driver: driver.to_string(),
         continuation_owner: continuation_owner.into(),

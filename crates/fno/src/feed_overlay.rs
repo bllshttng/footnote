@@ -68,8 +68,8 @@ pub struct FeedItem {
     pub reason: Option<String>,
     /// `L{level} {scope}` for the team kinds and a teamed removal.
     #[serde(default)]
-    pub crown: Option<String>,
-    /// The crowned worker's name on the crown kinds; the feed search
+    pub role: Option<String>,
+    /// The promoted worker's name on the role kinds; the feed search
     /// answers `l:` through it.
     #[serde(default)]
     pub holder: Option<String>,
@@ -82,7 +82,7 @@ pub struct FeedItem {
     /// The PR URL, on a ship row. The provenance view's PR action opens it.
     #[serde(default)]
     pub url: Option<String>,
-    /// The crown holder the row rolls up to; `l:` answers through it before
+    /// The role holder the row rolls up to; `l:` answers through it before
     /// the owner spelling.
     #[serde(default)]
     pub lead: Option<String>,
@@ -412,7 +412,7 @@ pub fn event_fields(item: &FeedItem, ctx: &EventCtx) -> crate::search_query::Fie
     }
     let holder = item.holder.clone().or_else(|| {
         let o = item.owner.as_deref().unwrap_or("");
-        if let Some(rest) = o.strip_prefix("king ") {
+        if let Some(rest) = o.strip_prefix("lead ") {
             rest.split_once(" L").map(|(h, _)| h.to_string())
         } else {
             o.rsplit_once('(')
@@ -485,13 +485,13 @@ mod tests {
 
     #[test]
     fn new_fields_deserialize_when_the_projection_sends_them() {
-        let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"heir removed","reason":"why","crown":"L2 x-eeee","owner":"epic x-2222 the epic","parent":"s-lead","holder":"heir"},{"ts":"2026-09-29T08:00:00Z","kind":"node_created","node":"x-aaaa","cwd":"/workspace/node-project","title":"created node"}]"#;
+        let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"successor removed","reason":"why","role":"L2 x-eeee","owner":"epic x-2222 the epic","parent":"s-lead","holder":"successor"},{"ts":"2026-09-29T08:00:00Z","kind":"node_created","node":"x-aaaa","cwd":"/workspace/node-project","title":"created node"}]"#;
         let items = parse_feed(body, b"").expect("a body carrying the new fields parses");
         assert_eq!(items[0].reason.as_deref(), Some("why"));
-        assert_eq!(items[0].crown.as_deref(), Some("L2 x-eeee"));
+        assert_eq!(items[0].role.as_deref(), Some("L2 x-eeee"));
         assert_eq!(items[0].owner.as_deref(), Some("epic x-2222 the epic"));
         assert_eq!(items[0].parent.as_deref(), Some("s-lead"));
-        assert_eq!(items[0].holder.as_deref(), Some("heir"));
+        assert_eq!(items[0].holder.as_deref(), Some("successor"));
         assert_eq!(items[1].cwd.as_deref(), Some("/workspace/node-project"));
         // AC7-HP: the event row interface answers the grammar's keys, and
         // `s:` refuses on the event surface.
@@ -499,9 +499,9 @@ mod tests {
             ts: "2026-10-01T08:00:00Z".into(),
             kind: "question_asked".into(),
             node: Some("x-eeee".into()),
-            session_id: Some("s-king-1234".into()),
+            session_id: Some("s-lead-1234".into()),
             title: "proceed with the merge?".into(),
-            owner: Some("king rowan L2".into()),
+            owner: Some("lead rowan L2".into()),
             url: Some("https://github.com/o/r/pull/2890".into()),
             ..Default::default()
         };
@@ -519,24 +519,24 @@ mod tests {
         assert!(keeps("l:rowan"), "l:rowan keeps through the owner holder");
         assert!(keeps("pr:2890"), "pr:2890 keeps through the url");
         assert!(keeps("ar:mail"), "ar:mail keeps");
-        assert!(keeps("sid:s-king-1234"), "sid: keeps");
+        assert!(keeps("sid:s-lead-1234"), "sid: keeps");
         assert!(keeps("is:open"), "the open node keeps is:open");
         assert!(
             crate::search_query::parse("s:ready", crate::search_query::Surface::Event, now)
                 .is_err()
         );
-        // A crown row keeps under l: through the new holder field.
-        let crown = FeedItem {
+        // A role row keeps under l: through the new holder field.
+        let role = FeedItem {
             ts: "2026-09-30T10:00:00Z".into(),
-            kind: "crown_granted".into(),
-            title: "heir crowned L2 x-eeee".into(),
-            holder: Some("heir".into()),
+            kind: "role_granted".into(),
+            title: "successor promoted L2 x-eeee".into(),
+            holder: Some("successor".into()),
             ..Default::default()
         };
-        let fc = event_fields(&crown, &ctx);
-        let p = crate::search_query::parse("l:heir", crate::search_query::Surface::Event, now)
-            .expect("l:heir parses");
-        assert!(p.keeps(&fc), "the crown row keeps under l:heir");
+        let fc = event_fields(&role, &ctx);
+        let p = crate::search_query::parse("l:successor", crate::search_query::Surface::Event, now)
+            .expect("l:successor parses");
+        assert!(p.keeps(&fc), "the role row keeps under l:successor");
         // The feed-row case table and the prefilter cases, from the feed's
         // own search surface.
         crate::client::feed_view::search::tests::feed_row_cases_through_the_shared_matcher();

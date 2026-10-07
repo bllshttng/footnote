@@ -68,7 +68,7 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # added the served facts (liveness, liveness_measured_at, harness_title):
     # 48 -> 54 declared, accounted as rust_only (the Rust row projects them).
     # x-7955: substrate moved out of storage_only into the projected key set.
-    # The reign parent-edge change adds required spawned_by_session on top:
+    # The term parent-edge change adds required spawned_by_session on top:
     # 41 -> 43 required, declared unchanged at 54 (it was already a declared
     # v26 leaf). v27 added launch_account_source, storage_only: 54 -> 55.
     # v28 added adopted_by_session (the adoption voucher, x-5283),
@@ -199,8 +199,8 @@ def test_live_coverage_classifies_contract_zeroes_and_keeps_real_dead(
     assert {"live_status", "live_status_basis"} <= set(
         projected["conditional_zero"]
     )
-    # crown fields have no population contract: still dead findings
-    assert {"crown", "crown_grantor", "crown_level", "crown_scope"} <= set(
+    # role fields have no population contract: still dead findings
+    assert {"role", "role_grantor", "role_level", "role_scope"} <= set(
         projected["dead_fields"]
     )
 
@@ -243,7 +243,7 @@ def test_live_coverage_fixture_zero_without_contract_stays_dead(
     assert "pid" in payload["persisted"]["conditional_zero"]
     # uncovered zeroes stay findings on both readings
     assert "stop" in payload["persisted"]["dead_fields"]
-    assert "crown" in payload["projected"]["dead_fields"]
+    assert "role" in payload["projected"]["dead_fields"]
 
 
 def test_live_coverage_malformed_contract_metadata_is_a_finding(
@@ -266,7 +266,7 @@ def test_live_coverage_malformed_contract_metadata_is_a_finding(
     schema_path = tmp_path / "schemas" / "agents-list-row.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     schema["population_contract"] = {
-        "crown": {"mode": "sometimes", "surface": "projected"},
+        "role": {"mode": "sometimes", "surface": "projected"},
     }
     schema_path.write_text(json.dumps(schema), encoding="utf-8")
 
@@ -276,7 +276,7 @@ def test_live_coverage_malformed_contract_metadata_is_a_finding(
     payload = json.loads(result.output)
     assert payload["contract_errors"], payload
     # the malformed entry covers nothing
-    assert "crown" in payload["projected"]["dead_fields"]
+    assert "role" in payload["projected"]["dead_fields"]
 
 
 def test_live_coverage_refuses_empty_registry(monkeypatch) -> None:

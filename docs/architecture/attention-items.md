@@ -93,7 +93,7 @@ The two trace keys name the hop the question answers. `answers_ask:` is the ask 
 
 One page per question. The page name is `<ask date>-<question id>-<slug>-<node>.md`, for example `20260922-q-aaaaaaaa-wont-do-deferral-kind-x-bbbb.md`. When the frontmatter `question_id` is the id inside the file name, the file is a page. A sync client's `q-1 (conflicted copy)` is ignored. Closed pages move to `done/<id>.md` (`<id>-2.md`, `-3.md`, ... when the name is taken).
 
-Frontmatter carries `question_id`, `kind`, `status`, `title`, `ask`, `recommend`, `aliases`, `asked_at`, `created`, `updated`, and `project`. It also carries the routing facts `harness_session_id`, `session_name`, `harness`, `model`, `node`, `blocks`, `epic`, `crown`, and `king`. Each option also renders a letter column (`a`, `b`, `c`, ...), and `answer` holds the typed cell. A close adds `answered_at` and `recorded_by`. An unmeasured asker fact reads `unknown` and an absent routing fact reads `none`, never a blank key. The renderer escapes `<` and `>` in every text field it writes, and the answer reader unescapes them. An unescaped `<stage>` reads as an open HTML tag and eats every checkbox on the page.
+Frontmatter carries `question_id`, `kind`, `status`, `title`, `ask`, `recommend`, `aliases`, `asked_at`, `created`, `updated`, and `project`. It also carries the routing facts `harness_session_id`, `session_name`, `harness`, `model`, `node`, `blocks`, `epic`, `role`, and `lead`. Each option also renders a letter column (`a`, `b`, `c`, ...), and `answer` holds the typed cell. A close adds `answered_at` and `recorded_by`. An unmeasured asker fact reads `unknown` and an absent routing fact reads `none`, never a blank key. The renderer escapes `<` and `>` in every text field it writes, and the answer reader unescapes them. An unescaped `<stage>` reads as an open HTML tag and eats every checkbox on the page.
 
 ## Answering
 
@@ -154,6 +154,6 @@ The arm's mux pass runs on every beat beside the pages. Every unsuperseded `atte
 
 1. `mail` - the clear's mail leg. The posture line decides: `delivered (hosted)` is the end, `rung: mail, outcome: landed`.
 2. `resume` - a durable park under an idle asker. When the asker has a session id, the arm runs `fno agents resume <session_id> --message <answer>`. This is the one resume door, with a 30 s bound and stdin closed. The message carries the question id and a dedupe line. A later beat looks for the question id in the asker's transcript, after the byte offset the resume saved. Seeing it confirms delivery (`rung: resume, outcome: confirmed`).
-3. `crown` - an exit-17 resume, a nonzero exit, a missing transcript, or five unconfirmed minutes. The arm mails the answer, wrapped, to the live role whose territory names the asker's node (`rung: crown, outcome: sent`). With no role, the row reads `rung: none, outcome: failed` and the evidence names why.
+3. `role` - an exit-17 resume, a nonzero exit, a missing transcript, or five unconfirmed minutes. The arm mails the answer, wrapped, to the live role whose territory names the asker's node (`rung: role, outcome: sent`). With no role, the row reads `rung: none, outcome: failed` and the evidence names why.
 
 Each item's ladder ends with one `attention_delivery` row in `questions.jsonl`. The panel shows the rung on the answered row for 15 minutes.

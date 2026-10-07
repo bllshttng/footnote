@@ -376,6 +376,7 @@ pub mod revival_check;
 pub mod revive_proof;
 pub mod rm_receipt;
 pub mod rm_tombstone;
+pub mod role_migration;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
@@ -1709,7 +1710,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // same kind through the shared emitter.
     "agent_team_vacated",
     // A succession reverted: the reap sweep restored the predecessor's
-    // session after an heir died unbound past the window (team_reap.rs;
+    // session after a successor died unbound past the window (team_reap.rs;
     // the daemon retire arm and `fno agents reap`).
     "team_succession_reverted",
     // The succession transaction (succession_txn.rs): announce (plus its
@@ -1807,8 +1808,8 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "session_report_stored",
     "session_report_dropped",
     // The same failure the Python identification arm emits: the manifest
-    // rebind at a crowned row's first self-identification did not land.
-    "crown_manifest_arm_failed",
+    // rebind at a promoted row's first self-identification did not land.
+    "role_manifest_arm_failed",
     // Ordered exit teardown (daemon-emitted, inside-out E3.3): a claude row with
     // an inside-leg report is going Exited; the completion is published before
     // the registry clears the report (AC-X2-4).

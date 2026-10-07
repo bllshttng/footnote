@@ -1312,8 +1312,8 @@ def briefs_dir() -> Path:
     return state_dir() / "briefs"
 
 
-def king_faqs_dir() -> Path:
-    return briefs_dir() / "king-faqs"
+def lead_faqs_dir() -> Path:
+    return briefs_dir() / "lead-faqs"
 
 
 def sidecar_dir() -> Path:

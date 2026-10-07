@@ -39,13 +39,13 @@ def test_emit_tick_omits_null_skip_reason(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_EVENTS_PATH", str(journal))
 
     assert emit_tick(
-        "king_wake", scheduler="daemon", interval_s=900, skip_reason="no_crowned_target"
+        "lead_wake", scheduler="daemon", interval_s=900, skip_reason="no_promoted_target"
     )
 
     from tests._event_rows import event_rows
 
     row = event_rows(journal)[0]
-    assert row["data"]["skip_reason"] == "no_crowned_target"
+    assert row["data"]["skip_reason"] == "no_promoted_target"
     assert "detail" not in row["data"]
 
 

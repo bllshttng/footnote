@@ -320,7 +320,7 @@ where
                 // the dead word: a quiet rollout is silence, so the row
                 // under it reads unmeasured - resumable, not dead - the same
                 // vocabulary the ask arm holds. The old match served "dead"
-                // over Unknown evidence, and the crown verdict read the
+                // over Unknown evidence, and the role verdict read the
                 // holder terminal on it.
                 new_liveness: if alive {
                     Some("alive")
@@ -566,7 +566,7 @@ where
         return (changes, recovered);
     }
     for entry in entries {
-        if entry.status != AgentStatus::Exited || entry.crown_scope.is_none() {
+        if entry.status != AgentStatus::Exited || entry.role_scope.is_none() {
             continue;
         }
         if !team_running(entry) || liveness(entry) != RowLiveness::Alive {
@@ -791,7 +791,7 @@ pub(crate) fn persist_reconcile_changes(
 
 /// One observed lifecycle transition of an owned row: the journal fuel for
 /// `row_lifecycle_observed` (ruling d-e096c669). `cause` is the evidence
-/// word: `pid_proven` (the row's own dead pid), `revival` (a guarded crown
+/// word: `pid_proven` (the row's own dead pid), `revival` (a guarded role
 /// revival), or `probe_inferred` (the reachability probe's word).
 pub(crate) struct AppliedTransition {
     pub(crate) row: String,
@@ -848,7 +848,7 @@ pub(crate) fn apply_reconcile_changes(
             // holder's status - and only while the team fields still sit on
             // it: a succession that moved the scope mid-sweep ends the
             // revival. A miss touches nothing, not even the stamp.
-            keyed.filter(|e| e.crown_scope.is_some() && e.crown_level.is_some())
+            keyed.filter(|e| e.role_scope.is_some() && e.role_level.is_some())
         } else {
             match keyed {
                 Some(e) => Some(e),
@@ -1535,7 +1535,7 @@ mod tests {
             e
         }
         let mut lead = row("lead-x-1", "s-lead", None);
-        lead.crown_level = Some(1);
+        lead.role_level = Some(1);
         let mut org = row("node-x-demo2-g2", "s-org", Some("s-lead"));
         org.status = AgentStatus::Busy;
         let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead-walk"));
@@ -1586,8 +1586,8 @@ mod tests {
         e.status = AgentStatus::Exited;
         e.exited_at = Some("2026-09-24T00:00:00Z".to_string());
         if teamed {
-            e.crown_scope = Some("zed".to_string());
-            e.crown_level = Some(2);
+            e.role_scope = Some("zed".to_string());
+            e.role_level = Some(2);
         }
         e
     }
@@ -1688,10 +1688,10 @@ mod tests {
         // A succession moved the team mid-sweep: the team fields are gone
         // from the row, so the revival is refused.
         let mut reg = state::Registry::default();
-        let mut uncrowned = teamed_exited("lead", "s-lead-uuid", true);
-        uncrowned.crown_scope = None;
-        uncrowned.crown_level = None;
-        reg.entries = vec![uncrowned];
+        let mut unpromoted = teamed_exited("lead", "s-lead-uuid", true);
+        unpromoted.role_scope = None;
+        unpromoted.role_level = None;
+        reg.entries = vec![unpromoted];
         crate::liveness_sweep::apply_reconcile_changes(
             &mut reg,
             &entries,
@@ -1727,7 +1727,7 @@ mod tests {
         // the keyed lookup misses and the name fallback is refused.
         let mut reg = state::Registry::default();
         let mut rebound = teamed_exited("lead", "s-successor", true);
-        rebound.crown_scope = None;
+        rebound.role_scope = None;
         reg.entries = vec![rebound];
         crate::liveness_sweep::apply_reconcile_changes(
             &mut reg,

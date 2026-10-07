@@ -117,7 +117,7 @@ def fold(rows: list, archive_entries: Iterable) -> list[dict[str, object]]:
                 "harness": harness,
                 "species": sp,
                 "rarity": tiers[harness] if isinstance(harness, str) else RARITY_TIERS[0],
-                "crown_level": getattr(r, "crown_level", None) or 0,
+                "role_level": getattr(r, "role_level", None) or 0,
                 "first_sighting": sp not in seen,
             }
         )

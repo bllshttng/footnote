@@ -121,7 +121,7 @@ def test_doctor_names_verbs_with_empty_slots(monkeypatch):
     text = "\n".join(out)
     assert "band routing inactive:" in text
     assert "declares 0 row(s)" in text
-    for verb in ("think", "blueprint", "target", "review", "crown"):
+    for verb in ("think", "blueprint", "target", "review", "role"):
         assert verb in text
 
 

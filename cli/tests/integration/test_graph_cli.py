@@ -1185,7 +1185,7 @@ def test_dispatch_hold_is_absent_from_ready_and_next_destinations(tmp_graph, tmp
         "  reason: Blocking review finding is unresolved\n"
         "  release_when: The finding is fixed and re-reviewed\n"
         "  review_on: 2099-08-20\n"
-        "  set_by: king:119e3c52\n---\n",
+        "  set_by: lead:119e3c52\n---\n",
         encoding="utf-8",
     )
     _seed_graph_text(tmp_graph, json.dumps({"entries": [
@@ -1202,7 +1202,7 @@ def test_dispatch_hold_on_owner_hides_parent_and_contained_descendants(tmp_graph
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Owner is held\n  release_when: Review passes\n"
-        "  review_on: 2099-08-20\n  set_by: king\n---\n",
+        "  review_on: 2099-08-20\n  set_by: lead\n---\n",
         encoding="utf-8",
     )
     entries = [

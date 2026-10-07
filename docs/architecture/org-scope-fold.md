@@ -21,7 +21,7 @@ The fragment is one org read behind the board that splices it. A graph mutation 
 
 ## The fold lives in the native binary
 
-`fno-agents court-fold` reads the graph, the claims dir, and the registry. It compiles each role's scope with the rules `king_board/scope.rs` applies. Workers are named through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the roles `gather_court` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the role `unresolved` with the reason rather than rendering an empty table.
+`fno-agents team-fold` reads the graph, the claims dir, and the registry. It compiles each role's scope with the rules `lead_board/scope.rs` applies. Workers are named through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the roles `gather_team` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the role `unresolved` with the reason rather than rendering an empty table.
 
 The fold resolves its own claims directory. Every key it asks after is a `node:` key. Those route to the global claims root on both the Rust and the Python side. One resolver answers, and no caller passes a path. `--claims-dir` stays as an override for tests.
 
@@ -38,7 +38,7 @@ nodes.
 ACTIVE_STATUSES (in_progress, in_review, ready, blocked, design) is the
 statuses a reader means by "what is being worked on": neither closed
 (done, superseded) nor unstarted (idea, deferred). It lives in
-`court_fold.rs`; the Python tree holds no second literal. Counts cover
+`team_fold.rs`; the Python tree holds no second literal. Counts cover
 every status present in the whole scope and render in lifecycle order;
 `omitted` is always stated, so a role whose active list is empty reads
 as "N nodes, none active", never as "nothing here".
@@ -57,7 +57,7 @@ When `claim_state` is `live` or `suspect`, `worker` names the holder. On any oth
 
 The board's HTML section renders `claim` and `age` as their own columns, because the section and the JSON come from one fold.
 
-`owned` says which live role answers for a node. The candidates are the registry's live roles, read the way the drain reads them (`territory::live_crowns`), never the roles one caller happens to pass. The deepest role level holds the node, then the lowest canonical scope on a tie. A role with no live registry row owns nothing. That covers a manifest-only role and a lead whose row went terminal while its session still runs. Its fold reads `owned_total` and `owned_counts` null with `owned_reason`, never 0. A failed owner read makes every fold's `owned` fields null with `owned_reason`. Measured 2026-09-21: 11 of the L1 role's 13 PR-bearing rows also sat in an L2 fold.
+`owned` says which live role answers for a node. The candidates are the registry's live roles, read the way the drain reads them (`territory::live_roles`), never the roles one caller happens to pass. The deepest role level holds the node, then the lowest canonical scope on a tie. A role with no live registry row owns nothing. That covers a manifest-only role and a lead whose row went terminal while its session still runs. Its fold reads `owned_total` and `owned_counts` null with `owned_reason`, never 0. A failed owner read makes every fold's `owned` fields null with `owned_reason`. Measured 2026-09-21: 11 of the L1 role's 13 PR-bearing rows also sat in an L2 fold.
 
 ## Owned counts
 
@@ -65,7 +65,7 @@ The board's HTML section renders `claim` and `age` as their own columns, because
 
 ## The stuck verdict
 
-The counts say how much. `stuck` says whether anything needs a hand, which is the only part of the read worth a glance. It is computed in `court_fold.rs`, beside the rows it judges, so no second reader can disagree about what a row means. The fold returns it as `stuck`, plus a rendered `stuck_line` for the node half of the one-line answer.
+The counts say how much. `stuck` says whether anything needs a hand, which is the only part of the read worth a glance. It is computed in `team_fold.rs`, beside the rows it judges, so no second reader can disagree about what a row means. The fold returns it as `stuck`, plus a rendered `stuck_line` for the node half of the one-line answer.
 
 A node counts as stuck under exactly these rules, with the threshold at 60 minutes:
 

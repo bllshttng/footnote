@@ -728,13 +728,13 @@ def test_auto_route_verbs_have_no_python_contract() -> None:
     auto-routed verb is daemon-native, so routing it cannot regress a Python
     flag/stdout contract.
 
-    ``crown`` is the one human-attended shared-registry mutation with no Rust
+    ``role`` is the one human-attended shared-registry mutation with no Rust
     port. Every Rust-backed verb plus ``ask`` still auto-routes.
     """
     assert rr.AUTO_ROUTE_VERBS == rr.RUST_CLIENT_VERBS - rr.PYTHON_AGENT_VERBS
     assert rr.AUTO_ROUTE_VERBS.isdisjoint(rr.PYTHON_AGENT_VERBS)
-    assert "crown" in rr.PYTHON_AGENT_VERBS
-    assert "crown" not in rr.AUTO_ROUTE_VERBS
+    assert "role" in rr.PYTHON_AGENT_VERBS
+    assert "role" not in rr.AUTO_ROUTE_VERBS
     for parity in ("stop", "rm", "list", "reconcile", "ask"):
         assert parity in rr.AUTO_ROUTE_VERBS, f"{parity} must auto-route"
 
@@ -744,7 +744,7 @@ def test_python_agent_verbs_match_registered_commands() -> None:
 
     Every Python ``@agents_app.command`` is preserved as fallback dispatch for
     ``FNO_AGENTS_RUNTIME=python`` mode and no-binary environments. Rust-backed
-    commands auto-route; ``crown`` remains Python-owned because no Rust client
+    commands auto-route; ``role`` remains Python-owned because no Rust client
     port exists. The guard keeps any future Python-only verb from silently
     escaping the explicit set.
     """
