@@ -1778,7 +1778,10 @@ mod tests {
             entries,
             ..crate::state::Registry::default()
         };
-        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
 
         let result = super::session_target_value("0a1b2c3d", &home);
         assert!(result.is_err(), "a short session prefix must be refused");

@@ -1772,7 +1772,10 @@ mod tests {
         legacy_entry.status = crate::AgentStatus::Live;
         let mut registry = crate::state::Registry::default();
         registry.entries.push(legacy_entry.clone());
-        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let acquired = crate::claims::acquire(
             "node:x-legacy",
             "target-session:s-legacy",
@@ -1822,7 +1825,10 @@ mod tests {
         genuine_entry.harness_session_id = Some("s-genuine".into());
         genuine_entry.status = crate::AgentStatus::Live;
         registry.entries.push(genuine_entry);
-        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let acquired_genuine = crate::claims::acquire(
             "node:x-genuine",
             "target-session:s-genuine",
@@ -1894,7 +1900,10 @@ mod tests {
         fresh_entry.harness_session_id = Some("s-fresh".into());
         fresh_entry.status = crate::AgentStatus::Live;
         registry.entries.push(fresh_entry);
-        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let acquired_fresh = crate::claims::acquire(
             "node:x-fresh",
             "target-session:s-fresh",
@@ -1987,7 +1996,10 @@ mod tests {
 
         legacy_entry.harness_session_id = Some("s-legacy".into());
         registry.entries = vec![legacy_entry];
-        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let broken_claims_root = temp.path().join("claims-root-file");
         std::fs::write(&broken_claims_root, "unreadable claims root").unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &broken_claims_root);
@@ -2172,7 +2184,10 @@ mod tests {
         team.model = Some("glm-5.3-flash".into());
         let mut registry = crate::state::Registry::default();
         registry.entries.push(team);
-        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let mut calls: Vec<Vec<String>> = Vec::new();
         let mut runner_inner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             calls.push(argv.to_vec());
