@@ -67,6 +67,30 @@ def test_fno_help_does_not_import_sub_app_modules():
     )
 
 
+# ---------------------------------------------------------------------------
+# AC3-HP: fno paths state-dir does NOT import heavy sub-apps
+# ---------------------------------------------------------------------------
+
+_CHECK_CODE_PATHS = """\
+import sys
+from fno import cli
+from typer.testing import CliRunner
+CliRunner().invoke(cli.app, ["paths", "state-dir"])
+found = [m for m in ["fno.adapters.providers.cli"] if m in sys.modules]
+if found:
+    print("FOUND:", ",".join(found), file=sys.stderr)
+sys.exit(len(found))
+"""
+
+
+def test_fno_paths_does_not_import_heavy_subapps():
+    """AC3-HP: `fno paths state-dir` only loads the paths sub-app."""
+    result = _run_py(_CHECK_CODE_PATHS)
+    assert result.returncode == 0, (
+        f"heavy sub-app imported during `fno paths state-dir`:\n{result.stderr}"
+    )
+
+
 def test_events_import_defers_schema_parse():
     """Importing fno.events leaves schema-derived exports unloaded."""
     result = _run_py(

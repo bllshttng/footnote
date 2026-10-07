@@ -43,9 +43,9 @@ Base ddb2ecc7ff (origin/main at the start of the pass). The pass rebuilt the cam
 
 | Measure | Before | After | Ratio |
 |---|---:|---:|---:|
-| Python declarations | 2,126 | 1,365 | 0.64 |
+| Python declarations | 2,126 | 1,366 | 0.64 |
 | Rust declarations | 451 | 424 | 0.94 |
-| All declarations | 2,577 | 1,789 | 0.69 |
+| All declarations | 2,577 | 1,790 | 0.69 |
 | Python collected cases | 2,549 | 1,718 | 0.67 |
 | Rust collected cases | unmeasured | unmeasured | none |
 
@@ -71,6 +71,8 @@ One audit cut tests/hooks/test_merge_guard_stacked_base.py from eight tests to o
 In cli/tests/unit/test_skill_bundles.py the same audit cut `test_generator_preserves_executable_bit`. The bundle freshness gate compares content only, so that test was the one check that a committed bundled script keeps its executable bit. The lead restored it.
 
 In crates/fno-agents/src/surface_check.rs the review restored `count_after_missing_renders_none`. The audit read it as the same branch as the `surface.count` refusal. It is not: a separate let-else refuses a missing `count_after`, and no other test reached it.
+
+In cli/tests/test_lazy_imports.py an external review restored `test_fno_paths_does_not_import_heavy_subapps`. The `--help` test never dispatches a command. This test is the only one that runs a sub-command and checks what it imported.
 
 The review pass also found references to deleted tests. Two skip-baseline rows, the lazy-imports contract list and two model-routing comments named them. Those references are gone.
 
@@ -158,7 +160,7 @@ One row per K1 file. A "Kept:" cell lists the surviving tests by name where the 
 | `cli/tests/test_config_autonomy.py` | 7 | 3 | Malformed autonomy.enabled degrades to True, unreadable config turns it off, the panic switch outranks FNO_AUTO_CONTINUE. |
 | `cli/tests/test_config_schema_drift.py` | 14 | 11 | Registry exact, docs and example toml fresh, wizard paths are real leaves, Rust merge_strategy allowlist, auto_merge_enabled fails closed. |
 | `cli/tests/test_import_time_env_reads.py` | 3 | 3 | Kept: the probe sees the opt in seams, no test module reads an ambient env at import, opt in live flags survive the sandbox. |
-| `cli/tests/test_lazy_imports.py` | 48 | 37 | --help imports no sub-app body, curated menu and help --all bytes, import cycles in both orders, error-path flags, reinstall hints, bounded wait and lazy retry rules, finder retry and namespace refuser. Cut 11: duplicate bad-module and lazy-group units, a skip-if-absent smoke, CPython-behaviour pins. |
+| `cli/tests/test_lazy_imports.py` | 48 | 38 | --help imports no sub-app body, a dispatched paths command imports no heavy sub-app, curated menu and help --all bytes, import cycles in both orders, error-path flags, reinstall hints, bounded wait and lazy retry rules, finder retry and namespace refuser. Cut 10: duplicate bad-module and lazy-group units, a skip-if-absent smoke, CPython-behaviour pins. |
 | `cli/tests/test_v2_paths.py` | 8 | 1 | v1 and v2 state paths. The other seven tests covered helpers deleted as dead. |
 | `cli/tests/unit/test_agent_cli.py` | 31 | 17 | whoami full stack, malformed manifest exits 2, mail handle equals stamp_from, unread counts by handle and lane, status gates and bounded tail, session model per harness. |
 | `cli/tests/unit/test_agent_integration.py` | 11 | 2 | whoami, status and status --json agree on the session id, --state-file override. |
