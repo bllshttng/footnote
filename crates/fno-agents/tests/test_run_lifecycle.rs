@@ -1374,8 +1374,9 @@ fn a_process_under_a_slot_holder_is_admitted_without_a_second_slot() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC4-HP: with every slot held, a waiting build-admit leaves build:cargo
-/// without a holder; it takes the slot first, then the build claim.
+/// AC4-HP: with every slot held, a queued build-admit (the whole-suite lane;
+/// a plain agent ask refuses under the try-lock) leaves build:cargo without
+/// a holder; it takes the slot first, then the build claim.
 #[test]
 fn build_admit_takes_a_run_slot_before_build_cargo() {
     let root = std::fs::canonicalize(tmp_claims_root("run-order")).unwrap();
@@ -1398,6 +1399,7 @@ fn build_admit_takes_a_run_slot_before_build_cargo() {
     let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
     let mut waiter = build_admit(&root, cargo_b.id(), &tree_b)
         .env("FNO_CONFIG", root.join("config.toml"))
+        .env("FNO_TEST_FULL", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
