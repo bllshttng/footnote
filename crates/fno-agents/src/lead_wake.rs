@@ -218,7 +218,7 @@ fn notify_operator(title: &str, body: &str) -> bool {
     crate::operator_notice::notify_operator_confirmed(title, body, Some("fno agents status"))
 }
 
-/// The beat's cron act (x-2ed1): a codex lead the wake reached gets its
+/// The beat's cron act: a codex lead the wake reached gets its
 /// resting goal resumed, so the beat is a work beat (check-in, then the
 /// board) and not one turn that sleeps again. A claude lead, a stale
 /// manifest, or an unreachable root is no signal, never an error; a provider
@@ -360,8 +360,21 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
     }
     let wakes = wake_receipts(&journals, &teams);
     let projects = junior_projects(config_cwd, &registry);
+    let plans = plan_wakes(&teams, &projects, &beats, &wakes, beat_secs, now);
+    if plans.is_empty() {
+        return Ok(Outcome {
+            acted: 0,
+            skip_reason: Some("none_overdue".to_string()),
+            detail: format!(
+                "{} lead(s) observed; none past the {}m line",
+                teams.len(),
+                mins(beat_secs)
+            ),
+        });
+    }
     // holder -> repo root (project_root, else cwd): where the lead manifest
-    // and the provider thread's cwd live, read once per pass.
+    // and the provider thread's cwd live, read once per pass, and only when
+    // a wake actually plans (the quiet pass never pays the registry parse).
     let roots: BTreeMap<String, String> = crate::state::load_registry(&registry)
         .map(|loaded| {
             loaded
@@ -378,18 +391,6 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
                 .collect()
         })
         .unwrap_or_default();
-    let plans = plan_wakes(&teams, &projects, &beats, &wakes, beat_secs, now);
-    if plans.is_empty() {
-        return Ok(Outcome {
-            acted: 0,
-            skip_reason: Some("none_overdue".to_string()),
-            detail: format!(
-                "{} lead(s) observed; none past the {}m line",
-                teams.len(),
-                mins(beat_secs)
-            ),
-        });
-    }
     let mut acted = 0u64;
     let mut notes: Vec<String> = Vec::new();
     for plan in plans {
@@ -613,33 +614,28 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::tempdir().unwrap();
-        let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
-        std::env::set_var("FNO_SPACES_DIR", spaces.path());
-        let outcome = || {
-            let repo = tempfile::tempdir().unwrap();
-            let lead = team("x-aaa", 2, "candor", "s-l2a");
-            let plan = wake_plan(&lead);
-            let roots = BTreeMap::from([("candor".to_string(), repo.path().display().to_string())]);
-            // No manifest, a claude manifest, or another session's manifest:
-            // all no signal.
-            assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-            write_beat_manifest(repo.path(), "x-aaa", "claude", "s-l2a");
-            assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-            write_beat_manifest(repo.path(), "x-aaa", "codex", "s-other");
-            assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-            // The woken codex session's own manifest: admitted, rooted at
-            // the holder's repo.
-            write_beat_manifest(repo.path(), "x-aaa", "codex", "s-l2a");
-            let (root, manifest) =
-                beat_resume_target(&plan, "s-l2a", &roots).expect("admits the woken codex lead");
-            assert_eq!(root, repo.path());
-            assert_eq!(manifest.scope, "x-aaa");
-        };
-        outcome();
-        match saved_spaces {
-            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
-            None => std::env::remove_var("FNO_SPACES_DIR"),
-        }
+        let _spaces = crate::claims::EnvVarGuard::set(
+            "FNO_SPACES_DIR",
+            spaces.path().to_str().expect("tempdir path is utf-8"),
+        );
+        let repo = tempfile::tempdir().unwrap();
+        let lead = team("x-aaa", 2, "candor", "s-l2a");
+        let plan = wake_plan(&lead);
+        let roots = BTreeMap::from([("candor".to_string(), repo.path().display().to_string())]);
+        // No manifest, a claude manifest, or another session's manifest:
+        // all no signal.
+        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
+        write_beat_manifest(repo.path(), "x-aaa", "claude", "s-l2a");
+        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
+        write_beat_manifest(repo.path(), "x-aaa", "codex", "s-other");
+        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
+        // The woken codex session's own manifest: admitted, rooted at
+        // the holder's repo.
+        write_beat_manifest(repo.path(), "x-aaa", "codex", "s-l2a");
+        let (root, manifest) =
+            beat_resume_target(&plan, "s-l2a", &roots).expect("admits the woken codex lead");
+        assert_eq!(root, repo.path());
+        assert_eq!(manifest.scope, "x-aaa");
     }
 
     #[test]
@@ -648,19 +644,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let spaces = tempfile::tempdir().unwrap();
-        let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
-        std::env::set_var("FNO_SPACES_DIR", spaces.path());
-        let outcome = || {
-            let lead = team("x-aaa", 2, "stranger", "s-l2a");
-            let plan = wake_plan(&lead);
-            assert!(beat_resume_target(&plan, "s-l2a", &BTreeMap::new()).is_none());
-            let roots = BTreeMap::from([("stranger".to_string(), String::new())]);
-            assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-        };
-        outcome();
-        match saved_spaces {
-            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
-            None => std::env::remove_var("FNO_SPACES_DIR"),
-        }
+        let _spaces = crate::claims::EnvVarGuard::set(
+            "FNO_SPACES_DIR",
+            spaces.path().to_str().expect("tempdir path is utf-8"),
+        );
+        let lead = team("x-aaa", 2, "stranger", "s-l2a");
+        let plan = wake_plan(&lead);
+        assert!(beat_resume_target(&plan, "s-l2a", &BTreeMap::new()).is_none());
+        let roots = BTreeMap::from([("stranger".to_string(), String::new())]);
+        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
     }
 }

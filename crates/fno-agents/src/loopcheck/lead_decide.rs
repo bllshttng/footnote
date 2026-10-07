@@ -286,7 +286,7 @@ pub(super) fn lead_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // The quiet exit names the reads it did not get (timeout-killed
             // truth batches included): the receipt is the record the next
             // wake re-reads against, never a silent clean. The provider goal
-            // parks here too (x-2ed1): an exit that leaves the goal active
+            // parks here too: an exit that leaves the goal active
             // leaves the codex thread asking what to do next forever, which
             // is the usage the parked beat exists to save.
             let mut parked = false;
@@ -312,16 +312,21 @@ pub(super) fn lead_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 } else {
                     None
                 };
-            let mut quiet = format!("board clean; exiting NoWork{}", board.not_read_receipt());
-            match provider_goal_error.as_deref() {
-                Some(error) => {
-                    quiet = format!("{quiet}; Codex provider goal pause refused: {error}");
+            let quiet = match provider_goal_error.as_deref() {
+                // The refusal blocks, so its message never claims an exit.
+                Some(error) => format!(
+                    "board clean{}; Codex provider goal pause refused: {error}",
+                    board.not_read_receipt()
+                ),
+                None => {
+                    let mut quiet =
+                        format!("board clean; exiting NoWork{}", board.not_read_receipt());
+                    if parked {
+                        quiet = format!("{quiet}; Codex provider goal parked; the beat resumes it");
+                    }
+                    quiet
                 }
-                None if parked => {
-                    quiet = format!("{quiet}; Codex provider goal parked; the beat resumes it");
-                }
-                None => {}
-            }
+            };
             if let Some(error) = provider_goal_error.as_deref() {
                 let readings = vec![format!(
                     "reading:provider-goal-pause:{}",
