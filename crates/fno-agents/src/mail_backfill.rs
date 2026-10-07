@@ -354,31 +354,36 @@ fn backfill_live_path(explicit: Option<&str>) -> PathBuf {
     crate::intel::bus_log_path(dot_fno)
 }
 
-/// Pair each send with its receiver-side block: the addressed socket must
-/// equal the block's `from` and the body head must agree. Deterministic, so
-/// a re-scan pairs the same halves.
-fn join(sends: &[SendRow], blocks: &[BlockRow]) -> Vec<(usize, usize)> {
-    let mut by_from: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+/// Pair each send with its receiver-side block by body attribution. The
+/// sender addresses a peer by NAME while the receiver block carries the
+/// sender's SOCKET, so the address forms never match; the body is the
+/// evidence both halves share. A send joins when its normalized 120-char
+/// head maps to exactly ONE candidate landing (a repeated head is
+/// ambiguous and stays out; a repeated head inside ONE receiver transcript
+/// is a resend and keeps the first copy). Heads under 40 chars are too
+/// short to attribute by body alone and stay out. Deterministic, so a
+/// re-scan pairs the same halves.
+fn join(sends: &[SendRow], blocks: &[BlockRow]) -> (Vec<(usize, usize)>, usize) {
+    let mut by_head: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<(String, &str)> = std::collections::HashSet::new();
     for (i, b) in blocks.iter().enumerate() {
-        if let Some(key) = b.from.as_deref() {
-            if !key.is_empty() {
-                by_from.entry(key).or_default().push(i);
-            }
+        let head = norm_head(&b.body, 120);
+        if seen.insert((head.clone(), b.receiver_transcript.as_str())) {
+            by_head.entry(head).or_default().push(i);
         }
     }
     let mut out = Vec::new();
+    let mut skipped = 0usize;
     for (si, s) in sends.iter().enumerate() {
         let head = norm_head(&s.body, 120);
-        if let Some(cands) = by_from.get(s.to.as_str()) {
-            for bi in cands {
-                if norm_head(&blocks[*bi].body, 120) == head {
-                    out.push((si, *bi));
-                    break;
-                }
-            }
+        let attributable = head.chars().count() >= 40;
+        match by_head.get(&head).map(Vec::as_slice) {
+            Some([only]) if attributable => out.push((si, *only)),
+            _ => skipped += 1,
         }
     }
-    out
+    (out, skipped)
 }
 
 /// The whole engine: scan roots, window-filter the sender side, join, and
@@ -480,7 +485,7 @@ fn run_backfill(args: &[String]) -> i32 {
             blocks.extend(receiver_blocks_in(&obj, &p));
         }
     }
-    let pairs = join(&sends, &blocks);
+    let (pairs, skipped) = join(&sends, &blocks);
     let mut written = 0usize;
     let mut rows_out: Vec<Value> = Vec::new();
     if apply {
@@ -517,7 +522,7 @@ fn run_backfill(args: &[String]) -> i32 {
     }
     println!(
         "{}",
-        json!({"written": written, "joined": pairs.len(), "rows": rows_out})
+        json!({"written": written, "joined": pairs.len(), "skipped": skipped, "rows": rows_out})
     );
     0
 }
@@ -599,7 +604,7 @@ mod engine_tests {
             "timestamp": "2026-10-07T10:00:00.000Z",
             "message": {"content": [{"type": "tool_use", "name": "SendMessage",
                 "input": {"to": "uds:/tmp/cc-socks/9.sock", "summary": "hold ack",
-                           "message": "hold ack: nothing running"}}]}
+                           "message": "hold ack: nothing running, tests green on both legs"}}]}
         });
         std::fs::write(sender.join("s.jsonl"), format!("{send_row}\n")).unwrap();
         let receiver = root.join("-Users-y-proj");
@@ -608,7 +613,7 @@ mod engine_tests {
             "type": "user",
             "sessionId": "sess-b",
             "timestamp": "2026-10-07T10:00:01.000Z",
-            "message": {"content": "<cross-session-message from=\"uds:/tmp/cc-socks/9.sock\" from-name=\"worker-1\">\nhold ack: nothing running\n</cross-session-message>"}
+            "message": {"content": "<cross-session-message from=\"uds:/tmp/cc-socks/9.sock\" from-name=\"worker-1\">\nhold ack: nothing running, tests green on both legs\n</cross-session-message>"}
         });
         std::fs::write(receiver.join("r.jsonl"), format!("{recv_row}\n")).unwrap();
     }
@@ -621,26 +626,65 @@ mod engine_tests {
             sender_session: "sess-a".into(),
             to: "uds:/tmp/cc-socks/9.sock".into(),
             summary: Some("hold ack".into()),
-            body: "hold ack: nothing running".into(),
+            body: "hold ack: nothing running, tests green on both legs".into(),
             sender_transcript: "s.jsonl".into(),
         }];
         let blocks = vec![
             BlockRow {
                 from: Some("uds:/tmp/cc-socks/9.sock".into()),
                 from_name: Some("worker-1".into()),
-                body: "hold ack: nothing running".into(),
+                body: "hold ack: nothing running, tests green on both legs".into(),
                 receiver_session: "sess-b".into(),
                 receiver_transcript: "r.jsonl".into(),
             },
             BlockRow {
                 from: Some("uds:/tmp/cc-socks/9.sock".into()),
                 from_name: Some("worker-1".into()),
-                body: "an entirely different report".into(),
+                body: "an entirely different report from another lane".into(),
                 receiver_session: "sess-b".into(),
                 receiver_transcript: "r.jsonl".into(),
             },
         ];
-        let pairs = join(&sends, &blocks);
+        let (pairs, skipped) = join(&sends, &blocks);
+        assert_eq!(pairs, vec![(0, 0)]);
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn join_skips_short_and_ambiguous_heads() {
+        let mk_send = |body: String| SendRow {
+            uuid: "row-1".into(),
+            ts: "2026-10-07T10:00:00.000Z".into(),
+            sender_session: "sess-a".into(),
+            to: "lead".into(),
+            summary: None,
+            body,
+            sender_transcript: "s.jsonl".into(),
+        };
+        let mk_block = |body: &str, session: &str| BlockRow {
+            from: Some("uds:/tmp/cc-socks/9.sock".into()),
+            from_name: Some("worker-1".into()),
+            body: body.to_string(),
+            receiver_session: session.into(),
+            receiver_transcript: "r.jsonl".into(),
+        };
+        // Under the attribution floor: never paired.
+        let (pairs, skipped) = join(&[mk_send("continue".into())], &[mk_block("continue", "b")]);
+        assert!(pairs.is_empty());
+        assert_eq!(skipped, 1);
+        // The same head in two transcripts is ambiguous: never paired.
+        let long = "PR 3147 holds until the other lane merges its wave".to_string();
+        let (pairs, skipped) = join(
+            &[mk_send(long.clone())],
+            &[mk_block(&long, "b1"), mk_block(&long, "b2")],
+        );
+        assert!(pairs.is_empty());
+        assert_eq!(skipped, 1);
+        // A repeat inside ONE transcript is a resend: first copy wins.
+        let (pairs, _skipped) = join(
+            &[mk_send(long.clone())],
+            &[mk_block(&long, "b1"), mk_block(&long, "b1")],
+        );
         assert_eq!(pairs, vec![(0, 0)]);
     }
 

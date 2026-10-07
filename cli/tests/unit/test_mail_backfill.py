@@ -1,38 +1,34 @@
-"""`fno agents mail backfill`: outage-era traffic back into the store.
+"""`fno-agents mail-backfill run`: outage-era traffic back into the store.
 
 The store skipped agent-to-agent messages that went over the harness's
 native cross-session transport while `fno mail send` was down. Both halves
-of each message live in the harness transcripts, so the engine joins the
-sender's native SendMessage call with the receiver's cross-session block
-and writes an audit-only row (delivery=cross-session) that never
-re-delivers. Idempotent by msg_id: the archive id is a deterministic
-function of the sender session and the source row, so a re-run skips what
-already landed. The engine is Rust (`fno-agents mail-backfill run`); the
-tests drive it through the real binary.
+of each message live in the harness transcripts; the engine joins them by
+body attribution (a unique normalized head, 40 chars or more) and writes
+an audit-only row (delivery=cross-session) that never re-delivers.
+Idempotent by msg_id: the archive id is a deterministic function of the
+sender session and the source row. The tests drive the real binary.
 """
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from fno.bus.log import Envelope, bus_log_path, is_deliverable
-from fno.mail.cli import mail_app
-from fno.paths_testing import use_tmpdir
-
-runner = CliRunner()
 
 _SENDER_SESSION = "0199aaaa-1111-7000-8000-aaaaaaaaaaaa"
 _RECEIVER_SESSION = "0199bbbb-2222-7000-8000-bbbbbbbbbbbb"
 _SOCKET = "uds:/tmp/cc-socks/4242.sock"
+_BODY = "hold ack: nothing running, tests green on both legs"
 
 
 @pytest.fixture
-def _tmp_state(tmp_path, monkeypatch):
-    use_tmpdir(monkeypatch, tmp_path)
+def _tmp_bus(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents-home" / "agents"))
     return tmp_path
 
 
@@ -47,12 +43,7 @@ def _rust_bin(monkeypatch):
     """
     candidate = os.environ.get("FNO_AGENTS_TEST_BIN")
     if not candidate:
-        root = (
-            Path(__file__).resolve().parents[3]
-            / "crates"
-            / "fno-agents"
-            / "target"
-        )
+        root = Path(__file__).resolve().parents[3] / "crates" / "fno-agents" / "target"
         for profile in ("debug", "release"):
             probe = root / profile / "fno-agents"
             if probe.exists():
@@ -60,7 +51,16 @@ def _rust_bin(monkeypatch):
                 break
     if not candidate or not Path(candidate).exists():
         pytest.skip("no fno-agents build with the mail-backfill verb")
-    monkeypatch.setenv("FNO_AGENTS_BIN", candidate)
+    return candidate
+
+
+def _run(binary, root, *extra):
+    proc = subprocess.run(
+        [str(binary), "mail-backfill", "run", "--root", str(root), *extra],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
 
 
 def _send_row(ts, body, uuid="row-1"):
@@ -74,7 +74,7 @@ def _send_row(ts, body, uuid="row-1"):
                 {
                     "type": "tool_use",
                     "name": "SendMessage",
-                    "input": {"to": _SOCKET, "summary": "hold ack", "message": body},
+                    "input": {"to": "jordan", "summary": "hold ack", "message": body},
                 }
             ]
         },
@@ -119,24 +119,18 @@ def test_a_cross_session_row_is_never_redelivered():
     assert is_deliverable(row) is False
 
 
-def test_backfill_scan_apply_and_idempotent_rerun(_tmp_state, _rust_bin):
+def test_run_apply_then_idempotent_rerun(_tmp_bus, _rust_bin):
     """End to end on fixture transcripts: dry run joins the halves, apply
     writes one provenance-complete row, a second apply writes nothing."""
-    root = _tmp_state / "projects"
-    _store_transcripts(root, "hold ack: nothing running")
+    root = _tmp_bus / "projects"
+    _store_transcripts(root, _BODY)
 
-    def _run(*args):
-        return runner.invoke(
-            mail_app,
-            ["backfill", "--root", str(root), *args],
-        )
-
-    dry = json.loads(_run().output)
+    dry = _run(_rust_bin, root)
     assert dry["joined"] == 1
     assert dry["rows"][0]["from_session"] == _SENDER_SESSION
     assert dry["rows"][0]["to_session"] == _RECEIVER_SESSION
 
-    applied = json.loads(_run("--apply").output)
+    applied = _run(_rust_bin, root, "--apply")
     assert applied["written"] == 1
 
     rows = [
@@ -154,50 +148,57 @@ def test_backfill_scan_apply_and_idempotent_rerun(_tmp_state, _rust_bin):
     assert row["meta"]["transport"] == "claude-cross-session"
     assert row["meta"]["sender_transcript"].endswith("s.jsonl")
     assert row["meta"]["receiver_transcript"].endswith("r.jsonl")
-    assert row["body"] == "hold ack: nothing running"
+    assert row["body"] == _BODY
     assert row["id"].startswith("fmail-bf-")
 
-    again = json.loads(_run("--apply").output)
+    again = _run(_rust_bin, root, "--apply")
     assert again["written"] == 0
 
 
-def test_backfill_scan_skips_rows_outside_the_window(_tmp_state, _rust_bin):
+def test_run_skips_rows_outside_the_window(_tmp_bus, _rust_bin):
     """The window bounds the scan: only sends stamped inside it join, even
     when both pairs live in the scanned files."""
-    root = _tmp_state / "projects"
-    _store_transcripts(root, "hold ack: nothing running")
+    root = _tmp_bus / "projects"
+    _store_transcripts(root, _BODY)
     late = root / "-Users-z-proj"
     late.mkdir()
     (late / "s.jsonl").write_text(
-        json.dumps(_send_row("2026-10-07T18:00:00.000Z", "a later message", uuid="row-2"))
+        json.dumps(_send_row("2026-10-07T18:00:00.000Z", "a later message with enough length", uuid="row-2"))
         + "\n",
         encoding="utf-8",
     )
     (late / "r.jsonl").write_text(
-        json.dumps(_receive_row("2026-10-07T18:00:01.000Z", "a later message")) + "\n",
-        encoding="utf-8",
-    )
-    result = runner.invoke(
-        mail_app,
-        [
-            "backfill", "--root", str(root),
-            "--since", "2026-10-07T15:00:00Z", "--until", "2026-10-07T19:00:00Z",
-        ],
-    )
-    rows = json.loads(result.output)
-    assert [r["body_head"] for r in rows] == ["a later message"]
-
-
-def test_backfill_scan_never_joins_a_mismatched_body(_tmp_state, _rust_bin):
-    """The join demands the body head agree: a block on the same socket
-    carrying different text is not this send's landing proof."""
-    root = _tmp_state / "projects"
-    _store_transcripts(root, "hold ack: nothing running")
-    other = root / "-Users-y-proj" / "other.jsonl"
-    other.write_text(
-        json.dumps(_receive_row("2026-10-07T10:00:02.000Z", "an entirely different report"))
+        json.dumps(_receive_row("2026-10-07T18:00:01.000Z", "a later message with enough length"))
         + "\n",
         encoding="utf-8",
     )
-    result = runner.invoke(mail_app, ["backfill", "--root", str(root)])
-    assert json.loads(result.output)["joined"] == 1
+    result = _run(
+        _rust_bin, root,
+        "--since", "2026-10-07T15:00:00Z", "--until", "2026-10-07T19:00:00Z",
+    )
+    assert [r["body_head"] for r in result["rows"]] == ["a later message with enough length"]
+
+
+def test_run_never_joins_a_mismatched_body(_tmp_bus, _rust_bin):
+    """A block whose body differs is not this send's landing proof."""
+    root = _tmp_bus / "projects"
+    _store_transcripts(root, _BODY)
+    other = root / "-Users-y-proj" / "other.jsonl"
+    other.write_text(
+        json.dumps(
+            _receive_row("2026-10-07T10:00:02.000Z", "an entirely different report from a peer")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = _run(_rust_bin, root)
+    assert result["joined"] == 1
+
+
+def test_run_leaves_a_short_body_unattributed(_tmp_bus, _rust_bin):
+    """A body under the attribution floor (40 chars) never pairs: a short
+    head cannot prove which session landed it."""
+    root = _tmp_bus / "projects"
+    _store_transcripts(root, "continue")
+    result = _run(_rust_bin, root)
+    assert result["joined"] == 0
