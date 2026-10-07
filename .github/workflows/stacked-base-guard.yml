@@ -81,7 +81,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/ci/check-stacked-base.sh "$PR_NUMBER" "$HEAD_SHA"
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bash scripts/ci/check-stacked-base.sh "$PR_NUMBER" "$HEAD_SHA" "$BASE_REF"
 
   queue-guard:
     if: github.event_name == 'merge_group'

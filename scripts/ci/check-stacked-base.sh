@@ -12,9 +12,13 @@
 # required - and the push-triggered sweep, the one that catches a base dying
 # after the PR's last push, would be the one left unable to block.
 #
-# Usage: check-stacked-base.sh <pr-number> <head-sha>
+# Usage: check-stacked-base.sh <pr-number> <head-sha> [base-ref]
 # Exit:  0 base still leads to the default branch AND the status was posted
 #        1 stale base, the probe could not evaluate, or the status POST failed
+#
+# A base-ref argument naming the repository default branch stamps success
+# directly: that PR has no stacked-base question, and the probe can only
+# answer ok or fail on an outage there.
 #
 # CI fails closed on an unevaluated probe: a check that could not run has
 # verified nothing, and reporting it green is the defect this guard exists for.
@@ -22,19 +26,26 @@
 # breadcrumb) so a gh outage cannot wedge a merge; the split is intentional.
 set -uo pipefail
 
-PR="${1:?usage: check-stacked-base.sh <pr-number> <head-sha>}"
-SHA="${2:?usage: check-stacked-base.sh <pr-number> <head-sha>}"
+PR="${1:?usage: check-stacked-base.sh <pr-number> <head-sha> [base-ref]}"
+SHA="${2:?usage: check-stacked-base.sh <pr-number> <head-sha> [base-ref]}"
+BASE_REF="${3:-}"
 CONTEXT="stacked-base-guard"
 
-out="$(uv run --project cli fno-py do pr base-lineage-check "$PR" 2>&1)"
-rc=$?
-printf '%s\n' "$out"
+default="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)" || default=""
+if [ -n "$BASE_REF" ] && [ "$BASE_REF" = "$default" ]; then
+  state=success
+  desc="base is the default branch"
+else
+  out="$(uv run --project cli fno-py do pr base-lineage-check "$PR" 2>&1)"
+  rc=$?
+  printf '%s\n' "$out"
 
-case "$rc" in
-  0) state=success; desc="base still leads to the default branch" ;;
-  3) state=failure; desc="base branch no longer leads to the default branch" ;;
-  *) state=failure; desc="lineage check could not evaluate (exit $rc)" ;;
-esac
+  case "$rc" in
+    0) state=success; desc="base still leads to the default branch" ;;
+    3) state=failure; desc="base branch no longer leads to the default branch" ;;
+    *) state=failure; desc="lineage check could not evaluate (exit $rc)" ;;
+  esac
+fi
 
 # The status is the durable artifact: a job's own conclusion is scoped to that
 # run, while a status stays attached to the head SHA where branch protection

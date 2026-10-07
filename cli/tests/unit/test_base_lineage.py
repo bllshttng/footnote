@@ -148,25 +148,21 @@ def patch_run(monkeypatch):
     return _apply
 
 
-@pytest.mark.parametrize(
-    "kwargs,verdict,fragment",
-    [
-        ({"pr_head": ""}, "unknown", "head sha"),
-        ({"contained": True}, "ok", "contains"),
-        ({"contained": False}, "stale", "merge origin/main into the branch"),
-        ({"fetch_fails": True}, "unknown", "could not refresh"),
-    ],
-)
-def test_default_base_lineage_table(patch_run, kwargs, verdict, fragment):
-    """A base that IS the default branch: ancestry decides, probes stay humble.
+def test_default_base_passes_without_probes(patch_run):
+    """A base that IS the default branch has no lineage question.
 
-    The stale row asserts the remedy, not just the fault: a refusal that
-    closes the door without pointing at the key invites improvisation.
+    GitHub's own conflict detection governs that merge; a head behind the tip
+    is not a lineage defect. The old catch-up refusal made every busy hour on
+    main cost a catch-up push that cancelled the CI run it protected, so no
+    probe runs here and none can fail the PR - not even a probe outage.
     """
-    patch_run(FakeRun(base="main", **kwargs))
+    fake = patch_run(FakeRun(base="main", pr_head="", fetch_fails=True))
     got, why = _base_lineage.lineage_verdict(805, "/repo")
-    assert got == verdict
-    assert fragment in why
+    assert got == "ok"
+    assert "default branch" in why
+    assert not [
+        c for c in fake.calls if c[0] == "git" and c[1] in ("fetch", "merge-base", "rev-parse")
+    ]
 
 
 def test_merged_pr_on_unmoved_base_refuses(patch_run):
