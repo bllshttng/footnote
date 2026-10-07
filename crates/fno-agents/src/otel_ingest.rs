@@ -669,13 +669,13 @@ mod tests {
             (key == "CLAUDE_CODE_ENABLE_TELEMETRY").then(|| "1".to_string())
         };
         assert!(crate::claude_supervisor::otel_env(&port_file, claude_on).is_empty());
-        let early = crate::claude_supervisor::otel_env(&sup_home.otel_dir().join("nope"), |_| None);
-        assert!(early.contains(&(
-            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT".into(),
-            "http://127.0.0.1:4318/v1/logs".into()
-        )));
+        // No published record: the port may belong to another collector.
+        assert!(
+            crate::claude_supervisor::otel_env(&sup_home.otel_dir().join("nope"), |_| None)
+                .is_empty()
+        );
         for content_flag in ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_CONTENT"] {
-            assert!(early.iter().all(|(key, _)| key != content_flag));
+            assert!(env.iter().all(|(key, _)| key != content_flag));
         }
 
         // AC1 + AC2: the live receiver.

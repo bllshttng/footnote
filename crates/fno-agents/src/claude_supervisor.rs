@@ -185,8 +185,8 @@ fn supervisor_birth_command(config_dir: Option<&Path>) -> std::process::Command 
     cmd
 }
 
-/// The OTEL_* env a supervisor birth carries when fno's localhost receiver is
-/// endpoint is known, even before its listener starts, and the ambient env
+/// The OTEL_* env a supervisor birth carries when fno's localhost receiver
+/// has published its endpoint (it bound the port once), and the ambient env
 /// has no telemetry of its own. An empty result leaves telemetry alone:
 /// an operator endpoint wins, and a running supervisor keeps its env
 /// until restart.
@@ -204,6 +204,11 @@ pub(crate) fn otel_env(
     .iter()
     .any(|key| ambient(key).is_some())
     {
+        return Vec::new();
+    }
+    // Only a bound receiver writes the record. With no record, 4318 may
+    // belong to another collector, which would get unredacted tool detail.
+    if !port_file.is_file() {
         return Vec::new();
     }
     let port = match crate::otel_ingest::receiver_port(port_file) {

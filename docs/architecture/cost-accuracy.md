@@ -122,7 +122,7 @@ Ground truth at ship time: the fixed parser reproduced the reference tool's $31.
 
 ## Reported request cost and local OTel ingest
 
-With `[telemetry] claude_otel = true` (the default), the daemon serves OTLP/http-json logs on localhost. Its `~/.fno/agents/otel/port` record survives shutdown, and the next daemon uses the same port. A first start uses port 4318. A bind conflict or invalid port record reports an error and does not choose a different endpoint. Supervisor birth uses this endpoint before the listener starts, so later receiver startup and daemon restarts keep the exporter destination stable. Explicit operator telemetry settings take precedence.
+With `[telemetry] claude_otel = true` (the default), the daemon serves OTLP/http-json logs on localhost. Its `~/.fno/agents/otel/port` record survives shutdown, and the next daemon uses the same port. A first start uses port 4318. A bind conflict or invalid port record reports an error and does not choose a different endpoint. Supervisor birth injects telemetry only after a receiver has published the port record. With no record, the port may belong to another collector, so the supervisor injects nothing. Daemon restarts keep the exporter destination stable. Explicit operator telemetry settings take precedence.
 
 The database retains every log event in `otel_events`, including unknown future event names. `api_requests` supplies typed cost and token columns. Both tables are defined in one canonical SQL file. The generated [schema reference](../reference/otel-schema.md) lists every table and column. A batch commits raw retention and typed projection together. Failed storage returns HTTP 503 so the exporter can retry. Invalid payloads return HTTP 400.
 
