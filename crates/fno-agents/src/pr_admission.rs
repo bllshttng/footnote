@@ -313,7 +313,7 @@ mod tests {
 
     fn pull(head: Value, base: &str, association: &str) -> Value {
         json!({
-            "head": {"repo": head},
+            "head": {"repo": {"full_name": head}},
             "base": {"repo": {"full_name": base}},
             "author_association": association,
             "user": {"login": "someone"},
