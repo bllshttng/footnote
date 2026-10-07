@@ -398,6 +398,9 @@ fn build_session_report_params(rest: &[String]) -> Result<Value, String> {
             "--wait-row" => {
                 params.insert("wait_row".into(), Value::Bool(true));
             }
+            "--origin-only" => {
+                params.insert("origin_only".into(), Value::Bool(true));
+            }
             other => return Err(format!("unknown flag: {other}")),
         }
     }
@@ -544,6 +547,51 @@ async fn drain_spool(home: &AgentsHome) {
     }
 }
 
+/// Write the origin record beside this session's transcript (see
+/// `fno::session_origin`). Best effort: an error never fails the hook. A
+/// source of `resume` writes nothing: the record names the machine a session
+/// BEGAN on, and a resume is not that machine's claim to make.
+fn record_origin(params: &Value) {
+    let payload = params.get("payload");
+    let source = payload
+        .and_then(|p| p.get("source"))
+        .or_else(|| params.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if source == "resume" {
+        return;
+    }
+    let harness = params
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let sid = payload
+        .and_then(|p| p.get("session_id"))
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if sid.is_empty() {
+        return;
+    }
+    let transcript = payload
+        .and_then(|p| p.get("transcript_path"))
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            if harness == "codex" {
+                crate::codex_store::codex_rollout_path(None, sid)
+            } else {
+                None
+            }
+        });
+    let Some(transcript) = transcript else {
+        return;
+    };
+    let _ = fno::session_origin::write_if_absent(
+        &fno::session_origin::SessionOrigin::for_this_machine(harness, sid, &transcript),
+    );
+}
+
 /// The `report` verb's dispatcher. `--kind session` selects the SessionStart
 /// transport; every other invocation is the inside-leg report, unchanged. The
 /// SessionStart form rides the EXISTING action because the client action list
@@ -593,6 +641,12 @@ pub async fn run_session_report(rest: &[String], home: &AgentsHome) -> i32 {
     let mut params = params;
     if let Some(payload) = read_stdin_payload() {
         params["payload"] = payload;
+    }
+    record_origin(&params);
+    // --origin-only writes the record and sends nothing: the daemon learns
+    // nothing new, and a hand-started session spools no frame for it.
+    if params.get("origin_only").and_then(Value::as_bool) == Some(true) {
+        return 0;
     }
     let req = Request::new(1, "agent.session_report", params);
     // FIFO: spooled frames go first, so a replayed startup report can never
@@ -682,16 +736,62 @@ mod tests {
         assert_eq!(response_json(&resp)["error"]["code"], "invalid_params");
     }
 
+    /// Backdate a file so the prune's 24-hour floor reads it as stale.
+    fn backdate(path: &std::path::Path, age: std::time::Duration) {
+        let past = std::time::SystemTime::now() - age;
+        let secs = past
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as libc::time_t;
+        let times = [
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+        ];
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid C string from an owned path; the call only sets times.
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+        }
+    }
+
     #[test]
     fn payload_session_id_wins_and_stamps_transcript_and_source() {
         let (_d, home) = temp_home("stamp");
         seed_registry(&home, claude_row());
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("w1.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        // An orphan this machine wrote over a day ago, its transcript gone:
+        // the next write in this folder prunes exactly it (AC2-PRUNE).
+        let orphan_sid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let orphan = dir.path().join(format!("{orphan_sid}.fno.json"));
+        std::fs::write(
+            &orphan,
+            serde_json::to_vec(&fno::session_origin::SessionOrigin {
+                machine: fno::session_origin::this_machine(),
+                host: "elsewhere".into(),
+                harness: "claude".into(),
+                session_id: orphan_sid.into(),
+                transcript_path: "/gone/w1.jsonl".into(),
+                recorded_at: "2026-09-01T00:00:00Z".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        backdate(&orphan, std::time::Duration::from_secs(2 * 24 * 3600));
+        let path_str = transcript.to_string_lossy().to_string();
         let params = json!({
             "harness": "claude",
             "session_id": "env-fallback",
             "payload": {
                 "session_id": "3228ccad-c078-4f2e-9a51-6d1f0a2b3c4d",
-                "transcript_path": "/t/w1.jsonl",
+                "transcript_path": path_str,
                 "source": "startup"
             }
         });
@@ -702,8 +802,20 @@ mod tests {
             row.harness_session_id.as_deref(),
             Some("3228ccad-c078-4f2e-9a51-6d1f0a2b3c4d")
         );
-        assert_eq!(row.transcript_path.as_deref(), Some("/t/w1.jsonl"));
+        assert_eq!(row.transcript_path.as_deref(), Some(path_str.as_str()));
         assert_eq!(row.start_source.as_deref(), Some("startup"));
+        // The startup report wrote the origin record beside the transcript;
+        // a second write is a no-op (first machine wins); the prune removed
+        // only the stale orphan (AC1-HP, AC2-PRUNE).
+        let record = dir
+            .path()
+            .join("3228ccad-c078-4f2e-9a51-6d1f0a2b3c4d.fno.json");
+        record_origin(&params);
+        assert!(record.exists());
+        assert!(!orphan.exists(), "stale orphan pruned");
+        let first = std::fs::read(&record).unwrap();
+        record_origin(&params);
+        assert_eq!(std::fs::read(&record).unwrap(), first, "first machine wins");
     }
 
     #[test]
@@ -756,10 +868,13 @@ mod tests {
                 "harness_session_id": "0197aaaa-1234-7abc-9def-0123456789ab"
             }),
         );
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("rollout.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
         let params = report_params(
             "codex",
             "0197bbbb-1234-7abc-9def-0123456789ab",
-            json!({"agent_self": "w1", "payload": {"source": "resume"}}),
+            json!({"agent_self": "w1", "payload": {"source": "resume", "transcript_path": transcript.to_string_lossy()}}),
         );
         let resp = handle_session_report(&home, &emitter(&home), &req(params));
         assert_eq!(response_json(&resp)["result"]["related_filled"], true);
@@ -773,6 +888,13 @@ mod tests {
             Some("0197bbbb-1234-7abc-9def-0123456789ab")
         );
         assert_eq!(row.start_source.as_deref(), Some("resume"));
+        // A resume writes no origin record: the record names the machine the
+        // session BEGAN on, and the resuming machine is not it (AC2-ERR).
+        record_origin(&params);
+        assert!(!dir
+            .path()
+            .join("0197bbbb-1234-7abc-9def-0123456789ab.fno.json")
+            .exists());
     }
 
     #[test]
