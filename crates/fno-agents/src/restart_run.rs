@@ -267,10 +267,19 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     if let Some(line) = out {
         say(&line);
     }
-    if let Some(line) = err {
+    if let Some(line) = &err {
         eprintln!("{line}");
     }
     if code != 0 {
+        let cause = err
+            .as_deref()
+            .and_then(|e| e.lines().rev().find(|l| !l.trim().is_empty()))
+            .unwrap_or("no cause captured");
+        eprintln!(
+            "fno agents restart: FAILED: the daemon is not running build {}: {}",
+            build_rev(),
+            cause.trim()
+        );
         return code;
     }
     // The preserved/lost read: after the fresh daemon answers, re-read the
@@ -402,7 +411,8 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         (Vec::new(), false)
     };
 
-    // Machine-readable summary; the LAST stdout line, so an orchestrator
+    // Machine-readable summary; the last machine line (only the closing
+    // verdict follows it, on stderr in --json mode), so an orchestrator
     // parses it without guessing. `components` names one row per component
     // (old pid -> new pid, or unchanged); `preserved` folds every session's
     // kept panes and threads into one list.
@@ -471,12 +481,38 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled") || post_mux_unproven, upgrade_failed).1,
     });
     println!("fno agents restart: keepers {summary}");
-    u8::from(
-        cycled.iter().any(|c| c.result != "cycled")
-            || post_mux_unproven
-            || mux_failed
-            || upgrade_failed,
-    ) as i32
+    let legs_failed = cycled.iter().any(|c| c.result != "cycled")
+        || post_mux_unproven
+        || mux_failed
+        || upgrade_failed;
+    // The closing line names whether the daemon now runs the build on disk;
+    // a restart that leaves it on an older build fails the verb.
+    let daemon = match check_daemon_drift(&home).await {
+        DriftState::Fresh => Ok(format!(
+            "daemon pid {} runs the new build {}",
+            new_pid.map_or("?".to_string(), |p| p.to_string()),
+            build_rev()
+        )),
+        DriftState::Drifted { .. } => Err("the daemon still runs an older build".to_string()),
+        DriftState::DaemonDown => Err("no daemon is running after the restart".to_string()),
+        DriftState::Unknown => Err("could not confirm which build the daemon runs".to_string()),
+    };
+    match (&daemon, legs_failed) {
+        (Ok(line), false) => say(&format!("fno agents restart: done; {line}.")),
+        (Ok(line), true) => {
+            eprintln!("fno agents restart: FAILED: a fleet leg did not heal (see above); {line}.")
+        }
+        (Err(line), _) => eprintln!(
+            "fno agents restart: FAILED: {line}; build on disk {}.",
+            build_rev()
+        ),
+    }
+    i32::from(legs_failed || daemon.is_err())
+}
+
+/// The first 12 characters of the build this binary carries.
+fn build_rev() -> String {
+    env!("FNO_AGENTS_GIT_REV").chars().take(12).collect()
 }
 
 /// The post-mux keeper-refresh gate: a second stale-keeper pass

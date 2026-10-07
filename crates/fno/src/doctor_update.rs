@@ -807,14 +807,161 @@ fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> 
 }
 
 /// Chain the crate's drift-gated daemon swap; the verb is quiet on fresh or
-/// down.
+/// down. A failed swap keeps its last stderr line for the closing verdict.
 fn chained_restart_if_drifted(binary: &Path, dry_run: bool) {
     let args: Vec<String> = ["restart".into(), "--if-drifted".into()].to_vec();
     if dry_run {
         println!("Would run: {} {}", binary.display(), args.join(" "));
         return;
     }
-    let _ = run_bounded(binary, &args, Duration::from_secs(120), None);
+    if let Ok((code, _out, err)) = run_bounded(binary, &args, Duration::from_secs(120), None) {
+        if code != 0 {
+            let cause = err
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            let _ = RESTART_FAILURE.set(format!("the daemon swap exited {code}: {}", cause.trim()));
+        }
+    }
+}
+
+static RESTART_FAILURE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Bring the source checkout to its upstream before anything builds: fetch,
+/// then fast-forward, or refuse naming how far behind it is. On 2026-10-07 an
+/// update built a checkout 122 commits behind origin/main and called the old
+/// bins fresh.
+pub(crate) fn sync_source_checkout(source: &Path, dry_run: bool) -> Result<(), String> {
+    // A packaged source is no git checkout: there is nothing to sync.
+    let Some(repo) = git_in(source, &["rev-parse", "--show-toplevel"]).map(PathBuf::from) else {
+        return Ok(());
+    };
+    let Some(upstream) = git_in(
+        &repo,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    ) else {
+        println!(
+            "fno doctor update: {} has no upstream branch; building its local HEAD as it stands",
+            repo.display()
+        );
+        return Ok(());
+    };
+    let git = |args: &[&str], bound: u64| {
+        let mut argv = vec!["-C".to_string(), repo.to_string_lossy().into_owned()];
+        argv.extend(args.iter().map(|a| a.to_string()));
+        run_bounded(Path::new("git"), &argv, Duration::from_secs(bound), None)
+    };
+    let first_line = |text: &str| {
+        text.lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    if dry_run {
+        println!(
+            "Would run: git -C {} fetch, then merge --ff-only {upstream}",
+            repo.display()
+        );
+        return Ok(());
+    }
+    match git(&["fetch", "--quiet"], 120) {
+        Ok((0, _, _)) => {}
+        Ok((code, _, err)) => eprintln!(
+            "fno doctor update: git fetch exited {code} ({}); checking against the last fetched {upstream}",
+            first_line(&err)
+        ),
+        Err(e) => eprintln!(
+            "fno doctor update: git fetch did not finish ({e}); checking against the last fetched {upstream}"
+        ),
+    }
+    let behind = git_in(&repo, &["rev-list", "--count", "HEAD..@{u}"])
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0);
+    if behind == 0 {
+        return Ok(());
+    }
+    match git(&["merge", "--ff-only", "--quiet", "@{u}"], 120) {
+        Ok((0, _, _)) => {
+            println!(
+                "fno doctor update: fast-forwarded {} by {behind} commit(s) to {upstream}",
+                repo.display()
+            );
+            Ok(())
+        }
+        Ok((_, out, err)) => Err(format!(
+            "fno doctor update: refused: {} is {behind} commit(s) behind {upstream} and cannot fast-forward ({}). Run `git -C {} pull --ff-only`, then re-run.",
+            repo.display(),
+            first_line(if err.trim().is_empty() { &out } else { &err }),
+            repo.display()
+        )),
+        Err(e) => Err(format!(
+            "fno doctor update: refused: {} is {behind} commit(s) behind {upstream} and the fast-forward did not finish ({e}).",
+            repo.display()
+        )),
+    }
+}
+
+/// The closing verdict: does the running daemon run the build on disk? Ok
+/// when it does or when none runs (the next verb starts the new build).
+fn daemon_verdict() -> Result<String, String> {
+    let bin = fno_agents_bin();
+    let rev = run_bounded(
+        &bin,
+        &["version".into(), "--json".into()],
+        Duration::from_secs(30),
+        None,
+    )
+    .ok()
+    .and_then(|(_, out, _)| serde_json::from_str::<Value>(out.trim()).ok())
+    .and_then(|v| {
+        v.get("git_rev")
+            .and_then(Value::as_str)
+            .map(|r| r.chars().take(12).collect::<String>())
+    })
+    .unwrap_or_else(|| "unknown".into());
+    let restart_failure = RESTART_FAILURE
+        .get()
+        .map(|f| format!("; {f}"))
+        .unwrap_or_default();
+    match run_bounded(
+        &bin,
+        &["status".into(), "--json".into()],
+        Duration::from_secs(30),
+        None,
+    ) {
+        Ok((0, out, _)) => {
+            let status: Value = serde_json::from_str(out.trim()).unwrap_or(Value::Null);
+            let pid = status
+                .pointer("/daemon/pid")
+                .and_then(Value::as_u64)
+                .map_or("?".to_string(), |p| p.to_string());
+            match status.get("drift").and_then(Value::as_str) {
+                Some("fresh") => Ok(format!("daemon pid {pid} runs the new build {rev}")),
+                Some("drifted") => Err(format!(
+                    "daemon pid {pid} still runs an older build, not {rev}{restart_failure}; run `fno restart`"
+                )),
+                _ => Err(format!(
+                    "could not confirm which build daemon pid {pid} runs{restart_failure}; run `fno restart`"
+                )),
+            }
+        }
+        Ok((13, _, _)) => Ok(format!(
+            "no daemon running; the next fno-agents verb starts the new build {rev}"
+        )),
+        Ok((code, _, err)) => Err(format!(
+            "the daemon status read exited {code} ({}){restart_failure}",
+            err.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+        )),
+        Err(e) => Err(format!(
+            "the daemon status read did not finish ({e}){restart_failure}"
+        )),
+    }
 }
 
 /// Live mux sessions on a wire below the compatibility floor: the `stale`
@@ -1520,6 +1667,10 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         return 1;
     };
     let resolved = PathBuf::from(path_str);
+    if let Err(refusal) = sync_source_checkout(&resolved, flags.dry_run) {
+        eprintln!("{refusal}");
+        return 1;
+    }
     println!("Reinstalling fno from {}", resolved.display());
 
     let mut failed: Vec<String> = Vec::new();
@@ -1658,7 +1809,12 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
 
     release_update_claim();
 
-    if failed.is_empty() {
+    let verdict = daemon_verdict();
+    if verdict.is_err() {
+        failed.push("daemon on the new build".into());
+    }
+
+    let code = if failed.is_empty() {
         let installed_fields: Vec<(&str, String)> = {
             let mut f: Vec<(&str, String)> = Vec::new();
             if let Some(r) = &rev {
@@ -1677,12 +1833,16 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     } else {
         let rc = "1";
         journal_call("failed", &[("rc", rc.to_string())], None);
-        println!(
-            "fno doctor update: completed with failed step(s): {}",
-            failed.join(", ")
-        );
         1
+    };
+    // One summary line, always last: the daemon verdict, then any failed step.
+    match &verdict {
+        Ok(line) if failed.is_empty() => println!("fno update: done; {line}."),
+        Ok(line) | Err(line) => {
+            eprintln!("fno update: FAILED step(s): {}; {line}.", failed.join(", "))
+        }
     }
+    code
 }
 
 fn which_uv() -> Option<PathBuf> {

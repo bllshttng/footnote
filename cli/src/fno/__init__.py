@@ -15,6 +15,12 @@ per-callsite edit could ever keep up with.
 import sys
 import time
 
+# An installed fno never writes bytecode into its tool venv: `fno update`
+# ships compiled .pyc, and a live process writing one while uv replaces the
+# venv fails the reinstall (os error 66, "Directory not empty").
+if "site-packages" in __file__:
+    sys.dont_write_bytecode = True
+
 # No `from __future__ import annotations` here on purpose: it costs a measured
 # ~154us of `__future__` import on EVERY `fno` process, and nothing below needs
 # postponed evaluation. This module is on the startup path of every caller.
