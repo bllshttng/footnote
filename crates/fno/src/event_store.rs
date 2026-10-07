@@ -361,7 +361,7 @@ fn open_store(store: &Path) -> Result<Connection, String> {
                     Ok(())
                 } else {
                     Err(format!(
-                        "{}: integrity check failed: {result}",
+                        "{}: database disk image is malformed: integrity check failed: {result}",
                         store.display()
                     ))
                 }

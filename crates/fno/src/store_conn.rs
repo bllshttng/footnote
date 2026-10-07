@@ -20,6 +20,7 @@ pub fn open_write(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| named(parent, error))?;
     }
+    refuse_truncated_database(path)?;
     let connection = Connection::open(path).map_err(|error| named(path, error))?;
     connection
         .busy_timeout(BUSY_WAIT)
@@ -33,6 +34,7 @@ pub fn open_write(path: &Path) -> Result<Connection, String> {
 
 /// A read-only handle. Never creates the file.
 pub fn open_read(path: &Path) -> Result<Connection, String> {
+    refuse_truncated_database(path)?;
     // A writer that died leaves a hot -wal, and a READ_ONLY open cannot run
     // the recovery that reading it needs. Retry read-write, which recovers
     // the log, before reporting the read-only error.
@@ -49,7 +51,21 @@ pub fn open_read(path: &Path) -> Result<Connection, String> {
     connection
         .busy_timeout(BUSY_WAIT)
         .map_err(|error| named(path, error))?;
+    connection
+        .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| named(path, error))?;
     Ok(connection)
+}
+
+fn refuse_truncated_database(path: &Path) -> Result<(), String> {
+    match path.metadata() {
+        Ok(meta) if meta.len() > 0 && meta.len() < 100 => {
+            Err(format!("{}: file is not a database", path.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(named(path, error)),
+    }
 }
 
 fn ensure_wal(connection: &Connection, path: &Path) -> Result<(), String> {
