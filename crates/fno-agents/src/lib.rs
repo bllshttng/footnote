@@ -257,6 +257,7 @@ pub mod machine_load;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
+pub mod mail_backfill;
 pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_header;

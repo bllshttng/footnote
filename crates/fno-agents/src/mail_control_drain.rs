@@ -27,8 +27,10 @@ const WITHDRAW_KIND: &str = "withdraw";
 const LANDED_KIND: &str = "landed";
 /// Delivery states meaning the bytes already reached the recipient
 /// (`bus.log.HOSTED_DELIVERY` / `TYPED_DELIVERY`); draining one would hand
-/// the recipient a second copy.
-const AUDIT_ONLY_DELIVERIES: &[&str] = &["hosted", "typed"];
+/// the recipient a second copy. `cross-session` is the historical backfill
+/// shape: the receiver transcript named in its provenance is the proof the
+/// bytes landed, so it is archive, never pending mail.
+const AUDIT_ONLY_DELIVERIES: &[&str] = &["hosted", "typed", "cross-session"];
 
 pub struct DrainArgs {
     pub bus_dir: PathBuf,
