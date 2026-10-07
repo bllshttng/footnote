@@ -38,10 +38,8 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
-#: Historical rows: an outage bypassed `fno mail send`, so traffic that went
-#: over the native cross-session transport goes back into the log with full
-#: provenance. The receiver transcript in the row's meta is the proof the
-#: bytes landed: audit-only like `hosted` and `typed`, never re-delivered.
+#: Audit-only like `hosted`/`typed`: outage-era traffic backfilled with full
+#: provenance; the receiver transcript in meta proves the bytes landed.
 CROSS_SESSION_DELIVERY = "cross-session"
 
 # Size-triggered rotation now lives in the Rust bus-append door
@@ -412,17 +410,14 @@ def is_deliverable(env: Envelope) -> bool:
     a delivery that already succeeded and exists only for sender/operator audit.
     A typed row records bytes already written into the recipient's pane, so it
     is audit-only too -- draining it would hand the recipient a second copy of
-    text already sitting at its prompt. A cross-session row is historical: the
-    bytes already reached the recipient over the native transport (the receiver
-    transcript in its provenance is the proof), so the surfaces read it as
-    archive, never as pending mail.
+    text already sitting at its prompt. A cross-session row is historical
+    traffic the archive already holds; it never renders as pending mail.
     """
     if getattr(env, "kind", None) in CONTROL_KINDS:
         return False
-    return getattr(env, "delivery", None) not in (
-        HOSTED_DELIVERY,
-        TYPED_DELIVERY,
-        CROSS_SESSION_DELIVERY,
+    return (
+        getattr(env, "delivery", None)
+        not in (HOSTED_DELIVERY, TYPED_DELIVERY, CROSS_SESSION_DELIVERY)
     )
 
 
