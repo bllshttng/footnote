@@ -330,7 +330,7 @@ def test_tick_store_backed_reads_only_rows_past_scan_seq(tmp_path):
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     sinks = [_text_sink(), _text_sink(name="f")]
-    emit_envelope(_ev("2026-07-12T00:00:05Z", "blocked"), journal)
+    emit_envelope(_ev("2026-07-12T00:00:05Z", "blocked", run="r"), journal)
     rec = _Recorder()
 
     first = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
@@ -341,7 +341,7 @@ def test_tick_store_backed_reads_only_rows_past_scan_seq(tmp_path):
     assert idle.rows_read == 0
     assert len(rec.calls) == 1
 
-    emit_envelope(_ev("2026-07-12T00:00:09Z", "blocked"), journal)
+    emit_envelope(_ev("2026-07-12T00:00:09Z", "blocked", run="r"), journal)
     later = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
     assert later.rows_read == 1
     assert sorted(rec.calls[1:]) == [("f", "2026-07-12T00:00:09Z"), ("s", "2026-07-12T00:00:09Z")]
