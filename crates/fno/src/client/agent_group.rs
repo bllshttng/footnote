@@ -156,7 +156,10 @@ fn emit<'a>(view: &'a View, buckets: Vec<Bucket<'a>>) -> (Vec<DisplayRow<'a>>, V
 /// move in a group mode refuses: the band order is label-appearance order,
 /// so a cross-band swap would be silently undone on the next paint.
 pub(super) fn reorder_agent_rows(view: &mut View, cur: usize, delta: isize) {
-    let rows = view.painted_rows();
+    // The selector cursor indexes display_rows(), the same catalog every
+    // other selector verb reads - painted_rows() names a different row in
+    // full-screen mode, where the two catalogs diverge.
+    let rows = view.display_rows();
     let name = match rows.get(cur) {
         Some(DisplayRow::Agent(a)) => a.name.clone(),
         _ => {
