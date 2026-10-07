@@ -674,7 +674,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install strace
-        run: sudo apt-get update && sudo apt-get install -y strace
+        timeout-minutes: 5
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y strace
       - name: Build release binary
         # The copy onto PATH installs the build for the freshness step below:
         # `fno doctor harness-matrix` execs the *installed* binary by design
@@ -803,7 +804,10 @@ jobs:
         # context when the tool is missing; the sibling_callers test pins that
         # wiring with a real grep over a temp tree, so the runner needs the
         # tool on PATH. The ubuntu image does not ship it.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        # A stalled package mirror once held this step for the whole 30-minute
+        # job cap; the step bound and apt retries make it fail in minutes.
+        timeout-minutes: 5
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq ripgrep
 
       - name: Set up Python (for flock_interop.rs cross-language test)
         # flock_interop.rs spawns a real python3 subprocess to verify that
@@ -1030,7 +1034,8 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install ripgrep (gather_context's sibling-caller grep)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        timeout-minutes: 5
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -qq ripgrep
 
       - name: Set up Python (for flock_interop.rs cross-language test)
         uses: actions/setup-python@v6
