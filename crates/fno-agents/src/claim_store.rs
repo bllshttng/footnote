@@ -270,6 +270,22 @@ fn insert_record(connection: &Connection, record: &ClaimRecord) -> Result<(), St
     Ok(())
 }
 
+/// Test seam: seed a claim written as the old lockfile YAML.
+#[cfg(test)]
+pub(crate) fn seed_yaml_at_path(path: &Path, yaml: &str) {
+    seed_at_path(path, &serde_yaml_ng::from_str(yaml).unwrap());
+}
+
+/// Test seam: put `record` in the table behind a claim locator path.
+#[cfg(test)]
+pub(crate) fn seed_at_path(path: &Path, record: &ClaimRecord) {
+    let connection = open_directory(path.parent().unwrap()).unwrap();
+    connection
+        .execute("DELETE FROM claims WHERE key = ?1", [&record.key])
+        .unwrap();
+    insert_record(&connection, record).unwrap();
+}
+
 fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimRecord> {
     let metadata: String = row.get(13)?;
     let metadata = serde_json::from_str(&metadata).map_err(|error| {
@@ -443,6 +459,7 @@ pub(crate) fn acquire(
             if let Some(previous) = &observed {
                 data.insert("previous_acquired_at".into(), json!(previous.acquired_at));
                 data.insert("previous_holder".into(), json!(previous.holder));
+                data.insert("previous_pid".into(), json!(previous.pid));
             }
             if let Some(reason) = &record.reason {
                 data.insert("reason".into(), json!(reason));

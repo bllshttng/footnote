@@ -11,7 +11,6 @@
 
 use serde_json::Value;
 #[cfg(test)]
-use std::fs;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -736,38 +735,11 @@ fn run_claim_sweep(args: &[String]) -> i32 {
     0
 }
 
-/// Read every parseable lockfile in one claims directory. The caller applies
-/// the historical prefix filter after parsing the record, so a filename cannot
-/// widen or narrow the decision by lying about its encoded key.
+/// Every claim row in one claims directory's table. The caller applies the
+/// prefix filter after reading the record.
 #[cfg(test)]
 fn claim_records_from_dir(dir: &Path) -> Vec<crate::claims::ClaimRecord> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-    entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-                && entry.file_name().to_string_lossy().ends_with(".lock")
-        })
-        .filter_map(
-            |entry| match crate::claims::read_claim_file(&entry.path()) {
-                Ok(rec) => Some(rec),
-                Err(crate::claims::ReadError::GoneAway) => None,
-                Err(crate::claims::ReadError::Corrupted(error)) => {
-                    eprintln!(
-                        "fno-agents: claim sweep: skipping {}: {error}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    None
-                }
-            },
-        )
-        .collect()
+    crate::claim_store::records_in(dir, None, true).unwrap_or_default()
 }
 
 /// The dispatcher-minted handover holder (mirrors `HANDOVER_HOLDER_PREFIX` in
@@ -1398,10 +1370,9 @@ mod tests {
     }
 
     #[test]
-    fn native_claim_doors_answer_over_lockfiles_without_sqlite() {
+    fn native_claim_doors_answer_over_the_claim_table() {
         // Both doors ride the same harness: acquire over the claims root,
-        // run the verb, and prove the answer came from the lockfile (no
-        // graph.db materialized).
+        // run the verb, and prove the answer came from the table.
         let rows: Vec<(
             &str,
             &str,
@@ -1412,14 +1383,10 @@ mod tests {
                 "node:native-status-test",
                 "target-session:test-session",
                 Some(std::process::id()),
-                Box::new(|key: &str, _holder: &str, temp: &std::path::Path| {
+                Box::new(|key: &str, _holder: &str, _temp: &std::path::Path| {
                     assert_eq!(
                         run_claim(&["status".into(), key.into(), "--json".into()]),
                         0
-                    );
-                    assert!(
-                        !temp.join("graph.db").exists(),
-                        "native status must read the lockfile store without opening SQLite"
                     );
                 }),
             ),
@@ -1430,7 +1397,7 @@ mod tests {
                 Box::new(|key: &str, holder: &str, temp: &std::path::Path| {
                     let claims_dir = crate::claims::claims_dir_for(Some(temp)).unwrap();
                     let path = crate::claims::claim_path(key, Some(temp)).unwrap();
-                    assert!(path.exists());
+                    assert!(crate::claim_store::read_at_path(&path).unwrap().is_some());
                     let holder_session = holder.rsplit(':').next().unwrap();
                     assert_eq!(
                         run_claim(&[
@@ -1444,7 +1411,10 @@ mod tests {
                         ]),
                         0
                     );
-                    assert!(!path.exists(), "the stopped session's lockfile is released");
+                    assert!(
+                        crate::claim_store::read_at_path(&path).unwrap().is_none(),
+                        "the stopped session's claim is released"
+                    );
                 }),
             ),
         ];
@@ -1570,13 +1540,26 @@ mod tests {
             let now = crate::claims::now_ms();
             // No registry row for the handover's worker, so the session
             // witness answers Unresolved: Suspect inside the grace.
-            let yaml = format!(
-                "schema_version: 1\nkey: \"node:x-grace\"\nholder: \"spawn-handover:ghost\"\nacquired_at: {}\npid: 999999\nhost: test-host\nsession_id: \"s-ghost\"\npid_provenance: \"ambient\"\nexpires_at: {}\nreason: \"spawn handover window for node:x-grace\"\n",
-                now - 120_000,
-                now - 60_000
-            );
             let dir = sweep_dir(td.path());
-            fs::write(dir.join("node%3Ax-grace.lock"), yaml).unwrap();
+            crate::claim_store::seed_at_path(
+                &dir.join("node%3Ax-grace.lock"),
+                &crate::claims::ClaimRecord {
+                    schema_version: 1,
+                    key: "node:x-grace".into(),
+                    holder: "spawn-handover:ghost".into(),
+                    acquired_at: now - 120_000,
+                    pid: Some(999_999),
+                    host: "test-host".into(),
+                    pid_unavailable: false,
+                    expires_at: Some(now - 60_000),
+                    reason: Some("spawn handover window for node:x-grace".into()),
+                    harness: None,
+                    session_id: Some("s-ghost".into()),
+                    pid_provenance: Some("ambient".into()),
+                    machine_id: None,
+                    metadata: Default::default(),
+                },
+            );
             let claims = claim_sweep_payload(&dir)["claims"]
                 .as_array()
                 .unwrap()
@@ -1624,29 +1607,6 @@ mod tests {
 
             let all = claim_sweep_payload_from_records(&records, None, &[], true);
             assert_eq!(all["claims"].as_array().unwrap().len(), 3);
-        });
-    }
-
-    #[test]
-    fn claim_sweep_excludes_corrupted_and_newer_schema_lockfiles() {
-        with_registry(serde_json::json!([]), || {
-            let td = tempfile::TempDir::new().unwrap();
-            sweep_acquire(td.path(), "node:x-good");
-            let dir = sweep_dir(td.path());
-            // Corrupted YAML under a sweep-prefixed name.
-            fs::write(dir.join("node%3Ax-bad.lock"), "{not yaml: [").unwrap();
-            // Newer schema writer: parse refuses, sweep excludes (does not crash).
-            fs::write(
-                dir.join("node%3Ax-newer.lock"),
-                "schema_version: 999\nkey: node:x-newer\nholder: h\nacquired_at: 1\npid: 1\nhost: x\n",
-            )
-            .unwrap();
-            // Non-lock and dot files are skipped.
-            fs::write(dir.join("node%3Ax-tmp.partial"), "x").unwrap();
-            let payload = claim_sweep_payload(&dir);
-            let claims = payload["claims"].as_array().unwrap();
-            assert_eq!(claims.len(), 1);
-            assert_eq!(claims[0]["key"], "node:x-good");
         });
     }
 
@@ -1744,7 +1704,6 @@ mod tests {
         // session: rec.session_id names nothing resolvable. The row was
         // RENAMED after mint, so the holder's original label lives in
         // aliases and must resolve identically.
-        let me = std::process::id();
         with_registry(
             serde_json::json!([
                 {
@@ -1754,15 +1713,8 @@ mod tests {
                     "created_at": "2026-09-07T00:00:00Z",
                     "aliases": ["w-thread-orig"],
                     "harness_session_id": "s-worker",
-                },
-                {
-                    "name": "w-proof",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-07T00:00:00Z",
-                    "harness_session_id": "s-worker",
-                    "pid": me,
-                    "pid_start_time": own_pid_start(),
+                    "liveness": "alive",
+                    "liveness_measured_at": z_stamp(10),
                 },
             ]),
             || {
@@ -2233,7 +2185,6 @@ mod tests {
         // so the record carries the DISPATCHER's ambient identity. The
         // subject must be the named worker: a live dispatcher session must
         // never keep a dead worker's lane reading live.
-        let me = std::process::id();
         with_registry(
             serde_json::json!([
                 {
@@ -2242,15 +2193,8 @@ mod tests {
                     "cwd": "/w",
                     "created_at": "2026-09-17T00:00:00Z",
                     "harness_session_id": "s-worker",
-                },
-                {
-                    "name": "w-proof",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-17T00:00:00Z",
-                    "harness_session_id": "s-worker",
-                    "pid": me,
-                    "pid_start_time": own_pid_start(),
+                    "liveness": "alive",
+                    "liveness_measured_at": z_stamp(10),
                 },
             ]),
             || {

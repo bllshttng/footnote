@@ -241,6 +241,12 @@ impl Write {
     }
 }
 
+/// Test seam: replace the whole registry document behind `path`.
+#[cfg(test)]
+pub(crate) fn replace_document(path: &Path, document: Value) {
+    begin(path).unwrap().commit(document).unwrap();
+}
+
 fn revision(connection: &Connection, path: &Path) -> Result<i64, StateError> {
     connection
         .query_row(

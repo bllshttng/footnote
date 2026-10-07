@@ -2682,15 +2682,30 @@ mod tests {
         // row pre-classification, so an in_progress node in its launch window
         // read driver-none and landed in unheld_progress - the exact silence
         // the classify tests cannot see past.
-        let dir = std::env::temp_dir().join(format!("kb-board-handover-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let root = std::env::temp_dir().join(format!("kb-board-handover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let dir = root.join("claims");
         let now = crate::claims::now_ms();
-        let yaml = format!(
-            "schema_version: 1\nkey: \"node:x-lease\"\nholder: \"spawn-handover:t-w\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {}\nreason: \"spawn handover window for node:x-lease\"\n",
-            now + 900_000
+        crate::claim_store::seed_at_path(
+            &dir.join("node%3Ax-lease.lock"),
+            &crate::claims::ClaimRecord {
+                schema_version: 1,
+                key: "node:x-lease".into(),
+                holder: "spawn-handover:t-w".into(),
+                acquired_at: now,
+                pid: Some(1),
+                host: "test-host".into(),
+                pid_unavailable: false,
+                expires_at: Some(now + 900_000),
+                reason: Some("spawn handover window for node:x-lease".into()),
+                harness: None,
+                session_id: None,
+                pid_provenance: None,
+                machine_id: None,
+                metadata: Default::default(),
+            },
         );
-        std::fs::write(dir.join("node%3Ax-lease.lock"), yaml).expect("write lock");
         let rows = claims::read_claims_in(std::slice::from_ref(&dir)).rows();
         assert_eq!(rows.len(), 1, "the live lock is one row: {rows:?}");
         let node = json!({"id": "x-lease", "priority": "p0", "status": "in_progress"});

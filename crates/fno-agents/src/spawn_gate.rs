@@ -1020,28 +1020,16 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
         None => return Vec::new(),
     };
     let dir = root.join(".fno/claims");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(), // no claims dir yet: nothing held.
+    let keys = match crate::claim_store::records_in(&dir, Some("worker:"), true) {
+        Ok(records) => records.into_iter().map(|r| r.key),
+        Err(_) => return Vec::new(), // no claims table yet: nothing held.
     };
-    let prefix = claims::encode_key("worker:");
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let fname = fname.to_string_lossy();
-        if !fname.starts_with(prefix.as_str()) {
-            continue;
-        }
-        // strip_suffix, not trim_end_matches: a worker name ending in ".lock"
-        // must lose exactly one suffix (gemini MEDIUM).
-        let key = match fname.strip_suffix(".lock").and_then(urldecode) {
-            Some(k) => k,
-            None => continue,
-        };
+    for key in keys {
         match claims::status(&key, Some(&root)) {
             (state @ (claims::ClaimState::Live | claims::ClaimState::Suspect), Some(rec)) => {
                 found.push(SlotReservation {
@@ -1072,25 +1060,6 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
         }
     }
     found
-}
-
-/// Minimal percent-decoder for claim filenames (inverse of
-/// `claims::encode_key`). `None` on malformed escapes.
-fn urldecode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// The gate's claims live under the GLOBAL root: the RAM budget is
@@ -3198,10 +3167,6 @@ MemAvailable:    8000000 kB\n";
             Some(456)
         );
         assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
-
-        let key = "worker:my agent/x";
-        assert_eq!(urldecode(&claims::encode_key(key)).as_deref(), Some(key));
-        assert_eq!(urldecode("bad%zz"), None);
     }
 
     const ROOTS: [&str; 1] = ["/Users/x/.fno"];
@@ -4279,8 +4244,9 @@ Swapouts: 3444531.\n";
         let claim_path = root
             .join(".fno/claims")
             .join(format!("{}.lock", claims::encode_key("worker:plain-codex")));
-        let raw = std::fs::read_to_string(claim_path).unwrap();
-        let record: claims::ClaimRecord = serde_yaml_ng::from_str(&raw).unwrap();
+        let record = crate::claim_store::read_at_path(&claim_path)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             record
                 .metadata
@@ -4796,7 +4762,9 @@ Swapouts: 3444531.\n";
             root.1
         );
         // One uncompilable live team refuses every node-bearing read.
-        let reg_bad = dir.join("registry-bad.json");
+        // A registry path's parent owns its table, so the bad one gets its own.
+        std::fs::create_dir_all(dir.join("bad")).unwrap();
+        let reg_bad = dir.join("bad/registry.json");
         std::fs::write(
             &reg_bad,
             format!(

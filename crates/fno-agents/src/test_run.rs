@@ -2445,19 +2445,9 @@ mod tests {
             crate::claims::AcquireOutcome::Acquired(_)
         ));
         let lock = crate::claims::claim_path(PRIORITY_KEY, Some(&root)).unwrap();
-        let text = std::fs::read_to_string(&lock).unwrap();
-        let rewound: String = text
-            .lines()
-            .map(|line| {
-                if line.starts_with("expires_at:") {
-                    "expires_at: 0"
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(&lock, rewound).unwrap();
+        let mut rewound = crate::claim_store::read_at_path(&lock).unwrap().unwrap();
+        rewound.expires_at = Some(0);
+        crate::claim_store::seed_at_path(&lock, &rewound);
         std::thread::sleep(Duration::from_millis(50));
         assert!(
             priority_lane(Some(&root)).is_none(),

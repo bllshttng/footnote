@@ -2492,13 +2492,9 @@ mod tests {
         let td = TempDir::new().unwrap();
         let out = acquire("session:u1", "pty:aa", opts_in(&td));
         assert!(matches!(out, AcquireOutcome::Acquired(_)));
-        let text = std::fs::read_to_string(lockfile(&td, "session:u1")).unwrap();
-        // Absent-not-null discipline: no expires_at LINE at all.
-        assert!(
-            !text.contains("expires_at"),
-            "PID claim must omit expires_at: {text}"
-        );
-        assert!(text.contains("schema_version: 1"));
+        let rec = read_claim(&td, "session:u1");
+        assert_eq!(rec.expires_at, None);
+        assert_eq!(rec.schema_version, 1);
     }
 
     #[test]
@@ -2511,8 +2507,7 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(rec.expires_at, Some(rec.acquired_at + 60_000));
-        let text = std::fs::read_to_string(lockfile(&td, "session:u2")).unwrap();
-        assert!(text.contains(&format!("expires_at: {}", rec.expires_at.unwrap())));
+        assert_eq!(read_claim(&td, "session:u2").expires_at, rec.expires_at);
     }
 
     #[test]
@@ -2528,9 +2523,9 @@ mod tests {
         assert_eq!(rec.pid, None);
         assert!(rec.pid_unavailable);
         assert_eq!(rec.schema_version, 2);
-        let text = std::fs::read_to_string(lockfile(&td, "session:u3")).unwrap();
-        assert!(text.contains("pid: null"));
-        assert!(text.contains("pid_unavailable: true"));
+        let stored = read_claim(&td, "session:u3");
+        assert_eq!(stored.pid, None);
+        assert!(stored.pid_unavailable);
     }
 
     #[test]
@@ -3321,9 +3316,7 @@ mod tests {
         let mut o = opts_in(&td);
         o.pid = Some(std::process::id());
         let stale = record(std::process::id() as i32, 1, None, &hostname());
-        let path = lockfile(&td, "session:x");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, serde_yaml_ng::to_string(&stale).unwrap()).unwrap();
+        crate::claim_store::seed_at_path(&lockfile(&td, "session:x"), &stale);
 
         let rec = match acquire("session:x", "pty:new", o) {
             AcquireOutcome::Acquired(r) => r,

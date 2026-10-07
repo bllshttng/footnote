@@ -271,12 +271,7 @@ mod tests {
     }
 
     fn write_rec(dir: &Path, rec: &ClaimRecord) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{}.lock", encode_key(&rec.key))),
-            serde_json::to_string(rec).unwrap(),
-        )
-        .unwrap();
+        crate::claim_store::seed_at_path(&dir.join(format!("{}.lock", encode_key(&rec.key))), rec);
     }
 
     #[test]
@@ -498,7 +493,7 @@ mod tests {
         let claims_dir = td.path().join("claims");
         write_rec(
             &claims_dir,
-            &flight_rec("flight:op", "single-flight:o", None, 13),
+            &flight_rec("flight:op", "single-flight:o", Some(dead_pid() as i32), 13),
         );
         let code = run_claim_long_holds(&[
             "--min-hold-s".into(),

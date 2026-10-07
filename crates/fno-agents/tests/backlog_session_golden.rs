@@ -76,15 +76,11 @@ fn seed(graph: &PathBuf, entries: &[serde_json::Value]) {
     fno_agents::graph_store::seed_rows(graph, entries).expect("seed store");
 }
 
+/// The claim row for a node, as the YAML the old lockfile carried.
 fn lockfile(graph: &PathBuf, node_id: &str) -> Option<String> {
-    let path = graph
-        .parent()
-        .unwrap()
-        .join("claims-root")
-        .join(".fno")
-        .join("claims")
-        .join(format!("node%3A{node_id}.lock"));
-    std::fs::read_to_string(path).ok()
+    let root = graph.parent().unwrap().join("claims-root");
+    let (_, record) = fno_agents::claims::status(&format!("node:{node_id}"), Some(&root));
+    record.map(|rec| serde_yaml_ng::to_string(&rec).unwrap())
 }
 
 #[test]

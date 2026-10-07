@@ -5,6 +5,7 @@
 use super::*;
 
 struct SuccessionFixture {
+    _agent: crate::spawn_gate_admission::AgentSelfFixture,
     _lock: std::sync::MutexGuard<'static, ()>,
     dir: std::path::PathBuf,
     registry: std::path::PathBuf,
@@ -53,6 +54,7 @@ impl SuccessionFixture {
         let pid = std::process::id();
         let pid_start = crate::daemon::process_start_time(pid).unwrap_or(0);
         let mut fixture = Self {
+            _agent: crate::spawn_gate_admission::AgentSelfFixture::set(),
             _lock: lock,
             dir,
             registry: std::path::PathBuf::new(),
@@ -112,7 +114,7 @@ impl SuccessionFixture {
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "entries": entries,
         });
-        std::fs::write(&self.registry, registry.to_string()).unwrap();
+        crate::registry_store::replace_document(&self.registry, registry);
     }
 
     fn spawn(
@@ -493,8 +495,9 @@ fn rust_headless_slot_claim_stamps_holder_pid_and_provenance() {
     .unwrap();
 
     let claim_path = claims::claim_path("worker:stamp-check", Some(&root)).unwrap();
-    let raw = std::fs::read_to_string(claim_path).unwrap();
-    let record: claims::ClaimRecord = serde_yaml_ng::from_str(&raw).unwrap();
+    let record = crate::claim_store::read_at_path(&claim_path)
+        .unwrap()
+        .unwrap();
     assert_eq!(record.pid, Some(holder_pid as i32), "{record:?}");
     assert_eq!(
         record.pid_provenance.as_deref(),
@@ -586,37 +589,6 @@ fn live_holder_keeps_its_headless_slot() {
         got[0].provider.as_deref(),
         Some(KNOWN_UNROUTED_PROVIDER),
         "unrouted spawn stamps the un-routed marker"
-    );
-
-    std::env::remove_var("FNO_CLAIMS_ROOT");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// AC2-ERR: a corrupted `worker:` claim file is not counted, not named,
-/// and still pushes the warning.
-#[test]
-fn corrupted_slot_claim_is_skipped_and_warned() {
-    let _g = claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("FNO_AGENT_SELF", "gate-fixture-worker");
-    let dir = std::env::temp_dir().join(format!("fno-gate-corrupt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let root = dir.join("claims-root");
-    let claims_dir = claims::claims_dir_for(Some(&root)).unwrap();
-    std::fs::create_dir_all(&claims_dir).unwrap();
-    std::env::set_var("FNO_CLAIMS_ROOT", &root);
-    let claim_path = claims_dir.join(format!("{}.lock", claims::encode_key("worker:broken")));
-    std::fs::write(&claim_path, "{ not yaml").unwrap();
-
-    let mut warnings = Vec::new();
-    let got = live_worker_slot_claims(&mut warnings);
-    assert!(got.is_empty(), "{got:?}");
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("corrupted slot claim worker:broken")),
-        "{warnings:?}"
     );
 
     std::env::remove_var("FNO_CLAIMS_ROOT");

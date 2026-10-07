@@ -81,24 +81,41 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn handover_row(holder: &str, expires_in_ms: i64, key: &str) -> (String, String) {
+    fn claim(key: &str, holder: &str, expires_at: i64) -> crate::claims::ClaimRecord {
         let now = crate::claims::now_ms();
-        let expires_at = now + expires_in_ms;
-        // Handwritten YAML on purpose: the lock file is the artifact the
-        // scanner reads, so the fixture is the artifact the writer would
-        // have produced, not a private constructor.
-        let yaml = format!(
-            "schema_version: 1\nkey: \"{decoded}\"\nholder: \"{holder}\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {expires_at}\nreason: \"spawn handover window for {decoded}\"\n",
-            decoded = key.replace("%3A", ":"),
-        );
-        (format!("{key}.lock"), yaml)
+        crate::claims::ClaimRecord {
+            schema_version: 1,
+            key: key.into(),
+            holder: holder.into(),
+            acquired_at: now,
+            pid: Some(1),
+            host: "test-host".into(),
+            pid_unavailable: false,
+            expires_at: Some(expires_at),
+            reason: Some(format!("spawn handover window for {key}")),
+            harness: None,
+            session_id: None,
+            pid_provenance: None,
+            machine_id: None,
+            metadata: Default::default(),
+        }
     }
 
+    fn handover_row(
+        holder: &str,
+        expires_in_ms: i64,
+        key: &str,
+    ) -> (String, crate::claims::ClaimRecord) {
+        let rec = claim(key, holder, crate::claims::now_ms() + expires_in_ms);
+        (format!("{}.lock", crate::claims::encode_key(key)), rec)
+    }
+
+    /// A claims dir whose state root (`graph.db` home) is private to the test.
     fn scan_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kb-claims-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        dir
+        let root = std::env::temp_dir().join(format!("kb-claims-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        root.join("claims")
     }
 
     #[test]
@@ -110,11 +127,10 @@ mod tests {
         // read driver-none and landed in unheld_progress - the exact
         // silence the scan-level skip manufactured.
         let dir = scan_dir("live");
-        let (name, yaml) = handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-90fa");
-        std::fs::write(dir.join(name), yaml).expect("write handover claim");
-        let (tname, tyaml) =
-            handover_row("target-session:a6d2ce6a-1da0", 900_000, "node%3Ax-requeue");
-        std::fs::write(dir.join(tname), tyaml).expect("write requeue claim");
+        let (name, rec) = handover_row("spawn-handover:t-90fa-port", 900_000, "node:x-90fa");
+        crate::claim_store::seed_at_path(&dir.join(name), &rec);
+        let (tname, trec) = handover_row("target-session:a6d2ce6a-1da0", 900_000, "node:x-requeue");
+        crate::claim_store::seed_at_path(&dir.join(tname), &trec);
         let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 2, "role rows stay in scope: {rows:?}");
         assert!(
@@ -128,8 +144,8 @@ mod tests {
     #[test]
     fn an_expired_handover_row_stays_in_scope() {
         let dir = scan_dir("exp");
-        let (name, yaml) = handover_row("spawn-handover:t-90fa-port", -1, "node%3Ax-90fa");
-        std::fs::write(dir.join(name), yaml).expect("write expired handover claim");
+        let (name, rec) = handover_row("spawn-handover:t-90fa-port", -1, "node:x-90fa");
+        crate::claim_store::seed_at_path(&dir.join(name), &rec);
         let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 1, "expired handover must stay: {rows:?}");
         assert_eq!(rows[0]["state"], "stale");
@@ -144,14 +160,13 @@ mod tests {
         // its row stays with session_id null, never an error or a drop.
         let dir = scan_dir("session-id");
         let now = crate::claims::now_ms();
-        let yaml = format!(
-            "schema_version: 1\nkey: \"node:x-cccc\"\nholder: \"target-session:a6d2ce6a-1da0\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {}\nsession_id: \"target-session:a6d2ce6a-1da0\"\n",
-            now + 900_000
-        );
-        std::fs::write(dir.join("node%3Ax-cccc.lock"), yaml).expect("write claim");
+        let mut named = claim("node:x-cccc", "target-session:a6d2ce6a-1da0", now + 900_000);
+        named.acquired_at = now;
+        named.session_id = Some("target-session:a6d2ce6a-1da0".into());
+        crate::claim_store::seed_at_path(&dir.join("node%3Ax-cccc.lock"), &named);
         let (name, pre_change) =
-            handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-requeue");
-        std::fs::write(dir.join(name), pre_change).expect("write pre-change claim");
+            handover_row("spawn-handover:t-90fa-port", 900_000, "node:x-requeue");
+        crate::claim_store::seed_at_path(&dir.join(name), &pre_change);
         let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 2, "both rows stay in scope: {rows:?}");
         let named = rows
@@ -179,16 +194,17 @@ mod tests {
             return; // root reads through mode 000; the assertion cannot fire
         }
         let dir = scan_dir("mode000");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let root = dir.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("chmod");
         let read = read_claims_in(&[dir.clone()]);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
             .expect("chmod restore");
         assert!(!read.is_ok(), "mode-000 dir must not read ok: {read:?}");
         let error = read.error.expect("error names the fault");
         assert!(
-            error.contains(&dir.display().to_string()),
-            "error names the unreadable dir: {error}"
+            error.contains(&root.display().to_string()),
+            "error names the unreadable state root: {error}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
