@@ -10,8 +10,8 @@
 //! itself. An unreadable registry is `Err` from [`world`], never an
 //! empty team list.
 //!
-//! x-1d4c's help router calls the same `Ask`/`resolve` shape: whichever
-//! node lands first owns this file.
+//! The help router's question ladder calls the same `Ask`/`resolve`
+//! shape: whichever node lands first owns this file.
 
 use crate::state::RegistryEntry;
 use crate::territory::Team;
@@ -58,7 +58,7 @@ pub(crate) enum Rung {
 }
 
 /// The ask: which node, who is asking, where to start. `start` also names
-/// the skip-self rung x-1d4c's question ladder enters at.
+/// the skip-self rung the question ladder enters at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ask<'a> {
     pub(crate) node: Option<&'a str>,
