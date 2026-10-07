@@ -1953,7 +1953,7 @@ fn write_handoff_doc(
     // its `old transcript: unknown` line already says so.
     let frontmatter = match (member.session_id.as_deref(), transcript.as_deref()) {
         (Some(sid), Some(path)) => format!(
-            "---\n{}---\n\n",
+            "---\n{}\n---\n\n",
             fno::session_origin::SessionOrigin::for_this_machine(&member.harness, sid, path)
                 .frontmatter()
         ),
@@ -2560,6 +2560,7 @@ mod tests {
         // The doc now opens with the origin frontmatter: harness, session id
         // and transcript all name the capped member (AC4-HP).
         assert!(body.starts_with("---\norigin:"), "{body}");
+        assert!(body.contains("\n---\n\n"), "frontmatter closes: {body}");
         assert!(body.contains("harness: \"codex\""), "{body}");
         assert!(
             body.contains(&format!("session_id: \"{CODEX_THREAD}\"")),
