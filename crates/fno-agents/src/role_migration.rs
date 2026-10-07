@@ -434,8 +434,8 @@ pub fn run_at(root: &Path) -> Result<(), String> {
 
 /// The roots one migration run walks. Readers find spaces at
 /// `<FNO_AGENTS_HOME parent>/spaces` unless `FNO_SPACES_DIR` names them, so
-/// that parent is a root too; without it a daemon pinned to its agents home
-/// never migrates the space role directories.
+/// that parent is a root too when it holds spaces; without it a daemon
+/// pinned to its agents home never migrates the space role directories.
 fn state_roots(var: impl Fn(&str) -> Option<PathBuf>) -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::new();
     for key in ["FNO_STATE_DIR", "FNO_AGENTS_HOME", "FNO_SPACES_DIR"] {
@@ -447,7 +447,7 @@ fn state_roots(var: impl Fn(&str) -> Option<PathBuf>) -> BTreeSet<PathBuf> {
         if let Some(parent) = var("FNO_AGENTS_HOME")
             .as_deref()
             .and_then(Path::parent)
-            .filter(|p| !p.as_os_str().is_empty())
+            .filter(|p| p.join("spaces").is_dir())
         {
             roots.insert(parent.to_path_buf());
         }
@@ -713,15 +713,19 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| PathBuf::from(v))
         }
-        let home = [("FNO_AGENTS_HOME", "/s/.fno/agents")];
-        let roots = state_roots(|k| env(&home, k));
-        assert!(roots.contains(Path::new("/s/.fno")));
-        let pinned = [
-            ("FNO_AGENTS_HOME", "/s/.fno/agents"),
-            ("FNO_SPACES_DIR", "/t/spaces"),
-        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("bare");
+        let agents = state.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let home = agents.to_str().unwrap();
+        let roots = state_roots(|k| env(&[("FNO_AGENTS_HOME", home)], k));
+        assert!(!roots.contains(&state), "no spaces beside the home");
+        std::fs::create_dir(state.join("spaces")).unwrap();
+        let roots = state_roots(|k| env(&[("FNO_AGENTS_HOME", home)], k));
+        assert!(roots.contains(&state));
+        let pinned = [("FNO_AGENTS_HOME", home), ("FNO_SPACES_DIR", "/t/spaces")];
         let roots = state_roots(|k| env(&pinned, k));
-        assert!(!roots.contains(Path::new("/s/.fno")));
+        assert!(!roots.contains(&state));
         assert!(roots.contains(Path::new("/t/spaces")));
     }
 
