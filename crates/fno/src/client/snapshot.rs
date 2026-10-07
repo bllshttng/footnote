@@ -20,7 +20,7 @@ use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSI
 
 const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
-[--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
+[--theme dark|light|macchiato|superscript] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
 [--font <family>] [--message <fmail-id>] \
 [--view bell|row-menu|tab-menu|sideline-menu]";
 
@@ -92,7 +92,8 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
     let mut out = None;
     let mut server = None;
     let mut squad = None;
-    let mut theme = frame_html::theme_by_name("dark").expect("dark is a snapshot theme");
+    let mut theme =
+        frame_html::theme_by_name("superscript").expect("superscript is a snapshot theme");
     let mut format = None;
     let mut size = None;
     let mut fit = false;
@@ -208,7 +209,7 @@ pub fn run(args: SnapshotArgs) -> i32 {
     // The chrome paints the mux theme a live client in this ground would run,
     // so its chips and badges carry that theme's own pairs.
     let chrome = match args.theme.name {
-        "dark" => crate::theme::theme_footnote_superscript(),
+        "dark" | "footnote superscript" => crate::theme::theme_footnote_superscript(),
         "light" => crate::theme::theme_footnote_paper(),
         _ => crate::theme::Theme::default_theme(),
     };

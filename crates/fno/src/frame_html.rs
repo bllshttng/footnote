@@ -119,7 +119,38 @@ pub const MACCHIATO: Theme = Theme {
     ],
 };
 
-pub const THEMES: [Theme; 3] = [DARK, LIGHT, MACCHIATO];
+/// The footnote brand ground (Telemetry palette): the theme the live fleet
+/// actually paints. The client OSC-11s `theme_footnote_superscript`'s base
+/// into the terminal, so a real frame's ground is `#141414` with `#e8e8e8`
+/// text, whatever the terminal's own scheme is. The ANSI 16 are transcribed
+/// from Ghostty's shipped `Ghostty Default Style Dark`, the scheme indexed
+/// colors resolve through on the operator's terminal. Public demo shots
+/// default to this theme so a demo frame reads as the real fleet.
+pub const SUPERSCRIPT: Theme = Theme {
+    fg: (0xe8, 0xe8, 0xe8),
+    bg: (0x14, 0x14, 0x14),
+    name: "footnote superscript",
+    ansi: [
+        (0x1d, 0x1f, 0x21),
+        (0xcc, 0x65, 0x66),
+        (0xb6, 0xbd, 0x68),
+        (0xf0, 0xc6, 0x74),
+        (0x82, 0xa2, 0xbe),
+        (0xb2, 0x94, 0xbb),
+        (0x8a, 0xbe, 0xb7),
+        (0xc4, 0xc8, 0xc6),
+        (0x66, 0x66, 0x66),
+        (0xd5, 0x4e, 0x53),
+        (0xb9, 0xca, 0x4b),
+        (0xe7, 0xc5, 0x47),
+        (0x7a, 0xa6, 0xda),
+        (0xc3, 0x97, 0xd8),
+        (0x70, 0xc0, 0xb1),
+        (0xea, 0xea, 0xea),
+    ],
+};
+
+pub const THEMES: [Theme; 4] = [DARK, LIGHT, MACCHIATO, SUPERSCRIPT];
 
 /// Resolve a palette index against `theme`: its own 16 for the system colours,
 /// the standard cube and greyscale ramp above that.
