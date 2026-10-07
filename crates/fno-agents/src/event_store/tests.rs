@@ -1105,7 +1105,15 @@ fn a_lost_row_is_dead_lettered_by_type_and_busy_locks_are_matched() {
         "ts": "2026-10-07T00:00:00Z",
         "type": "claim_released",
         "source": "fno-loop",
-        "data": {"session_id": "s-1"},
+        "data": {
+            "session_id": "s-1",
+            "key": "node:x-1:claude:s-1",
+            "holder": "s-1",
+            "pid": 4242,
+            "host": "test-host",
+            "acquired_at": "2026-10-06T00:00:00Z",
+            "duration_held_ms": 60000,
+        },
     })
     .to_string();
     let error = append_envelope(&journal, &envelope, None).unwrap_err();

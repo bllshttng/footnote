@@ -1092,7 +1092,7 @@ pub fn append_envelope(
     // back as an idempotent hit, never a duplicate.
     let mut last_error = String::new();
     for attempt in 0..APPEND_ATTEMPTS {
-        match commit_envelope(&store, line, &event_id, &row_hash, &ty, class) {
+        match commit_envelope(&store, line, &event_id, &row_hash, &ty, class, obj, ts_ms) {
             Ok(receipt) => return Ok(receipt),
             Err(error) => {
                 let settled = !lock_busy(&error) || attempt + 1 == APPEND_ATTEMPTS;
@@ -1156,6 +1156,8 @@ fn commit_envelope(
     row_hash: &[u8],
     ty: &str,
     class: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    ts_ms: i64,
 ) -> Result<AppendReceipt, String> {
     // The commit creates the directory it needs; the caller-side guards
     // (Python's hermetic fence, the shell's opt-in parent guard) already ran.
@@ -1221,8 +1223,8 @@ fn commit_envelope(
             tx.commit()
                 .map_err(|e| format!("{}: {e}", store.display()))?;
             return Ok(AppendReceipt {
-                store,
-                event_id,
+                store: store.to_path_buf(),
+                event_id: event_id.to_string(),
                 seq: 0,
                 retention_class: class.to_string(),
                 inserted: false,
