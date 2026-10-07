@@ -318,8 +318,9 @@ def test_tick_rotation_drains_dot1_before_active(tmp_path):
 
 def test_tick_store_backed_reads_only_rows_past_scan_seq(tmp_path):
     # The daemon ticks every few seconds over a store of a million rows: an
-    # unchanged store must cost a tick zero rows, a new row must still land,
-    # and a fresh sink must not replay store history the journal never held.
+    # unchanged store must cost a tick zero rows, a new row must still land
+    # even when it shares the last delivered row's ts, and a fresh sink must
+    # not replay store history the journal never held.
     from fno import status_fanout as sf
     from fno.events.store_client import emit_envelope
     from fno.paths import project_log
@@ -341,10 +342,10 @@ def test_tick_store_backed_reads_only_rows_past_scan_seq(tmp_path):
     assert idle.rows_read == 0
     assert len(rec.calls) == 1
 
-    emit_envelope(_ev("2026-07-12T00:00:09Z", "blocked", run="r"), journal)
+    emit_envelope(_ev("2026-07-12T00:00:05Z", "blocked", run="r", node="b"), journal)
     later = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
     assert later.rows_read == 1
-    assert sorted(rec.calls[1:]) == [("f", "2026-07-12T00:00:09Z"), ("s", "2026-07-12T00:00:09Z")]
+    assert sorted(rec.calls[1:]) == [("f", "2026-07-12T00:00:05Z"), ("s", "2026-07-12T00:00:05Z")]
 
 
 def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):

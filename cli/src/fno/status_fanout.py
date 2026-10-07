@@ -371,9 +371,17 @@ def _run_locked(
     # silent re-delivery storm. A fresh sink persists its EOF floor even with zero
     # dispatch so the next tick never backfills.
     if not dry_run:
+        # A held (short-circuited) sink re-reads this window, so the seq stays.
+        # Past an advance no same-ts peer remains, so counts restart at 0.
+        # Cursors land first: a crash between the writes re-delivers.
+        advance = high is not None and high != scan
+        advance = advance and not any(state[s.name].short_circuited for s in sinks)
         for s in sinks:
             st = state[s.name]
-            if st.dispatched or st.dropped or fresh[s.name]:
+            cursor = st.new_cursor
+            if advance and cursor[1]:  # type: ignore[index]
+                cursor = (cursor[0], 0)  # type: ignore[index]
+            if st.dispatched or st.dropped or fresh[s.name] or cursor != st.new_cursor:
                 if not verify_lease():
                     return TickResult(
                         sinks=[state[item.name] for item in sinks],
@@ -381,15 +389,13 @@ def _run_locked(
                         lease_lost=True,
                     )
                 try:
-                    _write_cursor(s.name, st.new_cursor, project_root)  # type: ignore[arg-type]
+                    _write_cursor(s.name, cursor, project_root)  # type: ignore[arg-type]
                 except OSError as exc:
+                    advance = False  # a stale count must not meet the next window
                     _log_error(s.name, project_root, {
                         "sink": s.name, "reason": f"cursor write failed: {exc}",
                         "class": "cursor_write_failed"})
-        # A short-circuited sink retries its held rows next tick, so the scan
-        # seq stays put and the same window is read again.
-        held = any(state[s.name].short_circuited for s in sinks)
-        if high is not None and high != scan and not held and verify_lease():
+        if advance and high is not None and verify_lease():
             try:
                 _write_cursor(_SCAN, ("", high), project_root)
             except OSError:
