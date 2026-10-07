@@ -334,12 +334,10 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 if current != name {
                     let target = path.with_file_name(current);
                     if target.exists() {
-                        return Err(format!(
-                            "both role directories exist at {}; migration refused",
-                            path.display()
-                        ));
+                        merge_dir(&path, &target)?;
+                    } else {
+                        std::fs::rename(&path, target).map_err(|e| e.to_string())?;
                     }
-                    std::fs::rename(&path, target).map_err(|e| e.to_string())?;
                 }
             }
         } else if kind.is_file() && selected(&path) {
@@ -376,6 +374,21 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Fold a legacy role directory into a current one that new code already
+/// wrote. As with the name store, the current entry is live: a name in both
+/// keeps it and parks the legacy entry beside it as `.superseded`.
+fn merge_dir(legacy: &Path, current: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(legacy).map_err(|e| format!("{}: {e}", legacy.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let mut dest = current.join(entry.file_name());
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            dest = superseded_backup(&dest);
+        }
+        std::fs::rename(entry.path(), dest).map_err(|e| e.to_string())?;
+    }
+    std::fs::remove_dir(legacy).map_err(|e| format!("{}: {e}", legacy.display()))
 }
 
 fn superseded_backup(path: &Path) -> PathBuf {
@@ -419,13 +432,35 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     atomic_write(&marker, b"1\n")
 }
 
-pub fn run() -> Result<(), String> {
+/// The roots one migration run walks. Readers find spaces at
+/// `<FNO_AGENTS_HOME parent>/spaces` unless `FNO_SPACES_DIR` names them, so
+/// that parent is a root too; without it a daemon pinned to its agents home
+/// never migrates the space role directories.
+fn state_roots(var: impl Fn(&str) -> Option<PathBuf>) -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::new();
     for key in ["FNO_STATE_DIR", "FNO_AGENTS_HOME", "FNO_SPACES_DIR"] {
-        if let Some(path) = std::env::var_os(key).filter(|s| !s.is_empty()) {
-            roots.insert(PathBuf::from(path));
+        if let Some(path) = var(key) {
+            roots.insert(path);
         }
     }
+    if var("FNO_SPACES_DIR").is_none() {
+        if let Some(parent) = var("FNO_AGENTS_HOME")
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            roots.insert(parent.to_path_buf());
+        }
+    }
+    roots
+}
+
+pub fn run() -> Result<(), String> {
+    let mut roots = state_roots(|key| {
+        std::env::var_os(key)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    });
     let explicit_roots = !roots.is_empty();
     if !explicit_roots {
         if let Some(root) = crate::live_store_fence::operator_state_root() {
@@ -643,6 +678,51 @@ mod tests {
         );
         let live = std::fs::read_to_string(agents.join("team_names.json")).unwrap();
         assert!(live.contains("Live") && live.contains("generation"));
+    }
+
+    #[test]
+    fn a_legacy_role_dir_folds_into_the_live_one_and_keeps_both_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let space = tmp.path().join("spaces").join("repo");
+        let (kings, leads) = (space.join("kings"), space.join("leads"));
+        std::fs::create_dir_all(&kings).unwrap();
+        std::fs::create_dir_all(&leads).unwrap();
+        std::fs::write(kings.join("fno.md"), "scope: fno\nshape: court\n").unwrap();
+        std::fs::write(kings.join("x-a792.md"), "scope: x-a792\n").unwrap();
+        std::fs::write(leads.join("fno.md"), "scope: fno\nshape: team\n").unwrap();
+        run_at(tmp.path()).unwrap();
+        assert!(!kings.exists());
+        assert_eq!(
+            std::fs::read_to_string(leads.join("fno.md")).unwrap(),
+            "scope: fno\nshape: team\n"
+        );
+        assert!(std::fs::read_to_string(leads.join("fno.md.superseded"))
+            .unwrap()
+            .contains("court"));
+        assert_eq!(
+            std::fs::read_to_string(leads.join("x-a792.md")).unwrap(),
+            "scope: x-a792\n"
+        );
+    }
+
+    #[test]
+    fn a_pinned_agents_home_still_walks_the_spaces_beside_it() {
+        fn env(pairs: &[(&str, &str)], key: &str) -> Option<PathBuf> {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| PathBuf::from(v))
+        }
+        let home = [("FNO_AGENTS_HOME", "/s/.fno/agents")];
+        let roots = state_roots(|k| env(&home, k));
+        assert!(roots.contains(Path::new("/s/.fno")));
+        let pinned = [
+            ("FNO_AGENTS_HOME", "/s/.fno/agents"),
+            ("FNO_SPACES_DIR", "/t/spaces"),
+        ];
+        let roots = state_roots(|k| env(&pinned, k));
+        assert!(!roots.contains(Path::new("/s/.fno")));
+        assert!(roots.contains(Path::new("/t/spaces")));
     }
 
     #[test]
