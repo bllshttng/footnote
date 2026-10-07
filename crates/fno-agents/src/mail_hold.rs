@@ -1072,6 +1072,11 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut park = false;
     let mut park_on_hold = false;
     let mut run_parked_mode = false;
+    let mut arm_handle: Option<&String> = None;
+    let mut arm_kind: Option<&String> = None;
+    let mut arm_minutes: Option<&String> = None;
+    let mut clear_handle: Option<&String> = None;
+    let mut extend_handle: Option<&String> = None;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--session" => session = iter.next(),
@@ -1082,11 +1087,104 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             "--park" => park = true,
             "--park-on-hold" => park_on_hold = true,
             "--run-parked" => run_parked_mode = true,
+            "--arm" => arm_handle = iter.next(),
+            "--kind" => arm_kind = iter.next(),
+            "--minutes" => arm_minutes = iter.next(),
+            "--clear" => clear_handle = iter.next(),
+            "--extend" => extend_handle = iter.next(),
             other => {
                 eprintln!("mail-hold: unknown argument {other:?}");
                 return 2;
             }
         }
+    }
+    if let Some(handle) = arm_handle {
+        // The Python arm/arm_wall bodies, ported: idle re-arms on activity
+        // (its ceiling is twice the window), wall is a fixed deadline.
+        let kind = arm_kind.map(String::as_str).unwrap_or("idle");
+        let minutes: i64 = arm_minutes.and_then(|m| m.parse().ok()).unwrap_or(5);
+        let window_s = std::cmp::max(1, minutes * 60);
+        let now = chrono::Utc::now();
+        let until = now + chrono::Duration::seconds(window_s);
+        let ceiling = if kind == "wall" {
+            None
+        } else {
+            Some(now + chrono::Duration::seconds(window_s * 2))
+        };
+        return match write_clock(handle, until, window_s, kind, ceiling, None) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("mail-hold: arm failed: {e}");
+                2
+            }
+        };
+    }
+    if let Some(handle) = clear_handle {
+        // Absent is success, not an error.
+        match hold_sidecar_path(handle).metadata() {
+            Ok(_) => {
+                let _ = std::fs::remove_file(hold_sidecar_path(handle));
+            }
+            Err(_) => {}
+        }
+        return 0;
+    }
+    if let Some(handle) = extend_handle {
+        // Re-arm an idle hold, or answer empty when there is no live timed
+        // hold to extend (no clock, a permanent policy, or one lapsed). A
+        // live wall hold returns unchanged so the policy stays live without
+        // moving.
+        let now = chrono::Utc::now();
+        let Some(clock) = read_clock(handle) else {
+            return 0;
+        };
+        let Some(until) = clock.until else {
+            return 0;
+        };
+        let window_s = clock.window_s;
+        if until <= now {
+            return 0;
+        }
+        if clock.clock_kind == "wall" {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "until": until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                    "window_s": window_s,
+                    "clock_kind": clock.clock_kind,
+                })
+            );
+            return 0;
+        }
+        let ceiling = clock
+            .ceiling
+            .unwrap_or_else(|| until + chrono::Duration::seconds(window_s));
+        if ceiling <= now {
+            return 0;
+        }
+        let new_until = std::cmp::min(now + chrono::Duration::seconds(window_s), ceiling);
+        if write_clock(
+            handle,
+            new_until,
+            window_s,
+            "idle",
+            Some(ceiling),
+            clock.source.as_deref(),
+        )
+        .is_err()
+        {
+            return 2;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "until": new_until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "window_s": window_s,
+                "clock_kind": "idle",
+                "ceiling": ceiling.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            })
+        );
+        return 0;
     }
     if render_digest {
         let mut input = String::new();

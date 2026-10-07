@@ -25,10 +25,8 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +67,36 @@ def hold_dir() -> Path:
 
 def hold_path(handle: str) -> Path:
     return hold_dir() / f"{handle}.json"
+
+
+def _hold_transport(argv: list[str]) -> str:
+    """One mail-hold write through the native door (the receipts pattern:
+    Python keeps transports, the clock assembly lives in Rust). A door
+    failure raises VerbUnavailable - the verb is the single writer, so there
+    is no Python fallback to drift from it."""
+    from fno.rust_binary import VerbUnavailable, resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise VerbUnavailable("fno-agents binary not found; run `fno doctor update`")
+    proc = subprocess.run(
+        [str(binary), "mail-hold", *argv],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise VerbUnavailable(
+            (proc.stderr or "fno-agents mail-hold failed").strip()[:200]
+        )
+    return proc.stdout.rstrip("\n")
+
+
+def _hold_query(argv: list[str]) -> Optional[dict]:
+    """The verb's one-line JSON state, or None when it printed nothing
+    (nothing to extend: no clock, a permanent policy, or a lapsed one)."""
+    stdout = _hold_transport(argv)
+    return json.loads(stdout) if stdout else None
 
 
 def _now() -> datetime:
@@ -124,108 +152,72 @@ def read(handle: str) -> Optional[Hold]:
     )
 
 
-def _write(hold: Hold) -> Hold:
-    """Atomic replace, so a reader never catches a half-written clock."""
-    directory = hold_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    fields = {
-        "until": hold.until.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.until else None,
-        "window_s": hold.window_s,
-        "clock_kind": hold.clock_kind,
-        "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
-    }
-    # Only when set: Python-written clocks keep their legacy bytes.
-    if hold.source:
-        fields["source"] = hold.source
-    payload = json.dumps(fields)
-    fd, tmp = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle_file:
-            handle_file.write(payload + "\n")
-        os.replace(tmp, hold_path(hold.handle))
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return hold
-
-
 def arm(handle: str, minutes: int = DEFAULT_MINUTES) -> Hold:
     """Start (or restart) a timed hold of ``minutes`` for ``handle``."""
     window_s = max(1, int(minutes * 60))
+    _hold_transport(["--arm", handle, "--kind", CLOCK_IDLE, "--minutes", str(minutes)])
     now = _now()
-    return _write(
-        Hold(
-            handle=handle,
-            until=now + timedelta(seconds=window_s),
-            window_s=window_s,
-            clock_kind=CLOCK_IDLE,
-            ceiling=now + timedelta(seconds=window_s * 2),
-        )
+    return Hold(
+        handle=handle,
+        until=now + timedelta(seconds=window_s),
+        window_s=window_s,
+        clock_kind=CLOCK_IDLE,
+        ceiling=now + timedelta(seconds=window_s * 2),
     )
 
 
 def arm_wall(handle: str, minutes: int) -> Hold:
     """Start a fixed wall-clock hold that never re-arms on activity."""
     window_s = max(1, int(minutes * 60))
-    return _write(
-        Hold(
-            handle=handle,
-            until=_now() + timedelta(seconds=window_s),
-            window_s=window_s,
-            clock_kind=CLOCK_WALL,
-            ceiling=None,
-        )
+    _hold_transport(["--arm", handle, "--kind", CLOCK_WALL, "--minutes", str(minutes)])
+    return Hold(
+        handle=handle,
+        until=_now() + timedelta(seconds=window_s),
+        window_s=window_s,
+        clock_kind=CLOCK_WALL,
+        ceiling=None,
     )
 
 
 def arm_permanent(handle: str) -> Hold:
     """Record a policy that never expires (the hand-stamped ``bus-only``).
 
-    Not needed for enforcement - an absent clock already never lapses. This is
-    for the RENDER: it lets the DND column distinguish a deliberate permanent
-    policy from a row nobody has looked at, on rows written from here on.
+    The verb has no permanent arm, so the marker is the ABSENCE of a clock
+    file plus the registry ``bus-only`` flag: an absent clock never lapses,
+    and the gate refuses a stamped row with no clock outright. The returned
+    Hold is the in-memory representation only - ``read`` of the cleared file
+    answers None - so the DND column's "held" comes from the flag plus that
+    absence, not from a clock file.
     """
-    return _write(Hold(handle=handle, until=None, window_s=None))
+    _hold_transport(["--clear", handle])
+    return Hold(handle=handle, until=None, window_s=None)
 
 
 def clear(handle: str) -> None:
     """Remove the clock. Absent is success, not an error."""
-    try:
-        hold_path(handle).unlink()
-    except OSError:
-        pass
+    _hold_transport(["--clear", handle])
 
 
 def extend(handle: str) -> Optional[Hold]:
     """Re-arm an idle hold, or return a live wall hold unchanged.
 
     Returns None when there is no live timed hold to extend (no clock, a
-    permanent policy, or one already lapsed). The caller is ``fno agents mail
-    notify-self``, which fires on every ``UserPromptSubmit``. Wall-clock holds
-    return their existing deadline so the policy stays live without moving it.
+    permanent policy, or one already lapsed) - the verb answers an empty
+    stdout for each. Wall-clock holds return their existing deadline so the
+    policy stays live without moving it. The caller is ``fno agents mail
+    notify-self``, which fires on every ``UserPromptSubmit``.
     """
-    hold = read(handle)
-    if hold is None or hold.until is None or hold.window_s is None:
+    state = _hold_query(["--extend", handle])
+    if state is None:
         return None
-    now = _now()
-    if hold.until <= now:
-        return None
-    if hold.clock_kind == CLOCK_WALL:
-        return hold
-    ceiling = hold.ceiling or (hold.until + timedelta(seconds=hold.window_s))
-    if ceiling <= now:
-        return None
-    return _write(
-        Hold(
-            handle=handle,
-            until=min(now + timedelta(seconds=hold.window_s), ceiling),
-            window_s=hold.window_s,
-            clock_kind=CLOCK_IDLE,
-            ceiling=ceiling,
-        )
+    ceiling = state.get("ceiling")
+    return Hold(
+        handle=handle,
+        until=_parse(state["until"]),
+        window_s=state["window_s"],
+        clock_kind=state["clock_kind"],
+        ceiling=_parse(ceiling) if ceiling else None,
+        source=None,
     )
 
 
