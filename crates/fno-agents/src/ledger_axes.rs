@@ -706,7 +706,7 @@ mod tests {
         }
         fn write_registry(&self, body: &str) {
             std::fs::create_dir_all(self.registry_path().parent().unwrap()).unwrap();
-            std::fs::write(self.registry_path(), body).unwrap();
+            crate::registry_store::seed_raw(&self.registry_path(), body);
         }
         fn write_receipt(&self) {
             // Production layout: the receipts live beside the registry, under

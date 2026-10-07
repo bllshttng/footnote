@@ -1036,7 +1036,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
         state::REGISTRY_SCHEMA_VERSION + 1,
         loss_shaped_rows().join(",")
     );
-    std::fs::write(home.registry_json(), &body).unwrap();
+    seed_registry(&home, &body).unwrap();
 
     let child = start_daemon(&home);
     // The sweep reads the store, computes changes, then refuses the write.
@@ -2121,7 +2121,7 @@ fn write_divergent_registry(home: &AgentsHome) {
         row("worker-beta", "hibernating"),
         row("worker-gamma", "live")
     );
-    std::fs::write(home.registry_json(), body).expect("seed divergent registry");
+    seed_registry(&home, body).expect("seed divergent registry");
 }
 
 /// A valid 2-row registry at the current schema.
@@ -2145,7 +2145,7 @@ fn write_valid_registry(home: &AgentsHome) {
         row("worker-alpha"),
         row("worker-gamma")
     );
-    std::fs::write(home.registry_json(), body).expect("seed valid registry");
+    seed_registry(&home, body).expect("seed valid registry");
 }
 
 /// AC5-HP: a divergent registry (3 raw rows, typed decode fails) must refuse
@@ -2343,7 +2343,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
     let mut attempt = 0;
     loop {
         if attempt > 0 {
-            std::fs::write(home.registry_json(), &divergent).unwrap();
+            seed_registry(&home, &divergent).unwrap();
         }
         let resp = call(
             &home,
@@ -2441,7 +2441,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
 async fn registry_true_empty_registry_still_serves_zero() {
     let home = short_home();
     home.ensure_root().unwrap();
-    std::fs::write(home.registry_json(), r#"{"schema_version":14,"agents":[]}"#).unwrap();
+    seed_registry(&home, r#"{"schema_version":14,"agents":[]}"#).unwrap();
     let mut daemon = start_daemon(&home);
 
     let out = Command::new(CLIENT_BIN)
@@ -2517,7 +2517,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
     // the real failure and always panics here.
     let mut attempt = 0;
     loop {
-        std::fs::write(home.registry_json(), &fixture).expect("seed future-schema registry");
+        seed_registry(&home, &fixture).expect("seed future-schema registry");
         let out = Command::new(CLIENT_BIN)
             .args(["list", "--json"])
             .envs(fno_agents::test_run::self_owner_env())
@@ -2540,7 +2540,8 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
         attempt += 1;
         let on_disk = registry_text(&home.registry_json()).unwrap_or_default();
         assert!(
-            on_disk != fixture,
+            serde_json::from_str::<serde_json::Value>(&on_disk).ok()
+                != serde_json::from_str::<serde_json::Value>(&fixture).ok(),
             "daemon served the 3-raw-row future-schema roster as complete: {}",
             String::from_utf8_lossy(&out.stdout)
         );
@@ -2766,4 +2767,10 @@ fn registry_text(path: &std::path::Path) -> std::io::Result<String> {
     fno_agents::registry_store::read(path)
         .map(|doc| serde_json::to_string_pretty(&doc).unwrap())
         .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+fn seed_registry(home: &AgentsHome, body: impl AsRef<str>) -> Result<(), String> {
+    let doc = serde_json::from_str(body.as_ref()).map_err(|e| e.to_string())?;
+    fno_agents::registry_store::replace_document(&home.registry_json(), doc);
+    Ok(())
 }

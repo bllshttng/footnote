@@ -524,7 +524,7 @@ mod tests {
                 "created_at": "2026-01-01T00:00:00Z",
             }],
         });
-        std::fs::write(home.registry_json(), body.to_string()).unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), body.to_string());
     }
 
     fn write_empty_registry(home: &crate::paths::AgentsHome) {
@@ -533,7 +533,7 @@ mod tests {
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "agents": [],
         });
-        std::fs::write(home.registry_json(), body.to_string()).unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), body.to_string());
     }
 
     #[test]

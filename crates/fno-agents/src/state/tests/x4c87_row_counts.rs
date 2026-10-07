@@ -96,7 +96,7 @@ fn registry_with_unrepresentable_row_errors_naming_both_counts() {
     let dir = tmpdir("divergent-row");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
-    std::fs::write(&path, divergent_registry_fixture()).unwrap();
+    crate::registry_store::seed_raw(&path, divergent_registry_fixture());
 
     let err = load_registry(&path).expect_err("unrepresentable row must fail the read");
     let msg = err.to_string();
@@ -179,7 +179,7 @@ fn registry_missing_agents_key_is_a_valid_empty() {
     let dir = tmpdir("no-array-key");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
-    std::fs::write(&path, r#"{"schema_version":14}"#).unwrap();
+    crate::registry_store::seed_raw(&path, r#"{"schema_version":14}"#);
     let (reg, raw) = load_registry_with_counts(&path).unwrap();
     assert!(reg.entries.is_empty());
     assert_eq!(raw, 0);
@@ -199,12 +199,12 @@ fn registry_true_empty_states_stay_successful_zeros() {
     assert!(reg.entries.is_empty(), "missing file is a valid empty");
     assert_eq!(raw, 0);
 
-    std::fs::write(&path, "   \n\t ").unwrap();
+    crate::registry_store::seed_raw(&path, "   \n\t ");
     let (reg, raw) = load_registry_with_counts(&path).unwrap();
     assert!(reg.entries.is_empty(), "whitespace file is a valid empty");
     assert_eq!(raw, 0);
 
-    std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
+    crate::registry_store::seed_raw(&path, r#"{"schema_version":14,"agents":[]}"#);
     let (reg, raw) = load_registry_with_counts(&path).unwrap();
     assert!(reg.entries.is_empty(), "an empty array is a valid empty");
     assert_eq!(raw, 0);
@@ -219,7 +219,7 @@ fn registry_typed_failure_without_rows_keeps_the_parse_error() {
     let dir = tmpdir("no-rows-failure");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
-    std::fs::write(&path, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
+    crate::registry_store::seed_raw(&path, r#"{"schema_version":"fourteen","agents":[]}"#);
     let err = load_registry(&path).expect_err("wrong-typed schema_version must fail");
     assert!(
         !matches!(err, StateError::InvariantViolation(_)),

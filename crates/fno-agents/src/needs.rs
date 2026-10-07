@@ -1882,7 +1882,7 @@ mod tests {
         // `fno agents needs`. A registry it cannot read also spends no
         // subprocess, which the panicking factory is what asserts.
         let home = refused_home("unreadable", 0);
-        std::fs::write(home.registry_json(), b"{ not json at all").unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), b"{ not json at all");
 
         let items = refused_worker_items_with(&home, |_| {
             panic!("an unreadable registry means no probe to spend")

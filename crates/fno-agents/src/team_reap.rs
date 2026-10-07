@@ -1076,7 +1076,7 @@ mod tests {
             "claude",
         );
         let registry = dir.join("registry.json");
-        fs::write(&registry, "{not json").unwrap();
+        crate::registry_store::seed_raw(&registry, "{not json");
         let emitter = events_of(&dir);
         let out = sweep(
             &dir,

@@ -1057,7 +1057,7 @@ mod resolve_tests {
         )
         .unwrap();
         let registry_path = dir.join("registry.json");
-        std::fs::write(&registry_path, registry_rows.to_string()).unwrap();
+        crate::registry_store::seed_raw(&registry_path, registry_rows.to_string());
         (dir.to_path_buf(), registry_path)
     }
 
@@ -1169,7 +1169,7 @@ path = \"/repo/alpha\"
         );
         // A MISSING registry reads as an empty one (fail-open, the Python
         // loader's contract); a CORRUPT one is the unknown case.
-        std::fs::write(&tmp.path().join("registry.json"), "{not json").unwrap();
+        crate::registry_store::seed_raw(&tmp.path().join("registry.json"), "{not json");
         let registry = tmp.path().join("registry.json");
         let err = resolve_territories(&tmp.path().to_path_buf(), &registry).unwrap_err();
         assert!(err.0.contains("registry unreadable"), "{err}");

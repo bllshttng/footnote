@@ -246,6 +246,17 @@ pub fn replace_document(path: &Path, document: Value) {
     begin(path).unwrap().commit(document).unwrap();
 }
 
+/// Seed `body` as the registry at `path`. Before the table owns the path the
+/// bytes land as the legacy file, so the import reads them raw; after, they
+/// replace the table document.
+pub fn seed_raw(path: &Path, body: impl AsRef<[u8]>) {
+    if path.is_dir() {
+        replace_document(path, serde_json::from_slice(body.as_ref()).unwrap());
+    } else {
+        std::fs::write(path, body).unwrap();
+    }
+}
+
 fn revision(connection: &Connection, path: &Path) -> Result<i64, StateError> {
     connection
         .query_row(

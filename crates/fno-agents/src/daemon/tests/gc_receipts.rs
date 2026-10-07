@@ -2737,7 +2737,7 @@ fn idle_exit_held_by_an_unreadable_registry() {
     // a transient read failure (the old code exited: unwrap_or(true)).
     let home = short_home("idle-unreadable");
     home.ensure_root().unwrap();
-    std::fs::write(home.registry_json(), "not json at all{").unwrap();
+    crate::registry_store::seed_raw(&home.registry_json(), "not json at all{");
     assert!(
         !no_live_worker(&home),
         "an unreadable registry must not license an idle exit"

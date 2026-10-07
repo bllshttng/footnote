@@ -57,7 +57,7 @@ fn write_stop_claim(
         "session_id": session,
     });
     let path = dir.join(format!("{}.lock", crate::claims::encode_key(key)));
-    std::fs::write(&path, body.to_string()).unwrap();
+    crate::claim_store::seed_yaml_at_path(&path, &body.to_string());
     path
 }
 
@@ -93,7 +93,7 @@ async fn a_stopped_false_response_releases_nothing() {
         result.get("claims").is_none(),
         "a refused stop carries no claims receipt"
     );
-    assert!(claim_path.exists(), "the claim file must stay in place");
+    assert!(crate::claim_store::read_at_path(&claim_path).unwrap().is_some(), "the claim must stay held");
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
@@ -139,7 +139,7 @@ async fn a_confirmed_stop_releases_the_stopped_holders_dead_claims() {
         dir_listing(&claims)
     );
     assert_eq!(released[0]["key"], "node:x-stop");
-    assert!(!claim_path.exists(), "the dead claim file is gone");
+    assert!(!crate::claim_store::read_at_path(&claim_path).unwrap().is_some(), "the dead claim is gone");
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
@@ -191,7 +191,7 @@ async fn a_stop_by_session_id_releases_the_rows_claims() {
         dir_listing(&claims)
     );
     assert_eq!(released[0]["key"], "node:x-bysid");
-    assert!(!claim_path.exists(), "the dead claim file is gone");
+    assert!(!crate::claim_store::read_at_path(&claim_path).unwrap().is_some(), "the dead claim is gone");
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();

@@ -1510,7 +1510,7 @@ pub(crate) mod tests {
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "agents": rows,
         });
-        std::fs::write(dir.join("registry.json"), doc.to_string()).unwrap();
+        crate::registry_store::seed_raw(&dir.join("registry.json"), doc.to_string());
     }
 
     pub(crate) fn clock(dir: &std::path::Path, handle: &str) -> serde_json::Value {

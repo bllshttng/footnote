@@ -1594,7 +1594,7 @@ mod tests {
         let registry = dir.path().join("registry.json");
         let mut v = json!({ "agents": registry_rows });
         v["schema_version"] = json!(crate::state::REGISTRY_SCHEMA_VERSION);
-        std::fs::write(&registry, v.to_string()).unwrap();
+        crate::registry_store::seed_raw(&registry, v.to_string());
         let cwd = dir.path().to_path_buf();
         let fold = org_fold(&dir.path().join("graph.json"), &cwd, None, &registry, teams).unwrap();
         (dir, registry, fold)

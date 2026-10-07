@@ -3662,7 +3662,7 @@ Swapouts: 3444531.\n";
         )
         .unwrap();
         let registry = dir.join("registry.json");
-        std::fs::write(&registry, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+        crate::registry_store::seed_raw(&registry, r#"{"schema_version":1,"entries":[]}"#);
 
         for sig in [libc::SIGTERM, libc::SIGKILL, libc::SIGPIPE] {
             let mut command = std::process::Command::new("sleep");

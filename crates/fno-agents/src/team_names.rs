@@ -1691,7 +1691,7 @@ mod tests {
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "agents": rows,
         });
-        std::fs::write(registry_path(tmp), doc.to_string()).unwrap();
+        crate::registry_store::seed_raw(&registry_path(tmp), doc.to_string());
     }
 
     fn team_row(name: &str, scope: &str, level: u8, session: &str) -> serde_json::Value {

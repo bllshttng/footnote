@@ -2744,7 +2744,7 @@ mod tests {
             ..Default::default()
         };
         let registry_path = crate::paths::AgentsHome::at(&home).registry_json();
-        std::fs::write(&registry_path, serde_json::to_string(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(&registry_path, serde_json::to_string(&registry).unwrap());
 
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);

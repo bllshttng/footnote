@@ -4712,7 +4712,7 @@ mod tests {
         age_file(&claim, 40);
         let registry =
             br#"{"entries":[{"name":"live-worker","created_at":"2026-09-09T00:00:00Z"}]}"#;
-        std::fs::write(home.registry_json(), registry).unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), registry);
         let summary = reap_state_files(
             &home,
             crate::agents_config::StateReapConfig::default(),

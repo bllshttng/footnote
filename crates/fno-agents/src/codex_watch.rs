@@ -434,7 +434,7 @@ mod tests {
         let mut registry = crate::state::Registry::default();
         registry.entries.push(codex_entry);
         registry.entries.push(oc_entry);
-        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), serde_json::to_vec(&registry).unwrap());
         let acquired = crate::claims::acquire(
             "node:x-codexwt",
             "target-session:thread-a",

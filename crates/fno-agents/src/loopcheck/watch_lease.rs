@@ -462,7 +462,7 @@ mod tests {
             ..Default::default()
         };
         let registry_path = crate::paths::AgentsHome::at(&home).registry_json();
-        std::fs::write(&registry_path, serde_json::to_string(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(&registry_path, serde_json::to_string(&registry).unwrap());
 
         let opts = crate::claims::AcquireOpts {
             root: Some(td.path().to_path_buf()),
