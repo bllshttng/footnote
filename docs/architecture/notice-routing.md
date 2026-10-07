@@ -31,7 +31,7 @@ A rung whose holder session equals the asker is skipped, so a worker never route
 
 ## The notice_route arm
 
-The daemon arm beats every 300 s over each workspace project root's `.fno/.reconcile-result.json` and `.fno/.orphan-plans-result.json`. Each warning resolves through the ladder. One deduped mail per owner goes through `fno/notice-router` (the system-sender lane, with the resume fallback). The mail carries the same cause text the hook printed. The dedupe store is `~/.fno/notice-route/sent.json`: a sha256 over the sorted `kind:node` pairs, kept 24 h. The arm renames each consumed result file to `.shown`, the rename the hook did before. A user-rung group files one question page through `fno inbox outstanding ask --question-file`.
+The daemon arm beats every 300 s over each workspace project root's `.fno/.reconcile-result.json` and `.fno/.orphan-plans-result.json`, plus the config root itself, so a repo outside the workspace map still reaches an owner. Each warning resolves through the ladder. One deduped mail per owner goes through `fno/notice-router` (the system-sender lane, with the resume fallback). The mail carries the same cause text the hook printed. The dedupe store is `~/.fno/notice-route/sent.json`: a sha256 over the sorted `kind:node` pairs, kept 24 h. The arm renames each consumed result file to `.shown`, the rename the hook did before. A user-rung group files one question page through `fno inbox outstanding ask --question-file`.
 
 The session-start hook keeps only its trigger duty: the retro-pending advisory, the pr-watch self-heal, and the throttled reconcile fire.
 

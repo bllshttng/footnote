@@ -101,6 +101,7 @@ pub(crate) fn world(home: &crate::paths::AgentsHome, config_cwd: &Path) -> Resul
     let journals = crate::tick_ledger::journals(home);
     let now = now_epoch();
     let claimed = crate::territory::live_node_claims().unwrap_or_default();
+    let notice_loads = crate::notice_route::open_notice_counts();
     let mut beats: BTreeMap<String, Option<i64>> = BTreeMap::new();
     let mut load: BTreeMap<String, u32> = BTreeMap::new();
     for team in &teams {
@@ -118,7 +119,7 @@ pub(crate) fn world(home: &crate::paths::AgentsHome, config_cwd: &Path) -> Resul
             .map(|(_, ids)| ids)
             .unwrap_or_default();
         let claims = crate::territory::live_held_in(&held, &claimed) as u32;
-        let notices = crate::notice_route::open_notice_count(&team.scope);
+        let notices = notice_loads.get(&team.scope).copied().unwrap_or(0);
         load.insert(team.scope.clone(), claims + notices);
     }
     Ok(World {

@@ -71,16 +71,22 @@ pub(crate) fn record_sent(fingerprint: &str, scope: &str, now: i64) {
     write_sent(&map);
 }
 
-/// Open notices assigned to a scope: the second load term the owner
-/// ladder's least-loaded rung reads. A repeat within the open window counts
-/// again on purpose: a scope piling identical warnings IS the loaded one.
-pub(crate) fn open_notice_count(scope: &str) -> u32 {
+/// Open notices per scope, from ONE read of the sent store: the second
+/// load term the owner ladder's least-loaded rung reads. A repeat within
+/// the open window counts again on purpose: a scope piling identical
+/// warnings IS the loaded one.
+pub(crate) fn open_notice_counts() -> BTreeMap<String, u32> {
     let now = now_epoch();
-    read_sent()
-        .into_values()
-        .filter(|v| v.get("scope").and_then(Value::as_str) == Some(scope))
-        .filter(|v| NOTICE_OPEN_SECS > now - v.get("ts").and_then(Value::as_i64).unwrap_or(0))
-        .count() as u32
+    let mut out: BTreeMap<String, u32> = BTreeMap::new();
+    for v in read_sent().into_values() {
+        let Some(scope) = v.get("scope").and_then(Value::as_str) else {
+            continue;
+        };
+        if NOTICE_OPEN_SECS > now - v.get("ts").and_then(Value::as_i64).unwrap_or(0) {
+            *out.entry(scope.to_string()).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 fn now_epoch() -> i64 {
@@ -493,8 +499,17 @@ pub(crate) fn run_pass(
     let mut detail: Vec<String> = Vec::new();
     let mut consumed: Vec<std::path::PathBuf> = Vec::new();
     let paths = crate::territory::workspace_paths(config_cwd);
-    for (_name, root) in paths.iter() {
-        let fno_dir = Path::new(root).join(".fno");
+    // Every workspace project root, plus the config root itself: a repo
+    // outside the workspace map still sweeps, and its result must reach an
+    // owner instead of sitting unconsumed.
+    let mut roots: Vec<std::path::PathBuf> = paths.values().map(|p| PathBuf::from(p)).collect();
+    roots.push(config_cwd.to_path_buf());
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    for root in roots {
+        let fno_dir = Path::new(&root).join(".fno");
+        if !seen.insert(fno_dir.clone()) {
+            continue;
+        }
         consumed.extend(consume_file(
             &fno_dir.join(".reconcile-result.json"),
             &w,
