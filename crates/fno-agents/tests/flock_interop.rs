@@ -265,7 +265,7 @@ print("APPENDED")
         29,
         "the daemon's rows were not dropped by the interleaved write"
     );
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = fno_agents::event_store::journal_text(&home.events_jsonl(), &[]);
     assert!(
         !events.contains("registry_row_removed"),
         "an interleave that keeps every row must announce nothing: {events}"
