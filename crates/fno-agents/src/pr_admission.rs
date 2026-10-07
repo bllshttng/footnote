@@ -492,7 +492,10 @@ mod tests {
         );
         assert!(after_record_with(&gh, "pr-hold:o/r#7", HOLD_DECISION, Some("crown")).is_none());
         assert!(after_record_with(&gh, "pr-hold:o/r#7", "release", Some("operator")).is_none());
-        assert!(after_record_with(&gh, "node:x-abcd", HOLD_DECISION, Some("operator")).is_none());
+        assert!(
+            after_record_with(&gh, "node-subject-that-is-not-a-hold", HOLD_DECISION, Some("operator"))
+                .is_none()
+        );
         assert_eq!(*seen.borrow(), 1);
         // A gh failure still returns the manual-disarm line.
         let out = after_record_with(
