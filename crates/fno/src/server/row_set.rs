@@ -146,6 +146,10 @@ impl Core {
         // Holder name -> node id: the live-claim reverse of `backlog_holders`.
         // A spawn row whose payload named a title, not a node id, still shows
         // the node it holds (and the PR beside it) through its claim.
+        // Real node ids only: the name guess resolves against the served
+        // backlog, so a name that merely parses like a node paints nothing.
+        let backlog_ids: std::collections::HashSet<&str> =
+            self.backlog.iter().map(|c| c.id.as_str()).collect();
         let node_by_holder: HashMap<&str, String> = self
             .backlog_holders
             .iter()
@@ -269,7 +273,7 @@ impl Core {
                                     .or_else(|| {
                                         agents_view::node_id_candidates(&a.name)
                                             .into_iter()
-                                            .find(|n| n.contains('-'))
+                                            .find(|n| backlog_ids.contains(n.as_str()))
                                     }),
                                 harness_title: a.harness_title.clone(),
                                 answerable: if exited { None } else { a.answerable.clone() },
@@ -480,7 +484,7 @@ impl Core {
                             .or_else(|| {
                                 agents_view::node_id_candidates(&a.name)
                                     .into_iter()
-                                    .find(|n| n.contains('-'))
+                                    .find(|n| backlog_ids.contains(n.as_str()))
                             }),
                         harness_title: a.harness_title.clone(),
                         answerable: None,
@@ -568,7 +572,7 @@ impl Core {
                             .or_else(|| {
                                 agents_view::node_id_candidates(&a.name)
                                     .into_iter()
-                                    .find(|n| n.contains('-'))
+                                    .find(|n| backlog_ids.contains(n.as_str()))
                             }),
                         harness_title: a.harness_title.clone(),
                         answerable: if a.exited { None } else { a.answerable.clone() },
