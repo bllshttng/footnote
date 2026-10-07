@@ -1533,6 +1533,30 @@ def _strip_git_global_opts(argv):
     return head + rest[i:]
 
 
+_GIT_CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--list", "-l",
+                          "--show-origin", "--unset", "--unset-all"}
+
+# Appended after the synthetic --no-verify so the deny path can tell an
+# agent-typed --no-verify from a hooksPath override and print the right text.
+_HOOKS_PATH_MARK = "--hooks-path-override"
+
+
+def _has_config_value(rest):
+    """True when the tokens after a config key hold a value, not just flags or
+    redirections: `git config core.hooksPath 2>&1` is still a read."""
+    skip = False
+    for i, tok in enumerate(rest):
+        if skip:
+            skip = False
+        elif tok in _REDIRECT_TOKENS or tok in ("<", "<<", "<<<", "<&"):
+            skip = True
+        elif tok.isdigit() and rest[i + 1:i + 2] and rest[i + 1] in _REDIRECT_TOKENS:
+            continue
+        elif not tok.startswith("-"):
+            return True
+    return False
+
+
 def _sets_hooks_path(argv):
     """True when this git invocation points core.hooksPath elsewhere, which
     disables .git/hooks/pre-push - and that hook IS the protected-branch guard,
@@ -1550,9 +1574,16 @@ def _sets_hooks_path(argv):
         if low.startswith("core.hookspath="):
             return True                      # -c core.hooksPath=x
         if low == "core.hookspath":
-            prev = argv[idx - 1].lower() if idx else ""
-            if prev == "-c" or "config" in [a.lower() for a in argv[1:idx]]:
-                return True                  # git config core.hooksPath x
+            before = [a.lower() for a in argv[:idx]]
+            if before and before[-1] == "-c":
+                return True                  # -c core.hooksPath
+            if "config" in before[1:]:
+                # A bare key, --get, --list and --unset read or remove the
+                # setting; only a value after the key sets it.
+                if any(a in _GIT_CONFIG_READ_FLAGS for a in before):
+                    continue
+                if _has_config_value(argv[idx + 1:]):
+                    return True              # git config core.hooksPath x
     return False
 
 
@@ -1840,7 +1871,7 @@ def _find_git_segments(segments):
             # IS a --no-verify by another name, and a `--`-prefixed token is
             # stripped by the push parsers instead of read as a branch.
             if _sets_hooks_path(argv):
-                normalized = normalized + ["--no-verify"]
+                normalized = normalized + ["--no-verify", _HOOKS_PATH_MARK]
             out.append(" ".join(normalized))
     return out
 
@@ -2017,6 +2048,23 @@ this gate and the branch gate are one protection with two doors.
 The merge-gate override does not reach either of them.
 
 ═══════════════════════════════════════════════════════════════════
+"""
+
+
+def _hooks_path_deny_message(command):
+    return f"""🚫 BLOCKED: core.hooksPath override
+
+Command: {command}
+
+Pointing core.hooksPath elsewhere disables .git/hooks/pre-push, the
+protected-branch guard, so it is a --no-verify by another name.
+
+Reading it is fine: `git config core.hooksPath` or `git config --get core.hooksPath`.
+To approve this override:
+
+  touch {APPROVAL_FLAG}
+
+Approval expires after 5 minutes and is single-use.
 """
 
 
@@ -2220,6 +2268,9 @@ def _evaluate_git_segment(command, has_approval, allowlist_ok=True):
     if any(p.lower() == "--no-verify" for p in command.split()):
         if has_approval:
             return ("allow", "[Approved] User approved --no-verify commit")
+        if command.split()[-2:] == ["--no-verify", _HOOKS_PATH_MARK]:
+            return ("deny", _hooks_path_deny_message(
+                " ".join(command.split()[:-2])))
         return ("deny", _no_verify_deny_message(command))
 
     # Push debounce, LAST among the push gates: it is a pacing rule, not a
