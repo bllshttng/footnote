@@ -172,22 +172,10 @@ fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// One stamp string to epoch seconds: RFC 3339 (Z or offset), else a naive
-/// stamp read as UTC, else a date-only stamp at midnight. Mirrors
-/// `provenance::turn_ts_epoch`'s parse core at the string level.
+/// One stamp string to epoch seconds: the provenance fold's own reader, so
+/// a format fix there reaches the window filter too.
 fn ts_epoch(ts: &str) -> Option<f64> {
-    let t = ts.trim();
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
-        return Some(dt.timestamp() as f64 + dt.timestamp_subsec_micros() as f64 / 1_000_000.0);
-    }
-    if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f") {
-        let utc = nd.and_utc();
-        return Some(utc.timestamp() as f64 + utc.timestamp_subsec_micros() as f64 / 1_000_000.0);
-    }
-    let date_only = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
-        .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))?;
-    Some(date_only.and_utc().timestamp() as f64)
+    crate::provenance::turn_ts_epoch(&json!({"timestamp": ts}))
 }
 
 /// Window bounds as epoch seconds; an unparseable bound refuses (a silent
@@ -411,8 +399,14 @@ fn run_backfill(args: &[String]) -> i32 {
                 i += 2;
             }
             "--root" => {
-                if let Some(v) = args.get(i + 1) {
-                    roots.push(v.clone());
+                // A following flag is never a path: consuming it would scan
+                // a directory named "--apply" and report a quiet zero.
+                match args.get(i + 1) {
+                    Some(v) if !v.starts_with("--") => roots.push(v.clone()),
+                    _ => {
+                        eprintln!("mail-backfill run: --root needs a path");
+                        return 2;
+                    }
                 }
                 i += 2;
             }
