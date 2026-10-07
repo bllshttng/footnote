@@ -1,14 +1,12 @@
 """Thin transport for the hidden `fno-agents mail-backfill run` engine."""
-
 import json
 
 import typer
 
 
 def cmd_mail_backfill(
-    apply: bool = typer.Option(False, "--apply", help="Write the joined rows."),
+    apply: bool = typer.Option(False, "--apply"),
 ) -> None:
-    """Backfill outage-era cross-session traffic into the mail store."""
     from fno.agents.discover import default_projects_dir
     from fno.bus.log import bus_log_path
     from fno.rust_binary import call_binary_json

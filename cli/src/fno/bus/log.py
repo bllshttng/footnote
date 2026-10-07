@@ -38,8 +38,7 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
-#: Audit-only like `hosted`/`typed`: outage-era traffic backfilled with full
-#: provenance; the receiver transcript in meta proves the bytes landed.
+#: Audit-only: outage-era traffic backfilled with full provenance, never re-delivered.
 CROSS_SESSION_DELIVERY = "cross-session"
 
 # Size-triggered rotation now lives in the Rust bus-append door
@@ -411,14 +410,12 @@ def is_deliverable(env: Envelope) -> bool:
     A typed row records bytes already written into the recipient's pane, so it
     is audit-only too -- draining it would hand the recipient a second copy of
     text already sitting at its prompt. A cross-session row is historical
-    traffic the archive already holds; it never renders as pending mail.
+    traffic the archive already holds.
     """
     if getattr(env, "kind", None) in CONTROL_KINDS:
         return False
-    return (
-        getattr(env, "delivery", None)
-        not in (HOSTED_DELIVERY, TYPED_DELIVERY, CROSS_SESSION_DELIVERY)
-    )
+    delivery = getattr(env, "delivery", None)
+    return delivery not in (HOSTED_DELIVERY, TYPED_DELIVERY, CROSS_SESSION_DELIVERY)
 
 
 def record_hosted_delivery(
@@ -527,11 +524,6 @@ def record_typed_delivery(
 # Reader (skips malformed lines)
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Reader (skips malformed lines)
-# ---------------------------------------------------------------------------
-
-def iter_messages(*, warn: bool = True) -> Iterator[Envelope]:
     """Yield every retained envelope oldest -> newest, skipping malformed lines.
 
     A corrupt line is skipped with a stderr warning (AC5-ERR); subsequent valid
