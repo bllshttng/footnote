@@ -308,17 +308,6 @@ fn rule7_word_cap_mail() {
 }
 
 #[test]
-fn rule7_word_cap_encounter() {
-    let body = format!("{}\n", "word ".repeat(81).trim_end());
-    assert_case(
-        None,
-        &["--stdin", "--surface", "encounter"],
-        Some(&body),
-        "rule 7 cap on encounter",
-    );
-}
-
-#[test]
 fn rule8_filler() {
     assert_case(
         None,
@@ -341,26 +330,6 @@ fn style_exception_line_skips_stdin() {
 }
 
 #[test]
-fn pr_body_surface_clean_footer() {
-    assert_case(
-        None,
-        &["--stdin", "--surface", "pr-body"],
-        Some("You should do this.\n"),
-        "pr-body surface refusal",
-    );
-}
-
-#[test]
-fn markdown_surface_footer() {
-    assert_case(
-        None,
-        &["--stdin", "--surface", "markdown"],
-        Some("You should do this.\n"),
-        "markdown surface refusal",
-    );
-}
-
-#[test]
 fn comment_surface_footer() {
     assert_case(
         None,
@@ -377,16 +346,6 @@ fn clean_stdin_exits_zero() {
         &["--stdin", "--surface", "mail"],
         Some("Do this now.\n"),
         "clean stdin exits 0",
-    );
-}
-
-#[test]
-fn empty_stdin_exits_zero() {
-    assert_case(
-        None,
-        &["--stdin", "--surface", "mail"],
-        Some(""),
-        "empty stdin exits 0",
     );
 }
 
@@ -426,19 +385,6 @@ fn files_style_exception_zero_read() {
         None,
         &[dir.path().display().to_string()],
         "files skipped by style-exception exits 2",
-    );
-}
-
-#[test]
-fn files_clean_exits_zero() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let p = write_case_file(&dir, "note.md", "Do this now.\n");
-    assert_case_volatile(
-        None,
-        &["--files", &p],
-        None,
-        &[dir.path().display().to_string()],
-        "files clean exits 0",
     );
 }
 

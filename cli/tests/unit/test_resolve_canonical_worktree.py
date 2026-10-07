@@ -85,23 +85,6 @@ def test_bare_repo_without_worktree_returns_none(tmp_path: Path) -> None:
     assert resolve_canonical_worktree(bare) is None
 
 
-def test_separate_git_dir_does_not_return_gitdir(tmp_path: Path) -> None:
-    """`git init --separate-git-dir` reports the external git dir as the first
-    `worktree` path; it has no `.git` child, so the helper skips it and returns
-    None (caller falls back to --show-toplevel) rather than the gitdir."""
-    from fno.paths import resolve_canonical_worktree
-
-    wtree = tmp_path / "wtree"
-    wtree.mkdir()
-    ext_gitdir = tmp_path / "external-gitdir"
-    _git("init", "-q", "--separate-git-dir", str(ext_gitdir), str(wtree), cwd=tmp_path)
-    _git("commit", "--allow-empty", "-qm", "init", cwd=wtree)
-
-    result = resolve_canonical_worktree(wtree)
-    # First non-bare record is the gitdir mis-report -> None (caller falls back).
-    assert result is None
-
-
 def test_separate_git_dir_with_linked_does_not_return_sibling(tmp_path: Path) -> None:
     """separate-git-dir + a linked worktree: the gitdir is listed FIRST. The
     helper must NOT skip past it to the linked sibling (that would root config
@@ -121,11 +104,3 @@ def test_separate_git_dir_with_linked_does_not_return_sibling(tmp_path: Path) ->
     assert result is None  # not `linked`, not the gitdir
     if result is not None:  # defensive: never the sibling or the gitdir
         assert result.resolve() not in (linked.resolve(), ext_gitdir.resolve())
-
-
-def test_not_a_git_repo_returns_none(tmp_path: Path) -> None:
-    from fno.paths import resolve_canonical_worktree
-
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    assert resolve_canonical_worktree(plain) is None

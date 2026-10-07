@@ -118,7 +118,12 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
     )
 
     assert sent.exit_code == 0, sent.output
-    assert sent.stdout == "msg-ruling1 delivered (hosted)\n"
+    import json as _json
+
+    receipt = _json.loads(sent.stdout)
+    assert set(receipt) == {"msg_id", "subject", "to", "status"}
+    assert receipt["msg_id"] == "msg-ruling1"
+    assert receipt["status"] == "delivered (hosted)"
     assert len(calls) == 1
     import os as _os
     import subprocess as _sp
@@ -416,7 +421,11 @@ def test_project_anycast_send_delivers_repeated_bodies_without_a_ledger(runner, 
     second = runner.invoke(app, args)
 
     assert first.exit_code == 0, first.output
-    assert "queued (durable) for project web" in first.stdout
+    import json as _json
+
+    receipt = _json.loads(first.stdout.strip())
+    assert receipt["to"] == "web"
+    assert "queued (durable)" in receipt["status"]
     assert second.exit_code == 0, second.output
     assert not (paths.bus_dir() / "word-budget").exists()
 
@@ -1274,7 +1283,9 @@ def test_project_send_no_peer_warns_deferred(runner, mailbox):
         app, ["mail", "send", "--to-project", "web", "--from-name", "etl", "quiet?"]
     )
     assert res.exit_code == 0, res.output
-    assert "queued (durable) for project web" in res.stdout
+    receipt = json.loads(res.stdout.strip())
+    assert receipt["to"] == "web"
+    assert "queued (durable)" in receipt["status"]
     assert "project inbox web has no live drain" in (res.stderr or "")
 
 

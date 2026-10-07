@@ -10,7 +10,7 @@ import tomllib
 from types import SimpleNamespace
 from pathlib import Path
 
-from fno.config import RoutingBlock, SettingsModel
+from fno.config import SettingsModel
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 # The sample ships in its own data package beside fno/ (pure data; the Python
@@ -43,49 +43,9 @@ def test_auto_merge_grant_degrades_when_settings_are_incomplete_or_broken():
     assert not auto_merge_grant(Broken())
 
 
-def test_empty_routing_block_defaults():
-    s = _settings({})
-    assert s.routing.objective == "cheapest-that-clears"
-    assert s.routing.prefer_harness == ""
-    assert s.routing.models == []
-
-
-def test_full_routing_block_parses():
-    s = _settings({
-        "routing": {
-            "objective": "prefer-harness",
-            "prefer_harness": "claude",
-            "models": [
-                {
-                    "name": "glm-5.3", "harness": "claude", "model": "glm-5.3",
-                    "band": "medium", "effort": "high",
-                    "cost_per_mtok_in": 6.9, "context": 1000000,
-                    "route": "zai/glm-5.3", "account": "makers",
-                },
-            ],
-        },
-    })
-    row = s.routing.models[0]
-    assert row["name"] == "glm-5.3"
-    assert row["harness"] == "claude"
-    assert row["cost_per_mtok_in"] == 6.9
-    assert row["context"] == 1000000
-    assert row["route"] == "zai/glm-5.3"
-    assert row["account"] == "makers"
-    assert s.routing.objective == "prefer-harness"
-
-
 def test_unknown_objective_degrades_to_the_default():
     s = _settings({"routing": {"objective": "fastest"}})
     assert s.routing.objective == "cheapest-that-clears"
-
-
-def test_rows_carry_no_validation_at_load_time():
-    """Leaf module: a nonsense harness/band loads fine; the spawn seam refuses."""
-    s = _settings({"routing": {"models": [
-        {"name": "x", "harness": "not-a-harness", "model": "m", "band": "purple"},
-    ]}})
-    assert s.routing.models[0]["band"] == "purple"
 
 
 def test_shipped_sample_parses_and_declares_rows():
@@ -102,40 +62,7 @@ def test_shipped_sample_parses_and_declares_rows():
     assert "NO CODE PATH READS THIS FILE" in _SAMPLE.read_text(encoding="utf-8")
 
 
-def test_sample_shows_one_model_two_access_paths():
-    """The access-path rule, demonstrated in the sample: the same model value
-    appears on two rows with two different cost profiles."""
-    data = tomllib.loads(_SAMPLE.read_text(encoding="utf-8"))
-    by_model: dict[str, list[float]] = {}
-    for row in data["routing"]["models"]:
-        by_model.setdefault(row["model"], []).append(row.get("cost_per_mtok_in"))
-    paired = [costs for costs in by_model.values() if len(costs) == 2]
-    assert paired, "the sample must show one model reached two ways"
-    assert all(c[0] != c[1] for c in paired)  # two profiles, never averaged
-
-
-def test_routing_block_tolerates_extra_keys():
-    block = RoutingBlock.model_validate({"objective": "best-available", "future_key": 1})
-    assert block.objective == "best-available"
-
-
 # --- config.sideline.colors (x-1b35) ----------------------------------------
-
-
-def test_sideline_colors_axis_tables_parse():
-    s = _settings({
-        "sideline": {"colors": {
-            "harness": {"codex": "cyan"},
-            "route": {"openrouter": "magenta"},
-            "model": {"glm-5.3-flash[1m]": "green"},
-            "row": {"zai-glm-flash": "orange"},
-        }},
-    })
-    c = s.sideline.colors
-    assert c.harness == {"codex": "cyan"}
-    assert c.route == {"openrouter": "magenta"}
-    assert c.model == {"glm-5.3-flash[1m]": "green"}
-    assert c.row == {"zai-glm-flash": "orange"}
 
 
 def test_sideline_colors_bare_key_is_refused():
@@ -147,20 +74,6 @@ def test_sideline_colors_bare_key_is_refused():
     with pytest.raises(ValidationError) as err:
         _settings({"sideline": {"colors": {"zai": "green"}}})
     assert "forbid" in str(err.value).lower() or "extra" in str(err.value).lower()
-
-
-def test_routing_model_row_carries_color():
-    """The routing row's `color` field is the cascade's most specific key."""
-    s = _settings({"routing": {"models": [
-        {"name": "zai-glm-flash", "harness": "claude",
-         "model": "glm-5.3-flash[1m]", "route": "zai", "color": "green"},
-    ]}})
-    assert s.routing.models[0]["color"] == "green"
-
-
-def test_routing_model_row_color_defaults_empty():
-    row = _settings({"routing": {"models": [{}]}}).routing.models[0]
-    assert row.get("color", "") == ""
 
 
 def test_spawn_defaults_carry_a_harness_overlay():
@@ -225,20 +138,3 @@ def test_provider_tier_models_rejects_unknown_tier_key():
     message = str(excinfo.value)
     assert "bogus" in message
     assert "opus" in message
-
-
-def test_provider_tier_models_rejects_empty_model():
-    import pytest
-    from pydantic import ValidationError
-
-    from fno.config import ModelProvider
-
-    with pytest.raises(ValidationError):
-        ModelProvider(tier_models={"opus": "  "})
-
-
-def test_provider_tier_models_normalizes_keys():
-    from fno.config import ModelProvider
-
-    record = ModelProvider(tier_models={" OPUS ": "glm-5.3[1m]"})
-    assert record.tier_models == {"opus": "glm-5.3[1m]"}

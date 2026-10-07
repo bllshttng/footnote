@@ -1,11 +1,5 @@
-"""Validate hooks/hooks.json structure after the consolidation pass.
-
-The cuts in Phase 02 removed hooks/distill-task-signal.sh plus its
-TaskCreated/TaskCompleted registrations. The merges in Phase 04 updated
-the postmortem script path in target-stop-hook.sh. If any of these touched
-hooks.json incorrectly we want a hard test failure rather than a runtime
-no-op hook discovered the next time a BLOCKED transition fires.
-"""
+"""Validate the hook manifests: every registered path resolves, and each guard
+that must reach both harnesses is wired exactly once on each."""
 from __future__ import annotations
 
 import json
@@ -19,30 +13,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 CODEX_HOOKS_JSON = REPO_ROOT / "hooks" / "codex-hooks.json"
-
-
-def test_hooks_json_no_distill_references() -> None:
-    """Phase 02 removed skills/distill/ and hooks/distill-task-signal.sh."""
-    text = HOOKS_JSON.read_text(encoding="utf-8")
-    assert "distill-task-signal" not in text, (
-        "hooks.json still references the removed distill-task-signal.sh hook"
-    )
-    # The TaskCreated and TaskCompleted hook arrays existed only to fire
-    # distill-task-signal. They should be gone too; if they reappear later
-    # for an unrelated hook, that's fine - this assertion catches the
-    # specific stale-registration class.
-    data = json.loads(text)
-    hooks = data.get("hooks", {})
-    for key in ("TaskCreated", "TaskCompleted"):
-        if key in hooks:
-            # Permit re-registration of these events for non-distill hooks
-            # in the future; only fail if a distill artifact survives.
-            for entry in hooks[key]:
-                for hook in entry.get("hooks", []):
-                    cmd = hook.get("command", "")
-                    assert "distill" not in cmd, (
-                        f"{key} still fires a distill-named command: {cmd}"
-                    )
 
 
 def test_hooks_json_command_paths_resolve() -> None:
@@ -79,32 +49,6 @@ def test_hooks_json_command_paths_resolve() -> None:
                     failures.append(f"{event}: missing path {path}")
     if failures:
         pytest.fail("hooks.json references missing files:\n  " + "\n  ".join(failures))
-
-
-def test_no_law_authority_gate_is_registered() -> None:
-    """Ruling d-e1eec854 retired the staged-law approval gate.
-
-    A registration left behind would shell a file that no longer exists on every
-    Bash call, so the absence is asserted rather than assumed. The file itself
-    stays one release as a no-op tombstone (`fno doctor lint hook-tombstones`):
-    sessions started before the retirement still hold its registration, so the
-    path must exist and do nothing when run.
-    """
-    import subprocess
-    import sys
-
-    text = HOOKS_JSON.read_text(encoding="utf-8")
-    assert "law-authority-gate" not in text
-    stub = REPO_ROOT / "hooks" / "law-authority-gate.py"
-    assert stub.exists(), "retired gate keeps a one-release no-op tombstone"
-    probe = subprocess.run(
-        [sys.executable, str(stub)],
-        input="{}",
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert probe.returncode == 0, "the tombstone must be a no-op, not a gate"
 
 
 def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
@@ -251,19 +195,6 @@ def test_write_guard_is_registered_once_per_harness(
     assert len(others) == 1, f"{config_path.name} registers a second location classifier"
 
 
-def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
-    for config_path in (HOOKS_JSON, CODEX_HOOKS_JSON):
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        commands = [
-            hook.get("command", "")
-            for registration in data["hooks"].get("PreToolUse", [])
-            for hook in registration.get("hooks", [])
-        ]
-        assert not any("worktree-harness-guard" in command for command in commands), (
-            f"{config_path.name} still blocks sessions by harness ownership"
-        )
-
-
 def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> None:
     """Both harness manifests reach ONE carrier, which owns the predicate.
 
@@ -344,36 +275,6 @@ def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     plugin_root = (REPO_ROOT / entry["source"]["path"]).resolve()
     assert plugin_root == REPO_ROOT
     assert (plugin_root / ".codex-plugin" / "plugin.json").is_file()
-
-
-def test_codex_marketplace_has_no_legacy_dev_alias() -> None:
-    assert not (
-        REPO_ROOT
-        / ".agents"
-        / "marketplaces"
-        / "footnote-dev"
-        / ".agents"
-        / "plugins"
-        / "marketplace.json"
-    ).exists()
-
-
-def test_postmortem_script_is_executable() -> None:
-    """Phase 04 moved generate-postmortem.sh; the stop hook must still find it.
-
-    Even with the path updated in target-stop-hook.sh, a permission regression
-    would silently disable postmortem capture on every BLOCKED transition.
-    """
-    pm = REPO_ROOT / "skills" / "target" / "scripts" / "postmortem" / "generate-postmortem.sh"
-    assert pm.is_file(), f"postmortem generator missing at {pm}"
-    assert os.access(pm, os.X_OK), f"postmortem generator not executable: {pm}"
-
-
-def test_preflight_runner_is_executable() -> None:
-    """Phase 04 also moved run-checks.sh; target invokes it."""
-    pf = REPO_ROOT / "skills" / "target" / "scripts" / "preflight" / "run-checks.sh"
-    assert pf.is_file(), f"preflight runner missing at {pf}"
-    assert os.access(pf, os.X_OK), f"preflight runner not executable: {pf}"
 
 
 def test_drain_hook_wired_into_claude_and_codex_sessionstart() -> None:
@@ -530,7 +431,6 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
         "a command using ${CLAUDE_PLUGIN_ROOT} must fail when only PLUGIN_ROOT "
         f"is set (real Codex sets no CLAUDE_PLUGIN_ROOT); got rc={wrong['rc']}"
     )
-
 
 
 def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> None:

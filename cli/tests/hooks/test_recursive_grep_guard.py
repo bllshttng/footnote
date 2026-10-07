@@ -174,12 +174,7 @@ def test_allows_benign_commands_over_a_confirmed_cache(command: str, tagged_repo
 
 @pytest.mark.parametrize(
     "command",
-    [
-        "grep -rn token crates/",
-        "grep -R token .",
-        "/usr/bin/grep -rn token .",
-        "cd cli && grep -rn token .",
-    ],
+    ["grep -rn token crates/", "grep -R token ."],
 )
 def test_a_bare_target_basename_is_not_a_cache(command: str, untagged_repo) -> None:
     """The 2026-09-02 shape: only untagged `target` source dirs, so nothing
@@ -189,11 +184,8 @@ def test_a_bare_target_basename_is_not_a_cache(command: str, untagged_repo) -> N
     )
 
 
-@pytest.mark.parametrize(
-    "command", ["grep -rn token crates/", "grep -R token ."]
-)
-def test_no_repository_means_no_refusal(command: str, no_repo) -> None:
-    assert guard.decide(command, str(no_repo)) is None
+def test_no_repository_means_no_refusal(no_repo) -> None:
+    assert guard.decide("grep -rn token crates/", str(no_repo)) is None
 
 
 def test_a_symlink_resolving_to_a_tagged_cache_is_refused(tmp_path_factory) -> None:

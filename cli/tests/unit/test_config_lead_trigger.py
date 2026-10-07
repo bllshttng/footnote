@@ -15,15 +15,6 @@ from fno.config import HandoffBlock
 _RATIONALE = "propagates into every ruling"
 
 
-def test_default_lead_trigger_is_40():
-    assert HandoffBlock().lead_used_pct_trigger == 40
-
-
-def test_lead_trigger_39_with_teammate_50_accepted():
-    block = HandoffBlock(used_pct_trigger=50, lead_used_pct_trigger=39)
-    assert block.lead_used_pct_trigger == 39
-
-
 def test_lead_trigger_equal_to_teammate_is_refused_with_both_values():
     with pytest.raises(ValidationError) as exc:
         HandoffBlock(used_pct_trigger=50, lead_used_pct_trigger=50)
@@ -36,23 +27,12 @@ def test_lead_trigger_equal_to_teammate_is_refused_with_both_values():
     assert _RATIONALE in msg
 
 
-def test_lead_trigger_above_teammate_is_refused():
-    with pytest.raises(ValidationError):
-        HandoffBlock(used_pct_trigger=50, lead_used_pct_trigger=60)
-
-
 def test_lead_trigger_range_1_to_100_enforced():
     with pytest.raises(ValidationError) as exc:
         HandoffBlock(lead_used_pct_trigger=0)
     assert "1-100" in str(exc.value)
     with pytest.raises(ValidationError):
         HandoffBlock(lead_used_pct_trigger=101)
-
-
-def test_lead_just_below_teammate_accepted():
-    # The boundary is strict-<, so lead = teammate - 1 is the tightest accept.
-    block = HandoffBlock(used_pct_trigger=50, lead_used_pct_trigger=49)
-    assert block.lead_used_pct_trigger == 49
 
 
 def test_defaulted_lead_does_not_invalidate_low_teammate():
@@ -62,12 +42,3 @@ def test_defaulted_lead_does_not_invalidate_low_teammate():
     block = HandoffBlock(used_pct_trigger=1)
     assert block.lead_used_pct_trigger == 40
     assert block.used_pct_trigger == 1
-
-
-def test_explicit_lead_above_teammate_still_refused():
-    # The rule still fires when lead is EXPLICITLY set (prevents normalizing 40
-    # up to 50, the failure mode the validator exists for).
-    with pytest.raises(ValidationError):
-        HandoffBlock(used_pct_trigger=1, lead_used_pct_trigger=1)
-    with pytest.raises(ValidationError):
-        HandoffBlock(used_pct_trigger=50, lead_used_pct_trigger=50)

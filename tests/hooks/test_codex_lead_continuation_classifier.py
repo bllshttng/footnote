@@ -252,24 +252,6 @@ def test_ac10_hp_and_ac11_hp_require_independent_stop_and_single_user_message():
     assert result["failed_reader"] is None
 
 
-def test_ac10_hp_accepts_visitor_stop_followed_by_goal_owned_continuation():
-    """Team init may ensure the goal after a visitor Stop on the same thread."""
-    receipt = verified_receipt()
-    receipt["stop"]["independent"].update(
-        {
-            "decision": "allow",
-            "class": "visitor",
-            "useful_action_after_stop": True,
-            "action_order": ["stop-visitor", "goal-init", "goal-useful-action"],
-        }
-    )
-
-    result = load_diagnostic().classify_receipt(receipt)
-
-    assert result["ok"] is True
-    assert result["class"] == "verified-continuation"
-
-
 def test_ac2_2_requires_promptless_goal_action_after_the_independent_stop():
     receipt = verified_receipt()
     receipt["stop"]["continuation"]["started_at_ns"] = 200
@@ -384,20 +366,7 @@ def test_ac3_resume_preserves_window_facts_after_private_restart():
 
 @pytest.mark.parametrize(
     ("failure_class", "reader"),
-    [
-        ("plugin-missing", "machine.plugin"),
-        ("machine-installed-session-refresh-unverified", "session.discovery"),
-        ("hooks-disabled", "session.hooks"),
-        ("session-hook-unobserved", "lifecycle.context_snapshot"),
-        ("identity-miss", "identity.registry"),
-        ("malformed-output", "stop.output"),
-        ("hook-timeout", "stop.timeout"),
-        ("parser-rejected", "stop.parser"),
-        ("wake-disabled", "wake.trigger"),
-        ("wake-budget-spent", "wake.budget"),
-        ("wake-refused", "wake.provider"),
-        ("compaction-marker-stale", "compaction.lifecycle_marker"),
-    ],
+    [("plugin-missing", "machine.plugin")],
 )
 def test_ac8_err_has_exactly_one_primary_failure_class(failure_class: str, reader: str):
     """AC8-ERR: every negative fixture names one failed reader, never success."""

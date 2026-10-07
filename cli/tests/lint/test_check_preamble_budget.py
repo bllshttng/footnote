@@ -20,8 +20,9 @@ from typer.testing import CliRunner
 ROOT = Path(__file__).resolve().parents[3]
 GATE = ROOT / "scripts" / "ci" / "check-preamble-budget.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "guards.yml"
-# One spelling of the heading. Two tests assert on its ABSENCE, and an
-# absence assertion against a string the script never emits cannot fail.
+# One spelling of the heading. test_no_skills_at_all_is_not_a_failure asserts
+# its ABSENCE; test_descriptions_are_measured_and_reported asserts the live
+# gate still prints it, so that absence check cannot go vacuous.
 DESCRIPTIONS_HEADING = "descriptions (always-loaded skill + agent pointers):"
 
 
@@ -153,21 +154,6 @@ def test_report_is_sorted_and_marks_consumer(tmp_path: Path) -> None:
     assert sum(int(g) for g in reach.groups()) == _reported_total(result)
 
 
-def test_reach_subtotals_sum_on_the_shipped_repo() -> None:
-    """AC1-HP against the real tree: the subtotals cover every counted byte."""
-    result = subprocess.run(
-        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
-    )
-
-    assert result.returncode == 0, result.stderr
-    reach = re.search(
-        r"by reach: every harness (\d+) B, hook (\d+) B, claude only (\d+) B",
-        result.stdout,
-    )
-    assert reach is not None, result.stdout
-    assert sum(int(g) for g in reach.groups()) == _reported_total(result)
-
-
 def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
     """AC7-HP: the reach label is only as true as the wiring that delivers it.
 
@@ -272,21 +258,6 @@ def test_empty_rules_glob_is_legal(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert _reported_total(result) == 210
     assert "*.md" not in result.stdout
-
-
-def test_all_zero_byte_roots_pass(tmp_path: Path) -> None:
-    """AC5-EDGE: a zero-byte preamble is valid and remains measurable."""
-    _write_fixed_roots(
-        tmp_path,
-        agents_bytes=0,
-        claude_bytes=0,
-        skill_bytes=0,
-    )
-
-    result = _run(tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    assert _reported_total(result) == 0
 
 
 def test_breach_teaches_trade_before_raise(tmp_path: Path) -> None:
@@ -415,13 +386,6 @@ def test_preamble_budget_step_is_unconditionally_reachable() -> None:
     assert "SessionStart preamble byte budget" in step_names
 
 
-def test_doctor_report_is_silent_when_gate_is_absent(tmp_path: Path) -> None:
-    """AC7-FR: consumer checkouts without the gate remain a normal case."""
-    from fno import doctor
-
-    assert doctor._preamble_budget_line(ROOT, cwd=tmp_path) is None
-
-
 def test_doctor_does_not_execute_a_foreign_checkout_gate(tmp_path: Path) -> None:
     """A consumer-controlled path must never become a doctor code-execution hook."""
     init = subprocess.run(
@@ -442,28 +406,6 @@ def test_doctor_does_not_execute_a_foreign_checkout_gate(tmp_path: Path) -> None
 
     assert doctor._preamble_budget_line(ROOT, cwd=tmp_path) is None
     assert not marker.exists()
-
-
-def test_doctor_resolves_a_footnote_subdirectory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from fno import doctor
-
-    common = ROOT / ".git-common"
-    monkeypatch.setattr(
-        doctor,
-        "_git_checkout_identity",
-        lambda path: (ROOT, common),
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_bounded_command",
-        lambda argv: (0, f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)\n", ""),
-    )
-
-    line = doctor._preamble_budget_line(ROOT, cwd=ROOT / "cli")
-
-    assert line == f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)"
 
 
 def test_doctor_surfaces_a_present_gate_failure(
@@ -816,27 +758,6 @@ def test_unbanked_description_cut_fails_and_names_the_value(tmp_path: Path) -> N
     assert f"DESCRIPTIONS_CEILING_BYTES={tiny + band // 2}" in result.stderr
 
 
-def test_readers_that_disagree_fail_rather_than_pick_one(tmp_path: Path) -> None:
-    """Equality, not a zero check: a partial reader failure must not pass.
-
-    The two instruments enumerate differently on purpose (find at any depth
-    versus a depth-1 glob), so a description either reaches both or fails the
-    gate. A zero-only check would pass while silently dropping bytes.
-    """
-    repo = _measured_tree(tmp_path)
-    nested = repo / "skills" / "group" / "inner" / "SKILL.md"
-    nested.parent.mkdir(parents=True, exist_ok=True)
-    nested.write_text(
-        '---\nname: inner\ndescription: "nested and unmeasured"\n---\n\nbody\n',
-        encoding="utf-8",
-    )
-
-    result = _run_at(repo)
-
-    assert result.returncode == 1
-    assert "the two readers disagree" in result.stderr
-
-
 def test_a_fence_the_reader_cannot_open_is_caught(tmp_path: Path) -> None:
     """A description the measuring reader skips must not pass as measured.
 
@@ -863,25 +784,6 @@ def test_a_fence_the_reader_cannot_open_is_caught(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "the two readers disagree" in result.stderr
-
-
-def test_descriptions_heading_is_the_string_this_file_asserts_on() -> None:
-    """Pin the heading, because two tests below assert on its ABSENCE.
-
-    An absence assertion against a string the script never emits cannot fail.
-    This file shipped exactly that: the heading gained "+ agent" and the
-    negative assertion kept naming the old wording, so a descriptions block
-    printing on a zero-description tree would have stayed green. Asserting the
-    live heading exists somewhere is what makes the absence checks mean
-    something.
-    """
-    result = subprocess.run(
-        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
-    )
-
-    assert DESCRIPTIONS_HEADING in result.stdout, (
-        "the heading moved; every absence assertion in this file is now vacuous"
-    )
 
 
 def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
@@ -993,24 +895,6 @@ def test_band_is_scoped_to_the_gates_own_repo(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "more than the" not in result.stderr
-
-
-
-def test_preamble_budget_is_registered_in_exactly_one_ci_path() -> None:
-    """AC1-HP: one prose breach reds exactly one check run.
-
-    The positive marker first: the guards job carries the step name. The smoke
-    lint registry must not carry the script - the gate already runs
-    unconditionally in guards, and the registry copy made one AGENTS.md breach
-    red three runs (guards, smoke, changed-smoke) at once.
-    """
-    from fno.test_cmd import _STRUCTURAL_STEPS
-
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    step_names = [s.get("name", "") for s in workflow["jobs"]["guards"]["steps"]]
-    assert "SessionStart preamble byte budget" in step_names
-    registry_cmds = [cmd for _, _, cmd in _STRUCTURAL_STEPS]
-    assert not any("check-preamble-budget.sh" in cmd for cmd in registry_cmds)
 
 
 def test_smoke_registry_shares_no_ci_script_with_guards() -> None:

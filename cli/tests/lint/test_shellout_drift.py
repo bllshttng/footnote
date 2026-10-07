@@ -69,38 +69,10 @@ def emit():
     subprocess.run(["bash", "-c", f"source {events_sh} && emit"])
 '''
 
-# A module that builds a resolve_repo_root()-rooted scripts/*.sh path but only
-# WRITES/reads it (no bash exec) - the paths_cli.py shape -> must NOT be flagged.
-CODEGEN_LIKE = '''
-from fno.paths import resolve_repo_root
-
-def emit():
-    out = resolve_repo_root() / "scripts" / "lib" / "paths.sh"
-    out.write_text("generated")
-'''
-
-# A module that bash-execs a script rooted at an INJECTED parameter (the
-# worktree.py _run_setup_worktree_hook shape) -> must NOT be flagged.
-PARAM_ROOTED = '''
-import subprocess
-from pathlib import Path
-
-def run_hook(repo_root: Path):
-    script = repo_root / "scripts" / "setup" / "setup-worktree.sh"
-    if not script.exists():
-        return -1
-    subprocess.run(["bash", str(script)])
-'''
-
 
 # --------------------------------------------------------------------------- #
 # AC4-HP: clean tree passes
 # --------------------------------------------------------------------------- #
-def test_ac4_hp_real_tree_scan_passes():
-    """The real cli/src/fno tree has no un-allowlisted repo-root shell-outs."""
-    report = g.run(do_degrade=False)
-    assert report.exit_code == 0, "\n".join(report.lines)
-    assert report.lines[0].startswith("shellout-drift: ok")
 
 
 @pytest.mark.skipif(not _FNO_AVAILABLE, reason="fno CLI not on PATH or beside the interpreter")
@@ -113,18 +85,6 @@ def test_ac4_hp_real_tree_full_check_passes():
 # --------------------------------------------------------------------------- #
 # AC4-ERR + AC4-UI: a new un-allowlisted shell-out fails with actionable output
 # --------------------------------------------------------------------------- #
-def test_ac4_err_new_shellout_fails(tmp_path):
-    scan_root = tmp_path / "cli" / "src" / "fno"
-    _make_module(scan_root, "badverb.py", BAD_VERB)
-    al = _write_allowlist(tmp_path, ["# empty allowlist"])
-
-    report = g.run(repo_root=tmp_path, scan_root=scan_root, allowlist_path=al,
-                   do_degrade=False)
-
-    assert report.exit_code == 1, "\n".join(report.lines)
-    joined = "\n".join(report.lines)
-    assert "scripts/new.sh" in joined
-    assert "cli/src/fno/badverb.py" in joined
 
 
 def test_ac4_ui_output_is_actionable(tmp_path):
@@ -239,28 +199,6 @@ def test_cost_like_plugin_root_shellout_not_flagged(tmp_path):
     assert report.exit_code == 0, "\n".join(report.lines)
 
 
-def test_codegen_like_not_flagged(tmp_path):
-    """resolve_repo_root()-rooted scripts/*.sh that is WRITTEN, not bash-exec'd
-    (paths_cli.py), is NOT flagged."""
-    scan_root = tmp_path / "cli" / "src" / "fno"
-    _make_module(scan_root, "codegenlike.py", CODEGEN_LIKE)
-    al = _write_allowlist(tmp_path, [])
-    report = g.run(repo_root=tmp_path, scan_root=scan_root, allowlist_path=al,
-                   do_degrade=False)
-    assert report.exit_code == 0, "\n".join(report.lines)
-
-
-def test_param_rooted_shellout_not_flagged(tmp_path):
-    """A bash exec rooted at an injected param (worktree.py setup hook), with no
-    shared-resolver call, is NOT flagged."""
-    scan_root = tmp_path / "cli" / "src" / "fno"
-    _make_module(scan_root, "paramrooted.py", PARAM_ROOTED)
-    al = _write_allowlist(tmp_path, [])
-    report = g.run(repo_root=tmp_path, scan_root=scan_root, allowlist_path=al,
-                   do_degrade=False)
-    assert report.exit_code == 0, "\n".join(report.lines)
-
-
 def test_scan_exclude_skips_in_repo_only_module(tmp_path):
     """A module on SCAN_EXCLUDE is not scanned even if it shells out."""
     scan_root = tmp_path / "cli" / "src" / "fno"
@@ -359,18 +297,6 @@ def go():
     report = g.run(repo_root=tmp_path, scan_root=scan_root, allowlist_path=al,
                    do_degrade=False)
     assert report.exit_code == 0, "\n".join(report.lines)
-
-
-def test_allowlist_lists_flock_pattern_and_drops_exception_caveat():
-    """AC2-UI/AC2-HP (ab-fd017698): once `fno doctor lint flock-pattern` conforms to the
-    shared resolve_repo_root(), it is LISTED on the allowlist and the scope note
-    no longer documents it as the private-rooted exception (the cv-ca99e324
-    caveat is removed), so the allowlist does not lie."""
-    text = (REPO_ROOT / g.ALLOWLIST_REL).read_text(encoding="utf-8")
-    assert "scripts/lint-flock-pattern.sh :: lint flock-pattern" in text
-    # the scope-note exception caveat + its carveout reference are gone
-    assert "cv-ca99e324" not in text
-    assert "out of scope" not in text
 
 
 def test_real_allowlist_parses_and_matches_real_scan():

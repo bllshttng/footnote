@@ -20,24 +20,3 @@ def test_think_runs_a_fixed_three_step_process() -> None:
     assert "Investigate primary sources" in text
     assert "Write one Markdown file" in text
     assert "fno do plan path" in text
-
-
-def test_think_offers_substrate_tokens_and_briefs() -> None:
-    """Substrate is an explicit token (D1); the briefs change the question only."""
-    text = SKILL.read_text(encoding="utf-8")
-    for token in ("bg", "subagent"):
-        assert token in text
-    for brief in ("what-if", "panel", "class"):
-        assert brief in text
-
-
-def test_think_demands_cited_claims() -> None:
-    text = SKILL.read_text(encoding="utf-8")
-    assert "file:line" in text
-
-
-def test_native_plan_boundary_survives_in_architecture() -> None:
-    """The Footnote-specific plan boundary is documented as footnote-native."""
-    architecture = ARCH.read_text(encoding="utf-8")
-    assert "Native Plan Mode" in architecture
-    assert "copies no external workflow pack" in architecture

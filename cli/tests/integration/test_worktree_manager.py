@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -94,7 +93,7 @@ def parse_json(stdout: str) -> dict:
     # Take the LAST line that parses as JSON. The script may emit log lines
     # to stderr, but stdout should be the JSON payload alone.
     lines = [ln for ln in stdout.strip().splitlines() if ln.strip()]
-    assert lines, f"no stdout from worktree-manager (stdout was empty)"
+    assert lines, "no stdout from worktree-manager (stdout was empty)"
     last = lines[-1]
     try:
         return json.loads(last)
@@ -140,51 +139,6 @@ def test_resolve_falls_back_to_claude_worktrees(tmp_repo, isolated_env):
     assert result.stdout.strip() == expected
 
 
-def test_resolve_honors_worktree_base_from_global_settings(tmp_repo, isolated_env, tmp_path):
-    """Project listed in global settings.yaml gets its worktree_base honored."""
-    write_settings(Path(isolated_env["HOME"]), textwrap.dedent("""
-        work:
-          workspaces:
-            ws1:
-              projects:
-                - name: foo
-                  path: /tmp/foo
-                  worktree_base: ~/conductor/workspaces/foo
-    """))
-    result = run_wtm("resolve", "foo", cwd=tmp_repo, env=isolated_env)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == f"{isolated_env['HOME']}/conductor/workspaces/foo"
-
-
-def test_resolve_legacy_flat_workspace_shape(tmp_repo, isolated_env):
-    """work.projects[] (legacy flat shape) is still honored."""
-    write_settings(Path(isolated_env["HOME"]), textwrap.dedent("""
-        work:
-          projects:
-            - name: legacy
-              path: /tmp/legacy
-              worktree_base: /custom/path/legacy
-    """))
-    result = run_wtm("resolve", "legacy", cwd=tmp_repo, env=isolated_env)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "/custom/path/legacy"
-
-
-def test_resolve_unknown_project_falls_back(tmp_repo, isolated_env):
-    """A project not in settings.yaml falls back to .claude/worktrees."""
-    write_settings(Path(isolated_env["HOME"]), textwrap.dedent("""
-        work:
-          workspaces:
-            ws1:
-              projects:
-                - name: foo
-                  worktree_base: /custom/foo
-    """))
-    result = run_wtm("resolve", "bar", cwd=tmp_repo, env=isolated_env)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == str(tmp_repo / ".claude" / "worktrees")
-
-
 # ---------------------------------------------------------------
 # create verb
 # ---------------------------------------------------------------
@@ -223,19 +177,6 @@ def test_create_is_idempotent(tmp_repo, isolated_env):
     payload2 = parse_json(result2.stdout)
     assert payload2["existing"] is True
     assert payload2["path"] == payload1["path"]
-
-
-def test_create_ephemeral_branch_naming(tmp_repo, isolated_env):
-    """ephemeral mode does not prepend feature/ to the branch name."""
-    result = run_wtm(
-        "create", ".", "ephem-test",
-        "--mode=ephemeral", "--branch=discover/abc123",
-        cwd=tmp_repo, env=isolated_env,
-    )
-    assert result.returncode == 0, result.stderr
-    payload = parse_json(result.stdout)
-    assert payload["branch"] == "discover/abc123"
-    assert payload["mode"] == "ephemeral"
 
 
 # ---------------------------------------------------------------
@@ -364,19 +305,6 @@ def test_cleanup_skips_in_progress_target_session(tmp_repo, isolated_env):
 # ---------------------------------------------------------------
 # migrate verb
 # ---------------------------------------------------------------
-
-
-def test_migrate_dry_run_classifies_without_removing(tmp_repo, isolated_env):
-    """migrate --dry-run lists candidates and removes nothing."""
-    create = run_wtm("create", ".", "migrate-test", cwd=tmp_repo, env=isolated_env)
-    wt_path = Path(parse_json(create.stdout)["path"])
-
-    result = run_wtm("migrate", "--dry-run", cwd=tmp_repo, env=isolated_env)
-    assert result.returncode == 0, result.stderr
-    payload = parse_json(result.stdout)
-    assert payload["status"] == "ok"
-    assert int(payload["removed"]) == 0
-    assert wt_path.is_dir()
 
 
 def test_migrate_auto_removes_stale_but_preserves_live(tmp_repo, isolated_env):

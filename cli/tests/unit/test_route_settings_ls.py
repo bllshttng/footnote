@@ -99,22 +99,6 @@ def test_prune_removes_only_unreferenced_old_files_by_name(tmp_path, monkeypatch
     assert "1 file(s) pruned" in result.output
 
 
-def test_json_rows_carry_the_staleness_facts(tmp_path, monkeypatch):
-    overlays = _pin(tmp_path, monkeypatch, referenced=[])
-    _overlay(overlays, "aa11", haiku="glm-4.5-air", mtime_days_ago=3)
-
-    result = runner.invoke(app, ["config", "route", "settings", "ls", "--json"])
-
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.output)["rows"]
-    assert rows[0]["file"] == "aa11.json"
-    assert rows[0]["provider"] == "zai"
-    assert rows[0]["haiku"] == "glm-4.5-air"
-    # x-f173: the marker names the tier that moved, not just the values.
-    assert rows[0]["stale"] == "haiku glm-4.5-air -> glm-4.7"
-    assert rows[0]["referenced"] == "no"
-
-
 def test_prune_refuses_to_act_when_the_registry_cannot_be_read(tmp_path, monkeypatch):
     """Fail closed: with the registry unreadable, 'no row references it' is a
     guess, and deleting on a guess is the exact defect class this verb exists

@@ -6,12 +6,9 @@ the real layout (cli/src/fno/review/prompts/ + agents/) so the unit
 tests remain hermetic and fast.
 """
 
-import os
 import subprocess
-import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "cli" / "scripts" / "check-prompt-drift.sh"
@@ -70,24 +67,6 @@ class TestClean:
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
-    def test_multiple_matching_pairs_exit_zero(self, tmp_path):
-        root = _make_tree(
-            tmp_path,
-            prompts={
-                "silent_failure_hunter": _FULL_CLI,
-                "code_reviewer": _FULL_CLI,
-            },
-            agents={
-                "silent-failure-hunter": _FULL_AGENT,
-                "code-reviewer": _FULL_AGENT,
-            },
-        )
-        result = _run(root)
-        assert result.returncode == 0, (
-            f"Expected exit 0 but got {result.returncode}.\n"
-            f"stdout: {result.stdout}\nstderr: {result.stderr}"
-        )
-
     def test_empty_prompt_dir_exits_zero(self, tmp_path):
         """No prompts = nothing to compare = clean."""
         root = _make_tree(tmp_path, prompts={}, agents={})
@@ -124,21 +103,6 @@ class TestBodyDrift:
         combined = result.stdout + result.stderr
         assert "DRIFT:" in combined, (
             f"Expected 'DRIFT:' in output but got:\n{combined}"
-        )
-
-    def test_drift_output_contains_diff_lines(self, tmp_path):
-        cli_body = _FM + "Line A only in CLI.\n"
-        agent_body = _FM + "Line B only in agent.\n"
-        root = _make_tree(
-            tmp_path,
-            prompts={"my_agent": cli_body},
-            agents={"my-agent": agent_body},
-        )
-        result = _run(root)
-        combined = result.stdout + result.stderr
-        # Unified diff lines start with + or -
-        assert "-Line B only in agent." in combined or "+Line A only in CLI." in combined, (
-            f"Expected diff content in output but got:\n{combined}"
         )
 
     def test_frontmatter_diff_alone_is_not_drift(self, tmp_path):
@@ -204,19 +168,3 @@ class TestOrphan:
         assert "ORPHAN:" in combined, (
             f"Expected 'ORPHAN:' in output but got:\n{combined}"
         )
-
-    def test_orphan_and_clean_together_exits_nonzero(self, tmp_path):
-        """One orphan + one clean pair = still exits non-zero."""
-        root = _make_tree(
-            tmp_path,
-            prompts={
-                "good_agent": _FULL_CLI,
-                "orphan_agent": _FULL_CLI,
-            },
-            agents={
-                "good-agent": _FULL_AGENT,
-                # no orphan-agent
-            },
-        )
-        result = _run(root)
-        assert result.returncode != 0

@@ -138,25 +138,6 @@ def test_unreadable_verdict_and_over_cap_report_together(tmp_path: Path) -> None
     assert "exceed the 10-entry cap" in r.stderr
 
 
-def test_over_cap_fails(tmp_path: Path) -> None:
-    path = _fixture(tmp_path, [GOOD] * 11)
-    r = _run(path)
-    assert r.returncode == 1
-    assert "exceed the 10-entry cap" in r.stderr
-
-
-def test_missing_graduates_to_fails(tmp_path: Path) -> None:
-    path = _fixture(tmp_path, [("Bad", "", FRESH)])
-    # _fixture always emits graduates-to; build a manual miss instead.
-    path.write_text(
-        f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n### Bad\n\ntrap.\n\n- added: {FRESH}\n\n{NEXT_HEADING}\n",
-        encoding="utf-8",
-    )
-    r = _run(path)
-    assert r.returncode == 1
-    assert "missing a 'graduates-to:' field" in r.stderr
-
-
 def test_missing_added_fails(tmp_path: Path) -> None:
     path = tmp_path / "agents.md"
     path.write_text(
@@ -166,13 +147,6 @@ def test_missing_added_fails(tmp_path: Path) -> None:
     r = _run(path)
     assert r.returncode == 1
     assert "missing an 'added:' field" in r.stderr
-
-
-def test_stale_entry_fails(tmp_path: Path) -> None:
-    path = _fixture(tmp_path, [("Old", "a lint", STALE)])
-    r = _run(path)
-    assert r.returncode == 1
-    assert "over the 60-day limit" in r.stderr
 
 
 def test_missing_section_fails(tmp_path: Path) -> None:

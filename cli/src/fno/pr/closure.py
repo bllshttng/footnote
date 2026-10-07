@@ -6,8 +6,7 @@ written to the graph - every other named node stays open forever, because
 the forward scan in `_reconcile.scan_merge_drift` needs a PR ref to query and
 the reverse branch-name map only carries the primary node's id.
 
-Free-text mentions ("this also fixes x-aaaa", "blocked by x-bbbb") are
-measurement-only (see `scripts/metrics/pr-node-closure-audit.py`) and must
+Free-text mentions ("this also fixes x-aaaa", "blocked by x-bbbb") must
 NEVER become a closure claim - a dependency note or a follow-up filing reads
 identically to a close claim to a prose scanner. The exact line is the only
 runtime-recognized closure grammar, so a claim is either the literal line or

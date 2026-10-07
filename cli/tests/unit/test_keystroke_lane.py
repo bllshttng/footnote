@@ -28,9 +28,7 @@ def _entry(**kw) -> AgentEntry:
         ({"harness": "claude"}, "control.sock", True),
         # 4. codex daemon (turn/start RPC) -> NOT a keystroke lane.
         ({"harness": "codex"}, "codex-daemon", False),
-        # 5. gemini daemon -> not a keystroke lane.
-        ({"harness": "gemini"}, "gemini-daemon", False),
-        # 6. opencode / unknown -> daemon lane, not a keystroke lane.
+        # 5. opencode / unknown -> daemon lane, not a keystroke lane.
         ({"harness": "opencode"}, "opencode-daemon", False),
     ],
 )
