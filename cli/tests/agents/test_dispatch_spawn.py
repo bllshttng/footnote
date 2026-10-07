@@ -1174,7 +1174,11 @@ def test_keeper_lane_child_env_never_inherits_the_spawn_trigger(
     class _Boom(Exception):
         pass
 
+    real_popen = dispatch.subprocess.Popen
+
     def _fake_popen(*args, **kwargs):
+        if "env" not in kwargs:  # the registry door, not the keeper launch
+            return real_popen(*args, **kwargs)
         captured["env"] = kwargs["env"]
         raise _Boom("stop before the keeper starts")
 
