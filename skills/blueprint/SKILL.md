@@ -79,6 +79,7 @@ input decides which path runs; the output shape is always the same (`plan == PR
 |-------|------|--------------|
 | A `/think` design-doc path | **[Single-doc mutation](#single-doc-mutation-design-doc-input)** | Mutate the doc in place (append Execution Strategy + File Ownership + kill_criteria) |
 | A raw idea / feature description | **[Single-doc creation](#single-doc-creation-idea-input)** | Write a fresh single `.md` with full frontmatter |
+| A plan that reads `status: ready`, changed by a new ruling, a seat order, or a landed blocker | **[Amend](#amend-a-plan-that-is-already-ready)** | Edit the plan in place: read rulings once, validate once, hand to execute |
 
 `quick` is a **size knob** on either path (fewer sections, single task), not a
 separate mode - a quick plan still carries full frontmatter (`kill_criteria`,
@@ -86,6 +87,18 @@ separate mode - a quick plan still carries full frontmatter (`kill_criteria`,
 block; there is no `00-INDEX.md` and no phase files.
 
 A batched dispatch can run this skill up to three times in sequence. Each run still produces exactly one `.md`. When two of the three share a shape, step 2d absorbs the sibling into one node before either becomes a plan.
+
+---
+
+## Amend (a plan that is already ready)
+
+An amend is not a rewrite. Skip discovery, the five questions, answerer enumeration, the code index audit, the collision check and intake. They ran at write time. One seated worker spent 48 minutes on an amend that re-ran them before its first source edit.
+
+1. A seat order that says "build wave one, then re-blueprint" means the first source edit comes first. Make it, then amend between waves. A seated worker never amends before its first edit.
+2. Read the live rulings once: `fno backlog decisions <node> --state live --json`. Add every missing `decisions_acknowledged` entry in one edit. Change only the tasks a ruling names.
+3. Validate once: `bash "${SKILL_DIR}/scripts/validate-plan.sh" "$PLAN_PATH"`. Fix everything that one output names, then validate one more time. A third run is a blocker, not a retry.
+4. A validator line that starts with `STOP`, or a timeout, ends the amend. Name the blocker in one `<help>` or mail your lead. Do not run the validator again.
+5. Hand the plan to `/fno:execute` or `/fno:target` in the same turn. The plan stays `status: ready`. If you changed the Execution Strategy, run `--finalize`. Otherwise skip it.
 
 ---
 
