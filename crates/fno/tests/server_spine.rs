@@ -420,6 +420,22 @@ fn spine_event_rows(events_path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The rows commit from the server's journal writer thread, after the echo
+/// has already rendered, so a reader waits for the rows it expects.
+fn spine_wait_rows(
+    events_path: &Path,
+    ready: impl Fn(&[serde_json::Value]) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = spine_event_rows(events_path);
+        if ready(&rows) || Instant::now() >= deadline {
+            return rows;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn server_spine_human_touch_keystroke_echo_latency_under_cpu_load() {
     let scratch = Scratch::new("human-touch-latency");
@@ -427,6 +443,22 @@ fn server_spine_human_touch_keystroke_echo_latency_under_cpu_load() {
     let mut stream = attach(&scratch.sock(), 24, 80);
     wait_for_frame(&mut stream, 10, |_| true);
     let _load = CpuLoad::start();
+
+    // A second writer holds the store lock for 3s: a commit on the core loop
+    // would stall the echo for that long.
+    let events_path = scratch.0.join("iso-agents").join("events.jsonl");
+    let store = fno::event_store::store_path(&events_path);
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&store).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
+            .unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        conn.execute_batch("COMMIT;").unwrap();
+    });
+    locked_rx.recv().unwrap();
 
     let started = Instant::now();
     send(
@@ -439,11 +471,13 @@ fn server_spine_human_touch_keystroke_echo_latency_under_cpu_load() {
     let latency = started.elapsed();
     assert!(
         latency < Duration::from_secs(2),
-        "keystroke-to-echo took {latency:?} under CPU load"
+        "keystroke-to-echo took {latency:?} under CPU load with the store locked"
     );
 
-    let events_path = scratch.0.join("iso-agents").join("events.jsonl");
-    let rows = spine_event_rows(&events_path);
+    holder.join().unwrap();
+    let rows = spine_wait_rows(&events_path, |rows| {
+        rows.iter().any(|row| row["type"] == "human_touch")
+    });
     let touch = rows
         .iter()
         .find(|row| row["type"] == "human_touch")
@@ -470,7 +504,11 @@ fn server_spine_touch_kill_switch_preserves_operator_witnesses() {
     });
 
     let events_path = scratch.0.join("iso-agents").join("events.jsonl");
-    let rows = spine_event_rows(&events_path);
+    let rows = spine_wait_rows(&events_path, |rows| {
+        ["operator_typing", "operator_submit"]
+            .iter()
+            .all(|kind| rows.iter().any(|row| row["type"] == *kind))
+    });
     assert_eq!(
         rows.iter()
             .filter(|row| row["type"] == "operator_typing")

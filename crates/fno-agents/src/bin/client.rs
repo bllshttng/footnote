@@ -1043,12 +1043,23 @@ async fn run(args: Vec<String>) -> i32 {
     // `resume --substrate thread` is the pane-to-thread LIFECYCLE move, not a
     // re-entry: it falls through to build_request, which routes it to the
     // daemon's agent.convert, whose agent lock outlives the client.
-    if verb == "resume" && !fno_agents::resume_args::requests_conversion(&args[1..]) {
+    // A row that is not a pane has nothing to convert, so the same flag falls
+    // back to the plain resume, which relaunches an exited session as a thread.
+    let resume_rest = if verb != "resume" {
+        None
+    } else if fno_agents::resume_args::requests_conversion(&args[1..]) {
+        fno_agents::resume_args::reentry_argv_for_unpaned_conversion(
+            &args[1..],
+            &AgentsHome::from_env(),
+        )
+    } else {
+        Some(args[1..].to_vec())
+    };
+    if let Some(rest) = resume_rest {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
         // thread is legal in both contexts (gc_sweep::stop_row_process is
         // the same shape).
-        let rest = args[1..].to_vec();
         let home = AgentsHome::from_env();
         return match std::thread::spawn(move || fno_agents::client_verbs::run_resume(&rest, &home))
             .join()
@@ -3707,6 +3718,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--harness-arg",
         "--crown",
         "--crown-scope",
+        "--role-level",
+        "--role-scope",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3986,6 +3999,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // thread spawn; the typed parse lives in spawn_axes.
             "--crown" | "--crown-scope" => {
                 fno_agents::spawn_axes::insert_crown_flag(&a, &mut it, &mut params)?;
+            }
+            "--role-level" | "--role-scope" => {
+                fno_agents::spawn_axes::insert_role_flag(&a, &mut it, &mut params)?;
             }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn

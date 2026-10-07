@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::sync::Arc;
@@ -267,15 +268,11 @@ impl Core {
                 "resolution": resolution,
             }
         });
-        if crate::pane_send_audit::append_agents_event(
+        crate::pane_send_audit::queue_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
-            eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
-        }
+            event,
+            Some(&self.touch_emit_failures),
+        );
     }
 
     /// One `operator_submit` witness row for a human Enter on `pane`: bind
@@ -287,17 +284,11 @@ impl Core {
     /// touches the keystroke path.
     pub(super) fn witness_submit(&self, pane: u64) {
         let event = self.witness_row(pane, "operator_submit");
-        // ponytail: the append runs inline on the core loop, one O_APPEND
-        // line per Enter; move it off-loop if keystroke latency ever shows it.
-        if crate::pane_send_audit::append_agents_event(
+        crate::pane_send_audit::queue_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
-            eprintln!("fno mux: operator_submit emit failed ({n} this session)");
-        }
+            event,
+            Some(&self.touch_emit_failures),
+        );
     }
 
     /// One `operator_typing` witness row for a burst of keystrokes with no
@@ -308,15 +299,11 @@ impl Core {
     /// auto-close guard reads it from there.
     pub(super) fn witness_typing(&self, pane: u64) {
         let event = self.witness_row(pane, "operator_typing");
-        if crate::pane_send_audit::append_agents_event(
+        crate::pane_send_audit::queue_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
-            eprintln!("fno mux: operator_typing emit failed ({n} this session)");
-        }
+            event,
+            Some(&self.touch_emit_failures),
+        );
     }
 
     /// True when `pane` received operator keystrokes within the last 60
@@ -788,6 +775,9 @@ mod tests {
     }
 
     fn journal_rows(dir: &Path, event_type: &str) -> Vec<serde_json::Value> {
+        assert!(crate::pane_send_audit::flush_agents_journal(
+            Duration::from_secs(10)
+        ));
         crate::event_store::query_events(
             &dir.join("events.jsonl"),
             &crate::event_store::EventQuery::of_types(&[event_type]),
@@ -848,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn human_touch_event_uses_agent_journal_inline() {
+    fn the_first_key_of_a_burst_writes_one_human_touch_row() {
         use crate::server::CoreMsg;
         let (guard, dir) = witness_env("human-touch");
         let mut core = typing_client_core();
@@ -887,6 +877,9 @@ mod tests {
             id: 1,
             bytes: b"ship it\r".to_vec(),
         });
+        assert!(crate::pane_send_audit::flush_agents_journal(
+            Duration::from_secs(10)
+        ));
 
         assert_eq!(
             core.touch_emit_failures.load(Ordering::Relaxed),
