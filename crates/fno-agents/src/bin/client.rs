@@ -3980,9 +3980,6 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--role-level" | "--role-scope" => {
                 fno_agents::spawn_axes::insert_role_flag(&a, &mut it, &mut params)?;
             }
-            "--role-level" | "--role-scope" => {
-                fno_agents::spawn_axes::insert_role_flag(&a, &mut it, &mut params)?;
-            }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn
                 // arm is not blocked by an unknown-flag error; the four-lane
