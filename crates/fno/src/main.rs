@@ -68,6 +68,13 @@ enum Role {
     /// fno plugin into each. Native, because it must answer before the wheel
     /// exists on a mid-install machine and forwards would 127 there.
     SetupAutowire,
+    /// `fno config get --defaults [--json]`: the defaults inventory
+    /// `config setup run` composes on. Native, so the inventory answers
+    /// beside the setup verb that reads it.
+    ConfigDefaults(Vec<OsString>),
+    /// `fno config setup run`: the one run-once setup over the one step
+    /// table, with a no-prompt path (`--yes`, non-TTY stdin, agent env).
+    SetupRun(Vec<OsString>),
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
@@ -337,8 +344,14 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::law_cli::classify_inbox_decide(args) {
         return Role::InboxDecide(rest);
     }
+    if let Some(rest) = fno::setup_run::classify(args) {
+        return Role::SetupRun(rest);
+    }
     if fno::setup_autowire::classify(args).is_some() {
         return Role::SetupAutowire;
+    }
+    if let Some(rest) = fno::config_defaults::classify(args) {
+        return Role::ConfigDefaults(rest);
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -496,6 +509,8 @@ fn main() {
         Role::MuxVersion(json) => fno::version::print_version(json),
         Role::Uninstall(opts) => std::process::exit(fno::uninstall::run_uninstall(opts)),
         Role::SetupAutowire => std::process::exit(fno::setup_autowire::run()),
+        Role::ConfigDefaults(rest) => std::process::exit(fno::config_defaults::run(&rest)),
+        Role::SetupRun(rest) => std::process::exit(fno::setup_run::run(&rest)),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(kill_req) => {
             if kill_req.stale_idle || kill_req.all {
