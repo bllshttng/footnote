@@ -153,8 +153,8 @@ fn emit<'a>(view: &'a View, buckets: Vec<Bucket<'a>>) -> (Vec<DisplayRow<'a>>, V
 /// Shift+up/down in the row selector: swap the focused agent with its
 /// neighbour agent row and record the display sequence as the manual order,
 /// switching the sort to Manual so the swap is visible at once. A band-edge
-/// move in a group mode refuses: the band order is label-appearance order,
-/// so a cross-band swap would be silently undone on the next paint.
+/// move refuses on every axis: the run sort orders inside each contiguous
+/// band, so a cross-band swap would be silently undone on the next paint.
 pub(super) fn reorder_agent_rows(view: &mut View, cur: usize, delta: isize) {
     // The selector cursor indexes display_rows(), the same catalog every
     // other selector verb reads - painted_rows() names a different row in
@@ -181,9 +181,10 @@ pub(super) fn reorder_agent_rows(view: &mut View, cur: usize, delta: isize) {
         }
         j += dir;
     };
-    if view.agent_group != AgentGroup::Workspace
-        && group_key_of(view, &name) != group_key_of(view, &neighbor)
-    {
+    // Every axis guards the band edge, workspace included: the run sort
+    // orders inside each contiguous run, so a cross-band swap would persist
+    // an order the paint can never show.
+    if group_key_of(view, &name) != group_key_of(view, &neighbor) {
         view.set_notice("reorder stays inside one band".into());
         return;
     }

@@ -1277,13 +1277,16 @@ impl View {
         // it. It yields to node · PR the way every right-edge occupant does:
         // a lead holding a PR keeps its PR there, no roll-up this paint.
         if agent.role_level.is_some() && identity_free {
+            // The lead's own glyph carries its state on the left; the strip
+            // counts the workers beneath it, so the lead row is out.
             let members = self
                 .layout
                 .agents
                 .iter()
                 .filter(|x| {
-                    super::agent_group::team_lead_name(self, x).as_deref()
-                        == Some(agent.name.as_str())
+                    !std::ptr::eq(*x, *agent)
+                        && super::agent_group::team_lead_name(self, x).as_deref()
+                            == Some(agent.name.as_str())
                 })
                 .map(|x| agent_lattice_state(x));
             let rollup = section_rollup(members);
