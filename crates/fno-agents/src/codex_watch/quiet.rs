@@ -102,18 +102,16 @@ fn action(episode: &mut Episode, tail: &Tail, now: i64, live: bool, dead: bool) 
             Action::Recover
         };
     }
-    if let Some((_, sent, stage)) = episode.pending.as_ref() {
+    if let Some((_, _, stage)) = episode.pending.as_ref() {
         if tail.read {
             episode.read_stage = *stage;
             episode.pending = None;
-        } else if now.saturating_sub(*sent) >= 600 {
+        } else {
             return if episode.recovered {
                 Action::Help
             } else {
                 Action::Recover
             };
-        } else {
-            return Action::Wait;
         }
     }
     if !live {
@@ -607,7 +605,7 @@ mod tests {
         };
         assert_eq!(action(&mut e, &t, 1000, true, false), Action::Nudge(1));
         e.pending = Some(("marker".into(), 1000, 1));
-        assert_eq!(action(&mut e, &t, 1500, true, false), Action::Wait);
+        assert_eq!(action(&mut e, &t, 1001, true, false), Action::Recover);
         assert_eq!(action(&mut e, &t, 1600, true, false), Action::Recover);
         t.read = true;
         assert_eq!(action(&mut e, &t, 1900, true, false), Action::Nudge(2));
