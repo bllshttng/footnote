@@ -1277,7 +1277,7 @@ sys.stdout.write("O\t%s\n" % validated.outcome)
 node_id = sys.argv[2] if len(sys.argv) > 2 else None
 if isinstance(node_id, str) and node_id.strip():
     try:
-        from fno.rust_binary import call_front_json
+        from fno.rust_binary import FrontTimeout, call_front_json
 
         answer = call_front_json(
             {
@@ -1287,6 +1287,9 @@ if isinstance(node_id, str) and node_id.strip():
         )
         rows = answer.get("decisions") or []
         damaged = int(answer.get("damaged") or 0)
+    except FrontTimeout as exc:
+        sys.stdout.write("T\t%s\n" % " ".join(str(exc).split())[:200])
+        raise SystemExit(0)
     except Exception as exc:  # noqa: BLE001 - an unread graph is not an empty graph
         sys.stdout.write(
             "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
@@ -1412,6 +1415,8 @@ PYEOF
             # be hiding the closing verdict this whole gate exists to catch,
             # so an inability to check is not evidence of a clean node.
             W) c_error "$label: decisions_acknowledged could not be checked ($payload) - fix the decision index and re-validate" ;;
+            # A timeout is the machine, not the index. Another run meets the same wait, so say stop.
+            T) c_error "$label: decisions_acknowledged could not be checked: $payload. STOP: do not re-run the validator; the read needs about 3s of CPU, so the machine had none to give. Raise one <help> naming this blocker, or mail your lead" ;;
         esac
     done <<< "$delegate_out"
 
