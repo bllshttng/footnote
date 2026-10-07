@@ -115,7 +115,7 @@ fn codex_sessions_dir() -> PathBuf {
 /// A uuid safe to use as a path component. Registry content is untrusted and
 /// lands in a path join, so anything but the transcript filename shape is
 /// refused before it can escape the projects dir.
-fn transcript_uuid_shaped(uuid: &str) -> bool {
+pub(crate) fn transcript_uuid_shaped(uuid: &str) -> bool {
     !uuid.is_empty() && uuid.len() <= 64 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
