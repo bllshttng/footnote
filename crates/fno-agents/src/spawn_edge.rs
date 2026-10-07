@@ -309,10 +309,6 @@ mod tests {
             payload["lineage_reason"],
             "daemon mint: spawn request carried no parent edge"
         );
-    }
-
-    #[test]
-    fn a_birth_with_neither_session_nor_reason_never_says_nothing() {
         let payload = birth_event(
             "t-x-worker",
             &Lineage::captured((None, None, None)),

@@ -539,14 +539,11 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::codex_inject::run_codex_assign_project(&args[1..]).await;
     }
 
-    // `claim` is the HIDDEN debug front over the native claims module
-    // (`fno_agents::claims`): the cross-impl compatibility matrix drives the
-    // Rust side of the lockfile protocol through it, and it doubles as an ops
-    // escape hatch when the Python CLI is unavailable. Matched with `matches!`
-    // (like `mail-inject`) so the routable-verb parity guard does not see it
-    // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno agents claim`
-    // remains the only operator CLI for claims.
+    // Hidden native claim operations; `fno agents claim` owns the operator surface.
     if matches!(verb, "claim") {
+        if args.get(1).map(String::as_str) == Some("birth") {
+            return fno_agents::first_check::run_record(&args[2..]);
+        }
         return fno_agents::claim_verbs::run_claim(&args[1..]);
     }
 

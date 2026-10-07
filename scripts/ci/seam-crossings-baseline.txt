@@ -68,6 +68,7 @@ crossing	crates/fno-agents/src/restart_run.rs	match std::process::Command::new(c
 crossing	crates/fno-agents/src/restart_run.rs	let mux_out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/resume_wake.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/resume_wake.rs	std::process::Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/resume_wake.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/retask/transport.rs	fn fno_bin() -> String {
 crossing	crates/fno-agents/src/retask/transport.rs	crate::scrape::fno_bin().to_string_lossy().into_owned()
 crossing	crates/fno-agents/src/retask/transport.rs	let mut cmd = Command::new(fno_bin());
