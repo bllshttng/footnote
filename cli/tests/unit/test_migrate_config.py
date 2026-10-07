@@ -110,5 +110,3 @@ def test_ac3_fr_crash_before_rename_leaves_yaml_intact(tmp_path, monkeypatch):
     assert _migrate_yaml_to_toml(yaml_path) is not None
     assert (fno / "config.toml").is_file()
     assert not yaml_path.exists()
-
-

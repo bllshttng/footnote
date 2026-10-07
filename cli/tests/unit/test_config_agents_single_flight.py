@@ -30,5 +30,3 @@ def test_a_non_positive_value_degrades_and_is_named():
         "agents.orphan_reap_after_seconds",
         "agents.single_flight_join_budget_seconds",
     }
-
-

@@ -90,5 +90,3 @@ def test_worktree_local_settings_win_over_canonical(
 
     settings = load_settings()
     assert settings.post_merge.parking_lot_path == "internal/worktree/parking-lot.md"
-
-

@@ -288,5 +288,3 @@ def test_report_machine_blockers_survives_a_raising_doctor(monkeypatch):
     assert blockers == []
     assert len(lines) == 1
     assert "could not run" in lines[0]
-
-

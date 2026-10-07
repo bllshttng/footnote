@@ -89,5 +89,3 @@ def test_direct_reader_candidates_are_bounded(
     assert inside.with_name("config.toml") in cands
     # ...but nothing under the out-of-ceiling canonical root leaks in.
     assert all("canonical" not in str(c) for c in cands)
-
-

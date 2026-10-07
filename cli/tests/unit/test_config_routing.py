@@ -138,5 +138,3 @@ def test_provider_tier_models_rejects_unknown_tier_key():
     message = str(excinfo.value)
     assert "bogus" in message
     assert "opus" in message
-
-

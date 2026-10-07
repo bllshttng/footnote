@@ -103,5 +103,3 @@ def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
 
     s = config_mod.load_settings()
     assert s.project.id == "shared-project"
-
-

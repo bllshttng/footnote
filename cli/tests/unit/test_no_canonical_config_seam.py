@@ -59,5 +59,3 @@ def test_ac3_err_flag_inert_unless_exactly_one(tmp_path, monkeypatch, value):
     monkeypatch.setenv("FNO_NO_CANONICAL_CONFIG", value)
     locs = _locs(monkeypatch, tmp_path)
     assert tmp_path / "canonical" / ".fno" / "settings.yaml" in locs
-
-

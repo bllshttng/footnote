@@ -386,5 +386,3 @@ def test_agy_install_manual_when_adapter_absent(tmp_path, monkeypatch):
     res = I._agy_install()
     # A CLI-only install can't wire a path that doesn't exist -> manual, never ok.
     assert res.status == "manual" and not res.ok
-
-

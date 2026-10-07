@@ -129,5 +129,3 @@ def test_stage_table_in_same_file_masks_legacy_harness(monkeypatch, tmp_path):
     assert "masks it" in text
     assert "fno config set agents.profiles" not in text
     assert "fno config unset dispatch.harness" in text
-
-

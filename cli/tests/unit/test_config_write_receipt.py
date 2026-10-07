@@ -263,5 +263,3 @@ def test_history_reads_both_journals_newest_first_and_renders_unset(tmp_path, mo
     )
     assert scoped.exit_code == 0, scoped.output
     assert json.loads(scoped.stdout)["data"]["scope"] == "project"
-
-

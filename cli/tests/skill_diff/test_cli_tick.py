@@ -375,7 +375,7 @@ def test_reconcile_ac2_err_tool_fault_excluded(monkeypatch, tmp_path):  # AC2-ER
     p = _wire(monkeypatch, tmp_path, events)
     # sid-a's replay tool-faults (excluded); sid-b genuinely still fails.
     _wire_reeval(monkeypatch, p, replay={"sid-a": "tool_fault", "sid-b": "fail"})
-    r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
+    runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
     closed = [e for e in _events(p) if e["type"] == "skill_diff_eval_closed"]
     # before_fail=2, after_fail=1 (tool_fault not counted) -> delta=1, not 0.
     assert closed and closed[0]["data"]["score_delta"] == 1
@@ -530,7 +530,7 @@ def test_reconcile_pr_number_already_closed_is_noop(monkeypatch, tmp_path):  # A
         {"type": "skill_diff_eval_closed",
          "data": {"pr_number": 201, "skill_id": "fno:blueprint", "run_id_before": "r1"}},
     ]
-    p = _wire(monkeypatch, tmp_path, events)
+    _wire(monkeypatch, tmp_path, events)
     r = runner.invoke(cli.skill_diff_app, ["reconcile", "--pr-number", "201"])
     assert "already has an eval-closed receipt" in r.output
 

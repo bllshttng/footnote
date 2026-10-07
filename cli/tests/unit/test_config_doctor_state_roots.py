@@ -82,5 +82,3 @@ def test_receipt_warns_when_the_worktree_and_canonical_roots_differ(
     assert "WARNING" in text
     assert str(worktree) in text
     assert str(canonical) in text
-
-

@@ -24,5 +24,3 @@ def test_config_block_bad_entry_shape_is_dropped_not_raised():
     cb = ConfigBlock(loops={"good-loop": {"level": "assisted"}, "bad-loop": "assisted"})
     assert cb.loops["good-loop"].level == "assisted"
     assert "bad-loop" not in cb.loops
-
-

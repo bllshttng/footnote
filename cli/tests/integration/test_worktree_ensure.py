@@ -102,7 +102,7 @@ def test_ensure_continues_origin_feature_branch_ahead_of_main(
 ) -> None:
     """AC2-HP (x-28ff): origin/feature/<name> ahead of main -> the new worktree
     tracks that branch at its tip, and the receipt names it as continued."""
-    origin = _bare_origin(main_repo, tmp_path)
+    _bare_origin(main_repo, tmp_path)
     _git("checkout", "-qb", "feature/x-1234", cwd=main_repo)
     (main_repo / "a.txt").write_text("one\n")
     _git("add", "a.txt", cwd=main_repo)

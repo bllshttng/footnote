@@ -42,5 +42,3 @@ def test_defaulted_king_does_not_invalidate_low_teammate():
     block = HandoffBlock(used_pct_trigger=1)
     assert block.king_used_pct_trigger == 40
     assert block.used_pct_trigger == 1
-
-
