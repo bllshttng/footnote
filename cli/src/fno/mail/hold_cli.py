@@ -20,102 +20,6 @@ from typing import Optional
 
 import typer
 
-def _manifest_fields(*names: str) -> dict[str, Optional[str]]:
-    """Read named fields from this session's ``.fno/target-state.md`` (cwd-relative).
-
-    The manifest is per-worktree (each target session owns one), so reading it
-    from cwd is reading THIS session's own claim binding. Returns ``{}`` when no
-    manifest is present (a non-target session has no job to drain)."""
-    try:
-        raw = (Path.cwd() / ".fno" / "target-state.md").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
-        return {}
-    out: dict[str, Optional[str]] = {}
-    for name in names:
-        m = re.search(rf"^{re.escape(name)}\s*:\s*(.*)$", raw, re.MULTILINE)
-        if m is None:
-            out[name] = None
-            continue
-        val = m.group(1).strip().strip("\"'")
-        out[name] = val if val and val != "null" else None
-    return out
-
-
-def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
-    """Scan job-addressed mail for the node THIS session holds, verified live.
-
-    The job address outlives any session, so a successor re-claiming the node
-    drains mail here that the prior holder never read (part 2). The node
-    comes from this session's own manifest (``target_claim_key``); the holder
-    check reuses ``resolve_truth_status`` -- the same node->holder-session join
-    ``fno agents list`` runs -- so this session drains only when IT is the live
-    holder. A successor sees a different holder -> ``session_id`` None -> no
-    drain, which is the security gate (a stale manifest must not drain another
-    holder's mail).
-
-    Returns ``(job_address, envelopes)``; ``(None, [])`` when this session holds
-    no live node claim. Never raises: an unreadable manifest or claim degrades to
-    no job mail, so the drain still surfaces handle mail.
-    """
-    from fno.agents.truth_status import resolve_truth_status
-    from fno.bus.cursor import scan_unread
-    from fno.mail.job_address import HOLDER_STATES
-
-    key = _manifest_fields("target_claim_key").get("target_claim_key")
-    if not key or not key.startswith("node:"):
-        return None, []
-    res = resolve_truth_status(
-        key[len("node:"):], manifest_cwd=str(Path.cwd())
-    )
-    if res.get("claim_state") not in HOLDER_STATES:
-        return None, []
-    # resolve_truth_status returns the holder's session id only when the live
-    # claim holder still matches this manifest's recorded holder; equalling
-    # ident.session_id means THIS session is that holder.
-    if not ident.session_id or res.get("session_id") != ident.session_id:
-        return None, []
-    return key, scan_unread(key)
-
-
-def _self_handle_or_exit() -> "tuple[str, object]":
-    """This session's canonical mail handle AND the identity it came from.
-
-    Returns both so the caller never re-resolves. A second resolve can answer
-    differently from the one this function validated, and then the row written
-    is not the row checked.
-
-    Fails closed on a contaminated env, for the same reason `--to-self` does
-    and with worse consequences. An inherited marker from a parent harness
-    makes a precedence-only resolve answer with the PARENT session. A
-    misaddressed `--to-self` sends one message to the wrong place, which is
-    visible and recoverable. A misaddressed hold stamps a DELIVERY POLICY on
-    another agent's row and arms a timer against their handle, silently holding
-    their mail.
-
-    The refusal is the shared one now. `resolve_harness_identity` already
-    refuses a mixed-family env, so nothing is laundered either way; what the
-    owned path adds is that a mixed env the process tree CAN decide resolves
-    instead of refusing, which is the difference between a real claude worker
-    holding its own mail and being told it has no identity.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-    from fno.harness_identity import canonical_handle
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError as exc:
-        sys.stderr.write(
-            f"{exc}\na hold stamped on the wrong row holds another agent's mail\n"
-        )
-        raise typer.Exit(code=3) from exc
-    if not ident.harness or not ident.session_id:
-        sys.stderr.write(
-            "no provable harness identity - there is no session to hold mail for\n"
-        )
-        raise typer.Exit(code=3)
-    return canonical_handle(ident.session_id), ident
 
 
 def cmd_hold(
@@ -150,6 +54,8 @@ def cmd_hold(
 
     from fno.mail import hold as hold_mod
     from fno.harness_identity import session_identity_key
+
+    from fno.mail.cli import _self_handle_or_exit
 
     handle, ident = _self_handle_or_exit()
     # Clock key: the collision-free identity key (first-eight collides in one 65.536s window).
