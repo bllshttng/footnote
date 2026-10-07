@@ -8,7 +8,6 @@ that execs it, so the flag spellings and the receipt cannot drift between the do
 """
 
 import subprocess
-import sys
 
 import typer
 
@@ -35,15 +34,11 @@ def restart_command(
         daemon_cmd.append("--mux")
     if json_out:
         daemon_cmd.append("--json")
+    # Inherited streams, not captured ones: a capture printed all of stderr
+    # before all of stdout, so the verdict line was no longer the last line.
     try:
-        proc = subprocess.run(daemon_cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(daemon_cmd, timeout=600)
     except (OSError, subprocess.SubprocessError) as exc:
         typer.echo(f"fno agents restart: could not run fno-agents restart ({exc})", err=True)
         raise typer.Exit(1)
-    if proc.stderr:
-        typer.echo(proc.stderr, err=True)
-    # stdout stays stdout in both modes: the Rust receipts are the parser
-    # surface, and relaying them to stderr starves every stdout reader.
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
     raise typer.Exit(proc.returncode)

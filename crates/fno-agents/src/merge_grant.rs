@@ -235,11 +235,15 @@ pub fn verdict_for_pr(
         }
     };
     if receipts.is_empty() {
+        // The absent reading still names the liveness it saw: a free or stale
+        // claim is the standing proof nobody is driving the node, so nothing
+        // would merge this PR even if a receipt existed. Report, never grant.
+        let claim_str = claim_of(&node_id).as_str();
         return Verdict {
             state: ABSENT,
             reason: "no do row on the node records a merge grant".to_string(),
             node_id: Some(node_id),
-            claim_state: None,
+            claim_state: Some(claim_str.to_string()),
             grant: None,
         };
     }
