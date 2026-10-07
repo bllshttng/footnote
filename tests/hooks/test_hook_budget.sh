@@ -72,7 +72,9 @@ echo "=== hook_overloaded ==="
 load_lib
 ovl_fail=0
 while read -r ovl_load ovl_cores ovl_pin ovl_want; do
-    [[ "$ovl_load" == "-" ]] && continue
+    # Skip blank lines only: "-" is the sentinel for an unreadable load and
+    # must REACH the function (the never-skip row depends on it).
+    [[ -z "$ovl_load" ]] && continue
     hook_load1() { printf '%s' "$ovl_load"; }
     hook_cores() { printf '%s' "$ovl_cores"; }
     unset FNO_HOOK_BUDGET_SKIP_PER_CORE
