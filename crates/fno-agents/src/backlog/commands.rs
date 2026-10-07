@@ -63,7 +63,7 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "list",
-        purpose: "Read saved node sets",
+        purpose: "Read saved node sets; bare `list <query>` is the native grammar door",
         actions: &[
             ("next", "next"),
             ("ready", "ready"),
