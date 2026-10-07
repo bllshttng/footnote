@@ -456,7 +456,7 @@ pub fn run(tail: &[String]) -> i32 {
     while let Some(arg) = it.next() {
         let mut value = || it.next().cloned();
         match arg.as_str() {
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             "--plan" => match value() {
                 Some(v) => plan = Some(v),
                 None => {
@@ -596,10 +596,24 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("src/a.rs"));
-        let journal = std::fs::read_to_string(&events).unwrap();
-        assert!(journal.contains(EVENT_KIND), "journal: {journal}");
-        assert!(journal.contains("\"node\":\"x-1\""), "journal: {journal}");
-        assert!(journal.contains("\"premise\":\""), "journal: {journal}");
+        let _ = crate::event_store::import_all(&events);
+        let rows =
+            crate::event_store::query_events(&events, &crate::event_store::EventQuery::default())
+                .unwrap_or_default();
+        let verdict_row = rows
+            .iter()
+            .find(|r| r.line.contains(EVENT_KIND))
+            .unwrap_or_else(|| panic!("no verdict event in {} rows", rows.len()));
+        assert!(
+            verdict_row.line.contains("\"node\":\"x-1\""),
+            "row: {}",
+            verdict_row.line
+        );
+        assert!(
+            verdict_row.line.contains("\"premise\":\""),
+            "row: {}",
+            verdict_row.line
+        );
     }
 
     #[test]
