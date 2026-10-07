@@ -127,7 +127,7 @@ mod tests {
         // read driver-none and landed in unheld_progress - the exact
         // silence the scan-level skip manufactured.
         let dir = scan_dir("live");
-        let (name, rec) = handover_row("spawn-handover:t-90fa-port", 900_000, "node:x-90fa");
+        let (name, rec) = handover_row("spawn-handover:launch-port", 900_000, "node:launching");
         crate::claim_store::seed_at_path(&dir.join(name), &rec);
         let (tname, trec) = handover_row("target-session:a6d2ce6a-1da0", 900_000, "node:x-requeue");
         crate::claim_store::seed_at_path(&dir.join(tname), &trec);
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn an_expired_handover_row_stays_in_scope() {
         let dir = scan_dir("exp");
-        let (name, rec) = handover_row("spawn-handover:t-90fa-port", -1, "node:x-90fa");
+        let (name, rec) = handover_row("spawn-handover:launch-port", -1, "node:launching");
         crate::claim_store::seed_at_path(&dir.join(name), &rec);
         let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 1, "expired handover must stay: {rows:?}");
@@ -165,7 +165,7 @@ mod tests {
         named.session_id = Some("target-session:a6d2ce6a-1da0".into());
         crate::claim_store::seed_at_path(&dir.join("node%3Ax-cccc.lock"), &named);
         let (name, pre_change) =
-            handover_row("spawn-handover:t-90fa-port", 900_000, "node:x-requeue");
+            handover_row("spawn-handover:launch-port", 900_000, "node:x-requeue");
         crate::claim_store::seed_at_path(&dir.join(name), &pre_change);
         let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 2, "both rows stay in scope: {rows:?}");
