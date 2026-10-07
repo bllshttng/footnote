@@ -20,7 +20,7 @@
 use crate::identity::session_handle_tier;
 use crate::AgentStatus;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -2725,7 +2725,7 @@ where
     // pre-write `before` snapshot already built above for identity checks --
     // a pre-existing violating row is never re-validated (AC3-FR).
     for entry in &registry.entries {
-        if !before.contains_key(&entry.name) {
+        if !before_entries.iter().any(|b| b.name == entry.name) {
             if let Err(msg) = validate_resolvable_handle(entry) {
                 return Err(StateError::InvariantViolation(msg));
             }
