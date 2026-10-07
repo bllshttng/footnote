@@ -795,7 +795,7 @@ fn mux_bool(cwd: &Path, key: &str, default: bool) -> bool {
 
 /// A `config.<section>.<key>` boolean with a fail-open default - the same
 /// coercion as [`mux_bool`] for a non-mux section (`resource_meter`).
-fn section_bool(cwd: &Path, section: &str, key: &str, default: bool) -> bool {
+pub(crate) fn section_bool(cwd: &Path, section: &str, key: &str, default: bool) -> bool {
     config_str(cwd, section, key)
         .and_then(|v| parse_bool(&v))
         .unwrap_or(default)
