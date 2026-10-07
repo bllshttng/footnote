@@ -254,10 +254,36 @@ pub fn replace_document(path: &Path, document: Value) {
     begin(path).unwrap().commit(document).unwrap();
 }
 
+/// The `agent.watch` version of the registry at `path`, or `None` when it
+/// vanished. After the table import the path is a fence directory whose stat
+/// never moves, so the table revision rides the `mtime_nanos` slot the agents
+/// view already parses; before it, the file's (mtime, len) stamp.
+pub fn watch_version(path: &Path) -> Result<Option<serde_json::Value>, crate::state::StateError> {
+    if path.is_dir() {
+        let (_, revision) = read_versioned(path)?;
+        return Ok(Some(serde_json::json!({"mtime_nanos": revision, "len": 0})));
+    }
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(crate::state::StateError::Io(e)),
+    };
+    let mtime_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    Ok(Some(
+        serde_json::json!({"mtime_nanos": mtime_nanos, "len": meta.len()}),
+    ))
+}
+
 /// Seed `body` as the registry at `path`. Before the table owns the path the
 /// bytes land as the legacy file, so the import reads them raw; after, they
 /// replace the table document.
-pub fn seed_raw(path: &Path, body: impl AsRef<[u8]>) {
+pub fn seed_raw(path: impl AsRef<Path>, body: impl AsRef<[u8]>) {
+    let path = path.as_ref();
     if path.is_dir() {
         let body = body.as_ref();
         let document = if body.iter().all(u8::is_ascii_whitespace) {
