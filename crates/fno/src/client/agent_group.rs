@@ -169,7 +169,7 @@ pub(super) fn reorder_agent_rows(view: &mut View, cur: usize, delta: isize) {
     };
     let dir = delta.signum();
     let mut j = cur as isize + dir;
-    let mut neighbor_at = cur;
+    let neighbor_at;
     let neighbor = loop {
         if j < 0 || j as usize >= rows.len() {
             view.set_notice("no agent row that way".into());

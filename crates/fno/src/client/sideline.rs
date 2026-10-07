@@ -1455,12 +1455,6 @@ fn row_age(a: &AgentRow, now: u64) -> String {
     }
 }
 
-/// The name a teamed row shows on its workers' cards. Today the lead's
-/// handle; the team's own name replaces it when the wire carries one.
-fn team_display_name(lead: &AgentRow) -> &str {
-    &lead.name
-}
-
 /// The one cwd-base noise rule, shared by both tag sites: a worktree named
 /// for the row's own node repeats the id the card already paints, so its
 /// basename tags nothing.
