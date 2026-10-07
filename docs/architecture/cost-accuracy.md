@@ -126,7 +126,7 @@ With `[telemetry] claude_otel = true` (the default), the daemon serves OTLP/http
 
 The database retains every log event in `otel_events`, including unknown future event names. `api_requests` supplies typed cost and token columns. Both tables are defined in one canonical SQL file. The generated [schema reference](../reference/otel-schema.md) lists every table and column. A batch commits raw retention and typed projection together. Failed storage returns HTTP 503 so the exporter can retry. Invalid payloads return HTTP 400.
 
-Content is redacted before storage. `OTEL_LOG_TOOL_DETAILS=1` provides real skill/plugin attribution but also exports command text and tool arguments. The receiver masks those values and keeps safe tool/skill/MCP names. Even if a sender enables content export, the receiver masks prompt/response text, API bodies, hook definitions and managed settings content. fno does not set `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_CONTENT`. Metrics and traces remain off. Nothing is forwarded outside this machine.
+Content is redacted before storage. `OTEL_LOG_TOOL_DETAILS=1` provides real skill/plugin attribution but also exports command text and tool arguments. The receiver masks those values and keeps safe tool/skill/MCP names. If a sender enables content export, the receiver still masks prompt/response text, API bodies, hook definitions and managed settings content. fno does not set `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_CONTENT`. Metrics and traces remain off. Nothing is forwarded outside this machine.
 
 ### Health and coverage
 
