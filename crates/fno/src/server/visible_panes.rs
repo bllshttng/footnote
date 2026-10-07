@@ -35,7 +35,7 @@ impl Core {
 }
 
 fn visible_path(session: &str) -> Result<PathBuf, String> {
-    crate::proto::socket_path(session).map(|sock| sock.with_extension("visible.json"))
+    crate::proto::socket_path(session).map(|sock| crate::proto::visible_sidecar_path(&sock))
 }
 
 #[cfg(test)]
