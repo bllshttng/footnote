@@ -681,7 +681,12 @@ pub fn snapshot_with(
             continue;
         };
         let name = name.to_string();
-        let session_id = s_field(row, "session_id").map(String::from);
+        // Codex rows carry the thread UUID in `harness_session_id`; the
+        // plain `session_id` field is the rarer spelling. The handoff
+        // frontmatter needs the real id, so the fallback rides here.
+        let session_id = s_field(row, "session_id")
+            .or_else(|| s_field(row, "harness_session_id"))
+            .map(String::from);
         let harness = s_field(row, "harness").unwrap_or("unknown").to_string();
         let provider = provider_of(row);
         let account = account_of(row);
@@ -1952,11 +1957,20 @@ fn write_handoff_doc(
     // machine IS the origin. Either value missing leaves the body unchanged;
     // its `old transcript: unknown` line already says so.
     let frontmatter = match (member.session_id.as_deref(), transcript.as_deref()) {
-        (Some(sid), Some(path)) => format!(
-            "---\n{}\n---\n\n",
-            fno::session_origin::SessionOrigin::for_this_machine(&member.harness, sid, path)
-                .frontmatter()
-        ),
+        (Some(sid), Some(path)) => {
+            // A copied transcript arrives with the origin record beside it:
+            // the record names the machine the session BEGAN on, and it
+            // outranks this machine's identity.
+            let origin = crate::session_origin::SessionOrigin::read_beside(path, sid)
+                .unwrap_or_else(|| {
+                    crate::session_origin::SessionOrigin::for_this_machine(
+                        &member.harness,
+                        sid,
+                        path,
+                    )
+                });
+            format!("---\n{}\n---\n\n", origin.frontmatter())
+        }
         _ => String::new(),
     };
     let body = format!(
@@ -2572,6 +2586,23 @@ mod tests {
         );
         assert!(body.contains(&t), "{body}");
         assert!(body.contains("old transcript:"), "{body}");
+        // A copied origin record outranks this machine's identity: the doc
+        // names the machine the session began on (AC4-HP, copied side).
+        let copied = format!(
+            "{{\"machine\":\"aaaaaaaaaaaaaaaa\",\"host\":\"mac-a\",\"harness\":\"codex\",\"session_id\":\"{CODEX_THREAD}\",\"transcript_path\":\"{t}\",\"recorded_at\":\"2026-10-01T00:00:00+00:00\"}}"
+        );
+        std::fs::write(
+            Path::new(&t)
+                .parent()
+                .unwrap()
+                .join(format!("{CODEX_THREAD}.fno.json")),
+            copied,
+        )
+        .unwrap();
+        let doc = write_handoff_doc(&home, lane, &lane.members[0], "dest2", 1_000_000_001).unwrap();
+        let body = std::fs::read_to_string(&doc).unwrap();
+        assert!(body.contains("machine: \"aaaaaaaaaaaaaaaa\""), "{body}");
+        assert!(body.contains("host: \"mac-a\""), "{body}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

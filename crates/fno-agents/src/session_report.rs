@@ -548,7 +548,7 @@ async fn drain_spool(home: &AgentsHome) {
 }
 
 /// Write the origin record beside this session's transcript (see
-/// `fno::session_origin`). Best effort: an error never fails the hook. A
+/// `crate::session_origin`). Best effort: an error never fails the hook. A
 /// source of `resume` writes nothing: the record names the machine a session
 /// BEGAN on, and a resume is not that machine's claim to make.
 fn record_origin(params: &Value) {
@@ -587,8 +587,8 @@ fn record_origin(params: &Value) {
     let Some(transcript) = transcript else {
         return;
     };
-    let _ = fno::session_origin::write_if_absent(
-        &fno::session_origin::SessionOrigin::for_this_machine(harness, sid, &transcript),
+    let _ = crate::session_origin::write_if_absent(
+        &crate::session_origin::SessionOrigin::for_this_machine(harness, sid, &transcript),
     );
 }
 
@@ -773,8 +773,8 @@ mod tests {
         let orphan = dir.path().join(format!("{orphan_sid}.fno.json"));
         std::fs::write(
             &orphan,
-            serde_json::to_vec(&fno::session_origin::SessionOrigin {
-                machine: fno::session_origin::this_machine(),
+            serde_json::to_vec(&crate::session_origin::SessionOrigin {
+                machine: crate::session_origin::this_machine(),
                 host: "elsewhere".into(),
                 harness: "claude".into(),
                 session_id: orphan_sid.into(),
