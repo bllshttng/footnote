@@ -409,11 +409,6 @@ fn stale_reads_version_drift_and_contract_change() {
     assert_eq!(status_json()["status"], "stale");
 }
 
-/// The restriction render contract, under both contracts: a denylist
-/// carries into 1.x's permission map as deny entries; an allowlist
-/// installs as deny-all + allows, never unrestricted; a 2.x stub opencode
-/// flips the render to a `permissions` rule list with shell/subagent
-/// names; an allowlist that maps to nothing skips the agent.
 /// A binary only the official installer's home dir holds still classifies,
 /// and a binary nobody can run is "missing", never a contract change.
 #[test]
@@ -436,6 +431,11 @@ fn off_path_binary_resolves_from_home_and_a_missing_one_is_not_a_contract_change
     assert_eq!(quick["contract_changed"], false);
 }
 
+/// The restriction render contract, under both contracts: a denylist
+/// carries into 1.x's permission map as deny entries; an allowlist
+/// installs as deny-all + allows, never unrestricted; a 2.x stub opencode
+/// flips the render to a `permissions` rule list with shell/subagent
+/// names; an allowlist that maps to nothing skips the agent.
 #[test]
 fn agent_restrictions_render_as_permission_records() {
     let s = scratch("restriction-parity");

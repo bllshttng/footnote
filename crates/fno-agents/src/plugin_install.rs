@@ -2209,6 +2209,10 @@ pub(crate) fn loop_install_probe(
                 let field = |k: &str| v[k].as_str().unwrap_or("unknown").to_string();
                 let why = if v["binary_missing"] == true {
                     "the opencode binary was not found; set FNO_OPENCODE_BIN or install it at ~/.opencode/bin/opencode"
+                } else if status == "absent" {
+                    "no footnote extension is installed"
+                } else if status == "partial" {
+                    "installed extension files are missing"
                 } else if v["contract_changed"] == true {
                     "the opencode contract changed since install"
                 } else {
