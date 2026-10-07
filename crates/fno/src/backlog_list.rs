@@ -327,7 +327,7 @@ pub fn run(tail: &[String]) -> i32 {
 }
 
 /// The gather the snapshot door runs: a current-thread runtime over the
-/// model's async gather, the crowned roster read once beside it.
+/// model's async gather, the role roster read once beside it.
 fn gather_inputs(graph: &Path) -> Result<crate::backlog_model::Inputs, String> {
     let now = crate::search_query::now_secs();
     let agents = std::fs::read_to_string(crate::agents_view::registry_path())
