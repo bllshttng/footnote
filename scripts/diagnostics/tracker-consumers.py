@@ -67,6 +67,9 @@ READ_ALLOWLIST = (
     # The claims store's db-path builder (the layout place of the graph
     # anchor, swapped to its db sibling), never a read.
     "crates/fno-agents/src/claim_store.rs",
+    # The registry store's db-path builder, the same graph anchor swapped
+    # to its db sibling, never a read.
+    "crates/fno-agents/src/registry_store.rs",
     # Unit-test fixture module, included cfg(test) from spawn_gate.rs: its
     # graph.json literals write hermetic tempdir fixtures, never store reads.
     "crates/fno-agents/src/spawn_gate_territory_tests.rs",

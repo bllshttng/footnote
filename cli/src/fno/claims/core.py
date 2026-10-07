@@ -24,7 +24,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from urllib.parse import quote as _url_quote
 
-from .io import (ClaimAlreadyHeld, ClaimCorrupted, ClaimGoneAway, claim_path, encode_key, dedup_claims_roots, global_claims_root)
+from .io import (ClaimAlreadyHeld, ClaimCorrupted, ClaimGoneAway, claim_path, encode_key, dedup_claims_roots, global_claims_root, read_claim_file)
 from .verdict import (
     ClaimSweepOmission,
     ClaimVerdictError,

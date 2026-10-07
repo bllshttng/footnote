@@ -335,11 +335,11 @@ fn gather_inputs(graph: &Path) -> Result<crate::backlog_model::Inputs, String> {
         .and_then(|raw| crate::agents_view::derive_rows(&raw, now as u64))
         .map(|rows: Vec<crate::agents_view::RegistryAgent>| {
             rows.iter()
-                .filter(|r| !r.exited && r.crown_scope.is_some())
+                .filter(|r| !r.exited && r.role_scope.is_some())
                 .map(|r| crate::proto::AgentRow {
                     name: r.name.clone(),
-                    crown_level: r.crown_level,
-                    crown_scope: r.crown_scope.clone(),
+                    role_level: r.role_level,
+                    role_scope: r.role_scope.clone(),
                     ..Default::default()
                 })
                 .collect()

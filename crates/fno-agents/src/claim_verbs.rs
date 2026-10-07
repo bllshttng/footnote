@@ -362,7 +362,9 @@ fn run_claim_reap(args: &[String]) -> i32 {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--root" => match it.next() {
-                Some(v) => dirs.push(PathBuf::from(v).join(".fno/claims")),
+                Some(v) => {
+                    dirs.extend(crate::claims::claims_dir_for(Some(std::path::Path::new(v))))
+                }
                 None => return 2,
             },
             "--claims-dir" => match it.next() {
