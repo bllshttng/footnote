@@ -23,6 +23,33 @@ from typing import Optional
 NOT_LANDED_EXIT = 14
 
 
+def _render(argv: list[str]) -> str:
+    """One mail-receipt read through the native door (the style-check
+    pattern: Python keeps transports, the assembly lives in Rust). The
+    receipt vocabulary is single-source, so a missing binary refuses rather
+    than falling back to a second renderer."""
+    from fno.rust_binary import VerbUnavailable, resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise VerbUnavailable("fno-agents binary not found; run `fno doctor update`")
+    proc = subprocess.run(
+        [str(binary), "mail-receipt", *argv],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise VerbUnavailable(
+            (proc.stderr or "fno-agents mail-receipt failed").strip()[:200]
+        )
+    return proc.stdout.rstrip("\n")
+
+
+def _flag(name: str, value: Optional[str]) -> list[str]:
+    return [f"--{name}", value] if value is not None else []
+
+
 def _live_miss_age_suffix(recipient: str) -> str:
     """The transcript-age suffix a live-miss or transcript- reason carries (AC8).
 
@@ -80,13 +107,7 @@ def durable_window_clause(owner: Optional[str]) -> str:
     from fno.inbox.store import owner_ttl_hours
 
     hours = owner_ttl_hours(owner or "")
-    if hours <= 0:
-        return ""
-    if hours < 1:
-        window = f"~{round(hours * 60)}m"
-    else:
-        window = f"~{round(hours)}h"
-    return f" - typically drains within {window} - an empty unread before then is not a failure"
+    return _render(["window", "--ttl-hours", repr(hours)])
 
 
 def durable_leg_story(
@@ -102,16 +123,11 @@ def durable_leg_story(
     (a ``waited-<n>s`` token in the reason) and the transcript-age suffix, so
     the sender can tell a busy peer from a silent one. Words only: no raw
     token reaches this line."""
-    if not _is_live_lane_failure(reason):
-        return None
-    story = "live leg unconfirmed"
-    for token in (reason or "").split(";"):
-        if token.startswith("waited-"):
-            story += f" after {token[len('waited-'):]}"
-            break
-    if recipient is not None:
-        story += _live_miss_age_suffix(recipient)
-    return story + "; durable leg holds"
+    suffix = _live_miss_age_suffix(recipient) if recipient is not None else None
+    story = _render(
+        ["story", *(_flag("reason", reason)), *(_flag("suffix", suffix)), *(_flag("age-of", recipient))]
+    )
+    return story or None
 
 
 def json_receipt(
@@ -127,8 +143,14 @@ def json_receipt(
     sender's ``--subject``, null when none), ``to``, and ``status`` carrying
     the delivery verdict in the receipt vocabulary every reader already
     greps (``delivered (hosted)``, ``queued (durable)``, ``typed``)."""
-    return json.dumps(
-        {"msg_id": msg_id, "subject": subject, "to": to, "status": status}
+    return _render(
+        [
+            "json",
+            "--msg-id", msg_id,
+            "--to", to,
+            "--status", status,
+            *(_flag("subject", subject)),
+        ]
     )
 
 
@@ -143,17 +165,23 @@ def demotion_receipt(
     subject: Optional[str] = None,
 ) -> str:
     """The stdout receipt for a durable demotion (refined by x-aaaa)."""
-    token = durable_leg_story(reason, age_target if age_target is not None else target)
-    if token is None:
-        token = reason or "live-miss"
-        if token == "live-miss" or token.startswith("transcript-"):
-            age_of = age_target if age_target is not None else target
-            if age_of is not None:
-                token += _live_miss_age_suffix(age_of)
-    status = f"queued (durable) [{token}]" + durable_window_clause(owner)
-    if project:
-        status += f" [project {project}]"
-    return json_receipt(msg_id, to=target or project or "", status=status, subject=subject)
+    from fno.inbox.store import owner_ttl_hours
+
+    age_of = age_target if age_target is not None else target
+    suffix = _live_miss_age_suffix(age_of) if age_of is not None else None
+    return _render(
+        [
+            "demotion",
+            "--msg-id", msg_id,
+            *(_flag("reason", reason)),
+            "--ttl-hours", repr(owner_ttl_hours(owner or "")),
+            *(_flag("target", target)),
+            *(_flag("project", project)),
+            *(_flag("age-of", age_of)),
+            *(_flag("suffix", suffix)),
+            *(_flag("subject", subject)),
+        ]
+    )
 
 
 def not_landed_receipt(
@@ -173,28 +201,16 @@ def not_landed_receipt(
     thread with no pane cannot be injected by fno at all - the session's own
     surface has to receive it - and the verify names that.
     """
-    lines = [
-        f"{msg_id} NOT LANDED - not claimed on the bus, not in the recipient "
-        "transcript"
-    ]
-    if pane is not None:
-        lines += [
-            f"  read the frame:         fno mux pane read {pane}",
-            f"  envelope in composer?   fno mux pane send {pane} --raw --submit   # presses Enter",
-            f"  then verify:            fno agents peek {target} --grep {msg_id}",
+    return _render(
+        [
+            "not-landed",
+            "--msg-id", msg_id,
+            *(_flag("pane", str(pane) if pane is not None else None)),
+            "--target", target,
+            *(_flag("harness", harness)),
+            *(_flag("session-id", session_id)),
         ]
-    elif harness == "codex" and session_id:
-        lines += [
-            "  fno cannot inject a codex thread with no pane; the session's own",
-            "  surface (the user's Codex window) must receive it. The durable copy",
-            "  drains on the recipient's next `fno agents mail unread` poll.",
-            f"  verify later:           fno agents peek {target} --grep {msg_id}",
-        ]
-    else:
-        lines += [
-            f"  verify:                 fno agents peek {target} --grep {msg_id}",
-        ]
-    return "\n".join(lines)
+    )
 
 
 def report_landing(
