@@ -95,6 +95,13 @@ fn action(episode: &mut Episode, tail: &Tail, now: i64, live: bool, dead: bool) 
     if episode.escalated {
         return Action::Wait;
     }
+    if dead {
+        return if episode.recovered {
+            Action::Help
+        } else {
+            Action::Recover
+        };
+    }
     if let Some((_, sent, stage)) = episode.pending.as_ref() {
         if tail.read {
             episode.read_stage = *stage;
@@ -108,13 +115,6 @@ fn action(episode: &mut Episode, tail: &Tail, now: i64, live: bool, dead: bool) 
         } else {
             return Action::Wait;
         }
-    }
-    if dead {
-        return if episode.recovered {
-            Action::Help
-        } else {
-            Action::Recover
-        };
     }
     if !live {
         return Action::Wait;
@@ -346,15 +346,6 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
             else {
                 return Ok(());
             };
-            if matches!(
-                entry.status,
-                crate::AgentStatus::Failed
-                    | crate::AgentStatus::Exited
-                    | crate::AgentStatus::PermanentDead
-            ) || stopped.contains(sid)
-            {
-                return Ok(());
-            }
             let Some(node) = entry.node.as_deref() else {
                 return Ok(());
             };
@@ -409,10 +400,6 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
                         .into_iter()
                         .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
                 });
-            let Some(path) = path else { return Ok(()) };
-            let Some(tail) = tail(&path, episode.pending.as_ref().map(|p| p.0.as_str())) else {
-                return Ok(());
-            };
             let native_codex_thread = entry.harness_name() == "codex" && entry.mux.is_none();
             let daemon_dead = native_codex_thread
                 && *codex_daemon_dead.get_or_insert_with(|| {
@@ -426,9 +413,23 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
                     .get_or_insert_with(crate::codex_inject::loaded_thread_ids)
                     .as_ref()
                     .is_ok_and(|roster| !roster.contains(sid));
-            let dead = entry.pid.is_some_and(|pid| crate::daemon::pid_is_gone(pid))
+            let dead = matches!(
+                entry.status,
+                crate::AgentStatus::Failed
+                    | crate::AgentStatus::Exited
+                    | crate::AgentStatus::PermanentDead
+            ) || stopped.contains(sid)
+                || entry.pid.is_some_and(|pid| crate::daemon::pid_is_gone(pid))
                 || daemon_dead
                 || thread_unloaded;
+            let transcript_tail = match path.as_deref() {
+                Some(path) => tail(path, episode.pending.as_ref().map(|p| p.0.as_str())),
+                None if dead => Some(Tail::default()),
+                None => None,
+            };
+            let Some(tail) = transcript_tail else {
+                return Ok(());
+            };
             let read_receipt = episode
                 .pending
                 .as_ref()
@@ -612,6 +613,10 @@ mod tests {
         assert_eq!(action(&mut e, &t, 1900, true, false), Action::Nudge(2));
         e.pending = Some(("second".into(), 1900, 2));
         assert_eq!(action(&mut e, &t, 2800, true, false), Action::Help);
+        e.pending = Some(("unread".into(), 2700, 2));
+        t.read = false;
+        assert_eq!(action(&mut e, &t, 2801, false, true), Action::Recover);
+        e.pending = None;
         t.activity = 2800;
         assert_eq!(action(&mut e, &t, 2801, true, false), Action::Wait);
         assert_eq!(e.read_stage, 0);
