@@ -637,6 +637,7 @@ def _append_to_bus(
     ttl_at: Optional[datetime] = None,
     word_count: Optional[int] = None,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> None:
     """Append a versioned envelope to the canonical bus log (the durable write).
 
@@ -682,6 +683,7 @@ def _append_to_bus(
             to_kind=to_kind,
             word_count=word_count,
             origin=origin,
+            subject=subject,
         )
     )
 
@@ -748,6 +750,7 @@ def post_inbox_message(
     msg_id: Optional[str] = None,
     word_count: Optional[int] = None,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> PostResult:
     """Post a project-addressed inbox message (the durable write path).
 
@@ -791,6 +794,7 @@ def post_inbox_message(
             owner=DurableOwner.INBOX_DRAIN.value,
             word_count=word_count,
             origin=origin,
+            subject=subject,
         )
         return PostResult(
             msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=True
@@ -804,6 +808,7 @@ def post_inbox_message(
         owner=DurableOwner.INBOX_DRAIN.value,
         word_count=word_count,
         origin=origin,
+        subject=subject,
     )
     return PostResult(
         msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=False
@@ -842,6 +847,7 @@ def write_new_thread(
     ttl_at: Optional[datetime] = None,
     word_count: Optional[int] = None,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> ThreadHandle:
     """Create a new thread file. Returns the resulting handle.
 
@@ -943,6 +949,7 @@ def write_new_thread(
             ttl_at=ttl_at,
             word_count=word_count,
             origin=origin,
+            subject=subject,
         )
     except Exception:
         try:

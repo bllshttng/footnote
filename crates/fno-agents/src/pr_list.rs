@@ -216,6 +216,17 @@ fn summary(item: &Value) -> Option<Value> {
     row.insert("state".into(), json!(state));
     row.insert("title".into(), json!(title));
     row.insert("headRefName".into(), json!(head));
+    // GitHub's own GraphQL name: true also for a deleted fork (a null
+    // head repo), which reads outside everywhere the field is read.
+    let head_repo = item.pointer("/head/repo/full_name").and_then(Value::as_str);
+    let base_repo = item.pointer("/base/repo/full_name").and_then(Value::as_str);
+    row.insert(
+        "isCrossRepository".into(),
+        json!(match (head_repo, base_repo) {
+            (Some(h), Some(b)) => h != b,
+            _ => true,
+        }),
+    );
     row.insert("url".into(), json!(url));
     row.insert(
         "body".into(),
@@ -370,22 +381,30 @@ mod tests {
             Ok(json!([
                 {
                     "number": 7, "state": "open", "merged_at": null, "title": "bound",
-                    "head": {"ref": "feature/x-aaaa"}, "html_url": "https://github.com/o/r/pull/7",
+                    "head": {"ref": "feature/x-aaaa", "repo": {"full_name": "o/r"}},
+                    "base": {"repo": {"full_name": "o/r"}},
+                    "html_url": "https://github.com/o/r/pull/7",
                     "body": "text",
                 },
                 {
                     "number": 8, "state": "open", "merged_at": null, "title": "missing",
-                    "head": {"ref": "feature/x-bbbb"}, "html_url": "https://github.com/o/r/pull/8",
+                    "head": {"ref": "feature/x-bbbb", "repo": {"full_name": "o/r"}},
+                    "base": {"repo": {"full_name": "o/r"}},
+                    "html_url": "https://github.com/o/r/pull/8",
                     "body": "text",
                 },
                 {
                     "number": 9, "state": "open", "merged_at": null, "title": "untracked",
-                    "head": {"ref": "chore/tidy-docs"}, "html_url": "https://github.com/o/r/pull/9",
+                    "head": {"ref": "chore/tidy-docs", "repo": {"full_name": "o/r"}},
+                    "base": {"repo": {"full_name": "o/r"}},
+                    "html_url": "https://github.com/o/r/pull/9",
                     "body": "Just a fix.",
                 },
                 {
                     "number": 110, "state": "open", "merged_at": null, "title": "ambiguous",
-                    "head": {"ref": "feature/x-aaaa-x-bbbb"}, "html_url": "https://github.com/o/r/pull/110",
+                    "head": {"ref": "feature/x-aaaa-x-bbbb", "repo": {"full_name": "o/r"}},
+                    "base": {"repo": {"full_name": "o/r"}},
+                    "html_url": "https://github.com/o/r/pull/110",
                     "body": "text",
                 },
             ])
@@ -416,6 +435,7 @@ mod tests {
                 "state",
                 "title",
                 "headRefName",
+                "isCrossRepository",
                 "url",
                 "node_id",
                 "node_binding"

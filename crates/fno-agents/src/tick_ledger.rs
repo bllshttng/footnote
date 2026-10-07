@@ -112,6 +112,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: None,
     },
     ArmSpec {
+        arm: "notice_route",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "watchdog",
         default_interval_s: 600,
         scheduler: SCHED_LAUNCHD,
@@ -1596,7 +1604,7 @@ mod tests {
     /// lead eval arm its 600-second daemon cadence.
     #[test]
     fn arm_watch_merge_close_and_lead_eval_are_known_daemon_arms() {
-        assert_eq!(KNOWN_ARMS.len(), 23);
+        assert_eq!(KNOWN_ARMS.len(), 24);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")

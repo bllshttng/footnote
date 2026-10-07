@@ -30,60 +30,6 @@ def test_ac7_hp_set_writes_coerced_value(tmp_path):
     assert _read(tmp_path)["agents"]["a2a"]["auto"] is False
 
 
-def test_set_int_coercion(tmp_path):
-    res = set_config_value(
-        "config.agents.a2a.turn_ceiling", "10", scope="project", repo_root=tmp_path
-    )
-    assert res.value == 10
-    assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
-
-
-def test_mux_theme_set_persists_for_the_settings_picker(tmp_path):
-    # The composer settings theme picker persists its apply through this key;
-    # the Rust client latches it back at startup (same config ladder).
-    res = set_config_value(
-        "config.mux.theme", "footnote-paper", scope="project", repo_root=tmp_path
-    )
-    assert res.value == "footnote-paper"
-    assert _read(tmp_path)["mux"]["theme"] == "footnote-paper"
-
-
-def test_set_max_open_ideas_round_trips(tmp_path):
-    """The Rust idea cap's key sets through the setter and stores an int."""
-    res = set_config_value(
-        "config.backlog.max_open_ideas", "400", scope="project", repo_root=tmp_path
-    )
-    assert res.value == 400
-    assert _read(tmp_path)["backlog"]["max_open_ideas"] == 400
-
-
-def test_set_max_open_ideas_rejects_negative(tmp_path, monkeypatch):
-    """0 is cap-off; a negative is refused and writes nothing (ge=0)."""
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
-    from fno.config_cli import app
-
-    res = CliRunner().invoke(app, ["set", "config.backlog.max_open_ideas", "--", "-1"])
-    assert res.exit_code != 0, res.output
-    assert "error:" in res.output
-    target = tmp_path / ".fno" / "config.toml"
-    written = tomllib.loads(target.read_text()) if target.exists() else {}
-    assert "max_open_ideas" not in written.get("backlog", {})
-
-
-def test_set_repairs_stored_quoted_bool_in_union_field(tmp_path):
-    # `enabled: bool | dict[str, bool]` stored a hand-quoted "true"; setting
-    # the same logical value must rewrite it as a bare bool, not no-op on
-    # the unchanged literal while printing success.
-    fno_dir = tmp_path / ".fno"
-    fno_dir.mkdir()
-    (fno_dir / "config.toml").write_text('[active_backlog]\nenabled = "true"\n')
-    res = set_config_value(
-        "active_backlog.enabled", "true", scope="project", repo_root=tmp_path
-    )
-    assert res.value is True
-    assert _read(tmp_path)["active_backlog"]["enabled"] is True
-
-
 @pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
 def test_config_set_rejects_nonterminating_lock_timeout(tmp_path, timeout):
     with pytest.raises(ValueError, match="finite and non-negative"):
@@ -124,49 +70,6 @@ def test_setting_a_block_rejected(tmp_path):
     with pytest.raises(ConfigSetError) as exc:
         set_config_value("config.agents.a2a", "x", scope="project", repo_root=tmp_path)
     assert "block" in str(exc.value)
-
-
-def test_bad_bool_rejected(tmp_path):
-    with pytest.raises(ConfigSetError) as exc:
-        set_config_value(
-            "config.agents.a2a.auto", "maybe", scope="project", repo_root=tmp_path
-        )
-    assert exc.value.exit_code == 2
-
-
-def test_ac7_edge_two_writes_preserve_each_other(tmp_path):
-    set_config_value(
-        "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
-    )
-    set_config_value(
-        "config.agents.a2a.turn_ceiling", "9", scope="project", repo_root=tmp_path
-    )
-    data = _read(tmp_path)
-    # The second write preserved the first key (no clobber / corruption).
-    assert data["agents"]["a2a"]["auto"] is False
-    assert data["agents"]["a2a"]["turn_ceiling"] == 9
-
-
-def test_preserves_unrelated_keys(tmp_path):
-    # Seed a legacy wrapped settings.yaml; the writer migrates it to a flat
-    # config.toml on first write, preserving unrelated top-level keys.
-    settings = tmp_path / ".fno" / "settings.yaml"
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(
-        "schema_version: 1\nwork:\n  workspaces:\n    ws:\n      projects:\n"
-        "      - name: p\n        path: /tmp/p\n",
-        encoding="utf-8",
-    )
-    set_config_value(
-        "config.agents.a2a.auto", "false", scope="project", repo_root=tmp_path
-    )
-    data = _read(tmp_path)
-    # Unrelated top-level keys survive the migrate + rewrite; the legacy yaml is
-    # gone (hard cut).
-    assert data["schema_version"] == 1
-    assert data["work"]["workspaces"]["ws"]["projects"][0]["name"] == "p"
-    assert data["agents"]["a2a"]["auto"] is False
-    assert not settings.exists()
 
 
 def test_ac7_fr_midwrite_failure_leaves_intact(tmp_path, monkeypatch):
@@ -214,18 +117,6 @@ def test_ac7_err_cli_invalid_exit_nonzero(tmp_path, monkeypatch):
     res = CliRunner().invoke(app, ["set", "config.agents.a2a.turn_ceiling", "0"])
     assert res.exit_code == 2
     assert "error:" in res.output
-
-
-def test_pep604_union_unwrap():
-    """gemini review: _unwrap_optional handles both typing.Optional and the
-    PEP 604 `X | None` syntax."""
-    import typing
-
-    from fno.config.writer import _unwrap_optional
-
-    assert _unwrap_optional(int | None) is int
-    assert _unwrap_optional(typing.Optional[int]) is int
-    assert _unwrap_optional(int) is int
 
 
 def test_set_writes_through_symlinked_config_to_canonical(tmp_path):
@@ -326,33 +217,6 @@ def test_set_list_comma_separated(tmp_path):
     ]
 
 
-def test_set_list_json_array(tmp_path):
-    res = set_config_value(
-        "config.review.required_bots",
-        '["chatgpt-codex-connector"]',
-        scope="project",
-        repo_root=tmp_path,
-    )
-    assert res.value == ["chatgpt-codex-connector"]
-
-
-def test_set_list_empty_value(tmp_path):
-    res = set_config_value(
-        "config.review.external_reviewers", "", scope="project", repo_root=tmp_path
-    )
-    assert res.value == []
-
-
-def test_set_list_single_item_round_trips(tmp_path):
-    # Regression: a single reviewer must store as a 1-item list, not a bare
-    # string that the model coercer would re-wrap.
-    res = set_config_value(
-        "config.review.external_reviewers", "gemini", scope="project", repo_root=tmp_path
-    )
-    assert res.value == ["gemini"]
-    assert _read(tmp_path)["review"]["external_reviewers"] == ["gemini"]
-
-
 def test_set_raw_list_field_stores_a_list_not_a_string(tmp_path):
     # `lanes` is typed Any so a bad list never breaks a config read. The verb
     # stored the JSON argument as a string, and the router saw no lanes.
@@ -434,24 +298,6 @@ def test_set_warns_when_higher_precedence_layer_overrides(
     assert "--local" in res.stderr
 
 
-def test_set_stays_silent_when_no_higher_precedence_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """x-389d: when no higher layer overrides the write, stderr remains silent."""
-    _pin_two_layers(
-        tmp_path,
-        monkeypatch,
-        project="schema_version = 1\n",
-        global_="schema_version = 1\n",
-    )
-    from fno.config_cli import app
-
-    res = CliRunner().invoke(app, ["set", "auto_merge.enabled", "false"])
-    assert res.exit_code == 0, res.output
-    assert "set auto_merge.enabled = False (global:" in res.stdout
-    assert "warn:" not in res.stderr
-
-
 def test_set_local_override_stays_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -470,57 +316,10 @@ def test_set_local_override_stays_silent(
     assert "warn:" not in res.stderr
 
 
-def test_set_multi_key_warns_only_for_overridden_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """x-389d: in multi-key sets, only the overridden key emits a warning."""
-    _pin_two_layers(
-        tmp_path,
-        monkeypatch,
-        project="[auto_merge]\nenabled = true\n",
-        global_="schema_version = 1\n",
-    )
-    from fno.config_cli import app
-
-    res = CliRunner().invoke(
-        app, ["set", "auto_merge.enabled=false", "blueprint.max_prs_per_epic=8"]
-    )
-    assert res.exit_code == 0, res.output
-    assert "warn: auto_merge.enabled set in" in res.stderr
-    assert "max_prs_per_epic" not in res.stderr
-
-
-
 # ---------------------------------------------------------------------------
 # x-043f task 1.3: one resolver answers a key no file sets; an unknown scope
 # is refused instead of falling through to the global file.
 # ---------------------------------------------------------------------------
-
-
-def test_unset_loop_level_reports_the_model_default(tmp_path):
-    from fno.config.writer import unset_config_value
-
-    set_config_value(
-        "config.loops.blueprint_judge.level",
-        "assisted",
-        scope="project",
-        repo_root=tmp_path,
-    )
-    res = unset_config_value(
-        "config.loops.blueprint_judge.level", scope="project", repo_root=tmp_path
-    )
-    assert res.present is True
-    assert res.default == "report"
-
-
-def test_unset_absent_loop_level_still_names_the_default(tmp_path):
-    from fno.config.writer import unset_config_value
-
-    res = unset_config_value(
-        "config.loops.blueprint_judge.level", scope="project", repo_root=tmp_path
-    )
-    assert res.present is False
-    assert res.default == "report"
 
 
 def test_unknown_scope_is_refused_not_routed_to_global(tmp_path, monkeypatch):

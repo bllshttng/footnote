@@ -343,30 +343,54 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 }
             }
         } else if kind.is_file() && selected(&path) {
-            if path.file_name().and_then(|s| s.to_str()) == Some("events.db") {
-                crate::event_store::upgrade_role_store(&path)?;
-            } else {
-                migrate_file(&path)?;
-            }
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             let current = if name == "crown_names.json" {
                 "team_names.json".to_string()
             } else {
                 vocabulary(name)
             };
-            if current != name {
-                let target = path.with_file_name(current);
-                if target.exists() {
+            let target = path.with_file_name(&current);
+            // Judge the collision before rewriting: a refused rename must
+            // leave the legacy file byte-for-byte as it was found.
+            if current != name && target.exists() {
+                if name != "crown_names.json" {
                     return Err(format!(
                         "both role files exist at {}; migration refused",
                         path.display()
                     ));
                 }
+                // The name store moved to team_names.json before this
+                // migration, so a surviving crown_names.json is an older
+                // generation. The live store wins; the old one is kept.
+                std::fs::rename(&path, superseded_backup(&path)).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if name == "events.db" {
+                crate::event_store::upgrade_role_store(&path)?;
+            } else {
+                migrate_file(&path)?;
+            }
+            if current != name {
                 std::fs::rename(&path, target).map_err(|e| e.to_string())?;
             }
         }
     }
     Ok(())
+}
+
+fn superseded_backup(path: &Path) -> PathBuf {
+    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("store");
+    let mut n = 0;
+    loop {
+        let candidate = path.with_file_name(match n {
+            0 => format!("{stem}.superseded"),
+            _ => format!("{stem}.superseded.{n}"),
+        });
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 pub fn run_at(root: &Path) -> Result<(), String> {
@@ -597,5 +621,42 @@ mod tests {
         assert_eq!(row.1, "lead_checkin");
         assert!(row.2.contains("successor_name"));
         assert!(!row.2.contains("heir_name"));
+    }
+
+    #[test]
+    fn a_superseded_name_store_yields_to_the_live_one_and_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        std::fs::create_dir(&agents).unwrap();
+        let legacy = r#"{"version":1,"crowns":{"fno":{"name":"Old","regnal":1}}}"#;
+        std::fs::write(agents.join("crown_names.json"), legacy).unwrap();
+        std::fs::write(
+            agents.join("team_names.json"),
+            r#"{"version":1,"teams":{"fno":{"name":"Live","regnal":2}}}"#,
+        )
+        .unwrap();
+        run_at(tmp.path()).unwrap();
+        assert!(!agents.join("crown_names.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(agents.join("crown_names.json.superseded")).unwrap(),
+            legacy
+        );
+        let live = std::fs::read_to_string(agents.join("team_names.json")).unwrap();
+        assert!(live.contains("Live") && live.contains("generation"));
+    }
+
+    #[test]
+    fn a_refused_collision_leaves_the_legacy_file_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kings = tmp.path().join("kings");
+        std::fs::create_dir(&kings).unwrap();
+        let legacy = r#"{"crown_scope":"x"}"#;
+        std::fs::write(kings.join("king-a.json"), legacy).unwrap();
+        std::fs::write(kings.join("lead-a.json"), "{}").unwrap();
+        assert!(run_at(tmp.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(kings.join("king-a.json")).unwrap(),
+            legacy
+        );
     }
 }

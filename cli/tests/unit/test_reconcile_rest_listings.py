@@ -79,6 +79,7 @@ def test_merged_listing_uses_rest_and_keeps_only_merged_rows(tmp_path, monkeypat
             "title": "PR 5",
             "body": "",
             "headRefName": "feature/x-0005",
+            "isCrossRepository": False,
             "url": "https://github.com/o/r/pull/5",
             "mergedAt": "2026-09-23T00:00:00Z",
         }

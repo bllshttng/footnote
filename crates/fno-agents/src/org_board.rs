@@ -107,8 +107,8 @@ pub(crate) const MAX_DRIVER_ROWS: usize = 24;
 /// with headroom; `--max-pr-reads` still overrides it.
 pub(crate) const DEFAULT_MAX_PR_READS: usize = 50;
 pub(crate) const SRC_PRS: &str =
-    "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
-pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url + fno backlog get <id>";
+    "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,isCrossRepository,url";
+pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,isCrossRepository,url + fno backlog get <id>";
 /// the mergeable_pr queue asks the gate, not just the listing.
 pub(crate) const SRC_PR_GATE: &str =
     "fno do pr status <n> (ready + ready_blockers per mergeable candidate)";

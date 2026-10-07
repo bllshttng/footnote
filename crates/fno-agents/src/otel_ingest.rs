@@ -1,14 +1,13 @@
-//! Localhost OTLP/http-json receiver for exact per-session cost.
+//! Localhost OTLP/http-json receiver for reported per-session cost.
 //!
 //! Claude Code exports an `api_request` log record per API call with
 //! `cost_usd_micros`, `session.id` and skill/plugin attribution when
 //! `CLAUDE_CODE_ENABLE_TELEMETRY=1` and an OTLP logs exporter points at a
 //! collector. fno births every hosted supervisor, so one listener on
 //! 127.0.0.1 that the daemon owns turns that on for the whole fleet: the
-//! receiver keeps only the named columns in `<agents home>/otel/otel.db`
-//! (tool details carry command text and are dropped) and nothing leaves the
-//! machine. The table and columns are harness-neutral: any OTLP speaker can
-//! feed the same port.
+//! receiver retains every log event in `<agents home>/otel/otel.db`, redacts
+//! content, and projects request cost into typed columns. Nothing leaves the
+//! machine. Any OTLP speaker can feed the same localhost port.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,33 +17,60 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::paths::AgentsHome;
 
 /// Exporter bodies are bounded; a bigger POST is refused unread.
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
-/// Bind 127.0.0.1:0, publish the port at `<home>/otel/port`, serve
-/// `POST /v1/logs` until `shutdown`, then remove the port file so a
-/// supervisor born later never reads a dead port.
+pub(crate) fn receiver_port(port_file: &Path) -> Result<u16, String> {
+    match std::fs::read_to_string(port_file) {
+        Ok(text) => text
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(|| format!("invalid OTEL port record: {}", port_file.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(4318),
+        Err(error) => Err(format!("cannot read OTEL port record: {error}")),
+    }
+}
+
+/// The endpoint record survives shutdown so hosted exporters reconnect to
+/// the same listener after a daemon restart.
 pub async fn run(home: AgentsHome, shutdown: Arc<AtomicBool>) {
+    match receiver_port(&home.otel_dir().join("port")) {
+        Ok(port) => run_on_port(home, shutdown, port).await,
+        Err(error) => eprintln!("fno OTEL receiver: {error}"),
+    }
+}
+
+async fn run_on_port(home: AgentsHome, shutdown: Arc<AtomicBool>, port: u16) {
     let dir = home.otel_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("fno OTEL receiver: cannot create state directory: {error}");
         return;
     }
-    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
-        return;
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("fno OTEL receiver: cannot bind port {port}: {error}");
+            return;
+        }
     };
-    let Some(port) = listener
-        .local_addr()
-        .ok()
-        .map(|a| a.port())
-        .filter(|p| *p != 0)
-    else {
-        return;
+    let port = match listener.local_addr() {
+        Ok(address) => address.port(),
+        Err(error) => {
+            eprintln!("fno OTEL receiver: cannot read listener address: {error}");
+            return;
+        }
     };
-    let port_file = dir.join("port");
-    if std::fs::write(&port_file, port.to_string()).is_err() {
+    let temporary = dir.join("port.tmp");
+    if let Err(error) = std::fs::write(&temporary, port.to_string())
+        .and_then(|_| std::fs::rename(&temporary, dir.join("port")))
+    {
+        eprintln!("fno OTEL receiver: cannot publish endpoint: {error}");
         return;
     }
     let db = dir.join("otel.db");
@@ -53,28 +79,30 @@ pub async fn run(home: AgentsHome, shutdown: Arc<AtomicBool>) {
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                if shutdown.load(Ordering::SeqCst) {
-                    break;
-                }
+                if shutdown.load(Ordering::SeqCst) { break; }
             }
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
                         let db = db.clone();
-                        tokio::spawn(handle_conn(stream, db));
+                        tokio::spawn(async move {
+                            let _ = tokio::time::timeout(Duration::from_secs(30), handle_conn(stream, db)).await;
+                        });
                     }
-                    Err(_) => break,
+                    Err(error) => {
+                        eprintln!("fno OTEL receiver: accept failed: {error}");
+                        break;
+                    }
                 }
             }
         }
     }
-    let _ = std::fs::remove_file(&port_file);
 }
 
 /// Daemon entry: spawn the receiver when the machine is not a sandbox and
 /// `[telemetry] claude_otel` is on. The returned flag is stored on daemon
-/// shutdown so the receiver removes `<home>/otel/port`; `None` means the arm
-/// never started.
+/// shutdown to release the listener; the endpoint record remains. `None`
+/// means the arm never started.
 pub fn spawn_for_daemon(home: &AgentsHome, sandbox: bool) -> Option<Arc<AtomicBool>> {
     if sandbox
         || !crate::agents_config::telemetry_claude_otel(
@@ -147,10 +175,15 @@ async fn handle_conn(mut stream: tokio::net::TcpStream, db: PathBuf) {
     }
     let status = if method != "POST" || path != "/v1/logs" {
         (404, "Not Found")
-    } else if ingest(&db, &body) {
-        (200, "OK")
     } else {
-        (400, "Bad Request")
+        match ingest(&db, &body) {
+            Ok(()) => (200, "OK"),
+            Err(IngestError::Payload) => (400, "Bad Request"),
+            Err(IngestError::Storage(error)) => {
+                eprintln!("fno OTEL ingest: storage failed: {error}");
+                (503, "Service Unavailable")
+            }
+        }
     };
     let reason = status.1;
     let _ = stream
@@ -161,69 +194,211 @@ async fn handle_conn(mut stream: tokio::net::TcpStream, db: PathBuf) {
         .await;
 }
 
-/// Parse an OTLP http/json logs body and store its `api_request` records.
-/// False means the body was not valid JSON.
-fn ingest(db: &Path, body: &[u8]) -> bool {
-    let Ok(v) = serde_json::from_slice::<Value>(body) else {
-        return false;
-    };
-    let Ok(conn) = Connection::open(db) else {
-        return true;
-    };
-    // Concurrent POSTs each open their own connection; without a busy
-    // timeout the second writer eats SQLITE_BUSY and its rows drop silently.
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-    if conn
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS api_requests (
-                dedupe_key TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                ts TEXT,
-                model TEXT,
-                cost_usd_micros INTEGER,
-                input_tokens INTEGER,
-                output_tokens INTEGER,
-                cache_read_tokens INTEGER,
-                cache_creation_tokens INTEGER,
-                skill_name TEXT,
-                plugin_name TEXT,
-                agent_name TEXT
-            )",
-        )
-        .is_err()
-    {
-        return true;
+enum IngestError {
+    Payload,
+    Storage(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for IngestError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error)
     }
-    for record in api_request_records(&v) {
-        let _ = store_record(&conn, &record);
+}
+
+fn ingest(db: &Path, body: &[u8]) -> Result<(), IngestError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| IngestError::Payload)?;
+    let records = log_records(&value)?;
+    let mut conn = Connection::open(db)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let transaction = conn.transaction()?;
+    transaction.execute_batch(crate::otel_read::schema_sql())?;
+    for (record, resource) in records {
+        store_event(&transaction, record, resource)?;
+        if attrs(record).get("event.name").and_then(|v| value_str(v)) == Some("api_request") {
+            store_record(&transaction, record)?;
+        }
     }
-    true
+    transaction.commit()?;
+    Ok(())
+}
+
+fn log_records(value: &Value) -> Result<Vec<(&Value, Option<&Value>)>, IngestError> {
+    fn array(value: Option<&Value>) -> Result<&[Value], IngestError> {
+        match value {
+            None => Ok(&[]),
+            Some(Value::Array(values)) => Ok(values),
+            _ => Err(IngestError::Payload),
+        }
+    }
+    if !value.is_object() {
+        return Err(IngestError::Payload);
+    }
+    let mut records = Vec::new();
+    for resource_log in array(value.get("resourceLogs"))? {
+        if !resource_log.is_object() {
+            return Err(IngestError::Payload);
+        }
+        let resource = resource_log.get("resource");
+        for scope in array(resource_log.get("scopeLogs"))? {
+            if !scope.is_object() {
+                return Err(IngestError::Payload);
+            }
+            for record in array(scope.get("logRecords"))? {
+                if !record.is_object() {
+                    return Err(IngestError::Payload);
+                }
+                array(record.get("attributes"))?;
+                records.push((record, resource));
+            }
+        }
+    }
+    Ok(records)
+}
+
+fn content_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "prompt"
+            | "prompttext"
+            | "userprompt"
+            | "response"
+            | "body"
+            | "bodyref"
+            | "toolinput"
+            | "toolparameters"
+            | "fullcommand"
+            | "bashcommand"
+            | "command"
+            | "processcommandline"
+            | "processcommandargs"
+            | "content"
+            | "diff"
+            | "newcontext"
+            | "systemreminders"
+            | "systempromptpreview"
+            | "usersystemprompt"
+            | "responsemodeloutput"
+            | "hookdefinitions"
+            | "managedsettingssettings"
+            | "error"
+            | "errormessage"
+            | "message"
+            | "stacktrace"
+            | "stdout"
+            | "stderr"
+    )
+}
+
+fn mask(value: &mut Value) {
+    *value = if value.get("stringValue").is_some() {
+        serde_json::json!({"stringValue": "<REDACTED>"})
+    } else {
+        Value::String("<REDACTED>".into())
+    };
+}
+
+fn sanitize_attribute(key: &str, value: &mut Value) {
+    if key == "tool_parameters" {
+        // Attribution names are metadata; arbitrary tool arguments are content.
+        let parameters = value_str(value).and_then(|text| serde_json::from_str::<Value>(text).ok());
+        if let Some(Value::Object(mut parameters)) = parameters {
+            for (name, parameter) in &mut parameters {
+                if !matches!(
+                    name.as_str(),
+                    "mcp_server_name"
+                        | "mcp_tool_name"
+                        | "skill_name"
+                        | "subagent_type"
+                        | "timeout"
+                        | "git_commit_id"
+                        | "git_branch"
+                ) {
+                    mask(parameter);
+                } else {
+                    sanitize(parameter);
+                }
+            }
+            let text = Value::Object(parameters).to_string();
+            *value = if value.get("stringValue").is_some() {
+                serde_json::json!({"stringValue": text})
+            } else {
+                Value::String(text)
+            };
+            return;
+        }
+    }
+    if content_key(key) {
+        mask(value);
+    } else {
+        sanitize(value);
+    }
+}
+
+fn sanitize(value: &mut Value) {
+    match value {
+        Value::Array(values) => values.iter_mut().for_each(sanitize),
+        Value::Object(values) => {
+            if let Some(key) = values.get("key").and_then(Value::as_str).map(str::to_owned) {
+                if let Some(value) = values.get_mut("value") {
+                    sanitize_attribute(&key, value);
+                }
+            } else {
+                for (key, value) in values {
+                    sanitize_attribute(key, value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn store_event(
+    conn: &Connection,
+    record: &Value,
+    resource: Option<&Value>,
+) -> rusqlite::Result<()> {
+    let attributes = attrs(record);
+    let text = |key: &str| attributes.get(key).and_then(|v| value_str(v));
+    let mut retained = record
+        .get("attributes")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let mut resource = resource.cloned().unwrap_or_else(|| serde_json::json!({}));
+    sanitize(&mut retained);
+    sanitize(&mut resource);
+    let retained = retained.to_string();
+    let resource = resource.to_string();
+    let mut hash = Sha256::new();
+    hash.update(retained.as_bytes());
+    hash.update([0u8]);
+    hash.update(resource.as_bytes());
+    // The source clock distinguishes records with identical attribute bags.
+    hash.update(
+        record
+            .get("timeUnixNano")
+            .map(Value::to_string)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let key = format!("{:x}", hash.finalize());
+    conn.execute(
+        "INSERT OR IGNORE INTO otel_events (dedupe_key, event_name, ts, session_id, prompt_id, attributes, resource)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![key, text("event.name").unwrap_or("unknown"), text("event.timestamp"),
+            text("session.id"), text("prompt.id").or_else(|| text("prompt_id")), retained, resource],
+    )?;
+    Ok(())
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
-}
-
-fn api_request_records(v: &Value) -> Vec<&Value> {
-    let Some(logs) = v.get("resourceLogs").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    logs.iter()
-        .filter_map(|rl| rl.get("scopeLogs"))
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(|sl| sl.get("logRecords"))
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter(|record| {
-            attrs(record)
-                .get("event.name")
-                .and_then(|v| value_str(v))
-                .is_some_and(|name| name == "api_request")
-        })
-        .collect()
 }
 
 fn attrs(record: &Value) -> HashMap<&str, &Value> {
@@ -262,7 +437,11 @@ fn value_i64(v: &Value) -> Option<i64> {
 fn value_f64(v: &Value) -> Option<f64> {
     v.get("doubleValue")
         .and_then(Value::as_f64)
-        .or_else(|| v.get("intValue").and_then(value_i64).map(|i| i as f64))
+        .or_else(|| {
+            v.get("intValue")
+                .and_then(|_| value_i64(v))
+                .map(|i| i as f64)
+        })
         .or_else(|| v.as_f64())
 }
 
@@ -300,12 +479,12 @@ fn store_record(conn: &Connection, record: &Value) -> rusqlite::Result<()> {
             str_attr("event.timestamp").unwrap_or_default(),
         ),
     };
-    // A record missing micros falls back to the float `cost_usd`.
-    let cost_usd_micros =
-        // A record missing micros falls back to the float `cost_usd`, scaled
-        // before the int cast so 2.5 dollars keeps its 50 cents.
-        int_attr("cost_usd_micros")
-            .or_else(|| a.get("cost_usd").and_then(|v| value_f64(v)).map(|usd| (usd * 1_000_000.0) as i64));
+    // Scale before casting so a fractional dollar amount keeps its cents.
+    let cost_usd_micros = int_attr("cost_usd_micros").or_else(|| {
+        a.get("cost_usd")
+            .and_then(|v| value_f64(v))
+            .map(|usd| (usd * 1_000_000.0) as i64)
+    });
     let row = Row {
         dedupe_key,
         session_id,
@@ -344,19 +523,7 @@ fn store_record(conn: &Connection, record: &Value) -> rusqlite::Result<()> {
 /// absent or holds no rows for the session - the caller falls back to the
 /// ledger estimate.
 pub fn session_cost_usd(db: &Path, session_id: &str) -> Option<f64> {
-    if !db.is_file() {
-        return None;
-    }
-    let conn = Connection::open(db).ok()?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-    conn.query_row(
-        "SELECT SUM(cost_usd_micros) FROM api_requests
-         WHERE session_id = ?1 AND cost_usd_micros IS NOT NULL",
-        [session_id],
-        |r| r.get::<_, Option<i64>>(0),
-    )
-    .ok()?
-    .map(|micros| micros as f64 / 1_000_000.0)
+    crate::otel_read::session_cost_usd(db, session_id)
 }
 
 #[cfg(test)]
@@ -411,14 +578,26 @@ mod tests {
             .unwrap_or(0)
     }
 
-    async fn started(home: &AgentsHome, shutdown: Arc<AtomicBool>) -> u16 {
+    async fn started(
+        home: &AgentsHome,
+        shutdown: Arc<AtomicBool>,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
         let h = home.clone();
         let sd = Arc::clone(&shutdown);
-        tokio::spawn(async move { run(h, sd).await });
+        let port = receiver_port(&home.otel_dir().join("port"))
+            .ok()
+            .filter(|_| home.otel_dir().join("port").exists())
+            .unwrap_or(0);
+        let task = tokio::spawn(async move { run_on_port(h, sd, port).await });
         for _ in 0..100 {
             if let Ok(port) = std::fs::read_to_string(home.otel_dir().join("port")) {
                 if let Ok(port) = port.trim().parse() {
-                    return port;
+                    if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                        .await
+                        .is_ok()
+                    {
+                        return (port, task);
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -481,8 +660,7 @@ mod tests {
             "http://127.0.0.1:4123/v1/logs".into()
         )));
         assert!(env.contains(&("OTEL_LOG_TOOL_DETAILS".into(), "1".into())));
-        // AC6: an ambient endpoint, ambient ENABLE_TELEMETRY, or a missing
-        // port file each step aside.
+        // Explicit telemetry settings keep their precedence.
         let ambient = |key: &str| -> Option<String> {
             (key == "OTEL_EXPORTER_OTLP_ENDPOINT").then(|| "http://localhost:4318".to_string())
         };
@@ -491,15 +669,19 @@ mod tests {
             (key == "CLAUDE_CODE_ENABLE_TELEMETRY").then(|| "1".to_string())
         };
         assert!(crate::claude_supervisor::otel_env(&port_file, claude_on).is_empty());
+        // No published record: the port may belong to another collector.
         assert!(
             crate::claude_supervisor::otel_env(&sup_home.otel_dir().join("nope"), |_| None)
                 .is_empty()
         );
+        for content_flag in ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_CONTENT"] {
+            assert!(env.iter().all(|(key, _)| key != content_flag));
+        }
 
         // AC1 + AC2: the live receiver.
         let (home, _td) = home();
         let shutdown = Arc::new(AtomicBool::new(false));
-        let port = started(&home, Arc::clone(&shutdown)).await;
+        let (port, task) = started(&home, Arc::clone(&shutdown)).await;
         let payload = body(json!([
             api_request("req_a", "sess-1", 1_500),
             api_request("req_b", "sess-1", 2_500),
@@ -534,6 +716,7 @@ mod tests {
         assert_eq!(stored(&home).len(), 3);
         // Malformed and oversized bodies are refused unread; wrong path 404s.
         assert_eq!(post(port, "/v1/logs", "{not json").await, 400);
+        assert_eq!(post(port, "/v1/logs", r#"{"resourceLogs":42}"#).await, 400);
         assert_eq!(post(port, "/v1/traces", "{}").await, 404);
         assert_eq!(post_oversized(port).await, 413);
         // Still serving after all three.
@@ -547,15 +730,106 @@ mod tests {
             200
         );
         assert_eq!(stored(&home).len(), 4);
-        // Shutdown removes the port file so no new supervisor reads a dead port.
+        let private = "PRIVATE-COMMAND-AND-PROMPT";
+        let logs = json!({"resourceLogs": [{
+            "resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "claude-code"}},
+                {"key": "process.command_line", "value": {"stringValue": private}}
+            ]},
+            "scopeLogs": [{"logRecords": [
+                {"attributes": [
+                    {"key": "event.name", "value": {"stringValue": "future_event"}},
+                    {"key": "session.id", "value": {"stringValue": "sess-1"}},
+                    {"key": "prompt.id", "value": {"stringValue": "prompt-1"}},
+                    {"key": "new.field", "value": {"intValue": "42"}},
+                    {"key": "prompt_text", "value": {"stringValue": private}}
+                ]},
+                {"attributes": [
+                    {"key": "event.name", "value": {"stringValue": "tool_result"}},
+                    {"key": "tool_input", "value": {"stringValue": private}},
+                    {"key": "tool_parameters", "value": {"stringValue": json!({
+                        "full_command": private, "mcp_server_name": "test-server",
+                        "mcp_tool_name": "search", "timeout": 1000
+                    }).to_string()}}
+                ]}
+            ]}]
+        }]});
+        assert_eq!(post(port, "/v1/logs", &logs.to_string()).await, 200);
+        assert_eq!(post(port, "/v1/logs", &logs.to_string()).await, 200);
+        let db = home.otel_dir().join("otel.db");
+        let conn = Connection::open(&db).unwrap();
+        let (attributes, resource, prompt): (String, String, String) = conn.query_row(
+            "SELECT attributes, resource, prompt_id FROM otel_events WHERE event_name = 'future_event'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        ).unwrap();
+        assert!(attributes.contains("new.field") && attributes.contains("42"));
+        assert_eq!(prompt, "prompt-1");
+        assert!(resource.contains("claude-code"));
+        assert!(!attributes.contains(private) && !resource.contains(private));
+        let tool: String = conn
+            .query_row(
+                "SELECT attributes FROM otel_events WHERE event_name = 'tool_result'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(tool.contains("test-server") && tool.contains("search"));
+        assert!(!tool.contains(private));
+        let raw_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM otel_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw_count, 6);
+        conn.execute_batch("CREATE TRIGGER refuse_cost BEFORE INSERT ON api_requests BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert_eq!(
+            post(
+                port,
+                "/v1/logs",
+                &body(json!([api_request("req_fail", "sess-fail", 10)]))
+            )
+            .await,
+            503
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM otel_events", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            raw_count
+        );
+        conn.execute_batch("DROP TRIGGER refuse_cost").unwrap();
+        drop(conn);
+
         shutdown.store(true, Ordering::SeqCst);
-        for _ in 0..100 {
-            if !home.otel_dir().join("port").exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(!home.otel_dir().join("port").exists());
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.otel_dir().join("port")).unwrap(),
+            port.to_string()
+        );
+        let shutdown_again = Arc::new(AtomicBool::new(false));
+        let (after, restarted) = started(&home, Arc::clone(&shutdown_again)).await;
+        assert_eq!(after, port);
+        let exported = crate::claude_supervisor::otel_env(&home.otel_dir().join("port"), |_| None);
+        assert!(exported.contains(&(
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT".into(),
+            format!("http://127.0.0.1:{after}/v1/logs")
+        )));
+        assert_eq!(
+            post(
+                after,
+                "/v1/logs",
+                &body(json!([api_request("req_restart", "sess-restart", 25)]))
+            )
+            .await,
+            200
+        );
+        assert_eq!(session_cost_usd(&db, "sess-restart"), Some(0.000025));
+        shutdown_again.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(3), restarted)
+            .await
+            .unwrap()
+            .unwrap();
 
         // AC7 + AC8: the exact-cost read prefers OTel rows, falls back to the
         // ledger, and an absent db reads None.

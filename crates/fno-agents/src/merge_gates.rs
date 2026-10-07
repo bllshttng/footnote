@@ -495,6 +495,16 @@ fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<Str
         breadcrumb("overlap probe unavailable (pr refs unreadable); holding for a rebase");
         return None;
     };
+    base_move_paths_between(probes, cwd, &base, &head)
+}
+
+/// [`base_move_paths`] for a caller that already holds the base ref and head.
+pub(crate) fn base_move_paths_between<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    base: &str,
+    head: &str,
+) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/compare/{head}...{base}"),
@@ -534,15 +544,16 @@ fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<Str
     Some(paths)
 }
 
-/// The PR's own changed file paths, or None (HOLD). An EMPTY list is a real
-/// answer: a PR with no diff cannot overlap anything.
-fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+/// The PR's own changed file paths, the old name of a rename included, or
+/// None (HOLD). An EMPTY list is a real answer: a PR with no diff cannot
+/// overlap anything.
+pub(crate) fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/pulls/{pr}/files"),
         "--paginate".to_string(),
         "--jq".to_string(),
-        ".[] | .filename // empty".to_string(),
+        ".[] | (.filename // empty), (.previous_filename // empty)".to_string(),
     ];
     let (ok, stdout) = probes.run_gh(cwd, &args).ok()?;
     if !ok {

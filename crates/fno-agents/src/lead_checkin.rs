@@ -1198,6 +1198,13 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("state_root_drift", r_state_root_drift());
     take("capacity", r_capacity());
     take(
+        "telemetry",
+        crate::otel_read::health(
+            crate::paths::AgentsHome::from_env().root(),
+            crate::agents_config::telemetry_claude_otel(&ctx.cwd),
+        ),
+    );
+    take(
         "machine",
         crate::lead_checkin_machine::newest_reading(&ctx.events_paths),
     );
@@ -1258,6 +1265,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     let mut data = Map::new();
     data.insert("scope".into(), json!(scope));
     let get = |name: &str| readings.iter().find(|r| r.name == name);
+    if let Some(reading) = get("telemetry").filter(|r| r.ok) {
+        data.insert("telemetry".into(), reading.value.clone());
+    }
     if let Some(board) = get("board").filter(|r| r.ok) {
         for key in ["open_prs", "free_claim_no_driver", "blocked"] {
             data.insert(
@@ -1691,11 +1701,17 @@ fn render_lines_with(
     };
     let mut lines: Vec<String> = Vec::new();
 
-    if let Some(r) = by_name("machine") {
-        if r.ok {
-            lines.push(crate::lead_checkin_machine::beat_line(&r.value));
-        } else {
-            lines.push(format!("READER FAILED machine: {}", r.error));
+    for (name, render) in [
+        (
+            "machine",
+            crate::lead_checkin_machine::beat_line as fn(&Value) -> String,
+        ),
+        ("telemetry", crate::otel_read::health_line),
+    ] {
+        if ok(name, &mut lines) {
+            if let Some(reading) = by_name(name) {
+                lines.push(render(&reading.value));
+            }
         }
     }
 
@@ -3011,46 +3027,7 @@ mod tests {
         include!("lead_checkin_watch_tests.rs");
     }
 
-    #[test]
-    fn cause_rows() {
-        let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";
-        assert_eq!(
-            stderr_cause(stderr),
-            "gh: API rate limit exceeded for user ID 4994564. (HTTP 403)"
-        );
-
-        let error = "gh api repos/{owner}/{repo}/commits/<sha>/check-runs failed: fno config: x is not modeled\ngh: API rate limit exceeded (HTTP 403)";
-        assert_eq!(
-            gh_error_cause(error),
-            "gh: API rate limit exceeded (HTTP 403)"
-        );
-
-        assert_eq!(
-            stderr_cause("fno config: first\nfno config: last"),
-            "fno config: last"
-        );
-        assert_eq!(stderr_cause(" \n\t"), "no stderr");
-
-        let cause = "é".repeat(300);
-        let result = stderr_cause(&cause);
-        assert_eq!(result.chars().count(), 120);
-        assert_eq!(result, "é".repeat(120));
-    }
-
-    #[test]
-    fn count_rows() {
-        let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
-        let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
-        assert_eq!(
-            open_pr_total(&[first, second, json!({"unexpected": true}), json!([1, 2])]),
-            109
-        );
-
-        assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
-        assert_eq!(sanitize_scope_key("  --x--  "), "x");
-        assert_eq!(sanitize_scope_key("///"), "");
-        assert_eq!(sanitize_scope_key("a, b"), "a-b");
-    }
+    include!("lead_checkin_readings_tests.rs");
 
     #[test]
     fn team_handoff_doc_reads_the_role_keyed_writer() {

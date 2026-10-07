@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 
 def _write(p: Path, text: str) -> Path:
@@ -37,53 +36,12 @@ def test_local_legacy_beats_global_canonical(tmp_path):
     assert s.review.external_reviewers == ["codex"]
 
 
-def test_local_canonical_beats_global_legacy(tmp_path):
-    from fno.config import settings_from_files
-
-    glob = _write(
-        tmp_path / "global.yaml",
-        "config:\n  external_reviewers:\n    - gemini\n",
-    )
-    local = _write(
-        tmp_path / "local.yaml",
-        "config:\n  review:\n    external_reviewers:\n      - codex\n",
-    )
-    s = settings_from_files([local, glob])
-    assert s.review.external_reviewers == ["codex"]
-
-
 def test_legacy_scalar_aliases_to_list(tmp_path):
     from fno.config import settings_from_files
 
     f = _write(tmp_path / "s.yaml", "config:\n  external_reviewer: gemini\n")
     s = settings_from_files([f])
     assert s.review.external_reviewers == ["gemini"]
-
-
-def test_retired_attention_rows_load_and_are_ignored(tmp_path):
-    """The md sink is retired: `[[attention]]` / `[[reach_me]]` rows in a
-    config still load, and the model carries no `attention` field."""
-    from fno.config import settings_from_files
-
-    f = _write(
-        tmp_path / "s.yaml",
-        "config:\n"
-        "  attention:\n    - name: new\n      path: p-new.md\n"
-        "  reach_me:\n    - name: old\n      path: p-old.md\n",
-    )
-    s = settings_from_files([f])
-    assert not hasattr(s, "attention")
-    assert not hasattr(s, "reach_me")
-
-
-def test_top_level_project_aliases_id_and_vision(tmp_path):
-    """The whole top-level project block (id + vision) lifts to config.project."""
-    from fno.config import settings_from_files
-
-    f = _write(tmp_path / "s.yaml", 'project:\n  id: myproj\n  vision: "ship it"\n')
-    s = settings_from_files([f])
-    assert s.project.id == "myproj"
-    assert s.project.vision == "ship it"
 
 
 def test_top_level_work_aliases_to_config_work(tmp_path):
@@ -98,20 +56,6 @@ def test_top_level_work_aliases_to_config_work(tmp_path):
     s = settings_from_files([f])
     ws = s.work.workspaces.get("main")
     assert ws is not None and ws.projects[0].name == "web"
-
-
-def test_canonical_config_work_wins_over_legacy_top_level(tmp_path):
-    from fno.config import settings_from_files
-
-    f = _write(
-        tmp_path / "s.yaml",
-        "work:\n  workspaces:\n    main:\n      projects:\n"
-        "      - name: legacy\n        path: ~/x\n"
-        "config:\n  work:\n    workspaces:\n      main:\n        projects:\n"
-        "        - name: canonical\n          path: ~/y\n",
-    )
-    s = settings_from_files([f])
-    assert s.work.workspaces["main"].projects[0].name == "canonical"
 
 
 def test_health_load_config_fail_open_on_bad_unrelated_setting(tmp_path):

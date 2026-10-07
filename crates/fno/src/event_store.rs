@@ -1321,7 +1321,7 @@ impl EventQuery {
         };
         let limit_sql = self
             .limit
-            .map(|n| format!(" LIMIT {n}"))
+            .map(|n| format!(" ORDER BY seq LIMIT {n}"))
             .unwrap_or_default();
         let history = if recovery {
             "EXISTS(SELECT 1 FROM recovery_history h WHERE h.event_id = events.event_id)"
@@ -1333,7 +1333,28 @@ impl EventQuery {
         } else {
             "NULL"
         };
-        (format!("SELECT seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch} FROM events{where_sql} ORDER BY seq{limit_sql}"), args)
+        let columns = format!("seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch}");
+        // An indexed filter reads rows out of commit order. The filter then
+        // picks seqs in a subquery, so the sort holds integers only. Sorting
+        // the selected rows sorted every `line` in a temp B-tree, which
+        // spilled gigabytes to disk on each daemon tick. With no indexed
+        // filter, a plain scan is already in seq order.
+        let indexed = !self.types.is_empty()
+            || self.scope.is_some()
+            || self.session_id.is_some()
+            || self.node_id.is_some()
+            || self.pr_number.is_some()
+            || self.head_sha.is_some();
+        let sql = if indexed {
+            format!("SELECT {columns} FROM events WHERE seq IN (SELECT seq FROM events{where_sql}{limit_sql}) ORDER BY seq")
+        } else {
+            let limit = self
+                .limit
+                .map(|n| format!(" LIMIT {n}"))
+                .unwrap_or_default();
+            format!("SELECT {columns} FROM events{where_sql} ORDER BY seq{limit}")
+        };
+        (sql, args)
     }
 }
 

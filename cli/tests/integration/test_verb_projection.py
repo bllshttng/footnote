@@ -1,7 +1,7 @@
 """Integration tests for graph-mutating verbs repainting their linked docs (x-5d84).
 
-Drives the REAL backlog verbs (update/defer/undefer/supersede) through the Typer
-CliRunner against a temp graph + temp plan doc, and asserts the doc's mirror
+Drives the REAL backlog verbs (add/supersede) through the native door
+against a temp graph + temp plan doc, and asserts the doc's mirror
 frontmatter converges to the graph after the mutation. Covers AC1-HP (a mutating
 verb repaints its touched doc) and AC1-ERR (a missing plan file never fails the
 verb).
@@ -15,12 +15,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from typer.testing import CliRunner
 
-from fno.cli import app
 from tests.conftest import run_native_create
-
-runner = CliRunner()
 
 
 def _strify(v):
@@ -171,17 +167,3 @@ def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
     assert res.exit_code == 0, res.output
     _, fe, _ = read_plan_file(e_doc)
     assert fe["children_total"] == "1"
-
-
-@pytest.mark.usefixtures("native_backlog_door")
-def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
-    """defer + undefer both project best-effort and never fail on a live doc."""
-    plan = _plan(tmp_path)
-    _seed(tmp_graph, [_node(plan)])
-
-    res = runner.invoke(app, ["backlog", "defer", "x-1234", "--reason", "later"])
-    assert res.exit_code == 0, res.output
-    res = runner.invoke(app, ["backlog", "undefer", "x-1234"])
-    assert res.exit_code == 0, res.output
-
-

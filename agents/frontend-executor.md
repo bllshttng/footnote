@@ -79,7 +79,7 @@ Helpers to read these from the flat config.toml without a full parser (match
 
 ```bash
 THRESHOLD=$(awk -F= '/^[[:space:]]*critique_(threshold|target)[[:space:]]*=/{gsub(/[^0-9]/,"",$2); print $2; exit}' .fno/config.toml 2>/dev/null)
-THRESHOLD=${THRESHOLD:-35}   # accepts critique_target (canonical, matches orchestrator.py) or critique_threshold (legacy alias)
+THRESHOLD=${THRESHOLD:-35}   # accepts critique_target (canonical) or critique_threshold (legacy alias)
 
 FLOOR=$(awk -F= '/^[[:space:]]*critique_floor[[:space:]]*=/{gsub(/[^0-9]/,"",$2); print $2; exit}' .fno/config.toml 2>/dev/null)
 FLOOR=${FLOOR:-25}
