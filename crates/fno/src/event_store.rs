@@ -333,6 +333,52 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 /// schema ensured (v2 created, or v1 migrated) before the connection is
 /// handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
+    if store.exists() {
+        let check = crate::store_conn::open_read(store).and_then(|conn| {
+            let result: String = conn
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
+            if result == "ok" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: database disk image is malformed: integrity check failed: {result}",
+                    store.display()
+                ))
+            }
+        });
+        if let Err(error) = check {
+            let parent = store.parent().unwrap_or_else(|| Path::new("."));
+            let root = if parent.file_name().is_some_and(|name| name == "db") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            let attention = root.join("questions.jsonl");
+            let mut identity = Sha256::new();
+            identity.update(store.as_os_str().as_encoded_bytes());
+            if let Ok(meta) = store.metadata() {
+                identity.update(meta.dev().to_le_bytes());
+                identity.update(meta.ino().to_le_bytes());
+            }
+            let id = format!("q-store-{:x}", identity.finalize());
+            let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "asker": "event-store", "node": "none", "context": {"blocked_because": error, "unknowns": "The original corruption interleaving and live installation safety have not been verified."}, "subject": "event-store-integrity", "blocks": []}});
+            use std::io::Write;
+            let notice = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&attention)
+                .and_then(|mut file| writeln!(file, "{row}"));
+            return Err(match notice {
+                Ok(()) => format!("{error}; write refused; attention: {}", attention.display()),
+                Err(e) => format!(
+                    "{error}; write refused; attention {} failed: {e}",
+                    attention.display()
+                ),
+            });
+        }
+    }
     let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
     observation::ensure_observation_tables(&conn)

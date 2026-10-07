@@ -214,6 +214,48 @@ pub fn requests_conversion(args: &[String]) -> bool {
         .any(|arg| arg == "--substrate" || arg.starts_with("--substrate="))
 }
 
+/// `--substrate thread` aimed at a row that is not a pane has nothing to
+/// convert: an adopted row records no substrate, and the caller means "bring
+/// it back as a thread", which the plain resume does for an exited session.
+/// Returns that plain argv, the substrate flag dropped, or `None` when the
+/// conversion door is the right answer (a pane row, a thread row, a dry run,
+/// or a row that does not resolve).
+pub fn reentry_argv_for_unpaned_conversion(
+    rest: &[String],
+    home: &crate::paths::AgentsHome,
+) -> Option<Vec<String>> {
+    let parsed = parse_resume_args(rest).ok()?;
+    if parsed.substrate.as_deref() != Some("thread") || parsed.dry_run || parsed.allow_new_id {
+        return None;
+    }
+    let registry = home.registry_json();
+    let entries = crate::client_verbs::read_registry_entries(&registry).ok()?;
+    let entry = crate::client_verbs::resolve_entry_with_heal_scoped(
+        &entries,
+        &parsed.name,
+        &registry,
+        parsed.cross_project,
+        None,
+    )
+    .ok()?;
+    if matches!(
+        entry.get("substrate").and_then(serde_json::Value::as_str),
+        Some("pane" | "thread")
+    ) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(rest.len());
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--substrate" {
+            it.next();
+        } else if !arg.starts_with("--substrate=") {
+            out.push(arg.clone());
+        }
+    }
+    Some(out)
+}
+
 /// Parse an argv that [`requests_conversion`] routed to the convert door,
 /// and refuse it unless the parse really produced `--substrate thread`.
 ///
