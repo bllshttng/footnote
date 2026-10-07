@@ -295,6 +295,33 @@ pub fn run_mail_receipt(args: &[String]) -> i32 {
             println!("{attended}");
             return 0;
         }
+        "manifest" => {
+            // cli.py _manifest_fields, ported verbatim: the line regex, the
+            // quote strip, and the empty/"null" spelling answer the same
+            // bytes the Python read answered. Unreadable manifest = {}.
+            let names: Vec<&str> = get("names")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|n| !n.is_empty())
+                .collect();
+            let raw = std::fs::read_to_string(".fno/target-state.md").unwrap_or_default();
+            let mut out_map = serde_json::Map::new();
+            for name in &names {
+                let found =
+                    regex::Regex::new(&format!(r"(?m)^{}\s*:\s*(.*)$", regex::escape(name)))
+                        .ok()
+                        .and_then(|re| re.captures(&raw))
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str().trim().trim_matches(['"', '\'']).to_string());
+                let value = match found {
+                    Some(v) if v.is_empty() || v == "null" => serde_json::Value::Null,
+                    Some(v) => serde_json::json!(v),
+                    None => serde_json::Value::Null,
+                };
+                out_map.insert(name.to_string(), value);
+            }
+            serde_json::Value::Object(out_map).to_string()
+        }
         "debounce" => {
             let dir = std::path::Path::new(get("marker-dir").unwrap_or_default());
             let window: u64 = get("window-secs")

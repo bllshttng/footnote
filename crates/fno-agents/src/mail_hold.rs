@@ -291,6 +291,23 @@ fn clock_json(clock: &Clock) -> serde_json::Value {
     v
 }
 
+/// hold.py clock_description, ported: the operator-facing clock prose the
+/// status line and the receipts share. The ceiling's None spelling matches
+/// the Python interpolation ("ceiling legacy unbounded") byte for byte.
+fn clock_description(clock: &Clock) -> String {
+    let Some(until) = clock.until else {
+        return "no expiry".to_string();
+    };
+    let stamp = |d: chrono::DateTime<chrono::Utc>| d.format("%H:%M:%S UTC").to_string();
+    if clock.clock_kind == "wall" {
+        return format!("wall clock, fixed deadline {}", stamp(until));
+    }
+    match clock.ceiling {
+        Some(ceiling) => format!("quiet minutes idle clock, ceiling {}", stamp(ceiling)),
+        None => "quiet minutes idle clock, ceiling legacy unbounded".to_string(),
+    }
+}
+
 /// Spawn the Python release timer detached (stdio null, own process group):
 /// the third drain trigger that lifts the hold and delivers the digest with
 /// no further input. The timer re-reads the clock every poll, so a re-arm
@@ -1100,6 +1117,9 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut extend_handle: Option<&String> = None;
     let mut read_handle: Option<&String> = None;
     let mut read_first_handles: Vec<&String> = Vec::new();
+    let mut describe_handles: Vec<&String> = Vec::new();
+    let mut status_line_handle: Option<&String> = None;
+    let mut policy_value: Option<&String> = None;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--session" => session = iter.next(),
@@ -1117,6 +1137,9 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             "--extend" => extend_handle = iter.next(),
             "--read" => read_handle = iter.next(),
             "--read-first" => read_first_handles = iter.by_ref().collect(),
+            "--describe" => describe_handles = iter.by_ref().collect(),
+            "--status-line" => status_line_handle = iter.next(),
+            "--policy" => policy_value = iter.next(),
             other => {
                 eprintln!("mail-hold: unknown argument {other:?}");
                 return 2;
@@ -1137,7 +1160,14 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             Some(now + chrono::Duration::seconds(window_s * 2))
         };
         return match write_clock(handle, until, window_s, kind, ceiling, None) {
-            Ok(()) => 0,
+            Ok(()) => {
+                // The third drain trigger (cmd_hold's detached release timer,
+                // ported): the hold lifts on the clock, not only at the next
+                // prompt or send. A failed spawn answers on stderr and the
+                // fallbacks still cover it.
+                spawn_release_timer(handle);
+                0
+            }
             Err(e) => {
                 eprintln!("mail-hold: arm failed: {e}");
                 2
@@ -1226,6 +1256,86 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
         if let Some(clock) = read_first_handles.iter().find_map(|h| read_clock(h)) {
             println!("{}", clock_json(&clock));
         }
+        return 0;
+    }
+    if !describe_handles.is_empty() {
+        // The DND render's one read: the first candidate carrying a clock,
+        // else the no-clock shape - never an error. `remaining` mirrors
+        // hold.py remaining_label: integer-truncated seconds under a minute,
+        // integer-ceiling minutes above.
+        let now = chrono::Utc::now();
+        let clock = describe_handles.iter().find_map(|h| read_clock(h));
+        let (lapsed, remaining) = match &clock {
+            None => (false, None),
+            Some(c) => match c.until {
+                None => (false, Some("held".to_string())),
+                Some(until) => {
+                    let ms = (until - now).num_milliseconds();
+                    if ms <= 0 {
+                        (true, None)
+                    } else if ms < 60_000 {
+                        (false, Some(format!("~{}s", ms / 1000)))
+                    } else {
+                        (false, Some(format!("~{}m", (ms + 59_999) / 60_000)))
+                    }
+                }
+            },
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "lapsed": lapsed,
+                "remaining": remaining,
+                "source": clock.as_ref().and_then(|c| c.source.clone()),
+                "clock_kind": clock.as_ref().map(|c| c.clock_kind.clone()),
+                "until": clock
+                    .as_ref()
+                    .and_then(|c| c.until)
+                    .map(|u| u.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            })
+        );
+        return 0;
+    }
+    if let Some(handle) = status_line_handle {
+        // hold_cli cmd_hold's --status block, ported string for string. The
+        // POLICY is resolved by the caller: it needs the registry row, the
+        // line needs only the answer.
+        let policy = policy_value.map(String::as_str).unwrap_or("");
+        let now = chrono::Utc::now();
+        let clock = read_clock(handle);
+        let desc = match &clock {
+            Some(c) => clock_description(c),
+            None => "no expiry".to_string(),
+        };
+        let line = if policy != "bus-only" {
+            format!("{handle}: no hold - mail delivers normally")
+        } else if clock.as_ref().and_then(|c| c.source.as_deref()) == Some("conversation") {
+            format!(
+                "{handle}: holding mail, machine-armed while you talk ({desc}), \
+                 lifts about 2 min after your answer"
+            )
+        } else if clock
+            .as_ref()
+            .map(|c| c.until.map(|u| u <= now).unwrap_or(false))
+            .unwrap_or(false)
+        {
+            format!(
+                "{handle}: holding mail, but the clock disagrees with the \
+                 delivery gate - run `fno agents mail hold --off` to clear it"
+            )
+        } else if clock.as_ref().map(|c| c.until.is_none()).unwrap_or(true) {
+            format!("{handle}: holding mail, no expiry (hand-stamped bus-only)")
+        } else {
+            let until = clock.as_ref().and_then(|c| c.until).expect("checked above");
+            let ms = (until - now).num_milliseconds();
+            let label = if ms < 60_000 {
+                format!("~{}s", ms / 1000)
+            } else {
+                format!("~{}m", (ms + 59_999) / 60_000)
+            };
+            format!("{handle}: holding mail, {desc}, lifts in {label}")
+        };
+        println!("{line}");
         return 0;
     }
     if render_digest {

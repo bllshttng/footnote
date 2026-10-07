@@ -4564,21 +4564,13 @@ def _manifest_fields(*names: str) -> dict[str, Optional[str]]:
     The manifest is per-worktree (each target session owns one), so reading it
     from cwd is reading THIS session's own claim binding. Returns ``{}`` when no
     manifest is present (a non-target session has no job to drain)."""
+    from fno.mail.receipts import _render
+
     try:
-        raw = (Path.cwd() / ".fno" / "target-state.md").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
+        raw = _render(["manifest", "--names", ",".join(names)])
+        return json.loads(raw) if raw else {}
+    except Exception:  # noqa: BLE001 - an unreadable manifest degrades to {}
         return {}
-    out: dict[str, Optional[str]] = {}
-    for name in names:
-        m = re.search(rf"^{re.escape(name)}\s*:\s*(.*)$", raw, re.MULTILINE)
-        if m is None:
-            out[name] = None
-            continue
-        val = m.group(1).strip().strip("\"'")
-        out[name] = val if val and val != "null" else None
-    return out
 
 
 def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":

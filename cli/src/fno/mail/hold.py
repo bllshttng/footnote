@@ -24,7 +24,6 @@ Three sidecar states, and only one of them ever expires:
 from __future__ import annotations
 
 import json
-import math
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -97,6 +96,16 @@ def _hold_query(argv: list[str]) -> Optional[dict]:
     (nothing to extend: no clock, a permanent policy, or a lapsed one)."""
     stdout = _hold_transport(argv)
     return json.loads(stdout) if stdout else None
+
+
+def _describe(target) -> Optional[dict]:
+    """One describe read over the candidate sweep (first clock wins), or None
+    when the door is down - the read posture: a clock read never raises into
+    a caller."""
+    try:
+        return _hold_query(["--describe", *candidate_keys(target)])
+    except Exception:  # noqa: BLE001 - a clock read never breaks a caller
+        return None
 
 
 def _now() -> datetime:
@@ -236,10 +245,8 @@ def lapsed(handle) -> bool:
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     that already holds the registry lock and cannot raise into the gate.
     """
-    hold = read_any(handle)
-    if hold is None or hold.until is None:
-        return False
-    return hold.until <= _now()
+    state = _describe(handle)
+    return bool(state and state.get("lapsed"))
 
 
 def tidy_lapsed(handle: str) -> bool:
@@ -313,11 +320,15 @@ def dnd_label(handle) -> Optional[str]:
     has no end to show. A duration whenever there is one, because a hold with
     no visible end is what the operator asked to avoid.
     """
-    if lapsed(handle):
+    state = _describe(handle)
+    if state is None:
+        # Door down: the same degrade the in-process read had - the column
+        # claims "held" rather than claiming mail flows while the flag stands.
+        return "held"
+    if state.get("lapsed"):
         return None
-    clock = read_any(handle)
-    auto = clock is not None and clock.source == CONVERSATION_SOURCE
-    return (remaining_label(handle) or "held") + (" (auto)" if auto else "")
+    auto = state.get("source") == CONVERSATION_SOURCE
+    return (state.get("remaining") or "held") + (" (auto)" if auto else "")
 
 
 def remaining_label(handle) -> Optional[str]:
@@ -327,17 +338,8 @@ def remaining_label(handle) -> Optional[str]:
     answers the question the column asks. This one answers only "how long is
     left", and returns None for a row that is held with no end recorded.
     """
-    hold = read_any(handle)
-    if hold is None:
-        return None
-    if hold.until is None:
-        return "held"
-    seconds = (hold.until - _now()).total_seconds()
-    if seconds <= 0:
-        return None
-    if seconds < 60:
-        return f"~{int(seconds)}s"
-    return f"~{math.ceil(seconds / 60)}m"
+    state = _describe(handle)
+    return state.get("remaining") if state else None
 
 
 def gate_answer_in_process(token: str) -> Optional[str]:

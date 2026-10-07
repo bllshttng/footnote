@@ -46,9 +46,6 @@ def cmd_hold(
     Either clock DELIVERS without a new prompt, so a hold whose only drain
     trigger is the operator cannot stall.
     """
-    import shutil
-    import subprocess
-
     from fno.mail import hold as hold_mod
     from fno.harness_identity import session_identity_key
 
@@ -64,34 +61,9 @@ def cmd_hold(
 
     if status:
         # The record, not the gate: the gate's own-pass never refuses your own hold.
-        from fno.agents.dispatch import BUS_ONLY_POLICY
-
         entry = hold_mod.resolve_entry(handle)
-        if getattr(entry, "delivery_policy", None) != BUS_ONLY_POLICY:
-            print(f"{handle}: no hold - mail delivers normally")
-            return
-        clock = hold_mod.read_any(handle)
-        if clock is not None and clock.source == hold_mod.CONVERSATION_SOURCE:
-            print(
-                f"{handle}: holding mail, machine-armed while you talk "
-                f"({hold_mod.clock_description(clock)}), lifts about 2 min after your answer"
-            )
-            return
-        label = hold_mod.dnd_label(handle)
-        if label == "held":
-            print(f"{handle}: holding mail, no expiry (hand-stamped bus-only)")
-        elif label is None:
-            # Unreachable while both derive from `lapsed`, and nothing across
-            # the module boundary enforces it: report, never pick a side.
-            print(
-                f"{handle}: holding mail, but the clock disagrees with the "
-                "delivery gate - run `fno agents mail hold --off` to clear it"
-            )
-        else:
-            print(
-                f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
-                f"lifts in {label.lstrip('~')}"
-            )
+        policy = str(getattr(entry, "delivery_policy", None) or "")
+        print(hold_mod._hold_transport(["--status-line", handle, "--policy", policy]))
         return
 
     if off:
@@ -135,35 +107,12 @@ def cmd_hold(
     )
     clock = hold_mod.arm_wall(clock_key, window) if wall_clock else hold_mod.arm(clock_key, window)
 
-    # The third drain trigger, detached: it must outlive this invocation, and
-    # it re-invokes THIS binary, not PATH `fno` - a stale deployed binary dies
-    # on an unknown command and the hold never lifts.
-    binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
-    armed = False
-    if binary:
-        try:
-            subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                [binary, "agents", "mail", "hold-release", "--handle", clock_key],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            armed = True
-        except OSError:
-            armed = False
-
     until = clock.until or datetime.now(timezone.utc)
     clock_text = hold_mod.clock_description(clock)
     print(
         f"busy mode on for {handle}: {clock_text}, holds until "
         f"{until.strftime('%H:%M:%S')} UTC ({window}m), then delivers itself."
     )
-    if not armed:
-        print(
-            "note: the release timer did not start, so the hold lifts on the "
-            "next send attempt or at your next prompt instead of on the clock."
-        )
 
 
 def cmd_hold_release(
