@@ -660,8 +660,12 @@ pub(crate) enum FoldAction {
 }
 
 /// The fold's key: event type plus the normalized error (digits, hex runs,
-/// uuids and absolute paths replaced by one token, first 160 chars).
+/// uuids and absolute paths replaced by one token, first 160 chars). A
+/// banner row keys as `banner_repeated:<producer id>` (AC17).
 pub(crate) fn fold_key(etype: &str, error: &str) -> String {
+    if etype == "banner" {
+        return format!("banner_repeated:{}", error.trim());
+    }
     format!("{}:{}", etype, normalize_error(error))
 }
 

@@ -384,8 +384,10 @@ mod tests {
     fn ac1_to_ac5_ladder_rungs_role_and_record_guard() {
         let now = 1_000_000_i64;
         let fresh = now - 60;
+        // Rung order: LOWER level numbers sit higher in authority, so the
+        // rung-up of the level-1 lead is the level-0 team.
         let teams = vec![
-            team("proj-top", 2, "lead-top", Some("sid-top")),
+            team("proj-top", 0, "lead-top", Some("sid-top")),
             team("x-epic", 1, "lead-mid", Some("sid-mid")),
             team("proj-a", 0, "lead-a", Some("sid-a")),
             team("proj-b", 0, "lead-b", Some("sid-b")),
