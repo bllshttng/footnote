@@ -196,6 +196,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `auto_merge.require_fresh_ci` | bool | `true` | advanced | Require green pull_request checks to have run against the current base tip. |
 | `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
 | `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
+| `merge.visual_paint_paths` | list[str] | `[]` | advanced | Path globs for render surfaces. A PR that touches one holds at merge until the user has looked (answered question page or recorded decision). Empty = the visual-approval gate is off. Read in Rust. |
 | `auto_heal.enabled` | bool | `false` | advanced | Arm the CI healer: each tick spawns one detached pr-heal --all --apply drive loop over every project root, off the tick's own budget. Default false. Measured 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. Arm with: fno config set auto_heal.enabled true. |
 | `pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
 | `pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |

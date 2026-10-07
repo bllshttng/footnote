@@ -486,6 +486,13 @@ FIELD_META: dict[str, Meta] = {
     "auto_merge.require_fresh_ci": Meta("advanced", "Require green pull_request checks to have run against the current base tip."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
+    # --- config.merge.* ---
+    "merge.visual_paint_paths": Meta(
+        "advanced",
+        "Path globs for render surfaces. A PR that touches one holds at merge "
+        "until the user has looked (answered question page or recorded "
+        "decision). Empty = the visual-approval gate is off. Read in Rust.",
+    ),
     # --- config.pr_watch.* ---
     "pr_watch.enabled": Meta("advanced", "Enable the global PR-state watcher daemon."),
     "pr_watch.interval_seconds": Meta("never", "PR-watcher poll interval (seconds)."),
