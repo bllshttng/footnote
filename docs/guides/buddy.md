@@ -27,6 +27,15 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 - **The fno CLI is optional.** Fleet news and fleet counts need the `fno` CLI. Without it, the buddy still talks about your own session.
 - **Fleet counts.** Beside its name, the buddy shows live workers, questions that wait for you, and your open PRs. One read every 5 minutes serves every session.
 
+## Only where you can see it
+
+Each live session has its own buddy, and all of them share one soul. A buddy spends a model call only when a person can see the answer. Hidden sessions stay quiet.
+
+- **In an fno mux pane,** the mux writes the panes on screen to `~/.fno/mux/<session>.visible.json`. A buddy whose pane is not in that list makes no model call. Its sessions on another tab or in the sideline cost nothing.
+- **Anywhere else,** the buddy counts as seen for 10 minutes after you type in that session's prompt box.
+- **Idle talk and fleet news happen once for the machine.** The first seen session past the 2-minute gap says the idle line. The first seen session to read a fleet event tells it. Two panes side by side do not say the same news twice.
+- **Reactions** stay with each session, because each one is about that session's own turn.
+
 ## Where it stands
 
 The buddy has three places. It uses the first place that is available.

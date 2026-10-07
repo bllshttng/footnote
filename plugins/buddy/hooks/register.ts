@@ -18,10 +18,9 @@ const FLEET_MS = 300_000
 // A buddy that drew within this window has someone looking at it.
 const SEEN_MS = 5_000
 // The status line runs in every live session, hidden mux panes too, so a draw does not mean a
-// person is there. A key typed in a session's prompt box does: for this long after one, the
-// session reacts to its turns, and the session typed in last speaks for the machine.
+// person is there. In an fno mux pane the mux names the panes on screen; elsewhere a key typed
+// in this session's prompt box within this window stands in for that.
 const TYPED_MS = 600_000
-const SPEAKER_STAMP_MS = 30_000
 // The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
 const FRAME_REFRESH_MS = 10_000
 const PANE_ID = 'buddy'
@@ -40,7 +39,11 @@ let bubble: { text: string; at: number } | null = null
 let pettedAt = -Infinity
 let drawnAt = -Infinity
 let typedAt = -Infinity
-let stampedAt = -Infinity
+// The mux's on-screen file and this session's pane in it; '' outside an fno mux pane.
+let muxVisible = ''
+let muxPane = 0
+// Null when there is no mux answer to read.
+let onScreen: boolean | null = null
 let paneDrawnAt = -Infinity
 let paneAsked = false
 let reactedAt = -Infinity
@@ -116,11 +119,26 @@ async function syncSoul($: EngineInterface): Promise<void> {
   buddy = embody(saved)
 }
 
-// Idle talk and fleet news cost a model call each. Only the session typed in last makes them,
-// and only while someone typed there lately, so hidden sessions and an empty desk stay quiet.
-async function speaking($: EngineInterface, now: number): Promise<boolean> {
-  if (now - typedAt >= TYPED_MS) return false
-  return (await $.store.get('speaker')) === sessionId
+// A model call is spent only where a person can see the answer.
+function attended(now: number): boolean {
+  return onScreen ?? now - typedAt < TYPED_MS
+}
+
+async function readOnScreen($: EngineInterface): Promise<void> {
+  if (!muxVisible) return
+  try {
+    onScreen = (JSON.parse(await $.fs.read(muxVisible)).panes ?? []).includes(muxPane)
+  } catch {
+    // An older mux writes no file: fall back to typing.
+    onScreen = null
+  }
+}
+
+// Idle talk is one line for the whole machine: the first attended session past the gap says it.
+async function claimIdle($: EngineInterface, now: number): Promise<boolean> {
+  if (now - (Number(await $.store.get('idleAt')) || -Infinity) < IDLE_TALK_MS) return false
+  await $.store.set('idleAt', now)
+  return true
 }
 
 // An fno release from before the move still loads its own copy of the buddy, which stamps fno's
@@ -510,15 +528,18 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
   if (!rows) return
   const before = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now)).bank
   const after = await rerolls($, now, rows.filter(row => row.kind === 'node_shipped').map(row => Date.parse(row.ts)).filter(Number.isFinite))
+  // Every session counts ships, so none is missed; an attended one tells them, once for the machine.
+  if (!attended(now)) return
+  let since = Math.max(feedSince, Number(await $.store.get('newsSince')) || 0)
   let line: string | null = null
   for (const row of rows) {
     const at = Math.floor(Date.parse(row.ts) / 1000)
-    if (!(at >= feedSince)) continue
-    feedSince = Math.max(feedSince, at + 1)
+    if (!(at >= since)) continue
+    since = Math.max(since, at + 1)
     line = newsFact(row) ?? line
   }
-  // Every session counts ships, so none is missed; only the speaker tells them.
-  if (!(await speaking($, now))) return
+  feedSince = since
+  await $.store.set('newsSince', since)
   const earned = after.bank > before ? `+1 reroll (${after.bank}/${REROLL_BANK})` : ''
   if (line && buddy) {
     const c = buddy
@@ -637,6 +658,10 @@ export function register(on: On) {
     // A buddy that is off runs nothing at start: no process, no settings read.
     if (!muted) {
       stateDir = await resolveStateDir($)
+      // The fno mux sets both in each pane it hosts, and writes <mux dir>/<session>.visible.json.
+      const mux = await $.env.get('FNO_SESSION')
+      muxPane = Number(await $.env.get('FNO_PANE')) || 0
+      if (mux && muxPane && stateDir) muxVisible = `${(await $.env.get('FNO_MUX_DIR')) || `${stateDir}/mux`}/${mux}.visible.json`
       const settings = await readSettings($)
       wrapped = isOurs(settings?.statusLine)
       if (wrapped && stateDir) await installWrapper($).catch(() => {})
@@ -651,7 +676,8 @@ export function register(on: On) {
       if (!buddy || muted) return
       const at = await $.clock.now()
       if (tick % 4 === 0) {
-        if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS && (await speaking($, at))) {
+        await readOnScreen($)
+        if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS && attended(at) && (await claimIdle($, at))) {
           // Stamp first so a slow call is not asked twice; the line shows when it arrives.
           bubble = { text: '', at }
           react($, 'idle').catch(() => {})
@@ -764,17 +790,13 @@ export function register(on: On) {
 
   on('prompt.edit', async ($, e, next) => {
     typedAt = await $.clock.now()
-    if (typedAt - stampedAt >= SPEAKER_STAMP_MS) {
-      stampedAt = typedAt
-      await $.store.set('speaker', sessionId).catch(() => {})
-    }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     if (buddy && !muted && !e.agentId && !e.isAborted) {
       const now = await $.clock.now()
-      if (now - drawnAt < SEEN_MS && now - typedAt < TYPED_MS) {
+      if (now - drawnAt < SEEN_MS && attended(now)) {
         const messages = await $.session.messages()
         const why: Reason = addressedBy(lastPrompt(messages), buddy.name) ? 'addressed' : loudReason(turnOutput(messages)) ?? 'turn'
         if (why !== 'turn' || now - reactedAt >= REACT_GAP_MS) {

@@ -31,7 +31,7 @@ function band(maxRows: number) {
 }
 
 // The stubs every test needs before session.start runs the mod's hook.
-function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), files = new Map<string, string>()) {
+function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), files = new Map<string, string>(), env: Record<string, string> = {}) {
   const clock = mock.clock(on)
   // Nothing after the buddy draws in the band.
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }))
@@ -42,7 +42,7 @@ function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), 
     saved.set(e.key, e.value)
     return { value: undefined }
   })
-  on('env.get', () => ({ value: '/home/u' }))
+  on('env.get', ($: any, e: any) => ({ value: env[e.name] ?? '/home/u' }))
   on('session.id', () => ({ value: 's1' }))
   on('fs.read', ($: any, e: any) => {
     if (e.path === '/home/u/.claude.json') return { value: config }
@@ -137,6 +137,32 @@ test('a finished turn shows the model reaction, with no canned line first', asyn
 
   const after = await $.ui.mount(band(8))
   expect(await after.find({ type: 'Text', text: /Quip: That null check does zero work\.$/ })).toBeDefined()
+})
+
+test('in an fno mux pane the buddy reacts only while the mux shows that pane', async ($, on) => {
+  const files = new Map([['/mux/main.visible.json', '{"panes":[3]}']])
+  const { clock } = boot(on, OLD_CONFIG, new Map(), files, { FNO_SESSION: 'main', FNO_PANE: '7', FNO_MUX_DIR: '/mux' })
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the parser', toolUses: [] }, { role: 'assistant', text: 'done', toolUses: [{ tool: 'Edit', input: {} }] }] }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'That null check does zero work.', usage: null } }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  // Pane 7 is in another tab: typing there does not count, the mux decides.
+  await $.prompt.edit(typed)
+  let ui = await $.ui.mount(band(8))
+  await clock.advance(2_000)
+  await $.turn.complete({ turnId: 't0', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
+  await clock.advance(1)
+  await ui.unmount()
+  expect(await (await $.ui.mount(band(8))).find({ type: 'Text', text: /null check/ })).toBeUndefined()
+
+  files.set('/mux/main.visible.json', '{"panes":[3,7]}')
+  ui = await $.ui.mount(band(8))
+  await clock.advance(2_000)
+  await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
+  await clock.advance(1)
+  await ui.unmount()
+  expect(await (await $.ui.mount(band(8))).find({ type: 'Text', text: /Quip: That null check does zero work\.$/ })).toBeDefined()
 })
 
 test('a shipped node in the fleet feed is told in the buddy voice', async ($, on) => {

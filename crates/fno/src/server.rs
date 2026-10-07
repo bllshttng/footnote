@@ -95,6 +95,7 @@ mod squad_persistence;
 mod squad_sync;
 mod thread_workspace;
 mod truth_probe;
+mod visible_panes;
 mod workspace_restore;
 use self::session_guard::{ConnAlive, SocketGuard};
 
@@ -8591,8 +8592,6 @@ impl Core {
                 c.id,
                 rects.len()
             ));
-            // An observer subscribes to all panes; a driving client to just
-            // its viewed tab's rects.
             let frame_ids: Vec<u64> = if c.passive {
                 all_pane_ids.clone()
             } else {
@@ -8637,6 +8636,7 @@ impl Core {
             ));
             self.push_layout(true);
         }
+        self.publish_visible_panes();
     }
 
     /// One client's `Layout`: the shared squad/tab catalog, with the
