@@ -670,13 +670,7 @@ fn emit_delivery(state: &mut ReplyState) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    use std::io::Write;
-    let wrote = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut f| writeln!(f, "{row}"))
-        .is_ok();
+    let wrote = crate::day::append_row(&path, &format!("{row}\n")).is_ok();
     if !wrote {
         state.outcome.clear();
     }

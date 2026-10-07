@@ -1508,13 +1508,7 @@ pub(crate) fn append_answer_row(
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    writeln!(f, "{row}").map_err(|e| e.to_string())?;
+    crate::day::append_row(&path, &format!("{row}\n"))?;
     Ok((receipt, already_won))
 }
 
