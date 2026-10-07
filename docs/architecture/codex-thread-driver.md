@@ -80,6 +80,16 @@ The claim was measured wrong in both directions before the shared-daemon move. T
 
 That is now a promise the implementation keeps rather than one it overstates.
 
+## Failed turns and quiet workers
+
+A failed `turn/completed` retains its error, keeps the worker Working, and emits `codex_turn_error`. The actor preserves waiters and starts a continuation after exponential backoff, from five seconds to five minutes. Interrupt and shutdown cancel recovery. A start without confirmed acceptance never triggers another blind start.
+
+Worker spawn and resume set OpenAI stream retries to 20 and the stream idle timeout to 600,000 ms. Explicit per-thread overrides take precedence. These settings travel through thread config and do not change the shared app-server configuration.
+
+The settle arm also checks unfinished workers once a minute. A live claim and no new transcript item for 15 minutes trigger a nudge. The 30-minute nudge includes the recorded harness resume command. At 45 minutes, the daemon sends stuck help to the lead. A nudge counts only when its marker appears in the recipient transcript. An unread nudge after ten minutes triggers recovery. An unread recovery escalates instead of repeating. Active watch leases and foreign claims hold recovery.
+
+Dead unfinished pane workers use `fno mux workspace restore --member-session <full-session-id>` in their recorded worktree. Thread workers use the native thread resume lane. Refused recovery preserves changes on a recovery branch using an isolated index, then sends branch evidence to the lead. The original branch, index, and worktree stay intact. Finished nodes and merged work are excluded from nudging.
+
 ## The two durable halves already exist
 
 Codex persists every conversation as a rollout at `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<full-session-id>.jsonl`. The full session id is in the filename. The working cwd is in the body. `codex resume <full-id>` re-enters one with context intact.

@@ -56,21 +56,24 @@ pub(super) fn codex_thread_on_done(
             if let Some(session_id) = session_id.as_deref() {
                 crate::mail_hold::conversation_turn_end(session_id);
             }
-            let _ = emitter.emit(
-                if failed {
-                    "codex_turn_error"
-                } else {
-                    "agent_ask_done"
-                },
-                &json!({
-                    "name": name,
-                    "backend": "codex-thread",
-                    "turn_id": turn_id,
-                    "turn_status": status,
-                    "error": error,
-                    "session_id": session_id,
-                }),
-            );
+            let mut payload = json!({
+                "name": name,
+                "backend": "codex-thread",
+                "turn_id": turn_id,
+                "turn_status": status,
+                "session_id": session_id,
+            });
+            if let Some(error) = error {
+                payload["error"] = error;
+            }
+            let event = if failed {
+                emitter.emit("codex_turn_error", &payload)
+            } else {
+                emitter.emit("agent_ask_done", &payload)
+            };
+            if let Err(error) = event {
+                eprintln!("codex-thread: completion event write failed: {error}");
+            }
         });
     })
 }

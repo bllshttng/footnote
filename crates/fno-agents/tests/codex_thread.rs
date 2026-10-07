@@ -90,23 +90,24 @@ async fn start_actor() -> (CodexThreadActor, tempfile::TempDir) {
     )
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_completion_retries_without_reporting_done() {
+async fn failed_completion_case(manual_followup: bool) {
     let behavior = Behavior {
         failed_turns: 1,
         turn_duration: Duration::from_millis(20),
         ..Behavior::quick()
     };
     let received = behavior.received.clone();
-    with_fake_daemon(behavior, async {
+    with_fake_daemon(behavior, async move {
         let worktree = tempfile::tempdir().unwrap();
         let driver = CodexThread::start(worktree.path(), None, &CodexPosture::bounded(), None)
             .await
             .unwrap();
         let phases = Arc::new(Mutex::new(Vec::new()));
         let observed = phases.clone();
+        let receipts = Arc::new(Mutex::new(Vec::new()));
+        let observed_receipts = receipts.clone();
         let actor = driver.into_actor(
-            Arc::new(|_| {}),
+            Arc::new(move |receipt| observed_receipts.lock().unwrap().push(receipt)),
             Arc::new(move |phase| {
                 observed.lock().unwrap().push(phase);
             }),
@@ -115,16 +116,48 @@ async fn failed_completion_retries_without_reporting_done() {
             .submit("continue the assigned work".into())
             .await
             .unwrap();
-        let receipt = tokio::time::timeout(Duration::from_secs(40), reply)
+        let recovered = if manual_followup {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if receipts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|r: &fno_agents::codex_thread::TurnReceipt| r.status == "failed")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            receipt.status, "completed",
-            "a provider failure must not settle the work"
+            .expect("failed receipt is observed before retry delay");
+            let followup = actor.submit("operator follow-up".into()).await.unwrap();
+            vec![
+                tokio::time::timeout(Duration::from_secs(5), reply)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                tokio::time::timeout(Duration::from_secs(5), followup)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+            ]
+        } else {
+            vec![tokio::time::timeout(Duration::from_secs(40), reply)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()]
+        };
+        assert!(
+            recovered
+                .iter()
+                .all(|r| r.turn_id == "turn-2" && r.status == "completed"),
+            "{recovered:?}"
         );
-        assert_eq!(receipt.turn_id, "turn-2");
         assert_eq!(
             phases.lock().unwrap().first(),
             Some(&fno_agents::codex_thread::ThreadTurnPhase::Working)
@@ -150,6 +183,12 @@ async fn failed_completion_retries_without_reporting_done() {
         actor.shutdown().await.unwrap();
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_completion_retries_without_reporting_done() {
+    failed_completion_case(false).await;
+    failed_completion_case(true).await;
 }
 
 /// AC1: two back-to-back submits against an idle thread make ONE turn/start,

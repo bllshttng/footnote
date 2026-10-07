@@ -2263,7 +2263,7 @@ impl ActorCtx {
 
     fn schedule_retry(&mut self, driving: Driving) {
         self.failures = self.failures.saturating_add(1);
-        let delay = Duration::from_secs((5u64 << self.failures.min(6).saturating_sub(1)).min(300));
+        let delay = Duration::from_secs((5u64 << self.failures.min(7).saturating_sub(1)).min(300));
         self.retry = Some((tokio::time::Instant::now() + delay, driving));
     }
 
@@ -2279,7 +2279,9 @@ impl ActorCtx {
         if let Some(driving) = self.driving.as_mut() {
             driving.waiters = previous.waiters;
         } else {
-            self.schedule_retry(previous);
+            for waiter in previous.waiters {
+                let _ = waiter.send(Err("codex recovery was not confirmed; the unfinished thread remains available to the watchdog".into()));
+            }
         }
     }
 
@@ -2412,17 +2414,7 @@ impl ActorCtx {
         match driving_turn {
             // Idle: drive a fresh turn. The reply resolves when the completion
             // routes in the main loop.
-            None => {
-                let retry = self.retry.take();
-                self.start_turn(body, reply, accept, frames).await;
-                if let Some((_, previous)) = retry {
-                    if let Some(driving) = self.driving.as_mut() {
-                        driving.waiters.extend(previous.waiters);
-                    } else {
-                        self.schedule_retry(previous);
-                    }
-                }
-            }
+            None => self.start_turn(body, reply, accept, frames).await,
             Some(expected) => {
                 // Driving: steer into the in-flight turn instead of queueing
                 // behind it. The steer ack returns in milliseconds; the
@@ -2499,6 +2491,7 @@ impl ActorCtx {
         accept: Option<AcceptTx>,
         frames: &mut mpsc::Receiver<Value>,
     ) {
+        let retry = self.retry.take();
         let sent = self.driver.send_turn_start(&body).await;
         let response = match sent {
             Ok(id) => self.await_response(id, frames).await,
@@ -2517,9 +2510,21 @@ impl ActorCtx {
                     turn_id,
                     waiters: vec![reply],
                 });
+                if let Some((_, previous)) = retry {
+                    self.driving
+                        .as_mut()
+                        .expect("accepted turn")
+                        .waiters
+                        .extend(previous.waiters);
+                }
                 (self.on_turn_phase)(ThreadTurnPhase::Working);
             }
             Err(error) => {
+                if let Some((_, previous)) = retry {
+                    for waiter in previous.waiters {
+                        let _ = waiter.send(Err(error.clone()));
+                    }
+                }
                 if let Some(accept) = accept {
                     let _ = accept.send(Err(error.clone()));
                 }

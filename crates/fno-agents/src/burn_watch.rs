@@ -809,7 +809,7 @@ fn escalation_note_text(
 
 /// The node's owning team scope, resolved once per pass and cached.
 /// An unreadable registry reads as no owner.
-fn node_owner(
+pub(crate) fn node_owner(
     config_cwd: &Path,
     registry_path: &Path,
     rows: &[Value],
