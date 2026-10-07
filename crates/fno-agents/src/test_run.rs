@@ -41,11 +41,22 @@ const BUILD_IDLE_TAKEOVER: Duration = Duration::from_secs(30);
 /// True when the cargo at these doors is `fno doctor update`'s install
 /// build: update.py exports `FNO_INSTALL_BUILD=1` into its cargo legs and the
 /// env reaches this wrapper through cargo. Such a build is the user's fno
-/// loading (law d-829648bb): it bypasses the tests hold and the worker
-/// run-slot queue, and waits only at the one-at-a-time build:cargo claim,
-/// in the priority lane.
+/// loading (law d-829648bb): it bypasses the tests hold, the worker
+/// run-slot queue, and the build:cargo queue, like a user-origin build.
 fn install_build() -> bool {
     std::env::var_os("FNO_INSTALL_BUILD").is_some_and(|v| v == "1")
+}
+
+/// True the first time a door for this cargo pid asks; later asks from the
+/// same cargo find the marker and stay quiet. Each crate runs a fresh door
+/// process, so the once-ness lives in a temp-dir file, not in memory.
+fn first_beside_notice(cargo_pid: u32) -> bool {
+    let marker = std::env::temp_dir().join(format!("fno-cargo-beside-{cargo_pid}"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+        .is_ok()
 }
 
 /// True when this cargo runs inside an unattended agent session. FNO_AGENT_SELF
@@ -1034,7 +1045,10 @@ fn run_build_admit(args: &[String]) -> i32 {
         // and here it queues like any agent, bounded by the holder-idle
         // takeover. No preempt-release: the holder keeps its claim, so its
         // next crate queues normally and no third compile starts.
-        if !agent_cargo() {
+        // An install build is the user's fno loading (law d-829648bb), so it
+        // takes this lane too: queued behind agent builds, `fno update` sat
+        // 999s twice and blew the post-merge sync's 600s bound.
+        if install_build() || !agent_cargo() {
             match crate::claims::acquire(
                 BUILD_CLAIM_KEY,
                 &holder,
@@ -1048,9 +1062,14 @@ fn run_build_admit(args: &[String]) -> i32 {
                 },
             ) {
                 crate::claims::AcquireOutcome::Acquired(_) => {}
-                crate::claims::AcquireOutcome::HeldByOther { holder: h, .. } => eprintln!(
-                    "cargo admission: user build compiles beside {h}; the user's cargo never waits (law d-705a00a3)"
-                ),
+                // Cargo calls this door once per crate; say it once per cargo.
+                crate::claims::AcquireOutcome::HeldByOther { holder: h, .. } => {
+                    if first_beside_notice(cargo_pid) {
+                        eprintln!(
+                            "cargo admission: user build compiles beside {h}; the user's cargo never waits (law d-705a00a3)"
+                        )
+                    }
+                }
                 crate::claims::AcquireOutcome::Error(e) => {
                     eprintln!("cargo admission: user build proceeds claimless ({e})")
                 }
@@ -1076,17 +1095,13 @@ fn run_build_admit(args: &[String]) -> i32 {
             ..Default::default()
         };
         let lane_of = || {
-            if install_build() || priority_lane(None).is_some_and(|p| p.worktree == worktree) {
+            if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
                 Lane::Priority
             } else {
                 Lane::Normal
             }
         };
-        // An install build never claimed a run slot (admit_run_slot waived
-        // it), so the slot guard would re-queue it forever; its contract is
-        // exactly "no slot, priority at the build claim".
-        let still_slotted =
-            || install_build() || holds_run_slot(cargo_pid, &holder, &slot_keys, None);
+        let still_slotted = || holds_run_slot(cargo_pid, &holder, &slot_keys, None);
         let result = acquire_claim_blocking_guarded(
             &[BUILD_CLAIM_KEY.to_string()],
             &holder,
@@ -1377,12 +1392,10 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<
     install_signal_handlers();
     // An install build (FNO_INSTALL_BUILD=1, exported by `fno doctor update`
     // into its cargo legs) is the user's fno loading, and law d-829648bb
-    // says nothing stops fno loading for the user. It never waits at the
-    // tests hold and never queues behind worker run slots; it serializes
-    // only on the one-at-a-time build:cargo claim, where its lane is
-    // Priority (run_build_admit below). A user-origin build holds the same
-    // pass, wider: law d-705a00a3 never holds the user's cargo at any gate,
-    // so it skips the build queue too (run_build_admit below).
+    // says nothing stops fno loading for the user. Like a user-origin build
+    // (law d-705a00a3), it never waits at the tests hold, never queues
+    // behind worker run slots, and skips the build queue too
+    // (run_build_admit below).
     if install_build() || !agent_cargo() {
         return Ok(());
     }
