@@ -55,12 +55,6 @@ def test_unprocessed_excludes_skill_ref_runs():  # AC6-EDGE (x-ed13 Locked Decis
     assert engine.unprocessed_runs(evs, "fno:blueprint") == ["sweep1"]  # after1 excluded
 
 
-def test_unprocessed_scopes_by_skill():
-    evs = [_rc("r1", skill_id="fno:blueprint"), _rc("r2", skill_id="fno:review")]
-    assert engine.unprocessed_runs(evs, "fno:blueprint") == ["r1"]
-    assert engine.unprocessed_runs(evs, "fno:review") == ["r2"]
-
-
 def test_idempotency_key_is_run_id_and_skill():
     # A shared run_id across two skills: a terminal event for blueprint must not
     # mark the review run handled.

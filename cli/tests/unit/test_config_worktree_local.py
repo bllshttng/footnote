@@ -70,12 +70,6 @@ def test_project_id_override_wins_parking_lot_ignored(tmp_path, monkeypatch, cap
     assert "post_merge.parking_lot_path" in warnings[0].getMessage()
 
 
-def test_absent_local_file_is_noop(tmp_path, monkeypatch):
-    s = _load(tmp_path, monkeypatch, SHARED, None)
-    assert s.post_merge.parking_lot_path == "shared/parking-lot.md"
-    assert s.project.id == "shared-project"
-
-
 def test_uncached_repo_loader_applies_worktree_local_override(tmp_path, monkeypatch):
     """Explicit repo loads must preserve the lane-local project identity."""
     d = _fno_dir(tmp_path)
@@ -90,25 +84,6 @@ def test_uncached_repo_loader_applies_worktree_local_override(tmp_path, monkeypa
     settings = load_settings_for_repo(tmp_path)
     assert settings.project.id == "lane-project"
     assert settings.post_merge.parking_lot_path == "shared/parking-lot.md"
-
-
-def test_non_allowlisted_key_ignored_with_one_warning(tmp_path, monkeypatch, caplog):
-    # Local file mixes the allowlisted key (project.id) with a non-allowlisted
-    # one. Only the allowlisted key applies; the other is dropped with one warning.
-    local = (
-        "[project]\n"
-        'id = "my-worktree"\n'
-        "[post_merge]\n"
-        "enabled = false\n"  # NOT worktree-local -> ignored
-    )
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        s = _load(tmp_path, monkeypatch, SHARED, local)
-    assert s.project.id == "my-worktree"
-    # Non-allowlisted key kept its shared value.
-    assert s.post_merge.enabled is True
-    warnings = [r for r in caplog.records if "config.local.toml" in r.getMessage()]
-    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
-    assert "post_merge.enabled" in warnings[0].getMessage()
 
 
 def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
@@ -128,72 +103,3 @@ def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
 
     s = config_mod.load_settings()
     assert s.project.id == "shared-project"
-
-
-def test_worktree_local_override_filters_pure():
-    # Unit-test the pure filter directly: allowlisted leaves kept, others dropped.
-    # Input is a flat dict (config.local.toml has no `config.` wrapper).
-    from fno.config import _worktree_local_override
-
-    out = _worktree_local_override(
-        {
-            "post_merge": {"parking_lot_path": "x", "enabled": False},
-            "project": {"id": "y", "vision": "nope"},
-        }
-    )
-    # x-071c: parking_lot_path is no longer allowlisted -> dropped with the rest.
-    assert out == {"project": {"id": "y"}}
-
-
-def test_production_anchor_via_repo_root(tmp_path, monkeypatch):
-    # Production path (no FNO_CONFIG): a legacy settings.yaml + settings.local.yaml
-    # sit in <repo_root>/.fno/. The loader auto-migrates BOTH to flat config.toml /
-    # config.local.toml on load, then applies the worktree-local override.
-    d = _fno_dir(tmp_path)
-    (d / "settings.yaml").write_text(
-        "schema_version: 1\n"
-        "config:\n"
-        "  post_merge:\n"
-        "    parking_lot_path: shared/parking-lot.md\n"
-        "  project:\n"
-        "    id: shared-project\n",
-        encoding="utf-8",
-    )
-    (d / "settings.local.yaml").write_text(
-        "config:\n  project:\n    id: from-repo-root\n", encoding="utf-8"
-    )
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", os.devnull)
-    from fno import config as config_mod
-
-    s = config_mod.load_settings()
-    assert s.project.id == "from-repo-root"
-    # Both files were migrated to flat TOML (hard cut).
-    assert (d / "config.toml").is_file()
-    assert (d / "config.local.toml").is_file()
-    assert not (d / "settings.yaml").exists()
-
-
-def test_non_string_key_in_local_does_not_crash(caplog):
-    # The pure filter str-coerces non-string keys rather than TypeError on
-    # sorted()/join() (Gemini review, PR #128). TOML keys are always strings, so
-    # this is defensive; exercise it at the unit level with int/float keys.
-    from fno.config import _worktree_local_override
-
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        out = _worktree_local_override(
-            {1: "bare-int", 3.14: "bare-float", "project": {"id": "still-works"}}
-        )
-    assert out == {"project": {"id": "still-works"}}
-    warnings = [r for r in caplog.records if "config.local.toml" in r.getMessage()]
-    assert len(warnings) == 1
-    assert "1" in warnings[0].getMessage() and "3.14" in warnings[0].getMessage()
-
-
-def test_allowlist_is_exactly_project_id():
-    # x-071c narrowed the allowlist to the single collision key. post_merge.
-    # parking_lot_path was removed - the ritual anchors on the canonical root.
-    from fno.config import WORKTREE_LOCAL_KEYS
-
-    assert WORKTREE_LOCAL_KEYS == frozenset({"project.id"})

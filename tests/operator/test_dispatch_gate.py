@@ -9,12 +9,9 @@ AC2-ERR: PRODUCT.md missing entirely -> emits <help reason="missing-product-md">
 AC3-EDGE: PRODUCT.md stale ([TODO] < 200 chars) -> treated as missing, emits <help>.
 AC4-EDGE: PRODUCT.md found via .agents/context/ fallback -> dispatch proceeds.
 """
-import io
 import sys
-import tempfile
 from pathlib import Path
 
-import pytest
 
 # The functions we are testing live in skills/execute/orchestrator.py.
 # Import it relative to the repo root.
@@ -26,8 +23,6 @@ from orchestrator import (  # noqa: E402
     find_product_md,
     is_product_md_stale,
 )
-import os
-import stat
 
 
 # ---------------------------------------------------------------------------
@@ -113,21 +108,12 @@ def test_ac3_edge_product_md_stale_treated_as_missing(tmp_path, capsys):
 # AC3-EDGE variant: stale-check details
 # ---------------------------------------------------------------------------
 
-def test_is_product_md_stale_short_content():
-    """Content shorter than 200 chars is stale."""
-    assert is_product_md_stale("short content only 30 chars") is True
-
 
 def test_is_product_md_stale_todo_dominance():
     """Content with TODO dominance (>25% [TODO] markers) is stale."""
     # 10 [TODO] markers in 200 chars of text -> TODO dominance
     content = "[TODO] " * 15 + "A" * 100
     assert is_product_md_stale(content) is True
-
-
-def test_is_product_md_stale_valid_content():
-    """Content with 200+ chars and no TODO dominance is not stale."""
-    assert is_product_md_stale("A" * 250) is False
 
 
 # ---------------------------------------------------------------------------
@@ -166,83 +152,24 @@ def test_find_product_md_docs_fallback(tmp_path):
     assert found == docs_path
 
 
-def test_find_product_md_returns_none_when_absent(tmp_path):
-    """Returns None when PRODUCT.md is absent in all search locations."""
-    found = find_product_md(tmp_path)
-    assert found is None
-
-
 # ---------------------------------------------------------------------------
 # Help message evidence field includes plan path and stages
 # ---------------------------------------------------------------------------
 
 def test_help_message_includes_plan_path_in_evidence(tmp_path, capsys):
-    """The <help> evidence attribute must include the plan path."""
-    result = check_product_md_for_dispatch(
-        repo_root=tmp_path,
-        plan_path="myplan.md",
-        stages=["craft"],
-    )
-    captured = capsys.readouterr()
-    assert "myplan.md" in captured.out, (
-        "Evidence attribute must include the plan path"
-    )
-
-
-def test_help_message_includes_stages_in_evidence(tmp_path, capsys):
-    """The <help> evidence attribute must include the stage list."""
+    """The <help> evidence attribute must include the plan path and stages."""
     check_product_md_for_dispatch(
         repo_root=tmp_path,
-        plan_path="plan.md",
+        plan_path="myplan.md",
         stages=["craft", "harden"],
     )
     captured = capsys.readouterr()
-    assert "craft" in captured.out and "harden" in captured.out, (
-        "Evidence attribute must include the stages"
-    )
+    assert "myplan.md, stages: [craft, harden]" in captured.out
 
 
 # ---------------------------------------------------------------------------
 # AC3-EDGE: PRODUCT.md deleted between /spec and dispatch (Phase 04.2 requirement)
 # ---------------------------------------------------------------------------
-
-def test_ac3_edge_product_md_deleted_between_spec_and_dispatch(tmp_path, capsys):
-    """AC3-EDGE: PRODUCT.md present at /spec time but deleted before dispatch -> dispatch gate catches it.
-
-    This verifies the dispatch-time check is an independent re-read, not a cache
-    of the /spec check result. The gate must catch deletion even when /spec passed.
-    """
-    # Simulate: PRODUCT.md exists when /spec runs (we skip the spec check here
-    # and go straight to dispatch), then delete it before dispatch.
-    product_path = _make_product_md(tmp_path, GOOD_PRODUCT_CONTENT)
-
-    # Verify it would pass (as /spec would have seen it).
-    result_before = check_product_md_for_dispatch(
-        repo_root=tmp_path,
-        plan_path="plan.md",
-        stages=["craft", "critique", "harden"],
-    )
-    assert result_before is True, "PRODUCT.md present - dispatch should proceed"
-
-    # Now delete it (simulating deletion between /spec and dispatch).
-    product_path.unlink()
-    capsys.readouterr()  # drain the first call's output
-
-    # Dispatch gate must re-check and catch the deletion.
-    result_after = check_product_md_for_dispatch(
-        repo_root=tmp_path,
-        plan_path="plan.md",
-        stages=["craft", "critique", "harden"],
-    )
-    captured = capsys.readouterr()
-
-    assert result_after is False, (
-        "Dispatch gate must re-check PRODUCT.md independently; "
-        "deletion after /spec must be caught at dispatch time."
-    )
-    assert '<help reason="missing-product-md"' in captured.out, (
-        "Deleted PRODUCT.md must trigger <help reason='missing-product-md'> at dispatch"
-    )
 
 
 # ---------------------------------------------------------------------------

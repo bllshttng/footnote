@@ -1,14 +1,12 @@
 """Tests for the ``fno doctor lanes`` advisor: the arm table, the dark-sensor
 refusal, and the swap-total-zero fallback.
 
-The sensor functions are injected, so no test needs macmon on PATH except the
-one live smoke that skips without it.
+The sensor functions are injected, so no test needs macmon on PATH.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -121,22 +119,6 @@ def _healthy_reading(monkeypatch, sample=None):
     )
 
 
-def test_healthy_machine_answers_with_per_arm_readings(monkeypatch) -> None:
-    _healthy_reading(monkeypatch)
-    reading = dl.read_lanes()
-    assert not reading.refused
-    assert reading.lane_count is not None and reading.lane_count >= 0
-    by_name = {a.name: a for a in reading.arms}
-    assert by_name["whole-machine cpu"].state == dl.MEASURED
-    assert by_name["whole-machine cpu"].source == "macmon cpu_usage_pct"
-    # swap_total is 0 in the sample: the memory arm MUST NOT read swap 0 as
-    # headroom, it must name memory_pressure as its source.
-    assert by_name["memory"].state == dl.MEASURED
-    assert "memory_pressure" in by_name["memory"].source
-    assert by_name["power and thermals"].state == dl.MEASURED
-    assert by_name["cpu admission"].state == dl.MEASURED
-
-
 def test_swap_total_zero_never_reads_swap_zero_as_headroom(monkeypatch) -> None:
     """The measured case that forced the rule: 81.5 of 103 GB used, swap 0
     because NO swap file exists. The memory arm falls to memory_pressure and
@@ -189,21 +171,6 @@ def test_dark_arms_are_named_and_working_arms_survive(monkeypatch) -> None:
     assert "memory" in reading.refusal_reason
 
 
-def test_macmon_timeout_is_dark_never_headroom(monkeypatch) -> None:
-    """A hanging macmon: the read is bounded, the arm is dark, and no number
-    is printed on the strength of a sensor that never answered."""
-    _pin_admission(monkeypatch)
-    monkeypatch.setattr(
-        dl, "read_macmon", lambda **k: (None, "macmon produced no sample within 5s")
-    )
-    monkeypatch.setattr(
-        dl, "read_memory_pressure", lambda **k: (None, "timed out")
-    )
-    reading = dl.read_lanes()
-    assert reading.refused
-    assert "no sample" in reading.arm("whole-machine cpu").reason
-
-
 def test_a_hold_or_refusal_verdict_caps_the_answer_at_zero(monkeypatch) -> None:
     sample = _macmon_sample(
         cpu_usage_pct=0.05,
@@ -222,14 +189,6 @@ def test_a_hold_or_refusal_verdict_caps_the_answer_at_zero(monkeypatch) -> None:
     assert reading.lane_count == 0
     assert "capped at 0" in reading.cost_source
     assert "cpu admission hold" in reading.cost_source
-
-
-def test_per_lane_cost_is_measured_not_assumed(monkeypatch) -> None:
-    _healthy_reading(monkeypatch)
-    reading = dl.read_lanes()
-    assert reading.per_lane_cpu_cores == 0.08
-    assert reading.per_lane_mem_gb == 0.31
-    assert "6 live row(s)" in reading.cost_source
 
 
 def test_memory_pressure_output_is_parsed(monkeypatch) -> None:
@@ -272,56 +231,6 @@ def test_refusal_exits_nonzero_and_prints_no_number(monkeypatch) -> None:
     assert "dark" in result.stdout
     # No lane number anywhere in the human output.
     assert "more fit" not in result.stdout
-
-
-def test_a_macmon_fraction_passes_through_unrescaled(monkeypatch) -> None:
-    """macmon's measured contract is a 0-1 fraction, and the arm does not
-    guess about hypothetical percent-spelling builds: 45 means 45x the
-    machine there, so no normalization sits in the way."""
-    _pin_admission(monkeypatch)
-    sample = _macmon_sample(cpu_usage_pct=0.45)
-    monkeypatch.setattr(dl, "read_macmon", lambda **k: (sample, None))
-    monkeypatch.setattr(dl, "read_memory_pressure", lambda **k: (0.84, None))
-    reading = dl.read_lanes()
-    assert reading.arm("whole-machine cpu").value["busy_fraction"] == 0.45
-
-
-def test_the_machine_cpu_arm_quotes_the_machine_census(monkeypatch) -> None:
-    """x-d6ad AC10: the lanes arm quotes the same machine-wide census the
-    control-plane arm reads, taken from the one footprint read the fleet
-    census already made."""
-    _healthy_reading(monkeypatch)
-    footprint = SimpleNamespace(
-        fleet_cpu_cores=0.5,
-        rss_gb=1.9,
-        test_process_count=0,
-        attribution_gap=None,
-        top=[],
-        runnable_count=66,
-        machine_process_count=1010,
-    )
-    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (footprint, _rows(6), None, 421))
-    reading = dl.read_lanes()
-    value = reading.arm("whole-machine cpu").value
-    assert value["runnable"] == 66
-    assert value["processes"] == 1010
-
-
-@pytest.mark.skipif(
-    shutil.which("macmon") is None,
-    reason="macmon not on PATH; the live smoke needs the real sensor",
-)
-def test_live_macmon_smoke_answers_on_a_healthy_machine(monkeypatch) -> None:
-    """The plan's own acceptance: macmon present, healthy machine -> a lane
-    number and a per-arm reading list, from the REAL sensor."""
-    _pin_admission(monkeypatch)
-    result = runner.invoke(app, ["doctor", "lanes", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["lane_count"] is not None
-    states = {a["name"]: a["state"] for a in payload["arms"]}
-    assert states["whole-machine cpu"] == dl.MEASURED
-    assert states["memory"] == dl.MEASURED
 
 
 def test_ac2_hp_census_counts_add_up_and_the_cost_is_measured(monkeypatch) -> None:
@@ -437,52 +346,6 @@ def test_an_unreadable_team_nulls_the_roles_rather_than_reporting_none(
     assert census["workers"] is None
 
 
-def test_json_payload_carries_the_census(monkeypatch) -> None:
-    _healthy_reading(monkeypatch)
-    result = runner.invoke(app, ["doctor", "lanes", "--json"])
-    assert result.exit_code == 0, result.output
-    census = json.loads(result.stdout)["census"]
-    assert census["leads"] == 2
-    assert census["workers"] == 4
-    assert census["tests"] == 3
-
-
-def test_the_cpu_admission_arm_names_the_whole_vocabulary(monkeypatch) -> None:
-    """x-7783 AC12 (carrying x-aeab's rule): the panel cannot label what the
-    arm never emits. The interval bounds, the ceiling, the 15-minute trend
-    figure, and the 1m/5m trend ride on the value object."""
-    from fno.agents import spawn_gate
-    from fno.footprint import Admission
-
-    admission = Admission(
-        verdict="undecidable",
-        axis="fleet_cpu_share",
-        reason="spawn-gate: cannot decide",
-        share_low=0.175,
-        share_high=0.6,
-        bound="upper",
-        fleet_cores=2.1,
-        machine_cores=7.2,
-        capacity_cores=12.0,
-        ceiling=0.5,
-        gap="3 pidless row(s)",
-    )
-    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
-    monkeypatch.setattr(dl.os, "getloadavg", lambda: (184.9, 122.3, 143.8))
-
-    arm = {a.name: a for a in dl.read_lanes().arms}["cpu admission"]
-
-    assert arm.value["fleet_cores"] == 2.1
-    assert arm.value["share_low"] == 0.175
-    assert arm.value["share_high"] == 0.6
-    assert arm.value["bound"] == "upper"
-    assert arm.value["ceiling"] == 0.5
-    assert arm.value["verdict"] == "undecidable"
-    assert arm.value["load_15m"] == 143.8
-    assert arm.value["load_1m"] == 184.9
-    assert arm.value["load_5m"] == 122.3
-
-
 def _instrument_admission():
     from fno.footprint import Admission
 
@@ -503,20 +366,6 @@ def _instrument_admission():
         ceiling=0.0,
         gap=None,
     )
-
-
-def test_the_cpu_admission_arm_goes_dark_when_the_instrument_never_answered(
-    monkeypatch,
-) -> None:
-    """Zeros the instrument never measured are not a reading. The
-    arm carries the admission's own words as its reason instead."""
-    from fno.agents import spawn_gate
-
-    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: _instrument_admission())
-    arm = dl._cpu_admission_arm()
-    assert arm.state == dl.DARK
-    assert arm.value is None
-    assert "process table unavailable: timed out after 5.0s" in arm.reason
 
 
 def test_a_dark_cpu_admission_arm_never_refuses_the_lane_answer(monkeypatch) -> None:

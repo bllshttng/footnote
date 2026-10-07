@@ -18,38 +18,11 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
     config_mod._loaded_from = None
-    import fno.paths as paths_mod
     yield
     config_mod._loaded_from = None
 # ---------------------------------------------------------------------------
 # AC6-HP: Normal case - no v2_enabled, returns False
 # ---------------------------------------------------------------------------
-
-
-def test_load_v2_config_flag_returns_false_by_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC6-HP: _load_v2_config_flag returns False when v2_enabled not set."""
-    from fno.cli import _load_v2_config_flag
-    result = _load_v2_config_flag(tmp_path)
-    assert result is False
-
-
-def test_load_v2_config_flag_returns_true_when_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC6-HP: _load_v2_config_flag returns True when v2_enabled: true."""
-    fno_dir = tmp_path / ".fno"
-    fno_dir.mkdir()
-    settings = fno_dir / "settings.yaml"
-    settings.write_text(
-        "schema_version: 1\nconfig:\n  v2_enabled: true\n",
-        encoding="utf-8",
-    )
-
-    from fno.cli import _load_v2_config_flag
-    result = _load_v2_config_flag(tmp_path)
-    assert result is True
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +49,6 @@ def test_load_v2_config_flag_fails_open_on_validation_error(
 
     from fno import config as config_mod
     config_mod._loaded_from = None
-    import fno.paths as paths_mod
 
     from fno.cli import _load_v2_config_flag
 

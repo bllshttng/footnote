@@ -247,7 +247,9 @@ mod tests {
 
     #[test]
     fn the_state_dir_carrier_outranks_config_and_home() {
-        let _guard = crate::claims::test_env_lock();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os("FNO_STATE_DIR");
         std::env::set_var("FNO_STATE_DIR", "/pinned-state");
 

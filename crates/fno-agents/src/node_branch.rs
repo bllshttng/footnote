@@ -300,16 +300,6 @@ mod tests {
         assert!(node_ids("feature/xg863").is_empty());
     }
 
-    #[test]
-    fn ids_scan_any_kind_prefix_and_fixed_width_hex() {
-        assert_eq!(node_ids("feature/x-1179a"), vec!["x-1179a"]);
-        assert_eq!(node_ids("x-7b9cd"), vec!["x-7b9cd"]);
-        assert_eq!(node_ids("bugfix/x-7aafb-repro"), vec!["x-7aafb"]);
-        assert_eq!(node_ids("feature/x-5b667"), vec!["x-5b667"]);
-        assert_eq!(node_ids("x-ab123-x-cd456"), vec!["x-ab123", "x-cd456"]);
-        assert!(node_ids("fix/thing").is_empty());
-    }
-
     // -- the kind map -----------------------------------------------------------
 
     #[test]

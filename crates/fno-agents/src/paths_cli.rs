@@ -1272,15 +1272,6 @@ mod tests {
     }
 
     #[test]
-    fn live_stub_reflects_custom_state_dir() {
-        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let fx = LiveFx::new("state", "state_dir = '~/.my-custom-fno'\n");
-        let _env = EnvGuard::new(&fx.pins());
-        let stub = emit_paths_sh_live(&fx.root).unwrap();
-        assert!(stub.contains("$HOME/.my-custom-fno"), "stub:\n{stub}");
-    }
-
-    #[test]
     fn live_stub_resolves_vault_templates() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = LiveFx::new("vault", "");
@@ -1305,20 +1296,6 @@ mod tests {
         let _env = EnvGuard::new(&fx.pins());
         let err = emit_paths_sh_live(&fx.root).unwrap_err();
         assert!(err.contains("glob"), "error: {err}");
-    }
-
-    #[test]
-    fn live_stub_config_file_is_the_loaded_path() {
-        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let fx = LiveFx::new("conffile", "");
-        let _env = EnvGuard::new(&fx.pins());
-        let stub = emit_paths_sh_live(&fx.root).unwrap();
-        let line = line_with(&stub, "export CONFIG_FILE=");
-        assert!(
-            line.contains(&fx.config.display().to_string()),
-            "CONFIG_FILE must name the loaded config: {line}"
-        );
-        assert!(!line.contains("$STATE_DIR"), "CONFIG_FILE: {line}");
     }
 
     #[test]

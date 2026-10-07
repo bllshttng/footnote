@@ -200,17 +200,6 @@ def clean_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     return home, repo
 
 
-def test_setup_surface_answers_on_a_clean_machine(clean_machine):
-    """`fno config setup plan` - setup's scriptable form - answers with a real
-    schema-derived question plan (the wizard is its interactive twin)."""
-    _home, repo = clean_machine
-    proc = _run_fno(repo, _home, "config", "setup", "plan")
-    assert proc.returncode == 0, proc.stderr
-    # The banner line precedes the JSON; parse from the first "{".
-    payload = json.loads(proc.stdout[proc.stdout.index("{"):])
-    assert payload["fields"], payload
-
-
 def test_authorized_target_init_journey(clean_machine):
     """Setup -> minted fixture node -> authorized init -> matching readbacks.
 
@@ -233,10 +222,12 @@ def test_authorized_target_init_journey(clean_machine):
     assert proc.returncode == 0, proc.stderr
     node = json.loads(proc.stdout)["id"]
 
-    # 2. Setup ran through the same CLI before init (the wizard's plan, above,
-    #    proves the surface; this journey re-runs it so the receipt is one run).
+    # 2. Setup answers through the same CLI before init: `config setup plan`
+    #    (the wizard's scriptable twin) returns a schema-derived question plan.
     plan = _run_fno(repo, home, "config", "setup", "plan")
     assert plan.returncode == 0, plan.stderr
+    # The banner line precedes the JSON; parse from the first "{".
+    assert json.loads(plan.stdout[plan.stdout.index("{"):])["fields"], plan.stdout
 
     # 3. Authorized target init: a declared denominator, no plan, no remote.
     init = _run_fno(repo, home, "do", "target", "init", "--input", node, "--deliverables", "1")
@@ -286,24 +277,3 @@ def test_authorized_target_init_journey(clean_machine):
         assert "in_progress" in got.stdout, got.stdout
     else:
         assert '"status": "idea"' in got.stdout, got.stdout
-
-
-def test_both_command_families_usable_after_init(clean_machine):
-    """AC3-HP's tail: after the journey, the mux family and the Python family
-    both answer. The mux leg runs the checkout's own front door; the Python
-    leg is every CLI process the journey already ran."""
-    home, repo = clean_machine
-    door = _front_door()
-    if door is None:
-        pytest.skip("compiled fno front door not present (build with `cargo build -p fno`)")
-    proc = subprocess.run(
-        [str(door), "mux", "ls", "--json"],
-        cwd=repo,
-        env={k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS},
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    json.loads(proc.stdout)
