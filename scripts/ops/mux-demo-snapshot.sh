@@ -10,6 +10,9 @@
 set -euo pipefail
 
 FNO="${FNO_BIN:-fno}"
+# Absolute: the shim below execs this path from a PATH that puts the shim
+# itself first, and a bare `fno` there would re-enter the shim forever.
+case "$FNO" in /*) ;; *) FNO="$(command -v "$FNO")" ;; esac
 SERVER=demo
 # /tmp, not TMPDIR: a socket path must stay under 104 bytes on macOS.
 # pwd -P: macOS resolves /tmp to /private/tmp, and HOME must match the real path.
@@ -65,6 +68,38 @@ export FNO_CONFIG="$ROOT/config.toml" FNO_MUX_DIR="$ROOT/mux" FNO_AGENTS_HOME="$
 # and a real home would list real sessions in the sideline.
 export HOME="$ROOT"
 unset FNO_SERVER FNO_SESSION FNO_PANE FNO_OWNER_BIRTH
+
+# The server's truth probe measures the fleet with `fno agents list
+# --json`. A shim on PATH lets that one call answer for the invented
+# sessions: cost, token and activity fields the demo cards would otherwise
+# never carry. Every other call passes through.
+mkdir -p "$ROOT/bin"
+cat >"$ROOT/bin/fno" <<SH
+#!/bin/bash
+if [ "\$1" = agents ] && [ "\$2" = list ] && [ "\${3:-}" = --json ]; then
+  "$FNO" agents list --json | python3 -c '
+import json, sys
+EXTRA = {
+    "scout": (214, 79_400_000, 35, 0),
+    "archer": (695, 120_700_000, 12, 1),
+    "reviewer": (7, 9_800_000, 48, 0),
+    "pager": (112, 30_200_000, 90, 0),
+    "scribe": (61, 22_400_000, 600, 0),
+}
+d = json.load(sys.stdin)
+for row in d.get("agents", []):
+    e = EXTRA.get(row.get("name"))
+    if e:
+        row["session_cost_cents"], row["session_tokens"], row["last_activity_age_s"], row["compaction_count"] = e
+print(json.dumps(d))
+'
+  exit 0
+fi
+exec "$FNO" "\$@"
+SH
+chmod +x "$ROOT/bin/fno"
+export PATH="$ROOT/bin:$PATH"
+
 # Under an owner session the server lives as long as its owner. Left alone,
 # the owner is the first short-lived `pane run`, and the server shuts down
 # before the shot. This script owns it instead, so it also dies with us.
@@ -74,6 +109,9 @@ cd "$ROOT/code/checkout"
 # A repo, so every attach resolves the panes' workspace instead of
 # minting a second one, and the status row names a branch.
 git init -q -b main
+# A remote, so the PR numbers below attribute: without one, update
+# --pr-number refuses to stamp an unattributable PR.
+git remote add origin https://github.com/acme/checkout.git
 # Invented work. The board's lanes come from priority, and its scope from
 # the server's project, so these stay unscoped.
 IDS=()
@@ -102,6 +140,12 @@ for i in 0 1 2; do
   "$FNO" agents claim acquire "node:${IDS[$i]}" --holder "target-session:${SIDS[$i]}" --ttl 2h --pid-unavailable >/dev/null
   "$FNO" backlog session add "${IDS[$i]}" --phase execute --harness "${HARNESSES[$i]}" --session-id "${SIDS[$i]}" >/dev/null
 done
+# Cards read the node's PR alongside its id, so the claimed work reads
+# as review-ready: "x-... · #NNN".
+"$FNO" backlog update "${IDS[0]}" --pr-number 118 >/dev/null
+"$FNO" backlog update "${IDS[1]}" --pr-number 121 >/dev/null
+"$FNO" backlog update "${IDS[2]}" --pr-number 123 >/dev/null
+
 # The selected card carries a plan and a rank. --operator: this script is
 # the operator's own tool, writing a graph that dies with the shot.
 mkdir -p "$ROOT/code/checkout/plans"
@@ -215,11 +259,16 @@ path, server, cwd = sys.argv[1:4]
 sids = sys.argv[4:7]
 ids = [int(p) for p in sys.argv[7:]]
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-def row(name, harness, model, pane, state, sid=None):
+def row(name, harness, model, pane, state, sid=None, age_h=4, ctx=34, node=None):
+    import datetime as dt
+    started = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.timedelta(hours=age_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"harness_session_id": sid} | {
         "name": name, "cwd": cwd, "harness": harness, "model": model,
+        **({"node": node} if node else {}),
         "status": "live", "liveness": "alive", "liveness_measured_at": now,
-        "created_at": now, "last_message_at": now, "substrate": "pane",
+        "created_at": started, "last_message_at": now, "substrate": "pane",
+        "context_used_pct": ctx, "tool_calls": 14, "tool_errors": 1,
         "mux": {"session": server, "pane_id": pane},
         "inside_leg": {"state": state, "seq": 1, "received_at": now},
     }
@@ -235,11 +284,11 @@ def thread(name, harness, how):
         "mux": None,
     }
 json.dump({"schema_version": 1, "agents": [
-    row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1]),
-    row("scout", "claude", "opus", ids[1], "done", sids[0]),
-    row("reviewer", "opencode", "zen", ids[2], "working", sids[2]),
-    row("pager", "pi", "glm-5", ids[3], "working"),
-    row("scribe", "claude", "sonnet", ids[4], "done"),
+    row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1], age_h=3, ctx=61, node=ids[0]),
+    row("scout", "claude", "opus", ids[1], "done", sids[0], age_h=4, ctx=34, node=ids[1]),
+    row("reviewer", "opencode", "zen", ids[2], "working", sids[2], age_h=4, ctx=78, node=ids[2]),
+    row("pager", "pi", "glm-5", ids[3], "working", age_h=6, ctx=22),
+    row("scribe", "claude", "sonnet", ids[4], "done", age_h=18, ctx=45),
     # Paneless threads, so the sideline shows the other states too.
     thread("planner", "codex", "idle"),
     thread("indexer", "claude", "unmeasured"),
@@ -247,12 +296,22 @@ json.dump({"schema_version": 1, "agents": [
 ]}, open(path, "w"))
 PY
 
+# Two clocks to satisfy. The truth probe (cost, tokens, activity ages)
+# first fires 60s after server start and its child takes seconds more, so
+# the shot must wait it out; and the server idle-exits when no client
+# attaches for a grace window, so the wait is broken into warm-up attaches
+# that each reset that clock. Three warms: one early to start the registry
+# read, one at the probe's fire time, one after the map lands.
+WARM() {
+  "$FNO" mux serve --snapshot --server "$SERVER" --size 200x63 --fit --squad checkout --font "Maple Mono" --out "$ROOT/warm.svg" >/dev/null
+}
 sleep 6
-
-# The server reads the registry only while a viewer is attached, and the
-# first attach ends before the rows join. A warm-up shot starts that read.
-"$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout --out "$ROOT/warm.svg" >/dev/null
+WARM
+sleep 52
+WARM
+sleep 58
+WARM
 sleep 3
 
 # The flags after ours win. HOME makes the status row read ~/code/checkout.
-"$FNO" mux serve --snapshot --server "$SERVER" --size 200x56 --fit --squad checkout "$@"
+"$FNO" mux serve --snapshot --server "$SERVER" --size 200x63 --fit --squad checkout --font "Maple Mono" "$@"
