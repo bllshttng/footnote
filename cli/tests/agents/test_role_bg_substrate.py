@@ -283,49 +283,122 @@ def test_headless_role_is_refused(bg_home, one_shot_args) -> None:
     )
     assert result.exit_code == 2
     assert "outlives the grant" in result.output
+    assert "not yet supported" not in result.output
+    assert "--substrate pane" in result.output and "--substrate thread" in result.output
     assert not [e for e in load_registry() if e.name == "one-shot-lead"], (
         "a refused role must launch nothing"
     )
 
 
-def test_refusal_does_not_claim_bg_is_unsupported(bg_home) -> None:
-    """The old message said bg roles were 'not yet supported', which read as a
-    capability claim about the substrate when it was really a plumbing gap - a
-    reader took it at face value and filed a design question against it. The
-    replacement must name what DOES work and must not resurrect that phrasing."""
-    result = _spawn(
-        "spawn", "--name", "one-shot-lead", "-H", "claude", "term",
-        "-p", "--promote", "epic-z",
-    )
-    assert "not yet supported" not in result.output
-    assert "--substrate pane" in result.output and "--substrate thread" in result.output
-
-
 # --- in-process callers get the same guards ----------------------------------
 
 
-def test_dispatch_spawn_refuses_a_role_it_cannot_stamp(tmp_path: Path, monkeypatch) -> None:
-    """The guard lives in dispatch_spawn, not only at the CLI seam: only the
-    claude bg branch reaches the stamping helper, so any other provider would
-    drop the role while reporting success. A guard on one of N reachable paths
-    is decorative."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+@pytest.mark.parametrize("harness", ["codex", "opencode", "pi"])
+def test_thread_spawn_stamps_the_promotion(bg_home, monkeypatch, harness) -> None:
+    """All persistent carriers promote their row and arm the lead loop.
+    Codex carries the stamp at mint; keeper promotion precedes seed submission.
+    """
+    import json as _json
+    import subprocess as _subprocess
+    import uuid as _uuid
 
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_spawn(
-            name="codex-lead",
-            message="term",
-            harness="codex",
-            cwd=tmp_path,
-            role_level=1,
-            role_scope="epic-x",
+    import fno.lead.state as lead_state
+
+    monkeypatch.setattr(lead_state, "lead_loop_enabled", lambda: True)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents")
+    )
+    session_id = "ses_thread_test" if harness == "opencode" else str(_uuid.uuid4())
+    seen = {}
+
+    real_run = _subprocess.run  # captured before the patch replaces the attribute
+
+    def fake_run(*args, **kwargs):
+        # The Rust lane's registry write, simulated: the row exists BEFORE the
+        # Python settlement runs, with all three role fields unset. The fake
+        # answers ONLY the lane-spawn argv: this patch rides the shared
+        # subprocess module, and every other caller (the event-store writer
+        # among them) must reach the real run or a retry loop spins.
+        argv = args[0]
+        tokens = [a for a in argv if isinstance(a, str)] if argv else []
+        if "spawn" not in tokens or "--substrate" not in tokens:
+            return real_run(*args, **kwargs)
+        if "--" in argv:
+            seen["seed"] = argv[argv.index("--") + 1]
+        if harness == "codex":
+            assert "--role-level=2" in tokens
+            assert "--role-scope=epic-x" in tokens
+        update_registry(
+            lambda rows: rows
+            + [
+                AgentEntry(
+                    name="lead-codex",
+                    cwd=str(bg_home),
+                    log_path="",
+                    harness=harness,
+                    harness_session_id=session_id,
+                    short_id="codexk1",
+                    status="busy",
+                    role_level=2 if harness == "codex" else None,
+                    role_scope="epic-x" if harness == "codex" else None,
+                )
+            ]
         )
-    assert exc.value.exit_code == 2
-    assert "claude-only" in str(exc.value)
+        return _subprocess.CompletedProcess(
+            argv, 0, stdout=_json.dumps({"harness_session_id": session_id, "session_id": session_id}) + "\n",
+            stderr="",
+        )
+
+    import fno.agents.dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
+
+    # The spawn gate is not this test's contract, and its codex/thread lane
+    # consults fleet state a dev-build CI run does not carry: admit ungated,
+    # the same posture the test env gives every other spawn axis.
+    from fno.agents.spawn_gate import GateGuard
+
+    import fno.agents.spawn_gate as spawn_gate_mod
+
+    monkeypatch.setattr(spawn_gate_mod, "run_gate", lambda *a, **k: GateGuard())
+
+    if harness == "pi":
+        def keeper_mint(**kwargs):
+            fake_run(["spawn", "--substrate", "thread"])
+            return {"session_id": session_id, "keeper_socket": "/fake/keeper.sock"}
+        def seed_submit(**kwargs):
+            assert _row("lead-codex").role_scope == "epic-x"
+            seen["seed"] = kwargs["message"]
+        monkeypatch.setattr(dispatch_mod, "_lane_b_thread_spawn", keeper_mint)
+        monkeypatch.setattr(dispatch_mod, "_keeper_seed_submit", seed_submit)
+
+    result = _spawn(
+        "spawn", "--name", "lead-codex", "-H", harness, "lead",
+        "--substrate", "thread", "--cwd", str(bg_home), "--promote", "epic-x",
+    )
+    assert result.exit_code == 0, result.output
+    # Codex spells the plugin verb with $; a /fno:lead seed would hand the
+    # lead's first turn a command its harness cannot invoke.
+    verb = {"codex": "$fno:lead", "pi": "/skill:lead"}.get(harness, "/fno:lead")
+    assert seen["seed"].splitlines()[0] == f"{verb} epic-x"
+
+    row = _row("lead-codex")
+    assert row.role_level == 2, "an epic is a Director"
+    assert row.role_scope == "epic-x"
+    assert row.role_grantor == "human"
+    # Resolve the manifest path through the same state-root resolver the arm
+    # uses: a dev-build env can pin the state root away from <cwd>/.fno.
+    from fno.lead.state import lead_state_root
+
+    manifest = lead_state_root(Path(row.cwd)) / "leads" / "epic-x.md"
+    if harness == "opencode":
+        assert not manifest.exists()
+        assert "was NOT armed" in result.output
+    else:
+        assert manifest.exists(), "the lead loop manifest armed"
 
 
-def test_dispatch_spawn_refuses_a_one_shot_role(tmp_path: Path, monkeypatch) -> None:
+def test_dispatch_spawn_refuses_a_one_shot_promotion(tmp_path: Path, monkeypatch, native_backlog_door) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
 
@@ -367,7 +440,7 @@ def test_dispatch_spawn_refuses_a_one_shot_role(tmp_path: Path, monkeypatch) -> 
     ],
 )
 def test_dispatch_spawn_refuses_invalid_role_values(
-    tmp_path: Path, monkeypatch, level, scope
+    tmp_path: Path, monkeypatch, native_backlog_door, level, scope
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
@@ -386,7 +459,7 @@ def test_dispatch_spawn_refuses_invalid_role_values(
 
 
 def test_dispatch_spawn_pane_refuses_invalid_role_values(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """The pane path takes the same pair from the same in-process callers, so it
     needs the same guard - the CLI seam is not the only door to either."""
@@ -452,16 +525,6 @@ def test_dispatch_spawn_pane_refuses_a_duplicate_role_before_launch(
         )
     assert exc.value.exit_code == 2
     assert "--hand-off" in str(exc.value)
-
-
-def test_valid_role_pairs_and_the_unpromoted_pair_pass() -> None:
-    """The validator must not reject the two shapes that are legal: a real role
-    at each ladder rung, and both-None (an ordinary unpromoted spawn)."""
-    from fno.agents.role import role_validation_error
-
-    assert role_validation_error(None, None) is None
-    for lvl in (0, 1, 2):
-        assert role_validation_error(lvl, "epic-x") is None
 
 
 # --- the literal copies in cli.py must not drift from registry ---------------

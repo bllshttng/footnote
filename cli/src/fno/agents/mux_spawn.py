@@ -42,10 +42,10 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
 from fno.agents import launch_provenance
+from fno.agents.team_thread import lead_typed_message
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
-    _term_typed_message,
     _report_unlinked_parent,
     build_spawn_provenance,
     _capture_spawn_trigger,
@@ -3338,7 +3338,7 @@ def dispatch_spawn_pane(
     # in-process caller hands (level, scope) straight to this signature, and a
     # value that skipped validation is written to the SHARED registry. Fail
     # closed before the pane exists, so a refusal leaves no worker behind.
-    role_problem = role_validation_error(role_level, role_scope)
+    role_problem = role_validation_error(role_level, role_scope) if role_level is not None or role_scope is not None else None
     if role_problem is not None:
         raise DispatchAskError(role_problem, exit_code=2)
     role_plan: Optional[dict] = None
@@ -3362,8 +3362,9 @@ def dispatch_spawn_pane(
 
     # The pane half of the promoted-spawn typing: `pane` is the DEFAULT
     # substrate, so typing only on the bg lane left the common case improvising.
-    message, term_typed = _term_typed_message(
-        message, role_level, role_scope, revive=False
+    message, term_typed = (
+        lead_typed_message(message, role_level, role_scope, revive=False, harness=provider)
+        if role_level is not None else (message, False)
     )
 
     # Launch-time headroom picking: `pane` is the DEFAULT substrate and

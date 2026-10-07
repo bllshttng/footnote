@@ -825,22 +825,6 @@ def _codex_create_path(
 from fno.agents.spawn_lineage import _capture_parent_edge, _parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
 
 
-def _term_typed_message(
-    message: str,
-    role_level: Optional[int],
-    role_scope: Optional[str],
-    revive: bool,
-) -> tuple[str, bool]:
-    """A promoted spawn's payload opens with the plugin-qualified term verb.
-
-    A revival keeps its own payload (the session already knows what it is);
-    the receipt names the not-typed case with the remedy.
-    """
-    if role_level is not None and role_scope and not revive:
-        return f"/fno:lead {role_scope}\n{message}", True
-    return message, False
-
-
 def _capture_spawn_trigger() -> Optional[str]:
     """The CAUSE of this spawn, distinct from :func:`_capture_parent_edge`.
 
@@ -1573,7 +1557,10 @@ def _claude_create_path(
 
     # A promoted spawn TYPES the term verb as the payload's first line, so the
     # lead's first turn is the skill itself, not a hand-improvised ritual.
-    message, term_typed = _term_typed_message(message, role_level, role_scope, revive)
+    from fno.agents.team_thread import lead_typed_message
+
+    message, term_typed = (lead_typed_message(message, role_level, role_scope, revive)
+                            if role_level is not None else (message, False))
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -2449,14 +2436,9 @@ def dispatch_spawn(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
-    # Role eligibility, checked HERE rather than only at the CLI seam: this
-    # function is the in-process entry point too, and only the claude bg branch
-    # below reaches `_claude_create_path`, the one route that stamps the fields.
-    # Every other route builds its AgentEntry elsewhere and would drop the role
-    # while reporting a successful spawn - a silently unpromoted lead is the
-    # failure this refusal exists to make impossible. Fail closed before anything
-    # is created, so a refusal launches nothing and leaves the node dispatchable.
-    role_problem = role_validation_error(role_level, role_scope)
+    # In-process callers bypass the CLI parser. Validate requested stamps
+    # before any carrier launches; an ordinary worker has no stamp to validate.
+    role_problem = role_validation_error(role_level, role_scope) if role_level is not None or role_scope is not None else None
     if role_problem is not None:
         raise DispatchAskError(role_problem, exit_code=2)
     # Bound for every path, not just the promoted one: the create call below
@@ -2468,13 +2450,7 @@ def dispatch_spawn(
         if once or headless:
             raise DispatchAskError(
                 "--promote needs a session that outlives the grant; a one-shot "
-                "exits after one answer. Use the pane or bg substrate.",
-                exit_code=2,
-            )
-        if harness != "claude":
-            raise DispatchAskError(
-                f"--promote on the bg substrate is claude-only; got harness "
-                f"{harness!r}. Use --substrate pane, which maps every harness.",
+                "exits after one answer. Use --substrate pane or --substrate thread.",
                 exit_code=2,
             )
 
@@ -2515,6 +2491,15 @@ def dispatch_spawn(
             exit_code=2,
         )
 
+    from fno.agents.team_thread import plan_thread_promotion, settle_thread_promotion
+
+    promotion = None
+    if role_level is not None and harness != "claude":
+        promotion = plan_thread_promotion(
+            message, role_level, role_scope, succession, harness, parent_edge,
+            name=name, revive=bool(resume_session_id))
+        message = promotion["message"]
+
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
     # The spawn front door already demoted every flag the thread lane cannot
@@ -2542,7 +2527,10 @@ def dispatch_spawn(
             passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
+            role_level=role_level, role_scope=role_scope,
         )
+        if promotion is not None:
+            settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=session_id)
         _emit_ev(
             "agent_ask_done",
             stage="dispatch",
@@ -2576,6 +2564,7 @@ def dispatch_spawn(
             "deny_tools": deny_tools, "permission_mode": permission_mode,
             "resume_session_id": resume_session_id,
             "passthrough": list(passthrough) if passthrough else None,
+            "promotion": promotion,
         },
         lock_timeout=lock_timeout,
     )
@@ -2632,7 +2621,7 @@ def dispatch_spawn(
                     exit_code=2,
                 )
 
-            if role_level is not None:
+            if role_level is not None and harness == "claude":
                 # Refuses BEFORE launch - nothing exists as a result of an
                 # authority error. caller_row is read once and its name
                 # threaded to the write as role_caller_name, so the receipt
@@ -2936,6 +2925,8 @@ def dispatch_spawn(
                         name=name, message=message, cwd=cwd,
                         from_name=from_name, model=model, node=node, effort=effort,
                     )
+                    if promotion is not None:
+                        settle_thread_promotion(promotion, name=name, cwd=cwd, session_id=short_id)
                     _emit_ev(
                         "agent_ask_done",
                         stage="dispatch",
