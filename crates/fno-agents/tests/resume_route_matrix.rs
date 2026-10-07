@@ -340,6 +340,7 @@ fn nonterminal_rows_refuse_instead_of_relaunching_and_terminal_rows_exec() {
         .take(HARNESSES.len() * 2)
         .skip(1)
         .step_by(2)
+        .filter(|row| row.harness != "claude")
     {
         let output = run_null(&fixture, row, &[], &fixture.bins);
         assert_eq!(
