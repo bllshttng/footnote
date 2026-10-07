@@ -25,6 +25,10 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/hook-budget.sh
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
+# Overload skip: past the threshold the preamble alone can pass the harness
+# cap; the reader keeps its cursor and the announcement is re-seen next turn.
+hook_overloaded && exit 0
+
 boundary="${1:-prompt}"
 
 input="$(cat 2>/dev/null || true)"

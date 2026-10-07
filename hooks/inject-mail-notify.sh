@@ -21,6 +21,11 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/hook-budget.sh
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 
+# Overload skip before the verb: past the threshold the preamble alone can
+# pass the harness cap, so the verb runs only to be killed mid-ack, which is
+# the lost-mail case. Skipped mail stays pending and delivers next turn.
+hook_overloaded && exit 0
+
 # Stdout of the atomic verb IS the hook payload: it streams through fd 3
 # (saved below) untouched, byte-for-byte. Stderr lands in the variable so a
 # miss can name its cause instead of looking like every other miss. A miss is

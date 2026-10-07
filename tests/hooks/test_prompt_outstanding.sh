@@ -11,6 +11,9 @@ HOOK="hooks/prompt-outstanding.sh"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# The overload skip must never fire in a suite: the stub verb must run on
+# every boundary. Pin past any runner load (hook-budget.sh's skip contract).
+export FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000
 STUB="$TMP/bin"
 mkdir -p "$STUB"
 
@@ -56,7 +59,9 @@ out="$(run_with_stub 'exit 3' "$PAYLOAD")"
 check "a failing verb renders nothing" "" "$out"
 
 rm "$STUB/fno-agents"
-out="$(printf '%s' "$PAYLOAD" | PATH="$STUB:$PATH" bash "$HOOK" 2>/dev/null)"
+# Pin the probe PATH: the caller's PATH may carry a real fno-agents, which
+# turns this missing-binary case into a live read on any machine that has one.
+out="$(printf '%s' "$PAYLOAD" | PATH="$STUB:/usr/bin:/bin" bash "$HOOK" 2>/dev/null)"
 check "a missing fno-agents renders nothing" "" "$out"
 
 echo

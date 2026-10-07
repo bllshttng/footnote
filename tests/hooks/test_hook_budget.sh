@@ -2,9 +2,9 @@
 # test_hook_budget.sh
 #
 # Contract for scripts/lib/hook-budget.sh, the one load-aware budget for the
-# optional hook families: three tiers (idle 3s, loaded 1s, skip past the
-# threshold), fail-open to the idle tier when load is unreadable, silence
-# (empty output, status 0) on a fired bound or a skip, and a
+# optional hook families: four tiers (idle 3s, loaded 1s, overloaded skip via
+# hook_overloaded, unreadable fail-open to the idle tier), silence
+# (empty output, status 0) on a fired bound, and a
 # stale-while-revalidate cache whose refresh runs detached and whose stale
 # copy is served when the live read skipped or failed.
 
@@ -65,6 +65,49 @@ load_lib
 hook_load1() { printf 'garbage'; }
 out="$(hook_budget_secs)"
 [[ "$out" == "3" ]] && pass "non-numeric load -> idle tier" || fail "garbage load: got '$out'"
+
+echo "=== hook_overloaded ==="
+
+# One truth table, one case: load cores [pin] -> expect overloaded (1) or not (0).
+load_lib
+ovl_fail=0
+while read -r ovl_load ovl_cores ovl_pin ovl_want; do
+    [[ "$ovl_load" == "-" ]] && continue
+    hook_load1() { printf '%s' "$ovl_load"; }
+    hook_cores() { printf '%s' "$ovl_cores"; }
+    unset FNO_HOOK_BUDGET_SKIP_PER_CORE
+    [[ "$ovl_pin" != "-" ]] && FNO_HOOK_BUDGET_SKIP_PER_CORE="$ovl_pin"
+    if hook_overloaded; then ovl_got=1; else ovl_got=0; fi
+    unset FNO_HOOK_BUDGET_SKIP_PER_CORE
+    [[ "$ovl_got" == "$ovl_want" ]] || { ovl_fail=1; echo "    case [$ovl_load $ovl_cores $ovl_pin] -> got $ovl_got, want $ovl_want"; }
+done <<'CASES'
+70.0 8 - 1
+20.0 8 - 0
+- 8 - 0
+garbage 8 - 0
+70.0 8 1000 0
+1.0 8 0 1
+CASES
+[[ $ovl_fail -eq 0 ]] \
+    && pass "truth table: 8.75x skips, 2.5x and unreadable never skip, pin raises it, 0 pins it on" \
+    || fail "hook_overloaded truth table"
+
+# The sysctl branch (macOS) parses the brace-wrapped 3-tuple: the braces
+# word-split into their own tokens (5 fields), so the average is field 2.
+# The old 3-or-4 case matched none of them and the probe read as empty, so
+# the busy tier never engaged on macOS. Linux always reads /proc, so this
+# case can only run where /proc is absent.
+if [[ ! -r /proc/loadavg ]]; then
+    load_lib
+    FAKEBIN="$TMP/fakesysctl"
+    mkdir -p "$FAKEBIN"
+    printf '#!/bin/sh\necho "{ 7.77 2.90 2.71 }"\n' > "$FAKEBIN/sysctl"
+    chmod +x "$FAKEBIN/sysctl"
+    ovl_got="$(PATH="$FAKEBIN:$PATH" hook_load1)"
+    [[ "$ovl_got" == "7.77" ]] \
+        && pass "sysctl brace-wrapped 3-tuple parses to the one-minute average" \
+        || fail "sysctl parse: got '$ovl_got'"
+fi
 
 echo "=== hook_run_optional ==="
 

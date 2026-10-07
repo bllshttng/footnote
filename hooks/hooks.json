@@ -1,5 +1,5 @@
 {
-  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection. Optional context/nudge/inject/announce hooks fail open fast under scripts/lib/hook-budget.sh; their timeout entries here are backstops just above that internal budget. Gates that decide (target-stop-hook.sh, the PreToolUse guards, edit-integrity.sh, code-review-attest.sh, target-subagent-guard.sh, inject-control-drain-tool-boundary.sh) keep their own budgets; docs/hooks-fail-open.md owns the list.",
+  "description": "Abilities plugin hooks for target loops, context monitoring, and project context injection. Optional context/nudge/inject/announce hooks fail open fast under scripts/lib/hook-budget.sh, and skip entirely once hook_overloaded reads the load at 8x cores; their timeout entries here are backstops just above that internal budget. Gates that decide (target-stop-hook.sh, the PreToolUse guards, edit-integrity.sh, code-review-attest.sh, target-subagent-guard.sh, inject-control-drain-tool-boundary.sh) keep their own budgets; docs/hooks-fail-open.md owns the list.",
   "modules": [
     "./register.mjs"
   ],
