@@ -67,7 +67,14 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     let gh = bin_dir.join("gh");
     fs::write(
         &gh,
-        "#!/bin/sh\nprintf 'gh %s\\n' \"$*\" >> \"$GH_CALLS_LOG\"\nexit 1\n",
+        "#!/bin/sh\n\
+         printf 'gh %s\\n' \"$*\" >> \"$GH_CALLS_LOG\"\n\
+         for a in \"$@\"; do case \"$a\" in\n\
+         \x20 repos/o/r/pulls/358)\n\
+         \x20    echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'\n\
+         \x20    exit 0 ;;\n\
+         esac; done\n\
+         exit 1\n",
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
@@ -111,6 +118,9 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          \x20   sys.exit(1)\n\
          if args[:3] == ['agents', 'claim', 'release']:\n\
          \x20   sys.exit(1 if os.environ.get('FNO_STUB_CLAIM_RELEASE_FAIL') else 0)\n\
+         if args[:2] == ['backlog', 'decisions'] and '--json' in args:\n\
+         \x20   sys.stdout.write(json.dumps({'decisions': []}))\n\
+         \x20   sys.exit(0)\n\
          sys.exit(1)\n",
     )
     .unwrap();

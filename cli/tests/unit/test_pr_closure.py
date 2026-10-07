@@ -641,12 +641,13 @@ def test_open_binding_ambiguous_when_one_node_has_several_open_prs():
 
     # A fork PR naming the same node yields no binding at all: outside code
     # never enters fleet automation. Only a positive true skips, so an older
-    # producer row without the field still classifies as ambiguous.
+    # producer row without the field classifies as today (missing: the node's
+    # back-pointer names another PR).
     entries = [_node(id="x-1a2b", pr_number=5, pr_url="https://github.com/o/r/pull/5")]
     fork = _open_row(7, "feature/x-1a2b")
     fork["isCrossRepository"] = True
     assert _classify([fork], entries) == []
-    assert _classify([_open_row(7, "feature/x-1a2b")], entries)[0].verdict == "ambiguous"
+    assert _classify([_open_row(7, "feature/x-1a2b")], entries)[0].verdict == "missing"
 
 
 def test_open_binding_missing_through_the_body_trailer():

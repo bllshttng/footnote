@@ -4181,7 +4181,7 @@ for a in "$@"; do case "$a" in
   *'pulls?state=open'*)
      echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null}]'
      exit 0 ;;
-  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":null,"body":"b"}'; exit 0 ;;
   *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}},"author_association":"OWNER","mergeable":null,"body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/777/job/9"}]}'; exit 0 ;;
   */logs) echo "all steps passed"; exit 0 ;;
