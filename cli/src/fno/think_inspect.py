@@ -330,10 +330,9 @@ def _graph_section(
                 parent_row,
                 archived=resolved["parent"] in archive_by_id and resolved["parent"] not in active_by_id,
             )
-    # Graph re-read of the resolved node's closure, not classify_closure: that
-    # helper probes a named behavior against current main and needs inputs a
-    # blueprint does not have. A done/superseded row here is a halt signal for
-    # the consolidation gate, so the fields are read verbatim from the row.
+    # Graph re-read of the resolved node's closure: a done/superseded row here
+    # is a halt signal for the consolidation gate, so the fields are read
+    # verbatim from the row.
     closure = None
     if resolved:
         closure = {

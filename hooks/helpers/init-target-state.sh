@@ -1826,15 +1826,36 @@ PYEOF
     # null arm that used to sit here could never run.
     echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
 
-    # Stale plan: notes newer than the plan's last commit (else its mtime)
-    # mean the plan lags its node. Advisory and silent on any failure.
-    if [[ "$_NODE_OWNED" -eq 1 && -n "${INITIAL_PLAN_PATH:-}" && -f "${INITIAL_PLAN_PATH%%#*}" ]]; then
-      _stale_json="$(fno backlog notes stale "$_NODE_ID" --plan "${INITIAL_PLAN_PATH%%#*}" --json 2>/dev/null)" || _stale_json=""
-      if [[ "$_stale_json" == *'"stale":true'* ]]; then
-        _stale_n="$(printf '%s' "$_stale_json" | sed -n 's/.*"newer_notes":\([0-9]*\).*/\1/p')"
-        _stale_ts="$(printf '%s' "$_stale_json" | sed -n 's/.*"newest_note_at":"\([^"]*\)".*/\1/p')"
-        _stale_basis="$(printf '%s' "$_stale_json" | sed -n 's/.*"basis":"\([^"]*\)".*/\1/p')"
-        echo "target: plan ${INITIAL_PLAN_PATH%%#*} predates ${_stale_n} notes on $_NODE_ID (newest ${_stale_ts}, basis ${_stale_basis}); read them before trusting the plan" >&2
+    # Premise and plan freshness against current main, from the native
+    # freshness verb. One advisory read: verdict lines print, nothing
+    # blocks, and an older fno-agents without the verb stays silent. The
+    # notes `predates` line survives, printed from the plan leg's notes
+    # field when the notes are newer than the plan.
+    if [[ "$_NODE_OWNED" -eq 1 ]]; then
+      _fresh_json=""
+      if [[ -n "${INITIAL_PLAN_PATH:-}" && -f "${INITIAL_PLAN_PATH%%#*}" ]]; then
+        _fresh_json="$(fno backlog freshness "$_NODE_ID" --plan "${INITIAL_PLAN_PATH%%#*}" --json 2>/dev/null)" || _fresh_json=""
+      else
+        _fresh_json="$(fno backlog freshness "$_NODE_ID" --json 2>/dev/null)" || _fresh_json=""
+      fi
+      if [[ -n "$_fresh_json" ]]; then
+        _fresh_pv="$(printf '%s' "$_fresh_json" | sed -n 's/.*"premise":{"verdict":"\([^"]*\)".*/\1/p')"
+        _fresh_pe="$(printf '%s' "$_fresh_json" | sed -n 's/.*"premise":{"verdict":"[^"]*","evidence":"\([^"]*\)".*/\1/p')"
+        if [[ -n "$_fresh_pv" ]]; then
+          echo "target: premise: ${_fresh_pv} - ${_fresh_pe}" >&2
+        fi
+        _fresh_plv="$(printf '%s' "$_fresh_json" | sed -n 's/.*"plan":{"verdict":"\([^"]*\)".*/\1/p')"
+        if [[ -n "$_fresh_plv" ]]; then
+          _fresh_pls="$(printf '%s' "$_fresh_json" | sed -n 's/.*"plan":{"verdict":"[^"]*","since":"\([^"]*\)".*/\1/p')"
+          _fresh_ple="$(printf '%s' "$_fresh_json" | sed -n 's/.*"plan":{"verdict":"[^"]*","since":"[^"]*","evidence":"\([^"]*\)".*/\1/p')"
+          echo "target: plan: ${_fresh_plv} since ${_fresh_pls:-unknown} - ${_fresh_ple}" >&2
+        fi
+        if [[ "$_fresh_json" == *'"stale":true'* ]]; then
+          _stale_n="$(printf '%s' "$_fresh_json" | sed -n 's/.*"newer_notes":\([0-9]*\).*/\1/p')"
+          _stale_ts="$(printf '%s' "$_fresh_json" | sed -n 's/.*"newest_note_at":"\([^"]*\)".*/\1/p')"
+          _stale_basis="$(printf '%s' "$_fresh_json" | sed -n 's/.*"basis":"\([^"]*\)".*/\1/p')"
+          echo "target: plan ${INITIAL_PLAN_PATH%%#*} predates ${_stale_n} notes on $_NODE_ID (newest ${_stale_ts}, basis ${_stale_basis}); read them before trusting the plan" >&2
+        fi
       fi
     fi
 

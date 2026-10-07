@@ -1718,6 +1718,8 @@ def classify_open_pr_bindings(
         head = str(row.get("headRefName") or "")
         if not isinstance(number, int) or not head:
             continue
+        if row.get("isCrossRepository"):
+            continue
         body_supplied = "body" in row
         # ONE pr-closure-parse spawn per body answers both fields.
         answer = parse_closure_answer(row["body"]) if body_supplied else {}

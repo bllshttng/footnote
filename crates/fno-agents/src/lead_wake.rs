@@ -78,10 +78,7 @@ pub(crate) fn plan_wakes<'a>(
             continue;
         }
         let level = team.level as i64;
-        let up: Vec<&Team> = teams
-            .iter()
-            .filter(|t| t.level as i64 + 1 == level)
-            .collect();
+        let up: Vec<&Team> = crate::owner_ladder::rung_up(teams, team);
         let down: Vec<&Team> = teams
             .iter()
             .filter(|t| {

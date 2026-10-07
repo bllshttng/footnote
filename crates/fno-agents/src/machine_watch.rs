@@ -152,6 +152,8 @@ pub fn decide(
         .load_15m
         .zip(sample.cores)
         .map_or_else(|| "unknown".into(), |(load, cores)| num(load / cores));
+    let busy_cores = busy_cores_text(sample);
+    let groups = top_groups_text(sample);
     let reason = if sample.busy_fraction.is_none() {
         "Machine unclear: CPU use is not readable (host CPU ticks unavailable)".to_string()
     } else {
@@ -161,7 +163,7 @@ pub fn decide(
             _ => "unclear",
         };
         format!(
-            "Machine {word}: CPU {busy} busy across {cores} cores (fine is under {:.0}%), about {per_core} jobs per core waiting (fine is under {}); {} of {} processes running",
+            "Machine {word}: {busy_cores} of {cores} cores busy (CPU {busy}, fine is under {:.0}%), about {per_core} jobs per core waiting (fine is under {}); top groups {groups}; {} of {} processes running",
             busy_band * 100.0,
             num(load_band),
             sample.runnable.map_or_else(|| "unknown".into(), |v| v.to_string()),
@@ -169,6 +171,40 @@ pub fn decide(
         )
     };
     (verdict.into(), reason)
+}
+
+/// The busy-core count a person reads: `12`, or `unknown` when the host ticks
+/// or the core count cannot answer. `busy_fraction * cores`, rounded: the
+/// notice itself distinguishes "cores actually busy" from "jobs per core
+/// waiting" (2026-10-03 investigation).
+fn busy_cores_text(sample: &MachineSample) -> String {
+    sample.busy_fraction.zip(sample.cores).map_or_else(
+        || "unknown".to_string(),
+        |(busy, cores)| format!("{:.0}", (busy * cores).round()),
+    )
+}
+
+/// The busiest process-name groups, `rustc x4, python3 x15`, from the census
+/// the sample already carries (sorted by count, so the first rows lead).
+fn top_groups_text(sample: &MachineSample) -> String {
+    let rows: Vec<String> = sample
+        .top_names
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let name = row.get("name").and_then(|v| v.as_str())?;
+            let count = row.get("count").and_then(|v| v.as_u64())?;
+            Some(format!("{} x{count}", name))
+        })
+        .take(3)
+        .collect();
+    if rows.is_empty() {
+        "unmeasured".to_string()
+    } else {
+        rows.join(", ")
+    }
 }
 
 pub fn tick_machine_watch(
@@ -246,21 +282,24 @@ pub fn tick_machine_watch_with_thresholds(
             verdict = "runaway".into();
             forced_escalation = true;
             reason = format!(
-                "Machine overloaded: about {} jobs per core waiting (fine is under {}) and CPU {} busy across {} cores (brake needs over {:.0}%) for {}",
+                "Machine overloaded: {} of {} cores busy (CPU {}, brake needs over {:.0}%), about {} jobs per core waiting (fine is under {}) for {}",
+                busy_cores_text(sample),
+                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
+                busy_text(sample),
+                busy_band * 100.0,
                 num(sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0)),
                 num(thresholds.load_per_core),
-                busy_text(sample),
-                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
-                busy_band * 100.0,
                 span(elapsed),
             );
         } else {
             verdict = "hot".into();
             reason = format!(
-                "Machine busy: about {} jobs per core waiting (fine is under {}) and CPU {} busy for {}; tests pause at {}",
+                "Machine busy: {} of {} cores busy (CPU {}), about {} jobs per core waiting (fine is under {}) for {}; tests pause at {}",
+                busy_cores_text(sample),
+                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
+                busy_text(sample),
                 num(sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0)),
                 num(thresholds.load_per_core),
-                busy_text(sample),
                 span(elapsed),
                 span(thresholds.load_hold),
             );
@@ -994,6 +1033,14 @@ mod tests {
         let (verdict, reason) = decide(&sample(Some(0.95), Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "hot");
         assert!(
+            reason.contains("11 of 12 cores busy"),
+            "the reason names the busy cores: {reason}"
+        );
+        assert!(
+            reason.contains("top groups unmeasured"),
+            "a sample with no census says so instead of inventing groups: {reason}"
+        );
+        assert!(
             reason.contains("about 30.2 jobs per core waiting (fine is under 10)"),
             "{reason}"
         );
@@ -1152,11 +1199,12 @@ mod tests {
                 assert_eq!(outcome.verdict, "runaway");
             }
         }
-        // The page a person reads: plain words, both numbers, the scale built in.
+        // The page a person reads: plain words, busy cores first, both
+        // numbers, the scale built in.
         assert_eq!(last.0, RUNAWAY_TITLE);
         assert!(
             last.1.starts_with(
-                "Machine overloaded: about 8 jobs per core waiting (fine is under 4) and CPU 95.0% busy across 12 cores (brake needs over 90%) for 10 minutes"
+                "Machine overloaded: 11 of 12 cores busy (CPU 95.0%, brake needs over 90%), about 8 jobs per core waiting (fine is under 4) for 10 minutes"
             ),
             "{}",
             last.1

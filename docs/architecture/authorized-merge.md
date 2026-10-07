@@ -38,7 +38,7 @@ The receipt keeps them apart. `Armed` is a queue entry, a promise GitHub keeps l
 | `Unknown` | an instrument could not answer | retry; never read it as clear |
 | `Failed` | the effect ran and failed | report |
 
-The gate merges a PR only after its CI tested the current main. The test is ancestry, not a timestamp. The gate compares the PR against its base (`compare/{base}...{head}`). Any `behind_by` above zero holds as `ci_base_stale`: no run at a head that lacks the base tip can have tested the merged tree. The run-timestamp heuristic this replaced answered the wrong question. A run can start after the base tip moves yet still run at a head cut before it. Main went red three times in two days (2026-10-04/05) through exactly that window. No file-overlap rule waives this. Two PRs that share no file can still break main together: a test in one reads what the other moved. An unreadable freshness read answers `Unknown`, never a merge. The gate covers `Effect::Arm` too. Main has no branch protection, so GitHub merges an armed green PR at once.
+The gate merges a PR only after its CI tested the current main. The test is ancestry, not a timestamp. The gate compares the PR against its base (`compare/{base}...{head}`). A `behind_by` above zero holds as `ci_base_stale` only on file overlap: the newer base commits touch a file the PR changes. A behind head with no shared file merges (user ruling, 2026-10-07). An unreadable file set holds. The run-timestamp heuristic this replaced answered the wrong question. A run can start after the base tip moves yet still run at a head cut before it. An unreadable freshness read answers `Unknown`, never a merge. The gate covers `Effect::Arm` too. Main has no branch protection, so GitHub merges an armed green PR at once.
 
 After a main merge, every open PR with older CI is stale. While the slot is free, `decide` holds the first stale PR with `ci_base_stale` and gives it the slot. The holder then has GitHub merge main into its branch (`PUT pulls/<n>/update-branch`, pinned to the head it read). That is a merge commit, never a rebase, so CI reruns against the current main. The review coverage carries over as `carried_base_sync`. A conflict or a failed call holds with the manual remedy: merge `origin/main` into the branch and push. The receipt says `merge_slot_held`. While a PR holds the slot, all others are `Held`, even with fresh CI. This keeps another merge from invalidating the holder's retest. When the holder merges or closes, turns red, takes a dispatch hold, or its 60-minute lease expires, the slot releases. A held holder can satisfy none of the other three, so a hold releases the slot. An admitted holder that arms keeps the slot until its merge lands. The 60-minute TTL covers one retest, the measured 31-minute rust-ci maximum, one 10-minute sweep tick, and margin. The lease uses `<canonical repo>/.fno/claims`, keyed `merge-slot:<base_ref>`.
 
@@ -46,14 +46,16 @@ After a main merge, every open PR with older CI is stale. While the slot is free
 
 1. **One guarded fetch.** `fno do pr info` gives the number, the head, the state, the body, and whether GitHub's queue owns the PR. The armed flag rides that same payload. A second `gh pr view` probe describes a different head.
 2. **Terminal state.** A merged or closed PR holds before every other guard. The guards below protect a merge that has not happened yet. An "unreviewed" answer about a landed merge sends a caller hunting a defect that blocks nothing.
-3. **Authority.** A per-run refusal (`auto_merge_approved: false`) outranks every grant, except the head-scoped operator grant below. An explicit per-run env grant (`auto_merge_source: env-target-auto-merge`) satisfies the standing arm on its own. Otherwise the LIVE config decides. A manifest snapshot never outlives an operator who flips the switch off mid-flight. Then the automerge posture floor.
-4. **Node binding.** The graph must see the PR. Three keys decide, in order. A node id the branch names. A node whose own back-pointer carries the PR. A closure line in the body (`Fixes <id> [<id>...]`. The retired `Backlog-Closure:` spelling still reads). The same predicate answers the lead board's untracked warning, so the board and the gate cannot disagree. When all three miss, the merge refuses. The remedy is to bind it: pick or file the node, write the closure trailer onto the body, retry. A revert or a hotfix binds the same way. There is no bypass flag. The team merges, and not only the operator. A bypass flag is one the agents pass to themselves. The gate stays silent where the repo keeps no backlog. A graph with no node under the canonical root has nothing to bind to. A graph or a body that cannot be read is `Unknown`, never a verdict.
-5. **The dispatch hold** (`fno do pr hold-check`), fail-closed.
-6. **The in-flight review hold** (`fno do pr review-hold check`), fail-closed. Coverage answers what verdicts EXIST for a head. It cannot say that a review runs right now with its findings uncommitted.
-7. **The pin.** The covered head comes from the caller's own coverage gate, or from the `review_coverage` journal. An unreadable head is `Unknown`. There is no unpinned fallback. A head that no longer matches the PR's is `HeadChanged`.
-8. **Base lineage** (`fno do pr base-lineage-check`), fail-open. A refusal on a gh hiccup makes auto-merge silently never work. That reads exactly like nobody opting in.
-9. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. The same merge tree also runs the repo's preamble budget from its own copy. Two PRs that each pass their own base can no longer merge into a main over the byte ceiling. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
-10. **Checks**. The caller asks for these or leaves them out. `--auto` IS the wait for the checks, so the arm path leaves them out and the queue enforces them server-side.
+3. **Outside PR.** The gate refuses a head repo that is not the base repo, and a non-owner-class author. Outside is final: no law row, flag or config admits an outside PR. The refusal names the rebuild path, never an admit command. An origin read that cannot answer is `Unknown`, never a quiet clear. The section below carries the rule.
+4. **Authority.** A per-run refusal (`auto_merge_approved: false`) outranks every grant, except the head-scoped operator grant below. An explicit per-run env grant (`auto_merge_source: env-target-auto-merge`) satisfies the standing arm on its own. Otherwise the LIVE config decides. A manifest snapshot never outlives an operator who flips the switch off mid-flight. Then the automerge posture floor.
+5. **Node binding.** The graph must see the PR. Three keys decide, in order. A node id the branch names. A node whose own back-pointer carries the PR. A closure line in the body (`Fixes <id> [<id>...]`. The retired `Backlog-Closure:` spelling still reads). The same predicate answers the lead board's untracked warning, so the board and the gate cannot disagree. When all three miss, the merge refuses. The remedy is to bind it: pick or file the node, write the closure trailer onto the body, retry. A revert or a hotfix binds the same way. There is no bypass flag. The team merges, and not only the operator. A bypass flag is one the agents pass to themselves. The gate stays silent where the repo keeps no backlog. A graph with no node under the canonical root has nothing to bind to. A graph or a body that cannot be read is `Unknown`, never a verdict.
+6. **The dispatch hold** (`fno do pr hold-check`), fail-closed.
+7. **The per-PR hold**, an operator law row at `pr-hold:<owner/repo>#<n>`, fail-closed beside the dispatch hold. Held, not refused: the owner releasing it clears it. The section below carries the exact commands.
+8. **The in-flight review hold** (`fno do pr review-hold check`), fail-closed. Coverage answers what verdicts EXIST for a head. It cannot say that a review runs right now with its findings uncommitted.
+9. **The pin.** The covered head comes from the caller's own coverage gate, or from the `review_coverage` journal. An unreadable head is `Unknown`. There is no unpinned fallback. A head that no longer matches the PR's is `HeadChanged`.
+10. **Base lineage** (`fno do pr base-lineage-check`), fail-open. A refusal on a gh hiccup makes auto-merge silently never work. That reads exactly like nobody opting in.
+11. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. The same merge tree also runs the repo's preamble budget from its own copy. Two PRs that each pass their own base can no longer merge into a main over the byte ceiling. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
+12. **Checks**. The caller asks for these or leaves them out. `--auto` IS the wait for the checks, so the arm path leaves them out and the queue enforces them server-side.
 
 ## The head-scoped operator merge grant
 
@@ -74,6 +76,36 @@ The reader lives in `merge_grant.rs` (`head_grant_status`) and shares the waiver
 Head invalidation is structural. A push changes the head, the subject no longer matches, and the new subject has no rows: the refusal stands until the operator grants again. No manifest is rewritten.
 
 The grant supersedes only the per-run layer. Live config, the posture floor, the holds, the pin, and every later guard still run. A merge that passes them carries `"merge_grant": "operator head grant <short head>"` in its receipt.
+
+## Outside pull requests and the owner's per-PR hold
+
+The predicate lives in `pr_admission.rs` (`outside_reason`). When the head repo is not the base repo, the PR reads outside. A deleted fork reads outside. When the `author_association` is not `OWNER`, `MEMBER` or `COLLABORATOR`, the PR reads outside. Bots read outside like any other non-member author.
+
+No outside PR is merged, healed, bound or reviewed by fleet lanes, and no law row, flag or config admits one. The refusal names the rebuild path, never an admit command. Worth-pursuing work enters through its linked issue as a backlog node. Normal triage decides. The fleet builds accepted work on its own branch and credits the contributor with a `Co-authored-by: <login> <numeric-id>+<login>@users.noreply.github.com>` trailer. The issue-first comment and intake flow (the PR steward, a separate delivery) is the contributor's way in.
+
+The decision reads the two gates in the order above: `outside_pr` refused (and `Unknown` on an unreadable origin read), `pr_hold` held. The preview walk carries the same two as blockers, so `fno do pr status` never says ready where merge refuses. `Effect::Merge` and `Effect::Arm` both pass through the decision, so finalize's auto-merge arm and the daemon's grant queue obey them with no change of their own.
+
+The per-PR hold is an operator law row at `pr-hold:<owner/repo>#<n>` with decision `do not merge this pull request`. It is not head-scoped, so it survives pushes, and it applies to every PR, the owner's own included. Hold:
+
+```
+fno backlog decide 'pr-hold:<owner/repo>#<n>' 'do not merge this pull request' --authority operator
+```
+
+Release by superseding it:
+
+```
+fno backlog decide 'pr-hold:<owner/repo>#<n>' 'release' --authority operator --supersedes <decision id>
+```
+
+Recording a hold disarms an armed auto-merge queue at once: the decide door runs `gh pr merge <n> --repo <owner/repo> --disable-auto` after the ruling lands. If that call fails, the ruling still stands (the record exits 0) and stderr names the manual command.
+
+The origin facts never change for a PR: head repo, base repo, author association, login. The outside probe caches them per PR at `cache/pr-origin` inside the state root. One GitHub call per PR, ever. No TTL. Deleting the file forces a fresh read. That is also the remedy for an author whose association changed after the first read.
+
+Heal skips every outside PR with a `skip_outside` receipt, fail closed on an unreadable origin read. Heal pushes to origin, the base repo, so it can never fix a fork's branch anyway. `guarded_push` refuses the protected branches (`main`, `master`, `develop`, `dev`) even under a force flag.
+
+Both open-PR binding legs and the board's mergeable queue skip a row whose `isCrossRepository` reads true. Reconcile never binds a fork PR. Pr-watch, the grant queue, the review lanes and the board never see one. Only a positive true skips. A row without the field classifies as before.
+
+Uncovered cases, kept on purpose: a hand bind of a fork PR with `fno backlog update <id> --pr-number` still cannot merge, but nothing gates a review-fix dispatch onto it. The owner's raw `gh pr merge` is the owner's call. A same-repo branch from a non-member bot is caught by the merge and heal predicate but not by the binding legs, which read cross-repo only. A member who lost access keeps reading inside until the cache file is removed. A useful bot PR can never merge through fno. The owner merges it by hand.
 
 ## The effect
 
