@@ -39,7 +39,7 @@ Halving K1 by deletion means deleting distinct-contract tests of fail-closed too
 
 ## Second pass, 2026-10-07
 
-Base ddb2ecc7ff (origin/main at the start of the pass). The pass rebuilt the campaign map first. The old map missed 192 tracked files and still named 87 that are gone. Most gaps were renames (king to lead, crown to team, court to org), and each one kept its old key. The rest went to the key that owns the subsystem. K1 now owns 194 files.
+Base ddb2ecc7ff (origin/main at the start of the pass). The pass rebuilt the campaign map first. The old map missed 192 tracked files and still named 87 that are gone. Most gaps were renames (king to lead, crown to team, court to org), and each one kept its old key. The rest went to the key that owns the subsystem. K1 now owns 194 files. The map was rebuilt again at merge 0d421fbc04 with main's later renames. Each renamed file kept its old key, and the cut files dropped out. There K1 owns 186 files and 1,793 declarations. The 3 above the table below are tests that main added to K1 files after the base.
 
 | Measure | Before | After | Ratio |
 |---|---:|---:|---:|
@@ -176,7 +176,7 @@ One row per K1 file. A "Kept:" cell lists the surviving tests by name where the 
 | `cli/tests/unit/test_config_doctor_state_roots.py` | 5 | 3 | Rows carry root class, the claims root, the both-roots warning. |
 | `cli/tests/unit/test_config_get.py` | 20 | 10 | Unknown field after a hop refuses, invalid enum fails, prefix fallback never hides an unknown key, equal values credit the higher file, --json. |
 | `cli/tests/unit/test_config_handoff.py` | 11 | 3 | Live fields win over generation_cap, triggers 0 and 101 refused. |
-| `cli/tests/unit/test_config_king_trigger.py` | 8 | 3 | Lead trigger at or above teammate refused, 1-100 range, the default never invalidates. |
+| `cli/tests/unit/test_config_lead_trigger.py` (renamed on main from `test_config_king_trigger.py`) | 8 | 3 | Lead trigger at or above teammate refused, 1-100 range, the default never invalidates. |
 | `cli/tests/unit/test_config_legacy_aliasing.py` | 10 | 6 | Local legacy beats global canonical, reviewer scalar becomes a list, work: lifts, max_iterations 0 becomes 40. |
 | `cli/tests/unit/test_config_load_refusal.py` | 5 | 2 | SettingsRefused names file, key, value, legal set and the deciding layer. |
 | `cli/tests/unit/test_config_loops.py` | 9 | 2 | Unknown level falls back to report, a non-mapping entry drops and siblings stay. |
