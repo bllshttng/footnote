@@ -51,7 +51,7 @@ fn pane_send_labelled_pane_identity_resolution() {
         }
         other => panic!("expected unresolved-identity refusal, got {other:?}"),
     }
-    core.panes.get_mut(&pane).unwrap().name = Some("kestrel-heir".into());
+    core.panes.get_mut(&pane).unwrap().name = Some("kestrel-successor".into());
     let uuid = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
     let mut good = agent_in("sess", pane, None, false);
     good.name = "bob".into();
@@ -171,6 +171,9 @@ fn pane_send_addresses_either_id_of_a_split_row() {
         reply_rx.try_recv().unwrap(),
         ServerMsg::PaneInputResult(receipt)
             if receipt.request_id == 9 && receipt.pane_id == pane && receipt.result == Ok(())
+    ));
+    assert!(crate::pane_send_audit::flush_agents_journal(
+        std::time::Duration::from_secs(10)
     ));
     let submit_rows = crate::event_store::query_events(
         &events_dir.join("events.jsonl"),

@@ -120,7 +120,7 @@ def _populate_state(sandbox: Path) -> Path:
         encoding="utf-8",
     )
     (state_dir / "agents" / "registry.json").write_text(
-        json.dumps({"entries": [{"name": "state-canary", "crown_label": "state-canary"}]}),
+        json.dumps({"entries": [{"name": "state-canary", "role_label": "state-canary"}]}),
         encoding="utf-8",
     )
     (state_dir / "claims" / "state-canary.lock").write_text(

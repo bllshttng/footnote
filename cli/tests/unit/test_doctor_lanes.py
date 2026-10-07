@@ -110,9 +110,9 @@ def _healthy_reading(monkeypatch, sample=None):
         ),
     )
     monkeypatch.setattr(
-        "fno.agents.court.gather_court",
+        "fno.agents.team.gather_team",
         lambda rows=None: {
-            "crowns": [],
+            "roles": [],
             "conflicts": [],
             "summary": {"total": 2, "disagreements": 0, "unknowns": 0},
         },
@@ -234,7 +234,7 @@ def test_refusal_exits_nonzero_and_prints_no_number(monkeypatch) -> None:
 
 
 def test_ac2_hp_census_counts_add_up_and_the_cost_is_measured(monkeypatch) -> None:
-    """AC2-HP: kings plus workers equals the roster rows, because both come
+    """AC2-HP: leads plus workers equals the roster rows, because both come
     from ONE rows list. The per-lane cost reads measured, never seed."""
     _healthy_reading(monkeypatch)
 
@@ -242,9 +242,9 @@ def test_ac2_hp_census_counts_add_up_and_the_cost_is_measured(monkeypatch) -> No
 
     census = reading.census
     assert census["roster_rows"] == 6
-    assert census["kings"] == 2
+    assert census["leads"] == 2
     assert census["workers"] == 4
-    assert census["kings"] + census["workers"] == census["roster_rows"]
+    assert census["leads"] + census["workers"] == census["roster_rows"]
     assert census["tests"] == 3
     assert census["read_ms"] == 421
     assert "measured" in reading.cost_source
@@ -265,7 +265,7 @@ def test_ac2_edge_unreadable_registry_nulls_the_counts_and_keeps_the_seed(
 
     census = reading.census
     assert census["roster_rows"] is None
-    assert census["kings"] is None
+    assert census["leads"] is None
     assert census["workers"] is None
     assert reading.cost_source == "seed (no live roster rows to measure)"
     text = dl.render(reading)
@@ -280,7 +280,7 @@ def test_the_census_renders_on_a_refusal_too(monkeypatch) -> None:
     monkeypatch.setattr(dl, "read_memory_pressure", lambda **k: (None, "unreadable"))
     monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), _rows(4), None, 30))
     monkeypatch.setattr(
-        "fno.agents.court.gather_court",
+        "fno.agents.team.gather_team",
         lambda rows=None: {"conflicts": [], "summary": {"total": 1}},
     )
 
@@ -288,7 +288,7 @@ def test_the_census_renders_on_a_refusal_too(monkeypatch) -> None:
 
     assert reading.refused
     assert reading.census["roster_rows"] == 4
-    assert "court: 1 king(s), 3 worker(s)" in dl.render(reading)
+    assert "team: 1 lead(s), 3 worker(s)" in dl.render(reading)
 
 
 def test_the_attribution_gap_rides_its_own_line_never_the_counts(
@@ -306,15 +306,15 @@ def test_the_attribution_gap_rides_its_own_line_never_the_counts(
 
     assert gap in text
     assert "undercount, not headroom" in text
-    assert "court: 2 king(s), 4 worker(s)" in text
+    assert "team: 2 lead(s), 4 worker(s)" in text
 
 
-def test_a_king_conflict_is_rendered_because_a_bare_count_hides_it(
+def test_a_lead_conflict_is_rendered_because_a_bare_count_hides_it(
     monkeypatch,
 ) -> None:
     _healthy_reading(monkeypatch)
     monkeypatch.setattr(
-        "fno.agents.court.gather_court",
+        "fno.agents.team.gather_team",
         lambda rows=None: {
             "conflicts": [{"scope": "node:x-1", "holders": ["a", "b"]}],
             "summary": {"total": 2},
@@ -323,26 +323,26 @@ def test_a_king_conflict_is_rendered_because_a_bare_count_hides_it(
 
     reading = dl.read_lanes()
 
-    assert reading.census["king_conflicts"] == 1
-    assert "court conflicts: 1 scope(s)" in dl.render(reading)
+    assert reading.census["lead_conflicts"] == 1
+    assert "team conflicts: 1 scope(s)" in dl.render(reading)
 
 
-def test_an_unreadable_court_nulls_the_crowns_rather_than_reporting_none(
+def test_an_unreadable_team_nulls_the_roles_rather_than_reporting_none(
     monkeypatch,
 ) -> None:
-    """gather_court nulls its summary on an unreadable registry. Reading that
-    null as zero kings would report a kingless fleet from a read that saw
+    """gather_team nulls its summary on an unreadable registry. Reading that
+    null as zero leads would report a kingless fleet from a read that saw
     nothing."""
     _healthy_reading(monkeypatch)
     monkeypatch.setattr(
-        "fno.agents.court.gather_court",
+        "fno.agents.team.gather_team",
         lambda rows=None: {"conflicts": None, "summary": {"total": None}},
     )
 
     census = dl.read_lanes().census
 
     assert census["roster_rows"] == 6
-    assert census["kings"] is None
+    assert census["leads"] is None
     assert census["workers"] is None
 
 

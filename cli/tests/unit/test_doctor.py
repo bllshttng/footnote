@@ -1152,9 +1152,9 @@ def test_control_plane_arms_report_consumes_the_rust_attention_set(
                       "producer_evidence": "observed", "line": "watchdog ok"}
     stale_left_out = {"arm": "reap", "stale": True, "failing": False,
                       "producer_evidence": "observed"}
-    unobserved = {"arm": "king_wake", "stale": False, "failing": False,
+    unobserved = {"arm": "lead_wake", "stale": False, "failing": False,
                   "producer_evidence": "unobserved",
-                  "line": "king_wake         UNOBSERVED     never via=launchd"}
+                  "line": "lead_wake         UNOBSERVED     never via=launchd"}
     payload = json.dumps({"arms": [observed_fresh, stale_left_out, unobserved],
                           "arms_attention": [unobserved]})
 
@@ -1808,7 +1808,7 @@ def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypat
                         "stale",
                         False,
                         differing_count=1422,
-                        sample=["hooks/king-delegation-guard.sh"],
+                        sample=["hooks/lead-delegation-guard.sh"],
                     ),
                 ]
             ),
@@ -1826,7 +1826,7 @@ def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypat
     assert "fno config plugin install claude" in report["remedy"]
     blockers = doctor._blockers({"plugin_cache": report})
     assert any("second copy" in b and "1422 file(s)" in b for b in blockers)
-    assert any("hooks/king-delegation-guard.sh" in b for b in blockers)
+    assert any("hooks/lead-delegation-guard.sh" in b for b in blockers)
 
 
 def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeypatch):

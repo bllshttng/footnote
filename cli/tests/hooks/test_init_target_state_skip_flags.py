@@ -421,7 +421,7 @@ def test_fno_absent_refuses_named_node_hold_lookup(tmp_path):
 def test_env_grant_honored_on_operator_origin_run(tmp_path):
     """AC-HP: TARGET_AUTO_MERGE=1 on an attended, agent-free run folds to the
     env grant. This is the documented per-run arm the merge verb and finalize
-    honor; the crown's own origin bar (no FNO_AGENT_SELF) decides who holds
+    honor; the role's own origin bar (no FNO_AGENT_SELF) decides who holds
     it."""
     proc = _run_init_script(
         tmp_path, {"TARGET_AUTO_MERGE": "1", "FNO_AGENT_SELF": ""}

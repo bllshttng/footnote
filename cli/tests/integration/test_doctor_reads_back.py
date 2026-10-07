@@ -230,8 +230,9 @@ def test_a_typod_leaf_inside_a_dict_keyed_block_is_still_caught(tmp_path: Path) 
 
 def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path: Path) -> None:
     """The operator shape measured on 2026-09-16 (x-4455): worktree.auto_install,
-    the route-slot policy leaves on profiles, and a by_difficulty rung are all
-    real keys consumed outside this model (setup-worktree.sh, route_slot.rs),
+    the route-slot policy leaves on profiles, a by_difficulty rung, and
+    merge.visual_paint_paths are all real keys consumed outside this model
+    (setup-worktree.sh, route_slot.rs, merge_gates.rs),
     so the walker must stay silent on every one of them."""
     f = _write(
         tmp_path / "config.toml",
@@ -241,7 +242,8 @@ def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path
         '[agents.profiles.target]\nlanes = ["zai-flash"]\n'
         'on_exhausted = "queue"\non_low = "prefer_healthy"\non_unknown = "skip"\n'
         "[agents.profiles.target.by_difficulty.high]\n"
-        'lanes = ["claude-opus-5"]\non_exhausted = "queue"\n' % (tmp_path / ".fno"),
+        'lanes = ["claude-opus-5"]\non_exhausted = "queue"\n'
+        '[merge]\nvisual_paint_paths = ["crates/fno/src/client/**"]\n' % (tmp_path / ".fno"),
     )
     result = _doctor(f)
     assert result.exit_code == 0, result.output

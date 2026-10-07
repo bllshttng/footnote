@@ -1,11 +1,7 @@
-"""Every front argv the Rust checkin/loop emitters pass resolves for real.
+"""Every front argv from the native check-in emitters resolves.
 
-x-cf9e: the rename to `fno agents org` left the Rust beat spawning
-`["agents", "lead", "drain", ...]`, a spelling the front refuses, so one
-reader failed each beat. The argv literals are pinned from the two Rust
-emitters' source (the house form, as daemon.rs's mcp pin), the drain argv
-runs through the real door dispatcher, and the dead `lead` spelling is the
-negative control.
+The emitters use the organization door; the renamed lead group remains a
+valid front for an attended drain.
 """
 from __future__ import annotations
 
@@ -48,7 +44,7 @@ def test_every_emitted_argv_is_an_org_spelling():
     assert not stale, f"dead lead spellings remain: {stale}"
 
 
-def test_the_drain_argv_dispatches_and_lead_refuses():
+def test_the_drain_argv_dispatches_under_both_role_forms():
     from fno.agents.cli import agents_app
 
     # The door execs the binary; drain is a count read, so the dispatch is
@@ -58,7 +54,6 @@ def test_the_drain_argv_dispatches_and_lead_refuses():
     combined = (result.output or "") + (result.stderr or "")
     assert "No such command" not in combined, combined
 
-    dead = runner.invoke(agents_app, ["lead", "drain"])
-    combined = (dead.output or "") + (dead.stderr or "")
-    assert dead.exit_code != 0
-    assert "No such command" in combined
+    lead = runner.invoke(agents_app, ["lead", "drain", "example-scope"])
+    combined = (lead.output or "") + (lead.stderr or "")
+    assert "No such command" not in combined, combined

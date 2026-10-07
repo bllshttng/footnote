@@ -42,7 +42,7 @@ impl BlockedPeer {
     pub(crate) fn line(&self) -> String {
         format!(
             "PEER BLOCKED: {} ({}) looping on Stop-hook refusals since {} ({} trailing blocked rows); \
-             fno agents resume {} restores the crowned sandbox and objective",
+             fno agents resume {} restores the promoted sandbox and objective",
             self.holder, self.harness, self.since, self.rows, self.holder
         )
     }
@@ -148,7 +148,7 @@ pub(super) fn reading() -> Result<Value, String> {
     let mut rows = Vec::new();
     for row in &registry.entries {
         if row
-            .crown_scope
+            .role_scope
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -259,7 +259,7 @@ mod tests {
         let line = blocked.line();
         assert!(line.starts_with("PEER BLOCKED: rowan (codex)"), "{line}");
         assert!(
-            line.contains("fno agents resume rowan restores the crowned sandbox"),
+            line.contains("fno agents resume rowan restores the promoted sandbox"),
             "{line}"
         );
 

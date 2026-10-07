@@ -129,33 +129,33 @@ def test_once_maps_to_headless_for_the_gate(runner, gate_calls, monkeypatch):
     assert calls[0]["substrate"] == "headless"
 
 
-def test_succeed_passes_the_crown_scope_to_the_gate(runner, gate_calls, monkeypatch):
+def test_succeed_passes_the_role_scope_to_the_gate(runner, gate_calls, monkeypatch):
     calls, _ = gate_calls
     _fake_created(monkeypatch)
-    from fno.agents import crown
+    from fno.agents import role
     from fno.agents.cli import agents_app
 
-    monkeypatch.setattr(crown, "resolve_crown", lambda scopes: (1, "x-epic"))
+    monkeypatch.setattr(role, "resolve_role", lambda scopes: (1, "x-epic"))
     result = runner.invoke(
         agents_app,
         [
             "spawn", "--name", "w1", "hi", "--harness", "claude",
-            "--substrate", "thread", "--crown", "x-epic", "--succeed",
+            "--substrate", "thread", "--promote", "x-epic", "--succeed",
         ],
     )
     assert result.exit_code == 0, result.output
     assert calls[0].get("succession_scope") == "x-epic"
 
 
-def test_crown_without_succeed_does_not_send_a_succession_scope(
+def test_role_without_succeed_does_not_send_a_succession_scope(
     runner, gate_calls, monkeypatch
 ):
     calls, _ = gate_calls
     _fake_created(monkeypatch)
-    from fno.agents import crown
+    from fno.agents import role
     from fno.agents.cli import agents_app
 
-    monkeypatch.setattr(crown, "resolve_crown", lambda scopes: (1, "x-epic"))
+    monkeypatch.setattr(role, "resolve_role", lambda scopes: (1, "x-epic"))
     result = runner.invoke(
         agents_app,
         [
@@ -167,7 +167,7 @@ def test_crown_without_succeed_does_not_send_a_succession_scope(
             "claude",
             "--substrate",
             "thread",
-            "--crown",
+            "--promote",
             "x-epic",
         ],
     )

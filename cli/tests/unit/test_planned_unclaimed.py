@@ -76,7 +76,7 @@ def test_contained_node_with_free_claim_stays_out():
     """Containment, not the claim list, decides offerability: a contained
     subtask carries no claim of its own (the owner holds node:<owner>), so
     the claim leg read it free and the queue offered it beside genuinely
-    undispatched work - with a note telling a king to dispatch it. It ships
+    undispatched work - with a note telling a lead to dispatch it. It ships
     inside its owner's PR and never dispatches alone."""
     receipt = classify_planned_unclaimed(
         [_node("x-open"), _node("x-subtask", contained_in="x-owner", parent="x-owner")],

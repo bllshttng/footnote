@@ -262,18 +262,18 @@ fn render_one(
     Ok((snapshot_page(crate::web::BACKLOG_PAGE, &payload)?, count))
 }
 
-/// The registry rows the snapshot's roster needs: live crowned agents only.
-/// Only the crown fields copy over, so `live` stays false on the static page
+/// The registry rows the snapshot's roster needs: live promoted agents only.
+/// Only the role fields copy over, so `live` stays false on the static page
 /// (no `harness_session_id` is carried).
 fn agents_from_registry(raw: &str, now: u64) -> Vec<crate::proto::AgentRow> {
     crate::agents_view::derive_rows(raw, now)
         .unwrap_or_default()
         .iter()
-        .filter(|r| !r.exited && r.crown_scope.is_some())
+        .filter(|r| !r.exited && r.role_scope.is_some())
         .map(|r| crate::proto::AgentRow {
             name: r.name.clone(),
-            crown_level: r.crown_level,
-            crown_scope: r.crown_scope.clone(),
+            role_level: r.role_level,
+            role_scope: r.role_scope.clone(),
             ..Default::default()
         })
         .collect()
@@ -301,7 +301,7 @@ const PUBLIC_PAYLOAD_FIELDS: &[&str] = &[
     "nodes",
 ];
 
-/// The card fields the public page may carry: the board facts only. `king`
+/// The card fields the public page may carry: the board facts only. `lead`
 /// and `live` are roster facts and stay private.
 const PUBLIC_CARD_FIELDS: &[&str] = &[
     "id",
@@ -354,7 +354,7 @@ const LINK_KEYS: &[&str] = &[
     "parent",
 ];
 
-/// The facet lists the public filter bar may carry. `kings` is a roster
+/// The facet lists the public filter bar may carry. `leads` is a roster
 /// fact; `tags` is free text the title gate never sees, so both stay
 /// private even though the page could render them.
 const PUBLIC_FACET_FIELDS: &[&str] = &[
@@ -745,21 +745,21 @@ mod tests {
         assert!(out.contains("a\\u003cb"), "{out}");
     }
 
-    /// The registry reader keeps exactly the live crowned rows, with their
-    /// scope and level; exited and uncrowned rows drop. Only crown fields
+    /// The registry reader keeps exactly the live promoted rows, with their
+    /// scope and level; exited and unpromoted rows drop. Only role fields
     /// copy, so the static page's roster stays paneless.
     #[test]
-    fn crowned_registry_rows_become_the_snapshot_roster() {
+    fn promoted_registry_rows_become_the_snapshot_roster() {
         let raw = r#"{"agents": [
-            {"name": "lead-live", "crown_level": 1, "crown_scope": "x-aaaa"},
-            {"name": "lead-exited", "crown_level": 2, "crown_scope": "x-bbbb", "status": "exited"},
-            {"name": "plain", "crown_level": null, "crown_scope": null}
+            {"name": "lead-live", "role_level": 1, "role_scope": "x-aaaa"},
+            {"name": "lead-exited", "role_level": 2, "role_scope": "x-bbbb", "status": "exited"},
+            {"name": "plain", "role_level": null, "role_scope": null}
         ]}"#;
         let roster = agents_from_registry(raw, 1000);
-        assert_eq!(roster.len(), 1, "one live crowned row survives");
+        assert_eq!(roster.len(), 1, "one live promoted row survives");
         assert_eq!(roster[0].name, "lead-live");
-        assert_eq!(roster[0].crown_scope.as_deref(), Some("x-aaaa"));
-        assert_eq!(roster[0].crown_level, Some(1));
+        assert_eq!(roster[0].role_scope.as_deref(), Some("x-aaaa"));
+        assert_eq!(roster[0].role_level, Some(1));
         assert!(roster[0].harness_session_id.is_none());
         assert!(agents_from_registry("not json at all", 1000).is_empty());
     }

@@ -119,13 +119,13 @@ pub fn run(args: &[String]) -> i32 {
         }
         return allow("");
     };
-    let crown_scope = row
-        .crown_scope
+    let role_scope = row
+        .role_scope
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("");
-    if row.crown_level.is_none() && crown_scope.is_empty() {
+    if row.role_level.is_none() && role_scope.is_empty() {
         return allow("");
     }
 
@@ -148,8 +148,7 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         PathBuf::from(&row.cwd)
     };
-    let manifest = match crate::lead_state::manifest_path(&super::events_space(&root), crown_scope)
-    {
+    let manifest = match crate::lead_state::manifest_path(&super::events_space(&root), role_scope) {
         Ok(m) => m,
         // An unsafe or empty scope never names a manifest; never-block allows.
         Err(_) => return allow(""),
@@ -165,7 +164,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // 7. Mode knob: refuse (default) | warn | off.
-    let mode = config_lookup(&root, &["king", "implementation_guard"])
+    let mode = config_lookup(&root, &["lead", "implementation_guard"])
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "refuse".to_string());
     if mode == "off" {
@@ -176,7 +175,7 @@ pub fn run(args: &[String]) -> i32 {
     //    unresolvable state, so the never-block contract needs no escape
     //    hatch here: outside the repo allows, whatever it is.
     let repo_root = crate::paths::worktree_repo_root(&root);
-    let roots = write_roots(config_lookup(&root, &["king", "write_roots"]), &repo_root);
+    let roots = write_roots(config_lookup(&root, &["lead", "write_roots"]), &repo_root);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload
@@ -1263,7 +1262,7 @@ mod tests {
         assert!(text.contains("operates the machine and does not author it"));
         assert!(text.contains("fno config plugin install"));
         assert!(text.contains("Delegate the edit or escalate"));
-        assert!(text.contains("config.king.write_roots"));
+        assert!(text.contains("config.lead.write_roots"));
     }
 
     #[test]

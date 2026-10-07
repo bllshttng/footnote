@@ -710,7 +710,7 @@ def _run_tick(
     from fno.graph._reconcile import ReconcileError
     from fno.paths import graph_json as default_graph_json
     from fno.pr_watch import decide
-    from fno.pr_watch._king_wake import graph_entries
+    from fno.pr_watch._lead_wake import graph_entries
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
@@ -722,7 +722,7 @@ def _run_tick(
     # backend has no equivalent yet, so this tick degrades to "nothing to
     # sweep" rather than reading the wrong store (mirrors _catchup_roots'
     # existing no-graph degrade for the same daemon). graph_entries is the
-    # tick's one ident-keyed memo: sweep discovery and king_wake share a
+    # tick's one ident-keyed memo: sweep discovery and lead_wake share a
     # single real read of the 15 MB store instead of queueing on it twice.
     entries = graph_entries(gpath)
     candidates = discover_fn(entries)

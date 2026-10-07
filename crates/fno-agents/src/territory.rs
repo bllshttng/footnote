@@ -454,7 +454,7 @@ pub fn live_teams(registry_path: &Path) -> Result<Vec<Team>, TerritoryUnknown> {
     let mut out: Vec<Team> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for row in rows {
-        let raw = row.crown_scope.as_deref().unwrap_or("").trim();
+        let raw = row.role_scope.as_deref().unwrap_or("").trim();
         if raw.is_empty() || !crate::spawn_gate::status_is_liveish(&row.status) {
             continue;
         }
@@ -462,7 +462,7 @@ pub fn live_teams(registry_path: &Path) -> Result<Vec<Team>, TerritoryUnknown> {
         if canon.is_empty() || !seen.insert(canon.clone()) {
             continue;
         }
-        let level = row.crown_level.unwrap_or(0).clamp(0, 255) as u8;
+        let level = row.role_level.unwrap_or(0).clamp(0, 255) as u8;
         out.push(Team {
             scope: canon,
             level,
@@ -1083,7 +1083,7 @@ path = \"/repo/alpha\"
 
     fn registry_fixture() -> Value {
         let mut v = json!({"agents": [
-            {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+            {"name": "lead-a", "status": "live", "role_scope": "e-1", "role_level": 2,
              "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
             {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
              "pid": std::process::id()},
@@ -1182,7 +1182,7 @@ path = \"/repo/alpha\"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "k", "status": "live", "crown_scope": "alpha", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
+                {"name": "k", "status": "live", "role_scope": "alpha", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
         )
@@ -1315,9 +1315,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "lead-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                {"name": "lead-p", "status": "live", "role_scope": "alpha", "role_level": 1,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "role_scope": "e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
@@ -1338,9 +1338,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "lead-01", "status": "live", "crown_scope": "e-0,e-1", "crown_level": 2,
+                {"name": "lead-01", "status": "live", "role_scope": "e-0,e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "lead-1", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-1", "status": "live", "role_scope": "e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
@@ -1369,9 +1369,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "lead-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                {"name": "lead-p", "status": "live", "role_scope": "alpha", "role_level": 1,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "lead-a", "status": "exited", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "exited", "role_scope": "e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
             ]})
             .to_string(),
@@ -1394,9 +1394,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "lead-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                {"name": "lead-p", "status": "live", "role_scope": "alpha", "role_level": 1,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "role_scope": "e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
                  "pid": std::process::id()},
@@ -1460,7 +1460,7 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "role_scope": "e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "w-1", "status": "live", "node": null, "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
                  "pid": std::process::id()},
@@ -1529,9 +1529,9 @@ path = "/repo/alpha"
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
-                {"name": "lead-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                {"name": "lead-a", "status": "live", "role_scope": "e-1", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
-                {"name": "lead-bad", "status": "live", "crown_scope": "e-loose", "crown_level": 2,
+                {"name": "lead-bad", "status": "live", "role_scope": "e-loose", "role_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
                  "pid": std::process::id()}

@@ -77,7 +77,7 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
                 },
             ],
         },
-        # The whoami/crown block gets its OWN entry on startup: the combined
+        # The whoami/role block gets its OWN entry on startup: the combined
         # wrapper payload is truncated by codex at ~2500 tokens before the
         # whoami block (position 3 of the combined output) ever lands.
         {

@@ -188,6 +188,28 @@ def test_the_timer_exits_quietly_when_the_hold_was_lifted_by_hand(state):
     )
 
 
+def test_an_expired_clock_releases_on_the_first_wake_and_delivers(state):
+    """An already-expired clock releases immediately, with nothing to wait for.
+
+    The release verb's Rust arm lifts the stamp, rewrites the clock EXPIRED,
+    and arms this standard timer - so the sideline menu's Release hold is
+    the ordinary expiry path whose deadline has already passed.
+    """
+    env, home = state
+    hold_dir = home / ".fno" / "mail-hold"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    _send_to_held_session("menu release report", ts="2026-08-20T10:00:00Z")
+    _arm_clock(hold_dir, seconds_out=-1)
+
+    proc = _run_release(env)
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["held_count"] == 1, "the release delivers what the hold kept"
+    assert result["outcome"] in ("delivered", "inject-missed")
+    assert not (hold_dir / f"{HANDLE}.json").exists()
+
+
 def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
     """The timer re-reads its clock on every wake, so a prompt pushes it out.
 

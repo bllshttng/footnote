@@ -290,19 +290,19 @@ pub(crate) fn build(
     info("parent", parent.or_else(|| item.parent.clone()), &mut rows);
 
     // lead: the exact row's team, else the row's own stamp.
-    let lead = exact_row(&dest).and_then(|a| match a.crown_scope.as_deref() {
+    let lead = exact_row(&dest).and_then(|a| match a.role_scope.as_deref() {
         Some(scope) => Some(
-            a.crown_title
+            a.role_title
                 .as_deref()
                 .map(str::to_string)
-                .or_else(|| a.crown_level.map(|l| format!("L{l} {scope}")))
+                .or_else(|| a.role_level.map(|l| format!("L{l} {scope}")))
                 .unwrap_or_else(|| scope.to_string()),
         ),
-        None => a.crown_title.clone(),
+        None => a.role_title.clone(),
     });
-    info("lead", lead.or_else(|| item.crown.clone()), &mut rows);
+    info("lead", lead.or_else(|| item.role.clone()), &mut rows);
     info("reason", item.reason.clone(), &mut rows);
-    info("crown", item.crown.clone(), &mut rows);
+    info("role", item.role.clone(), &mut rows);
     info(
         "owner",
         item.owner.as_deref().map(|o| live_owner(o, agents)),

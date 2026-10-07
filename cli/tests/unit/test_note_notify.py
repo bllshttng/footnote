@@ -8,7 +8,7 @@ verb its exit code, because a silent success is indistinguishable from
 delivery from where the author stands.
 
 Every prover is injected or patched. `claim_status` walks a real lockfile tree
-and `resolve_to_king` reads the live agent registry, so reading either for real
+and `resolve_to_lead` reads the live agent registry, so reading either for real
 would make these tests pass or fail on what else is running on the machine.
 Tests always pass `rows` to `note_readers`, so no test reads this machine's
 registry.
@@ -66,17 +66,17 @@ def _free(monkeypatch) -> None:
 # --- who gets reached --------------------------------------------------------
 
 
-def test_holder_then_king_each_once_and_in_order() -> None:
+def test_holder_then_lead_each_once_and_in_order() -> None:
     got = note_readers(
         {"id": "x-0d08", "parent": "x-16b7"},
         index={"x-16b7": {"id": "x-16b7"}},
         rows=[],
         holder_of=_holders(**{"x-0d08": "sess-worker"}),
-        kings_of=lambda scope: ["king-a", "king-a"],
+        leads_of=lambda scope: ["lead-a", "lead-a"],
     )
     assert got.recipients == [
         ("sess-worker", "holder of x-0d08"),
-        ("king-a", "king of x-16b7"),
+        ("lead-a", "lead of x-16b7"),
     ]
 
 
@@ -87,7 +87,7 @@ def test_a_contained_note_reaches_the_owners_holder() -> None:
         index={"x-5a62": {"id": "x-5a62", "parent": "x-16b7"}},
         rows=[],
         holder_of=_holders(**{"x-0d08": "sess-note-owner", "x-5a62": "sess-builder"}),
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
     )
     assert got.recipients == [
         ("sess-note-owner", "holder of x-0d08"),
@@ -103,7 +103,7 @@ def test_a_graph_session_reaches_a_worker_the_claim_misses(monkeypatch) -> None:
         {"id": "x-d211", "locked_by_harness_session": "sess-live"},
         index={},
         rows=rows,
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
     )
     assert got.recipients == [
         ("t-d211-selfkill", "session bound to x-d211 (graph locked_by_harness_session)")
@@ -115,14 +115,14 @@ def test_a_graph_session_reaches_a_worker_the_claim_misses(monkeypatch) -> None:
 def test_the_registry_arm_reaches_a_worker_no_graph_field_names(monkeypatch) -> None:
     """AC1-EDGE: a graph session_id naming no live row falls to the registry arm."""
     _free(monkeypatch)
-    rows = [_row("bp-2e1f-crown-slot", sid="other", node="x-2e1f")]
+    rows = [_row("bp-2e1f-role-slot", sid="other", node="x-2e1f")]
     got = note_readers(
         {"id": "x-2e1f", "session_id": "sess-gone"},
         index={},
         rows=rows,
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
     )
-    assert got.recipients == [("bp-2e1f-crown-slot", "worker on x-2e1f (registry node)")]
+    assert got.recipients == [("bp-2e1f-role-slot", "worker on x-2e1f (registry node)")]
     assert "graph session_id: sess-gone names no live row" in got.readings
 
 
@@ -133,7 +133,7 @@ def test_every_live_row_on_the_node_is_reached_not_just_the_first(monkeypatch) -
         _row("bp-a-first", node="x-2e1f"),
         _row("bp-b-second", node="x-2e1f"),
     ]
-    got = note_readers({"id": "x-2e1f"}, index={}, rows=rows, kings_of=lambda scope: [])
+    got = note_readers({"id": "x-2e1f"}, index={}, rows=rows, leads_of=lambda scope: [])
     assert got.recipients == [
         ("bp-a-first", "worker on x-2e1f (registry node)"),
         ("bp-b-second", "worker on x-2e1f (registry node)"),
@@ -145,76 +145,76 @@ def test_a_live_claim_stops_the_chain_before_the_registry_arm(monkeypatch) -> No
         "fno.claims.core.claim_status",
         lambda key: {"state": "live", "holder": "sess-worker"},
     )
-    rows = [_row("bp-2e1f-crown-slot", node="x-2e1f")]
-    got = note_readers({"id": "x-2e1f"}, index={}, rows=rows, kings_of=lambda scope: [])
+    rows = [_row("bp-2e1f-role-slot", node="x-2e1f")]
+    got = note_readers({"id": "x-2e1f"}, index={}, rows=rows, leads_of=lambda scope: [])
     assert got.recipients == [("sess-worker", "holder of x-2e1f")]
     assert not any(reading.startswith("registry:") for reading in got.readings)
 
 
-def test_an_epic_notes_its_own_crown() -> None:
-    """AC2-HP: an epic's crown sits on the epic itself, not on a parent."""
+def test_an_epic_notes_its_own_role() -> None:
+    """AC2-HP: an epic's role sits on the epic itself, not on a parent."""
     scopes: list[str] = []
     got = note_readers(
         {"id": "x-a792", "type": "epic"},
         index={},
         rows=[],
         holder_of=_holders(),
-        kings_of=lambda scope: scopes.append(scope)
-        or (["king-a792-control"] if scope == "x-a792" else []),
+        leads_of=lambda scope: scopes.append(scope)
+        or (["lead-a792-control"] if scope == "x-a792" else []),
     )
-    assert got.recipients == [("king-a792-control", "king of x-a792")]
+    assert got.recipients == [("lead-a792-control", "lead of x-a792")]
     assert scopes == ["x-a792"]
 
 
-def test_a_parentless_node_walks_to_its_project_king() -> None:
+def test_a_parentless_node_walks_to_its_project_lead() -> None:
     got = note_readers(
         {"id": "x-1b2c", "project": "fno"},
         index={},
         rows=[],
         holder_of=_holders(),
-        kings_of=lambda scope: ["king-fno-g5"] if scope == "fno" else [],
+        leads_of=lambda scope: ["lead-fno-g5"] if scope == "fno" else [],
     )
-    assert got.recipients == [("king-fno-g5", "king of fno (project)")]
-    assert "crown fno (project): king-fno-g5" in got.readings
+    assert got.recipients == [("lead-fno-g5", "lead of fno (project)")]
+    assert "role fno (project): lead-fno-g5" in got.readings
 
 
-def test_the_crown_walk_stops_at_the_first_live_scope() -> None:
-    """AC2-EDGE: the epic crown wins, so the resolver never asks the project."""
+def test_the_role_walk_stops_at_the_first_live_scope() -> None:
+    """AC2-EDGE: the epic role wins, so the resolver never asks the project."""
     scopes: list[str] = []
 
-    def kings(scope: str) -> list[str]:
+    def leads(scope: str) -> list[str]:
         scopes.append(scope)
-        return ["king-a792-control"] if scope == "x-a792" else ["king-fno-g5"]
+        return ["lead-a792-control"] if scope == "x-a792" else ["lead-fno-g5"]
 
     got = note_readers(
         {"id": "x-child", "parent": "x-a792", "project": "fno"},
         index={},
         rows=[],
         holder_of=_holders(),
-        kings_of=kings,
+        leads_of=leads,
     )
-    assert got.recipients == [("king-a792-control", "king of x-a792")]
+    assert got.recipients == [("lead-a792-control", "lead of x-a792")]
     assert scopes == ["x-a792"]
 
 
-def test_an_unreadable_crown_scope_costs_itself_not_the_walk() -> None:
-    def kings(scope: str) -> list[str]:
+def test_an_unreadable_role_scope_costs_itself_not_the_walk() -> None:
+    def leads(scope: str) -> list[str]:
         if scope == "x-a792":
-            raise RuntimeError("court unreadable")
-        return ["king-fno-g5"]
+            raise RuntimeError("team unreadable")
+        return ["lead-fno-g5"]
 
     got = note_readers(
         {"id": "x-child", "parent": "x-a792", "project": "fno"},
         index={},
         rows=[],
         holder_of=_holders(),
-        kings_of=kings,
+        leads_of=leads,
     )
-    assert got.recipients == [("king-fno-g5", "king of fno (project)")]
-    assert "crown x-a792: unreadable (court unreadable)" in got.readings
+    assert got.recipients == [("lead-fno-g5", "lead of fno (project)")]
+    assert "role x-a792: unreadable (team unreadable)" in got.readings
 
 
-def test_the_crown_scope_is_the_epic_not_the_grandparent() -> None:
+def test_the_role_scope_is_the_epic_not_the_grandparent() -> None:
     """An ordinary child's epic is its own parent, whatever sits above that."""
     scopes: list[str] = []
     got = note_readers(
@@ -222,13 +222,13 @@ def test_the_crown_scope_is_the_epic_not_the_grandparent() -> None:
         index={"x-16b7": {"id": "x-16b7", "parent": "x-mission"}},
         rows=[],
         holder_of=_holders(),
-        kings_of=lambda scope: scopes.append(scope) or ["king-of-the-epic"],
+        leads_of=lambda scope: scopes.append(scope) or ["lead-of-the-epic"],
     )
     assert scopes == ["x-16b7"]
-    assert got.recipients == [("king-of-the-epic", "king of x-16b7")]
+    assert got.recipients == [("lead-of-the-epic", "lead of x-16b7")]
 
 
-def test_a_contained_node_looks_one_level_further_out_for_the_crown() -> None:
+def test_a_contained_node_looks_one_level_further_out_for_the_role() -> None:
     """Its parent carries its PR, so the epic is that node's parent."""
     scopes: list[str] = []
     got = note_readers(
@@ -236,10 +236,10 @@ def test_a_contained_node_looks_one_level_further_out_for_the_crown() -> None:
         index={"x-5a62": {"id": "x-5a62", "parent": "x-16b7"}},
         rows=[],
         holder_of=_holders(),
-        kings_of=lambda scope: scopes.append(scope) or ["king-of-the-epic"],
+        leads_of=lambda scope: scopes.append(scope) or ["lead-of-the-epic"],
     )
     assert scopes == ["x-16b7"]
-    assert got.recipients == [("king-of-the-epic", "king of x-16b7")]
+    assert got.recipients == [("lead-of-the-epic", "lead of x-16b7")]
 
 
 @pytest.mark.parametrize("state", ["stale", "free", "corrupted"])
@@ -276,7 +276,7 @@ def test_the_author_is_never_mailed_its_own_note() -> None:
         index={},
         rows=[],
         holder_of=_holders(**{"x-0d08": "sess-me"}),
-        kings_of=lambda scope: ["sess-me"],
+        leads_of=lambda scope: ["sess-me"],
         self_session="sess-me",
     )
     assert got.recipients == []
@@ -289,27 +289,27 @@ def test_a_role_prefixed_holder_is_still_recognised_as_self() -> None:
         index={},
         rows=[_row("sess-me", sid="sess-me")],
         holder_of=_holders(**{"x-0d08": "target-session:sess-me"}),
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
         self_session="sess-me",
     )
     assert got.recipients == []
     assert got.author_bound == "holder of x-0d08"
 
 
-def test_a_king_is_never_mailed_its_own_note_on_its_own_epic() -> None:
+def test_a_lead_is_never_mailed_its_own_note_on_its_own_epic() -> None:
     """AC3-HP: identity key, not name shape, names the author."""
     self_sid = "d88ad3a3-b820-440e-9654-70fad39cd7d8"
-    rows = [_row("king-a792-control", sid=self_sid)]
+    rows = [_row("lead-a792-control", sid=self_sid)]
     got = note_readers(
         {"id": "x-child", "parent": "x-a792"},
         index={},
         rows=rows,
         holder_of=_holders(),
-        kings_of=lambda scope: ["king-a792-control"],
+        leads_of=lambda scope: ["lead-a792-control"],
         self_session=self_sid,
     )
     assert got.recipients == []
-    assert got.author_bound == "king of x-a792"
+    assert got.author_bound == "lead of x-a792"
 
 
 def test_a_role_holder_backed_by_the_own_row_is_the_author() -> None:
@@ -320,7 +320,7 @@ def test_a_role_holder_backed_by_the_own_row_is_the_author() -> None:
         index={},
         rows=rows,
         holder_of=_holders(**{"x-0b97": "spawn-handover:bp-0b97-note-notify"}),
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
         self_session=self_sid,
     )
     assert got.recipients == []
@@ -334,7 +334,7 @@ def test_a_row_with_a_different_session_is_a_reader_not_the_author() -> None:
         index={},
         rows=rows,
         holder_of=_holders(**{"x-0d08": "sess-worker"}),
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
         self_session="sess-me-uuid",
     )
     assert got.recipients == [("sess-worker", "holder of x-0d08")]
@@ -379,7 +379,7 @@ def test_a_resolvable_role_holder_reaches_the_worker_behind_it() -> None:
         index={},
         rows=[_Row()],
         holder_of=_holders(**{"x-0d08": "spawn-handover:t-ae54-worker"}),
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
     )
     assert got.recipients == [("t-ae54-worker", "holder of x-0d08")]
 
@@ -392,7 +392,7 @@ def test_an_unresolvable_role_holder_skips_instead_of_failing() -> None:
         index={},
         rows=[],
         holder_of=_holders(**{"x-0d08": "spawn-handover:bp-c79d-prwatch-deadline"}),
-        kings_of=lambda scope: [],
+        leads_of=lambda scope: [],
     )
     assert got.recipients == []
 
@@ -459,7 +459,7 @@ def test_nobody_bound_refuses_with_every_arm_reading(tmp_path, monkeypatch) -> N
     """AC4-HP: silence is the defect; the refusal names every arm it read."""
     _free(monkeypatch)
     monkeypatch.setattr(note_notify, "own_session", lambda: "sess-me")
-    monkeypatch.setattr(note_notify, "crowned_over", lambda scope: [])
+    monkeypatch.setattr(note_notify, "promoted_over", lambda scope: [])
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
     _forbid_append(monkeypatch)
     got = readers_before_append(
@@ -474,8 +474,8 @@ def test_nobody_bound_refuses_with_every_arm_reading(tmp_path, monkeypatch) -> N
         "  graph session_id: none\n"
         "  graph locked_by: none\n"
         "  registry: no live row names x-d211\n"
-        "  crown fno (project): vacant\n"
-        "Write it anyway with --quiet, or find a reader with fno agents court "
+        "  role fno (project): vacant\n"
+        "Write it anyway with --quiet, or find a reader with fno agents team "
         "and mail them by name."
     )
 
@@ -497,7 +497,7 @@ def test_an_unreadable_registry_refuses_before_the_append(tmp_path, monkeypatch)
         "(registry at /tmp/r.json is malformed JSON), so nothing was written."
     )
     assert got.message.endswith(
-        "Write it anyway with --quiet, or find a reader with fno agents court "
+        "Write it anyway with --quiet, or find a reader with fno agents team "
         "and mail them by name."
     )
 
@@ -528,7 +528,7 @@ def test_the_exact_slug_resolves_like_the_write_path(tmp_path, monkeypatch) -> N
     """The store's by-id write path accepts the exact slug; so must the read."""
     _free(monkeypatch)
     monkeypatch.setattr(note_notify, "own_session", lambda: "sess-me")
-    monkeypatch.setattr(note_notify, "crowned_over", lambda scope: [])
+    monkeypatch.setattr(note_notify, "promoted_over", lambda scope: [])
     monkeypatch.setattr(
         "fno.agents.registry.load_registry",
         lambda: [_row("t-0d08-worker", node="x-0d08")],
@@ -544,7 +544,7 @@ def test_a_bound_author_alone_is_not_a_refusal(monkeypatch, tmp_path) -> None:
     """Decision 1: the author being the only bound reader still writes."""
     _free(monkeypatch)
     monkeypatch.setattr(note_notify, "own_session", lambda: "sess-me")
-    monkeypatch.setattr(note_notify, "crowned_over", lambda scope: [])
+    monkeypatch.setattr(note_notify, "promoted_over", lambda scope: [])
     monkeypatch.setattr(
         "fno.agents.registry.load_registry",
         lambda: [_row("sess-me", sid="sess-me", node="x-d211")],
@@ -608,10 +608,10 @@ def test_the_author_as_the_only_reader_sends_nothing_and_exits_zero(
         raise AssertionError("nothing to send")
 
     monkeypatch.setattr(note_notify, "send_pointer", no_send)
-    readers = NoteReaders("x-a792", [], "king of x-a792", [])
+    readers = NoteReaders("x-a792", [], "lead of x-a792", [])
     assert note_notify.deliver(readers, "the ruling", json_output=False) == 0
     assert (
-        "notify: you are the only reader bound to x-a792 (king of x-a792); "
+        "notify: you are the only reader bound to x-a792 (lead of x-a792); "
         "nobody else to tell"
     ) in capsys.readouterr().out
 
@@ -624,7 +624,7 @@ def test_no_confirmed_delivery_costs_the_exit_code(monkeypatch, capsys) -> None:
     monkeypatch.setattr(note_notify, "send_pointer", boom)
     readers = NoteReaders(
         "x-0d08",
-        [("sess-a", "holder of x-0d08"), ("sess-b", "king of x-16b7")],
+        [("sess-a", "holder of x-0d08"), ("sess-b", "lead of x-16b7")],
         None,
         [],
     )
@@ -646,7 +646,7 @@ def test_one_confirmed_delivery_among_failures_still_exits_zero(monkeypatch) -> 
 
     monkeypatch.setattr(note_notify, "send_pointer", send)
     readers = NoteReaders(
-        "x-0d08", [("sess-a", "holder of x-0d08"), ("sess-b", "king of x-16b7")], None, []
+        "x-0d08", [("sess-a", "holder of x-0d08"), ("sess-b", "lead of x-16b7")], None, []
     )
     assert note_notify.deliver(readers, "the finding", json_output=False) == 0
 
@@ -821,7 +821,7 @@ def test_a_refusal_writes_nothing_and_exits_three(monkeypatch) -> None:
 
     refused = Refused(
         "note refused: nobody bound to x-d211 would be told, so nothing was written.\n"
-        "Write it anyway with --quiet, or find a reader with fno agents court "
+        "Write it anyway with --quiet, or find a reader with fno agents team "
         "and mail them by name.",
         3,
     )
@@ -838,13 +838,13 @@ def test_the_author_only_reader_prints_the_binding_line(monkeypatch) -> None:
     def no_send(address: str, body: str) -> str:
         raise AssertionError("nothing to send")
 
-    readers = NoteReaders("x-a792", [], "king of x-a792", [])
+    readers = NoteReaders("x-a792", [], "lead of x-a792", [])
     result, _ = _run(
         monkeypatch, ["note", "x-a792", "the ruling"], readers=readers, send=no_send
     )
     assert result.exit_code == 0
     assert (
-        "notify: you are the only reader bound to x-a792 (king of x-a792)"
+        "notify: you are the only reader bound to x-a792 (lead of x-a792)"
         in result.stdout
     )
 

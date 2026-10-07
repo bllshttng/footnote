@@ -10,10 +10,12 @@ import re
 import subprocess
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
+from fno.agents.registry import TERMINAL_STATUSES, load_registry, update_registry
 
 _CODEX_DAEMON_START_TIMEOUT_S = 15  # `daemon start` no-ops when running.
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -268,6 +270,51 @@ def _make_codex_bind_probe(
         return candidate
 
     return _probe
+
+
+def codex_backfill_stamp_applies(
+    row, name, session_id, child_pid, pid_start_time, mux
+) -> bool:
+    """The compare-and-set guards reconcile's backfill and the spawn-time
+    late-bind stamp share: only this pane's codex row, id-less and
+    non-terminal. The caller owns the duplicate-id check.
+    """
+    return (
+        row.name == name
+        and row.harness == "codex"
+        and row.pid == child_pid
+        and row.pid_start_time == pid_start_time
+        and row.mux == mux
+        and not row.harness_session_id
+        and row.status not in TERMINAL_STATUSES
+    )
+
+
+def stamp_late_bind(
+    name, session_id, child_pid, pid_start_time, mux, registry_path=None
+) -> bool:
+    """Stamp a post-window codex bind onto the pane's id-less row; True on success.
+
+    Compare-and-set as reconcile's backfill (same guard helper); never an id
+    another row holds. A raced miss leaves the row `spawning` for the next
+    reconcile to heal.
+    """
+    def apply(rows):
+        dup = any(r.name != name and r.harness_session_id == session_id for r in rows)
+        return [
+            replace(r, harness_session_id=session_id, status="live")
+            if (not dup and codex_backfill_stamp_applies(
+                r, name, session_id, child_pid, pid_start_time, mux
+            ))
+            else r
+            for r in rows
+        ]
+
+    update_registry(apply, path=registry_path)
+    row = next((r for r in load_registry(path=registry_path) if r.name == name), None)
+    return bool(row and row.harness_session_id == session_id)
+
+
 def deliver_seed(thread_id: str, seed: str, cwd: Path, dirs: Sequence[str]) -> bool:
     """Send a bounded pane's seed as a fno turn/start, which carries the roots."""
     from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV

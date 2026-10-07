@@ -3,7 +3,7 @@
 //! Two asks on the `spawn-axes` verb (the shrink law allows no new client
 //! action), each failing open:
 //!
-//! - `dispatch_credit`: the live crown whose scope covers the node. The
+//! - `dispatch_credit`: the live role whose scope covers the node. The
 //!   spawn door stamps it as the worker's owner when no producer carrier
 //!   named one, so the row names the lead that owns the territory and the
 //!   spawn counts in that lead's share.
@@ -29,8 +29,8 @@ const MAIL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAIL_SENDER: &str = "fno/dispatch-credit";
 
 /// The node row's territory member: its epic (parent), else the node id
-/// itself. Crown scopes are epic-member sets, so a node under an epic
-/// answers to whatever crown holds that epic.
+/// itself. Role scopes are epic-member sets, so a node under an epic
+/// answers to whatever role holds that epic.
 fn territory_member(row: &Value) -> String {
     let parent = row
         .get("parent")
@@ -85,9 +85,9 @@ fn registry_rows() -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The covering-crown ask: one answer naming the owner and (when the crown
+/// The covering-role ask: one answer naming the owner and (when the role
 /// row carries a live session) the lead to mail.
-pub fn covering_crown(payload: &Value) -> Value {
+pub fn covering_role(payload: &Value) -> Value {
     let node = payload
         .get("node")
         .and_then(Value::as_str)
@@ -99,12 +99,12 @@ pub fn covering_crown(payload: &Value) -> Value {
     }
     let node_row = graph_row(&node);
     let projects = project_map(&std::env::current_dir().unwrap_or_default()).unwrap_or_default();
-    covering_crown_in(&node, node_row.as_ref(), &registry_rows(), &projects)
+    covering_role_in(&node, node_row.as_ref(), &registry_rows(), &projects)
 }
 
-/// [`covering_crown`] over handed-in rows: pure, so a test pins fixtures and
+/// [`covering_role`] over handed-in rows: pure, so a test pins fixtures and
 /// the ask never touches a store under test.
-pub fn covering_crown_in(
+pub fn covering_role_in(
     node: &str,
     node_row: Option<&Value>,
     registry_rows: &[Value],
@@ -118,8 +118,8 @@ pub fn covering_crown_in(
     if member.is_empty() {
         return kingless();
     }
-    // The node answers to an epic crown through its territory member and to
-    // a project or portfolio crown through its project, aliases
+    // The node answers to an epic role through its territory member and to
+    // a project or portfolio role through its project, aliases
     // canonicalized both ways.
     let project = node_project(row);
     let canonical_project = projects.get(project.as_str()).cloned();
@@ -130,11 +130,11 @@ pub fn covering_crown_in(
                 .is_some_and(|p| members.contains(p))
     };
     // Live rows holding a scope whose canonical members cover the node's
-    // territory. Terminal rows are dead crowns, never a covering lead.
+    // territory. Terminal rows are dead roles, never a covering lead.
     let mut best: Option<(&Value, String, HashSet<String>)> = None;
     for entry in registry_rows {
         let scope = entry
-            .get("crown_scope")
+            .get("role_scope")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty());
@@ -146,8 +146,8 @@ pub fn covering_crown_in(
         if !covers(&members) {
             continue;
         }
-        // Most specific crown wins: the smallest covering member set, so a
-        // crown over the epic itself beats a portfolio that merely holds it.
+        // Most specific role wins: the smallest covering member set, so a
+        // role over the epic itself beats a portfolio that merely holds it.
         let better = match &best {
             None => true,
             Some((_, _, prev)) => members.len() < prev.len(),
@@ -173,7 +173,7 @@ pub fn covering_crown_in(
     });
     json!({
         "node": node,
-        "owner": {"kind": "crown", "project": project, "scope": scope},
+        "owner": {"kind": "role", "project": project, "scope": scope},
         "lead": lead,
     })
 }
@@ -195,14 +195,14 @@ pub fn launch_mail_text(node: &str, worker: &Value) -> String {
         effort
     };
     format!(
-        "Launch notice: {name} started on {node} ({harness}, model {model}, effort {effort}). Your crown scope covers the node, so the worker counts in your share; the worker reports through its own loop and this is the one launch notice.",
+        "Launch notice: {name} started on {node} ({harness}, model {model}, effort {effort}). Your role scope covers the node, so the worker counts in your share; the worker reports through its own loop and this is the one launch notice.",
         name = s("name"),
         harness = s("harness"),
         model = s("model"),
     )
 }
 
-/// The `launch_credit_mail` ask: resolve the covering crown's lead and
+/// The `launch_credit_mail` ask: resolve the covering role's lead and
 /// deliver the notice through the mail verb the scheduler itself uses.
 pub fn launch_credit_mail(payload: &Value) -> Value {
     let node = payload
@@ -212,7 +212,7 @@ pub fn launch_credit_mail(payload: &Value) -> Value {
         .trim()
         .to_string();
     let worker = payload.get("worker").cloned().unwrap_or(json!({}));
-    let credit = covering_crown(&json!({"node": node}));
+    let credit = covering_role(&json!({"node": node}));
     let lead = credit.get("lead").cloned().unwrap_or(Value::Null);
     let session = lead
         .get("session")

@@ -618,7 +618,7 @@ class TestControlPlaneArmRows:
     the three pr-watch-hosted arm rows land in the anchored journal, each
     saying why it did nothing."""
 
-    def test_tick_writes_watchdog_king_wake_and_merge_arm_rows(self, tmp_path, monkeypatch):
+    def test_tick_writes_watchdog_lead_wake_and_merge_arm_rows(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
         from unittest.mock import patch
 
@@ -653,7 +653,7 @@ class TestControlPlaneArmRows:
             review=ns(github_apps=[], required_bots=[]),
             autonomy=ns(enabled=False),
             recovery=ns(enabled=False, watchdog=ns(enabled=False, mode="report")),
-            king=ns(wake_enabled=False, wake_debounce_seconds=900),
+            lead=ns(wake_enabled=False, wake_debounce_seconds=900),
             auto_heal=ns(enabled=False),
         )
 
@@ -673,12 +673,12 @@ class TestControlPlaneArmRows:
         by_arm = {r["data"]["arm"]: r["data"] for r in rows}
         assert by_arm["watchdog"]["skip_reason"] == "watchdog_off"
         assert by_arm["watchdog"]["scheduler"] == "launchd:sh.fno.pr-watcher"
-        assert by_arm["king_wake"]["skip_reason"] == "wake_disabled"
-        assert by_arm["king_wake"]["interval_s"] == 900
+        assert by_arm["lead_wake"]["skip_reason"] == "wake_disabled"
+        assert by_arm["lead_wake"]["interval_s"] == 900
         assert by_arm["pr_watch_merge"]["skip_reason"] == "disabled"
         assert by_arm["pr_watch_merge"]["interval_s"] == 600
         detail = by_arm["pr_watch_merge"]["detail"]
-        # The merge row speaks its own grammar now: the king_wake verdict,
+        # The merge row speaks its own grammar now: the lead_wake verdict,
         # then the skip. A clean skip still names no phase.
         assert detail.startswith("merge kw=")
         assert detail.endswith("pr_watch disabled")
@@ -701,9 +701,9 @@ def test_tick_end_bits_names_the_phase_only_when_the_tick_broke():
     from fno.pr_watch._install import tick_end_bits
 
     timeout = tick_end_bits(
-        {"outcome": "timeout", "phase": "king_wake", "duration_s": 480.0}
+        {"outcome": "timeout", "phase": "lead_wake", "duration_s": 480.0}
     )
-    assert "phase: king_wake" in timeout, f"timeout bits: {timeout}"
+    assert "phase: lead_wake" in timeout, f"timeout bits: {timeout}"
     assert "480.0s" in timeout, f"timeout bits: {timeout}"
 
     degraded = tick_end_bits(

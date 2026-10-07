@@ -16,12 +16,12 @@ from fno.yard import citizen_id, fold, rarity_tiers, seen_species, species_for
 runner = CliRunner()
 
 
-def _row(name="w", harness="claude", sid=None, crown=None, created="2026-08-15T00:00:00Z"):
+def _row(name="w", harness="claude", sid=None, role=None, created="2026-08-15T00:00:00Z"):
     return SimpleNamespace(
         name=name,
         harness=harness,
         harness_session_id=sid,
-        crown_level=crown,
+        role_level=role,
         created_at=created,
     )
 
@@ -106,8 +106,8 @@ def test_fold_marks_first_sighting_against_the_album():
 # -- fold shape --------------------------------------------------------------
 
 
-def test_fold_shape_order_and_crown_default():
-    rows = [_row(name="zed", sid="s1"), _row(name="alpha", sid="s2", crown=2)]
+def test_fold_shape_order_and_role_default():
+    rows = [_row(name="zed", sid="s1"), _row(name="alpha", sid="s2", role=2)]
     citizens = fold(rows, [])
     assert [c["name"] for c in citizens] == ["alpha", "zed"]  # sorted by name
     alpha = citizens[0]
@@ -117,11 +117,11 @@ def test_fold_shape_order_and_crown_default():
         "harness",
         "species",
         "rarity",
-        "crown_level",
+        "role_level",
         "first_sighting",
     }
-    assert alpha["crown_level"] == 2
-    assert citizens[1]["crown_level"] == 0  # None reads as 0, never renders a hat
+    assert alpha["role_level"] == 2
+    assert citizens[1]["role_level"] == 0  # None reads as 0, never renders a hat
 
 
 def test_fold_empty_registry_is_empty():
@@ -138,7 +138,7 @@ def test_yard_cli_json_emits_citizens(tmp_path, monkeypatch):
     monkeypatch.setattr(
         registry_mod,
         "load_registry",
-        lambda: [_row(name="cli-cat", sid="cli-id", crown=1)],
+        lambda: [_row(name="cli-cat", sid="cli-id", role=1)],
     )
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     # The canonical spelling: the root `fno yard` is a VERB_MOVES shim whose
@@ -150,7 +150,7 @@ def test_yard_cli_json_emits_citizens(tmp_path, monkeypatch):
     (c,) = payload["citizens"]
     assert c["name"] == "cli-cat"
     assert c["rarity"] == "common"  # single-harness population
-    assert c["crown_level"] == 1
+    assert c["role_level"] == 1
 
 
 def test_yard_cli_text_lists_citizens(tmp_path, monkeypatch):

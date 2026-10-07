@@ -203,7 +203,7 @@ fn build_bench() -> Bench {
             json!({"name": format!("fixture-{i}"), "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": format!("session-{i}"), "status": "live"}),
         );
     }
-    rows.push(json!({"name": "fixture-lead", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": LEAD_SID, "status": "live", "crown_level": 2, "crown_scope": "latency-fixture"}));
+    rows.push(json!({"name": "fixture-lead", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": LEAD_SID, "status": "live", "role_level": 2, "role_scope": "latency-fixture"}));
     rows.push(json!({"name": "fixture-target", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": TARGET_SID, "status": "live"}));
     rows.push(json!({"name": "fixture-watch", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": WATCH_SID, "status": "live"}));
     write(
@@ -213,7 +213,7 @@ fn build_bench() -> Bench {
 
     // The org manifest the lead paths resolve.
     write(
-        &space.join("kings/latency-fixture.md"),
+        &space.join("leads/latency-fixture.md"),
         &format!(
             "---\nfno_id: 20260915T190000Z-lg1-abcdef\ncreated_at: 2026-09-15T19:00:00Z\nscope: latency-fixture\nshape: org\nharness: claude\nharness_session_id: {LEAD_SID}\n---\n"
         ),
@@ -1306,12 +1306,12 @@ fn assert_subsequence(order: &[String], stream: &[String], msg: &str) {
     }
 }
 
-/// Edit from an uncrowned session: allow (the common case). AC-guard row.
+/// Edit from an unpromoted session: allow (the common case). AC-guard row.
 #[test]
 #[ignore]
-fn latency_guard_uncrowned_edit() {
+fn latency_guard_unpromoted_edit() {
     run_fixture(
-        "guard_uncrowned_edit",
+        "guard_unpromoted_edit",
         "hooks/lead-delegation-guard.sh",
         &FixtureSpec {
             payload: guard_payload(

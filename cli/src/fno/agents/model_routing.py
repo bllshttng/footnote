@@ -103,7 +103,7 @@ DEFAULT_ZAI_HAIKU_MODEL = "glm-4.7"
 # the 1M context, Claude Code caps the threshold at the model window, and a
 # threshold of 1000000 (the old value) is identical to setting nothing, i.e. no
 # compaction before the ceiling. The lead compact nudge fires at ~40%
-# (target.handoff.king_used_pct_trigger) so the agent prepares and compacts
+# (target.handoff.lead_used_pct_trigger) so the agent prepares and compacts
 # while it still has decision runway; this 80%
 # threshold is the BACKSTOP that catches a worker that ignored it, could not
 # act, or was mid-loop. 800k leaves ~200k runway for the compaction request

@@ -2635,7 +2635,7 @@ mod tests {
 
     const GRACE: i64 = 900;
 
-    /// A spawn-origin, uncrowned row whose work is done everywhere it is
+    /// A spawn-origin, unpromoted row whose work is done everywhere it is
     /// named and whose transcript has been quiet past the grace: the AC3-HP
     /// base case.
     fn retiring() -> GcRow {

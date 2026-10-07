@@ -137,7 +137,7 @@ impl MessagesSnapshot {
 
 /// Gather the projection: `fno-agents mail-threads --format json` with
 /// org_model's 30s bound and fail-open shape. The command path rides PATH
-/// like org_model::gather's court-fold call.
+/// like org_model::gather's team-fold call.
 pub async fn gather() -> Result<Value, String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),

@@ -611,6 +611,26 @@ def test_hooks_path_and_message_text_rows():
             assert '"permissionDecision": "deny"' in out2, cmd
 
 
+def test_hooks_path_reads_pass_and_override_has_its_own_message():
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git config core.hooksPath",
+                    "git config --get core.hooksPath",
+                    "git config --show-origin --get-all core.hooksPath",
+                    "git config --unset core.hooksPath",
+                    "git config core.hooksPath 2>&1",
+                    "git config core.hooksPath 2>/dev/null"):
+            out, rc = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' not in out and rc == 0, cmd
+        out, _ = _run_hook_subprocess("git config core.hooksPath /tmp/x",
+                                      fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert "core.hooksPath override" in out
+        assert "--no-verify flag detected" not in out
+        assert "Command: git config core.hooksPath /tmp/x\\n" in out
+
+
 def test_authorization_disqualified_by_extra_capability_rows():
     # Nothing can be counted on the unparseable fallback, so nothing may be
     # authorized there either.

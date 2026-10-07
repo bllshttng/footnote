@@ -66,9 +66,9 @@ VERB_MOVES: dict[str, Move] = {
     "done": Move(kind="deprecated", to="backlog done"),
     "evals": Move(kind="deprecated", to="doctor evals"),
     "event": Move(kind="deprecated", to="doctor event"),
-    "king": Move(
+    "lead": Move(
         kind="deprecated",
-        to="agents king",
+        to="agents lead",
         leaf_destinations=(("board", "inbox board"),),
     ),
     "lint": Move(kind="deprecated", to="doctor lint"),

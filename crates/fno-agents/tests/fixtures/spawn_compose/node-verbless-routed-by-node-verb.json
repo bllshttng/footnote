@@ -67,7 +67,7 @@
       },
       "seed": "do the work",
       "suppressed": [],
-      "verb": "crown"
+      "verb": "role"
     },
     "stderr": [
       "fno agents spawn: applied grid=grid=no-inventory-declared (routing)"

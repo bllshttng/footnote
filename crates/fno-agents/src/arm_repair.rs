@@ -896,9 +896,8 @@ mod tests {
         let mut expired = row("team_ledger", SCHED_DAEMON);
         expired.failing = true;
         expired.skip_reason = Some("error".into());
-        expired.detail = Some(
-            "subprocess.TimeoutExpired: ['fno-agents', 'lead-rundown', '--court-json']".into(),
-        );
+        expired.detail =
+            Some("subprocess.TimeoutExpired: ['fno-agents', 'lead-rundown', '--team-json']".into());
         let mut rows = vec![expired];
         annotate(&mut rows, &facts(false));
         assert_eq!(rows[0].cause.as_deref(), Some("timeout"));

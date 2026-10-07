@@ -1827,6 +1827,7 @@ fn decide_gate(
                                 &live,
                                 input.caller_session.as_deref(),
                                 scope,
+                                &name,
                             )
                         });
                         last_succession_error = succession
@@ -4154,7 +4155,7 @@ Swapouts: 3444531.\n";
         };
         let teamed = |name: &str, session: &str| {
             format!(
-                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"{session}"}}"#
+                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","role_level":1,"harness_session_id":"{session}"}}"#
             )
         };
         // 2 leads -> share 2; the caller holds its full share with 2 rows, so
@@ -4228,7 +4229,7 @@ Swapouts: 3444531.\n";
             format!(
                 r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
-                r#"{"name":"lead-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#,
+                r#"{"name":"lead-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","role_level":1,"harness_session_id":"session-aaaaaaaa"}"#,
                 r#"{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
                 r#"{"name":"w2","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
             ),
@@ -4521,10 +4522,10 @@ Swapouts: 3444531.\n";
                     r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}{nodef}}}"#
                 ));
             }
-            if !sc["crown_scope"].is_null() {
+            if !sc["role_scope"].is_null() {
                 entries.push(format!(
-                    r#"{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":{}}}"#,
-                    sc["crown_scope"]
+                    r#"{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"role_scope":{}}}"#,
+                    sc["role_scope"]
                 ));
             }
             let reg = dir.join("registry.json");
@@ -4628,7 +4629,7 @@ Swapouts: 3444531.\n";
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":1,"entries":[{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"role_scope":"x-epic","role_level":2}}]}}"#
             ),
         )
         .unwrap();
@@ -4669,7 +4670,7 @@ Swapouts: 3444531.\n";
     /// AC9: the two territory attributions on one branch - resolve_territories
     /// for the drain readout, territory_of_node for the cap - agree on
     /// leadless for the same node. The fixture carries one epic team and one
-    /// uncrowned workspace project, so both the teamed and the loose leg are
+    /// unpromoted workspace project, so both the teamed and the loose leg are
     /// pinned: a divergence between the readers ships caught, not silent.
     #[test]
     fn territory_of_node_and_resolve_territories_agree_on_leadless() {
@@ -4694,7 +4695,7 @@ Swapouts: 3444531.\n";
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":1,"entries":[{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-lead","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"role_scope":"x-epic","role_level":2}}]}}"#
             ),
         )
         .unwrap();
@@ -4727,7 +4728,7 @@ Swapouts: 3444531.\n";
         let loose_row = territories
             .iter()
             .find(|t| t.key == "other")
-            .expect("uncrowned workspace project resolves as a loose territory");
+            .expect("unpromoted workspace project resolves as a loose territory");
         assert!(!teamed.2, "a live team scope is not leadless");
         assert!(loose.2, "a project no team rules is leadless");
         assert_eq!(teamed.2, team_row.leadless, "teamed leg diverges");
@@ -4766,7 +4767,7 @@ Swapouts: 3444531.\n";
         .unwrap();
         let reg_row = |name: &str, scope: &str, level: i64| {
             format!(
-                r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"{scope}","crown_level":{level}}}"#
+                r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"role_scope":"{scope}","role_level":{level}}}"#
             )
         };
         let reg = dir.join("registry.json");

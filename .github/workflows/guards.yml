@@ -574,6 +574,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
 
+      - name: Role vocabulary check
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-role-vocabulary.sh
+
       # Keep the human address in skills aligned with the shared vocabulary.
       - name: Skill operator-address check
         if: ${{ !cancelled() }}

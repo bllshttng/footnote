@@ -459,8 +459,8 @@ fn run_request(
     let mut kept: Vec<String> = Vec::new();
     let mut rows: Vec<state::RegistryEntry> = Vec::new();
     for entry in joined {
-        if entry.crown_level.is_some() || crate::lead_state::row_holds_manifest_live_team(&entry) {
-            kept.push(format!("{}:kept_crowned", entry.name));
+        if entry.role_level.is_some() || crate::lead_state::row_holds_manifest_live_team(&entry) {
+            kept.push(format!("{}:kept_promoted", entry.name));
             continue;
         }
         if entry.origin.as_deref() == Some("operator") {
@@ -791,7 +791,7 @@ pub(crate) fn consume_merge_cleanup_requests(
             }
             let mut rows = Vec::new();
             for entry in merge_cleanup_rows(home, request) {
-                if entry.crown_level.is_some() || entry.origin.as_deref() == Some("operator") {
+                if entry.role_level.is_some() || entry.origin.as_deref() == Some("operator") {
                     continue;
                 }
                 batch_entries.push(entry.clone());
@@ -1490,7 +1490,7 @@ mod tests {
             "origin": "spawn",
         });
         if teamed {
-            row["crown_level"] = json!(1);
+            row["role_level"] = json!(1);
         }
         row
     }
@@ -1652,8 +1652,8 @@ mod tests {
             .collect();
         assert!(
             kept.iter()
-                .any(|k| k.as_str().starts_with("lead-x-1:kept_crowned")),
-            "the teamed row must be named under kept_crowned: {kept:?}"
+                .any(|k| k.as_str().starts_with("lead-x-1:kept_promoted")),
+            "the teamed row must be named under kept_promoted: {kept:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
 
