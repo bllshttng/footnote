@@ -233,3 +233,74 @@ fn run_refuses_during_an_in_progress_target() {
     let _ = std::fs::remove_dir_all(&tmp);
     assert_eq!(code, 1);
 }
+
+fn git_ok(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn source_sync_fast_forwards_or_refuses_naming_the_gap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = tmp.path().join("r.git");
+    let (canonical, peer) = (tmp.path().join("c"), tmp.path().join("p"));
+    let path = |p: &PathBuf| p.to_string_lossy().into_owned();
+    git_ok(
+        tmp.path(),
+        &["init", "-q", "--bare", "-b", "trunk", &path(&remote)],
+    );
+    git_ok(tmp.path(), &["clone", "-q", &path(&remote), &path(&peer)]);
+    git_ok(&peer, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    git_ok(&peer, &["push", "-q", "origin", "HEAD:trunk"]);
+    git_ok(
+        tmp.path(),
+        &["clone", "-q", &path(&remote), &path(&canonical)],
+    );
+    for n in 0..3 {
+        git_ok(
+            &peer,
+            &["commit", "-q", "--allow-empty", "-m", &format!("ahead {n}")],
+        );
+    }
+    git_ok(&peer, &["push", "-q", "origin", "HEAD:trunk"]);
+
+    sync_source_checkout(&canonical, false).expect("a clean behind checkout fast-forwards");
+    assert_eq!(
+        git_ok(&canonical, &["rev-parse", "HEAD"]),
+        git_ok(&peer, &["rev-parse", "HEAD"])
+    );
+
+    git_ok(
+        &canonical,
+        &["commit", "-q", "--allow-empty", "-m", "local"],
+    );
+    git_ok(
+        &peer,
+        &["commit", "-q", "--allow-empty", "-m", "ahead again"],
+    );
+    git_ok(&peer, &["push", "-q", "origin", "HEAD:trunk"]);
+    let refusal =
+        sync_source_checkout(&canonical, false).expect_err("diverged cannot fast-forward");
+    assert!(
+        refusal.contains("is 1 commit(s) behind origin/trunk"),
+        "{refusal}"
+    );
+}

@@ -141,6 +141,47 @@ fn migrate_value(value: &mut Value, field: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A config that holds both `[king]` and `[lead]` folds the legacy table
+/// under the current one, the current value winning each clash. A refusal
+/// left `[king]` in place, and the loader read it over `lead.enabled`.
+fn fold_legacy_tables(value: &mut Value) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    for child in map.values_mut() {
+        fold_legacy_tables(child);
+    }
+    let legacy: Vec<String> = map
+        .keys()
+        .filter(|key| {
+            let current = vocabulary(key);
+            current != **key && map.contains_key(&current)
+        })
+        .cloned()
+        .collect();
+    for key in legacy {
+        let Some(old) = map.remove(&key) else {
+            continue;
+        };
+        if let Some(current) = map.get_mut(&vocabulary(&key)) {
+            merge_under(current, old);
+        }
+    }
+}
+
+fn merge_under(current: &mut Value, legacy: Value) {
+    if let (Value::Object(current), Value::Object(legacy)) = (current, legacy) {
+        for (key, value) in legacy {
+            match current.get_mut(&key) {
+                Some(existing) => merge_under(existing, value),
+                None => {
+                    current.insert(key, value);
+                }
+            }
+        }
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = path.with_extension(format!("role-upgrade-{}.tmp", std::process::id()));
     let result = (|| {
@@ -248,6 +289,7 @@ fn migrate_file(path: &Path) -> Result<(), String> {
                 toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let mut value = serde_json::to_value(document).map_err(|e| e.to_string())?;
             let original = value.clone();
+            fold_legacy_tables(&mut value);
             migrate_value(&mut value, "")?;
             if value == original {
                 return Ok(());
@@ -305,6 +347,11 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
         let path = entry.path();
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         if kind.is_symlink() {
+            // A relocated spaces root is still this root's spaces; skipping
+            // it would stamp the marker over unmigrated role dirs.
+            if depth == 0 && entry.file_name() == "spaces" && path.is_dir() {
+                walk(&path, depth + 1)?;
+            }
             continue;
         }
         if kind.is_dir() {
@@ -334,12 +381,10 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 if current != name {
                     let target = path.with_file_name(current);
                     if target.exists() {
-                        return Err(format!(
-                            "both role directories exist at {}; migration refused",
-                            path.display()
-                        ));
+                        merge_dir(&path, &target)?;
+                    } else {
+                        std::fs::rename(&path, target).map_err(|e| e.to_string())?;
                     }
-                    std::fs::rename(&path, target).map_err(|e| e.to_string())?;
                 }
             }
         } else if kind.is_file() && selected(&path) {
@@ -350,19 +395,10 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
                 vocabulary(name)
             };
             let target = path.with_file_name(&current);
-            // Judge the collision before rewriting: a refused rename must
-            // leave the legacy file byte-for-byte as it was found.
+            // Judge the collision before rewriting: the legacy file is kept
+            // byte-for-byte as it was found, beside the live one.
             if current != name && target.exists() {
-                if name != "crown_names.json" {
-                    return Err(format!(
-                        "both role files exist at {}; migration refused",
-                        path.display()
-                    ));
-                }
-                // The name store moved to team_names.json before this
-                // migration, so a surviving crown_names.json is an older
-                // generation. The live store wins; the old one is kept.
-                std::fs::rename(&path, superseded_backup(&path)).map_err(|e| e.to_string())?;
+                supersede(&path, &target)?;
                 continue;
             }
             if name == "events.db" {
@@ -376,6 +412,37 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Both the legacy and the current name exist. The current one is the live
+/// store, so it wins and the legacy one moves to a `.superseded` backup. A
+/// refusal here stopped the walk before config.toml, wrote no marker, and
+/// every later process retried and printed the same refusal.
+fn supersede(legacy: &Path, current: &Path) -> Result<(), String> {
+    let backup = superseded_backup(legacy);
+    std::fs::rename(legacy, &backup).map_err(|e| e.to_string())?;
+    eprintln!(
+        "role migration: kept {}; moved the older {} to {}",
+        current.display(),
+        legacy.display(),
+        backup.display()
+    );
+    Ok(())
+}
+
+/// Fold a legacy role directory into a current one that new code already
+/// wrote. As with the name store, the current entry is live: a name in both
+/// keeps it and parks the legacy entry beside it as `.superseded`.
+fn merge_dir(legacy: &Path, current: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(legacy).map_err(|e| format!("{}: {e}", legacy.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let mut dest = current.join(entry.file_name());
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            dest = superseded_backup(&dest);
+        }
+        std::fs::rename(entry.path(), dest).map_err(|e| e.to_string())?;
+    }
+    std::fs::remove_dir(legacy).map_err(|e| format!("{}: {e}", legacy.display()))
 }
 
 fn superseded_backup(path: &Path) -> PathBuf {
@@ -397,7 +464,9 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     if !root.is_dir() {
         return Ok(());
     }
-    let marker = root.join("migrations/role-vocabulary-v1.done");
+    // v1 receipts were stamped by a walk that skipped a symlinked spaces
+    // root, so they cannot vouch for it; a re-walk is idempotent.
+    let marker = root.join("migrations/role-vocabulary-v2.done");
     if marker.exists() {
         return Ok(());
     }
@@ -419,13 +488,35 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     atomic_write(&marker, b"1\n")
 }
 
-pub fn run() -> Result<(), String> {
+/// The roots one migration run walks. Readers find spaces at
+/// `<FNO_AGENTS_HOME parent>/spaces` unless `FNO_SPACES_DIR` names them, so
+/// that parent is a root too when it holds spaces; without it a daemon
+/// pinned to its agents home never migrates the space role directories.
+fn state_roots(var: impl Fn(&str) -> Option<PathBuf>) -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::new();
     for key in ["FNO_STATE_DIR", "FNO_AGENTS_HOME", "FNO_SPACES_DIR"] {
-        if let Some(path) = std::env::var_os(key).filter(|s| !s.is_empty()) {
-            roots.insert(PathBuf::from(path));
+        if let Some(path) = var(key) {
+            roots.insert(path);
         }
     }
+    if var("FNO_SPACES_DIR").is_none() {
+        if let Some(parent) = var("FNO_AGENTS_HOME")
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|p| p.join("spaces").is_dir())
+        {
+            roots.insert(parent.to_path_buf());
+        }
+    }
+    roots
+}
+
+pub fn run() -> Result<(), String> {
+    let mut roots = state_roots(|key| {
+        std::env::var_os(key)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    });
     let explicit_roots = !roots.is_empty();
     if !explicit_roots {
         if let Some(root) = crate::live_store_fence::operator_state_root() {
@@ -646,17 +737,109 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_collision_leaves_the_legacy_file_untouched() {
+    fn a_legacy_role_dir_folds_into_the_live_one_and_keeps_both_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let space = tmp.path().join("spaces").join("repo");
+        let (kings, leads) = (space.join("kings"), space.join("leads"));
+        std::fs::create_dir_all(&kings).unwrap();
+        std::fs::create_dir_all(&leads).unwrap();
+        std::fs::write(kings.join("fno.md"), "scope: fno\nshape: court\n").unwrap();
+        std::fs::write(kings.join("ops.md"), "scope: ops\n").unwrap();
+        std::fs::write(leads.join("fno.md"), "scope: fno\nshape: team\n").unwrap();
+        run_at(tmp.path()).unwrap();
+        assert!(!kings.exists());
+        assert_eq!(
+            std::fs::read_to_string(leads.join("fno.md")).unwrap(),
+            "scope: fno\nshape: team\n"
+        );
+        assert!(std::fs::read_to_string(leads.join("fno.md.superseded"))
+            .unwrap()
+            .contains("court"));
+        assert_eq!(
+            std::fs::read_to_string(leads.join("ops.md")).unwrap(),
+            "scope: ops\n"
+        );
+
+        let state = tmp.path().join("linked");
+        let moved = tmp.path().join("moved-spaces");
+        std::fs::create_dir_all(moved.join("repo").join("kings")).unwrap();
+        std::fs::create_dir_all(state.join("migrations")).unwrap();
+        std::fs::write(state.join("migrations/role-vocabulary-v1.done"), "1\n").unwrap();
+        std::os::unix::fs::symlink(&moved, state.join("spaces")).unwrap();
+        run_at(&state).unwrap();
+        assert!(moved.join("repo").join("leads").is_dir());
+        assert!(!moved.join("repo").join("kings").exists());
+    }
+
+    #[test]
+    fn a_pinned_agents_home_still_walks_the_spaces_beside_it() {
+        fn env(pairs: &[(&str, &str)], key: &str) -> Option<PathBuf> {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| PathBuf::from(v))
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("bare");
+        let agents = state.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let home = agents.to_str().unwrap();
+        let roots = state_roots(|k| env(&[("FNO_AGENTS_HOME", home)], k));
+        assert!(!roots.contains(&state), "no spaces beside the home");
+        std::fs::create_dir(state.join("spaces")).unwrap();
+        let roots = state_roots(|k| env(&[("FNO_AGENTS_HOME", home)], k));
+        assert!(roots.contains(&state));
+        let pinned = [("FNO_AGENTS_HOME", home), ("FNO_SPACES_DIR", "/t/spaces")];
+        let roots = state_roots(|k| env(&pinned, k));
+        assert!(!roots.contains(&state));
+        assert!(roots.contains(Path::new("/t/spaces")));
+    }
+
+    #[test]
+    fn a_collision_keeps_both_files_and_the_walk_still_migrates_config() {
         let tmp = tempfile::tempdir().unwrap();
         let kings = tmp.path().join("kings");
         std::fs::create_dir(&kings).unwrap();
         let legacy = r#"{"crown_scope":"x"}"#;
         std::fs::write(kings.join("king-a.json"), legacy).unwrap();
         std::fs::write(kings.join("lead-a.json"), "{}").unwrap();
-        assert!(run_at(tmp.path()).is_err());
+        std::fs::write(kings.join("king-b.json"), "{}").unwrap();
+        let leads = tmp.path().join("leads");
+        std::fs::create_dir(&leads).unwrap();
+        std::fs::write(leads.join("lead-c.json"), "{}").unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[king]\nenabled = false\nwake_enabled = true\n\n[lead]\nenabled = true\n",
+        )
+        .unwrap();
+        run_at(tmp.path()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(kings.join("king-a.json")).unwrap(),
-            legacy
+            std::fs::read_to_string(tmp.path().join("leads/king-a.json.superseded")).unwrap(),
+            legacy,
+            "the legacy file is kept byte-for-byte beside the live one"
         );
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(tmp.path().join("config.toml")).unwrap())
+                .unwrap();
+        assert!(config.get("king").is_none(), "{config}");
+        assert_eq!(
+            config["lead"]["enabled"].as_bool(),
+            Some(true),
+            "current wins"
+        );
+        assert_eq!(
+            config["lead"]["wake_enabled"].as_bool(),
+            Some(true),
+            "legacy-only key kept"
+        );
+        assert!(
+            leads.join("lead-b.json").exists() && leads.join("lead-c.json").exists(),
+            "a legacy-only child joins the live directory beside its own"
+        );
+        assert!(!kings.exists(), "the emptied legacy directory is removed");
+        assert!(tmp
+            .path()
+            .join("migrations/role-vocabulary-v1.done")
+            .exists());
     }
 }

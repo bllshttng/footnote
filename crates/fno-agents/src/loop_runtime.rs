@@ -462,10 +462,14 @@ impl Journal {
         // Write to project file - FATAL on failure.
         self.append_to_file(&self.project_path, &env, true)?;
 
-        // Mirror to global file - best-effort (warn, never fatal).
+        // Mirror to global file - best-effort and non-fatal, so a failure is
+        // said only on FNO_VERBOSE=1 (a locked store once printed it 14 times
+        // in one second).
         if self.project_path != self.global_path {
             if let Err(e) = self.append_to_file(&self.global_path, &env, false) {
-                eprintln!("loop-runtime: global mirror write failed (non-fatal): {e}");
+                if std::env::var_os("FNO_VERBOSE").is_some_and(|v| v == "1") {
+                    eprintln!("loop-runtime: global mirror write failed (non-fatal): {e}");
+                }
             }
         }
 

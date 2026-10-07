@@ -21,6 +21,8 @@ NARROW = 60
 BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
+# The user's own status line reruns at most this often unless its input changes.
+INNER_MAX_AGE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
 LEAD = "⠀"
 COLORS = {"gray": 90, "green": 32, "cyan": 36, "magenta": 35, "yellow": 33}
@@ -85,6 +87,43 @@ def wrap(text, n):
     if line:
         lines.append(line)
     return lines
+
+
+def inner_key(data):
+    """The payload minus the clocks Claude Code advances on every tick, plus the width the rows were sized for."""
+    stable = dict(data)
+    stable["cost"] = {k: v for k, v in (data.get("cost") or {}).items() if not k.endswith("duration_ms")}
+    stable["columns"] = os.environ.get("COLUMNS", "")
+    return json.dumps(stable, sort_keys=True)
+
+
+def cached_inner_rows(stdin, data, session):
+    """The user's status line reruns on a real session change or once its rows age out; other ticks reuse them.
+
+    The age bound keeps a clock or a background git change from going stale for good.
+    A failed run never replaces good rows: the last good rows show and the next tick retries.
+    """
+    if not session:
+        return inner_rows(stdin, data)
+    path = os.path.join(HOME, "frames", f"{session}.inner.json")
+    key = inner_key(data)
+    cached = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("key") == key and time.time() - cached.get("at", 0) < INNER_MAX_AGE_S:
+            return cached["rows"]
+    except (OSError, ValueError, KeyError):
+        pass
+    rows = inner_rows(stdin, data)
+    if not rows:
+        return cached.get("rows") or rows
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"key": key, "at": time.time(), "rows": rows}, f)
+    except OSError:
+        pass
+    return rows
 
 
 def inner_rows(stdin, data):
@@ -220,7 +259,7 @@ def main():
                 f.write(str(int(time.time() * 1000)))
         except OSError:
             pass
-    left = inner_rows(stdin, data)
+    left = cached_inner_rows(stdin, data, session)
     # Claude Code's usable status width runs a few columns under COLUMNS.
     cols = int(os.environ.get("COLUMNS") or 120) - 4
     print("\n".join(layout(left, read_frame(session), cols)))
