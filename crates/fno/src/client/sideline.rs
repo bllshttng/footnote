@@ -1314,13 +1314,20 @@ impl View {
         base: bool,
     ) -> bool {
         match display.get(i) {
-            Some(DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)) => {
+            Some(row @ (DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..))) => {
                 base || self.list_selector() == Some(i)
                     || self.hover_row == Some(i)
                     || self.list_selector() == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
                     || self.list_selector() == Some(i.saturating_sub(2))
                     || self.hover_row == Some(i.saturating_sub(2))
+                    // The detail line is the metrics line's upper half too:
+                    // a hover or selection on the card's last line bands it.
+                    // The metrics line never has a card row below.
+                    || matches!(row, DisplayRow::CardDetail(..))
+                        && matches!(display.get(i + 1), Some(DisplayRow::CardMetrics(..)))
+                        && (self.list_selector() == Some(i + 1)
+                            || self.hover_row == Some(i + 1))
             }
             Some(DisplayRow::Agent(_)) => {
                 base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(..)))

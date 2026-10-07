@@ -192,7 +192,7 @@ A quiet window is not a halt. When the user asks you not to interrupt them, run 
 
 At handoff or before `fno agents org done`, the succession files parts 1 and 2 for you. The verify step launches `fno-agents intel --windows --session <predecessor session> --write` for every harness. Your part is the reading: write `part3-failures.md` and `part4-reforms.md` from `part1-metrics.md` and `part2-timeline.md`, filing each reform as a node. With `--once`, `fno agents org done` is the last act of pass step 5 or of the org's wave boundary.
 
-The one-wave pass, the role model, and the minion contract are in [references/](references/): [once.md](references/once.md), [minion-clause.md](references/minion-clause.md), [org-operations.md](references/org-operations.md), [cli-commands.md](references/cli-commands.md), [review.md](references/review.md), [retro-interview.md](references/retro-interview.md), [workflow-routes.md](references/workflow-routes.md), [postcompact-brief.md](references/postcompact-brief.md).
+The one-wave pass, the role model, and the minion contract are in [references/](references/): [once.md](references/once.md), [minion-clause.md](references/minion-clause.md), [org-operations.md](references/org-operations.md), [cli-commands.md](references/cli-commands.md), [review.md](references/review.md), [retro-interview.md](references/retro-interview.md), [workflow-routes.md](references/workflow-routes.md), [postcompact-brief.md](references/postcompact-brief.md). The exact spawn line for each harness, with its payload prefix and known refusals, is in [beat-by-harness.md](references/beat-by-harness.md#spawn-by-harness).
 
 ## Known Limitations and Deferred Work
 

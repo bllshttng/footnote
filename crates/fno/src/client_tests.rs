@@ -177,9 +177,11 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
         pane_state(Some(AgentBadge::Done), true, None),
         PaneState::Idle
     );
-    // (x-d401) The blind fold is gone: no badge and no activity reading is
-    // a marked absence, never a measured idle.
-    assert_eq!(pane_state(None, false, None), PaneState::Unmeasured);
+    // 2026-10-06 shell ruling: an unbadged shell tab is live.
+    let shell = |act: Option<ShellActivity>| pane_state(None, false, act);
+    assert_eq!(shell(None), PaneState::Idle);
+    assert_eq!(shell(Some(ShellActivity::Empty)), PaneState::Idle);
+    assert_eq!(shell(Some(ShellActivity::Unmeasured)), PaneState::Idle);
     // Worst-first ordering (Invariant): the squad rollup takes the `min`, so
     // the worst state must be the Ord-minimum - x-d140's `min` and the
     // navigator filter must agree on this ordering.
@@ -357,10 +359,8 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         last_activity_age_s: None,
         resumable: false,
         no_pane_reason: None,
-        // (x-d401) A badgeless LIVE row in these fixtures means "an idle
-        // worker"; under the absence predicate that must be SAID (an
-        // explicit Idle reading), not implied by badge absence - absence
-        // now renders Unmeasured.
+        // A badgeless LIVE row says "an idle worker" aloud; the fixture
+        // keeps the explicit reading under the 2026-10-06 shell ruling.
         pane_activity: if badge.is_none() && !exited {
             Some(ShellActivity::Idle)
         } else {
@@ -4753,10 +4753,9 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
             harness_session_id: None,
             name: "w1".into(),
             pane_id: None,
-            // The paneless bg row is Unmeasured (no badge, no activity
-            // reading), so the flag rides along (x-b5d1, x-a33f): the
-            // server no longer reads it, but the wire shape is pinned.
-            measure: true,
+            // The 2026-10-06 shell ruling reads an unbadged row as a live
+            // shell: no measure prompt rides; the wire shape is pinned.
+            measure: false,
         }],
         "the remove byte removed the live row in one gesture"
     );
@@ -7678,8 +7677,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             frame.cells[r * cols].flags & cell_flags::DIM == cell_flags::DIM,
         )
     };
-    // A badgeless reading-less row paints `?` + DIM; a badgeless local row
-    // and a badgeless external row collide there on purpose (the glyph
+    // A badgeless reading-less row paints `Idle` + DIM (the 2026-10-06
+    // shell ruling dropped the `?` mark); a badgeless local row and a
+    // badgeless external row collide there on purpose (the word
     // discriminates STATE, never external-ness; DIM only reinforces it).
     // External-ness reads through the row's ACTIONS, and the exited
     // precedence below is unchanged.
@@ -7690,13 +7690,13 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     );
     let (word, dim) = probe("z-external");
     assert!(
-        word.trim_start().starts_with('?') && dim,
-        "external: ? + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && dim,
+        "external: Idle + DIM: {word:?}"
     );
     let (word, dim) = probe("z-fnolive");
     assert!(
-        word.trim_start().starts_with('?') && dim,
-        "fno-live: ? + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && !dim,
+        "fno-live: Idle, live and undimmed now the mark is gone: {word:?}"
     );
     // AC1-UI: external + Blocked renders `Input` in the amber accent,
     // BOLD, and NOT dimmed even though it is external - the accent beats the
