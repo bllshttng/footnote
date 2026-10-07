@@ -49,9 +49,12 @@ fn main() {
     // Same single-threaded rule: fill the build-dir env before the runtime
     // below spawns threads, so the heal lane's `fno doctor update` and every
     // other child inherits it even when the daemon's parent passed no value.
+    // The server start is best-effort and detached; the watch tick re-ensures
+    // it every 300s, so a boot-time failure costs nothing.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     fno_agents::cargo_build_dirs::fill_build_dir_env(&cwd);
     fno_agents::cargo_build_dirs::fill_sccache_env(&cwd);
+    fno_agents::cargo_build_dirs::ensure_sccache_server();
 
     // A failed daemon must surface a non-zero exit and a clear stderr line; it
     // must never panic silently (Silent-Failure-Hunter posture).

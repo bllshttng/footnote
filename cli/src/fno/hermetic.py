@@ -97,6 +97,11 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # developer's Rust build directory; Cargo supplies its own value to build
     # scripts when it invokes them.
     "OUT_DIR",
+    # The sccache server's idle timeout. fill_sccache_env and the rustc
+    # wrapper resolve an operator's value, and a test inheriting it would
+    # see a server lifetime the code under test did not choose; the wrapper
+    # test pins its own value explicitly.
+    "SCCACHE_IDLE_TIMEOUT",
     "EDITOR",  # the board editor (backlog_board.rs spawns it); a developer's editor is not a test input
     # Colour suppression, scrubbed rather than kept, which splits it from its
     # siblings TERM and COLORTERM in _ENVIRONMENT below. Those two DESCRIBE a

@@ -172,6 +172,10 @@ esac
 
 if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}"
+    # 0 stops the server exiting on idle mid-build, which fell compiles back
+    # to local rustc under fleet load. The daemon sets the same default; this
+    # keeps an operator's shorter override working.
+    export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
     # The fleet cache lives under the build-dir base so one reclaim lane owns
     # the whole tree. The rc export and fill_sccache_env set it first; this
     # default only covers shells that predate them.
