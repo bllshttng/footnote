@@ -36,14 +36,14 @@ const HELP: &str = "fno agents org - the org chart of roles and their lifecycle
 
 /// The old verb spellings and their `org` forms, for the one stderr line.
 const OLD: &[(&str, &str)] = &[
-    ("crown", "fno agents org promote <session> --scope <scope>"),
-    ("court", "fno agents org"),
-    ("court-fold", "fno agents org fold"),
-    ("court-orphans", "fno agents org vacancies"),
-    ("king", "fno agents org <action>"),
-    ("king-checkin", "fno agents org checkin"),
-    ("king-history", "fno agents org history"),
-    ("reign-ledger", "fno agents org rundown"),
+    ("role", "fno agents org promote <session> --scope <scope>"),
+    ("team", "fno agents org"),
+    ("team-fold", "fno agents org fold"),
+    ("team-orphans", "fno agents org vacancies"),
+    ("lead", "fno agents org <action>"),
+    ("lead-checkin", "fno agents org checkin"),
+    ("lead-history", "fno agents org history"),
+    ("term-ledger", "fno agents org rundown"),
 ];
 
 fn os(text: &str) -> OsString {
@@ -81,10 +81,10 @@ fn rundown_out_arg() -> Option<OsString> {
     None
 }
 
-/// `org rundown` argv: `king ledger` plus the default --out when the caller
+/// `org rundown` argv: `lead ledger` plus the default --out when the caller
 /// gave none and the state root resolved faithfully.
 fn rundown_argv(rest: &[OsString], default_out: Option<OsString>) -> Vec<OsString> {
-    let mut argv: Vec<OsString> = vec![os("agents"), os("king"), os("ledger")];
+    let mut argv: Vec<OsString> = vec![os("agents"), os("lead"), os("ledger")];
     let has_out = rest.iter().any(|a| {
         a.to_str()
             .map(|s| s == "--out" || s.starts_with("--out="))
@@ -100,37 +100,34 @@ fn rundown_argv(rest: &[OsString], default_out: Option<OsString>) -> Vec<OsStrin
     argv
 }
 
-/// The spawn door answers `--promote` natively, so a spawn argv is not
-/// claimed here: it dispatches through the normal front unchanged, and the
-/// retired `--crown`/`--succeed` spellings reach the door's one-release alias
-/// path, which prints the notice.
+/// The spawn door owns promotion and hand-off flags; this group routes lifecycle actions.
 fn org(rest: &[OsString]) -> Org {
     let first = rest.first().and_then(|a| a.to_str());
     let tail: Vec<OsString> = rest.iter().skip(1).cloned().collect();
-    let mut court: Vec<OsString> = vec![os("agents"), os("court")];
-    court.extend(rest.iter().cloned());
+    let mut team: Vec<OsString> = vec![os("agents"), os("team")];
+    team.extend(rest.iter().cloned());
     match first {
-        None => Org::Forward(vec![os("agents"), os("court")]),
+        None => Org::Forward(vec![os("agents"), os("team")]),
         Some("-h" | "--help") => Org::Help(HELP.to_string()),
-        Some(flag) if flag.starts_with('-') => Org::Forward(court),
+        Some(flag) if flag.starts_with('-') => Org::Forward(team),
         Some("promote") => {
-            let mut argv: Vec<OsString> = vec![os("agents"), os("crown")];
+            let mut argv: Vec<OsString> = vec![os("agents"), os("role")];
             argv.extend(tail);
             Org::Forward(argv)
         }
         Some("rundown") => Org::Forward(rundown_argv(&tail, rundown_out_arg())),
         Some("vacancies") => {
-            let mut argv: Vec<OsString> = vec![os("agents"), os("court-orphans")];
+            let mut argv: Vec<OsString> = vec![os("agents"), os("team-orphans")];
             argv.extend(tail);
             Org::Forward(argv)
         }
         Some("fold") => {
-            let mut argv: Vec<OsString> = vec![os("agents"), os("court-fold")];
+            let mut argv: Vec<OsString> = vec![os("agents"), os("team-fold")];
             argv.extend(tail);
             Org::Forward(argv)
         }
         Some(action) if ACTIONS.contains(&action) => {
-            let mut argv: Vec<OsString> = vec![os("agents"), os("king"), os(action)];
+            let mut argv: Vec<OsString> = vec![os("agents"), os("lead"), os(action)];
             argv.extend(tail);
             Org::Forward(argv)
         }
@@ -149,6 +146,11 @@ pub fn classify(args: &[OsString]) -> Option<Org> {
         return None;
     }
     let verb = args.get(1).and_then(|a| a.to_str())?;
+    if let Some(instead) = crate::role_migration::retired_verb(verb) {
+        return Some(Org::Refuse(format!(
+            "this role verb is retired; use {instead}"
+        )));
+    }
     if verb == "org" {
         return Some(org(&args[2..]));
     }
@@ -166,18 +168,18 @@ pub fn classify(args: &[OsString]) -> Option<Org> {
 mod tests {
     #[test]
     fn every_forward_and_refusal_answers_at_the_front_door() {
-        fn org_bare_and_flags_forward_the_court_argv() {
+        fn org_bare_and_flags_forward_the_team_argv() {
             assert_eq!(
                 classify(&osv(&["agents", "org"])),
-                Some(Org::Forward(osv(&["agents", "court"])))
+                Some(Org::Forward(osv(&["agents", "team"])))
             );
             assert_eq!(
                 classify(&osv(&["agents", "org", "-J"])),
-                Some(Org::Forward(osv(&["agents", "court", "-J"])))
+                Some(Org::Forward(osv(&["agents", "team", "-J"])))
             );
             assert_eq!(
                 classify(&osv(&["agents", "org", "-n", "--json"])),
-                Some(Org::Forward(osv(&["agents", "court", "-n", "--json"])))
+                Some(Org::Forward(osv(&["agents", "team", "-n", "--json"])))
             );
         }
 
@@ -191,13 +193,13 @@ mod tests {
             }
         }
 
-        fn org_promote_forwards_the_crown_argv() {
+        fn org_promote_forwards_the_role_argv() {
             assert_eq!(
                 classify(&osv(&[
                     "agents", "org", "promote", "folio", "--scope", "fno"
                 ])),
                 Some(Org::Forward(osv(&[
-                    "agents", "crown", "folio", "--scope", "fno"
+                    "agents", "role", "folio", "--scope", "fno"
                 ])))
             );
         }
@@ -206,34 +208,34 @@ mod tests {
             let default = Some(OsString::from("/s/pages/rundown.html"));
             assert_eq!(
                 rundown_argv(&osv(&[]), default.clone()),
-                osv(&["agents", "king", "ledger", "--out", "/s/pages/rundown.html"])
+                osv(&["agents", "lead", "ledger", "--out", "/s/pages/rundown.html"])
             );
             assert_eq!(
                 rundown_argv(&osv(&["--out", "/x.html"]), default.clone()),
-                osv(&["agents", "king", "ledger", "--out", "/x.html"])
+                osv(&["agents", "lead", "ledger", "--out", "/x.html"])
             );
             assert_eq!(
                 rundown_argv(&osv(&["--out=/x.html"]), default),
-                osv(&["agents", "king", "ledger", "--out=/x.html"])
+                osv(&["agents", "lead", "ledger", "--out=/x.html"])
             );
         }
 
         fn org_vacancies_and_fold_forward_the_old_sweeps() {
             assert_eq!(
                 classify(&osv(&["agents", "org", "vacancies", "--json"])),
-                Some(Org::Forward(osv(&["agents", "court-orphans", "--json"])))
+                Some(Org::Forward(osv(&["agents", "team-orphans", "--json"])))
             );
             assert_eq!(
                 classify(&osv(&["agents", "org", "fold", "fno"])),
-                Some(Org::Forward(osv(&["agents", "court-fold", "fno"])))
+                Some(Org::Forward(osv(&["agents", "team-fold", "fno"])))
             );
         }
 
-        fn every_lifecycle_action_forwards_the_king_action() {
+        fn every_lifecycle_action_forwards_the_lead_action() {
             for action in ACTIONS {
                 assert_eq!(
                     classify(&osv(&["agents", "org", action, "--flag"])),
-                    Some(Org::Forward(osv(&["agents", "king", action, "--flag"])))
+                    Some(Org::Forward(osv(&["agents", "lead", action, "--flag"])))
                 );
             }
         }
@@ -276,12 +278,12 @@ mod tests {
             assert_eq!(classify(&osv(&["agents", "spawn", "--promote", "x"])), None);
             assert_eq!(classify(&osv(&[])), None);
         }
-        org_bare_and_flags_forward_the_court_argv();
+        org_bare_and_flags_forward_the_team_argv();
         org_help_is_native_and_names_the_actions();
-        org_promote_forwards_the_crown_argv();
+        org_promote_forwards_the_role_argv();
         org_rundown_appends_the_default_out_only_when_absent();
         org_vacancies_and_fold_forward_the_old_sweeps();
-        every_lifecycle_action_forwards_the_king_action();
+        every_lifecycle_action_forwards_the_lead_action();
         an_unknown_org_word_refuses_listing_the_actions();
         every_old_spelling_forwards_unchanged_with_a_notice();
         bare_promote_refuses_naming_the_group_form();

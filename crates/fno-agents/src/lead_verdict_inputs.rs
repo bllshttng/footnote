@@ -168,13 +168,13 @@ pub(crate) fn resolve_scope(
         ));
     }
     let team = row
-        .crown_scope
+        .role_scope
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             format!(
-                "the registry row for {session} carries no crown_scope: the row \
+                "the registry row for {session} carries no role_scope: the row \
                  is unstamped, so no team proves this session's authority"
             )
         })?;
@@ -401,7 +401,7 @@ pub(crate) fn resolve_verdict_inputs(
                 .spawned_by_session
                 .as_deref()
                 .filter(|session| !session.trim().is_empty());
-            let inherited = parent.is_some() && row.crown_grantor.as_deref() != Some("human");
+            let inherited = parent.is_some() && row.role_grantor.as_deref() != Some("human");
             (
                 Some(inherited),
                 inherited.then(|| parent.map(str::to_string)).flatten(),
@@ -765,9 +765,9 @@ mod tests {
             "harness": "claude",
             "harness_session_id": "sess-k",
             "spawned_by_session": "grantor-session",
-            "crown_level": 2,
-            "crown_scope": "x-root",
-            "crown_grantor": "spawn"
+            "role_level": 2,
+            "role_scope": "x-root",
+            "role_grantor": "spawn"
         })
     }
 
@@ -1165,8 +1165,8 @@ mod tests {
             "status": "idle",
             "harness": "claude",
             "harness_session_id": "ses-team",
-            "crown_level": 2,
-            "crown_scope": "probe fleet",
+            "role_level": 2,
+            "role_scope": "probe fleet",
         });
         if let Value::Object(map) = extra {
             for (k, v) in map {

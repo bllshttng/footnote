@@ -14,8 +14,8 @@ fn card_view(agents: Vec<AgentRow>) -> View {
 fn lead_and_worker() -> Vec<AgentRow> {
     let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
     lead.harness = Some("claude".into());
-    lead.crown_level = Some(2);
-    lead.crown_scope = Some("fno".into());
+    lead.role_level = Some(2);
+    lead.role_scope = Some("fno".into());
     lead.harness_session_id = Some("sess-lead".into());
     let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
     w1.harness = Some("claude".into());
@@ -120,8 +120,8 @@ fn card_age_sort_orders_workers_inside_a_lead_group() {
     let ages = [("w-old", 720u64), ("w-new", 60), ("w-mid", 600)];
     let mut agents = Vec::new();
     let mut lead = agent_row("lead-a", 4, Some(AgentBadge::Working), false);
-    lead.crown_level = Some(2);
-    lead.crown_scope = Some("fno".into());
+    lead.role_level = Some(2);
+    lead.role_scope = Some("fno".into());
     lead.harness_session_id = Some("sess-lead".into());
     lead.last_activity_age_s = Some(10);
     agents.push(lead);
@@ -187,7 +187,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     // scales to the card's own max (8) and grades one warn, one error.
     agents[1].activity = Some(vec![(2, 0), (4, 1), (8, 4), (0, 0)]);
     agents[0].model = Some("claude-opus-5-5".into());
-    agents[0].crown_title = Some("Lead of mux".into());
+    agents[0].role_title = Some("Lead of mux".into());
     let mut v = card_view(agents);
     v.term = (30, 140);
     v.sideline_width = 80;
@@ -321,7 +321,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     bare.harness = Some("claude".into());
     bare.harness_session_id = Some("sess-w9".into());
-    bare.crown_level = Some(2);
+    bare.role_level = Some(2);
     bare.context_used_pct = Some(26);
     bare.session_tokens = Some(999);
     bare.session_cost_cents = Some(77);
@@ -331,7 +331,7 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
         "activity stays blank until two intervals land, it never fakes a line"
     );
     assert!(matches!(&cells[3], card_line::MetricCell::Value(v) if v == "999 tok"));
-    // Cost left the metrics line (it rides line 2, served-only): a crowned
+    // Cost left the metrics line (it rides line 2, served-only): a promoted
     // lead's session_cost_cents never reach this line at all.
     // A codex row keeps the populated-paint contract off its unreportable
     // fields: context and compactions hide even when the wire carries them,

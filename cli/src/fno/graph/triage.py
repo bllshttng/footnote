@@ -1594,7 +1594,7 @@ def cmd_health(
     # 7b. Ownership defects (change 5): every node carrying an
     # ownership_defect stamped by the Rust recompute - a stale graph lock, or
     # an open do row past the do TTL. Surfacing only: the section names the
-    # verification pair a human or king runs, because the graph cannot decide
+    # verification pair a human or lead runs, because the graph cannot decide
     # liveness from a timestamp (Locked Decision #2 posture, same as the
     # stranded section above).
     ownership_defects: list[dict] = []

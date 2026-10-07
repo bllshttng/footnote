@@ -51,7 +51,7 @@ def _silent_walk_and_attester(monkeypatch, attested_id: str):
 
 
 def _silent_walk_and_attester_with_codex_proof(monkeypatch, attested_id: str):
-    """The king's shape (x-a409): the process tree DOES prove codex (the pane
+    """The lead's shape (x-a409): the process tree DOES prove codex (the pane
     runner), but the attester stays env_only - codex never carries
     CODEX_THREAD_ID in its own env, so ancestry cannot witness the id value.
     This is exactly the gap the rollout witness fills."""
@@ -123,7 +123,7 @@ def test_name_only_own_row_resolves_when_the_attester_witnesses(
 
 
 def test_name_only_own_row_resolves_by_rollout_witness(tmp_path, monkeypatch):
-    """AC1 (x-a409): the king shape. A name_only codex stamp, a live registry
+    """AC1 (x-a409): the lead shape. A name_only codex stamp, a live registry
     row holding the marker id, a codex-proofed tree, and an attester that only
     saw env - yet the rollout fd witnesses the id, and that fd cannot be
     forged by a leaked marker. The resolver completes its own pair and answers

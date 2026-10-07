@@ -182,15 +182,15 @@ pub static AREAS: &[Area] = &[
         kinds: &[
             "session_spawned",
             "session_reaped",
-            "crown_granted",
-            "crown_vacated",
+            "role_granted",
+            "role_vacated",
             "worker_died",
             "worker_stalled",
             "help_emitted",
             "spawn_refused",
         ],
         title_terms: &[
-            "agent", "agents", "spawn", "worker", "session", "reap", "crown", "king", "lead",
+            "agent", "agents", "spawn", "worker", "session", "reap", "role", "lead", "lead",
             "harness",
         ],
         path_terms: &["agents/", "spawn"],
@@ -1119,7 +1119,7 @@ pub fn help_text(surface: Surface) -> String {
         Surface::Event => &[
             "a:rowan k:question",
             "m:glm k:node_shipped ts:>=2026-10-01",
-            "ar:mail l:heir -k:day_boundary",
+            "ar:mail l:successor -k:day_boundary",
         ],
     };
     out.push_str("examples:\n");

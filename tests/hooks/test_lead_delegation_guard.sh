@@ -10,7 +10,7 @@
 # the script became a probe-and-relay wrapper (never exec: a candidate that
 # lacks the hook verb falls through instead of refusing every tool), so the
 # fixtures are real files the native guard reads (registry.json under
-# FNO_AGENTS_HOME, the org manifest under the space's kings/, config.toml at
+# FNO_AGENTS_HOME, the org manifest under the space's leads/, config.toml at
 # the payload cwd) instead of stubbed verb outputs. Every pre-port case keeps
 # its semantics; the stub positive control became a no-subprocess canary (the
 # native guard must spawn no `fno`).
@@ -49,7 +49,7 @@ trap 'rm -rf "$TMP"' EXIT
 export FNO_AGENTS_HOME="$TMP/home/agents"
 export FNO_EVENTS_PATH="$TMP/space/events.jsonl"
 export FNO_SPACES_DIR="$TMP/spaces"
-mkdir -p "$FNO_AGENTS_HOME" "$TMP/space/kings" "$TMP/repo/.fno"
+mkdir -p "$FNO_AGENTS_HOME" "$TMP/space/leads" "$TMP/repo/.fno"
 
 # A `fno` canary: the native guard never shells out, so this must never run.
 mkdir -p "$TMP/bin"
@@ -89,28 +89,28 @@ registry_fixture() { printf '{"schema_version":26,"agents":[%s]}\n' "$1" > "$FNO
 manifest_fixture() {
   local shape="$1" mside="${2:-$SID}"
   printf -- '---\nfno_id: 20260915T190000Z-kg1-abcdef\nscope: fno\nshape: %s\nharness_session_id: %s\n---\n' "$shape" "$mside" \
-    > "$TMP/space/kings/fno.md"
+    > "$TMP/space/leads/fno.md"
 }
-clear_manifest() { rm -f "$TMP/space/kings/fno.md"; }
+clear_manifest() { rm -f "$TMP/space/leads/fno.md"; }
 set_knob() { # empty -> unset (refuse default); else refuse|warn|off
   if [[ -z "$1" ]]; then
     sed -i '' '/implementation_guard/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
       || sed -i '/implementation_guard/d' "$TMP/repo/.fno/config.toml"
   else
-    printf '[king]\nimplementation_guard = "%s"\n' "$1" >> "$TMP/repo/.fno/config.toml"
+    printf '[lead]\nimplementation_guard = "%s"\n' "$1" >> "$TMP/repo/.fno/config.toml"
   fi
 }
 clear_knob() {
-  sed -i '' '/implementation_guard/d; /write_roots/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
-    || sed -i '/implementation_guard/d; /write_roots/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml"
+  sed -i '' '/implementation_guard/d; /write_roots/d; /^\[lead\]$/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
+    || sed -i '/implementation_guard/d; /write_roots/d; /^\[lead\]$/d' "$TMP/repo/.fno/config.toml"
 }
 
 run_guard() { # $1 = payload JSON; stderr lands in $ERR via RUN_GUARD_ERR
   printf '%s' "$1" | bash "$KGD" 2>"$TMP/stderr.txt"
 }
 
-TEAMED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'","crown_level":1,"crown_scope":"fno"}'
-UNCROWNED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'"}'
+TEAMED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'","role_level":1,"role_scope":"fno"}'
+UNPROMOTED='{"name":"fixture-lead","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'"}'
 
 edit_payload() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$TMP/repo" "$1"; }
 bash_payload() { printf '{"tool_name":"Bash","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"command":"%s"}}' "$SID" "$TMP/repo" "$1"; }
@@ -188,13 +188,13 @@ clear_knob
 # ── AC2b-HP: a listed write root allows its subtree; source still denies ─────
 registry_fixture "$TEAMED"
 manifest_fixture org
-printf '[king]\nwrite_roots = ["docs"]\n' >> "$TMP/repo/.fno/config.toml"
+printf '[lead]\nwrite_roots = ["docs"]\n' >> "$TMP/repo/.fno/config.toml"
 OUT="$(run_guard "$(edit_payload "$TMP/repo/docs/guide.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2b: listed write root allows docs/guide.md" \
   || fail "AC2b: listed write root rc=$RC out=$OUT"
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
-[[ $RC -eq 0 && "$OUT" == *'"block"'* && "$OUT" == *"config.king.write_roots"* ]] \
+[[ $RC -eq 0 && "$OUT" == *'"block"'* && "$OUT" == *"config.lead.write_roots"* ]] \
   && pass "AC2b: source still denies and names the key" \
   || fail "AC2b: source deny rc=$RC out=${OUT:0:200} err=$ERR"
 clear_knob
@@ -225,27 +225,27 @@ OUT="$(run_guard "$(edit_payload_at "$TMP/outside/notes.md" "$TMP/outside")")"; 
 # through the binary's own resolver, never a hand-computed slug.
 REPO_EVENTS="$( cd "$TMP/repo" && unset FNO_EVENTS_PATH && "$BIN" state path events 2>/dev/null )"
 REPO_SPACE="${REPO_EVENTS%/*}"
-mkdir -p "$REPO_SPACE/kings"
+mkdir -p "$REPO_SPACE/leads"
 printf -- '---\nfno_id: 20260915T190000Z-kg1-abcdef\nscope: fno\nshape: org\nharness_session_id: %s\n---\n' "$SID" \
-  > "$REPO_SPACE/kings/fno.md"
+  > "$REPO_SPACE/leads/fno.md"
 OUT="$( unset FNO_EVENTS_PATH; run_guard "$(edit_payload_at "$SRC_FILE" "$TMP/outside")" )"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "foreign shell: unpinned org manifest read through the team row's space" \
   || fail "foreign shell unpinned manifest rc=$RC out=${OUT:0:300} err=$(cat "$TMP/stderr.txt")"
-rm -f "$REPO_SPACE/kings/fno.md"
+rm -f "$REPO_SPACE/leads/fno.md"
 
-# ── AC3-EDGE: pass shape, uncrowned row, no row, unreadable registry ─────────
+# ── AC3-EDGE: pass shape, unpromoted row, no row, unreadable registry ─────────
 registry_fixture "$TEAMED"
 manifest_fixture pass
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC3: pass shape allows" \
   || fail "AC3: pass shape rc=$RC out=$OUT"
 
-registry_fixture "$UNCROWNED"
+registry_fixture "$UNPROMOTED"
 clear_manifest
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
-[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC3: uncrowned row allows" \
-  || fail "AC3: uncrowned row rc=$RC out=$OUT"
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC3: unpromoted row allows" \
+  || fail "AC3: unpromoted row rc=$RC out=$OUT"
 
 registry_fixture "$TEAMED"
 manifest_fixture org

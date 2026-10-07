@@ -1257,7 +1257,7 @@ mod tests {
             .expect("the org action is bound");
 
         assert_eq!(binding.key, b'C');
-        assert_eq!(binding.event, crate::keys::Event::OpenCourt);
+        assert_eq!(binding.event, crate::keys::Event::OpenTeam);
         assert!(matches!(binding.section, crate::keys::KeySection::Global));
     }
 }

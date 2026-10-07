@@ -351,7 +351,7 @@ def test_the_exact_refusal_printed_command_returns_a_query_result(tmp_path, monk
 
 
 def test_flag_first_route_argv_is_refused_at_the_cli(tmp_path, monkeypatch):
-    """The king's shape: flags after -- with no command word must refuse."""
+    """The lead's shape: flags after -- with no command word must refuse."""
     rec = _fake_gh(tmp_path, monkeypatch)
     result = runner.invoke(
         app,

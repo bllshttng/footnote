@@ -1,6 +1,6 @@
 """x-3ecf: the `distress-verdicts` board-collection helper.
 
-The king board's blocked_child queue shells this command once per board
+The lead board's blocked_child queue shells this command once per board
 build to learn the fleet watchdog's current word for each blocked session,
 as informational enrichment (Change 2: one classifier, two callers). The
 mail-answered signal itself (AC3-EDGE) is read natively in Rust.

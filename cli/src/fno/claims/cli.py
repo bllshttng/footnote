@@ -88,7 +88,7 @@ def _parse_metadata(value: str) -> dict:
 
 #: Seconds the roster cross-check may spend shelling out to the harness.
 #: A status read is interactive, so it must answer late-but-honestly
-#: ("roster not consulted") rather than hang a king mid-decision.
+#: ("roster not consulted") rather than hang a lead mid-decision.
 _ROSTER_CROSSCHECK_TIMEOUT_S = 10.0
 
 
@@ -698,7 +698,7 @@ def status(
     On a ``node:<id>`` key that nobody holds, the roster is cross-checked
     before the answer is rendered. ``free`` had two explanations the output
     could not tell apart - nobody is working this, and the claim never got
-    taken - and four kings read the first while getting the second, then
+    taken - and four leads read the first while getting the second, then
     staffed a duplicate onto a node that already had a live worker on it.
 
     Only ``node:`` keys, because only they have a fleet to cross-check
@@ -804,7 +804,7 @@ def status(
             # at 68 unresolved of 133 scanned, a majority, and a warm worker
             # sat unimplementing because ownership was unprovable. A
             # coverage-ratio arm was proposed for this exact reader,
-            # measured against those numbers, and refused by the crown on
+            # measured against those numbers, and refused by the role on
             # 2026-09-11: a verdict about node N turns on evidence about
             # node N, never on a count of rows that implicate no node at
             # all. This per-node candidate check is the arm that survived.
@@ -1361,7 +1361,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
     expires on its own TTL, and a wrongly reaped one hands a live worker's node
     to a second worker.
 
-    THREE additions feed it evidence that lives outside the claim (the king's
+    THREE additions feed it evidence that lives outside the claim (the lead's
     2026-08-23 specimens, both of which needed a manual --force release):
 
     1. A handover holder is no longer unconditionally unprovable. Its launch

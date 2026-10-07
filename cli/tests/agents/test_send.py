@@ -3518,7 +3518,7 @@ def test_team_passthrough_flags_reach_the_writer(
     result = _team_invoke(
         monkeypatch,
         [
-            "team", "--scope", "kings", "shift change",
+            "team", "--scope", "leads", "shift change",
             "--subject", "maintenance", "--expires", "45m", "--urgent",
         ],
     )

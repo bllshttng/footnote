@@ -325,7 +325,7 @@ pub struct Stats {
 pub struct Facets {
     pub projects: Vec<String>,
     pub epics: Vec<EpicRef>,
-    #[serde(rename = "kings")]
+    #[serde(rename = "leads")]
     pub leads: Vec<String>,
     pub priorities: Vec<String>,
     pub sizes: Vec<String>,
@@ -1704,7 +1704,7 @@ pub(crate) fn lead_of(
 ) -> Option<(String, u32)> {
     let mut best: Option<(usize, &AgentRow)> = None;
     for a in agents {
-        let (Some(scope), Some(_)) = (&a.crown_scope, a.crown_level) else {
+        let (Some(scope), Some(_)) = (&a.role_scope, a.role_level) else {
             continue;
         };
         let mut rank: Option<usize> = None;
@@ -1730,7 +1730,7 @@ pub(crate) fn lead_of(
             }
         }
     }
-    best.map(|(_, a)| (a.name.clone(), a.crown_level.unwrap_or(0)))
+    best.map(|(_, a)| (a.name.clone(), a.role_level.unwrap_or(0)))
 }
 
 // ---------------------------------------------------------------------------

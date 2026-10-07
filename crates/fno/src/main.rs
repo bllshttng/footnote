@@ -612,6 +612,10 @@ fn run_client(session: &str) {
 }
 
 fn run_server(socket: PathBuf) {
+    if let Err(error) = fno::role_migration::run() {
+        eprintln!("role migration: {error}");
+        std::process::exit(2);
+    }
     // The one mux role that never returns through `exit_mux`: the daemon
     // blocks until killed, so the config warning it recorded while resolving
     // the socket dir would otherwise never surface. Server stderr is a log
@@ -696,7 +700,7 @@ mod tests {
         use fno::agents_alias::Org;
         assert_eq!(
             decide_role(&os(&["agents", "org", "-J"]), false),
-            Role::AgentsAlias(Org::Forward(os(&["agents", "court", "-J"])))
+            Role::AgentsAlias(Org::Forward(os(&["agents", "team", "-J"])))
         );
         assert_eq!(
             decide_role(
@@ -704,7 +708,7 @@ mod tests {
                 false
             ),
             Role::AgentsAlias(Org::Forward(os(&[
-                "agents", "crown", "folio", "--scope", "fno"
+                "agents", "role", "folio", "--scope", "fno"
             ])))
         );
         assert!(matches!(

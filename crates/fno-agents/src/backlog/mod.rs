@@ -288,6 +288,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         if archive_needs_import(&connection, graph)? {
             archive_import_if_needed(&mut connection, graph)?;
         }
+        migrate_role_provenance(&mut connection)?;
         return Ok(connection);
     }
     connection
@@ -313,7 +314,25 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     decisions::import_if_needed(&mut connection, graph)?;
     archive_import_if_needed(&mut connection, graph)?;
     stamp_meta(&connection, "open_setup_version", OPEN_SETUP_VERSION)?;
+    migrate_role_provenance(&mut connection)?;
     Ok(connection)
+}
+
+fn migrate_role_provenance(connection: &mut Connection) -> Result<(), String> {
+    let done: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM graph_meta WHERE key = 'role_provenance_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if done {
+        return Ok(());
+    }
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    nodes::migrate_role_provenance(&tx)?;
+    stamp_meta(&tx, "role_provenance_v1", "1")?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn schema_needs_ensure(connection: &Connection) -> Result<bool, String> {

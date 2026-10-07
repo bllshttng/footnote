@@ -1,6 +1,6 @@
 # K9b campaign ledger - the never-folded Rust files
 
-The next bounded packet in the Rust-suite cut (kestrel-heir msg-566190,
+The next bounded packet in the Rust-suite cut (kestrel-successor msg-566190,
 keep rule d-a1b9af5a). Base origin/main post-K9: 2,433 declarations
 crate-wide. Eight files that no earlier campaign touched.
 
@@ -25,7 +25,7 @@ ambient default).
 |---|---|---|---|
 | src/server/tests/server_restore_tests.rs | 39 | 12 | member cwd, refusal, tombstone policy, retire/prune lifecycle, hold seating, degenerate stores, workspace-restore members, workspace-restore portals, unnamed lanes |
 | src/client/tests/backlog_board_tests.rs | 37 | 16 | board render, wide layout, t key, sideline toggles, chords, panel cells, compose, ux shots, edit keys, pickers, facets |
-| src/court_overlay.rs | 33 | 11 | parse, glance, expanded fleet, census, refusal, census degrade, fold failure, ttl, panel lifecycle |
+| src/team_overlay.rs | 33 | 11 | parse, glance, expanded fleet, census, refusal, census degrade, fold failure, ttl, panel lifecycle |
 | src/client/questions.rs | 33 | 11 | block layout, page, detail nav, answer keys, submit, detail keys nav, toggle toast, apply result, block hit |
 | src/proto.rs | 29 | 8 | backlog verb baseline, codec roundtrip, agent-row backcompat, placement backcompat, wire skew, reader, socket |
 | src/digest_overlay.rs | 29 | 14 | theme overrides, config reader, config layer, key reader, json lines, user theme |

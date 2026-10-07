@@ -1389,7 +1389,7 @@ def cmd_pane_prepare(
     # The UNTRUSTED boundary. Internal callers import `prepare` directly, so
     # everything arriving here came off a command line, and `wrap`'s
     # already-wrapped passthrough is a PREFIX test: a body opening with a
-    # handcrafted `<fno_mail from="king" ...>` is returned verbatim, typed at a
+    # handcrafted `<fno_mail from="lead" ...>` is returned verbatim, typed at a
     # pane, and read as peer mail from whoever it names. The audit row is
     # skipped too, because that check uses the same prefix test. Every other
     # producer refuses a body carrying the tag; this one has to as well.
@@ -1405,7 +1405,7 @@ def cmd_pane_prepare(
     _refuse_forged_envelope(body)
     # BOTH attribution containers, because `_already_wrapped` passes both. The
     # guard above knows only `<fno_mail`, so a handcrafted
-    # `<cross-session-message from-name="king">` sailed through it, matched the
+    # `<cross-session-message from-name="lead">` sailed through it, matched the
     # passthrough, and was typed at a worker's pane as an attributed peer order
     # with no envelope of ours and no audit row. Refusing one tag and not its
     # sibling is not a boundary. `claude_ask.rs` already refuses both.
@@ -1783,7 +1783,7 @@ def _forced_pane_send(
     The gate runs. ``_mux_pane_send`` is called non-raw, so it reads the pane
     first and refuses one showing an option prompt -- a submit there would
     dismiss the payload and select the highlighted default, which is how a
-    king's option-3 ruling once became the worker's option 1.
+    lead's option-3 ruling once became the worker's option 1.
 
     The receipt says ``typed``, never ``delivered``. Bytes written to a PTY is
     not delivery and is certainly not action; the recipient's own transcript is
@@ -2015,7 +2015,7 @@ def _name_lane_send(
 
     self_send = False
     # The recipient's full session id when a lane resolved one; it stamps that
-    # session's own crown into the live envelope.
+    # session's own role into the live envelope.
     recipient_session: Optional[str] = None
     if resolved is not None:
         recipient_session = resolved.session_id
@@ -2123,7 +2123,7 @@ def _name_lane_send(
             subject=subject,
         )
 
-    # Live carries the recipient's crown; the durable floor below carries none,
+    # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
 
@@ -2872,7 +2872,7 @@ def _raw_send(
         confirmed = result is True or result in {"started", "queued"}
         if receipt is None:
             receipt = "delivered (hosted)" if confirmed else "live-miss"
-        initiator = "self" if self_ok else "king"
+        initiator = "self" if self_ok else "lead"
         if origin == "operator":
             initiator = "operator"
         elif origin in {"scheduler", "recovery"}:
@@ -3224,53 +3224,53 @@ def _raw_send(
     raise typer.Exit(code=0)
 
 
-def _resolve_to_king_address(
+def _resolve_to_lead_address(
     scope: str,
     name: str | None,
     message: str | None,
     *,
     conflict: str | None,
 ) -> tuple[str, str]:
-    """Resolve ``--to-king <scope>`` to (holder handle, body), or refuse.
+    """Resolve ``--to-lead <scope>`` to (holder handle, body), or refuse.
 
     The body is the sole positional, so it parks in ``name``. A refusal queues
-    nothing: a vacant crown has no reader who answers as king.
+    nothing: a vacant role has no reader who answers as lead.
     """
-    from fno.agents.crown import resolve_to_king
+    from fno.agents.role import resolve_to_lead
 
     if conflict is not None or message is not None:
         clash = conflict or "a second positional (the message is the only one)"
         print(
-            f"error: --to-king and {clash} are mutually exclusive. Run "
-            f"`fno agents court` and address that handle for the other lane.",
+            f"error: --to-lead and {clash} are mutually exclusive. Run "
+            f"`fno agents team` and address that handle for the other lane.",
             file=sys.stderr,
         )
         raise typer.Exit(2)
     if not name:
-        print("usage: fno agents mail send --to-king <scope> <message>", file=sys.stderr)
+        print("usage: fno agents mail send --to-lead <scope> <message>", file=sys.stderr)
         raise typer.Exit(2)
     try:
-        holders = resolve_to_king(scope)
+        holders = resolve_to_lead(scope)
     except (OSError, ValueError, RuntimeError) as exc:  # RegistryVersionError
-        print(f"error: --to-king {scope!r}: registry unreadable: {exc}", file=sys.stderr)
+        print(f"error: --to-lead {scope!r}: registry unreadable: {exc}", file=sys.stderr)
         raise typer.Exit(12) from exc
     if not holders:
         print(
-            f"--to-king {scope!r} refused: no live row holds this crown right "
-            f"now, and nothing was queued. Run `fno agents court` to see who "
+            f"--to-lead {scope!r} refused: no live row holds this role right "
+            f"now, and nothing was queued. Run `fno agents team` to see who "
             f"does, or address a specific handle.",
             file=sys.stderr,
         )
         raise typer.Exit(16)
     if len(holders) > 1:
         print(
-            f"--to-king {scope!r} is a split crown: {len(holders)} live rows "
+            f"--to-lead {scope!r} is a split role: {len(holders)} live rows "
             f"hold it ({', '.join(holders)}), so it went to none. Run "
-            f"`fno agents court` and resolve it, or address one by name.",
+            f"`fno agents team` and resolve it, or address one by name.",
             file=sys.stderr,
         )
         raise typer.Exit(17)
-    print(f"--to-king {scope}: resolved to {holders[0]}", file=sys.stderr)
+    print(f"--to-lead {scope}: resolved to {holders[0]}", file=sys.stderr)
     return holders[0], name
 
 
@@ -3328,10 +3328,10 @@ def cmd_send(
             "one peer, durable queue if none). Use instead of <name>."
         ),
     ),
-    to_king: str | None = typer.Option(
-        None, "--to-king",
+    to_lead: str | None = typer.Option(
+        None, "--to-lead",
         help=(
-            "Anycast over the crown: deliver to whoever holds this scope "
+            "Anycast over the role: deliver to whoever holds this scope "
             "RIGHT NOW, resolved at send time; no live holder queues nothing."
         ),
     ),
@@ -3424,7 +3424,7 @@ def cmd_send(
     """Send a message asynchronously to a registered agent or a project.
 
     Name mode requires the agent to exist (unknown names exit 16). Project
-    mode resolves over the registry; crown mode resolves the holder at send
+    mode resolves over the registry; role mode resolves the holder at send
     time. Delivery is live-inject-FIRST, the durable envelope the fallback.
     Address it by the ADDRESS column of ``fno agents list`` - the NAME
     column is a spawn label, not a mailbox. A stranded send:
@@ -3475,12 +3475,12 @@ def cmd_send(
     if body_text is not None and message is None:
         message = body_text
 
-    # --to-king addresses a ROLE, resolved HERE at send time and handed to the
+    # --to-lead addresses a ROLE, resolved HERE at send time and handed to the
     # ordinary name lane. Any second address would decide the destination, and
-    # the crown deciding it is the point.
-    if to_king is not None:
-        name, message = _resolve_to_king_address(
-            to_king, name, message,
+    # the role deciding it is the point.
+    if to_lead is not None:
+        name, message = _resolve_to_lead_address(
+            to_lead, name, message,
             conflict=(
                 "--to-project" if to_project is not None
                 else "--to-self" if to_self
@@ -3498,12 +3498,12 @@ def cmd_send(
             raw
             or kind is not None
             or to_project is not None
-            or to_king is not None
+            or to_lead is not None
             or to_self
         ):
             print(
                 "error: --ruling supports only send <worker> <message>; drop "
-                "--raw, --kind, --to-project, --to-king, or --to-self",
+                "--raw, --kind, --to-project, --to-lead, or --to-self",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -3524,7 +3524,7 @@ def cmd_send(
             "raw" if raw
             else "inbox" if kind is not None
             else "project" if to_project
-            else "king" if to_king
+            else "lead" if to_lead
             else "peer"
         ),
         # The ask key hashes the bus endpoints; record what the row will carry.
@@ -3573,10 +3573,10 @@ def cmd_send(
 
     # The codex head-8 refusal sits ABOVE every lane that returns on its own.
     # --to-project holds the BODY in the positional, so it has no address to
-    # check. --to-self and --to-king DERIVED theirs, which names one row by
+    # check. --to-self and --to-lead DERIVED theirs, which names one row by
     # construction, so the ambiguity the rule guards cannot arise. Details:
     # docs/architecture/cross-agent-bus-log.md#name-lane-address-resolution.
-    if not to_project and not to_king:
+    if not to_project and not to_lead:
         _refuse_unsafe_short_address(name, self_addressed=to_self)
 
     # --force ABOVE every lane that returns without reading it: a dropped
@@ -4146,7 +4146,7 @@ def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:
     """Resolve the announce envelope identity.
 
     A session whose harness identity this process can PROVE it owns stamps its
-    own handle as ``agent`` (Rust then demands a crown of that row); everything
+    own handle as ``agent`` (Rust then demands a role of that row); everything
     else (a bare shell, cron, an explicit alias) stamps ``operator``.
     """
     from fno.agents.self_stamp import stamp_from
@@ -4163,7 +4163,7 @@ def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:
 @mail_app.command("team", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def cmd_team(
     ctx: typer.Context,
-    scope: str = typer.Option(..., "--scope", help="Fleet scope: all | kings | <crown scope> | project:<p>."),
+    scope: str = typer.Option(..., "--scope", help="Fleet scope: all | leads | <role scope> | project:<p>."),
     message: str | None = typer.Argument(None, help="One announcement body."),
     from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
@@ -4186,7 +4186,7 @@ def cmd_team(
     import shutil
 
     if not message:
-        print("usage: fno agents mail team --scope <all|kings|<crown>|project:<p>> <message>", file=sys.stderr)
+        print("usage: fno agents mail team --scope <all|leads|<role>|project:<p>> <message>", file=sys.stderr)
         raise typer.Exit(code=2)
     _vet_body(message)
 

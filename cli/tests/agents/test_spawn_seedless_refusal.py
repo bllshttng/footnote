@@ -23,9 +23,9 @@ def test_the_refusal_names_the_seeded_form():
 
 @pytest.mark.parametrize(
     "message,extra",
-    [("/fno:target x-1", {}), ("", {"resume": RESUME}), ("", {"crown": True})],
+    [("/fno:target x-1", {}), ("", {"resume": RESUME}), ("", {"role": True})],
 )
-def test_a_seed_a_resume_or_a_crown_is_not_refused(message, extra):
+def test_a_seed_a_resume_or_a_role_is_not_refused(message, extra):
     assert seedless_thread_refusal("claude", "thread", message, **extra) is None
 
 

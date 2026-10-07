@@ -49,7 +49,7 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
 def _assert_state_landed(tmp_state: Path) -> None:
     """Refuse loudly when the declared root did not actually take.
 
-    One assertion, inherited by every caller. The crown family resolved
+    One assertion, inherited by every caller. The role family resolved
     ``graph_json`` past this fixture and overwrote the operator's live graph.
     Silence was the whole defect, so this is a receipt, not a comment.
     """

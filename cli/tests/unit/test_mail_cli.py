@@ -5,7 +5,7 @@ a durable envelope; `mail unread`/`ack` are the per-recipient cursor consume;
 `mail rebuild-render` regenerates the derived markdown from the log. The old
 `fno inbox` namespace (mail's alias for `mail unread`) was retired clean (no
 pointer, no shim). x-afa6 later minted a real `fno inbox` root for an
-unrelated purpose (approvals/notify/outstanding/the king board); mail's old
+unrelated purpose (approvals/notify/outstanding/the lead board); mail's old
 `unread` leaf never came back under it.
 """
 from __future__ import annotations
@@ -113,7 +113,7 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
         app,
         [
             "agents", "mail", "send", "worker-one", marker,
-            "--from-name", "king", "--ruling", "x-511a",
+            "--from-name", "lead", "--ruling", "x-511a",
         ],
     )
 
@@ -194,7 +194,7 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
         app,
         [
             "agents", "mail", "send", "worker-one", marker,
-            "--from-name", "king", "--cwd", str(nested_workdir),
+            "--from-name", "lead", "--cwd", str(nested_workdir),
             "--ruling", "x-511a",
         ],
     )
@@ -214,7 +214,7 @@ def test_send_ruling_unknown_node_refuses_before_mail(
         app,
         [
             "agents", "mail", "send", "worker-one",
-            "This ruling names no real node.", "--from-name", "king",
+            "This ruling names no real node.", "--from-name", "lead",
             "--ruling", "x-dead",
         ],
     )

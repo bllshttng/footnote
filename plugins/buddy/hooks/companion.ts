@@ -9,7 +9,7 @@ export const SPECIES = [
 export type Species = (typeof SPECIES)[number]
 
 export const EYES = ['·', '✦', '×', '◉', '@', '°'] as const
-export const HATS = ['none', 'crown', 'tophat', 'propeller', 'halo', 'wizard', 'beanie', 'tinyduck'] as const
+export const HATS = ['none', 'role', 'tophat', 'propeller', 'halo', 'wizard', 'beanie', 'tinyduck'] as const
 export type Hat = (typeof HATS)[number]
 
 export const STAT_NAMES = ['DEBUGGING', 'PATIENCE', 'CHAOS', 'WISDOM', 'SNARK'] as const

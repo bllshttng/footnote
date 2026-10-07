@@ -93,7 +93,7 @@ pub struct FeedRow {
     /// agents, mux, fleet or ci. A pure function of the kind, so no migration
     /// ever backfills it.
     pub area: String,
-    /// The crown holder the row rolls up to, when the row's scope is held.
+    /// The role holder the row rolls up to, when the row's scope is held.
     /// The search answers `l:` through it, else through `owner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead: Option<String>,
@@ -1087,7 +1087,7 @@ fn assign_owners(
         ));
     }
     // A removal whose team is set clears that team's scope from its own ts:
-    // after the heir's removal the territory has no lead, so later rows stop
+    // after the successor's removal the territory has no lead, so later rows stop
     // rolling up to it.
     for r in rows.iter() {
         if r.kind == "session_reaped" && r.team.is_some() {
@@ -1144,7 +1144,7 @@ fn assign_owners(
             r.lead = Some(holder.clone());
             r.owner = Some(format!("{rank} ({holder})"));
         } else if r.node.is_none() {
-            // A node-less row whose parent session IS a held crown holder's
+            // A node-less row whose parent session IS a held role holder's
             // session rolls up to that holder: the question a lead's own
             // session asked belongs to the lead it holds.
             let named = r.parent.as_deref().and_then(|p| spawn_names.get(p));
@@ -2402,11 +2402,11 @@ mod tests {
         assert!(got.is_empty(), "no harness, no return");
 
         // The lead route: a node-less row whose parent session is a held
-        // crown holder's spawn rolls up to that holder; the node route keeps
+        // role holder's spawn rolls up to that holder; the node route keeps
         // setting lead beside owner.
-        let team = r#"{"ts":"2026-09-02T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"nd-aaaa"}}"#;
+        let team = r#"{"ts":"2026-09-02T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"successor","scope":"nd-aaaa"}}"#;
         let spawns = concat!(
-            r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"heir","harness":"claude","harness_session_id":"20260904T151442Z-cl54345-58af0c","substrate":"pane","spawned_by_session":"s-op"}}"#,
+            r#"{"ts":"2026-09-02T16:00:00Z","type":"agent_spawned","source":"python","data":{"name":"successor","harness":"claude","harness_session_id":"20260904T151442Z-cl54345-58af0c","substrate":"pane","spawned_by_session":"s-op"}}"#,
             "\n",
             r#"{"ts":"2026-09-02T17:30:00Z","type":"agent_spawned","source":"python","data":{"name":"w1","harness":"codex","harness_session_id":"00847995-e0db-47c2-ab5b-24468ba1a4f5","substrate":"pane","spawned_by_session":"20260904T151442Z-cl54345-58af0c"}}"#,
         );
@@ -2416,8 +2416,8 @@ mod tests {
             .iter()
             .find(|r| r.session_id.as_deref() == Some("00847995-e0db-47c2-ab5b-24468ba1a4f5"))
             .unwrap();
-        assert_eq!(child.lead.as_deref(), Some("heir"));
-        assert_eq!(child.owner.as_deref(), Some("Lead of nd-aaaa (heir)"));
+        assert_eq!(child.lead.as_deref(), Some("successor"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of nd-aaaa (successor)"));
         let holder_row = p
             .rows
             .iter()
@@ -2431,7 +2431,7 @@ mod tests {
         // AC7-HP: one row of each new main-store type projects its kind and
         // area, and a merged node reads pr_merged instead of node_ended.
         let main = concat!(
-            r#"{"ts":"2026-09-30T10:00:00Z","type":"spawn_gate_refused","source":"agents","data":{"reason":"king_share","name":"t-w-glm","substrate":"bg","gate":"python"}}"#,
+            r#"{"ts":"2026-09-30T10:00:00Z","type":"spawn_gate_refused","source":"agents","data":{"reason":"lead_share","name":"t-w-glm","substrate":"bg","gate":"python"}}"#,
             "\n",
             r#"{"ts":"2026-09-30T10:01:00Z","type":"worker_silent","source":"daemon","data":{"handle":"t-w","harness":"claude","age_s":802,"deadline_s":600,"node":null}}"#,
             "\n",
@@ -2453,11 +2453,11 @@ mod tests {
         };
         assert_eq!(
             find("session_spawn_refused").title,
-            "spawn refused (king_share): t-w-glm"
+            "spawn refused (lead_share): t-w-glm"
         );
         assert_eq!(
             find("session_spawn_refused").reason.as_deref(),
-            Some("king_share")
+            Some("lead_share")
         );
         assert_eq!(find("worker_stalled").title, "t-w silent 802s");
         assert_eq!(find("worker_stalled").area, "agents");
@@ -2837,14 +2837,14 @@ mod tests {
                 "id": "x-epic", "title": "the epic", "created_at": "2026-09-28T16:00:00Z",
             }),
         ];
-        let team = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"heir","scope":"x-epic"}}"#;
+        let team = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_teamed","source":"python","data":{"grantor":"s-lead","level":2,"name":"successor","scope":"x-epic"}}"#;
         let p = project("", &entries, &[], "", team, "", "", None);
         let child = p
             .rows
             .iter()
             .find(|r| r.node == Some("x-child".into()))
             .unwrap();
-        assert_eq!(child.owner.as_deref(), Some("Lead of x-epic (heir)"));
+        assert_eq!(child.owner.as_deref(), Some("Lead of x-epic (successor)"));
         // The team row itself renders in the teams band: no owner on it.
         let granted = p
             .rows
@@ -2857,7 +2857,7 @@ mod tests {
             .iter()
             .find(|r| r.node == Some("x-epic".into()))
             .unwrap();
-        assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (heir)"));
+        assert_eq!(epic.owner.as_deref(), Some("Lead of x-epic (successor)"));
         // Without a team the child rolls up to its epic by the graph parent.
         let p = project("", &entries, &[], "", "", "", "", None);
         let child = p

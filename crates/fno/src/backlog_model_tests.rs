@@ -433,8 +433,8 @@ fn node_lists_children_blockers_and_live_sessions() {
     assert!(view.card.blocked, "x-top has an open dependency");
     let mut lead = row(Some("lead-session"));
     lead.name = "finch".into();
-    lead.crown_scope = Some("territory".into());
-    lead.crown_level = Some(1);
+    lead.role_scope = Some("territory".into());
+    lead.role_level = Some(1);
     inp.agents.push(lead);
     let mut org = crate::org_model::OrgInputs {
         backlog: inp,
@@ -657,8 +657,8 @@ fn a_board_facts_failure_degrades_to_created_at_order() {
 fn moved_helpers_still_answer() {
     let mut lead = row(None);
     lead.name = "kd".into();
-    lead.crown_level = Some(2);
-    lead.crown_scope = Some("x-9".into());
+    lead.role_level = Some(2);
+    lead.role_scope = Some("x-9".into());
     assert_eq!(
         lead_of(&[lead.clone()], "x-9", None, None),
         Some(("kd".into(), 2))
@@ -669,12 +669,12 @@ fn moved_helpers_still_answer() {
     );
     let mut node_team = row(None);
     node_team.name = "node-lead".into();
-    node_team.crown_level = Some(1);
-    node_team.crown_scope = Some("x-9".into());
+    node_team.role_level = Some(1);
+    node_team.role_scope = Some("x-9".into());
     let mut project_team = row(None);
     project_team.name = "project-lead".into();
-    project_team.crown_level = Some(2);
-    project_team.crown_scope = Some("fno".into());
+    project_team.role_level = Some(2);
+    project_team.role_scope = Some("fno".into());
     let both = [project_team, node_team];
     assert_eq!(
         lead_of(&both, "x-9", None, Some("fno")),

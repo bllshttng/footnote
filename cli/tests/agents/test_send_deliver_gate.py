@@ -1917,12 +1917,12 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert ' session="' not in framed
 
 
-def test_relay_continuation_into_crowned_session_carries_its_crown(
+def test_relay_continuation_into_promoted_session_carries_its_role(
     tmp_path, monkeypatch
 ) -> None:
     # AC4-HP (x-3dcc via x-d7cf): the recipient-side relay ctx wraps B's replies,
     # which are injected into A, so its to_session is A's session and A reads its
-    # own live crown on every continuation hop, not only the first message.
+    # own live role on every continuation hop, not only the first message.
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import _MailCtx, _run_relay_loop
     from fno.agents.registry import AgentEntry, write_registry
@@ -1934,7 +1934,7 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
             AgentEntry(
                 name="alice", harness="claude", cwd="/repo", log_path="",
                 harness_session_id="a11ce000-1111-4222-8333-444444444444", status="live",
-                crown_level=1, crown_scope="fno",
+                role_level=1, role_scope="fno",
             ),
             AgentEntry(
                 name="bob", harness="claude", cwd="/repo", log_path="",
@@ -1967,7 +1967,7 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
         ),
     }
     # seed = bob's reply; the first continuation drives alice with it, so the
-    # hop body is wrapped as BOB and crowned for ALICE's reading.
+    # hop body is wrapped as BOB and promoted for ALICE's reading.
     _run_relay_loop(
         "bob",
         "alice",
@@ -1978,13 +1978,13 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
     )
     body = calls[0]["body"]
     # The continuation is wrapped as BOB (the delivered header names the
-    # sender row). Crown context no longer rides wire attrs: the reader's own
-    # surface renders its crown, so only the wrap contract is assertable here.
+    # sender row). Role context no longer rides wire attrs: the reader's own
+    # surface renders its role, so only the wrap contract is assertable here.
     assert body.splitlines()[0].startswith("`@bob · fmail-"), body
     assert "bob says hi" in body
 
 
-def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
+def test_relay_continuation_with_unresolved_session_renders_no_role_line(
     monkeypatch,
 ) -> None:
     # AC4-ERR (x-3dcc): a peer whose session id never resolved gets a raw

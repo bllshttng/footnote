@@ -67,6 +67,24 @@ check() {
 fresh; const_file keep-a keep-b keep-c lane-heal; commit
 check 'an added action is refused' 1 'added: lane-heal'
 
+# The migration changes vocabulary while preserving the same action.
+legacy_lead="$(python3 - "$(dirname "$GATE")/../../crates/fno-agents/src/role_migration.rs" <<'PYTHON'
+import re, sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text().split('const WORDS:', 1)[1].split('];', 1)[0]
+print(next(old for old, new in re.findall(r'\("([A-Za-z]+)",\s*"([a-z_]+)"\)', source) if new == 'lead'))
+PYTHON
+)"
+fresh
+git checkout -q main
+const_file keep-a "${legacy_lead}-checkin"
+commit
+git push -q origin main
+git checkout -q -B feature main
+const_file keep-a lead-checkin
+commit
+check 'vocabulary migration preserves the action identity' 0 'the action list only shrank'
+
 # --- removals are banked --------------------------------------------------------
 fresh; const_file keep-a keep-c; commit
 check 'a removed action is banked' 0 'banked: keep-b'

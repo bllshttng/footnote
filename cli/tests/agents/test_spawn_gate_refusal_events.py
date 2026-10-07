@@ -104,8 +104,8 @@ def test_ram_floor_refusal_carries_its_measurement_and_threshold(journal: Path) 
     assert rows[0]["min_free_gb"] == 4.0
 
 
-def test_king_share_refusal_emits_though_it_carries_no_receipt(journal: Path) -> None:
-    """The king share refuses with receipt=None, and still has to be answerable.
+def test_lead_share_refusal_emits_though_it_carries_no_receipt(journal: Path) -> None:
+    """The lead share refuses with receipt=None, and still has to be answerable.
 
     This is the branch the seam exists for: four refusals never built a
     receipt, so a design that only forwarded receipts would have left them as
@@ -117,20 +117,20 @@ def test_king_share_refusal_emits_though_it_carries_no_receipt(journal: Path) ->
         spawn_gate._refuse(
             spawn_gate.EXIT_LEAD_SHARE,
             None,
-            reason="king_share",
-            king="kingA",
+            reason="lead_share",
+            lead="leadA",
             held=4,
             share=4,
             max_live=8,
-            kings=2,
+            leads=2,
         )
 
     assert excinfo.value.receipt is None, "stdout receipt shape must not change"
 
     rows = _refusals(journal)
     assert len(rows) == 1, rows
-    assert rows[0]["reason"] == "king_share"
-    assert rows[0]["king"] == "kingA"
+    assert rows[0]["reason"] == "lead_share"
+    assert rows[0]["lead"] == "leadA"
     assert rows[0]["held"] == 4
     assert rows[0]["max_live"] == 8
 

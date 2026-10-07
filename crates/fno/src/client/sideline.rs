@@ -1272,7 +1272,7 @@ impl View {
     }
 
     /// Line 2 keeps model, lead and cost left, with created and activity
-    /// ages right. Cost is served-only: a crowned lead never prices, and an
+    /// ages right. Cost is served-only: a promoted lead never prices, and an
     /// unserved cost renders nothing rather than a placeholder.
     pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
         let mut segments: Vec<String> = Vec::new();
@@ -1358,11 +1358,11 @@ impl View {
     /// ancestor, or a lineage cycle (capped at one step per agent), labels
     /// nothing.
     pub(super) fn lead_label(&self, a: &AgentRow) -> Option<String> {
-        if a.crown_level.is_some() {
-            if let Some(title) = a.crown_title.as_deref().filter(|t| !t.is_empty()) {
+        if a.role_level.is_some() {
+            if let Some(title) = a.role_title.as_deref().filter(|t| !t.is_empty()) {
                 return Some(title.to_string());
             }
-            return a.crown_scope.clone();
+            return a.role_scope.clone();
         }
         let mut parent = lineage_parent(a);
         let mut steps = 0;
@@ -1375,7 +1375,7 @@ impl View {
                 .agents
                 .iter()
                 .find(|r| r.harness_session_id.as_deref() == Some(pid))?;
-            if row.crown_level.is_some() {
+            if row.role_level.is_some() {
                 return Some(team_display_name(row).to_string());
             }
             parent = lineage_parent(row);

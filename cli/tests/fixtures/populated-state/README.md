@@ -3,7 +3,7 @@
 This profile is created inside the smoke runner's temporary sandbox before the
 populated lane starts. It carries the state channels that a developer machine
 normally has: one graph node named `STATE_LEAK_CANARY`, a config file pointing
-at the sandbox state directory, an agent registry with a crown, a session
+at the sandbox state directory, an agent registry with a role, a session
 identity, and one live claim.
 
 The clean lane creates none of these markers. `test_state_canary.py` reads the

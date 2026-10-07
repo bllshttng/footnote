@@ -659,7 +659,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // ── preflight (all before any dispatch) ───────────────────────────────────
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
     // driver: a lead reads its per-scope file `<space>/leads/<scope>.md` (expired
-    // by `fno agents org done` on abdication) and never touches the target one.
+    // by `fno agents org done` on departure) and never touches the target one.
     let driver_name = driver.clone().unwrap_or_else(|| "target".to_string());
     let mut target_queue: Option<TargetQueue> = None;
     let mut lead_queue: Option<crate::loop_lead::LeadQueue> = None;
@@ -671,7 +671,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             eprintln!(
                 "fno-agents loop run: --driver lead needs --scope <scope> (the teamed \
                  territory to respawn a lead over; the manifest is \
-                 <space>/kings/<scope>.md)"
+                 <space>/leads/<scope>.md)"
             );
             return Ok(2);
         };

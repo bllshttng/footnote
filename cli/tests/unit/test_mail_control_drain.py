@@ -49,7 +49,7 @@ def test_the_control_lane_stamps_pending_flags(env):
 
     handle = write_new_thread(
         MY_HANDLE,
-        sender="king",
+        sender="lead",
         kind="send",
         body="control: freeze - hold",
     )
@@ -69,5 +69,5 @@ def _control_reply_append_marks_pending(env):
     from fno.inbox.store import append_to_thread
 
     thread = _seed_thread(MY_HANDLE)
-    append_to_thread(thread, sender="king", body="control: hold")
+    append_to_thread(thread, sender="lead", body="control: hold")
     assert _flag_path(MY_HANDLE).exists()
