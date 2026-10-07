@@ -1000,9 +1000,6 @@ def _payload(
     }
     if reading.attribution_gap is not None:
         payload["attribution_gap"] = reading.attribution_gap
-    if not cause_only:
-        payload["sccache_server_pid"] = _LAST_SCCACHE[0]
-        payload["sccache_restarts_1h"] = _LAST_SCCACHE[1]
     return payload
 
 
@@ -1049,6 +1046,9 @@ def _emit_result(
     )
     if note is not None:
         payload["degraded"] = note
+    if not cause_only:
+        payload["sccache_server_pid"] = _LAST_SCCACHE[0]
+        payload["sccache_restarts_1h"] = _LAST_SCCACHE[1]
     if json_output:
         typer.echo(json.dumps(payload, sort_keys=True))
     else:
