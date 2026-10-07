@@ -4160,12 +4160,12 @@ where
                     .unwrap_or(Value::Null);
                 // Same formatter as Python's `AgentEntry.team_label`, so the two
                 // surfaces render an identical descriptor for the same row. Python
-                // tests the scope for falsiness (`self.crown_scope or '?'`), so the
+                // tests the scope for falsiness (`self.role_scope or '?'`), so the
                 // empty string has to fall back here too, not just None.
-                let team: Value = match e.crown_level {
+                let team: Value = match e.role_level {
                     Some(level) => Value::String(format!(
                         "L{level} {}",
-                        e.crown_scope
+                        e.role_scope
                             .as_deref()
                             .filter(|s| !s.is_empty())
                             .unwrap_or("?")
@@ -4294,10 +4294,10 @@ where
                     "substrate": e.substrate,
                     // Team (US9): the compact descriptor plus the raw fields, so a
                     // minion can resolve who to escalate to.
-                    "crown": team,
-                    "crown_level": e.crown_level,
-                    "crown_scope": e.crown_scope,
-                    "crown_grantor": e.crown_grantor,
+                    "role": team,
+                    "role_level": e.role_level,
+                    "role_scope": e.role_scope,
+                    "role_grantor": e.role_grantor,
                     // The parent edge the orphan check keys on; null is a real answer.
                     "spawned_by_session": e.spawned_by_session,
                     // The served CHILD/PEER word; null before the first stamp.
@@ -5143,7 +5143,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
 }
 
 fn cleanup_lead_manifest(entry: &state::RegistryEntry) {
-    let Some(scope) = entry.crown_scope.as_deref() else {
+    let Some(scope) = entry.role_scope.as_deref() else {
         return;
     };
     if scope.is_empty()
@@ -5157,7 +5157,7 @@ fn cleanup_lead_manifest(entry: &state::RegistryEntry) {
     let Some(leads) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
         return;
     };
-    let path = leads.join("kings").join(format!("{scope}.md"));
+    let path = leads.join("leads").join(format!("{scope}.md"));
     // Owner guard, the Rust half of Python remove_lead_manifest's
     // expected_harness_session_id: a successor teamed over this scope after
     // the row went terminal can have re-armed the manifest with ITS session

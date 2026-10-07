@@ -1022,7 +1022,7 @@ mod tests {
             // A native peer row (origin.kind == "peer" on the transcript row
             // itself) is its own relay kind, never an operator turn.
             json!({
-                "type": "user", "origin": {"kind": "peer", "name": "king-a1"},
+                "type": "user", "origin": {"kind": "peer", "name": "lead-a1"},
                 "message": {"role": "user", "content": "hi from a peer"}
             }),
         ];

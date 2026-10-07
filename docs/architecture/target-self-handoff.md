@@ -62,7 +62,7 @@ The former `target.handoff.generation_cap` setting is retired. Legacy config con
 
 ## Context compaction
 
-`hooks/context-nudge.sh` remains the single context-pressure decision path. `target.handoff.used_pct_trigger` and `target.handoff.king_used_pct_trigger` now describe general and lead compact nudges. The retired PreCompact arm hook and PostCompact handoff marker no longer exist. Normal PostCompact target context reinjection remains.
+`hooks/context-nudge.sh` remains the single context-pressure decision path. `target.handoff.used_pct_trigger` and `target.handoff.lead_used_pct_trigger` now describe general and lead compact nudges. The retired PreCompact arm hook and PostCompact handoff marker no longer exist. Normal PostCompact target context reinjection remains.
 
 ## Observability
 

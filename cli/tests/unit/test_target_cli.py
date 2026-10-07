@@ -1100,7 +1100,7 @@ def _held_graph(tmp_path, monkeypatch):
         "  reason: Blocking review finding is unresolved\n"
         "  release_when: The finding is fixed and re-reviewed\n"
         "  review_on: 2099-08-20\n"
-        "  set_by: king:119e3c52\n---\n",
+        "  set_by: lead:119e3c52\n---\n",
         encoding="utf-8",
     )
     gp = tmp_path / "graph-held.json"
@@ -1119,7 +1119,7 @@ def test_target_init_refuses_held_node_before_bootstrap(tmp_path, monkeypatch):
     result = runner.invoke(app, ["do", "target", "init", "--input", "x-5a5c"])
     assert result.exit_code == 2, result.output
     assert "Blocking review finding is unresolved" in result.output
-    assert "king:119e3c52" in result.output
+    assert "lead:119e3c52" in result.output
     assert "The finding is fixed and re-reviewed" in result.output
     assert ran == []
 
@@ -1139,7 +1139,7 @@ def test_check_dispatch_hold_is_wired_for_direct_shell_bootstrap(tmp_path, monke
     monkeypatch.setenv("TARGET_INPUT", "x-5a5c")
     result = runner.invoke(app, ["do", "target", "check-dispatch-hold"])
     assert result.exit_code == 9, result.output
-    assert "king:119e3c52" in result.output
+    assert "lead:119e3c52" in result.output
 
     from pathlib import Path as _P
     from fno.paths import resolve_plugin_script
@@ -1627,7 +1627,7 @@ def test_resolve_owned_identity_verb_proven_claude_wins_foreign_codex_refused(
     with no registry collision consulted - a session with no stamp resolves by
     elimination and contradiction only, because colliding there read a
     hand-started joined session's OWN registered row as contention and refused
-    every crown grantor. Collision reporting lives on the stamped branches.
+    every role grantor. Collision reporting lives on the stamped branches.
 
     Proven in Python so it does not depend on the PATH-resolved `fno` carrying
     the verb - the bash hook test's CI limitation, since the PR's own CI runs a

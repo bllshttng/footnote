@@ -73,6 +73,10 @@ pub(crate) fn resume_route(
 
     if caller_has_terminal {
         ResumeRoute::TerminalExec
+    } else if !has_mux_ref && conversion.strategy == "client-resume" {
+        // No terminal needed: the wake route attaches a live session or
+        // relaunches an exited one on a thread.
+        ResumeRoute::ClientResume
     } else if has_mux_ref {
         ResumeRoute::Refused(format!(
             "fno agents resume: {name}: this exited row still records a mux pane; run fno agents resume {name} from a terminal"
@@ -405,6 +409,11 @@ mod tests {
                 &contract
             ),
             ResumeRoute::Refused("fno agents resume: o: the opencode resume form is a terminal program and this caller has no terminal; run fno agents resume o from a terminal".to_string())
+        );
+        assert_eq!(
+            resume_route("claude", None, false, false, "c", "c-session", &contract),
+            ResumeRoute::ClientResume,
+            "an adopted claude row needs no terminal: the wake route relaunches it"
         );
         assert_eq!(
             resume_route("unknown", None, false, false, "u", "u-session", &contract),

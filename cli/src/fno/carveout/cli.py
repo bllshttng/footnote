@@ -72,8 +72,8 @@ def add(
     scope: str = typer.Option(
         None,
         "--scope",
-        help="The crown scope this carve-out discharges (e.g. an epic id). Lets a "
-        "structured match - the king orphan check reads this field rather than "
+        help="The role scope this carve-out discharges (e.g. an epic id). Lets a "
+        "structured match - the lead orphan check reads this field rather than "
         "grepping the description free text.",
     ),
     severity: str = typer.Option(
@@ -178,7 +178,7 @@ def list_carveouts(
         "--all",
         "-A",
         help="Read the WHOLE ledger instead of just this session's rows. Needed "
-        "by any consumer that folds across sessions (the king orphan check "
+        "by any consumer that folds across sessions (the lead orphan check "
         "does; it filters by .scope over every row).",
     ),
     as_json: bool = typer.Option(
@@ -351,7 +351,7 @@ def update(
     priority: str = typer.Option(
         None, "--priority", "-p", help="Replacement priority hint (p0-p3)."
     ),
-    scope: str = typer.Option(None, "--scope", help="Replacement crown scope."),
+    scope: str = typer.Option(None, "--scope", help="Replacement role scope."),
 ) -> None:
     """Correct a carve-out in place, keeping its id.
 

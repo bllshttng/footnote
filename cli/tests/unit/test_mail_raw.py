@@ -140,9 +140,9 @@ def test_raw_delivers_command_and_refuses_plain_word(mailbox, monkeypatch, capsy
 
     injected = _seed_claude(mailbox, monkeypatch)
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "$fno:reign x-4d9b", self_ok=False)
+        _raw_send("claudepeer", "$fno:lead x-4d9b", self_ok=False)
     assert exc.value.exit_code == 0
-    assert [t for (_s, t, _sender) in injected] == ["$fno:reign x-4d9b"]
+    assert [t for (_s, t, _sender) in injected] == ["$fno:lead x-4d9b"]
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "hello", self_ok=False)
     assert exc.value.exit_code != 0
@@ -643,10 +643,10 @@ def test_raw_delivers_codex_verb_to_codex_daemon(mailbox, monkeypatch, capsys):
         lambda session, text, **_k: calls.append((session, text)) or True,
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", "$fno:reign x-4d9b", self_ok=False)
+        _raw_send("codexpeer", "$fno:lead x-4d9b", self_ok=False)
     assert exc.value.exit_code == 0
     assert capsys.readouterr().out.strip() == "injected"
-    assert calls == [(SID_CODEX, "$fno:reign x-4d9b")]
+    assert calls == [(SID_CODEX, "$fno:lead x-4d9b")]
 
 
 def test_raw_codex_turn_start_miss_refuses_and_releases_budget(
@@ -662,7 +662,7 @@ def test_raw_codex_turn_start_miss_refuses_and_releases_budget(
         mail_cli, "_release_budget", lambda reservation: released.append(reservation)
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", "$fno:reign x-4d9b", self_ok=False)
+        _raw_send("codexpeer", "$fno:lead x-4d9b", self_ok=False)
     assert exc.value.exit_code != 0
     assert "turn/start not delivered" in capsys.readouterr().err
     assert len(released) == 1
@@ -801,7 +801,7 @@ def test_raw_check_non_review_verb_on_codex_daemon_injectable_turn_start(
         "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", "$fno:reign x-4d9b", self_ok=False, check=True)
+        _raw_send("codexpeer", "$fno:lead x-4d9b", self_ok=False, check=True)
     assert exc.value.exit_code == 0
     assert "injectable: codex-daemon turn/start" in capsys.readouterr().out
 
@@ -842,7 +842,7 @@ def test_raw_check_dead_pane_thread_not_loaded_answers_not_injectable(
         ),
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpane", "$fno:reign x-4d9b", self_ok=False, check=True)
+        _raw_send("codexpane", "$fno:lead x-4d9b", self_ok=False, check=True)
     assert exc.value.exit_code == 1
     out = capsys.readouterr().out
     assert "not-injectable" in out
@@ -859,7 +859,7 @@ def test_raw_check_unmeasurable_heal_answers_exit_3(mailbox, monkeypatch, capsys
         lambda sid: ("unmeasurable", "binary-absent", None),
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpane", "$fno:reign x-4d9b", self_ok=False, check=True)
+        _raw_send("codexpane", "$fno:lead x-4d9b", self_ok=False, check=True)
     assert exc.value.exit_code == 3
     assert "unmeasurable" in capsys.readouterr().out
 
@@ -873,7 +873,7 @@ def test_raw_check_live_mux_pane_answers_probed_live(mailbox, monkeypatch, capsy
         lambda sid: ("live-pane", None, {"session": "main", "pane_id": 2179}),
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpane", "$fno:reign x-4d9b", self_ok=False, check=True)
+        _raw_send("codexpane", "$fno:lead x-4d9b", self_ok=False, check=True)
     assert exc.value.exit_code == 0
     assert "injectable: mux-pane" in capsys.readouterr().out
 
@@ -913,9 +913,9 @@ def test_raw_rebound_thread_re_resolves_and_delivers_over_the_daemon(
         lambda *a, **k: pane_paste.append(True),
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpane", "$fno:reign x-4d9b", self_ok=False)
+        _raw_send("codexpane", "$fno:lead x-4d9b", self_ok=False)
     assert exc.value.exit_code == 0
-    assert calls == [(SID_CODEX, "$fno:reign x-4d9b")]
+    assert calls == [(SID_CODEX, "$fno:lead x-4d9b")]
     assert not pane_paste
     assert pane_entry is not None
 
@@ -1675,7 +1675,7 @@ def test_raw_self_ok_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
 
 
 def test_raw_self_refusal_fires_on_the_canonical_handle(mailbox, monkeypatch, capsys):
-    """The king-mediated flow addresses by the 8-char canonical handle, not the
+    """The lead-mediated flow addresses by the 8-char canonical handle, not the
     full session id; the refusal must fire on that alias path too."""
     from fno.mail.cli import _raw_send
 

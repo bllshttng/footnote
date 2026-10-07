@@ -16,7 +16,7 @@ The order is close-blueprint, retask, target, and retask itself is the model cha
 
 ## Arriving on a node you did not spawn: the lookup ladder
 
-The continuity contract assumes you held the handle from the start; a pass lead or a successor after abdication does not, and the eight-spawn failure (three live agents re-spawned because nobody looked first) is what this prevents. Look in order, each step naming the store it reads:
+The continuity contract assumes you held the handle from the start; a pass lead or a successor after departure does not, and the eight-spawn failure (three live agents re-spawned because nobody looked first) is what this prevents. Look in order, each step naming the store it reads:
 
 1. `fno agents claim status node:<id>` for the live holder. The claim is the ownership authority; the manifest's claim field is an init-time snapshot and can lie, so read the verb, not the manifest.
 2. If the claim is empty or stale, `fno agents top` for the process census plus the REACH column: PID/RSS say a process exists, REACH says the transcript answers. A row with a live PID and `unknown` REACH (or STATUS `quiet` past an hour) is a session that stood down; mail it only through the durable bus, and prefer step 3 before resuming it.

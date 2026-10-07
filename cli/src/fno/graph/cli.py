@@ -752,7 +752,7 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
 
     The PR link is ship's START (the PR is open, awaiting review/merge), so the
     row carries started_at only - no ended_at, since merge is recorded elsewhere
-    or not at all. The row records whoever ran the link - a crown or an ambient
+    or not at all. The row records whoever ran the link - a role or an ambient
     session can be that - not the implementer or the merger, and no terminal
     ever closes it, so readers must treat it as a link event, never occupancy.
     ``fno do pr bind-created`` is the second such site and calls this too.

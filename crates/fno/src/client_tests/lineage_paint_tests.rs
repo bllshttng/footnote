@@ -59,7 +59,7 @@ fn lineage_child_sorts_beneath_its_parent_within_squad() {
         lineage_row("worker-b", 4, Some("sid-lead")),
     ]);
     // Pre-order: the parent first, its children beneath it keeping input
-    // order among siblings. Authority rank (crown_level) no longer moves a
+    // order among siblings. Authority rank (role_level) no longer moves a
     // row; lineage does.
     assert_eq!(agent_order(&v), vec!["lead", "worker-a", "worker-b"]);
 }

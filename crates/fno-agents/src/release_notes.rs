@@ -96,7 +96,7 @@ fn area_of(scope: Option<&str>) -> &'static str {
         "mux" => "mux",
         "backlog" => "backlog",
         "agents" => "agents",
-        "review" | "reign" | "lead" => "review",
+        "review" | "term" | "lead" => "review",
         "merge" | "pr" => "merge",
         _ => "general",
     }

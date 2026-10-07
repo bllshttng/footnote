@@ -232,9 +232,9 @@ def test_stdout_stays_pure_json_for_machine_callers(graph):
     assert "rollup" in res.stderr, "the receipt must still be surfaced, on stderr"
 
 
-# -- crowned filer: the parent comes from the crown scope, not the scorer --
+# -- promoted filer: the parent comes from the role scope, not the scorer --
 
 
-def _crown(scope):
+def _role(scope):
     return {"level": 1, "scope": scope, "grantor": "human",
             "label": f"L1 {scope}", "text": f"L1 {scope} (by human)"}

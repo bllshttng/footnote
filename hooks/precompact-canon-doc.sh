@@ -109,7 +109,7 @@ REG_RC=0
 if command -v fno >/dev/null 2>&1; then
   # A hook is never a delegated one-verb child, so a FNO_AGENTS_RUNTIME pin
   # here has leaked off a spawned worker: strip it for this read, keep the
-  # exit code, and let a failed read read as `unknown`, never as uncrowned
+  # exit code, and let a failed read read as `unknown`, never as unpromoted
   # (under the pin the silent `|| true` took the failure for "no
   # registry row" and a teamed lead got a plain session doc).
   REG_ROWS="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
@@ -131,8 +131,8 @@ if isinstance(data, dict):
 rows = data if isinstance(data, list) else []
 mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
 r = mine[0] if mine else {}
-lvl = r.get("crown_level")
-scp = r.get("crown_scope")
+lvl = r.get("role_level")
+scp = r.get("role_scope")
 print("1" if (mine and (lvl is not None or scp is not None)) else "0")
 print(scp if isinstance(scp, str) else "")
 ' 2>/dev/null || true)"
@@ -240,8 +240,8 @@ rows = rows_from(os.environ.get("REG_ROWS", ""))
 mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
 r = mine[0] if mine else {}
 
-lvl = r.get("crown_level")
-scp = r.get("crown_scope")
+lvl = r.get("role_level")
+scp = r.get("role_scope")
 teamed = os.environ.get("IS_TEAMED") == "1"
 reg_rc = os.environ.get("REG_RC", "")
 if reg_rc not in ("", "0"):
@@ -249,7 +249,7 @@ if reg_rc not in ("", "0"):
 elif not mine:
     team = "none (no registry row for this session)"
 elif not teamed:
-    team = "none (uncrowned)"
+    team = "none (unpromoted)"
 else:
     team = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
 
@@ -354,7 +354,7 @@ def nodes_under_purview(scope):
 
 
 # A lead additionally holds its nodes under purview and its own live workers -
-# facts no other session has. Skipped whole when uncrowned so a non-lead canon
+# facts no other session has. Skipped whole when unpromoted so a non-lead canon
 # doc stays byte-identical to the prior output (AC2-EDGE).
 if teamed:
     nodes = nodes_under_purview(scp) or "_(nodes under purview: unavailable)_"

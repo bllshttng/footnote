@@ -9,14 +9,14 @@ claim:
   - fno.claims.cli:cli
   - Work-claim coordination primitive
   - hidden: true
-king:
-  - fno.king.cli:agents_king_app
-  - The king session manifest and escalation controls.
+lead:
+  - fno.lead.cli:agents_lead_app
+  - The lead session manifest and escalation controls.
   - hidden: true
 # The canonical spelling the Rust front and every hint teach: the same app
-# under both names until the king mount takes its one-release exit.
+# under both names until the lead mount takes its one-release exit.
 org:
-  - fno.king.cli:agents_king_app
+  - fno.lead.cli:agents_lead_app
   - The org chart of roles and their lifecycle.
   - hidden: true
 mail:

@@ -103,14 +103,14 @@ def test_manifest_file_degrades_to_the_checkout_path(tmp_path: Path, monkeypatch
 
 def test_an_absent_manifest_records_the_ambient_session(tmp_path: Path, journal: Path, monkeypatch) -> None:
     """A canonical checkout has no manifest; the merging process names itself."""
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-lead")
 
     _merge._emit_session_satisfied(
         "https://github.com/o/r/pull/1", str(tmp_path / ".fno" / "target-state.md")
     )
 
     data = _rows(journal)[0]["data"]
-    assert data["session_id"] == "sess-king"
+    assert data["session_id"] == "sess-lead"
     # The hash needs a manifest to hash, so it still degrades to the sentinel.
     assert data["gate_state_hash"] == _merge._MERGE_ROW_UNKNOWN
 
@@ -120,7 +120,7 @@ def test_the_manifest_session_still_wins_over_ambient(
 ) -> None:
     manifest = tmp_path / "target-state.md"
     manifest.write_text("session_id: sess-42\nharness: claude\n", encoding="utf-8")
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-lead")
 
     _merge._emit_session_satisfied("", str(manifest))
 

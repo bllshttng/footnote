@@ -1663,7 +1663,7 @@ pub(crate) fn run_with_release(
         .entries
         .iter()
         .filter(|e| {
-            e.crown_level.is_none()
+            e.role_level.is_none()
                 && graph.is_some()
                 && (e.origin.as_deref() == Some("spawn")
                     || e.pid.is_some_and(crate::daemon::pid_is_gone)
@@ -1695,7 +1695,7 @@ pub(crate) fn run_with_release(
     let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
         Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
-        let eligible = e.crown_level.is_none()
+        let eligible = e.role_level.is_none()
             && (e.origin.as_deref() == Some("spawn")
                 || e.pid.is_some_and(crate::daemon::pid_is_gone)
                 || e.harness_name() == "claude"
@@ -1758,14 +1758,14 @@ pub(crate) fn run_with_release(
         }
     }
 
-    let mut manifest_teams = crate::lead_state::ManifestCrownCache::new();
+    let mut manifest_teams = crate::lead_state::ManifestRoleCache::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
         }
-        if e.crown_level.is_some() || manifest_teams.holds(e) {
+        if e.role_level.is_some() || manifest_teams.holds(e) {
             summary.kept_teamed.push(id);
             continue;
         }
@@ -2099,7 +2099,7 @@ pub(crate) fn run_with_release(
         };
         let mut row = GcRow {
             origin: e.origin.clone(),
-            teamed: e.crown_level.is_some(),
+            teamed: e.role_level.is_some(),
             work,
             transcript_age_s: age,
             owns_worktree,

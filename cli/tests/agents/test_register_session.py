@@ -537,15 +537,15 @@ def test_restamp_repoints_row_at_the_reminted_id(tmp_path: Path, monkeypatch) ->
     assert rows[0].name == "target-x-f0c2"
 
 
-def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> None:
+def test_restamp_branches_a_promoted_live_row(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import load_registry, restamp_harness_session_id, write_registry
 
     _spawned_row()
     row = load_registry()[0]
-    row.crown_level = 1
-    row.crown_scope = "scope-a"
-    row.crown_grantor = "human"
+    row.role_level = 1
+    row.role_scope = "scope-a"
+    row.role_grantor = "human"
     write_registry([row])
 
     entry = restamp_harness_session_id(
@@ -560,18 +560,18 @@ def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> Non
     assert len(rows) == 2
     predecessor = next(row for row in rows if row.harness_session_id == BIRTH)
     branch = next(row for row in rows if row.harness_session_id == REMINT)
-    assert predecessor.crown_level == 1
-    assert predecessor.crown_scope == "scope-a"
-    assert predecessor.crown_grantor == "human"
+    assert predecessor.role_level == 1
+    assert predecessor.role_scope == "scope-a"
+    assert predecessor.role_grantor == "human"
     assert branch.name == "target-x-f0c2-branch-08054b1d"
     # The branch mints its own id at the write; it is neither session id.
     assert branch.fno_id
     assert branch.fno_id != REMINT
     assert branch.fno_id != BIRTH
     assert branch.forked_from_session_id == BIRTH
-    assert branch.crown_level is None
-    assert branch.crown_scope is None
-    assert branch.crown_grantor is None
+    assert branch.role_level is None
+    assert branch.role_scope is None
+    assert branch.role_grantor is None
     # x-a457: born bg-routable - the 8-hex jobId the rv socket farm keys on,
     # derived from the new session id, not the predecessor's handle.
     assert branch.short_id == REMINT.split("-", 1)[0]
@@ -596,7 +596,7 @@ def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> Non
     assert len(load_registry()) == 2
 
 
-def test_restamp_succession_preserves_a_crowned_dead_predecessor(
+def test_restamp_succession_preserves_a_promoted_dead_predecessor(
     tmp_path: Path, monkeypatch
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
@@ -604,9 +604,9 @@ def test_restamp_succession_preserves_a_crowned_dead_predecessor(
 
     _spawned_row()
     row = load_registry()[0]
-    row.crown_level = 1
-    row.crown_scope = "scope-a"
-    row.crown_grantor = "human"
+    row.role_level = 1
+    row.role_scope = "scope-a"
+    row.role_grantor = "human"
     write_registry([row])
 
     entry = restamp_harness_session_id(
@@ -621,10 +621,10 @@ def test_restamp_succession_preserves_a_crowned_dead_predecessor(
     assert len(rows) == 1
     assert rows[0].harness_session_id == REMINT
     assert rows[0].predecessor_session_ids == [BIRTH]
-    assert rows[0].crown_level == 1
+    assert rows[0].role_level == 1
 
 
-def test_restamp_branches_an_uncrowned_live_row(tmp_path: Path, monkeypatch) -> None:
+def test_restamp_branches_an_unpromoted_live_row(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import load_registry, restamp_harness_session_id
 

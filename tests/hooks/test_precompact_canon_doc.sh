@@ -360,14 +360,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. AC2-EDGE: an uncrowned session's doc carries no Lead block at all.
+# 7. AC2-EDGE: an unpromoted session's doc carries no Lead block at all.
 # Assert a positive marker too (team: none), not absence alone - an absence
 # also fires if team classification or auto-block generation never ran.
 # ---------------------------------------------------------------------------
 if grep -q "team: none" "$DOC" && ! grep -q "## Lead:" "$DOC"; then
-  pass "uncrowned doc carries no Lead block (AC2-EDGE)"
+  pass "unpromoted doc carries no Lead block (AC2-EDGE)"
 else
-  fail "uncrowned doc unexpectedly carries a Lead block, or the auto block never ran"
+  fail "unpromoted doc unexpectedly carries a Lead block, or the auto block never ran"
 fi
 
 # ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ cat > "$FAKE_BIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
   *"agents registry-json"*)
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","role_level":2,"role_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-9e1e-fixture"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"},{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
@@ -427,7 +427,7 @@ cat > "$PORTFOLIO_BIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
   *"agents registry-json"*)
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-epic-a,x-epic-b","name":"lead-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","role_level":2,"role_scope":"x-epic-a,x-epic-b","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-epic-a"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
@@ -468,7 +468,7 @@ cat > "$LIVENESS_BIN/fno" <<'FAKE'
 case "$*" in
   *"agents registry-json"*)
     echo '[
-      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"lead-fixture"},
+      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","role_level":2,"role_scope":"x-9e1e-fixture","name":"lead-fixture"},
       {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"alive-child","status":"live","liveness":"alive"},
       {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"unmeasured-child","status":"live","liveness":"unmeasured"}
     ]'
@@ -707,7 +707,7 @@ case "\$*" in
     if [ -n "\${FNO_AGENTS_RUNTIME:-}" ]; then
       exit 127
     fi
-    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","role_level":2,"role_scope":"x-9e1e-fixture","name":"lead-fixture"}]'
     ;;
   *"backlog epic status x-9e1e-fixture"*)
     echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
@@ -741,7 +741,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # 16. AC6-ERR: a genuinely failing registry read is reported, never
-# read as "uncrowned". The fake refuses unconditionally; the hook must print
+# read as "unpromoted". The fake refuses unconditionally; the hook must print
 # one stderr line naming the exit code and the doc's team line must read
 # `unknown (registry-json exit 127)`, never `none`.
 # ---------------------------------------------------------------------------

@@ -51,7 +51,7 @@ fn pane_send_labelled_pane_identity_resolution() {
         }
         other => panic!("expected unresolved-identity refusal, got {other:?}"),
     }
-    core.panes.get_mut(&pane).unwrap().name = Some("kestrel-heir".into());
+    core.panes.get_mut(&pane).unwrap().name = Some("kestrel-successor".into());
     let uuid = "01a0ee3f-235d-7671-8fbb-e09af1d5fb52";
     let mut good = agent_in("sess", pane, None, false);
     good.name = "bob".into();

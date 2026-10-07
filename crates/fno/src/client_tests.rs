@@ -177,9 +177,11 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
         pane_state(Some(AgentBadge::Done), true, None),
         PaneState::Idle
     );
-    // (x-d401) The blind fold is gone: no badge and no activity reading is
-    // a marked absence, never a measured idle.
-    assert_eq!(pane_state(None, false, None), PaneState::Unmeasured);
+    // 2026-10-06 shell ruling: an unbadged shell tab is live.
+    let shell = |act: Option<ShellActivity>| pane_state(None, false, act);
+    assert_eq!(shell(None), PaneState::Idle);
+    assert_eq!(shell(Some(ShellActivity::Empty)), PaneState::Idle);
+    assert_eq!(shell(Some(ShellActivity::Unmeasured)), PaneState::Idle);
     // Worst-first ordering (Invariant): the squad rollup takes the `min`, so
     // the worst state must be the Ord-minimum - x-d140's `min` and the
     // navigator filter must agree on this ordering.
@@ -350,17 +352,15 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
         no_pane_reason: None,
-        // (x-d401) A badgeless LIVE row in these fixtures means "an idle
-        // worker"; under the absence predicate that must be SAID (an
-        // explicit Idle reading), not implied by badge absence - absence
-        // now renders Unmeasured.
+        // A badgeless LIVE row says "an idle worker" aloud; the fixture
+        // keeps the explicit reading under the 2026-10-06 shell ruling.
         pane_activity: if badge.is_none() && !exited {
             Some(ShellActivity::Idle)
         } else {
@@ -571,9 +571,9 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -2184,9 +2184,9 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -2337,9 +2337,9 @@ fn pull_rows() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -2786,9 +2786,9 @@ fn view_with_dead_interleaved() -> View {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -2958,9 +2958,9 @@ fn caret_rows() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3036,9 +3036,9 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3633,9 +3633,9 @@ fn row_menu_rows() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4481,9 +4481,9 @@ async fn row_menu_disambiguates_same_named_agents() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4753,10 +4753,9 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
             harness_session_id: None,
             name: "w1".into(),
             pane_id: None,
-            // The paneless bg row is Unmeasured (no badge, no activity
-            // reading), so the flag rides along (x-b5d1, x-a33f): the
-            // server no longer reads it, but the wire shape is pinned.
-            measure: true,
+            // The 2026-10-06 shell ruling reads an unbadged row as a live
+            // shell: no measure prompt rides; the wire shape is pinned.
+            measure: false,
         }],
         "the remove byte removed the live row in one gesture"
     );
@@ -6128,9 +6127,9 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -6904,9 +6903,9 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -6947,9 +6946,9 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -6990,9 +6989,9 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -7106,9 +7105,9 @@ fn band_rows() {
             pr: None,
             pr_session_short: None,
             tail: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
+            role_level: None,
+            role_scope: None,
+            role_title: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -7514,9 +7513,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -7557,9 +7556,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -7600,9 +7599,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -7646,9 +7645,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pr: None,
                 pr_session_short: None,
                 tail: None,
-                crown_level: None,
-                crown_scope: None,
-                crown_title: None,
+                role_level: None,
+                role_scope: None,
+                role_title: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -7678,8 +7677,9 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             frame.cells[r * cols].flags & cell_flags::DIM == cell_flags::DIM,
         )
     };
-    // A badgeless reading-less row paints `?` + DIM; a badgeless local row
-    // and a badgeless external row collide there on purpose (the glyph
+    // A badgeless reading-less row paints `Idle` + DIM (the 2026-10-06
+    // shell ruling dropped the `?` mark); a badgeless local row and a
+    // badgeless external row collide there on purpose (the word
     // discriminates STATE, never external-ness; DIM only reinforces it).
     // External-ness reads through the row's ACTIONS, and the exited
     // precedence below is unchanged.
@@ -7690,13 +7690,13 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     );
     let (word, dim) = probe("z-external");
     assert!(
-        word.trim_start().starts_with('?') && dim,
-        "external: ? + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && dim,
+        "external: Idle + DIM: {word:?}"
     );
     let (word, dim) = probe("z-fnolive");
     assert!(
-        word.trim_start().starts_with('?') && dim,
-        "fno-live: ? + DIM: {word:?}"
+        word.trim_start().starts_with("Idle") && !dim,
+        "fno-live: Idle, live and undimmed now the mark is gone: {word:?}"
     );
     // AC1-UI: external + Blocked renders `Input` in the amber accent,
     // BOLD, and NOT dimmed even though it is external - the accent beats the
@@ -8131,9 +8131,9 @@ fn unified_rows_view() -> View {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -8520,9 +8520,9 @@ fn peek_rows() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -8980,9 +8980,9 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -9044,9 +9044,9 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -9777,9 +9777,9 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             pr: None,
             pr_session_short: None,
             tail: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
+            role_level: None,
+            role_scope: None,
+            role_title: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -9820,9 +9820,9 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             pr: None,
             pr_session_short: None,
             tail: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
+            role_level: None,
+            role_scope: None,
+            role_title: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -9902,9 +9902,9 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10066,9 +10066,9 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10512,9 +10512,9 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10730,9 +10730,9 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
         pr: None,
         pr_session_short: None,
         tail: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_title: None,
+        role_level: None,
+        role_scope: None,
+        role_title: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11522,8 +11522,8 @@ pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
 fn teamed_row(name: &str, pane: u64, level: Option<u32>, scope: Option<&str>) -> AgentRow {
     let mut r = blocked_row(name, pane, None);
     r.badge = None;
-    r.crown_level = level;
-    r.crown_scope = scope.map(str::to_string);
+    r.role_level = level;
+    r.role_scope = scope.map(str::to_string);
     r
 }
 
@@ -11539,7 +11539,7 @@ fn agent_order(v: &View) -> Vec<String> {
 }
 
 #[test]
-fn team_all_uncrowned_squad_keeps_order_and_paints_no_badge_or_indent() {
+fn team_all_unpromoted_squad_keeps_order_and_paints_no_badge_or_indent() {
     // The common case (Operator Intent): a stable sort of equal ranks is
     // the identity, so the squad's order is unchanged and no team ceremony
     // reaches the paint - the no-regression path.
@@ -12197,7 +12197,7 @@ fn yard_item(
         harness: Some("claude".into()),
         species,
         rarity: rarity.into(),
-        crown_level: team,
+        role_level: team,
         first_sighting: first,
     }
 }

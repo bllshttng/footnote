@@ -427,7 +427,7 @@ def test_blueprint_planning_claim_blocks_dispatch(iso, monkeypatch):
 def test_blueprint_planning_claim_dead_pid_frees_node(iso, monkeypatch):
     """x-f81f: the same claim on an exited pid with no TTL reads stale at
     once, so planner death never wedges dispatch - the bound the no-TTL
-    shape buys over the crown workaround's --ttl suspect window."""
+    shape buys over the role workaround's --ttl suspect window."""
     child = _subprocess_module.Popen(["true"])
     child.wait()
     key = f"node:{NODE['id']}"
@@ -504,7 +504,7 @@ def test_one_unmeasurable_row_elsewhere_does_not_block_a_free_node(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.graph.statuses.live_worked_node_ids",
-        lambda **_kw: {"x-a238": ["bp-a238-king-brief (unmeasurable: no harness session id)"]},
+        lambda **_kw: {"x-a238": ["bp-a238-lead-brief (unmeasurable: no harness session id)"]},
     )
 
     observation = adv._observe_node_claim(NODE["id"], emit=False)
@@ -904,7 +904,7 @@ def test_gate_refusal_carries_queue_retry_at():
 def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
     """LD6: the exit code rides the exception and the detail is the gate's own
     LAST spawn-gate: line - not the unrelated provider-stamp warning that
-    three crowned sessions misread on 2026-09-09."""
+    three promoted sessions misread on 2026-09-09."""
     monkeypatch.setattr(
         adv.subprocess,
         "run",
@@ -939,7 +939,7 @@ def test_spawn_worker_gate_detail_falls_back_to_stderr_head(monkeypatch):
 
 
 def test_spawn_worker_stamps_territory_on_the_dispatch_spawned_row(iso, monkeypatch):
-    """A crowned dispatch stamps territory + kingless:false on the event row
+    """A promoted dispatch stamps territory + kingless:false on the event row
     and mirrors both into the caller's receipt - the record, not the veto."""
     monkeypatch.setattr(
         adv, "_territory_stamp", lambda node_id: {"territory": "x-epic", "kingless": False}
@@ -1022,16 +1022,16 @@ def test_auto_continue_tick_marks_a_kingless_dispatch(iso, monkeypatch):
     assert arms[0]["data"]["detail"].endswith(" kingless")
 
 
-def test_auto_continue_tick_crowned_dispatch_is_byte_identical(iso, monkeypatch):
-    """Given a crowned dispatch, the arm row is byte-identical to the
+def test_auto_continue_tick_promoted_dispatch_is_byte_identical(iso, monkeypatch):
+    """Given a promoted dispatch, the arm row is byte-identical to the
     pre-stamp shape: no mark, no new field, nothing to re-learn."""
 
-    def crowned_spawn(node_id, node_cwd, node_slug=None, **kw):
+    def promoted_spawn(node_id, node_cwd, node_slug=None, **kw):
         kw["receipt"].update({"territory": "x-epic", "kingless": False})
         return "sid1"
 
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", crowned_spawn)
+    monkeypatch.setattr(adv, "_spawn_worker", promoted_spawn)
     adv.advance(project="fno", events_path=iso)
     from tests._event_rows import event_rows
 
@@ -2897,7 +2897,7 @@ def test_direct_dependents_skips_plan_held_successor(tmp_path, monkeypatch):
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
         "  reason: Blocking finding\n  release_when: Finding fixed\n"
-        "  review_on: 2099-08-20\n  set_by: king\n---\n"
+        "  review_on: 2099-08-20\n  set_by: lead\n---\n"
     )
     entries = [
         {"id": "A", "status": "done", "project": "etl"},
@@ -4123,7 +4123,7 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
             },
             "/blueprint x-ready", "bp", "/blueprint", "declared",
         ),
-        # The research-doc specimen: a crown declared /blueprint on a research
+        # The research-doc specimen: a role declared /blueprint on a research
         # doc that merely carried status: ready. The declared verb dispatches
         # /blueprint; the worker never edits hooks on a research brief again.
         (

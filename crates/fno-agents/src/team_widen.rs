@@ -39,7 +39,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
     let caller = payload.get("caller").cloned().unwrap_or(Value::Null);
     let name = caller.get("name").and_then(Value::as_str).unwrap_or("");
     let held = caller
-        .get("crown_scope")
+        .get("role_scope")
         .and_then(Value::as_str)
         .map(split_scope)
         .unwrap_or_default();
@@ -49,7 +49,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     let grantor_held = caller
-        .get("crown_grantor")
+        .get("role_grantor")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
@@ -136,7 +136,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
 
     // Self re-scope from here on. A team is stamped by a grantor, never
     // self-declared: an edit that neither adds nor drops anything is the
-    // succession shape, and succession runs through `spawn --crown`.
+    // succession shape, and succession runs through `spawn --promote`.
     if added.is_empty() && dropped.is_empty() {
         return Ok(refused(Some(&format!(
             "refusing to team {name:?}: that is this session, and a team is stamped by a \
@@ -219,10 +219,10 @@ mod tests {
 
     fn payload(requested: &str, held: &str, members: Value) -> Value {
         json!({
-            "kind": "crown-widen",
+            "kind": "role-widen",
             "requested": requested,
             "target": "lead-a",
-            "caller": {"name": "lead-a", "status": "idle", "crown_scope": held,
+            "caller": {"name": "lead-a", "status": "idle", "role_scope": held,
                        "harness_session_id": S, "cc_session_id": null},
             "members": members,
         })
@@ -346,8 +346,8 @@ mod tests {
 
         // AC3-EDGE: no `requested` makes the verb exit 2.
         let error = resolve(&json!({
-            "kind": "crown-widen",
-            "caller": {"name": "lead-a", "status": "idle", "crown_scope": "e-1"},
+            "kind": "role-widen",
+            "caller": {"name": "lead-a", "status": "idle", "role_scope": "e-1"},
             "members": [],
         }))
         .unwrap_err();
@@ -355,8 +355,8 @@ mod tests {
         assert!(resolve(&payload("", "e-1", json!([]))).is_err());
 
         let error = resolve(&json!({
-            "kind": "crown-widen", "requested": "e-2",
-            "caller": {"name": "lead-a", "crown_scope": "e-1"},
+            "kind": "role-widen", "requested": "e-2",
+            "caller": {"name": "lead-a", "role_scope": "e-1"},
             "members": "nope",
         }))
         .unwrap_err();
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(out["widen"], false);
         assert!(out["hint"].is_null());
 
-        // AC3-EDGE: crown_grantor unset on the row; the echo is the name.
+        // AC3-EDGE: role_grantor unset on the row; the echo is the name.
         let out = resolve(&payload(
             "e-1",
             "e-1,e-2",
@@ -479,7 +479,7 @@ mod tests {
 
     fn grantor_payload(requested: &str, held: &str, members: Value, grantor: &str) -> Value {
         let mut p = payload(requested, held, members);
-        p["caller"]["crown_grantor"] = json!(grantor);
+        p["caller"]["role_grantor"] = json!(grantor);
         p
     }
 }

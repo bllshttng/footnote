@@ -29,7 +29,7 @@ class FakeRun:
         self,
         *,
         default: str = "main",
-        base: str = "feature/bg-crown",
+        base: str = "feature/bg-role",
         merged_pr: str = "",
         merged_head: str = LANDED,
         base_tip: str = LANDED,
@@ -178,7 +178,7 @@ def test_default_base_lineage_table(patch_run, kwargs, verdict, fragment):
 
 
 def test_merged_pr_on_unmoved_base_refuses(patch_run):
-    """The specimen: PR #789 merged feature/bg-crown, whose tip had not moved."""
+    """The specimen: PR #789 merged feature/bg-role, whose tip had not moved."""
     patch_run(FakeRun(merged_pr="789", merged_head=LANDED, base_tip=LANDED, contained=True))
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"

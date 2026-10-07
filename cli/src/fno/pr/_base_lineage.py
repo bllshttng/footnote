@@ -4,9 +4,9 @@ A stacked PR names another feature branch as its base. When that base lands on
 main and nobody retargets the stacked PR, GitHub still merges it - into the dead
 base - and reports MERGED while the code reaches nobody.
 
-Specimen: PR #800 merged into ``feature/bg-crown`` at 2026-08-10T19:42:32Z, an
+Specimen: PR #800 merged into ``feature/bg-role`` at 2026-08-10T19:42:32Z, an
 hour after PR #789 had landed that same branch on main at 18:05:58Z. Its merge
-commit ``9b665db4`` is the tip of ``origin/feature/bg-crown`` and is not an
+commit ``9b665db4`` is the tip of ``origin/feature/bg-role`` and is not an
 ancestor of ``origin/main``; its three commits are still not on main. GitHub
 reports the PR MERGED.
 
@@ -356,7 +356,7 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     # about the branch as it stands now: delete `feature/x` after merging it,
     # recreate it later for new work, and the old PR still answers this query
     # forever. Comparing to the live tip keeps the specimen caught (#789 merged
-    # head 85b90e485, which was still feature/bg-crown's tip when #800 merged)
+    # head 85b90e485, which was still feature/bg-role's tip when #800 merged)
     # while a recreated or continued branch reads as alive - the false refusal
     # that would otherwise get this guard switched off.
     if merged > 0 and merged_head and base_tip and merged_head == base_tip:

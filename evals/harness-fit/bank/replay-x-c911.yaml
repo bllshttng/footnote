@@ -10,7 +10,7 @@ prompt: |
 
   THE CAUSE. Three shims in ~/.local/bin were symlinks into a mktemp staging directory: fno-gh-proxy, fno-gh-coverage and fno-gh-loopcheck all pointed at /var/folders/.../T/tmp.<random>/tools/fno/bin/. That directory was gone, so all three dangled. Every other fno entry point runs from /Users/bb16/.local/share/uv/tools/fno/bin, and durable copies of all three binaries exist there. So the installer staged into temp and linked rather than copying, and only these three shims were affected.
 
-  THE BLAST RADIUS. The proxy is the sanctioned lane for gh, since direct gh api graphql, gh pr list and gh pr checks are refused. So while it dangles, every merge-readiness read, CI check and review-coverage read in the fleet falls back to cache or fails. A king reading mergeable_pr during that window gets stale rows with no fresh verdict.
+  THE BLAST RADIUS. The proxy is the sanctioned lane for gh, since direct gh api graphql, gh pr list and gh pr checks are refused. So while it dangles, every merge-readiness read, CI check and review-coverage read in the fleet falls back to cache or fails. A lead reading mergeable_pr during that window gets stale rows with no fresh verdict.
 
   WHAT I DID. Repointed all three symlinks to the uv tools directory and confirmed fno do pr list returned real PRs again. The repair is three ln -sfn calls and is reversible.
 
