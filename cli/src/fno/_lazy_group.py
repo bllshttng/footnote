@@ -285,6 +285,10 @@ class _LazyStub(click.Group):
                 f"Module {module_path!r} has no attribute {attr_name!r} "
                 f"(lazy entry for {self.name!r})"
             )
+        # Module-pinned hook: guards must be on before Click builds the tree.
+        pre = getattr(module, "_fno_pre_dispatch", None)
+        if callable(pre):
+            pre()
         if isinstance(attr, typer.Typer):
             self._real = typer_group_shape(attr, self._info_overrides)
             if self._collapse_keep is not None:

@@ -25,13 +25,10 @@ import typer
 
 from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
-# the external-backend verb classification: the sets live beside the data
-# they classify (the classification runner below fails the import when a
-# verb is missing from both lists)
+# the external-backend verb classification lives beside its data
 from fno.graph._verb_classification import (
-    _FOOTNOTE_OWNED_VERBS,
     _NO_GRAIN_ON_EXTERNAL_BACKEND,
-    _TRACKER_OWNED_VERBS,
+    classify_backlog_verbs,
 )
 from fno.graph.api import wire_rows  # noqa: F401 - re-export for lazy importers
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
@@ -84,10 +81,7 @@ cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
-# `fno agents mail` (cross-project messaging).
-# `inbox` was a SECOND registration of this same app, so all nine of its
-# subcommands were duplicates and the surface paid for them twice. It is gone;
-# `fno.tombstones` keeps the name reachable as a signpost.
+# `fno agents mail`. The retired `inbox` spelling lives in fno.tombstones.
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
 cli.add_typer(_capture_cli, name="capture", hidden=True)
@@ -667,11 +661,9 @@ def cmd_epic_status(
     from fno.graph.store import entries_with_archive
 
     # Read through the archive for the METRIC only (the same read-only fallback
-    # `get` uses). Without it a swept child stops counting and the epic's
-    # realized cost and follow-up set shrink as grooming runs - a number that
-    # quietly changes with unrelated maintenance is the failure this metric is
-    # supposed to be immune to. The children table above stays working-graph
-    # only, as it was before.
+    # `get` uses): without it a swept child stops counting and the number
+    # quietly changes with unrelated grooming. The children table stays
+    # working-graph only.
     growth = scope_growth(entries_with_archive(entries), epic_id)
 
     if json_mode(ctx):
@@ -7340,12 +7332,9 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
 
 def iter_backlog_registry():
     """The (group-label, typer-app) pairs carrying every backlog verb.
-
-    The ONE structural list: the verb classifier below, the consumer census
-    (scripts/diagnostics/tracker-consumers.py), and the classification tests
-    all walk it, so a new sub-app is registered exactly here, beside its
-    add_typer call - never re-copied into an instrument that would then
-    certify a registry it never saw.
+    The ONE structural list: the verb classifier, the census, and the
+    classification tests all walk it; register a new sub-app beside its
+    add_typer call.
     """
     return [
         (None, cli),
@@ -7357,45 +7346,6 @@ def iter_backlog_registry():
         ("task", task_app),
         ("collisions", collisions_app),
     ]
-
-
-def _classify_backlog_verbs() -> None:
-    import functools
-
-    apps = iter_backlog_registry()
-    seen: set[str] = set()
-    for group, app in apps:
-        for info in app.registered_commands:
-            name = info.name or ""
-            label = f"{group} {name}" if group else name
-            seen.add(label)
-            callback = info.callback
-            if callback is None:
-                raise RuntimeError(f"backlog verb {label!r} has no callback")
-            if label in _TRACKER_OWNED_VERBS:
-
-                @functools.wraps(callback)
-                def _guarded(*args, _orig=callback, _label=label, **kwargs):
-                    _refuse_tracker_owned_on_external_backend(_label)
-                    return _orig(*args, **kwargs)
-
-                setattr(_guarded, "_fno_tracker_owned", True)
-                info.callback = _guarded
-            elif label in _FOOTNOTE_OWNED_VERBS:
-                setattr(callback, "_fno_footnote_owned", True)
-            else:
-                raise RuntimeError(
-                    f"unclassified backlog verb {label!r}: classify it in "
-                    "_TRACKER_OWNED_VERBS or _FOOTNOTE_OWNED_VERBS "
-                    "(graph/_verb_classification.py) so the external-backend "
-                    "census holds"
-                )
-    unknown = (_TRACKER_OWNED_VERBS | _FOOTNOTE_OWNED_VERBS) - seen
-    if unknown:
-        raise RuntimeError(
-            f"classified verbs missing from the live registry (renamed or "
-            f"removed?): {sorted(unknown)}"
-        )
 
 
 from fno.graph import note_cli  # noqa: E402,F401
@@ -7416,4 +7366,5 @@ register_lifecycle_commands(
     lambda *a, **k: _project_plans_from_graph(*a, **k),
 )
 
-_classify_backlog_verbs()
+# The root loader runs this before Click builds the tree.
+_fno_pre_dispatch = classify_backlog_verbs
