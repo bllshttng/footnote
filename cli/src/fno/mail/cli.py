@@ -46,7 +46,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from fno.mail.receipts import _escalate_to_human, _recipient_is_attended
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -425,18 +424,12 @@ def _reserve_control_budget(
             recipient_key=recipient_key,
         )
     except budget.BudgetRefused as exc:
-        print(
-            f"refused: control word budget for {exc.pair}: {exc.marker()}",
-            file=sys.stderr,
-        )
+        print(f"refused: control word budget for {exc.pair}: {exc.marker()}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
     except (budget.BudgetUnavailable, budget.BudgetCountUnavailable) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
-    print(
-        "control lane: reserved against its own 60-word rolling window",
-        file=sys.stderr,
-    )
+    print("control lane: reserved against its own 60-word rolling window", file=sys.stderr)
     return reservation, words
 
 
@@ -510,10 +503,7 @@ def _daemon_loaded(project: str) -> DaemonState:
             timeout=5,
         )
     except subprocess.TimeoutExpired:
-        print(
-            f"warning: launchctl list timed out after 5s for project={project!r}",
-            file=sys.stderr,
-        )
+        print(f"warning: launchctl list timed out after 5s for project={project!r}", file=sys.stderr)
         return DaemonState.UNKNOWN_TIMEOUT
     except FileNotFoundError:
         return DaemonState.NOT_INSTALLED
@@ -645,10 +635,7 @@ def _sent_unclaimed_count() -> int:
     except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
         # Advisory-degrade to 0, but leave a breadcrumb (matches _active_session)
         # so a structural break doesn't render `sent unclaimed: 0` forever silently.
-        print(
-            f"warning: sent-unclaimed count failed: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
+        print(f"warning: sent-unclaimed count failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 0
 
 
@@ -1905,10 +1892,7 @@ def _forced_pane_send(
             subject=subject,
         )
     except Exception as exc:  # noqa: BLE001 - the bytes are already typed
-        print(
-            f"typed; outbox record failed; do not retry: {exc}",
-            file=sys.stderr,
-        )
+        print(f"typed; outbox record failed; do not retry: {exc}", file=sys.stderr)
     corr = f" re:{reply_to}" if reply_to else ""
     label = f"thread viewport {mux_session}:{pane_id}" if thread_viewport else f"pane {pane_id}"
     print(json_receipt(
@@ -3224,10 +3208,7 @@ def _raw_send(
         print(f"injected.{note}" if note else "injected")
         raise typer.Exit(code=0)
     if review_request and delivered == "unconfirmed":
-        print(
-            "unconfirmed (review request was not positively classified; do not retry blindly)",
-            file=sys.stderr,
-        )
+        print("unconfirmed (review request was not positively classified; do not retry blindly)", file=sys.stderr)
         raise typer.Exit(code=0)
     # not-confirmed: the transport returns one bool for two different worlds --
     # poll-budget exhaustion on a paste that DID land, and a clean send failure
@@ -3527,10 +3508,7 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
         if not name or message is None or _is_job_name(name):
-            print(
-                "error: --ruling supports only send <worker> <message>",
-                file=sys.stderr,
-            )
+            print("error: --ruling supports only send <worker> <message>", file=sys.stderr)
             raise typer.Exit(code=2)
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
@@ -3567,10 +3545,7 @@ def cmd_send(
     # message=<payload>, indistinguishable from a typed `send <own-id> <body>`.
     if to_self:
         if to_project is not None:
-            print(
-                "error: --to-self and --to-project are mutually exclusive",
-                file=sys.stderr,
-            )
+            print("error: --to-self and --to-project are mutually exclusive", file=sys.stderr)
             raise typer.Exit(code=2)
         if message is not None:
             print(
@@ -3591,10 +3566,7 @@ def cmd_send(
             print(f"error: --to-self: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
         if not (ident.session_id and ident.harness):
-            print(
-                "error: --to-self: no ambient harness identity - cannot self-address",
-                file=sys.stderr,
-            )
+            print("error: --to-self: no ambient harness identity - cannot self-address", file=sys.stderr)
             raise typer.Exit(code=2)
         message = name
         name = canonical_handle(ident.session_id)
@@ -3685,10 +3657,7 @@ def cmd_send(
             print(f"error: --from-self: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
         if not (ident.session_id and ident.harness):
-            print(
-                "error: --from-self: no ambient harness identity - cannot self-stamp",
-                file=sys.stderr,
-            )
+            print("error: --from-self: no ambient harness identity - cannot self-stamp", file=sys.stderr)
             raise typer.Exit(code=2)
         from_name = canonical_handle(ident.session_id)
 
@@ -3758,10 +3727,7 @@ def cmd_send(
         persist_to_memory = False
         if persist is not None:
             if persist != "memory":
-                print(
-                    f"error: --persist only accepts 'memory' (got {persist!r})",
-                    file=sys.stderr,
-                )
+                print(f"error: --persist only accepts 'memory' (got {persist!r})", file=sys.stderr)
                 raise typer.Exit(code=2)
             persist_to_memory = True
 
@@ -3783,10 +3749,7 @@ def cmd_send(
                     if suggestions
                     else ""
                 )
-                print(
-                    f"unknown agent or live-session handle: {recipient!r}.{hint}",
-                    file=sys.stderr,
-                )
+                print(f"unknown agent or live-session handle: {recipient!r}.{hint}", file=sys.stderr)
                 raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
             if resolved.identity_provisional:
                 print(
@@ -3813,10 +3776,7 @@ def cmd_send(
                 != session_identity_key(resolved.session_id)
             ):
                 detail = f"; candidates: {', '.join(ambiguous)}" if ambiguous else ""
-                print(
-                    f"cannot resolve agent heads-up uniquely: {recipient!r}{detail}",
-                    file=sys.stderr,
-                )
+                print(f"cannot resolve agent heads-up uniquely: {recipient!r}{detail}", file=sys.stderr)
                 raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
             recipient = canonical_handle(durable.session_id)
 
@@ -3923,10 +3883,7 @@ def cmd_send(
             else (message if message is not None else name)
         )
         if not content:
-            print(
-                "usage: fno agents mail send --to-project <project> <message>",
-                file=sys.stderr,
-            )
+            print("usage: fno agents mail send --to-project <project> <message>", file=sys.stderr)
             raise typer.Exit(code=2)
         _vet_body(content, allow_reason=style_exception)
         try:
@@ -4237,10 +4194,7 @@ def cmd_team(
 
     binary = shutil.which("fno-agents")
     if binary is None:
-        print(
-            "error: mail team needs the fno-agents binary on PATH (the announce writer)",
-            file=sys.stderr,
-        )
+        print("error: mail team needs the fno-agents binary on PATH (the announce writer)", file=sys.stderr)
         raise typer.Exit(code=1)
 
     args = [
@@ -4487,10 +4441,7 @@ def cmd_withdraw(
         print(f"{msg_id} is already withdrawn")
         raise typer.Exit(code=0)
     if target.delivery == HOSTED_DELIVERY:
-        print(
-            f"{msg_id} was already delivered (hosted); it cannot be withdrawn",
-            file=sys.stderr,
-        )
+        print(f"{msg_id} was already delivered (hosted); it cannot be withdrawn", file=sys.stderr)
         raise typer.Exit(code=1)
     if target.delivery == TYPED_DELIVERY:
         # A typed row is not a durable message with a tombstone to write, it is
@@ -4607,281 +4558,10 @@ def cmd_bus_ack(
         print(f"cursor for {name!r} already at or past {msg_id}; unchanged")
 
 
-def _manifest_fields(*names: str) -> dict[str, Optional[str]]:
-    """Read named fields from this session's ``.fno/target-state.md`` (cwd-relative).
+from fno.mail.hold_cli import cmd_hold, cmd_hold_release  # noqa: E402
 
-    The manifest is per-worktree (each target session owns one), so reading it
-    from cwd is reading THIS session's own claim binding. Returns ``{}`` when no
-    manifest is present (a non-target session has no job to drain)."""
-    try:
-        raw = (Path.cwd() / ".fno" / "target-state.md").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
-        return {}
-    out: dict[str, Optional[str]] = {}
-    for name in names:
-        m = re.search(rf"^{re.escape(name)}\s*:\s*(.*)$", raw, re.MULTILINE)
-        if m is None:
-            out[name] = None
-            continue
-        val = m.group(1).strip().strip("\"'")
-        out[name] = val if val and val != "null" else None
-    return out
-
-
-def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
-    """Scan job-addressed mail for the node THIS session holds, verified live.
-
-    The job address outlives any session, so a successor re-claiming the node
-    drains mail here that the prior holder never read (part 2). The node
-    comes from this session's own manifest (``target_claim_key``); the holder
-    check reuses ``resolve_truth_status`` -- the same node->holder-session join
-    ``fno agents list`` runs -- so this session drains only when IT is the live
-    holder. A successor sees a different holder -> ``session_id`` None -> no
-    drain, which is the security gate (a stale manifest must not drain another
-    holder's mail).
-
-    Returns ``(job_address, envelopes)``; ``(None, [])`` when this session holds
-    no live node claim. Never raises: an unreadable manifest or claim degrades to
-    no job mail, so the drain still surfaces handle mail.
-    """
-    from fno.agents.truth_status import resolve_truth_status
-    from fno.bus.cursor import scan_unread
-    from fno.mail.job_address import HOLDER_STATES
-
-    key = _manifest_fields("target_claim_key").get("target_claim_key")
-    if not key or not key.startswith("node:"):
-        return None, []
-    res = resolve_truth_status(
-        key[len("node:"):], manifest_cwd=str(Path.cwd())
-    )
-    if res.get("claim_state") not in HOLDER_STATES:
-        return None, []
-    # resolve_truth_status returns the holder's session id only when the live
-    # claim holder still matches this manifest's recorded holder; equalling
-    # ident.session_id means THIS session is that holder.
-    if not ident.session_id or res.get("session_id") != ident.session_id:
-        return None, []
-    return key, scan_unread(key)
-
-
-def _self_handle_or_exit() -> "tuple[str, object]":
-    """This session's canonical mail handle AND the identity it came from.
-
-    Returns both so the caller never re-resolves. A second resolve can answer
-    differently from the one this function validated, and then the row written
-    is not the row checked.
-
-    Fails closed on a contaminated env, for the same reason `--to-self` does
-    and with worse consequences. An inherited marker from a parent harness
-    makes a precedence-only resolve answer with the PARENT session. A
-    misaddressed `--to-self` sends one message to the wrong place, which is
-    visible and recoverable. A misaddressed hold stamps a DELIVERY POLICY on
-    another agent's row and arms a timer against their handle, silently holding
-    their mail.
-
-    The refusal is the shared one now. `resolve_harness_identity` already
-    refuses a mixed-family env, so nothing is laundered either way; what the
-    owned path adds is that a mixed env the process tree CAN decide resolves
-    instead of refusing, which is the difference between a real claude worker
-    holding its own mail and being told it has no identity.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-    from fno.harness_identity import canonical_handle
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError as exc:
-        sys.stderr.write(
-            f"{exc}\na hold stamped on the wrong row holds another agent's mail\n"
-        )
-        raise typer.Exit(code=3) from exc
-    if not ident.harness or not ident.session_id:
-        sys.stderr.write(
-            "no provable harness identity - there is no session to hold mail for\n"
-        )
-        raise typer.Exit(code=3)
-    return canonical_handle(ident.session_id), ident
-
-
-@mail_app.command("hold")
-def cmd_hold(
-    minutes: int = typer.Option(
-        None,
-        "--minutes",
-        "-m",
-        help="Idle minutes before the hold lifts by itself (default 5). The "
-        "quiet window restarts every prompt and ends at 2x the requested window.",
-    ),
-    for_minutes: int = typer.Option(
-        None,
-        "--for",
-        help="Wall-clock minutes before the hold lifts. The deadline never moves.",
-    ),
-    off: bool = typer.Option(
-        False, "--off", help="Lift the hold now and deliver what it held."
-    ),
-    status: bool = typer.Option(
-        False, "--status", help="Report the current hold without changing it."
-    ),
-) -> None:
-    """Busy mode: hold this session's incoming mail, and drain it on a timer.
-
-    While the hold is on, mail addressed to this session never pastes into the
-    prompt line. It queues durable and the sender gets a receipt saying so.
-    Either clock DELIVERS without a new prompt, so a hold whose only drain
-    trigger is the operator cannot stall.
-    """
-    import shutil
-    import subprocess
-
-    from fno.mail import hold as hold_mod
-    from fno.harness_identity import session_identity_key
-
-    handle, ident = _self_handle_or_exit()
-    # Clock key: the collision-free identity key (first-eight collides in one 65.536s window).
-    clock_key = session_identity_key(str(getattr(ident, "session_id", "") or ""))
-
-    if minutes is not None and for_minutes is not None:
-        sys.stderr.write("error: --minutes and --for are mutually exclusive\n")
-        raise typer.Exit(code=2)
-
-    if status:
-        # The record, not the gate: the gate's own-pass never refuses your own hold.
-        from fno.agents.dispatch import BUS_ONLY_POLICY
-
-        entry = hold_mod.resolve_entry(handle)
-        if getattr(entry, "delivery_policy", None) != BUS_ONLY_POLICY:
-            print(f"{handle}: no hold - mail delivers normally")
-            return
-        clock = hold_mod.read_any(handle)
-        if clock is not None and clock.source == hold_mod.CONVERSATION_SOURCE:
-            print(
-                f"{handle}: holding mail, machine-armed while you talk "
-                f"({hold_mod.clock_description(clock)}), lifts about 2 min after your answer"
-            )
-            return
-        label = hold_mod.dnd_label(handle)
-        if label == "held":
-            print(f"{handle}: holding mail, no expiry (hand-stamped bus-only)")
-        elif label is None:
-            # Unreachable while both derive from `lapsed`, and nothing across
-            # the module boundary enforces it: report, never pick a side.
-            print(
-                f"{handle}: holding mail, but the clock disagrees with the "
-                "delivery gate - run `fno agents mail hold --off` to clear it"
-            )
-        else:
-            print(
-                f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
-                f"lifts in {label.lstrip('~')}"
-            )
-        return
-
-    if off:
-        result = hold_mod.release(clock_key, held_for_s=0)
-        # Report the FLAG first: a failed registry write leaves mail held
-        # while the receipt below says the hold is off.
-        if not result["policy_cleared"]:
-            sys.stderr.write(
-                f"hold NOT off: the registry write failed, so {handle} still "
-                "reads bus-only and mail is still held. Retry, or check "
-                "`fno agents list` for the row.\n"
-            )
-            raise typer.Exit(code=1)
-        if result["held_count"]:
-            print(
-                f"hold off: delivered {result['held_count']} held message(s) "
-                f"({result['deduped_count']} deduped) - {result['outcome']}"
-            )
-        else:
-            print("hold off: nothing was held")
-        return
-
-    wall_clock = for_minutes is not None
-    window = (
-        for_minutes
-        if wall_clock
-        else hold_mod.DEFAULT_MINUTES if minutes is None else minutes
-    )
-    if window < 1:
-        flag = "--for" if wall_clock else "--minutes"
-        sys.stderr.write(f"error: {flag} must be at least 1\n")
-        raise typer.Exit(code=2)
-
-    from fno.agents.registry import register_existing_session
-
-    register_existing_session(
-        provider=str(getattr(ident, "harness", "") or ""),
-        session_id=str(getattr(ident, "session_id", "") or ""),
-        cwd=os.getcwd(),
-        delivery_policy="bus-only",
-    )
-    clock = hold_mod.arm_wall(clock_key, window) if wall_clock else hold_mod.arm(clock_key, window)
-
-    # The third drain trigger, detached: it must outlive this invocation, and
-    # it re-invokes THIS binary, not PATH `fno` - a stale deployed binary dies
-    # on an unknown command and the hold never lifts.
-    binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
-    armed = False
-    if binary:
-        try:
-            subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                [binary, "agents", "mail", "hold-release", "--handle", clock_key],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            armed = True
-        except OSError:
-            armed = False
-
-    until = clock.until or datetime.now(timezone.utc)
-    clock_text = hold_mod.clock_description(clock)
-    print(
-        f"busy mode on for {handle}: {clock_text}, holds until "
-        f"{until.strftime('%H:%M:%S')} UTC ({window}m), then delivers itself."
-    )
-    if not armed:
-        print(
-            "note: the release timer did not start, so the hold lifts on the "
-            "next send attempt or at your next prompt instead of on the clock."
-        )
-
-
-@mail_app.command("hold-release", hidden=True)
-def cmd_hold_release(
-    handle: str = typer.Option(..., "--handle", help="The held session's handle."),
-    poll_s: int = typer.Option(
-        15, "--poll-s", hidden=True, help="Seconds between clock re-reads."
-    ),
-) -> None:
-    """Sleep until ``handle``'s hold expires, then release it.
-
-    Re-reads the clock on every wake rather than sleeping once to the original
-    deadline, so an idle re-arm (the operator typed again) extends the hold
-    instead of being overrun by a timer that already committed to a time.
-
-    Exits quietly when the clock disappears or turns permanent: both mean
-    someone else took the hold off, and a second release would be a no-op that
-    still emitted a release event.
-    """
-    from fno.mail import hold as hold_mod
-
-    started = time.monotonic()
-    while True:
-        clock = hold_mod.read(handle)
-        if clock is None or clock.until is None:
-            return
-        remaining = (clock.until - datetime.now(timezone.utc)).total_seconds()
-        if remaining <= 0:
-            break
-        time.sleep(min(remaining, max(1, poll_s)))
-
-    result = hold_mod.release(handle, held_for_s=int(time.monotonic() - started))
-    print(json.dumps(result))
+mail_app.command("hold")(cmd_hold)
+mail_app.command("hold-release", hidden=True)(cmd_hold_release)
 
 
 @mail_app.command("drain-self", hidden=True)
@@ -4949,6 +4629,8 @@ def cmd_drain_self(
     # address outlives any session, so this is where a successor picks up mail
     # the prior holder never read (part 2). Per-address cursor, so this is
     # independent of the handle/form cursors -- no double-delivery across them.
+    from fno.mail.hold_cli import _scan_held_job_mail
+
     job_addr, job_msgs = _scan_held_job_mail(ident)
 
     # W2 cross-delivery dedup: a message whose id already landed in THIS

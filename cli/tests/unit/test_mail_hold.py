@@ -775,9 +775,10 @@ def test_bounce_reason_none_keeps_the_callers_text(monkeypatch):
 def test_cli_rejects_minutes_and_for_together(monkeypatch):
     from typer.testing import CliRunner
     from fno.mail import cli as mail_cli
+    from fno.mail import hold_cli
 
     monkeypatch.setattr(
-        mail_cli,
+        hold_cli,
         "_self_handle_or_exit",
         lambda: (HANDLE, SimpleNamespace(harness="claude", session_id="sid")),
     )
@@ -791,7 +792,7 @@ def test_cli_rejects_minutes_and_for_together(monkeypatch):
 
 
 def test_cli_for_arms_wall_clock_and_names_it_in_the_receipt(monkeypatch, capsys):
-    from fno.mail import cli as mail_cli
+    from fno.mail import hold_cli as mail_cli
 
     start = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
     armed = hold_mod.Hold(
@@ -890,7 +891,7 @@ def test_hold_refuses_a_contaminated_env_rather_than_stamping_a_guessed_row(monk
     import typer
 
     from fno.harness_identity import OwnedHarnessIdentity
-    from fno.mail import cli as mail_cli
+    from fno.mail import hold_cli as mail_cli
 
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
