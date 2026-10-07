@@ -1056,5 +1056,42 @@ fn journal_text_checked_fast_path_stays_bounded_on_a_huge_journal() {
     );
 }
 
+#[test]
+fn a_filtered_read_sorts_seqs_not_lines_and_keeps_limit_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    append(
+        &journal,
+        &[
+            checkin("2026-10-07T00:00:03Z", "s", "first"),
+            checkin("2026-10-07T00:00:01Z", "s", "second"),
+            checkin("2026-10-07T00:00:02Z", "s", "third"),
+        ],
+    );
+    sync(&journal).unwrap();
+    let mut q = EventQuery::of_types(&["lead_checkin"]);
+    let (sql, args) = q.build_sql(false);
+    let conn = open_read(&store_path(&journal)).unwrap();
+    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    let plan: Vec<String> = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(refs.as_slice(), |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+        "{plan:?}"
+    );
+    q.limit = Some(2);
+    let text = journal_text_checked(&journal, &q).unwrap();
+    let kept: Vec<&str> = ["first", "second", "third"]
+        .into_iter()
+        .filter(|c| text.contains(c))
+        .collect();
+    assert_eq!(kept, ["first", "second"], "{text}");
+}
+
 mod coverage;
 mod observation;
