@@ -490,7 +490,7 @@ fn behind_by<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> u64 {
 
 /// Files the BASE branch gained since the PR head diverged, or None (HOLD).
 /// Truncation is a miss: an under-reported move fails in the merging direction.
-fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+pub(crate) fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
     let Some((base, head)) = pr_base_head_refs(probes, cwd, pr) else {
         breadcrumb("overlap probe unavailable (pr refs unreadable); holding for a rebase");
         return None;
@@ -536,7 +536,7 @@ fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<Str
 
 /// The PR's own changed file paths, or None (HOLD). An EMPTY list is a real
 /// answer: a PR with no diff cannot overlap anything.
-fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+pub(crate) fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/pulls/{pr}/files"),
@@ -561,7 +561,7 @@ fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<Strin
 
 /// Sorted intersection of two changed-file lists, documentation paths dropped
 /// from both sides first. Empty: no semantic conflict the merge could carry.
-fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
+pub(crate) fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
     let base: std::collections::BTreeSet<&str> = base_paths
         .iter()
         .map(String::as_str)

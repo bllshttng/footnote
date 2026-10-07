@@ -1623,9 +1623,13 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci base compare unreadable: {error}"))
             }
         };
-        // No disjoint-files waiver: two PRs that share no file still break
-        // main together when one's test reads what the other moved.
-        ci_base_verdict(compare)
+        if compare == 0 {
+            return ProbeOutcome::Clear;
+        }
+        let overlap = crate::merge_gates::base_move_paths(self, cwd, facts.number)
+            .zip(crate::merge_gates::pr_file_paths(self, cwd, facts.number))
+            .map(|(base, pr)| crate::merge_gates::overlaps(&base, &pr));
+        ci_base_verdict(compare, overlap.as_deref())
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
@@ -2266,18 +2270,21 @@ pub fn classify_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> Probe
     })
 }
 
-/// Did the CI at this head test a tree that already held the base tip? Only
-/// the ancestry answers that. The run-timestamp heuristic this replaces
-/// cleared a head whose runs started after the base tip moved, but a run at a
-/// head that lacks the tip still never tested the merge - the back-to-back
-/// merge race that went red on main three times in two days (2026-10-04/05).
-pub fn ci_base_verdict(behind_by: u64) -> ProbeOutcome {
-    if behind_by == 0 {
-        return ProbeOutcome::Clear;
+/// Did the CI at this head test a tree close enough to the merge? A head that
+/// holds the base tip clears. A behind head clears only when the newer base
+/// commits touch no file the PR changes (`overlap` is `Some(&[])`). A shared
+/// file, or an unreadable file set (`None`), refuses.
+pub fn ci_base_verdict(behind_by: u64, overlap: Option<&[String]>) -> ProbeOutcome {
+    match (behind_by, overlap) {
+        (0, _) | (_, Some([])) => ProbeOutcome::Clear,
+        (_, Some(shared)) => ProbeOutcome::Refused(format!(
+            "ci_base_stale: PR is {behind_by} behind its base and the newer commits touch files it changes ({})",
+            shared.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+        )),
+        (_, None) => ProbeOutcome::Refused(format!(
+            "ci_base_stale: PR is {behind_by} behind its base and the file overlap is unreadable"
+        )),
     }
-    ProbeOutcome::Refused(format!(
-        "ci_base_stale: PR is {behind_by} behind its base; no run at this head tested the merged tree"
-    ))
 }
 
 /// The head sha from the latest covered `review_coverage` event that matches the
@@ -3332,14 +3339,15 @@ mod tests {
 
     #[test]
     fn ci_base_verdict_reads_each_branch() {
-        // Ancestry is the whole verdict now: behind_by 0 clears, anything
-        // behind refuses, because no run at a head that lacks the base tip
-        // can have tested the merged tree.
-        assert_eq!(ci_base_verdict(0), ProbeOutcome::Clear);
-        let outcome = ci_base_verdict(3);
-        assert!(
-            matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
-        );
+        // behind_by 0 clears; a behind head clears only with no shared file.
+        let shared = vec!["src/lib.rs".to_string()];
+        assert_eq!(ci_base_verdict(0, None), ProbeOutcome::Clear);
+        assert_eq!(ci_base_verdict(3, Some(&[])), ProbeOutcome::Clear);
+        for outcome in [ci_base_verdict(3, Some(&shared)), ci_base_verdict(3, None)] {
+            assert!(
+                matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
+            );
+        }
     }
 
     #[test]
