@@ -692,6 +692,34 @@ def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
     return None
 
 
+def resolve_seed_node(message: str) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a /fno:target seed word via the backlog id resolver: exact id, slug, bare hex
+    (configured prefix), title fuzzy. A proven miss refuses with the nearest matches; an
+    unreadable graph fails open (absence cannot be proven).
+    """
+    first = message.strip().splitlines()[0].split()
+    if len(first) < 2 or first[1].startswith(("-", "/", "$")):
+        return None, None
+    if parse_verb_token(first[0]) != ("target", True):
+        return None, None
+    from fno.graph.fuzzy import resolve_id, resolve_node, search_entries
+    from fno.graph.load import load_graph
+    try:
+        entries = [e for e in load_graph() if not e.get("archived_at")]
+    except Exception:  # noqa: BLE001 - an unreadable graph cannot prove a miss
+        return None, None
+    match = resolve_node(first[1], entries)
+    match = match if match.kind == "exact" and match.id else resolve_id(first[1], entries)
+    if match.id and match.kind in ("exact", "fuzzy") and len(match.candidates) <= 1:
+        return match.id, None
+    near = list(match.candidates) or search_entries(first[1], entries)
+    nearest = "; ".join(f"{e.get('id')} ({e.get('title', '')})" for e in near[:5]) or "none"
+    return None, ("refused: the /target word %r names no backlog node; the worker would"
+                  " carry a prose node and its PR lands on no card. Nearest nodes: %s."
+                  " Spawn with a node id, slug, bare hex, or title word that resolves."
+                  % (first[1], nearest))
+
+
 def verb_fired_marker(message: str) -> Optional[str]:
     """The command that proves a ``/fno:target <node>`` seed actually fired.
 
@@ -702,6 +730,7 @@ def verb_fired_marker(message: str) -> Optional[str]:
         return None
     if parse_verb_token(first[0]) != ("target", True):
         return None
+    first[1] = resolve_seed_node(message)[0] or first[1]
     return f"fno agents claim status node:{first[1]}"
 
 
@@ -712,7 +741,7 @@ def render_seed(message: str, harness: str) -> str:
 
     if not is_verb_seed(message):
         return message
-    refusal = cannot_fire_refusal(message, harness)
+    refusal = cannot_fire_refusal(message, harness) or resolve_seed_node(message)[1]
     if refusal:
         raise DispatchResolveError(refusal)
     return normalize_command(message, harness)
