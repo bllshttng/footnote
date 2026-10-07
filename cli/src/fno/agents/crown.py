@@ -733,7 +733,12 @@ def settle_spawn_crown(
         rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
     if heir_owner is not None:
         for index in reown_indexes:
-            provenance = dict(rows[index].spawn_provenance or {})
+            if rows[index].spawn_provenance is None:
+                # Reown moves an existing provenance owner only. Forking a
+                # block onto a provenance-less row (adopt, pre-v33 birth edge)
+                # wrote an origin-less block the typed Rust reader rejects.
+                continue
+            provenance = dict(rows[index].spawn_provenance)
             provenance["owner"] = dict(heir_owner)
             rows[index] = replace(rows[index], spawn_provenance=provenance)
             vacated.append((rows[index], "reowned"))

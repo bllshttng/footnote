@@ -644,6 +644,34 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
 }
 
 #[test]
+fn a_teamed_rows_node_worktree_cwd_never_tags_the_name_with_its_node() {
+    // A node-backed codex thread inherits its spawner's workspace, so its
+    // own node worktree reads as a FOREIGN cwd and the card rendered
+    // `t-<node> (x-<node>)` - the node twice on one line. The parenthetical
+    // drops whenever the cwd base repeats the row's node, teamed or not; a
+    // genuinely foreign directory still tags.
+    let mut leak = agent_row("t-x64d4", 11, Some(AgentBadge::Working), false);
+    leak.harness = Some("codex".into());
+    leak.node = Some("x-64d4".into());
+    leak.cwd_base = Some("x-64d4".into());
+    let mut foreign = agent_row("t-else", 12, Some(AgentBadge::Working), false);
+    foreign.harness = Some("codex".into());
+    foreign.cwd_base = Some("elsewhere".into());
+    let mut v = card_view(vec![leak, foreign]);
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !text.contains("(x-64d4)"),
+        "a cwd base that repeats the node id tags no teamed name: {text}"
+    );
+    assert!(
+        text.contains("t-else (elsewhere)"),
+        "a real foreign directory keeps its context: {text}"
+    );
+}
+
+#[test]
 fn chosen_card_fills_all_three_lines_with_the_accent_and_a_left_bar() {
     // The operator's 2026-10-04 ruling: the focused card fills all 3 lines
     // with the theme accent plus a left bar, unmistakable against resting
@@ -1078,4 +1106,97 @@ fn unhighlighted_rows_read_on_a_light_terminal() {
         assert_eq!(cell.fg, Color::Indexed(8), "line 2 fg follows the palette");
         assert_eq!(cell.flags & cell_flags::DIM, 0, "no DIM on line 2");
     }
+}
+
+// ---- a card's whole span answers the menu gestures ----------------------
+
+#[tokio::test]
+async fn a_long_press_on_each_card_line_opens_the_agents_menu() {
+    // The card's detail and metrics lines carry their agent's identity, so
+    // a press there arms the hold and a 600ms hold opens the agent's menu
+    // from any line of the card - the same span the tap path resolves.
+    let (agent_i, detail_i) = card_rows_for(&card_view(lead_and_worker()), "lead-a");
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let mut v = card_view(lead_and_worker());
+        let id = v
+            .row_identity(display_i)
+            .expect("every card line has an identity");
+        assert_eq!(id, "agent:lead-a", "card lines identify as their agent");
+        v.press_hold = Some((display_i, id, Instant::now() - Duration::from_millis(600)));
+        let term_row = (display_i - v.sideline_offset() + 1) as u16;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut carry = Vec::<u8>::new();
+        crate::client::handle_stdin(
+            &mut v,
+            &mut Scanner::default(),
+            &mut carry,
+            format!("\x1b[<0;7;{}m", term_row + 1).as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "lead-a"
+            ),
+            "line {display_i}: the card's menu opened: {:?}",
+            v.row_menu.as_ref().map(|m| &m.target)
+        );
+        assert!(
+            buf.is_empty(),
+            "line {display_i}: no click action rode the long press"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_right_press_on_each_card_line_opens_the_agents_menu() {
+    // Same span for right-click, the no-config path for terminals that
+    // swallow the hold. The inter-card rule stays inert: no menu opens.
+    let (agent_i, detail_i) = card_rows_for(&card_view(lead_and_worker()), "lead-a");
+    for display_i in [agent_i, detail_i, detail_i + 1] {
+        let mut v = card_view(lead_and_worker());
+        let term_row = (display_i - v.sideline_offset() + 1) as u16;
+        let mut scanner = Scanner::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut carry = Vec::<u8>::new();
+        crate::client::handle_stdin(
+            &mut v,
+            &mut scanner,
+            &mut carry,
+            format!("\x1b[<2;7;{}M", term_row + 1).as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "lead-a"
+            ),
+            "line {display_i}: the card's menu opened: {:?}",
+            v.row_menu.as_ref().map(|m| &m.target)
+        );
+    }
+    let rule_i = card_view(lead_and_worker())
+        .painted_rows()
+        .iter()
+        .position(|row| matches!(row, DisplayRow::CardRule))
+        .expect("adjacent cards paint a rule");
+    let mut v = card_view(lead_and_worker());
+    let term_row = (rule_i - v.sideline_offset() + 1) as u16;
+    let mut scanner = Scanner::default();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut carry = Vec::<u8>::new();
+    crate::client::handle_stdin(
+        &mut v,
+        &mut scanner,
+        &mut carry,
+        format!("\x1b[<2;7;{}M", term_row + 1).as_bytes(),
+        &mut buf,
+    )
+    .await
+    .unwrap();
+    assert!(v.row_menu.is_none(), "the rule row stays inert");
 }

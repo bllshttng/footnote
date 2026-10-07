@@ -34,6 +34,7 @@ mod doctor_update_tests;
 pub mod event_cli;
 pub mod event_store;
 pub mod feed_overlay;
+pub(crate) mod first_check;
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;

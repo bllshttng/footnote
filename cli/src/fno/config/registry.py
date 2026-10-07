@@ -39,6 +39,7 @@ class Meta:
 
 # Every leaf maps to exactly one Meta. Keep in rough model order for scanning.
 FIELD_META: dict[str, Meta] = {
+    "agents.first_check_minutes": Meta("advanced", "Minutes after spawn before the daemon checks worker progress (default 10, range 1 to 60). With no progress it mails the spawning lead and checks once more after the same interval.", default_source="default"),
     "schema_version": Meta("never", "Settings schema version; managed by fno, not hand-set."),
     # --- config.paths.* (all defaulted; advanced) ---
     "state_dir": Meta("advanced", "Root dir for global fno do state.", default_source="default"),

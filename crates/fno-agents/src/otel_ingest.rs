@@ -211,7 +211,7 @@ fn ingest(db: &Path, body: &[u8]) -> Result<(), IngestError> {
     let mut conn = Connection::open(db)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     let transaction = conn.transaction()?;
-    transaction.execute_batch(include_str!("otel_schema.sql"))?;
+    transaction.execute_batch(crate::otel_read::schema_sql())?;
     for (record, resource) in records {
         store_event(&transaction, record, resource)?;
         if attrs(record).get("event.name").and_then(|v| value_str(v)) == Some("api_request") {
