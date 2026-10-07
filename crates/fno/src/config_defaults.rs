@@ -19,6 +19,7 @@ const EXAMPLE: &str = include_str!("../../../docs/config.example.toml");
 
 /// One inventory row: the dotted key, its default rendered as text, the
 /// effective value, and the source that answered.
+#[derive(Debug)]
 pub struct Row {
     pub key: String,
     pub default: String,

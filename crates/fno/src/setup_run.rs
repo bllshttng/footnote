@@ -26,6 +26,7 @@ use serde_json::json;
 /// terminal asks one by one. `act` steps may write config through
 /// `fno config set`; `report` steps only ever print a command; `human`
 /// steps need a person at a browser or terminal.
+#[derive(Debug)]
 pub struct Step {
     pub id: &'static str,
     pub layer: Layer,
@@ -48,10 +49,11 @@ pub enum Kind {
     Human,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Scope {
     Global,
     Project,
+    #[default]
     Both,
 }
 
@@ -352,7 +354,7 @@ fn in_source_checkout(cwd: &Path) -> bool {
 /// project layer. Returns the config file written, so the report's paths
 /// stay absolute.
 fn config_set(exe: &Path, key: &str, value: &str, local: bool) -> Result<PathBuf, String> {
-    let mut argv: Vec<OsString> = vec![exe.to_path_buf(), "config".into(), "set".into()];
+    let mut argv: Vec<OsString> = vec![exe.to_path_buf().into(), "config".into(), "set".into()];
     argv.push(key.into());
     argv.push(value.into());
     if local {
