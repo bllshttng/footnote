@@ -125,8 +125,8 @@ def _default_branch(slug: str, cwd: str) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def _base_ref_and_head(pr_number, slug: str, cwd: str) -> Tuple[Optional[str], Optional[str]]:
-    """``(base_ref, head_sha)`` from one PR read; ``(None, None)`` on a miss."""
+def _base_ref(pr_number, slug: str, cwd: str) -> Optional[str]:
+    """The base ref from one PR read; ``None`` on a miss."""
     selector = str(pr_number).rstrip("/").rsplit("/", 1)[-1]
     if selector.isdigit():
         endpoint = f"repos/{slug}/pulls/{selector}"
@@ -136,18 +136,16 @@ def _base_ref_and_head(pr_number, slug: str, cwd: str) -> Tuple[Optional[str], O
         endpoint = f"repos/{slug}/pulls?state=all&head={head}&per_page=2"
     res = _probe(["gh", "api", endpoint], cwd)
     if res is None or not res.ok:
-        return None, None
+        return None
     try:
         payload = json.loads(res.stdout)
         if isinstance(payload, list):
             payload = payload[0] if payload else None
         base_row: Optional[dict] = payload.get("base") if isinstance(payload, dict) else None
-        head_row: Optional[dict] = payload.get("head") if isinstance(payload, dict) else None
         ref: Optional[str] = base_row.get("ref") if isinstance(base_row, dict) else None
-        sha: Optional[str] = head_row.get("sha") if isinstance(head_row, dict) else None
     except (json.JSONDecodeError, AttributeError):
-        return None, None
-    return ref if isinstance(ref, str) and ref else None, sha if isinstance(sha, str) and sha else None
+        return None
+    return ref if isinstance(ref, str) and ref else None
 
 
 def _merged_pr_for_head(base: str, slug: str, cwd: str) -> tuple:
@@ -302,7 +300,7 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     if default is None:
         return ("unknown", "could not read the repository default branch (REST read failed)")
 
-    base, _ = _base_ref_and_head(pr_number, slug, cwd)
+    base = _base_ref(pr_number, slug, cwd)
     if base is None:
         return ("unknown", f"could not read the base ref of PR #{pr_number} (REST read failed)")
 

@@ -150,7 +150,7 @@ def patch_run(monkeypatch):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"contained": True}, {"contained": False}, {"pr_head": ""}, {"fetch_fails": True}],
+    [{"contained": True}, {"contained": False}, {"fetch_fails": True}],
 )
 def test_default_base_passes_whether_or_not_the_head_has_the_tip(patch_run, kwargs):
     """A base that IS the default branch never fails on how far behind the head is.
