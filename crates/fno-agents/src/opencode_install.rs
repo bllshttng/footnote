@@ -981,7 +981,7 @@ pub fn status_json() -> serde_json::Value {
                 .as_ref()
                 .map(|m| m.opencode_contract.as_str())
                 .unwrap_or("?"),
-            _reported.as_deref().unwrap_or("an unknown version")
+            reported.as_deref().unwrap_or("an unknown version")
         ),
     );
     }
