@@ -41,6 +41,10 @@ One invariant governs the daemon's role, because the epic prose once said otherw
 
 A `keeper` harness with no built lane still gets an honest refusal naming what is missing, never a verdict that the harness cannot thread.
 
+## Promotion
+
+`fno agents spawn --promote <scope> --substrate thread` applies the same authority and occupancy checks as pane promotion. Every built persistent carrier can carry the role. One-shot and headless requests refuse promotion because they exit after one answer. Rust owns the seed, validation, registry effects, journal facts, and receipts. Python uses the existing write boundaries. Codex carries promotion fields into the app-server request so the row is promoted at mint. Keeper carriers settle promotion before submitting the lead seed. When a carrier's session identity is not a full UUID, the manifest writer reports an unarmed loop. The receipt distinguishes that state from a recorded role.
+
 ## What a thread survives
 
 Measured 2026-09-21, on the question of who owns a claude thread. The owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`). It hosts each session in its own `bg-pty-host`. The fno daemon hosts none. The spawning `fno agents spawn` client parents nothing and exits once the session is backgrounded.
