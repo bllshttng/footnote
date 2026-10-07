@@ -172,6 +172,9 @@ fn pane_send_addresses_either_id_of_a_split_row() {
         ServerMsg::PaneInputResult(receipt)
             if receipt.request_id == 9 && receipt.pane_id == pane && receipt.result == Ok(())
     ));
+    assert!(crate::pane_send_audit::flush_agents_journal(
+        std::time::Duration::from_secs(10)
+    ));
     let submit_rows = crate::event_store::query_events(
         &events_dir.join("events.jsonl"),
         &crate::event_store::EventQuery::of_types(&["operator_submit"]),
