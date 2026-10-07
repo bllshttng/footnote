@@ -73,6 +73,12 @@ The machine arm reports duplicate mux servers on one socket. It also reports own
 
 Two bounds upstream keep the leak from forming in the first place. The suite runner runs each suite in its own process group with a wall-clock timeout (`config.test.timeout_seconds`, default 1800). On expiry or interrupt it kills the GROUP. Killing cargo alone orphans the deps binary it exec'd, which is exactly how the ppid-1 shape forms. And test-spawned children are killed and waited through Drop guards, so a panicking test no longer leaves a live child whose corpse has no reaper.
 
+## Non-fno load: WindowServer and the terminal
+
+A "Machine busy" notice can fire with fno itself near-idle. The 2026-10-03 investigation sampled a saturated 12-core box at 0% idle and found WindowServer at 88-97% of one core across every sample, the ghostty terminal at about 43%, and Chrome's 86 renderer processes at 8% total. WindowServer and the terminal panes feed each other: every visible pane, tab and render tick costs a desktop process, and neither is fno work. fno spawns neither. It cannot trim either. When the reason line's `top groups` names `WindowServer` or `ghostty`, the desktop is a real contributor on a box running many panes, and cutting fleet concurrency will not cool it.
+
+The desktop contribution is a floor, not a driver fno owns. Treat it as you treat foreign load: attribute it, then look at the fno-attributed share before touching the fleet. `scripts/load-sample.sh` takes the one-line host reading (host-tick busy, load, runnable and process counts, top process groups by count) a load investigation starts from. It never sums `ps %CPU`: that figure is a decaying per-process average that read 610% while `top` read 0% idle in the same sample, an undercount of about 600 points on a saturated box.
+
 ## Test all-stop
 
 `fno agents incident stop --hold tests --reason <why>` is the one user command. The breaker record holds new runs at the doors. `fno doctor test` refuses a new suite, and the cargo build and run doors wait with a holding line. The same verb reaches the tests already running. It ends (SIGKILL, subtree included) every `cargo test`, `cargo nextest run` and `pytest` process under a live registry row, so a held run can never keep holding a pid-anchored admission claim while unable to progress. The user's own terminal is never a registry row, so its processes are never touched. The first pass of a hold sends one fleet announcement: tests are held, keep coding, do not rerun, wait for the all-clear.
