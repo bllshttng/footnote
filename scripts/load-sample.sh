@@ -63,20 +63,22 @@ esac
 # One ps pass for counts and groups: runnable begins with R (the census's
 # own rule); groups are basename counts, never CPU sums.
 ps_out=$(ps -eo state=,comm=)
-runnable=$(awk '$1 ~ /^R/ {n++} END {print n + 0}' <<EOF
-$ps_out
-EOF
-)
-processes=$(awk 'END {print NR}' <<EOF
-$ps_out
-EOF
-)
+runnable=$(awk '$1 ~ /^R/ {n++} END {print n + 0}' <<<"$ps_out")
+processes=$(awk 'END {print NR}' <<<"$ps_out")
 top_groups=$(awk '{
+    $1 = ""
+    sub(/^ +/, "")
     n = split($0, f, "/")
-    print f[n]
-}' <<EOF
-$ps_out
-EOF
-    | sort | uniq -c | sort -rn | head -5 | awk '{printf "%s%s:%s", sep, $2, $1; sep = ","}')
+    name = f[n]
+    gsub(/[[:space:]]+$/, "", name)
+    count[name]++
+} END { for (k in count) printf "%d %s\n", count[k], k }' <<<"$ps_out" \
+    | sort -rn | head -5 | awk '{
+    c = $1
+    $1 = ""
+    sub(/^ /, "")
+    printf "%s%s:%s", sep, $0, c
+    sep = ","
+}')
 
 echo "load_sample cores=$cores load1=$load1 load5=$load5 load15=$load15 busy_pct=$busy_pct runnable=$runnable processes=$processes top_groups=$top_groups"
