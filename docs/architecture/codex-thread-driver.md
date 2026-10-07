@@ -86,7 +86,7 @@ A failed `turn/completed` retains its error, keeps the worker Working, and emits
 
 Worker spawn and resume set OpenAI stream retries to 20 and the stream idle timeout to 600,000 ms. Explicit per-thread overrides take precedence. These settings travel through thread config and do not change the shared app-server configuration.
 
-The settle arm also checks unfinished workers once a minute. A live claim and no new transcript item for 15 minutes trigger a nudge. The 30-minute nudge includes the recorded harness resume command. At 45 minutes, the daemon sends stuck help to the lead. Recipient transcript markers confirm nudge reads. An unread nudge after ten minutes triggers recovery. An unread recovery escalates instead of repeating. Active watch leases and foreign claims hold recovery.
+The settle arm also checks unfinished workers once a minute. A live claim and no new transcript item for 15 minutes trigger a nudge. The 30-minute nudge includes the recorded harness resume command. At 45 minutes, the daemon sends stuck help to the lead. Recipient transcript markers confirm nudge reads. An unread nudge triggers recovery on the next sweep. An unread recovery escalates instead of repeating. Active watch leases and foreign claims hold recovery.
 
 Dead unfinished pane workers use `fno mux workspace restore --member-session <full-session-id>` in their recorded worktree. Thread workers use the native thread resume lane. Refused recovery preserves changes on a recovery branch using an isolated index, then sends branch evidence to the lead. The original branch, index, and worktree stay intact. Finished nodes and merged work are excluded from nudging.
 
