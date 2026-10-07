@@ -503,8 +503,11 @@ wire_harnesses() {
 # The one run-once setup (config + wiring), best effort: the CLI install
 # already succeeded, and the verb stops at its own done markers. FNO_YES or
 # a non-TTY stdin (curl | sh) takes the recommended defaults; the JSON
-# report prints so the run is never silent.
+# report prints so the run is never silent. FNO_NO_WIRE carries through:
+# the opt-out that skips plugin wiring skips the setup pass too, because
+# its harness-wiring step is the same work.
 run_setup_once() {
+	[ -n "${FNO_NO_WIRE:-}" ] && return 0
 	_mux="$(dirname "$FNO_REAL")/fno"
 	[ -x "$_mux" ] || _mux="$FNO_TOOL_BIN/fno"
 	[ -x "$_mux" ] || return 0
@@ -631,6 +634,7 @@ main() {
 					if [ "$FNO_CHANNEL" = stable ] || plugin_version_matches "$FNO_VERIFIED_VERSION" "$FNO_DECLARED_VERSION"; then
 						say "fno is already installed and verified - nothing to do."
 						report_success
+						run_setup_once
 						return 0
 					fi
 					say "installed fno ${FNO_VERIFIED_VERSION:-<unreadable>} is not this tree's ${FNO_CHANNEL} ${FNO_DECLARED_VERSION}; replacing it."

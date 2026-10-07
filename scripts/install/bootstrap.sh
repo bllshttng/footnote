@@ -396,6 +396,9 @@ mode_from_source() {
 # check_frontdoor does, hand it FNO_YES / --yes, and let its own done
 # markers keep reruns cheap. A report-only pass (READY=0) never runs it.
 run_setup_once() {
+  # FNO_NO_WIRE carries through: the opt-out that skips plugin wiring skips
+  # the setup pass too, because its harness-wiring step is the same work.
+  [ -n "${FNO_NO_WIRE:-}" ] && return 0
   local cand=""
   if [[ -n "$TOOL_DIR" && -x "$TOOL_DIR/fno/bin/fno" ]]; then
     cand="$TOOL_DIR/fno/bin/fno"

@@ -495,19 +495,22 @@ fn step_guardrails(exe: &Path, rep: &mut Report) {
     }
 }
 
-/// The backlog prefix: the repo slug, written project-scoped only when the
-/// key is still unset.
+/// The backlog prefix: the repo slug, written project-scoped only when no
+/// config file sets the key yet. A configured prefix is the project's own
+/// choice; setup never overwrites one with the slug.
 fn step_backlog_prefix(exe: &Path, root: &Path, rep: &mut Report) {
+    let global = crate::model_catalog::state_dir().join("config.toml");
+    let project = root.join(".fno").join("config.toml");
+    if crate::config_defaults::key_set(Some(&global), Some(&project), "backlog.id_prefix") {
+        rep.skipped.push(
+            "backlog-prefix: backlog.id_prefix is configured; setup never overwrites it".into(),
+        );
+        return;
+    }
     let slug = slug_prefix(root);
     if slug.is_empty() {
         rep.skipped
             .push("backlog-prefix: no repo name to derive a prefix from".into());
-        return;
-    }
-    let value = toml::Value::String(slug.clone());
-    if !crate::config_defaults::differs("backlog.id_prefix", &value) {
-        rep.skipped
-            .push("backlog-prefix: backlog.id_prefix already set".into());
         return;
     }
     match config_set(exe, "backlog.id_prefix", &slug, true) {
@@ -521,9 +524,11 @@ fn step_backlog_prefix(exe: &Path, root: &Path, rep: &mut Report) {
 }
 
 /// The steps this run executes: the scope's layers, plus the contributor
-/// rows when the cwd is a footnote source checkout, filtered by `--only`.
-/// An `--only` id that names no selected step refuses with the valid ids.
-fn select_steps<'a>(opts: &'a Opts, cwd: &Path) -> Result<Vec<&'a Step>, String> {
+/// rows when the repo root is a footnote source checkout (the root, not
+/// the cwd: setup launched from a subdirectory still sees the crates),
+/// filtered by `--only`. An `--only` id that names no selected step
+/// refuses with the valid ids.
+fn select_steps<'a>(opts: &'a Opts, root: &Path) -> Result<Vec<&'a Step>, String> {
     let layers = |l: Layer| match opts.scope {
         Scope::Global => l == Layer::Global,
         Scope::Project => l == Layer::Project,
@@ -535,7 +540,7 @@ fn select_steps<'a>(opts: &'a Opts, cwd: &Path) -> Result<Vec<&'a Step>, String>
             layers(s.layer)
                 || (opts.scope != Scope::Global
                     && s.layer == Layer::Contributor
-                    && in_source_checkout(cwd))
+                    && in_source_checkout(root))
         })
         .collect();
     if !opts.only.is_empty() {
@@ -668,7 +673,7 @@ pub fn run(tail: &[OsString]) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root = repo_root();
     // Validate the argv (including --only) before --once can return early.
-    let steps = match select_steps(&opts, &cwd) {
+    let steps = match select_steps(&opts, &root) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("fno config setup run: {e}");
@@ -787,9 +792,11 @@ pub fn run(tail: &[OsString]) -> i32 {
     let global_ran = steps.iter().any(|s| s.layer == Layer::Global);
     let project_ran = steps.iter().any(|s| s.layer != Layer::Global && in_repo);
     // A layer's marker waits until nothing needs a human and nothing was
-    // declined: `--once` never papers over a blocked or refused run. Step
+    // declined: `--once` never papers over a blocked or refused run. A
+    // partial `--only` pass never writes one either - the steps it skipped
+    // have not run, so a later full pass must still offer them. Step
     // runners are idempotent and differ-guarded, so the rerun is cheap.
-    if rep.needs_human.is_empty() && declined == 0 {
+    if opts.only.is_empty() && rep.needs_human.is_empty() && declined == 0 {
         if global_ran {
             write_marker(&global_marker());
         }

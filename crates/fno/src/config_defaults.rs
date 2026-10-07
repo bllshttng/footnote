@@ -195,6 +195,23 @@ pub fn differs(key: &str, value: &toml::Value) -> bool {
     }
 }
 
+/// Whether any config file already sets `key`. Setup's write guard beside
+/// [`differs`]: `differs` compares against the shipped default, so an unset
+/// optional key always differs, and a CONFIGURED value must be read from
+/// the files. An unreadable file counts as set, because setup never
+/// overwrites a config it cannot read.
+pub fn key_set(global: Option<&Path>, project: Option<&Path>, key: &str) -> bool {
+    fn file_sets(path: &Path, key: &str) -> bool {
+        match read_flat(path) {
+            Ok(Some(map)) => map.contains_key(key),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+    global.map(|p| file_sets(p, key)).unwrap_or(false)
+        || project.map(|p| file_sets(p, key)).unwrap_or(false)
+}
+
 /// The global config file, beside the state root's other durable files.
 fn global_config_path() -> PathBuf {
     crate::model_catalog::state_dir().join("config.toml")
