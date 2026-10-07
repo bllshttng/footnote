@@ -2022,6 +2022,12 @@ pub(crate) fn acquire_with_session_witness(
             }
         }
 
+        match crate::first_check::take_parent_claim(key, holder, &opts, &existing) {
+            Ok(Some(claim)) => return AcquireOutcome::Acquired(claim),
+            Ok(None) => {}
+            Err(error) => return AcquireOutcome::Error(error),
+        }
+
         // Suspect (TTL-unexpired, dead pid) refuses exactly like Live: the TTL
         // still protects a respawned worker's slot, so we never reclaim it.
         let observed_state = classify_with_session_witness(&existing, session_witness);

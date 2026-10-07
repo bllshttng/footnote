@@ -644,6 +644,34 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
 }
 
 #[test]
+fn a_teamed_rows_node_worktree_cwd_never_tags_the_name_with_its_node() {
+    // A node-backed codex thread inherits its spawner's workspace, so its
+    // own node worktree reads as a FOREIGN cwd and the card rendered
+    // `t-<node> (x-<node>)` - the node twice on one line. The parenthetical
+    // drops whenever the cwd base repeats the row's node, teamed or not; a
+    // genuinely foreign directory still tags.
+    let mut leak = agent_row("t-x64d4", 11, Some(AgentBadge::Working), false);
+    leak.harness = Some("codex".into());
+    leak.node = Some("x-64d4".into());
+    leak.cwd_base = Some("x-64d4".into());
+    let mut foreign = agent_row("t-else", 12, Some(AgentBadge::Working), false);
+    foreign.harness = Some("codex".into());
+    foreign.cwd_base = Some("elsewhere".into());
+    let mut v = card_view(vec![leak, foreign]);
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let text = crate::vt::frame_text(&v.compose());
+    assert!(
+        !text.contains("(x-64d4)"),
+        "a cwd base that repeats the node id tags no teamed name: {text}"
+    );
+    assert!(
+        text.contains("t-else (elsewhere)"),
+        "a real foreign directory keeps its context: {text}"
+    );
+}
+
+#[test]
 fn chosen_card_fills_all_three_lines_with_the_accent_and_a_left_bar() {
     // The operator's 2026-10-04 ruling: the focused card fills all 3 lines
     // with the theme accent plus a left bar, unmistakable against resting

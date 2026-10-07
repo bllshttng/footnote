@@ -2277,11 +2277,9 @@ class AgentsBlock(SweepKeys):
     auto_register_sessions: bool = False
     # Only routed Claude panes use this machine-local integration.
     happy_routed_panes: bool = False
-    # Row-retirement grace in SECONDS. Full contract: FIELD_META.
+    first_check_minutes: int = Field(default=10, ge=1, le=60)
     retire_grace_s: int = Field(default=900, ge=0)
-    # Sweep cadence in SECONDS; clamped under a third of the grace. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
-    # Reaper-hold escalation in SECONDS. Full contract: FIELD_META.
     hold_escalate_after_s: int = Field(default=5400, ge=0)
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     reap: ReapBlock = Field(default_factory=ReapBlock)

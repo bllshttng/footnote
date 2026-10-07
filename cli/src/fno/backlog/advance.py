@@ -2566,7 +2566,7 @@ def _observe_node_claim(
         truth = "unknown"
     claim_state = info.get("state")
     holder = info.get("holder") or "unknown"
-    occupied = verdict in ("ours", "foreign_live")
+    occupied = info.get("dispatch_occupied", verdict in ("ours", "foreign_live"))
     worker = ""
     if worked_nodes is None and worked_error is None:
         try:
