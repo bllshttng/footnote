@@ -174,7 +174,7 @@ pub(crate) fn maybe_scan(
     in_flight: &std::sync::Arc<AtomicBool>,
     home: crate::paths::AgentsHome,
 ) {
-    if last.elapsed() < SCAN_CADENCE || !in_flight.swap(true, Ordering::SeqCst) {
+    if last.elapsed() < SCAN_CADENCE || in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
     *last = Instant::now();

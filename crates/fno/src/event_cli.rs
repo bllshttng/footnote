@@ -156,6 +156,10 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
     let result = crate::event_store::append_envelope(&journal, envelope.trim(), requested);
     match result {
         Ok(r) => {
+            if let Err(error) = crate::first_check::record(&journal, &r.event_id, envelope.trim()) {
+                eprintln!("error: birth committed, but {error}");
+                return 1;
+            }
             let receipt = serde_json::json!({
                 "success": true,
                 "store": r.store.display().to_string(),
