@@ -587,10 +587,12 @@ mod tests {
     }
 
     fn write_beat_manifest(path: &Path, scope: &str, harness: &str, session: &str) {
+        // fno_id is non-empty: the manifest parser refuses a frontmatter
+        // block without one, so the fixture must carry a real-shaped id.
         std::fs::write(
             path,
             format!(
-                "---\nscope: {scope}\nharness: {harness}\nharness_session_id: {session}\n---\n"
+                "---\nfno_id: {scope}-fixture\nscope: {scope}\nharness: {harness}\nharness_session_id: {session}\n---\n"
             ),
         )
         .unwrap();
