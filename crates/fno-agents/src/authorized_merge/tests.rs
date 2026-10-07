@@ -842,17 +842,20 @@ fn slot_holder_error_fails_open_to_the_stale_hold_without_taking_a_slot() {
 
 #[test]
 fn ci_base_verdict_reads_each_branch() {
-    // Ancestry is the whole verdict now: behind_by 0 clears, anything
-    // behind refuses, because no run at a head that lacks the base tip
-    // can have tested the merged tree.
-    assert_eq!(ci_base_verdict(0), ProbeOutcome::Clear);
-    let outcome = ci_base_verdict(3);
-    assert!(matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale")));
+    // behind_by 0 clears; a behind head clears only with no shared file.
+    let shared = vec!["src/lib.rs".to_string()];
+    assert_eq!(ci_base_verdict(0, None), ProbeOutcome::Clear);
+    assert_eq!(ci_base_verdict(3, Some(&[])), ProbeOutcome::Clear);
+    for outcome in [ci_base_verdict(3, Some(&shared)), ci_base_verdict(3, None)] {
+        assert!(
+            matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
+        );
+    }
 }
 
 #[test]
 fn a_green_pr_whose_ci_predates_main_merges_main_in_and_waits_for_the_retest() {
-    // The replay: one PR lands, then a second PR shares no file with it
+    // The replay: one PR lands, then a second PR shares a file with it
     // and is green on a run created before that landing. It holds, takes
     // the slot, and has main merged into its branch; once the rerun is
     // green against the current main it merges.

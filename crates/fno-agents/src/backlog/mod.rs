@@ -27,6 +27,7 @@ pub mod epic_cap;
 pub mod fields;
 pub mod find_cli;
 pub mod findings;
+pub mod freshness;
 pub mod get_cli;
 pub mod idea_cap;
 pub(crate) mod merge_evidence;
