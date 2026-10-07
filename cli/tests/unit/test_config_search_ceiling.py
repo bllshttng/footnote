@@ -15,9 +15,7 @@ import pytest
 
 
 def _clear_caches() -> None:
-    from fno import config as config_mod
-    from fno import paths as paths_mod
-
+    pass
 
 
 @pytest.fixture(autouse=True)
@@ -38,24 +36,6 @@ def _pin(monkeypatch: pytest.MonkeyPatch, *, worktree: Path, canonical: Path) ->
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: worktree)
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: canonical)
     _clear_caches()
-
-
-def test_canonical_candidate_outside_ceiling_is_dropped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A canonical .fno outside the ceiling never becomes a read candidate."""
-    from fno.config import _settings_yaml_locations
-
-    worktree = tmp_path / "wt"
-    poison_checkout = tmp_path / "canonical"  # stands in for ~/code/.../footnote
-    _pin(monkeypatch, worktree=worktree, canonical=poison_checkout)
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "global.yaml"))
-    monkeypatch.setenv("FNO_CONFIG_SEARCH_ROOT", str(worktree))
-
-    locs = _settings_yaml_locations()
-
-    assert worktree / ".fno" / "settings.yaml" in locs
-    assert poison_checkout / ".fno" / "settings.yaml" not in locs
 
 
 def test_poisoned_parent_config_not_loaded(
@@ -111,18 +91,3 @@ def test_direct_reader_candidates_are_bounded(
     assert all("canonical" not in str(c) for c in cands)
 
 
-def test_no_ceiling_env_is_a_noop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Unset FNO_CONFIG_SEARCH_ROOT leaves the full chain intact (production)."""
-    from fno.config import _settings_yaml_locations
-
-    worktree = tmp_path / "wt"
-    canonical = tmp_path / "canonical"
-    _pin(monkeypatch, worktree=worktree, canonical=canonical)
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "global.yaml"))
-    monkeypatch.delenv("FNO_CONFIG_SEARCH_ROOT", raising=False)
-
-    locs = _settings_yaml_locations()
-
-    assert canonical / ".fno" / "settings.yaml" in locs

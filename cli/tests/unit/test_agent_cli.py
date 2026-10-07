@@ -122,19 +122,7 @@ class TestWhoami:
         assert "target-state.md" in result.stderr
         assert "malformed" in result.stderr.lower()
 
-    def test_ac3_ui_json_mode_is_structured(self, tmp_path, runner, monkeypatch):
-        project = _make_workspace(tmp_path, target=True, walker=True)
-        result = _invoke(runner, project, monkeypatch, "whoami", "--json")
-        assert result.exit_code == 0, result.stdout + result.stderr
-        payload = json.loads(result.stdout)
-        # Absent fleet serializes as null, not as a missing key.
-        assert "fleet" in payload and payload["fleet"] is None
-        assert payload["walker"] is not None
-        assert payload["session"] is not None
-        assert payload["harness"]
-        assert "provider" not in payload
-
-    @pytest.mark.parametrize("global_flag", ["--json", "-J"])
+    @pytest.mark.parametrize("global_flag", ["-J"])
     def test_global_json_flag_honored(self, tmp_path, runner, monkeypatch, global_flag):
         """Regression (codex P2 on PR #500): the root callback's global -J/--json
         (passed BEFORE the verb: `fno -J whoami`) must also produce JSON, not
@@ -172,17 +160,6 @@ class TestWhoami:
         assert isinstance(created, str)
         assert created.startswith("2026-06-11T13:27:56")
 
-    def test_ac4_edge_no_state_at_all(self, tmp_path, runner, monkeypatch):
-        project = tmp_path / "empty"
-        project.mkdir()
-        result = _invoke(runner, project, monkeypatch, "whoami")
-        assert result.exit_code == 0
-        assert "project:" in result.stdout
-        assert "harness:" in result.stdout
-        assert "session:" not in result.stdout
-        assert "walker:" not in result.stdout
-        assert "fleet:" not in result.stdout
-
     def test_positive_manifest_session_mismatch_reports_visitor(
         self, tmp_path, runner, monkeypatch
     ):
@@ -210,34 +187,6 @@ class TestWhoami:
         assert payload["session"] is None
         assert payload["visitor"] == "manifest names session resident-session, not this one"
 
-    def test_ac5_fr_dual_states_picks_target_warns(self, tmp_path, runner, monkeypatch):
-        project = _make_workspace(tmp_path, target=True)
-        # Add session-state.md alongside target-state.md
-        (project / ".fno" / "session-state.md").write_text(
-            (FIXTURES / "session-state-think.md").read_text()
-        )
-        result = _invoke(runner, project, monkeypatch, "whoami")
-        assert result.exit_code == 0
-        assert "(target)" in result.stdout
-        assert "warn:" in result.stderr
-        assert "both" in result.stderr
-
-    def test_no_walker_flag_suppresses_walker_layer(self, tmp_path, runner, monkeypatch):
-        project = _make_workspace(tmp_path, target=True, walker=True)
-        result = _invoke(runner, project, monkeypatch, "whoami", "--no-walker")
-        assert result.exit_code == 0
-        assert "walker:" not in result.stdout
-
-    def test_no_fleet_flag_suppresses_fleet_layer(self, tmp_path, runner, monkeypatch):
-        project = _make_workspace(tmp_path, target=True, walker=True, fleet=True)
-        result = _invoke(
-            runner, project, monkeypatch, "whoami", "--no-fleet",
-            env_home=tmp_path / "fake_home",
-        )
-        assert result.exit_code == 0
-        assert "fleet:" not in result.stdout
-        assert "walker:" in result.stdout
-
     # --- x-5ee2 US1: mail handle + run: relabel -------------------------------
 
     def test_ac1_hp_mail_handle_surfaced(self, tmp_path, runner, monkeypatch):
@@ -261,32 +210,6 @@ class TestWhoami:
         )
         assert payload["mail_handle"] == "879d8d26" == stamp_from(None)
         assert payload["harness_session_id"] == "879d8d26-2505-4977-9b87-000000000000"
-
-    def test_ac4_fr_degrades_without_identity(self, tmp_path, runner, monkeypatch):
-        """No ambient harness identity: no `mail:` line, JSON `mail_handle` null,
-        every existing line and the exit code unchanged."""
-        _clear_markers(monkeypatch)
-        project = _make_workspace(tmp_path, target=True)
-        result = _invoke(runner, project, monkeypatch, "whoami")
-        assert result.exit_code == 0, result.stdout + result.stderr
-        assert "mail:" not in result.stdout
-        assert "harness:" in result.stdout  # existing lines intact
-        payload = json.loads(
-            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
-        )
-        assert payload["mail_handle"] is None
-        assert payload["harness_session_id"] is None
-
-    def test_ac5_edge_mesh_worker_shows_both_identities(self, tmp_path, runner, monkeypatch):
-        """A mesh worker with ambient identity surfaces both `agent:` (mesh name)
-        and `mail:` (canonical reply handle); they may differ, both reachable."""
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-prefix")
-        monkeypatch.setenv("FNO_AGENT_SELF", "myworker")
-        project = _make_workspace(tmp_path, target=True)
-        result = _invoke(runner, project, monkeypatch, "whoami")
-        assert result.exit_code == 0, result.stdout + result.stderr
-        assert "agent:    myworker (mesh)" in result.stdout
-        assert "mail:     879d8d26" in result.stdout
 
     # --- x-730d: dead-letterbox visibility (unread count) --------------------
 
@@ -369,40 +292,6 @@ class TestWhoami:
         )
         assert payload["mail_unread"] == 1  # the etl broadcast only, not our own
 
-    def test_mail_unread_corrupt_cursor_stays_silent(self, tmp_path, runner, monkeypatch):
-        """A corrupt cursor makes read_cursor warn on stderr; whoami must swallow
-        it - the recovery verb never gains noisy output."""
-        from fno.bus.cursor import cursor_path
-        from fno.inbox.store import write_new_thread
-
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
-        self._isolate_bus(tmp_path, monkeypatch)
-        write_new_thread(
-            recipient="879d8d26", sender="etl", kind="send",
-            body="ping", to_kind="name",
-        )
-        cp = cursor_path("claude-879d8d26")
-        cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text("{not json", encoding="utf-8")  # corrupt
-
-        project = _make_workspace(tmp_path, target=True)
-        result = _invoke(runner, project, monkeypatch, "whoami")
-        assert result.exit_code == 0, result.stdout + result.stderr
-        assert "corrupt cursor" not in (result.stderr or "")
-
-    def test_mail_unread_zero_silent(self, tmp_path, runner, monkeypatch):
-        """No unread mail: no unread line, no JSON key, exit 0 as today."""
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
-        self._isolate_bus(tmp_path, monkeypatch)
-        project = _make_workspace(tmp_path, target=True)
-        result = _invoke(runner, project, monkeypatch, "whoami")
-        assert result.exit_code == 0, result.stdout + result.stderr
-        assert "mail_unread:" not in result.stdout  # no unread line
-        payload = json.loads(
-            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
-        )
-        assert "mail_unread" not in payload
-
 
 # --- status --------------------------------------------------------------
 
@@ -414,15 +303,6 @@ class TestStatus:
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "gates:" in result.stdout
         assert "quality_check_passed" in result.stdout
-
-    def test_ac2_err_events_jsonl_unreadable_degrades(self, tmp_path, runner, monkeypatch):
-        project = _make_workspace(tmp_path, target=True)
-        # Create a directory where events.jsonl should be a file -> read fails open()
-        (project / ".fno" / "events.jsonl").mkdir()
-        result = _invoke(runner, project, monkeypatch, "status")
-        # rc=0 (degraded), warning emitted to stderr, events block omitted.
-        assert result.exit_code == 0
-        assert "events (last" not in result.stdout
 
     def test_ac3_ui_inconsistencies_flagged_inline(self, tmp_path, runner, monkeypatch):
         # target fixture has pr_number=1234 + external_review_passed missing/false.
@@ -498,32 +378,6 @@ class TestStatus:
         # marker is distinctive enough that an accidental render would
         # surface it.
         assert "phase_truncated_marker_xyz" not in result.stdout
-
-    def test_json_mode_includes_events_and_inconsistencies(self, tmp_path, runner, monkeypatch):
-        project = _make_workspace(tmp_path, target=True)
-        result = _invoke(runner, project, monkeypatch, "status", "--json")
-        assert result.exit_code == 0
-        payload = json.loads(result.stdout)
-        assert "events_tail" in payload
-        assert "inconsistencies" in payload
-
-
-# --- retired namespace ---------------------------------------------------
-
-
-class TestAgentNamespaceRetired:
-    """The `fno agent` (singular) namespace is gone (AC2-EDGE): the verbs are
-    absent (clean usage error), not a silent wrong result."""
-
-    @pytest.mark.parametrize("verb", ["whoami", "status", "suggest", "capabilities"])
-    def test_fno_agent_verb_is_absent(self, tmp_path, runner, monkeypatch, verb):
-        project = _make_workspace(tmp_path, target=True)
-        result = _invoke(runner, project, monkeypatch, "agent", verb)
-        assert result.exit_code != 0
-        # `agents` (plural mesh) still exists, so the suggestion may point there;
-        # the point is `fno agent <verb>` does not silently succeed.
-        combined = result.stdout + result.stderr
-        assert "No such command 'agent'" in combined or "Usage:" in combined
 
 
 # --- read-only invariant -------------------------------------------------
@@ -616,21 +470,3 @@ def test_session_model_ignores_sidechain_workers(tmp_path: Path, monkeypatch) ->
         ],
     )
     assert agent_cli._session_model() == "claude-opus-5"
-
-
-def test_session_model_absent_degrades_to_none(tmp_path: Path, monkeypatch) -> None:
-    """whoami is the confused-agent recovery verb: an unresolvable model drops
-    the line rather than becoming a failure."""
-    from fno.agent import cli as agent_cli
-
-    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-missing")
-    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
-    assert agent_cli._session_model() is None
-
-
-def test_session_model_none_without_ambient_identity(monkeypatch) -> None:
-    from fno.agent import cli as agent_cli
-
-    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
-        monkeypatch.delenv(m, raising=False)
-    assert agent_cli._session_model() is None

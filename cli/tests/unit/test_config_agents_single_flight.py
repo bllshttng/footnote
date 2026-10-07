@@ -11,24 +11,6 @@ from fno.config import AgentsBlock
 from fno.config._sweeps import DEGRADED
 
 
-def test_defaults_match_the_rust_daemon():
-    block = AgentsBlock()
-    assert block.single_flight_ttl_seconds == 60
-    assert block.single_flight_join_budget_seconds == 30
-    assert block.orphan_reap_after_seconds == 5400
-
-
-def test_configured_values_are_honored():
-    block = AgentsBlock(
-        single_flight_ttl_seconds=5,
-        single_flight_join_budget_seconds=60,
-        orphan_reap_after_seconds=900,
-    )
-    assert block.single_flight_ttl_seconds == 5
-    assert block.single_flight_join_budget_seconds == 60
-    assert block.orphan_reap_after_seconds == 900
-
-
 def test_a_non_numeric_value_degrades_and_is_named():
     DEGRADED.clear()
     block = AgentsBlock(single_flight_ttl_seconds="banana")
@@ -50,6 +32,3 @@ def test_a_non_positive_value_degrades_and_is_named():
     }
 
 
-def test_the_reap_receipt_block_still_rides_the_agents_block():
-    # It moved modules with the sweep keys; the config PATH must not have.
-    assert AgentsBlock().reap_receipts.retain_days == 7

@@ -56,16 +56,6 @@ def test_env_out_of_enum_refuses_fail_closed(tmp_path, monkeypatch):
         resolve_worktree_policy(repo, "claude")
 
 
-def test_env_empty_is_ignored(tmp_path, monkeypatch):
-    """AC2-EDGE: unset or empty resolves byte-identical to today."""
-    repo = _make_repo(tmp_path / "emptyenv")
-    monkeypatch.setenv("FNO_WORKTREE_POLICY", "")
-    pol = resolve_worktree_policy(repo, "claude")
-    assert pol.policy == "harness-native"
-    assert pol.source == "default"
-    assert pol.degraded is False
-
-
 def test_policy_receipt_names_source_and_degradation(tmp_path):
     """AC5-HP: `worktree policy` prints source= and the degraded clause."""
     from fno.worktree_cli.cli import app

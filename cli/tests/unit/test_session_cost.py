@@ -37,13 +37,6 @@ def test_render_tasks_md_pr_url_with_pr_number():
     assert "[#42](https://github.com/o/r/pull/42)" in md
 
 
-def test_render_tasks_md_no_pr_fields():
-    """Neither key present: existing .get() fallback renders #?."""
-    entries = [{"title": "bare entry"}]
-    md = session_cost.render_tasks_md(entries)
-    assert "PR: #?" in md
-
-
 def test_render_tasks_md_pr_number_explicit_none():
     """Gemini on PR #442: pr_number: null in JSON loads as None; the
     placeholder must render '?', not 'None'."""

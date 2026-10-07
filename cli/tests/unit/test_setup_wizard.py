@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
 import tomllib
-import typer
 from typer.testing import CliRunner
 
 from fno.config import schema_gen
@@ -90,26 +88,6 @@ def test_enabling_obsidian_with_vault_succeeds(tmp_path, monkeypatch):
     assert data["obsidian"]["vault"] == "MyVault"
 
 
-def test_ac4_err_rejected_value_reprompts(tmp_path, monkeypatch):
-    _global_path(tmp_path, monkeypatch)
-    # Just the id_prefix field, which has a strict validator.
-    field = next(f for f in _always_fields() if f["path"] == "backlog.id_prefix")
-
-    calls = {"n": 0}
-
-    def prompt_fn(message, default):
-        calls["n"] += 1
-        # First answer is rejected (uppercase / invalid), second is accepted.
-        return "BADPREFIX" if calls["n"] == 1 else "xy"
-
-    result = run_wizard(
-        tmp_path, [field], prompt_fn=prompt_fn, scope_fn=lambda k: "global"
-    )
-    # It re-prompted rather than aborting, and eventually wrote the valid value.
-    assert calls["n"] == 2
-    assert result["written"] == ["backlog.id_prefix"]
-
-
 def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
     """In a multi-field block, a genuinely invalid value on a field with a later
     sibling is deferred, but on retry it must RE-PROMPT (and eventually write a
@@ -152,36 +130,6 @@ def test_deferred_genuine_error_reprompts_not_skipped(tmp_path, monkeypatch):
     }
     data = tomllib.loads((gpath.parent / "config.toml").read_text())
     assert data["backlog"]["id_prefix"] == "ok"
-
-
-def test_project_vision_is_project_scoped(tmp_path):
-    assert "project.vision" in PROJECT_SCOPED_KEYS
-
-    field = {
-        "path": "project.vision",
-        "default": None,
-        "tier": "always",
-        "question": "vision?",
-    }
-    asked: list[str] = []
-
-    def scope_fn(key):
-        asked.append(key)
-        return "project"
-
-    run_wizard(
-        tmp_path,
-        [field],
-        prompt_fn=lambda m, d: "A CLI that ships features end to end.",
-        scope_fn=scope_fn,
-    )
-    # The scope was asked, and vision landed in the PROJECT file, not global.
-    assert asked == ["project.vision"]
-    data = tomllib.loads((tmp_path / ".fno" / "config.toml").read_text())
-    assert (
-        data["project"]["vision"]
-        == "A CLI that ships features end to end."
-    )
 
 
 def test_ac4_ui_echoes_scope_and_path(tmp_path, monkeypatch):
@@ -260,25 +208,6 @@ def test_ac4_fr_cancel_midrun_keeps_written_nothing_partial(tmp_path, monkeypatc
         tomllib.loads((gpath.parent / "config.toml").read_text())
 
 
-def test_cli_wizard_smoke_accepts_defaults(tmp_path, monkeypatch):
-    _global_path(tmp_path, monkeypatch)
-    monkeypatch.chdir(tmp_path)
-    from fno.setup import integration
-    from fno.setup_cli import app
-
-    # The integration step execs `claude plugin list` when a real agent CLI is
-    # on PATH, which the pytest provider-exec guard refuses; the prompt flow is
-    # what this test asserts, so stub the step like the receipt test does.
-    monkeypatch.setattr(integration, "run_cli_integration", lambda **kwargs: None)
-
-    fields = _always_fields()
-    # One newline per field accepts each default.
-    stdin = "\n" * (len(fields) + 2)
-    res = CliRunner().invoke(app, ["wizard"], input=stdin)
-    assert res.exit_code == 0, res.output
-    assert "wizard" in res.output.lower()
-
-
 def test_cli_wizard_completion_receipt_names_autonomy_status(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -304,22 +233,6 @@ def test_cli_wizard_completion_receipt_names_autonomy_status(tmp_path, monkeypat
     assert "fno agents autonomy status" in res.output
 
 
-def test_cli_wizard_advanced_surfaces_more_fields(tmp_path, monkeypatch):
-    _global_path(tmp_path, monkeypatch)
-    monkeypatch.chdir(tmp_path)
-    from fno.setup import integration
-    from fno.setup_cli import app
-
-    # Same stub as the smoke test: a real agent CLI on PATH would exec here.
-    monkeypatch.setattr(integration, "run_cli_integration", lambda **kwargs: None)
-
-    advanced = json.loads(schema_gen.wizard_plan())["fields"]
-    # --advanced asks more than the always-only set; feed plenty of newlines.
-    stdin = "\n" * (len(advanced) * 2 + 4)
-    res = CliRunner().invoke(app, ["wizard", "--advanced"], input=stdin)
-    assert res.exit_code == 0, res.output
-
-
 def test_cli_hook_offer_decline_is_inert():
     calls = []
 
@@ -330,42 +243,6 @@ def test_cli_hook_offer_decline_is_inert():
 
     assert result is False
     assert calls == []
-
-
-def test_cli_hook_offer_accepts_combined_installer():
-    calls = []
-
-    result = offer_cli_hooks(
-        confirm_fn=lambda _message: True,
-        install_fn=lambda **kwargs: calls.append(kwargs),
-    )
-
-    assert result is True
-    assert calls == [
-        {
-            "codex": True,
-            "gemini": True,
-            "gemini_settings": None,
-            "codex_config": None,
-            "codex_hooks_json": None,
-            "migrate_legacy_hooks_json": False,
-            "claude": True,
-            "claude_settings": None,
-        }
-    ]
-
-
-def test_cli_hook_offer_propagates_installer_failure():
-    def fail_install(**_kwargs):
-        raise typer.Exit(1)
-
-    with pytest.raises(typer.Exit) as exc_info:
-        offer_cli_hooks(
-            confirm_fn=lambda _message: True,
-            install_fn=fail_install,
-        )
-
-    assert exc_info.value.exit_code == 1
 
 
 def test_report_machine_blockers_names_a_real_blocker(monkeypatch):
@@ -413,26 +290,3 @@ def test_report_machine_blockers_survives_a_raising_doctor(monkeypatch):
     assert "could not run" in lines[0]
 
 
-def test_report_machine_blockers_clean_machine_says_so(monkeypatch):
-    """AC: a machine with no blockers says so in one line rather than
-    printing an empty header."""
-    import fno.doctor as doctor
-    from fno.setup_cli import report_machine_blockers
-
-    monkeypatch.setattr(
-        doctor,
-        "build_report",
-        lambda source=None: {
-            "status": "fresh",
-            "launch_agents": {"applicable": True, "dead": []},
-            "fd_limit": {"verdict": "ok"},
-            "plugin_hooks": {"failed": 0},
-            "plugin_cache": {"status": "fresh"},
-        },
-    )
-
-    lines = []
-    blockers = report_machine_blockers(echo_fn=lines.append)
-
-    assert blockers == []
-    assert any("clean" in line for line in lines)

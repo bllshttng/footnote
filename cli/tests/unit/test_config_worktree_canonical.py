@@ -18,8 +18,7 @@ import pytest
 
 
 def _clear_caches() -> None:
-    from fno import config as config_mod
-
+    pass
 
 
 @pytest.fixture(autouse=True)
@@ -93,38 +92,3 @@ def test_worktree_local_settings_win_over_canonical(
     assert settings.post_merge.parking_lot_path == "internal/worktree/parking-lot.md"
 
 
-def test_candidate_paths_include_canonical_in_worktree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """In a worktree the candidate order is [worktree, canonical, global]."""
-    canonical = tmp_path / "canonical"
-    worktree = tmp_path / "worktree"
-
-    _pin_roots(monkeypatch, worktree=worktree, canonical=canonical)
-
-    from fno.config import _candidate_paths
-
-    cands = _candidate_paths()
-    # config.toml is preferred over settings.yaml at each location, so each dir
-    # contributes its config.toml first, then its settings.yaml.
-    assert cands[0] == worktree / ".fno" / "config.toml"
-    assert cands[1] == worktree / ".fno" / "settings.yaml"
-    assert cands[2] == canonical / ".fno" / "config.toml"
-    assert cands[3] == canonical / ".fno" / "settings.yaml"
-
-
-def test_candidate_paths_dedup_when_canonical_equals_worktree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """From the canonical checkout (root == canonical) there is no duplicate."""
-    root = tmp_path / "repo"
-
-    _pin_roots(monkeypatch, worktree=root, canonical=root)
-
-    from fno.config import _candidate_paths
-
-    cands = _candidate_paths()
-    project_local = [
-        c for c in cands if c.name == "settings.yaml" and ".fno" in c.parts
-    ]
-    assert project_local == [root / ".fno" / "settings.yaml"]

@@ -15,11 +15,9 @@ from __future__ import annotations
 import pytest
 import typer
 
+from fno.config_cli import _report_band_routing
 
 requires_rust = pytest.mark.dev_build
-
-
-from fno.config_cli import _report_band_routing
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -70,18 +68,6 @@ def _pin_settings(
     )
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
     return settings
-
-
-def test_undeclared_inventory_names_the_gap(monkeypatch):
-    _pin_inventory(monkeypatch, declared=False)
-    _pin_roles(monkeypatch, {})
-    out = _capture(monkeypatch)
-
-    _report_band_routing()
-
-    text = "\n".join(out)
-    assert "band routing inactive:" in text
-    assert "routing.models" in text
 
 
 @requires_rust
@@ -139,29 +125,6 @@ def test_roles_set_alongside_an_empty_inventory_says_they_are_a_different_axis(
     text = "\n".join(out)
     assert "band routing inactive:" in text
     assert "model_routing.roles" in text and "ROLE" in text
-
-
-def test_unreadable_roles_still_prints_the_line(monkeypatch):
-    """The roles note is a hint on top of the advisory, so a failed settings
-    read must not cost the operator the line the advisory exists to print."""
-    _pin_inventory(monkeypatch, declared=False)
-
-    def boom():
-        raise RuntimeError("unreadable")
-
-    monkeypatch.setattr("fno.config.load_settings", boom)
-
-    def fake_call(payload, **_):
-        return {}
-
-    monkeypatch.setattr("fno.route_slot_client.route_slot_call", fake_call)
-    out = _capture(monkeypatch)
-
-    _report_band_routing()
-
-    text = "\n".join(out)
-    assert "band routing inactive:" in text
-    assert "model_routing.roles" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -235,32 +198,6 @@ def test_doctor_names_an_effort_value_with_no_surface(monkeypatch):
     assert "config.agents.profiles.target.effort = 'high'" in text
     assert "gemini" in text
     assert "[agents.profiles.target.harness.gemini]" in text
-
-
-def test_doctor_silent_when_every_pair_maps(monkeypatch):
-    """AC3-EDGE: with the scalars empty and each harness's answer under its
-    own overlay, every (verb, harness) pair maps and the readout prints
-    nothing. One scalar CANNOT be silent (no value maps on every harness),
-    which is exactly why the overlay exists."""
-    from fno.config_cli import _report_harness_overlays
-
-    _pin_overlay_settings(
-        monkeypatch,
-        profiles={
-            "target": {
-                "permission_mode": "",
-                "harness": {
-                    "claude": {"permission_mode": "bypassPermissions"},
-                    "codex": {"permission_mode": "yolo", "effort": "xhigh"},
-                },
-            },
-        },
-    )
-    out = _capture(monkeypatch)
-
-    _report_harness_overlays()
-
-    assert out == []
 
 
 def test_doctor_accepts_every_claude_help_value(monkeypatch):

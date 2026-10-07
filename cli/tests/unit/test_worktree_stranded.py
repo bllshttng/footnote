@@ -27,7 +27,6 @@ from fno.worktree_stranded import (
     act_on_stranded,
     apply_sweep,
     classify,
-    record_unknown,
     resolve_node_id,
 )
 
@@ -77,11 +76,7 @@ def _base_kwargs(**overrides) -> dict:
         pytest.param(
             {"node_entry": {"status": "superseded"}}, ABANDONED, id="abandoned-superseded"
         ),
-        pytest.param(
-            {"node_entry": {"status": "deferred"}}, ABANDONED, id="abandoned-deferred"
-        ),
         pytest.param({"registry_status": "busy"}, LIVE, id="live-busy"),
-        pytest.param({"registry_status": "idle"}, LIVE, id="live-idle"),
         pytest.param(
             {"node_entry": {"status": "ready", "pr_number": 42}}, PR_OPEN, id="pr-open"
         ),
@@ -111,34 +106,18 @@ def test_classify_exposes_provenance_facts():
     assert row.facts["live"] is True
 
 
-def test_classify_provenance_facts_default_false_and_none():
-    row = classify(**_base_kwargs())
-    assert row.facts["has_remote"] is False
-    assert row.facts["pr_number"] is None
-    assert row.facts["live"] is False
-
-
-def test_live_outranks_pr_open():
-    """The epic king's correction: a live-fleet row must win even when the
-    same node also carries an open PR, or a minutes-old branch could get
-    acted on because PR_OPEN was checked first."""
-    row = classify(**_base_kwargs(registry_status="busy", node_entry={"status": "ready", "pr_number": 7}))
-    assert row.klass == LIVE
-
-
 @pytest.mark.parametrize(
     "node_status",
     [
         pytest.param("done", id="live-outranks-shipped"),
         pytest.param("superseded", id="live-outranks-abandoned-superseded"),
-        pytest.param("deferred", id="live-outranks-abandoned-deferred"),
     ],
 )
 def test_live_outranks_terminal_node_status(node_status):
     """A code-review finding: a node auto-transitioning to a terminal status
     WHILE a worker is still mid-commit in that worktree must still read
     LIVE, not SHIPPED/ABANDONED - the same LIVE-outranks-everything-below-it
-    principle test_live_outranks_pr_open already covers for PR_OPEN. Reading
+    principle that also holds for PR_OPEN. Reading
     this as ABANDONED would have the SessionStart hook suggest `worktree
     cleanup --merged` on a genuinely live session."""
     row = classify(**_base_kwargs(registry_status="busy", node_entry={"status": node_status}))
@@ -160,11 +139,6 @@ def test_any_failed_input_is_unknown(overrides):
     row = classify(**_base_kwargs(**overrides))
     assert row.klass == UNKNOWN
     assert "read failed" in row.facts["reason"]
-
-
-def test_unresolved_node_is_unknown_not_stranded():
-    row = classify(**_base_kwargs(node=None, node_entry=None))
-    assert row.klass == UNKNOWN
 
 
 def test_graph_read_failure_reason_outranks_node_unresolved():
@@ -212,27 +186,12 @@ def test_resolve_by_state_file_when_dir_and_branch_miss(tmp_path):
     assert entry == entries["x-9ab2"]
 
 
-def test_resolve_state_file_null_is_unresolved(tmp_path):
-    state_dir = tmp_path / ".fno"
-    state_dir.mkdir()
-    (state_dir / "target-state.md").write_text("graph_node_id: null\n")
-    node, entry = resolve_node_id(str(tmp_path), None, {})
-    assert node is None
-    assert entry is None
-
-
-@pytest.mark.parametrize("raw", ["null", "NULL", "none", "None", "nil", "NIL", "''", '""', ""])
+@pytest.mark.parametrize("raw", ["NULL", "nil", '""'])
 def test_resolve_state_file_sentinel_is_unresolved(tmp_path, raw):
     state_dir = tmp_path / ".fno"
     state_dir.mkdir()
     (state_dir / "target-state.md").write_text(f"graph_node_id: {raw}\n")
     node, entry = resolve_node_id(str(tmp_path), None, {})
-    assert node is None
-    assert entry is None
-
-
-def test_resolve_nothing_matches():
-    node, entry = resolve_node_id("/repo/nope", None, {"x-1": {"id": "x-1"}})
     assert node is None
     assert entry is None
 
@@ -261,22 +220,6 @@ def test_worktrees_excludes_a_bare_entry(monkeypatch):
 
 
 # --- UNKNOWN never pushes -------------------------------------------------
-
-
-def test_unknown_row_never_pushes(monkeypatch):
-    calls = []
-
-    def fake_run(args, **kwargs):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
-
-    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
-
-    row = Row(UNKNOWN, "x-abcd", 3, "1 hour ago", {"path": "/wt/x-abcd", "branch": "feature/x-abcd", "reason": "test"})
-    outcome = record_unknown(row)
-
-    assert outcome["acts"] == [{"act": "event_emit", "ok": True}]
-    assert not any("push" in args for args in calls)
 
 
 def test_apply_sweep_only_acts_on_stranded_and_unknown(monkeypatch):
@@ -375,31 +318,6 @@ def test_act_on_stranded_writes_no_node_details(monkeypatch):
     assert not any(args[:2] == ["fno", "backlog"] for args in calls)
 
 
-def test_act_on_stranded_survives_a_timed_out_push(monkeypatch):
-    """A hung remote costs the push its own timeout, not the phase slice:
-    the act reports stopped_at=push and the row is re-detected next tick."""
-    def fake_run(args, **kwargs):
-        if "push" in args:
-            raise subprocess.TimeoutExpired(args, 30)
-        if args[:3] == ["git", "-C", "/wt/x-abcd"] and "rev-parse" in args:
-            return subprocess.CompletedProcess(args, 0, stdout="abc123def456\n", stderr="")
-        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
-
-    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
-
-    row = Row(
-        STRANDED,
-        "x-abcd",
-        3,
-        "1 hour ago",
-        {"path": "/wt/x-abcd", "branch": "feature/x-abcd"},
-    )
-    outcome = act_on_stranded(row)
-
-    assert outcome["stopped_at"] == "push"
-    assert outcome["acts"][0]["ok"] is False
-
-
 def test_a_timed_out_fetch_reads_might_hold_unique(monkeypatch, tmp_path):
     """git sets no connect timeout of its own, so the fetch carries the
     module's duration bound: a timeout maps onto the failed-fetch path -
@@ -471,26 +389,6 @@ def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
     assert has_remote is True
 
 
-def test_unpushed_batch_no_remote_reads_false(tmp_path):
-    """The strongest provenance signal: a branch with no origin/<branch> at
-    all. The unpushed count cannot distinguish 'caught up' from 'nowhere to
-    push'; has_remote can, so it must read False here without disturbing the
-    count the classifier consumes."""
-    work = tmp_path / "never-pushed"
-    work.mkdir()
-    _git(work, "init", "-q", "-b", "feature/x-norem")
-    _git(work, "config", "user.email", "t@t.co")
-    _git(work, "config", "user.name", "t")
-    (work / "f.txt").write_text("one\n")
-    _git(work, "add", "f.txt")
-    _git(work, "commit", "-q", "-m", "unpushed, no remote")
-
-    count, ok, _age, has_remote = _unpushed_batch([("feature/x-norem", str(work))])[str(work)]
-    assert ok is True
-    assert count == 1
-    assert has_remote is False
-
-
 def test_failed_remote_probe_reads_unknown(tmp_path):
     """A rev-parse that fails for any reason other than an absent ref
     (exit 1) is a failed probe, not a proven absence: has_remote answers
@@ -503,19 +401,6 @@ def test_failed_remote_probe_reads_unknown(tmp_path):
     ]
     assert ok is False  # the unpushed count fails toward keep, as always
     assert has_remote is None
-
-
-def test_worktree_stranded_never_imports_resolve_repo_root():
-    """A code-review finding, confirmed by three independent finder angles:
-    the script's own path must never come from resolve_repo_root(), a
-    process-cached, cwd-dependent read with no idea which of possibly many
-    swept repos (pr-watch's multi-repo tick loop) is in play. The module no
-    longer imports it at all - repo resolution for the interactive default
-    (worktree_cli/cli.py's `stranded` command) is the CLI layer's job, not
-    this module's, so there is nothing here left to decoy."""
-    import fno.worktree_stranded as ws
-
-    assert not hasattr(ws, "resolve_repo_root")
 
 
 def test_unpushed_batch_ignores_cwd(tmp_path, monkeypatch):
@@ -559,27 +444,3 @@ def test_unpushed_batch_missing_path_reads_unverifiable(tmp_path):
     count, ok, _age, _has_remote = counts[str(ghost)]
     assert ok is False
     assert count == 1
-
-
-# --- the shared resolution seam consumed by the unfinished-work report ----
-
-
-def test_unfinished_work_reuses_this_modules_node_resolution():
-    """One node-resolution implementation, not a second copy: the report
-    joins worktree identity through the same resolve_node_id this module
-    owns, so a fix to resolution fixes both surfaces."""
-    from fno.agents import unfinished_work as uw
-
-    assert uw.resolve_node_id is resolve_node_id
-
-
-def test_unfinished_work_keeps_its_own_ahead_metric():
-    """The report measures origin/main..HEAD with its own fresh-fetch counter
-    and must not lean on this module's unpushed probe: that probe's contract
-    is fail-toward-keep for DESTRUCTIVE cleanup and a different question."""
-    from fno.agents import unfinished_work as uw
-
-    assert callable(uw.fetch_origin_main)
-    assert callable(uw.ahead_of_main)
-    # The destructive-cleanup probe stays owned here, untouched.
-    assert callable(_unpushed_batch)

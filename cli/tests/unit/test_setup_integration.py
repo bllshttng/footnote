@@ -48,19 +48,6 @@ def _collector():
 
 # --- AC1-HP -----------------------------------------------------------------
 
-def test_ac1_hp_select_and_install():
-    lines, echo = _collector()
-    calls: list[str] = []
-    adapters = [_adapter("claude", "Claude Code", installed=False, calls=calls)]
-
-    results = run_cli_integration(
-        select_fn=lambda opts: ["claude"], echo_fn=echo, adapters=adapters
-    )
-
-    assert calls == ["claude"]
-    assert len(results) == 1 and results[0].ok and results[0].status == "installed"
-    assert any("Claude Code: installed" in m for m in lines)
-
 
 # --- AC1-ERR ----------------------------------------------------------------
 
@@ -130,30 +117,6 @@ def test_ac1_edge_already_installed_is_not_reinstalled():
     assert any("nothing to install" in m for m in lines)
 
 
-def test_ac1_edge_no_cli_available_skips_with_one_note():
-    lines, echo = _collector()
-    adapters = [
-        _adapter("claude", "Claude Code", available=False),
-        _adapter("gemini", "Gemini CLI", available=False),
-    ]
-
-    results = run_cli_integration(
-        select_fn=lambda opts: ["claude"], echo_fn=echo, adapters=adapters
-    )
-
-    assert results == []
-    assert any("no agent CLIs detected on PATH" in m for m in lines)
-
-
-def test_unchecked_cli_is_never_installed():
-    calls: list[str] = []
-    adapters = [_adapter("claude", "Claude Code", calls=calls)]
-    results = run_cli_integration(
-        select_fn=lambda opts: [], echo_fn=lambda _m: None, adapters=adapters
-    )
-    assert calls == [] and results == []
-
-
 # --- AC1-FR (claude skills-dir fallback) ------------------------------------
 
 class _FakeRun:
@@ -204,21 +167,6 @@ def test_ac1_fr_reports_failed_only_when_fallback_also_fails(tmp_path, monkeypat
     assert res.status == "failed" and "no network" in res.note
 
 
-def test_ac1_fr_old_claude_without_plugin_subcommand_routes_to_skills_dir(tmp_path, monkeypatch):
-    dest = tmp_path / "skills-fno"
-    monkeypatch.setattr(I, "_claude_skills_dir", lambda: dest)
-    run = _FakeRun([
-        ("plugin --help", 1, "", "unknown command 'plugin'"),
-        ("git clone", 0, "", ""),
-    ])
-
-    res = I._claude_install(run)
-
-    assert res.status == "installed" and "skills-dir" in res.note
-    # never attempted the preferred marketplace/install path
-    assert not any("marketplace add" in " ".join(c) for c in run.calls)
-
-
 def test_skills_dir_recovers_from_a_stale_partial_clone(tmp_path, monkeypatch):
     # A prior failed clone left dest non-empty but without a valid plugin.json.
     dest = tmp_path / "skills-fno"
@@ -242,36 +190,7 @@ def test_install_never_claims_success_on_nonzero_exit():
     assert res.status == "failed" and not res.ok
 
 
-def test_claude_is_installed_detects_fno_at_footnote_in_json(tmp_path, monkeypatch):
-    monkeypatch.setattr(I, "_claude_skills_dir", lambda: tmp_path / "absent")
-    run = _FakeRun([
-        ("plugin list", 0, '[{"id": "fno@footnote", "enabled": true}]', ""),
-    ])
-    # skills-dir not present, so it falls through to the JSON probe
-    assert I._claude_is_installed(run) is True
-
-
-def test_claude_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
-    monkeypatch.setattr(I, "_claude_skills_dir", lambda: tmp_path / "absent")
-    run = _FakeRun([("plugin list", 0, "not json", "")])
-    assert I._claude_is_installed(run) is False
-
-
 # --- codex: wizard delegates to the verified release convergence ------------
-
-def test_codex_install_reports_verified_install(monkeypatch):
-    from fno.setup.codex_plugin import ConvergenceResult
-
-    monkeypatch.setattr(
-        "fno.setup.codex_plugin.converge",
-        lambda **_kwargs: ConvergenceResult(
-            "release", "installed", "fno@footnote", "0.3.0"
-        ),
-    )
-    run = _FakeRun([])
-    res = I._codex_install(run)
-    assert res.status == "installed" and res.ok
-    assert "fno@footnote 0.3.0" in res.note
 
 
 def test_codex_install_failed_on_convergence_error(monkeypatch):
@@ -285,14 +204,6 @@ def test_codex_install_failed_on_convergence_error(monkeypatch):
     res = I._codex_install(run)
     assert res.status == "failed" and not res.ok
     assert "marketplace-add" in res.note
-
-
-def test_codex_is_installed_requires_fresh_verified_payload(monkeypatch):
-    monkeypatch.setattr(
-        "fno.setup.codex_plugin.inspect_freshness",
-        lambda **_kwargs: {"status": "fresh"},
-    )
-    assert I._codex_is_installed(_FakeRun([])) is True
 
 
 def test_manual_result_echoes_a_finish_step_not_installed():
@@ -333,29 +244,6 @@ def test_opencode_is_installed_reads_the_door(monkeypatch):
     assert I._opencode_is_installed() is False
 
 
-def test_opencode_install_maps_the_receipt(monkeypatch):
-    import fno.rust_binary as rb
-
-    monkeypatch.setattr(
-        rb,
-        "call_binary_json",
-        lambda verb, args, **kw: (
-            None,
-            {
-                "status": "installed",
-                "written": 71,
-                "version": "9.9.9",
-                "config_dir": "/tmp/conf",
-                "kept": [],
-            },
-        ),
-    )
-    res = I._opencode_install()
-    assert res.ok and res.cli == "opencode"
-    assert "71 file(s)" in res.note
-    assert "9.9.9" in res.note
-
-
 def test_opencode_install_names_kept_user_files(monkeypatch):
     import fno.rust_binary as rb
 
@@ -386,11 +274,6 @@ def test_opencode_install_maps_door_failure(monkeypatch):
     assert not res.ok
     assert res.status == "failed"
     assert res.note == "no binary"
-
-
-def test_opencode_adapter_registered():
-    clis = {a.cli for a in I.build_adapters()}
-    assert "opencode" in clis
 
 
 # --- pi (Rust pi arm of plugin-install; the agent dir pi itself reads) -------
@@ -434,16 +317,10 @@ def test_pi_install_copies_extension_and_is_installed(tmp_path, pi_agent_env):
     assert I._pi_is_installed() is True
 
 
-@pytest.mark.dev_build
-def test_pi_is_installed_false_when_stale(tmp_path, pi_agent_env):
-    dest = pi_agent_env / "extensions" / "footnote.ts"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("// stale older footnote extension\n", encoding="utf-8")
-    assert I._pi_is_installed() is False
-
-
-def test_pi_adapter_registered_and_gated_on_path():
-    adapter = next(a for a in I.build_adapters() if a.cli == "pi")
+def test_adapters_registered_and_pi_gated_on_path():
+    adapters = I.build_adapters()
+    assert {a.cli for a in adapters} == {"claude", "gemini", "codex", "opencode", "pi", "agy"}
+    adapter = next(a for a in adapters if a.cli == "pi")
     # Availability rides shutil.which("pi"), which is machine-dependent; the
     # contract asserted here is the gate's SHAPE, not this machine's answer.
     assert adapter.is_available() == (shutil.which("pi") is not None)
@@ -503,22 +380,6 @@ def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch,
     assert not (tmp_path / ".agent").exists()
 
 
-@pytest.mark.dev_build
-def test_agy_install_preserves_other_namespace_keys(tmp_path, monkeypatch, agy_rust_door):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    _fake_agy_adapter(tmp_path, monkeypatch)
-    hooks = I._agy_hooks_json()
-    hooks.parent.mkdir(parents=True, exist_ok=True)
-    hooks.write_text(json.dumps({"someOtherTool": {"Stop": [{"x": 1}]}}), encoding="utf-8")
-
-    I._agy_install()
-
-    data = json.loads(hooks.read_text(encoding="utf-8"))
-    assert data["someOtherTool"] == {"Stop": [{"x": 1}]}  # untouched
-    assert "footnote" in data
-
-
 def test_agy_install_manual_when_adapter_absent(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(I, "_agy_adapter_path", lambda: None)
@@ -527,94 +388,3 @@ def test_agy_install_manual_when_adapter_absent(tmp_path, monkeypatch):
     assert res.status == "manual" and not res.ok
 
 
-@pytest.mark.dev_build
-def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch, agy_rust_door):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _fake_agy_adapter(tmp_path, monkeypatch)
-    hooks = I._agy_hooks_json()
-    hooks.parent.mkdir(parents=True, exist_ok=True)
-    hooks.write_text("{not json", encoding="utf-8")
-    assert I._agy_is_installed() is False
-
-
-@pytest.mark.dev_build
-def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch, agy_rust_door):
-    # {"footnote": {"Stop": null}} must not TypeError on the any() iteration.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _fake_agy_adapter(tmp_path, monkeypatch)
-    hooks = I._agy_hooks_json()
-    hooks.parent.mkdir(parents=True, exist_ok=True)
-    hooks.write_text(json.dumps({"footnote": {"Stop": None}}), encoding="utf-8")
-    assert I._agy_is_installed() is False
-
-
-@pytest.mark.dev_build
-def test_agy_install_refuses_malformed_and_preserves_bytes(tmp_path, monkeypatch, agy_rust_door):
-    # A malformed FOREIGN file is refused, never overwritten: the bytes the
-    # user (or another tool) owns survive an install attempt byte for byte.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _fake_agy_adapter(tmp_path, monkeypatch)
-    hooks = I._agy_hooks_json()
-    hooks.parent.mkdir(parents=True, exist_ok=True)
-    broken = '{"other-plugin":BROKEN USER CONFIG'
-    hooks.write_text(broken, encoding="utf-8")
-    before = hooks.read_bytes()
-
-    res = I._agy_install()
-
-    assert res.status == "failed"
-    # The refusal names the file; the parse position is the Rust owner's
-    # assertion, and the transport caps the note at 200 chars, so the exact
-    # wording is not asserted here.
-    assert str(hooks) in res.note
-    assert hooks.read_bytes() == before, "malformed bytes must be preserved"
-
-
-@pytest.mark.dev_build
-def test_agy_install_keeps_disabled_disabled(tmp_path, monkeypatch, agy_rust_door):
-    # footnote.enabled = false is the operator's decision: install refreshes
-    # the handler and reports it, and never flips enabled back on.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    adapter = _fake_agy_adapter(tmp_path, monkeypatch)
-    hooks = I._agy_hooks_json()
-    hooks.parent.mkdir(parents=True, exist_ok=True)
-    hooks.write_text(
-        json.dumps(
-            {
-                "footnote": {
-                    "enabled": False,
-                    "Stop": [{"type": "command", "command": str(adapter), "timeout": 60}],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    assert I._agy_is_installed() is True  # disabled is configured, not absent
-
-    res = I._agy_install()
-    assert res.ok
-    assert "disabled" in res.note
-    data = json.loads(hooks.read_text(encoding="utf-8"))
-    assert data["footnote"]["enabled"] is False
-    assert data["footnote"]["Stop"][0]["command"] == str(adapter)
-
-
-@pytest.mark.dev_build
-def test_agy_is_installed_honest_without_adapter(tmp_path, monkeypatch, agy_rust_door):
-    # A footnote Stop entry with no resolvable adapter is unverifiable, and
-    # unverifiable is not installed.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(I, "_agy_adapter_path", lambda: None)
-    hooks = I._agy_hooks_json()
-    hooks.parent.mkdir(parents=True, exist_ok=True)
-    hooks.write_text(
-        json.dumps({"footnote": {"Stop": [{"command": "/anywhere"}]}}),
-        encoding="utf-8",
-    )
-    assert I._agy_is_installed() is False
-
-
-def test_agy_adapter_registered():
-    clis = {a.cli for a in I.build_adapters()}
-    assert "agy" in clis

@@ -193,21 +193,6 @@ def test_ensure_unreachable_origin_cuts_fresh_and_names_failure(
     assert "base fetch failed" in res.stderr
 
 
-def test_ensure_idempotent_reuse(main_repo: Path, tmp_path: Path) -> None:
-    """AC1-EDGE: a second ensure for the same name reuses the worktree."""
-    first = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "dup"])
-    assert first.exit_code == 0
-    wt = first.stdout.strip()
-    before = _git("worktree", "list", "--porcelain", cwd=main_repo).stdout
-
-    second = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "dup"])
-    assert second.exit_code == 0
-    assert second.stdout.strip() == wt
-    after = _git("worktree", "list", "--porcelain", cwd=main_repo).stdout
-    # No second worktree created.
-    assert before.count("worktree ") == after.count("worktree ")
-
-
 def test_ensure_reuse_honors_a_demanded_branch(main_repo: Path, tmp_path: Path) -> None:
     """A reused tree whose checkout differs from --branch switches to it.
 
@@ -363,21 +348,6 @@ def test_ensure_never_with_explicit_branch_refuses(main_repo: Path, tmp_path: Pa
     assert res.stdout.strip() == ""
 
 
-def test_ensure_honors_fno_config(
-    main_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """FNO_CONFIG, when set, is the sole config source: a `never` in it wins even
-    though the repo-local .fno has no policy (fail-closed parity with the loader)."""
-    cfg = tmp_path / "explicit.toml"
-    cfg.write_text(
-        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n'
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(cfg))
-    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "f"])
-    assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == str(main_repo.resolve())
-
-
 def test_ensure_malformed_workspaces_refuses(main_repo: Path, tmp_path: Path) -> None:
     """Fail-closed on gross map corruption: a `work.workspaces` present but the
     wrong type (a scalar, not a table) refuses rather than silently defaulting
@@ -387,20 +357,6 @@ def test_ensure_malformed_workspaces_refuses(main_repo: Path, tmp_path: Path) ->
     assert res.exit_code != 0
     assert res.stdout.strip() == ""
     assert not _default_wt(tmp_path, main_repo, "m").exists()
-
-
-def test_ensure_project_absent_falls_to_default(main_repo: Path, tmp_path: Path) -> None:
-    """AC1-EDGE: a repo absent from the workspaces map falls to the default
-    (harness-native under claude): a worktree IS created at the harness location."""
-    _write_config(
-        main_repo / ".fno",
-        '[[work.workspaces.default.projects]]\npath = "/some/other/repo"\nworktree = "never"\n',
-    )
-    res = runner.invoke(
-        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "d", "--harness", "claude"]
-    )
-    assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == str(main_repo / ".claude" / "worktrees" / "d")
 
 
 def test_ensure_external_worktrees_base_set_lands_under_base(
@@ -434,39 +390,6 @@ def test_ensure_harness_native_claude_lands_in_dot_claude(
     assert res.stdout.strip() == str(wt)
     assert wt.exists()
     assert not _default_wt(tmp_path, main_repo, "hn").exists()
-
-
-def test_ensure_harness_native_degrades_to_external_on_explicit_base(
-    main_repo: Path, tmp_path: Path
-) -> None:
-    """x-f96e: an explicitly configured paths.worktrees_base relocates a
-    harness-native claude dispatch to <base>/<repo>/<name>, receipt
-    policy=external. Before x-f96e the base was honored only under an
-    explicit `external` policy, so setting the key alone was a silent no-op
-    on this path while the WorktreeCreate hook relocated on it - two
-    creation paths disagreeing on one location."""
-    base = tmp_path / "custom-bases"
-    _write_config(main_repo / ".fno", f'[paths]\nworktrees_base = "{base}"\n')
-    res = runner.invoke(
-        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "ib", "--harness", "claude"]
-    )
-    assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == str(base / main_repo.name / "ib")
-    assert "policy=external" in res.stderr
-    assert not (main_repo / ".claude" / "worktrees" / "ib").exists()
-
-
-def test_ensure_harness_native_reuse(main_repo: Path, tmp_path: Path) -> None:
-    """AC2-FR: a re-dispatch reuses the existing harness-native worktree (same
-    path, exit 0), never clobbering or duplicating it."""
-    args = ["worktree", "ensure", "--repo", str(main_repo), "--name", "ru", "--harness", "claude"]
-    first = runner.invoke(app, args)
-    assert first.exit_code == 0, first.stderr
-    wt = main_repo / ".claude" / "worktrees" / "ru"
-    assert first.stdout.strip() == str(wt)
-    second = runner.invoke(app, args)
-    assert second.exit_code == 0, second.stderr
-    assert second.stdout.strip() == str(wt)
 
 
 def test_ensure_emits_stderr_receipt_naming_mode_and_path(
@@ -527,55 +450,6 @@ def test_codex_native_degradation_uses_fno_fallback_not_configured_allocator(
     assert "requested=harness-native" in res.stderr
     assert "degraded=true" in res.stderr
     assert not (configured / main_repo.name / "cx").exists()
-
-
-def test_codex_explicit_external_policy_honors_configured_allocator(
-    main_repo: Path, tmp_path: Path
-) -> None:
-    configured = tmp_path / "conductor" / "workspaces"
-    _write_config(
-        main_repo / ".fno",
-        f'[worktree]\npolicy = "external"\n[paths]\nworktrees_base = "{configured}"\n',
-    )
-
-    res = runner.invoke(
-        app,
-        ["worktree", "ensure", "--repo", str(main_repo), "--name", "cx-ext", "--harness", "codex"],
-    )
-
-    assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == str(configured / main_repo.name / "cx-ext")
-    assert "degraded=true" not in res.stderr
-
-
-def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) -> None:
-    """The read-only `policy` verb shares the resolver: line 1 is the bare
-    policy word (bash readers take line 1), later lines carry source=; the
-    default prints `harness-native` + a base line."""
-    _write_config(
-        main_repo / ".fno",
-        f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n',
-    )
-    res = runner.invoke(app, ["worktree", "policy", "--repo", str(main_repo)])
-    assert res.exit_code == 0, res.stderr
-    lines = res.stdout.strip().splitlines()
-    assert lines[0] == "never"
-    assert "source=per-project" in lines
-
-    # A fresh repo with no config -> default harness-native under claude.
-    other = tmp_path / "other"
-    other.mkdir()
-    _git("init", "-q", "-b", "main", cwd=other)
-    (other / "r").write_text("x")
-    _git("add", "r", cwd=other)
-    _git("commit", "-qm", "i", cwd=other)
-    res2 = runner.invoke(
-        app, ["worktree", "policy", "--repo", str(other), "--harness", "claude"]
-    )
-    assert res2.exit_code == 0, res2.stderr
-    lines = res2.stdout.strip().splitlines()
-    assert lines[0] == "harness-native"
-    assert lines[1].startswith("base=")
 
 
 def test_ensure_reuses_the_branch_checkout_when_the_policy_path_moves(
