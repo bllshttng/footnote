@@ -629,9 +629,9 @@ mod engine_tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let dry = run_backfill(&args);
+        let dry = run_mail_backfill(&args);
         assert_eq!(dry, 0);
-        let applied = run_backfill(&{
+        let applied = run_mail_backfill(&{
             let mut a = args.clone();
             a.push("--apply".to_string());
             a
@@ -654,7 +654,7 @@ mod engine_tests {
         assert_eq!(id, archive_msg_id("sess-a", "row-1"));
         assert_ne!(id, archive_msg_id("sess-b", "row-1"));
         assert_ne!(id, archive_msg_id("sess-a", "row-2"));
-        let again = run_backfill(&{
+        let again = run_mail_backfill(&{
             let mut a = args.clone();
             a.push("--apply".to_string());
             a
