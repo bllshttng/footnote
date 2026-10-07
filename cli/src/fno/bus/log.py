@@ -537,62 +537,6 @@ def record_typed_delivery(
 # Reader (skips malformed lines)
 # ---------------------------------------------------------------------------
 
-def record_backfill_delivery(
-    *,
-    msg_id: str,
-    sender: str,
-    recipient: str,
-    body: str,
-    ts: str,
-    from_session: str,
-    to_session: str,
-    sender_transcript: str,
-    receiver_transcript: str,
-    subject: Optional[str] = None,
-    sender_row: Optional[str] = None,
-    backfilled_at: Optional[str] = None,
-    thread: Optional[str] = None,
-    word_count: Optional[int] = None,
-) -> Envelope:
-    """Append one audit-only historical row: an outage-era message that went
-    over the harness's native cross-session transport, backfilled from the
-    harness transcripts with full provenance.
-
-    The row never re-delivers: `delivery=cross-session` is excluded by
-    `is_deliverable` and by the Rust drain gate (`AUDIT_ONLY_DELIVERIES`), and
-    no markdown render is written - `rebuild_render` skips audit-only rows, so
-    the surfaces read the row as archive. Idempotent by msg_id: the archive id
-    is deterministic (`mail_backfill::archive_msg_id`), so a re-scan lands on
-    the same id and the caller skips an id already in the log.
-    """
-    env = Envelope.new(
-        id=msg_id,
-        thread=thread or msg_id,
-        from_=sender,
-        to=recipient,
-        kind="send",
-        body=body,
-        ts=ts,
-        from_harness="claude",
-        to_harness="claude",
-        from_session=from_session,
-        to_kind="session",
-        word_count=word_count if word_count is not None else len(body.split()),
-        origin="peer",
-        subject=subject,
-        meta={
-            "transport": "claude-cross-session",
-            "sender_transcript": sender_transcript,
-            "receiver_transcript": receiver_transcript,
-            **({"to_session": to_session} if to_session else {}),
-            **({"sender_row": sender_row} if sender_row else {}),
-            **({"backfilled_at": backfilled_at} if backfilled_at else {}),
-        },
-    )
-    append(env)
-    return env
-
-
 # ---------------------------------------------------------------------------
 # Reader (skips malformed lines)
 # ---------------------------------------------------------------------------

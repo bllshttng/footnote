@@ -1,13 +1,14 @@
-"""``fno agents mail backfill``: outage-era traffic back into the store.
+"""`fno agents mail backfill`: outage-era traffic back into the store.
 
 The store skipped agent-to-agent messages that went over the harness's
-native cross-session transport while ``fno mail send`` was down. Both sides
-of each message live in the harness transcripts, so the scan joins the
-sender's ``SendMessage`` tool call with the receiver's
-``<cross-session-message>`` block and writes an audit-only row
-(``delivery=cross-session``) that never re-delivers. Idempotent by msg_id:
-the archive id is a deterministic function of the sender session and the
-source row, so a re-run skips what already landed.
+native cross-session transport while `fno mail send` was down. Both halves
+of each message live in the harness transcripts, so the engine joins the
+sender's native SendMessage call with the receiver's cross-session block
+and writes an audit-only row (delivery=cross-session) that never
+re-delivers. Idempotent by msg_id: the archive id is a deterministic
+function of the sender session and the source row, so a re-run skips what
+already landed. The engine is Rust (`fno-agents mail-backfill run`); the
+tests drive it through the real binary.
 """
 from __future__ import annotations
 
@@ -62,7 +63,7 @@ def _rust_bin(monkeypatch):
     monkeypatch.setenv("FNO_AGENTS_BIN", candidate)
 
 
-def _send_row(ts: str, body: str, uuid: str = "row-1") -> dict:
+def _send_row(ts, body, uuid="row-1"):
     return {
         "type": "assistant",
         "sessionId": _SENDER_SESSION,
@@ -73,18 +74,14 @@ def _send_row(ts: str, body: str, uuid: str = "row-1") -> dict:
                 {
                     "type": "tool_use",
                     "name": "SendMessage",
-                    "input": {
-                        "to": _SOCKET,
-                        "summary": "hold ack",
-                        "message": body,
-                    },
+                    "input": {"to": _SOCKET, "summary": "hold ack", "message": body},
                 }
             ]
         },
     }
 
 
-def _receive_row(ts: str, body: str) -> dict:
+def _receive_row(ts, body):
     return {
         "type": "user",
         "sessionId": _RECEIVER_SESSION,
@@ -98,7 +95,7 @@ def _receive_row(ts: str, body: str) -> dict:
     }
 
 
-def _store_transcripts(root: Path, send_body: str) -> None:
+def _store_transcripts(root, send_body):
     sender_dir = root / "-Users-x-proj"
     sender_dir.mkdir(parents=True)
     (sender_dir / "s.jsonl").write_text(
@@ -122,54 +119,22 @@ def test_a_cross_session_row_is_never_redelivered():
     assert is_deliverable(row) is False
 
 
-def test_record_backfill_delivery_writes_full_provenance(_tmp_state):
-    from fno.bus.log import iter_messages, record_backfill_delivery
-
-    env = record_backfill_delivery(
-        msg_id="fmail-bf-000000000001",
-        sender="worker-1",
-        recipient=_RECEIVER_SESSION,
-        body="hold ack: nothing running",
-        ts="2026-10-07T10:00:00Z",
-        from_session=_SENDER_SESSION,
-        to_session=_RECEIVER_SESSION,
-        sender_transcript="/t/s.jsonl",
-        receiver_transcript="/t/r.jsonl",
-        subject="hold ack",
-        sender_row="row-1",
-        backfilled_at="2026-10-07T16:00:00Z",
-    )
-    rows = [m for m in iter_messages() if m.id == env.id]
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.delivery == "cross-session"
-    assert row.from_session == _SENDER_SESSION
-    assert row.meta["to_session"] == _RECEIVER_SESSION
-    assert row.meta["transport"] == "claude-cross-session"
-    assert row.meta["sender_transcript"] == "/t/s.jsonl"
-    assert row.meta["receiver_transcript"] == "/t/r.jsonl"
-    assert row.ts == "2026-10-07T10:00:00Z"
-    assert row.subject == "hold ack"
-    assert row.word_count == len("hold ack: nothing running".split())
-    assert row.body == "hold ack: nothing running"
-
-
 def test_backfill_scan_apply_and_idempotent_rerun(_tmp_state, _rust_bin):
     """End to end on fixture transcripts: dry run joins the halves, apply
     writes one provenance-complete row, a second apply writes nothing."""
     root = _tmp_state / "projects"
     _store_transcripts(root, "hold ack: nothing running")
 
-    def _run(*args: str):
+    def _run(*args):
         return runner.invoke(
             mail_app,
-            ["backfill", "--root", str(root), "--json", *args],
+            ["backfill", "--root", str(root), *args],
         )
 
     dry = json.loads(_run().output)
-    assert len(dry) == 1
-    assert dry[0]["from_session"] == _SENDER_SESSION
-    assert dry[0]["to_session"] == _RECEIVER_SESSION
+    assert dry["joined"] == 1
+    assert dry["rows"][0]["from_session"] == _SENDER_SESSION
+    assert dry["rows"][0]["to_session"] == _RECEIVER_SESSION
 
     applied = json.loads(_run("--apply").output)
     assert applied["written"] == 1
@@ -186,6 +151,7 @@ def test_backfill_scan_apply_and_idempotent_rerun(_tmp_state, _rust_bin):
     assert row["to"] == _RECEIVER_SESSION
     assert row["from_session"] == _SENDER_SESSION
     assert row["meta"]["to_session"] == _RECEIVER_SESSION
+    assert row["meta"]["transport"] == "claude-cross-session"
     assert row["meta"]["sender_transcript"].endswith("s.jsonl")
     assert row["meta"]["receiver_transcript"].endswith("r.jsonl")
     assert row["body"] == "hold ack: nothing running"
@@ -200,22 +166,23 @@ def test_backfill_scan_skips_rows_outside_the_window(_tmp_state, _rust_bin):
     when both pairs live in the scanned files."""
     root = _tmp_state / "projects"
     _store_transcripts(root, "hold ack: nothing running")
-    late_pair = root / "-Users-z-proj"
-    late_pair.mkdir()
-    (late_pair / "s.jsonl").write_text(
+    late = root / "-Users-z-proj"
+    late.mkdir()
+    (late / "s.jsonl").write_text(
         json.dumps(_send_row("2026-10-07T18:00:00.000Z", "a later message", uuid="row-2"))
         + "\n",
         encoding="utf-8",
     )
-    (late_pair / "r.jsonl").write_text(
-        json.dumps(_receive_row("2026-10-07T18:00:01.000Z", "a later message"))
-        + "\n",
+    (late / "r.jsonl").write_text(
+        json.dumps(_receive_row("2026-10-07T18:00:01.000Z", "a later message")) + "\n",
         encoding="utf-8",
     )
     result = runner.invoke(
         mail_app,
-        ["backfill", "--root", str(root), "--json",
-         "--since", "2026-10-07T15:00:00Z", "--until", "2026-10-07T19:00:00Z"],
+        [
+            "backfill", "--root", str(root),
+            "--since", "2026-10-07T15:00:00Z", "--until", "2026-10-07T19:00:00Z",
+        ],
     )
     rows = json.loads(result.output)
     assert [r["body_head"] for r in rows] == ["a later message"]
@@ -228,13 +195,9 @@ def test_backfill_scan_never_joins_a_mismatched_body(_tmp_state, _rust_bin):
     _store_transcripts(root, "hold ack: nothing running")
     other = root / "-Users-y-proj" / "other.jsonl"
     other.write_text(
-        json.dumps(
-            _receive_row("2026-10-07T10:00:02.000Z", "an entirely different report")
-        )
+        json.dumps(_receive_row("2026-10-07T10:00:02.000Z", "an entirely different report"))
         + "\n",
         encoding="utf-8",
     )
-    result = runner.invoke(
-        mail_app, ["backfill", "--root", str(root), "--json"]
-    )
-    assert len(json.loads(result.output)) == 1
+    result = runner.invoke(mail_app, ["backfill", "--root", str(root)])
+    assert json.loads(result.output)["joined"] == 1
