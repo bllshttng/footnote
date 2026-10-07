@@ -44,8 +44,8 @@ Base ddb2ecc7ff (origin/main at the start of the pass). The pass rebuilt the cam
 | Measure | Before | After | Ratio |
 |---|---:|---:|---:|
 | Python declarations | 2,126 | 1,365 | 0.64 |
-| Rust declarations | 451 | 423 | 0.94 |
-| All declarations | 2,577 | 1,788 | 0.69 |
+| Rust declarations | 451 | 424 | 0.94 |
+| All declarations | 2,577 | 1,789 | 0.69 |
 | Python collected cases | 2,549 | 1,718 | 0.67 |
 | Rust collected cases | unmeasured | unmeasured | none |
 
@@ -68,7 +68,9 @@ Four Python functions are dead but still imported by tests outside K1: `Failover
 
 One audit cut tests/hooks/test_merge_guard_stacked_base.py from eight tests to one. That removed the only test proving the stale-base veto runs ahead of the override marker, which is a fail-closed path. The lead restored the file and cut only the missing-binary case, which takes the same exception branch as the timeout case.
 
-The same audit cut `test_generator_preserves_executable_bit` from cli/tests/unit/test_skill_bundles.py. The bundle freshness gate compares content only, so that test was the one check that a committed bundled script keeps its executable bit. The lead restored it.
+In cli/tests/unit/test_skill_bundles.py the same audit cut `test_generator_preserves_executable_bit`. The bundle freshness gate compares content only, so that test was the one check that a committed bundled script keeps its executable bit. The lead restored it.
+
+In crates/fno-agents/src/surface_check.rs the review restored `count_after_missing_renders_none`. The audit read it as the same branch as the `surface.count` refusal. It is not: a separate let-else refuses a missing `count_after`, and no other test reached it.
 
 The review pass also found references to deleted tests. Two skip-baseline rows, the lazy-imports contract list and two model-routing comments named them. Those references are gone.
 
@@ -264,7 +266,7 @@ One row per K1 file. A "Kept:" cell lists the surviving tests by name where the 
 | `crates/fno-agents/src/route_inventory.rs` | 8 | 8 | Unchanged: verdict order, percentile, drift lines, window cell. |
 | `crates/fno-agents/src/route_recovery.rs` | 5 | 5 | Unchanged, not re-audited this pass. |
 | `crates/fno-agents/src/skill_drift.rs` | 1 | 1 | Unchanged, not re-audited this pass. |
-| `crates/fno-agents/src/surface_check.rs` | 33 | 29 | Shape teeth each with its refusal text, cross-language walk refusals, warnings and NOT RUN states, symbol extraction rules. Cut: module-qualified call (receiver branch), camel-case unit (TS walk covers), single-tree wide cap (cross-tree cap covers), count_after None (same repr branch as count). |
+| `crates/fno-agents/src/surface_check.rs` | 33 | 30 | Shape teeth each with its refusal text, cross-language walk refusals, warnings and NOT RUN states, symbol extraction rules. Cut: module-qualified call (receiver branch), camel-case unit (TS walk covers), single-tree wide cap (cross-tree cap covers). |
 | `crates/fno-agents/src/test_hold.rs` | 1 | 1 | Unchanged, not re-audited this pass. |
 | `crates/fno-agents/tests/hook_latency.rs` | 13 | 12 | Per-hook latency budgets, stop_decision schema row. Cut: a source grep whose markers stop.rs behavior tests exercise. |
 | `crates/fno-agents/tests/loopcheck_hook_payload.rs` | 7 | 7 | Unchanged: payload promise, transcript fallback, agy delivery retry and live-session guards. |

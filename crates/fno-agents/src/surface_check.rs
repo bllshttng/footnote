@@ -1089,6 +1089,22 @@ mod tests {
     }
 
     #[test]
+    fn count_after_missing_renders_none() {
+        let dir = tmp_dir("cafter");
+        let fm =
+            surface_block("Is this reachable?", ONE_DUAL, 1, 1).replace("  count_after: 1\n", "");
+        let plan = write_plan(&dir, &fm, "cafter.md");
+        let out = run(&plan, None, None);
+        assert!(
+            out.contains(
+                "E\tsurface.count_after is `None` - state in a number how many answerers \
+                 survive this plan"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn count_after_above_count_fails() {
         let dir = tmp_dir("caexc");
         let fm = surface_block("Is this reachable?", ONE_DUAL, 1, 3);
