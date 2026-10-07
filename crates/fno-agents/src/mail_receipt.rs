@@ -168,37 +168,60 @@ fn not_landed(
     lines.join("\n")
 }
 
-/// The stderr recovery ladder for a durable demotion. `arm` is the CALLER's
-/// classification (project | lock | live | plain) because the lock reason
-/// constant lives Python-side; this owns the prose only. The literals are
-/// the retired Python bodies, line for line.
+const PROJECT_ARM: &str = concat!(
+    "mail: project inbox ",
+    "{TARGET}",
+    " has no live drain; queued durably as recovery only - a session must drain the project inbox to read this, and may never do so\n  this is NOT delivery. Address a live session instead: `fno agents top` to find one, then `fno agents mail send <short-id>`",
+);
+
+const LOCK_ARM: &str = concat!(
+    "mail: live delivery to ",
+    "{TARGET}",
+    " was not attempted (another verb held ",
+    "{TARGET}",
+    "'s agent lock past the wait); queued durably. That holder is any verb on this agent - a send, an ask, a spawn, a stop, an rm - so the token proves nothing about the recipient in either direction. Do not resurrect it on this evidence, and do not read it as healthy either: check it.\n  a busy peer may not drain soon, so the rungs that stay open,\n  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n  copy still lands at the recipient's next drain:\n    fno agents peek ",
+    "{TARGET}",
+    "     # still taking turns, or just stopped?\n    fno agents mail withdraw <id>      # retract the queued copy FIRST\n    fno agents mail send ",
+    "{TARGET}",
+    " '<message>'  # then retry live\n  a withdraw that refuses because the recipient already claimed\n  the message is telling you it LANDED. Stop there: re-sending on\n  top of that is the double delivery this ladder exists to avoid.",
+);
+
+const LIVE_ARM: &str = concat!(
+    "mail: live delivery to ",
+    "{TARGET}",
+    " not confirmed (",
+    "{REASON}",
+    "); queued durably as recovery only - the recipient was live and reachable, so the message may still land past the confirm window or sit until the recipient drains its inbox\n  live delivery NOT confirmed - do not wait for a reply, recover:\n    fno agents peek ",
+    "{TARGET}",
+    "     # did it land? a busy peer may have queued it\n    fno agents resume ",
+    "{TARGET}",
+    "   # wakes it (claude) or resumes it (other harnesses), then re-send\n    fno agents attach ",
+    "{TARGET}",
+    "   # drive it yourself (claude)\n    fno agents mail withdraw <id>      # none of the above? retract it",
+);
+
+const PLAIN_ARM: &str = concat!(
+    "{HEAD}",
+    "  live delivery NOT confirmed - do not wait for a reply, recover:\n    fno agents peek ",
+    "{TARGET}",
+    "     # did it land? a busy peer may have queued it\n    fno agents resume ",
+    "{TARGET}",
+    "   # wakes it (claude) or resumes it (other harnesses), then re-send\n    fno agents attach ",
+    "{TARGET}",
+    "   # drive it yourself (claude)\n    fno agents mail withdraw <id>      # none of the above? retract it",
+);
+
 fn warn_deferred(target: &str, arm: &str, reason: Option<&str>, head: Option<&str>) -> String {
-    let ladder = format!(
-        "  live delivery NOT confirmed - do not wait for a reply, recover:\n\
-         \x20   fno agents peek {target}     # did it land? a busy peer may have queued it\n\
-         \x20   fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n\
-         \x20   fno agents attach {target}   # drive it yourself (claude)\n\
-         \x20   fno agents mail withdraw <id>      # none of the above? retract it"
-    );
-    match arm {
-        "project" => concat!(
-            "mail: project inbox {TARGET} has no live drain; queued durably as ",
-            "recovery only - a session must drain the project inbox to read this, ",
-            "and may never do so\n",
-            "  this is NOT delivery. Address a live session instead: ",
-            "`fno agents top` to find one, then ",
-            "`fno agents mail send <short-id>`"
-        )
-        .replace("{TARGET}", target),
-        "lock" => format!(
-            "mail: live delivery to {target} was not attempted (another verb held {target}'s agent lock past the wait); queued durably. That holder is any verb on this agent - a send, an ask, a spawn, a stop, an rm - so the token proves nothing about the recipient in either direction. Do not resurrect it on this evidence, and do not read it as healthy either: check it.\n\n\x20 a busy peer may not drain soon, so the rungs that stay open,\n\x20 in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n\x20 copy still lands at the recipient's next drain:\n\x20   fno agents peek {target}     # still taking turns, or just stopped?\n\x20   fno agents mail withdraw <id>      # retract the queued copy FIRST\n\x20   fno agents mail send {target} '<message>'  # then retry live\n\x20 a withdraw that refuses because the recipient already claimed\n\x20 the message is telling you it LANDED. Stop there: re-sending on\n\x20 top of that is the double delivery this ladder exists to avoid."
-        ),
-        "live" => format!(
-            "mail: live delivery to {target} not confirmed ({reason}); queued durably as recovery only - the recipient was live and reachable, so the message may still land past the confirm window or sit until the recipient drains its inbox\n{ladder}",
-            reason = reason.unwrap_or_default(),
-        ),
-        _ => format!("{}{ladder}", head.unwrap_or_default()),
-    }
+    let arm_text = match arm {
+        "project" => PROJECT_ARM,
+        "lock" => LOCK_ARM,
+        "live" => LIVE_ARM,
+        _ => PLAIN_ARM,
+    };
+    arm_text
+        .replace("{TARGET}", target)
+        .replace("{REASON}", reason.unwrap_or_default())
+        .replace("{HEAD}", head.unwrap_or_default())
 }
 
 /// Entry: flag-value args in, one rendered block on stdout, exit 0. A

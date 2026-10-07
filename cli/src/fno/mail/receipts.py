@@ -365,69 +365,29 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
 
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     from fno.agents.dispatch import LOCK_TIMEOUT_REASON
+    from fno.mail.deferred_liveness import deferred_liveness_head
 
     if project:
-        msg = (
-            f"mail: project inbox {target} has no live drain; queued durably as "
-            "recovery only - a session must drain the project inbox to read this, "
-            "and may never do so\n"
-            "  this is NOT delivery. Address a live session instead: "
-            "`fno agents top` to find one, then `fno agents mail send <short-id>`"
-        )
+        arm = "project"
     elif reason == LOCK_TIMEOUT_REASON:
-        msg = (
-            f"mail: live delivery to {target} was not attempted (another verb "
-            f"held {target}'s agent lock past the wait); queued durably. That "
-            "holder is any verb on this agent - a send, an ask, a spawn, a "
-            "stop, an rm - so the token proves nothing about the recipient in "
-            "either direction. Do not resurrect it on this evidence, and do "
-            "not read it as healthy either: check it.\n"
-            "  a busy peer may not drain soon, so the rungs that stay open,\n"
-            "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
-            "  copy still lands at the recipient's next drain:\n"
-            f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
-            "    fno agents mail withdraw <id>      # retract the queued copy FIRST\n"
-            f"    fno agents mail send {target} '<message>'  # then retry live\n"
-            "  a withdraw that refuses because the recipient already claimed\n"
-            "  the message is telling you it LANDED. Stop there: re-sending on\n"
-            "  top of that is the double delivery this ladder exists to avoid."
-        )
+        arm = "lock"
     elif _is_live_lane_failure(reason):
-        msg = (
-            f"mail: live delivery to {target} not confirmed ({reason}); queued "
-            "durably as recovery only - the recipient was live and reachable, so "
-            "the message may still land past the confirm window or sit until the "
-            "recipient drains its inbox\n"
-            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
-            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            # The rung that was missing. Every option above tries to reach the
-            # recipient; when none of them can, the sender was left holding a
-            # message that nagged every turn and could not be taken back.
-            "    fno agents mail withdraw <id>      # none of the above? retract it"
-        )
+        arm = "live"
     else:
-        from fno.mail.deferred_liveness import deferred_liveness_head
-        msg = deferred_liveness_head(target) + (
-            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
-            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            # The rung that was missing. Every option above tries to reach the
-            # recipient; when none of them can, the sender was left holding a
-            # message that nagged every turn and could not be taken back.
-            "    fno agents mail withdraw <id>      # none of the above? retract it"
-        )
-    print(msg, file=sys.stderr)
-
-
-# Send-time human escalation for a question, per (sender, recipient). A burst
-# re-nudges every window rather than once forever (marker refreshed only on an
-# actual escalation, so the window runs from the last nudge, not the first send).
-_ESCALATION_DEBOUNCE_S = 300
-
-
+        arm = "plain"
+    head = deferred_liveness_head(target) if arm == "plain" else None
+    print(
+        _render(
+            [
+                "warn-deferred",
+                "--target", target,
+                "--arm", arm,
+                *(_flag("reason", reason)),
+                *(_flag("head", head)),
+            ]
+        ),
+        file=sys.stderr,
+    )
 def _recipient_is_attended(recipient: str) -> bool:
     """True iff ``recipient``'s registry row was stamped ``origin=operator`` at
     a hand-start (SessionStart register hook / ``fno agents register``).
