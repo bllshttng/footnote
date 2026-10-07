@@ -4,11 +4,13 @@
 # Wave 1 (ab-79165ba1) of retro-auto-triage. Verifies the SessionStart
 # reconcile trigger: the shared throttle helper (scripts/lib/reconcile-throttle.sh)
 # fires `fno backlog reconcile` in MUTATE mode only when the throttle window has
-# elapsed, and the hook (hooks/reconcile-session-start.sh) renders the prior
-# sweep's result exactly once.
+# elapsed. The hook no longer renders the sweep's result: the notice_route
+# daemon arm routes those warnings to the owning lead and consumes the result
+# files itself, so these tests pin the hook's silence and its leaving every
+# result file intact for that arm.
 #
 # Isolation: a FAKE `fno` is placed first on PATH so no real reconcile ever runs
-# against the live graph, and render tests pin a fresh throttle stamp so the
+# against the live graph, and silence tests pin a fresh throttle stamp so the
 # hook does not fire a reconcile while we assert on rendering.
 #
 # Run: bash tests/hooks/test_reconcile_session_start.sh
@@ -155,9 +157,11 @@ wait_for_file "$RESULT3" || fail "throttle: stale stamp did not re-fire reconcil
 pass "throttle: stamp older than window re-fires"
 
 # ============================================================================
-# AC: render — prior sweep with closed nodes surfaces a reminder, once.
+# AC: silence — prior sweep with closed nodes is NOT the hook's business:
+# the notice_route daemon arm routes them to the owning lead. The hook
+# stays silent and leaves the result file for that arm to consume.
 # ============================================================================
-log "render: closed nodes -> reminder emitted and result consumed"
+log "render: closed nodes -> hook silent, result left for the notice arm"
 REPO4="$WORK/repo4"; mkdir -p "$REPO4/.fno"
 git -C "$REPO4" init -q
 RESULT4="$REPO4/.fno/.reconcile-result.json"
@@ -167,18 +171,20 @@ cat > "$RESULT4" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [{"node_id":"ab-aaa111","pr_number":10},{"node_id":"ab-bbb222","pr_number":11}], "failures": []}
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO4" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-grep -q "closed 2 drifted node(s)" <<<"$OUT" \
-    || fail "render: reminder missing 'closed 2 drifted node(s)' (got: $OUT)"
-grep -q "ab-aaa111" <<<"$OUT" || fail "render: reminder missing node id ab-aaa111"
-grep -q "ab-bbb222" <<<"$OUT" || fail "render: reminder missing node id ab-bbb222"
-[[ ! -f "$RESULT4" ]] || fail "render: result not consumed (should move to .shown)"
-[[ -f "$RESULT4.shown" ]] || fail "render: consumed result not preserved as .shown"
-pass "render: closed-node reminder emitted; result consumed once"
+grep -q "drifted node" <<<"$OUT" \
+    && fail "render: hook still emits the worker-scope reminder (got: $OUT)"
+grep -q "ab-aaa111" <<<"$OUT" \
+    && fail "render: hook still surfaces node ids to every session (got: $OUT)"
+grep -q "ab-aaa111" <"$RESULT4" \
+    || fail "render: hook disturbed the result the notice arm must read"
+[[ -f "$RESULT4.shown" ]] \
+    && fail "render: the hook consumed a result the notice arm owns"
+pass "render: hook silent on closed nodes; result intact for the notice arm"
 
 # ============================================================================
-# AC: render — empty sweep is silent (no node closed => no reminder noise).
+# AC: an empty sweep is equally silent, and equally untouched.
 # ============================================================================
-log "render: empty sweep -> silent, still consumed"
+log "render: empty sweep -> silent, untouched"
 REPO5="$WORK/repo5"; mkdir -p "$REPO5/.fno"
 git -C "$REPO5" init -q
 RESULT5="$REPO5/.fno/.reconcile-result.json"
@@ -189,15 +195,14 @@ JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO5" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
 grep -q "drifted node" <<<"$OUT" \
     && fail "render: empty sweep wrongly emitted a reminder (got: $OUT)"
-[[ -f "$RESULT5.shown" ]] || fail "render: empty result not consumed to .shown"
-pass "render: empty sweep is silent and consumed"
+[[ -f "$RESULT5" ]] || fail "render: hook consumed the empty result the notice arm owns"
+pass "render: empty sweep is silent and untouched"
 
 # ============================================================================
-# AC: render — promise-gate held-open nodes surface a reminder (condition D +
-# #794). Surfacing only .closed left these silent; the hook reads
-# .promise_unmet too, ahead of the consume-after-show move.
+# AC: promise-gate held-open nodes are lead-scope context now: the hook
+# never surfaces them at session start, and the result stays put.
 # ============================================================================
-log "render: promise_unmet nodes -> held-open reminder emitted"
+log "render: promise_unmet nodes -> hook silent, result left"
 REPO_PM="$WORK/repo-pm"; mkdir -p "$REPO_PM/.fno"
 RESULT_PM="$REPO_PM/.fno/.reconcile-result.json"
 touch "$REPO_PM/.fno/.reconcile-stamp"
@@ -206,19 +211,15 @@ cat > "$RESULT_PM" <<'JSON'
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_PM" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
 grep -q "held 2 node(s) open on the promise gate" <<<"$OUT" \
-    || fail "render: missing promise-gate held-open reminder (got: $OUT)"
-grep -q "x-dd1" <<<"$OUT" || fail "render: reminder missing node id x-dd1"
-grep -q "x-dd2" <<<"$OUT" || fail "render: reminder missing node id x-dd2"
-[[ ! -f "$RESULT_PM" ]] || fail "render: promise_unmet result not consumed to .shown"
-pass "render: promise-gate held-open reminder emitted; result consumed"
+    && fail "render: hook still emits the promise-gate reminder (got: $OUT)"
+[[ -f "$RESULT_PM" ]] || fail "render: hook consumed the promise_unmet result"
+pass "render: hook silent on promise-gate rows; result intact"
 
 # ============================================================================
-# AC: render - a retryable UNKNOWN ship count holds the node open too, and the
-# hook must name it. A sweep that reads only .promise_unmet reports zero held
-# while the gate is holding nodes open on an outage, which is the silent-gate
-# shape this file exists to refuse.
+# AC: a retryable UNKNOWN ship count is likewise routed by the notice arm,
+# never rendered to the worker at session start.
 # ============================================================================
-log "render: promise_unknown nodes -> held-open reminder emitted"
+log "render: promise_unknown nodes -> hook silent, result left"
 REPO_PU="$WORK/repo-pu"; mkdir -p "$REPO_PU/.fno"
 RESULT_PU="$REPO_PU/.fno/.reconcile-result.json"
 touch "$REPO_PU/.fno/.reconcile-stamp"
@@ -227,21 +228,17 @@ cat > "$RESULT_PU" <<'JSON'
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_PU" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
 grep -q "held 1 node(s) open on the promise gate" <<<"$OUT" \
-    || fail "render: unmet line missing or miscounted (got: $OUT)"
-grep -q "could not read the ship count for 1 node(s)" <<<"$OUT" \
-    || fail "render: unknown rows got no line of their own (got: $OUT)"
-grep -q "x-uu1" <<<"$OUT" || fail "render: reminder missing node id x-uu1"
-# The load-bearing half: --force on an UNREADABLE count is the outcome the
-# promise gate exists to prevent, so the unknown line must not advise it.
-grep -q "Do not force these closed" <<<"$OUT" \
-    || fail "render: unknown line missing the do-not-force warning (got: $OUT)"
-pass "render: retryable-unknown nodes get their own line and no --force advice"
+    && fail "render: hook still emits the unmet line (got: $OUT)"
+grep -q "could not read the ship count" <<<"$OUT" \
+    && fail "render: hook still emits the unknown line (got: $OUT)"
+[[ -f "$RESULT_PU" ]] || fail "render: hook consumed the promise_unknown result"
+pass "render: hook silent on retryable-unknown rows; result intact"
 
 # ============================================================================
-# AC9-HP: the orphan-plan binder's result file renders one line
-# naming every bound id, then the file is consumed to .shown.
+# AC9-HP: the orphan-plan binder's result is the notice arm's input too:
+# no hook-side render, no hook-side consume.
 # ============================================================================
-log "orphan: bound_now rows -> one bound line, consumed"
+log "orphan: bound_now rows -> hook silent, result left"
 REPO_OP="$WORK/repo-orphan-bound"; mkdir -p "$REPO_OP/.fno"
 RESULT_OP="$REPO_OP/.fno/.orphan-plans-result.json"
 touch "$REPO_OP/.fno/.reconcile-stamp"
@@ -249,17 +246,16 @@ cat > "$RESULT_OP" <<'JSON'
 {"read_at":"2026-09-19T00:00:00Z","plans_dir":"/tmp/plans","rows":[{"node_id":"x-op1","plan_path":"/tmp/plans/a.md","verdict":"bound_now","detail":""},{"node_id":"x-op2","plan_path":"/tmp/plans/b.md","verdict":"bound_now","detail":""}],"counts":{"bound_now":2}}
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_OP" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-grep -q "bound 2 orphan plan(s) to their nodes (x-op1,x-op2)" <<<"$OUT" \
-    || fail "orphan: bound line missing or wrong (got: $OUT)"
-[[ ! -f "$RESULT_OP" ]] || fail "orphan: result not consumed (should move to .shown)"
-[[ -f "$RESULT_OP.shown" ]] || fail "orphan: consumed result not preserved as .shown"
-pass "orphan: bound_now rows render one line and are consumed"
+grep -q "bound 2 orphan plan(s)" <<<"$OUT" \
+    && fail "orphan: hook still emits the bound line (got: $OUT)"
+[[ -f "$RESULT_OP" ]] || fail "orphan: hook consumed the bound result"
+pass "orphan: bound_now rows stay silent; result intact for the notice arm"
 
 # ============================================================================
-# AC10-EDGE: only terminal and settling rows stay silent (transient and
-# healthy history never surfaces).
+# AC10-EDGE: terminal and settling rows stay silent (transient and healthy
+# history never surfaces) and the quiet result is likewise untouched.
 # ============================================================================
-log "orphan: terminal + settling rows -> silent, still consumed"
+log "orphan: terminal + settling rows -> silent, untouched"
 REPO_OQ="$WORK/repo-orphan-quiet"; mkdir -p "$REPO_OQ/.fno"
 RESULT_OQ="$REPO_OQ/.fno/.orphan-plans-result.json"
 touch "$REPO_OQ/.fno/.reconcile-stamp"
@@ -269,12 +265,13 @@ JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_OQ" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
 grep -q "orphan plan" <<<"$OUT" \
     && fail "orphan: terminal/settling rows wrongly surfaced (got: $OUT)"
-[[ -f "$RESULT_OQ.shown" ]] || fail "orphan: quiet result not consumed to .shown"
-pass "orphan: terminal + settling rows stay silent and are consumed"
+[[ -f "$RESULT_OQ" ]] || fail "orphan: hook consumed the quiet result"
+pass "orphan: terminal + settling rows stay silent and untouched"
 
 # ============================================================================
-# AC11-ERR: a result file that is not JSON must not kill the hook: the render
-# is cosmetic, so the run still reaches reconcile_maybe_fire and exits 0.
+# AC11-ERR: a result file that is not JSON must not kill the hook: the
+# notice arm owns that file's fate, so the hook neither reads nor consumes
+# it; the run still reaches reconcile_maybe_fire and exits 0.
 # ============================================================================
 log "orphan: non-JSON result -> hook survives and still fires"
 REPO_OB="$WORK/repo-orphan-bad"; mkdir -p "$REPO_OB/.fno"
@@ -287,18 +284,17 @@ OUT=$(CLAUDE_PROJECT_DIR="$REPO_OB" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 
 _RC_OB=$?
 [[ "$_RC_OB" -eq 0 ]] \
     || fail "orphan/bad: hook exited $_RC_OB on a non-JSON orphan result"
-[[ -f "$RESULT_OB.shown" ]] \
-    || fail "orphan/bad: non-JSON result not consumed"
+[[ -f "$RESULT_OB" ]] \
+    || fail "orphan/bad: hook consumed the non-JSON result the notice arm owns"
 wait_for_file "$REPO_OB/.fno/.reconcile-result.json" \
     || fail "orphan/bad: reconcile never fired - the orphan render killed the trigger"
 pass "orphan: non-JSON result survives and the reconcile still fires"
 
 # ============================================================================
-# AC: render - a PROVEN-STALE canonical catchup (outcome fresh, stale true)
-# surfaces the catch-up line: the tick leg that used to alarm on this state
-# is gone, and the hook is now the only place that says so.
+# AC: a PROVEN-STALE canonical catchup (outcome fresh, stale true) is
+# lead-scope context now: the notice arm routes it, the hook stays silent.
 # ============================================================================
-log "render: stale-and-fresh catchup -> reminder emitted"
+log "render: stale-and-fresh catchup -> hook silent"
 REPO_CS="$WORK/repo-catchup-stale"; mkdir -p "$REPO_CS/.fno"
 RESULT_CS="$REPO_CS/.fno/.reconcile-result.json"
 touch "$REPO_CS/.fno/.reconcile-stamp"
@@ -306,9 +302,10 @@ cat > "$RESULT_CS" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [], "failures": [], "sync_catchup": {"outcome": "fresh", "stale": true, "pr_number": null, "swept": 0, "detail": "local default branch 5 behind origin"}}
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_CS" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-grep -q "canonical-sync catch-up fresh (local default branch 5 behind origin)" <<<"$OUT" \
-    || fail "render: proven-stale catchup got no reminder line (got: $OUT)"
-pass "render: proven-stale catchup surfaces the reminder"
+grep -q "canonical-sync catch-up" <<<"$OUT" \
+    && fail "render: hook still emits the catchup line (got: $OUT)"
+[[ -f "$RESULT_CS" ]] || fail "render: hook consumed the catchup result"
+pass "render: proven-stale catchup stays silent; result intact"
 
 # ============================================================================
 # AC: render - a result written BEFORE the `stale` key existed (outcome fresh,
@@ -329,21 +326,24 @@ _RC_PC=$?
     || fail "render/pre-stale: hook exited $_RC_PC on a result with no stale key"
 grep -q "canonical-sync catch-up" <<<"$OUT" \
     && fail "render: pre-stale result wrongly emitted a catchup line (got: $OUT)"
-# No stamp => the hook must reach reconcile_maybe_fire and fire.
-wait_for_file "$RESULT_PC" \
+# No stamp => the hook must reach reconcile_maybe_fire and fire. The sweep
+# is detached, so poll the call log: the heredoc above left a non-empty
+# result file, so wait_for_file would pass before any chain spawns.
+wait_for_log_line "backlog reconcile --json" \
     || fail "render/pre-stale: reconcile never fired"
 pass "render: pre-stale result is silent and the reconcile still fires"
 
 # ============================================================================
-# AC: render — a legacy result (no `sync_catchup` key) must not kill the hook.
-# The render block runs under `set -euo pipefail` ABOVE the load-bearing
+# AC: a legacy result (no `sync_catchup` key) must not kill the hook. The
+# old render block ran under `set -euo pipefail` ABOVE the load-bearing
 # reconcile trigger, so a jq type error there took out both the consume and
 # every future sweep: `null | test(...)` is an ERROR (exit 5), not an empty
 # match, and a bare `cu=$(...)` propagates it. Symptom was silent and
 # permanent - the same stale reminder every session and no reconcile ever
-# firing again on that repo. Pins the trigger, which nothing else covered.
+# firing again on that repo. The render is gone, so this pins the trigger
+# plus the result left intact for the notice arm.
 # ============================================================================
-log "render: result predating sync_catchup -> still consumed, still fires"
+log "render: result predating sync_catchup -> silent, untouched, still fires"
 REPO_LEGACY="$WORK/repo-legacy"; mkdir -p "$REPO_LEGACY/.fno"
 RESULT_LEGACY="$REPO_LEGACY/.fno/.reconcile-result.json"
 cat > "$RESULT_LEGACY" <<'JSON'
@@ -356,21 +356,18 @@ _RC_LEGACY=$?
 [[ "$_RC_LEGACY" -eq 0 ]] \
     || fail "render/legacy: hook exited $_RC_LEGACY on a result with no sync_catchup"
 grep -q "ab-ccc333" <<<"$OUT" \
-    || fail "render/legacy: reminder missing (got: $OUT)"
-[[ ! -f "$RESULT_LEGACY" ]] \
-    || fail "render/legacy: result not consumed - the hook died before the mv"
+    && fail "render/legacy: hook still renders the legacy result (got: $OUT)"
+grep -q "ab-ccc333" <"$RESULT_LEGACY" \
+    || fail "render/legacy: hook disturbed the result the notice arm must read"
 # The stamp is a `touch`, so wait_for_file (which requires NON-EMPTY) is the
 # wrong probe for it; the call log is what proves the trigger actually ran.
 [[ -f "$REPO_LEGACY/.fno/.reconcile-stamp" ]] \
     || fail "render/legacy: no throttle stamp - the hook died before the trigger"
-# The sweep is detached, so poll for the REPUBLISHED result (the same probe the
-# fire case above uses) rather than the call log: other steps write to that log
-# first, so a non-empty check there passes before the reconcile has run.
-wait_for_file "$RESULT_LEGACY" \
+# The sweep is detached, so poll the call log (the same probe the fire case
+# above uses): the chain spawns asynchronously, so an instant grep races it.
+wait_for_log_line "backlog reconcile --json" \
     || fail "render/legacy: reconcile never fired - a cosmetic line killed the trigger"
-grep -q "backlog reconcile --json" "$FNO_CALL_LOG" \
-    || fail "render/legacy: fired, but not as a reconcile (got: $(cat "$FNO_CALL_LOG"))"
-pass "render: legacy result is consumed and the reconcile still fires"
+pass "render: legacy result is left intact and the reconcile still fires"
 
 # ============================================================================
 # AC: _reconcile_mtime must return DIGITS on either stat dialect.
