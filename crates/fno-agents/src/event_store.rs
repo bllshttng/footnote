@@ -1084,12 +1084,86 @@ pub fn append_envelope(
     let row_hash = Sha256::digest(line.as_bytes()).to_vec();
     let class = retention_class(&ty);
 
+    // Python's door client already retries the same policy
+    // (store_client.py:213): the store's 5s busy wait expires under
+    // fork-heavy contention, and one expired wait must not lose the row.
+    // The event id is the sha256 of the line, so a retried append reads
+    // back as an idempotent hit, never a duplicate.
+    let mut last_error = String::new();
+    for attempt in 0..APPEND_ATTEMPTS {
+        match commit_envelope(&store, line, &event_id, &row_hash, &ty, class, obj, ts_ms) {
+            Ok(receipt) => return Ok(receipt),
+            Err(error) => {
+                let settled = !lock_busy(&error) || attempt + 1 == APPEND_ATTEMPTS;
+                last_error = error;
+                if settled {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250 * (attempt as u64 + 1)));
+            }
+        }
+    }
+    report_lost_row(&store, &ty, &last_error);
+    Err(last_error)
+}
+
+/// How many commit attempts [`append_envelope`] makes before the row is
+/// reported lost. Python's store_client carries the same bound.
+const APPEND_ATTEMPTS: usize = 3;
+
+/// The diagnostic SQLite answers when the busy wait expired. Python's
+/// store_client matches the same string at store_client.py:232.
+fn lock_busy(error: &str) -> bool {
+    error.contains("database is locked")
+}
+
+/// The dead-letter line a finally-lost row leaves behind: every commit
+/// attempt failed, the row exists nowhere, and a plain file append is the
+/// only trace that does not contend with the store that refused the write.
+/// Best-effort by design: a failed sidecar write eprintlns, and the
+/// original error still returns to the caller.
+fn report_lost_row(store: &Path, type_name: &str, error: &str) {
+    use std::io::Write;
+    let sidecar = PathBuf::from(format!("{}.lost.jsonl", store.display()));
+    let row = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": type_name,
+        "store": store.display().to_string(),
+        "error": error,
+    });
+    let write = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&sidecar)
+        .and_then(|mut file| writeln!(file, "{row}"));
+    if let Err(e) = write {
+        eprintln!(
+            "event store: lost {type_name:?} row and could not record it in {}: {e}",
+            sidecar.display()
+        );
+    }
+}
+
+/// One commit attempt: the exact body `append_envelope` ran before the
+/// retry loop existed, from the directory create through the positive
+/// readback. Deterministic ids make any attempt after a half-landed
+/// predecessor an idempotent hit.
+fn commit_envelope(
+    store: &Path,
+    line: &str,
+    event_id: &str,
+    row_hash: &[u8],
+    ty: &str,
+    class: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    ts_ms: i64,
+) -> Result<AppendReceipt, String> {
     // The commit creates the directory it needs; the caller-side guards
     // (Python's hermetic fence, the shell's opt-in parent guard) already ran.
     if let Some(parent) = store.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", store.display()))?;
     }
-    let mut conn = open_store(&store)?;
+    let mut conn = open_store(store)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("{}: {e}", store.display()))?;
@@ -1108,8 +1182,8 @@ pub fn append_envelope(
         tx.commit()
             .map_err(|e| format!("{}: {e}", store.display()))?;
         return Ok(AppendReceipt {
-            store,
-            event_id: event_id.clone(),
+            store: store.to_path_buf(),
+            event_id: event_id.to_string(),
             seq,
             retention_class: class.to_string(),
             inserted: false,
@@ -1148,8 +1222,8 @@ pub fn append_envelope(
             tx.commit()
                 .map_err(|e| format!("{}: {e}", store.display()))?;
             return Ok(AppendReceipt {
-                store,
-                event_id,
+                store: store.to_path_buf(),
+                event_id: event_id.to_string(),
                 seq: 0,
                 retention_class: class.to_string(),
                 inserted: false,
@@ -1203,8 +1277,8 @@ pub fn append_envelope(
     tx.commit()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     Ok(AppendReceipt {
-        store,
-        event_id,
+        store: store.to_path_buf(),
+        event_id: event_id.to_string(),
         seq,
         retention_class: class.to_string(),
         inserted: inserted > 0,
