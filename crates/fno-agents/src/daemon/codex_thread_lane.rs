@@ -140,7 +140,7 @@ pub(super) async fn spawn_codex_thread_lane(
                 &crate::gc_sweep::graph_path(&home),
                 &crate::backlog::RowQuery {
                     fields: Some(
-                        ["id", "slug", "status", "deferred_kind"]
+                        ["id", "slug", "status", "deferred_kind", "merge_status"]
                             .into_iter()
                             .map(str::to_string)
                             .collect(),
@@ -377,8 +377,12 @@ fn codex_lead_recovery_blocker(rows: &[Value]) -> Option<&str> {
     rows.iter()
         .find(|row| {
             row.get("slug").and_then(Value::as_str) == Some("codex-turn-that-ends-error-is")
-                && row.get("status").and_then(Value::as_str) != Some("done")
+                && !matches!(
+                    row.get("status").and_then(Value::as_str),
+                    Some("done" | "superseded" | "deferred")
+                )
                 && row.get("deferred_kind").is_none_or(Value::is_null)
+                && row.get("merge_status").and_then(Value::as_str) != Some("merged")
         })
         .and_then(|row| row.get("id").and_then(Value::as_str))
 }

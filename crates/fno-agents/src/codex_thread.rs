@@ -2126,10 +2126,11 @@ async fn actor_task(
     // bounded interrupt-settle wait pauses it.
     let mut next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
     loop {
+        let retry_at = ctx.retry.as_ref().map(|(at, _)| *at);
         tokio::select! {
             _ = async {
-                match ctx.retry.as_ref() {
-                    Some((at, _)) => tokio::time::sleep_until(*at).await,
+                match retry_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending::<()>().await,
                 }
             } => ctx.retry_turn(&mut frames).await,
