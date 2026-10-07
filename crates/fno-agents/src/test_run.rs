@@ -1019,8 +1019,9 @@ fn run_build_admit(args: &[String]) -> i32 {
     // build wait and re-enter the slot queue instead of taking build:cargo
     // slotless once it frees (2026-09-29 and 2026-09-30, three times).
     let slot_keys = cargo_slot_keys(&worktree);
+    let mut reentry = false;
     loop {
-        if let Err(code) = admit_run_slot(cargo_pid, &worktree) {
+        if let Err(code) = admit_run_slot(cargo_pid, &worktree, reentry) {
             return code;
         }
 
@@ -1138,7 +1139,13 @@ fn run_build_admit(args: &[String]) -> i32 {
         wait.clear_marker();
         match result {
             Ok(()) => return 0,
-            Err(BUILD_SLOT_LOST) => continue,
+            Err(BUILD_SLOT_LOST) => {
+                // Mid-build re-entry: the cargo already holds build-door
+                // state, so it queues for a slot instead of dying on the
+                // try-lock.
+                reentry = true;
+                continue;
+            }
             Err(code) => return code,
         }
     }
@@ -1366,7 +1373,7 @@ fn holds_run_slot(cargo_pid: u32, holder: &str, keys: &[String], root: Option<&P
     })
 }
 
-fn admit_run_slot(cargo_pid: u32, new_worktree: &Path) -> Result<(), i32> {
+fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<(), i32> {
     install_signal_handlers();
     // An install build (FNO_INSTALL_BUILD=1, exported by `fno doctor update`
     // into its cargo legs) is the user's fno loading, and law d-829648bb
@@ -1419,9 +1426,18 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path) -> Result<(), i32> {
     // worker turn (idle turn end, reap, lost node). A free slot admits; the
     // cargo holds it keyed to its pid until exit, the same lifecycle the
     // queue path grants. Every slot busy refuses at once with the move-on
-    // answer. A sanctioned background whole-suite run (FNO_TEST_FULL=1)
-    // keeps the queue lane the guard's refusal text documents for it.
-    if try_lock_admission(agent_cargo(), full_suite_lane()) {
+    // answer. Two lanes keep the queue: a sanctioned background whole-suite
+    // run (FNO_TEST_FULL=1), and a `test:priority` checkout, whose lane the
+    // doors reorder (the same pass the build door grants at its claim). A
+    // mid-build re-entry after a slot theft (`reentry`) also queues: the
+    // cargo already compiled crates, and dying here abandons the build the
+    // takeover machinery exists to complete.
+    if !reentry
+        && try_lock_admission(
+            agent_cargo(),
+            full_suite_lane() || priority_lane(None).is_some_and(|p| p.worktree == worktree),
+        )
+    {
         for (i, key) in keys.iter().enumerate() {
             if let crate::claims::AcquireOutcome::Acquired(_) =
                 crate::claims::acquire(key, &holder, opts(i))
@@ -1478,7 +1494,7 @@ fn run_run_admit(args: &[String]) -> i32 {
             return 2;
         }
     };
-    match admit_run_slot(cargo_pid, &worktree) {
+    match admit_run_slot(cargo_pid, &worktree, false) {
         Ok(()) => 0,
         Err(code) => code,
     }
@@ -1953,11 +1969,23 @@ fn parent_pid(pid: u32) -> Option<u32> {
 /// the group can never boomerang onto the owner itself). The owner identity
 /// rides the child's env so nested runners and test-owned keepers can find
 /// it without a second IPC channel.
-fn spawn_group(argv: &[String], owner_pid: u32, owner_birth: u64) -> std::io::Result<Child> {
+fn spawn_group(
+    argv: &[String],
+    owner_pid: u32,
+    owner_birth: u64,
+    whole_lane: bool,
+) -> std::io::Result<Child> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.env("FNO_TEST_OWNER_PID", owner_pid.to_string());
     cmd.env("FNO_TEST_OWNER_BIRTH", owner_birth.to_string());
+    // A whole run holds the suite claim, so it is the sanctioned queue lane
+    // at the slot door too: stamping the mark here lets its cargo's
+    // admission asks queue instead of dying on the try-lock, whatever
+    // allowed the run (FNO_TEST_FULL=1 typed, or a backgrounded whole run).
+    if whole_lane {
+        cmd.env("FNO_TEST_FULL", "1");
+    }
     cmd.stdin(Stdio::inherit());
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
@@ -2197,7 +2225,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
         (pid, crate::daemon::process_start_time(pid).unwrap_or(0))
     });
 
-    let mut child = match spawn_group(&opts.argv, owner_pid, owner_birth) {
+    let mut child = match spawn_group(&opts.argv, owner_pid, owner_birth, whole) {
         Ok(c) => c,
         Err(e) => {
             emit(
