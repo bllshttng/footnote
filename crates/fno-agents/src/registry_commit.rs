@@ -148,6 +148,13 @@ fn absolute_path(path: &str) -> std::io::Result<PathBuf> {
     Ok(std::env::current_dir()?.join(path))
 }
 
+const RETIRED_ROW_KEYS: &[&str] = &[
+    "claude_short_id",
+    "claude_session_uuid",
+    "codex_session_id",
+    "gemini_session_id",
+];
+
 fn merge(
     mut disk: Value,
     payload: &Value,
@@ -192,6 +199,10 @@ fn merge(
             consumed[index] = true;
             if let Some(disk_row) = disk_agents[index].as_object() {
                 for (key, value) in disk_row {
+                    // Retired keys are read-only backfill; the writer dropped them on purpose.
+                    if RETIRED_ROW_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
                     merged.entry(key.clone()).or_insert_with(|| value.clone());
                 }
             }
@@ -208,7 +219,11 @@ fn merge(
     let payload_object = payload.as_object().expect("validated payload object");
     let target = disk.as_object_mut().expect("root checked above");
     for (key, value) in payload_object {
-        if key != "path" && key != "agents" && key != "schema_version" {
+        // Request fields steer this verb; they are not registry data.
+        if !matches!(
+            key.as_str(),
+            "path" | "agents" | "schema_version" | "revision" | "replace" | "op"
+        ) {
             target.insert(key.clone(), value.clone());
         }
     }

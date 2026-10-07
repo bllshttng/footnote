@@ -52,7 +52,7 @@ def commit_registry_document(
     try:
         answer = rust_binary.verb_call(
             "registry-commit",
-            {"path": str(Path(path).absolute()), "revision": revision, **payload},
+            {**payload, "path": str(Path(path).absolute()), "revision": revision},
         )
     except rust_binary.VerbUnavailable as exc:
         raise RegistryDoorError(f"registry-commit refused {path}: {exc}") from exc
