@@ -1093,5 +1093,32 @@ fn a_filtered_read_sorts_seqs_not_lines_and_keeps_limit_order() {
     assert_eq!(kept, ["first", "second"], "{text}");
 }
 
+#[test]
+fn a_lost_row_is_dead_lettered_by_type_and_busy_locks_are_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    let store = store_path(&journal);
+    // Junk past the truncation fence fails quick_check, so the commit
+    // errors and the row is lost for real.
+    std::fs::write(&store, b"junk".repeat(50)).unwrap();
+    let envelope = json!({
+        "ts": "2026-10-07T00:00:00Z",
+        "type": "claim_released",
+        "source": "fno-loop",
+        "data": {"session_id": "s-1"},
+    })
+    .to_string();
+    let error = append_envelope(&journal, &envelope, None).unwrap_err();
+    assert!(error.contains("integrity check failed"), "{error}");
+
+    let sidecar = PathBuf::from(format!("{}.lost.jsonl", store.display()));
+    let line = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(line.contains("\"type\":\"claim_released\""), "{line}");
+
+    assert!(lock_busy(".../events.db: database is locked"));
+    assert!(!lock_busy(".../events.db: file is not a database"));
+    assert!(!lock_busy(""));
+}
+
 mod coverage;
 mod observation;
