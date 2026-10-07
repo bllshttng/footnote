@@ -2631,8 +2631,8 @@ where
     let before_entries = registry.entries.clone();
     let before = before_entries
         .iter()
-        .map(|entry| (entry.name.clone(), identity_signature(entry)))
-        .collect::<BTreeMap<_, _>>();
+        .map(identity_signature)
+        .collect::<BTreeSet<_>>();
     let out = f(&mut registry);
     // Every transition into Exited carries its date, whichever closure wrote
     // it. A row already Exited with no stamp stays unstamped: a stamp written
@@ -3191,7 +3191,7 @@ fn identity_signature(entry: &RegistryEntry) -> IdentitySignature {
 }
 
 fn validate_changed_identities(
-    before: &BTreeMap<String, IdentitySignature>,
+    before: &BTreeSet<IdentitySignature>,
     entries: &[RegistryEntry],
 ) -> Result<(), String> {
     use crate::identity::{canonical_handle, legacy_suffix_handle, session_handle_tier};
@@ -3220,7 +3220,9 @@ fn validate_changed_identities(
     };
 
     for (index, candidate) in entries.iter().enumerate() {
-        if before.get(&candidate.name) == Some(&identity_signature(candidate)) {
+        // Keyed by the whole signature, not the name: duplicate names in a
+        // legacy document must each stay exempt while unchanged.
+        if before.contains(&identity_signature(candidate)) {
             continue;
         }
         let mut chosen = BTreeSet::from([candidate.name.clone()]);
@@ -3575,11 +3577,7 @@ pub(crate) fn validate_registry_document_change(
         crate::registry_guard::count_live(&after.entries),
     )
     .map_err(StateError::WriteGuard)?;
-    let identities = before
-        .entries
-        .iter()
-        .map(|entry| (entry.name.clone(), identity_signature(entry)))
-        .collect();
+    let identities = before.entries.iter().map(identity_signature).collect();
     validate_changed_identities(&identities, &after.entries)
         .map_err(StateError::InvariantViolation)?;
     for entry in &after.entries {
