@@ -30,6 +30,7 @@ from fno.claims.core import (
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.claims.verdict import claim_verdicts
+from tests._table_seed import update_claim
 
 
 HOLDER_A = "target-session:sid-a"
@@ -893,3 +894,251 @@ class TestSweepReadsWalkedDir:
         assert data["kept_unclassified"] == 2
         assert data["unclassified_dirs"] == {"/claims": 2}
         assert data["kept_suspect_unprobed_by"] == {"roster-read-degraded": 1}
+
+
+# ---------------------------------------------------------------------------
+# Reap contracts ported from the lockfile era: the claims table is read
+# through claim_status, never through files on disk.
+# ---------------------------------------------------------------------------
+
+
+def _held(key, root):
+    return claim_status(key, root=root)["state"] != "free"
+
+
+class TestReapOverTheClaimsTable:
+    def test_AC1_HP_kill_without_release_is_reaped(self, tmp_path):
+        """The load-bearing case. A real process, really killed, never released."""
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            acquire_claim("node:x-killed", HOLDER_A, pid=proc.pid, root=tmp_path)
+            proc.kill()
+            proc.wait(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        assert _held("node:x-killed", tmp_path)
+
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+
+        assert summary["reaped"] == 1
+        assert summary["reap_failed"] == []
+        assert not _held("node:x-killed", tmp_path)
+
+    def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
+        root_a, root_b = tmp_path / "a", tmp_path / "b"
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=root_a)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=root_b)
+
+        summary = reap_dead_claims(roots=[root_a, root_b], apply=True)
+
+        assert summary["reaped"] == 2
+        assert len(summary["roots"]) == 2
+        assert not _held("k", root_a) and not _held("k", root_b)
+
+    def test_roots_deduped_by_resolve(self, tmp_path):
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        summary = reap_dead_claims(roots=[tmp_path, tmp_path], apply=True)
+        assert summary["reaped"] == 1
+        assert len(summary["roots"]) == 1
+
+    def test_AC3_FR_off_machine_claim_never_reaped(self, tmp_path):
+        acquire_claim("node:x-remote", HOLDER_A, root=tmp_path)
+        update_claim(
+            "node:x-remote", root=tmp_path, host="some-other-host",
+            machine_id="not-this-machine", acquired_at=now_ms() - 100_000,
+        )
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+        assert summary["reaped"] == 0
+        assert summary["kept_offhost"] == 1
+        assert _held("node:x-remote", tmp_path), "an off-host claim must never be archived"
+
+    def test_AC4_FR_ttl_protected_suspect_never_reaped(self, tmp_path):
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), ttl_ms=60_000, root=tmp_path)
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+        assert summary["reaped"] == 0
+        assert summary["kept_suspect"] == 1
+        assert _held("k", tmp_path)
+
+    def test_a_failed_retire_is_reported_and_the_sweep_continues(self, tmp_path, monkeypatch):
+        import fno.claims.core as claims_core
+
+        acquire_claim("bad", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("good", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        real = claims_core._native_claim
+
+        def _fail_bad(operation, key, flags):
+            if operation == "force-release" and key == "bad":
+                raise OSError("simulated permission denied")
+            return real(operation, key, flags)
+
+        monkeypatch.setattr(claims_core, "_native_claim", _fail_bad)
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+
+        assert summary["reaped"] == 1
+        assert len(summary["reap_failed"]) == 1
+        assert "bad" in summary["reap_failed"][0][0]
+        assert "simulated permission denied" in summary["reap_failed"][0][1]
+        monkeypatch.setattr(claims_core, "_native_claim", real)
+        assert _held("bad", tmp_path)
+        assert not _held("good", tmp_path)
+
+    def test_AC5_EDGE_reap_credited_even_if_key_recreated_right_after(self, tmp_path, monkeypatch):
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        real = claims_core._native_claim
+
+        def _retire_then_race(operation, key, flags):
+            result = real(operation, key, flags)
+            if operation == "force-release":
+                acquire_claim("k", "other-holder", pid=os.getpid(), root=tmp_path)
+            return result
+
+        monkeypatch.setattr(claims_core, "_native_claim", _retire_then_race)
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+
+        assert summary["reaped"] == 1
+        assert summary["reap_failed"] == []
+        status = claim_status("k", root=tmp_path)
+        assert status["state"] == "live"
+        assert status["holder"] == "other-holder"
+
+    def test_AC6_EDGE_corrupted_row_is_never_reaped(self, tmp_path):
+        acquire_claim("node:x-bad", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        update_claim("node:x-bad", root=tmp_path, schema_version=999)
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+        assert summary["reaped"] == 0
+        assert claim_status("node:x-bad", root=tmp_path)["state"] == "corrupted"
+
+    def test_dry_run_reports_would_reap_and_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        events_path = tmp_path / ".fno" / "events.jsonl"
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(events_path))
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+
+        summary = reap_dead_claims(roots=[tmp_path], apply=False)
+
+        assert summary["apply"] is False
+        assert summary["would_reap"] == 1
+        assert summary["reaped"] == 0
+        assert _held("k", tmp_path)
+        from fno.paths import journal_and_ephemeral_sibling
+
+        lines = []
+        for candidate in journal_and_ephemeral_sibling(events_path):
+            if candidate.exists():
+                lines.extend(json.loads(line) for line in candidate.read_text().splitlines())
+        assert [e for e in lines if e["type"] == "claim_reap_swept"] == []
+
+    def test_AC7_counts_reconcile_with_the_table(self, tmp_path, monkeypatch):
+        from fno.claims.core import list_claims_with_counts
+
+        monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+        for i in range(5):
+            acquire_claim(f"k{i}", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k-live", HOLDER_A, pid=os.getpid(), root=tmp_path)
+
+        rows, counts, states_by_key = list_claims_with_counts(root=tmp_path)
+
+        assert counts["total"] == 6
+        assert counts["stale"] == 5
+        assert counts["live"] == 1
+        assert len(rows) == 1, "default include_stale=False shows only the live row"
+        assert len(states_by_key) == 6
+        assert states_by_key["k-live"] == "live"
+        assert states_by_key["k0"] == "stale"
+
+
+class TestReapCliOverTheTable:
+    def test_dry_run_is_the_default(self, cwd_tmp):
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+        result = runner.invoke(cli, ["reap"])
+        assert result.exit_code == 0, result.output
+        assert "would reap 1" in result.output
+        assert _held("k", cwd_tmp)
+
+    def test_apply_archives_and_exits_zero(self, cwd_tmp):
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+        result = runner.invoke(cli, ["reap", "--apply"])
+        assert result.exit_code == 0, result.output
+        assert "reaped 1" in result.output
+        assert not _held("k", cwd_tmp)
+
+
+class TestSharedPidOverTheTable:
+    _expired = staticmethod(TestSharedPidExclusivity._expired_prover_on_disk)
+
+    def test_apply_drains_the_whole_shared_set_not_one_member(self, tmp_path):
+        self._expired(tmp_path, "node:x-one", "target-session:s1")
+        self._expired(tmp_path, "node:x-two", "target-session:s2")
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: True
+        )
+        assert summary["reaped"] == 2
+        assert summary["kept_live"] == 0
+
+    def test_a_shared_pid_claim_whose_holder_is_working_is_kept(self, tmp_path):
+        self._expired(tmp_path, "node:x-one", "target-session:s1")
+        self._expired(tmp_path, "node:x-two", "target-session:s2")
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: False
+        )
+        assert summary["reaped"] == 0
+        assert summary["kept_suspect_alive"] == 2
+        assert _held("node:x-one", tmp_path)
+
+
+class TestRosterWiringOverTheTable:
+    _fake_roster = TestCliProbeWiring._fake_roster
+
+    def test_a_blind_roster_never_reaps_and_says_so(self, tmp_path, monkeypatch):
+        acquire_claim(
+            key="node:x-blind", holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "roster-read-degraded 1 (roster not consulted)" in r.output
+
+    def test_a_holder_absent_from_the_roster_is_never_reaped(self, tmp_path, monkeypatch):
+        """fleet_rows cannot represent a codex or hand-started holder, so its
+        absence there is never read as abandonment."""
+        from fno.agents.watchdog import Row
+
+        acquire_claim(
+            key="node:x-codex", holder="target-session:sid-codex", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(
+            monkeypatch,
+            rows=[
+                Row(row_id=f"other-{i}", name=f"t-{i}", state="working", node=f"x-{i}", cwd="")
+                for i in range(40)
+            ],
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "probe unanswered: row-absent-no-cwd 1" in r.output
+
+    def test_a_still_degraded_roster_after_retry_keeps(self, tmp_path, monkeypatch):
+        calls = {"n": 0}
+
+        def _always_degraded(*_a, **_kw):
+            calls["n"] += 1
+            return [], ["claude not on PATH"]
+
+        monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _always_degraded)
+        acquire_claim(
+            key="node:x-dead-roster", holder="target-session:sid-1",
+            ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path,
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "roster not consulted" in r.output
+        assert calls["n"] == 2

@@ -240,3 +240,15 @@ def test_a_resume_rebind_leaves_metadata_alone(tmp_path):
     claim, mode = compare_and_rebind(KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False)
     assert mode == "rebound"
     assert "dispatched_by_session" not in claim.metadata
+
+
+def test_rebind_corrupt_claim_refuses(tmp_path):
+    """AC3: an unreadable claim row refuses rather than guessing."""
+    from tests._table_seed import update_claim
+
+    _write(tmp_path, _claim(_DEAD_PID, now_ms(), expires_at=now_ms() + 60_000))
+    claim_status(KEY, root=tmp_path)  # open the store so the row is in the table
+    update_claim(KEY, root=tmp_path, schema_version=999)
+    with pytest.raises(RebindRefused) as exc:
+        compare_and_rebind(KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False)
+    assert exc.value.state == "corrupted"

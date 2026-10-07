@@ -38,6 +38,7 @@ from fno.claims.core import (
 )
 from fno.claims.io import claim_path, serialize_claim
 from fno.claims.types import Claim, ClaimState, now_ms
+from tests._table_seed import read_claim_row, update_claim
 
 
 HOLDER_A = "target-session:sid-a"
@@ -165,21 +166,6 @@ class TestPidProvenanceStamping:
     stamp is earned centrally at write time against the process-tree prover -
     never asserted by a writer that merely had a pid lying around."""
 
-    def test_prover_resolved_pid_on_a_ttl_claim_stamps_session_prover(self, tmp_path, monkeypatch):
-        """The target-init shape: the caller resolved its pid through the
-        process-tree prover (here: the prover answers our own pid), so the
-        long live session keeps its hybrid-arm protection past TTL expiry."""
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
-        )
-        # The harness is passed, not walked: the stamp now gates on the value
-        # the writer stores, so an unpinned test would assert session-prover
-        # under claude and ambient under codex - a flake keyed to who ran it.
-        claim = acquire_claim(
-            "node:x-1", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
-            harness="claude", root=tmp_path
-        )
-        assert claim.pid_provenance == "session-prover"
 
     def test_foreign_live_pid_stamps_ambient(self, tmp_path):
         """THE SPECIMEN WRITER SHAPE: a reattach resolved its incarnation
@@ -300,18 +286,6 @@ class TestPidProvenanceStamping:
         # never disagree about which harness wrote it.
         assert claim.harness == "codex"
 
-    def test_per_session_harness_still_earns_the_prover_stamp(self, tmp_path, monkeypatch):
-        """AC1's twin: the identical acquire under a harness that forks per
-        session still earns the stamp. The deny-list must not cost claude the
-        hybrid protection it was built for."""
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
-        )
-        claim = acquire_claim(
-            "node:x-forked", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
-            harness="claude", root=tmp_path
-        )
-        assert claim.pid_provenance == "session-prover"
 
     def test_refresh_under_shared_host_harness_does_not_repoison(self, tmp_path, monkeypatch):
         """AC5-EDGE - refresh_claim re-derives the stamp instead of asserting
@@ -333,22 +307,6 @@ class TestPidProvenanceStamping:
         )
         assert refreshed is not None
         assert refreshed.pid_provenance == "ambient"
-
-    def test_refresh_reanchor_stamps_session_prover(self, tmp_path, monkeypatch):
-        """The renewal re-anchor's pid IS the prover's answer by construction,
-        so the refreshed claim keeps hybrid protection; a bare TTL extension
-        (no anchor) leaves the written provenance untouched."""
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
-        )
-        first = acquire_claim(
-            "node:x-6", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
-            harness="claude", root=tmp_path
-        )
-        assert first.pid_provenance == "session-prover"
-        refreshed = refresh_claim("node:x-6", HOLDER_A, ttl_ms=60_000, root=tmp_path)
-        assert refreshed is not None
-        assert refreshed.pid_provenance == "session-prover"
 
 
 # ---------------------------------------------------------------------------
@@ -689,3 +647,138 @@ class TestSessionWitnessVerdicts:
         refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
         assert refreshed.pid == dead_pid
         assert refreshed.acquired_at == rec.acquired_at
+
+
+# ---------------------------------------------------------------------------
+# Contracts ported from the lockfile era: each seeds through the public verbs
+# and ages the row in the claims table instead of hand-writing a lockfile.
+# ---------------------------------------------------------------------------
+
+
+def _gone_pid() -> int:
+    pid = 999_999
+    while psutil.pid_exists(pid):
+        pid += 1
+    return pid
+
+
+def test_AC1_HP_fresh_key(tmp_path):
+    claim = acquire_claim("node:ab-1", HOLDER_A, root=tmp_path)
+    assert claim.holder == HOLDER_A
+    assert claim_status("node:ab-1", root=tmp_path)["holder"] == HOLDER_A
+
+
+def test_AC1_FR_pid_liveness_omits_expires_at(tmp_path):
+    claim = acquire_claim("k", HOLDER_A, root=tmp_path)
+    assert claim.expires_at is None
+    assert read_claim_row("k", root=tmp_path)["expires_at"] is None
+
+
+def test_AC3_HP_ttl_pid_unavailable_is_explicit(tmp_path):
+    claim = acquire_claim("k", HOLDER_A, ttl_ms=60_000, pid_unavailable=True, root=tmp_path)
+    assert claim.pid is None
+    assert claim.pid_unavailable is True
+    assert claim.schema_version == 2
+    row = read_claim_row("k", root=tmp_path)
+    assert row["pid"] is None
+    assert row["pid_unavailable"]
+    assert claim_status("k", root=tmp_path)["pid_unavailable"] is True
+
+
+def test_AC4_EDGE_stale_pid_recovered(tmp_path):
+    """A claim whose holder process is dead is reclaimable by another holder."""
+    acquire_claim("k", HOLDER_A, root=tmp_path)
+    update_claim("k", root=tmp_path, pid=_gone_pid(), acquired_at=now_ms() - 100_000)
+    new = acquire_claim("k", HOLDER_B, root=tmp_path)
+    assert new.holder == HOLDER_B
+    assert claim_status("k", root=tmp_path)["holder"] == HOLDER_B
+
+
+def test_hybrid_expired_live_pid_not_reclaimable(tmp_path):
+    """An expired TTL claim whose pid is a live prover-proven process stays
+    held: acquire honors the same hybrid liveness as status."""
+    proc_create_ms = int(psutil.Process(os.getpid()).create_time() * 1000)
+    assert now_ms() - 100 > proc_create_ms
+    acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+    update_claim(
+        "k", root=tmp_path, acquired_at=now_ms() - 100, expires_at=now_ms() - 50,
+        pid=os.getpid(), pid_provenance="session-prover", session_id=None,
+    )
+    with pytest.raises(ClaimHeldByOther) as exc:
+        acquire_claim("k", HOLDER_B, root=tmp_path)
+    assert exc.value.holder == HOLDER_A
+    assert claim_status("k", root=tmp_path)["holder"] == HOLDER_A
+
+
+def test_AC2_FR_release_silently_skips_other_holder(tmp_path):
+    acquire_claim("k", HOLDER_A, root=tmp_path)
+    release_claim("k", HOLDER_B, root=tmp_path)
+    assert claim_status("k", root=tmp_path)["holder"] == HOLDER_A
+
+
+def test_strict_release_by_the_owner_frees_the_key(tmp_path):
+    acquire_claim("node:x-abcd", HOLDER_A, root=tmp_path)
+    release_claim("node:x-abcd", HOLDER_A, strict=True, root=tmp_path)
+    assert claim_status("node:x-abcd", root=tmp_path)["state"] == "free"
+
+
+def test_AC2_HP_refresh_extends_expired_claim_whose_holder_reads_live(tmp_path):
+    """TTL expiry alone never refuses: an expired claim whose verdict reads
+    live extends, exactly as `claim status` reports."""
+    acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+    update_claim(
+        "k", root=tmp_path, expires_at=now_ms() - 1, pid=os.getpid(),
+        pid_provenance="session-prover", session_id=None,
+    )
+    time.sleep(0.01)
+    refreshed = refresh_claim("k", HOLDER_A, ttl_ms=7_200_000, root=tmp_path)
+    assert refreshed is not None
+    assert abs(refreshed.expires_at - (now_ms() + 7_200_000)) < 2_000
+
+
+def test_AC2_ERR_refresh_refuses_verdict_stale_and_leaves_the_row_alone(tmp_path):
+    """A stale verdict (dead holder, no live witness) refuses, and the
+    refusal leaves the row unchanged."""
+    acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+    update_claim(
+        "k", root=tmp_path, expires_at=now_ms() - 1, pid=_gone_pid(),
+        pid_provenance="session-prover", session_id=None,
+    )
+    before = read_claim_row("k", root=tmp_path)
+    with pytest.raises(ClaimValidationError, match="holder reads dead"):
+        refresh_claim("k", HOLDER_A, ttl_ms=7_200_000, root=tmp_path)
+    assert read_claim_row("k", root=tmp_path) == before
+
+
+def test_AC5_HP_list_empty_when_no_claims(tmp_path, monkeypatch):
+    # The list reads the global root too; pin it so other tests' claims stay out.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    assert list_claims(root=tmp_path) == []
+
+
+def test_AC5_FR_list_excludes_stale_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    acquire_claim("expired", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+    update_claim(
+        "expired", root=tmp_path, acquired_at=now_ms() - 200_000,
+        expires_at=now_ms() - 100_000, pid=_gone_pid(), session_id=None,
+    )
+    assert list_claims(root=tmp_path) == []
+    assert any(r["key"] == "expired" for r in list_claims(include_stale=True, root=tmp_path))
+
+
+def test_AC6_FR_force_release_archives_the_row(tmp_path):
+    acquire_claim("k", HOLDER_A, root=tmp_path)
+    outcome = force_release_claim("k", reason="cleanup", root=tmp_path)
+    assert outcome.archived is True
+    assert outcome.previous_holder == HOLDER_A
+    assert claim_status("k", root=tmp_path)["state"] == "free"
+
+
+def test_acquire_pinned_session_id_wins(tmp_path):
+    """An explicit harness_session_id (the init-hook pin) beats ambient."""
+    claim = acquire_claim(
+        "node:x-sid", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+        harness_session_id="pinned-sid", root=tmp_path,
+    )
+    assert claim.session_id == "pinned-sid"

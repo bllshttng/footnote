@@ -317,3 +317,59 @@ def test_a_claim_under_a_different_root_leaves_a_live_denial_alone(tmp_path, mon
 
     assert crumb.exists(), "a success elsewhere must not erase a live denial"
     assert json.loads(crumb.read_text())["denied_root"] == "/some/other/.fno"
+
+
+# ---------------------------------------------------------------------------
+# The read and archive locators over the claims table
+# ---------------------------------------------------------------------------
+
+
+def test_read_claim_file_round_trips_ttl_and_session_id(tmp_path):
+    from fno.claims import acquire_claim
+    from fno.claims.io import claim_path
+
+    acquire_claim(
+        "node:ab-1", "h", ttl_ms=60_000, pid=os.getpid(),
+        harness_session_id="abc123", root=tmp_path,
+    )
+    parsed = read_claim_file(claim_path("node:ab-1", root=tmp_path))
+    assert parsed.holder == "h"
+    assert parsed.expires_at is not None
+    assert parsed.session_id == "abc123"
+
+
+def test_pid_liveness_row_reads_expires_at_none(tmp_path):
+    from fno.claims import acquire_claim
+    from fno.claims.io import claim_path
+
+    acquire_claim("node:ab-2", "h", root=tmp_path)
+    assert read_claim_file(claim_path("node:ab-2", root=tmp_path)).expires_at is None
+
+
+@pytest.mark.parametrize("column,value", [("schema_version", 999), ("holder", "")])
+def test_an_invalid_row_raises_claim_corrupted(tmp_path, column, value):
+    from fno.claims import acquire_claim, claim_status
+    from fno.claims.io import ClaimCorrupted, claim_path
+    from tests._table_seed import update_claim
+
+    acquire_claim("node:ab-3", "h", root=tmp_path)
+    update_claim("node:ab-3", root=tmp_path, **{column: value})
+    with pytest.raises(ClaimCorrupted):
+        read_claim_file(claim_path("node:ab-3", root=tmp_path))
+    assert claim_status("node:ab-3", root=tmp_path)["state"] == "corrupted"
+
+
+def test_archive_claim_retires_the_row(tmp_path):
+    from fno.claims import acquire_claim, claim_status
+    from fno.claims.io import archive_claim, claim_path
+
+    acquire_claim("node:ab-4", "h", root=tmp_path)
+    archive_claim(claim_path("node:ab-4", root=tmp_path), ts_ms=1234567890)
+    assert claim_status("node:ab-4", root=tmp_path)["state"] == "free"
+
+
+def test_archive_missing_claim_is_noop(tmp_path):
+    from fno.claims.io import archive_claim, claim_path
+
+    path = claim_path("node:ab-5", root=tmp_path)
+    assert archive_claim(path, ts_ms=1) == path
