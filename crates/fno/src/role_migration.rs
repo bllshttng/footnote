@@ -306,6 +306,11 @@ fn walk(root: &Path, depth: usize) -> Result<(), String> {
         let path = entry.path();
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         if kind.is_symlink() {
+            // A relocated spaces root is still this root's spaces; skipping
+            // it would stamp the marker over unmigrated role dirs.
+            if depth == 0 && entry.file_name() == "spaces" && path.is_dir() {
+                walk(&path, depth + 1)?;
+            }
             continue;
         }
         if kind.is_dir() {
@@ -411,7 +416,9 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     if !root.is_dir() {
         return Ok(());
     }
-    let marker = root.join("migrations/role-vocabulary-v1.done");
+    // v1 receipts were stamped by a walk that skipped a symlinked spaces
+    // root, so they cannot vouch for it; a re-walk is idempotent.
+    let marker = root.join("migrations/role-vocabulary-v2.done");
     if marker.exists() {
         return Ok(());
     }
