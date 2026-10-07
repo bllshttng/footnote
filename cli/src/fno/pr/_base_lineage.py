@@ -265,6 +265,12 @@ def _rev(ref: str, cwd: str) -> str:
     return res.stdout.strip() if res is not None and res.ok else ""
 
 
+def _changed_files(span: str, cwd: str) -> Optional[set]:
+    """Paths ``git diff A...B`` changes (merge-base to B); None on a probe error."""
+    res = _probe(["git", "diff", "--name-only", "--no-renames", span], cwd)
+    return set(res.stdout.splitlines()) - {""} if res is not None and res.ok else None
+
+
 def _base_contained_in_default(base: str, default: str, cwd: str) -> Optional[bool]:
     """Whether ``origin/base`` is an ancestor of ``origin/default``; None on error."""
     res = _probe(
@@ -320,9 +326,19 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
             return ("unknown", f"ancestry probe failed between '{default}' and the head (git merge-base)")
         if res.returncode == 0:
             return ("ok", f"head contains the '{default}' tip ({tip[:8]})")
+        # A behind head fails only when the newer default-branch commits touch
+        # a file this PR also changes; a disjoint move does not hold the merge.
+        pr_files = _changed_files(f"{tip}...{head_oid}", cwd)
+        moved_files = _changed_files(f"{head_oid}...{tip}", cwd)
+        if pr_files is None or moved_files is None:
+            return ("unknown", f"file-overlap probe failed between '{default}' and the head (git diff)")
+        shared = sorted(pr_files & moved_files)
+        if not shared:
+            return ("ok", f"head is behind '{default}' ({tip[:8]}), but no newer commit touches a file this PR changes")
         return (
             "stale",
-            f"PR #{pr_number} is behind '{default}': its head does not contain the '{default}' "
+            f"PR #{pr_number} is behind '{default}' and the newer commits touch files it changes "
+            f"({', '.join(shared[:5])}): its head does not contain the '{default}' "
             f"tip ({tip[:8]}), so merging now lands code CI never ran on; merge origin/{default} "
             f"into the branch and push, then merge once CI is green on the updated head. "
             f"Set {BYPASS_ENV}={BYPASS_VALUE} to acknowledge once.",
