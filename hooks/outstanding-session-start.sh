@@ -47,7 +47,7 @@ if [[ $have_jq -eq 1 && -s "$cache" ]]; then
             printf 'No open questions from this session.\n'
         fi
         # Role audience: the fleet total is lead/user context. A worker
-        # sees only its own questions and the rule line (x-f455).
+        # sees only its own questions and the rule line.
         if [[ "${FNO_SESSION_ROLE:-}" != "worker" ]]; then
             printf '%s open across the fleet.\n' "${total:-0}"
         fi

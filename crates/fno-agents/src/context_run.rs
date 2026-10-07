@@ -452,7 +452,7 @@ fn parse_group(name: &str, value: &Value, file: &str) -> Result<Group, String> {
 
 /// The audience check the run_core filter takes: a producer with no
 /// `audience` runs for every role; one with an audience list runs only for
-/// the roles it names (x-f455 change 2).
+/// the roles it names.
 fn audience_includes_role(p: &Producer, role: crate::owner_ladder::Role) -> bool {
     match &p.audience {
         None => true,

@@ -217,7 +217,7 @@ impl FleetArms {
         crate::lead_wake::maybe_tick(&self.lead_wake, ctx.home.clone());
         // The notice router: lead-scope reconcile warnings become one
         // deduped mail to the owning lead; the hourly fold turns repeated
-        // failures and banners into one owned node (x-f455).
+        // failures and banners into one owned node.
         crate::notice_route::maybe_tick(&self.notice_route, ctx.home.clone());
         self.first_check.tick(ctx.home.clone());
         // Serve-only liveness tick: the served pair is the sweep's measurement,

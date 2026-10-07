@@ -5,7 +5,7 @@
 # Hook contract: stdout is appended to the session prompt; exit 0 = no error.
 # This hook NEVER blocks session start — the reconcile itself is detached (see
 # scripts/lib/reconcile-throttle.sh). The sweep's warnings no longer render
-# here: the notice_route daemon arm routes them to the owning lead (x-f455),
+# here: the notice_route daemon arm routes them to the owning lead,
 # so session start stays instant and the warnings reach one owner instead of
 # every session.
 set -euo pipefail
@@ -32,7 +32,7 @@ fi
 # shellcheck source=scripts/lib/reconcile-throttle.sh
 source "$HOOK_DIR/../scripts/lib/reconcile-throttle.sh" 2>/dev/null || exit 0
 
-# The reconcile render block is gone (x-f455 change 3): the promise-gate,
+# The reconcile render block is gone: the promise-gate,
 # canonical-sync and orphan-plan warnings are lead-scope context, and the
 # notice_route daemon arm routes them to the owning lead as one deduped
 # mail, renaming each consumed result file to `.shown` itself. This hook

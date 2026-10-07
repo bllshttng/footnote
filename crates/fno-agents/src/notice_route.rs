@@ -2,12 +2,11 @@
 //! session that owns them, plus the sent-fingerprint store the owner
 //! ladder's load read counts.
 //!
-//! Two jobs live here (plans/20261006-notice-routing-x-f455.md):
-//! change 3 routes reconcile warnings (promise gate, canonical sync,
-//! orphan plans) to the owning lead as one deduped mail; change 4 folds
-//! repeated failure events and repeated banners into one owned node.
-//! The shared sent store is `~/.fno/notice-route/sent.json`: fingerprint
-//! -> {scope, ts}, pruned on every write.
+//! Two jobs live here: routing reconcile warnings (promise gate,
+//! canonical sync, orphan plans) to the owning lead as one deduped mail,
+//! and folding repeated failure events and repeated banners into one
+//! owned node. The shared sent store is `~/.fno/notice-route/sent.json`:
+//! fingerprint -> {scope, ts}, pruned on every write.
 
 use serde_json::Value;
 use sha2::Digest;
@@ -910,7 +909,8 @@ pub(crate) fn scan_banners(
                 continue;
             }
             let ts = v.get("ts").and_then(Value::as_str).and_then(parse_iso);
-            if NOTICE_OPEN_SECS > now - ts.unwrap_or(i64::MAX) {
+            let age = now - ts.unwrap_or(i64::MAX);
+            if !(0..NOTICE_OPEN_SECS).contains(&age) {
                 continue;
             }
             let sid = v
@@ -1325,7 +1325,7 @@ mod tests {
         let actions = fold_pass(&rows, &mut state, now);
         assert_eq!(actions.len(), 1, "{actions:?}");
         match &actions[0] {
-            FoldAction::Encounter { node, count } => {
+            FoldAction::Encounter { node, count, .. } => {
                 assert_eq!(node, "fno-abcd");
                 assert_eq!(*count, 2);
             }

@@ -1,5 +1,5 @@
 //! One module answers "who owns this" and "who is this session"
-//! (plans/20261006-notice-routing-x-f455.md change 1).
+//! (docs/architecture/notice-routing.md).
 //!
 //! The ladder: a node's lead (rung 0, `territory::node_owners`), that
 //! lead's higher-up (rung 1, the level-minus-one rule moved out of
@@ -481,7 +481,7 @@ mod tests {
                 serde_json::from_value(r).unwrap()
             },
             {
-                let mut r = registry_row("worker-8", "sid-n");
+                let r = registry_row("worker-8", "sid-n");
                 serde_json::from_value(r).unwrap()
             },
         ];

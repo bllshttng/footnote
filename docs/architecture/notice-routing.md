@@ -1,6 +1,6 @@
 # Notice routing
 
-Every session-start and hook notice carries a role audience: `worker`, `lead`, or `user`. Each notice reaches the session that owns it. A warning meant for no session is owned instead of broadcast. The design is x-f455 (grill 2026-10-06). The measured evidence lives on the node.
+Every session-start and hook notice carries a role audience: `worker`, `lead`, or `user`. Each notice reaches the session that owns it. A warning meant for no session is owned instead of broadcast. The design came out of the 2026-10-06 grill on notice noise. The measured evidence lives on the node.
 
 ## Role audience
 
