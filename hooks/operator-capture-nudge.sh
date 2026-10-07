@@ -41,6 +41,10 @@ WT_LIB="$HOOK_DIR/../scripts/lib/hook-budget.sh"
 # shellcheck source=../scripts/lib/hook-budget.sh
 source "$WT_LIB" 2>/dev/null || exit 0
 
+# Overload skip: past the threshold the preamble alone can pass the harness
+# cap; the queue depth reports next turn.
+hook_overloaded && exit 0
+
 # The queue read derives from the session transcript, so it is keyed per
 # session and served from a stale-while-revalidate cache: a copy younger
 # than a minute costs milliseconds, a served copy past two thirds of its
