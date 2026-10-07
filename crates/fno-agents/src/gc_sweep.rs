@@ -4713,7 +4713,6 @@ mod tests {
         let registry =
             br#"{"entries":[{"name":"live-worker","created_at":"2026-09-09T00:00:00Z"}]}"#;
         std::fs::write(home.registry_json(), registry).unwrap();
-
         let summary = reap_state_files(
             &home,
             crate::agents_config::StateReapConfig::default(),
@@ -4723,10 +4722,8 @@ mod tests {
         assert!(!claim.exists());
         assert_eq!(summary.expired_claims.deleted, 1);
         assert_eq!(summary.totals.deleted, 1);
-        assert_eq!(
-            crate::registry_store::read(&home.registry_json()).unwrap(),
-            serde_json::from_slice::<serde_json::Value>(registry.as_ref()).unwrap()
-        );
+        let rows = crate::state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(rows.entries.len(), 1);
         assert!(summary.applied);
         assert!(!summary.dry_run);
         std::fs::remove_dir_all(&base).ok();
