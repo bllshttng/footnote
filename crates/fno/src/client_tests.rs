@@ -630,9 +630,8 @@ fn xf331_rows() {
         view.display_rows().len() > view.sideline_visible_rows(),
         "sanity: the sideline exceeds the viewport so scroll is live"
     );
-    let top = view.sideline_top();
     let list_rows = (view.term.0 as usize) - 1 - view.org_block_rows();
-    let pinned_row = (top + list_rows - 2) as u16;
+    let pinned_row = list_rows as u16; // the row the paint puts the footer on
     let footer = view
         .display_rows()
         .iter()
