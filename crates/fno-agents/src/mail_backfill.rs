@@ -196,6 +196,12 @@ fn bound_epoch(flag: &str, value: &str) -> Result<f64, String> {
     ts_epoch(value).ok_or_else(|| format!("unparseable --{flag} value {value:?}"))
 }
 
+/// The mail-send outage window, the engine's default scan scope: the hours
+/// `fno mail send` refused every send while the role-rename deploy healed.
+/// Overrides: --since / --until.
+const OUTAGE_SINCE: &str = "2026-10-07T08:42:47Z";
+const OUTAGE_UNTIL: &str = "2026-10-07T12:52:39Z";
+
 /// Window membership for one row timestamp: rows without a parseable stamp
 /// stay in (the mtime prefilter already bounded them loosely).
 fn ts_in_window(ts: &str, since: f64, until: f64) -> bool {
@@ -415,6 +421,16 @@ fn run_backfill(args: &[String]) -> i32 {
             }
         }
     }
+    let since = if since.is_empty() {
+        OUTAGE_SINCE.to_string()
+    } else {
+        since
+    };
+    let until = if until.is_empty() {
+        OUTAGE_UNTIL.to_string()
+    } else {
+        until
+    };
     let (since_e, until_e) = match bound_epoch("since", &since) {
         Ok(s) => match bound_epoch("until", &until) {
             Ok(u) => (s, u),

@@ -38,15 +38,10 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
-#: Historical rows: an outage bypassed `fno mail send`, so agent-to-agent
-#: messages that went over the harness's native cross-session transport go
-#: back into the log with full provenance (sender session, receiver session,
-#: time, id, both transcripts). The bytes already reached their recipient -
-#: the receiver transcript itself is the proof - so the row is audit-only,
-#: exactly like `hosted` and `typed`, and the mail surfaces read it as
-#: archive. Idempotent by msg_id: the archive id is a deterministic function
-#: of the sender session and the source row, so a re-scan lands on the same
-#: id and the store skips it.
+#: Historical rows: an outage bypassed `fno mail send`, so traffic that went
+#: over the native cross-session transport goes back into the log with full
+#: provenance. The receiver transcript in the row's meta is the proof the
+#: bytes landed: audit-only like `hosted` and `typed`, never re-delivered.
 CROSS_SESSION_DELIVERY = "cross-session"
 
 # Size-triggered rotation now lives in the Rust bus-append door
