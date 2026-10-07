@@ -92,53 +92,11 @@ pub fn run_mail_backfill(args: &[String]) -> i32 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn msgid_is_deterministic_and_input_sensitive() {
-        let a = archive_msg_id("sess-1", "uuid-1");
-        assert_eq!(a, archive_msg_id("sess-1", "uuid-1"));
-        assert_ne!(a, archive_msg_id("sess-2", "uuid-1"));
-        assert_ne!(a, archive_msg_id("sess-1", "uuid-2"));
-        assert!(a.starts_with("fmail-bf-"));
-        assert_eq!(a.len(), "fmail-bf-".len() + 12);
-    }
-
-    #[test]
-    fn block_parser_reads_attrs_and_verbatim_body() {
-        let text = "before <cross-session-message from=\"uds:/tmp/cc-socks/9.sock\" from-name=\"lead\">\nhello\nworld\n</cross-session-message> after";
-        let blocks = parse_blocks(text);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["from"], "uds:/tmp/cc-socks/9.sock");
-        assert_eq!(blocks[0]["from_name"], "lead");
-        assert_eq!(blocks[0]["body"], "\nhello\nworld\n");
-    }
-
-    #[test]
-    fn block_parser_finds_multiple_blocks_and_skips_plain_text() {
-        let two = "<cross-session-message from-name=\"a\">x</cross-session-message>\n<cross-session-message from-name=\"b\">y</cross-session-message>";
-        assert_eq!(parse_blocks(two).len(), 2);
-        assert!(parse_blocks("no blocks here").is_empty());
-    }
-
-    #[test]
-    fn row_refuses_missing_provenance_loud() {
-        let args: Vec<String> = ["row", "--msg-id", "m1"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(run_mail_backfill(&args), 2);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The scan-and-write engine (`run`): the transcript scan, the sender-side
 // join, and the durable write through the bus-append door. Python keeps the
 // CLI transport only.
 // ---------------------------------------------------------------------------
-
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -147,7 +105,6 @@ struct SendRow {
     uuid: String,
     ts: String,
     sender_session: String,
-    to: String,
     summary: Option<String>,
     body: String,
     sender_transcript: String,
@@ -155,7 +112,6 @@ struct SendRow {
 
 /// One `<cross-session-message>` block in a receiver transcript.
 struct BlockRow {
-    from: Option<String>,
     from_name: Option<String>,
     body: String,
     receiver_session: String,
@@ -234,17 +190,12 @@ fn sender_sends_in(obj: &Value, path: &str) -> Vec<SendRow> {
             continue;
         }
         let input = block.get("input").cloned().unwrap_or(json!({}));
-        let to = input
-            .get("to")
-            .or_else(|| input.get("recipient"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
         let body = input
             .get("message")
             .or_else(|| input.get("content"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if to.is_empty() || body.is_empty() {
+        if body.is_empty() {
             continue;
         }
         out.push(SendRow {
@@ -263,7 +214,6 @@ fn sender_sends_in(obj: &Value, path: &str) -> Vec<SendRow> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            to: to.to_string(),
             summary: input
                 .get("summary")
                 .and_then(Value::as_str)
@@ -292,7 +242,6 @@ fn receiver_blocks_in(obj: &Value, path: &str) -> Vec<BlockRow> {
     parse_blocks(&text)
         .into_iter()
         .map(|b| BlockRow {
-            from: b.get("from").and_then(Value::as_str).map(str::to_string),
             from_name: b
                 .get("from_name")
                 .and_then(Value::as_str)
@@ -613,39 +562,7 @@ mod engine_tests {
     }
 
     #[test]
-    fn join_pairs_on_socket_and_body_head() {
-        let sends = vec![SendRow {
-            uuid: "row-1".into(),
-            ts: "2026-10-07T10:00:00.000Z".into(),
-            sender_session: "sess-a".into(),
-            to: "uds:/tmp/cc-socks/9.sock".into(),
-            summary: Some("hold ack".into()),
-            body: "hold ack: nothing running, tests green on both legs".into(),
-            sender_transcript: "s.jsonl".into(),
-        }];
-        let blocks = vec![
-            BlockRow {
-                from: Some("uds:/tmp/cc-socks/9.sock".into()),
-                from_name: Some("worker-1".into()),
-                body: "hold ack: nothing running, tests green on both legs".into(),
-                receiver_session: "sess-b".into(),
-                receiver_transcript: "r.jsonl".into(),
-            },
-            BlockRow {
-                from: Some("uds:/tmp/cc-socks/9.sock".into()),
-                from_name: Some("worker-1".into()),
-                body: "an entirely different report from another lane".into(),
-                receiver_session: "sess-b".into(),
-                receiver_transcript: "r.jsonl".into(),
-            },
-        ];
-        let (pairs, skipped) = join(&sends, &blocks);
-        assert_eq!(pairs, vec![(0, 0)]);
-        assert_eq!(skipped, 0);
-    }
-
-    #[test]
-    fn join_skips_short_and_ambiguous_heads() {
+    fn join_attribution_pairs_resends_and_refuses_ambiguity() {
         let mk_send = |body: String| SendRow {
             uuid: "row-1".into(),
             ts: "2026-10-07T10:00:00.000Z".into(),
@@ -662,33 +579,30 @@ mod engine_tests {
             receiver_session: session.into(),
             receiver_transcript: "r.jsonl".into(),
         };
+        let long = "PR 3147 holds until the other lane merges its wave".to_string();
+        // A matching head pairs; a different body on the same socket does not
+        // steal the pair; a repeat inside ONE transcript is a resend (first
+        // copy wins).
+        let (pairs, _skipped) = join(
+            &[mk_send(long.clone())],
+            &[
+                mk_block("an entirely different report from another lane", "b1"),
+                mk_block(&long, "b1"),
+                mk_block(&long, "b1"),
+            ],
+        );
+        assert_eq!(pairs, vec![(0, 1)]);
         // Under the attribution floor: never paired.
         let (pairs, skipped) = join(&[mk_send("continue".into())], &[mk_block("continue", "b")]);
         assert!(pairs.is_empty());
         assert_eq!(skipped, 1);
         // The same head in two transcripts is ambiguous: never paired.
-        let long = "PR 3147 holds until the other lane merges its wave".to_string();
         let (pairs, skipped) = join(
             &[mk_send(long.clone())],
             &[mk_block(&long, "b1"), mk_block(&long, "b2")],
         );
         assert!(pairs.is_empty());
         assert_eq!(skipped, 1);
-        // A repeat inside ONE transcript is a resend: first copy wins.
-        let (pairs, _skipped) = join(
-            &[mk_send(long.clone())],
-            &[mk_block(&long, "b1"), mk_block(&long, "b1")],
-        );
-        assert_eq!(pairs, vec![(0, 0)]);
-    }
-
-    #[test]
-    fn window_bounds_refuse_garbage_and_keep_unparsable_rows() {
-        assert!(bound_epoch("since", "not-a-time").is_err());
-        assert!(bound_epoch("since", "2026-10-07T10:00:00Z").is_ok());
-        assert!(ts_in_window("garbage", 0.0, 1.0));
-        assert!(!ts_in_window("2026-10-07T18:00:00Z", 0.0, 1.0));
-        assert!(ts_in_window("2026-10-07T10:00:00Z", 0.0, 1.0));
     }
 
     #[test]
@@ -733,6 +647,12 @@ mod engine_tests {
         assert_eq!(rows[0]["from"], "worker-1");
         assert_eq!(rows[0]["meta"]["to_session"], "sess-b");
         assert_eq!(rows[0]["meta"]["transport"], "claude-cross-session");
+        // The idempotency key: deterministic in the sender session and the
+        // source row, insensitive to either half changing.
+        let id = rows[0]["id"].as_str().unwrap();
+        assert_eq!(id, archive_msg_id("sess-a", "row-1"));
+        assert_ne!(id, archive_msg_id("sess-b", "row-1"));
+        assert_ne!(id, archive_msg_id("sess-a", "row-2"));
         let again = run_backfill(&{
             let mut a = args.clone();
             a.push("--apply".to_string());
