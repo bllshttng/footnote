@@ -229,8 +229,12 @@ fn resume_resting_goal(
     lead_session: &str,
     roots: &BTreeMap<String, String>,
 ) -> Option<String> {
-    let (root, manifest) = beat_resume_target(plan, lead_session, roots)?;
-    match crate::lead_goal::resume(&manifest, &root) {
+    let root = roots.get(&plan.lead.holder).filter(|r| !r.is_empty())?;
+    let manifest_path = crate::paths::space_dir(Path::new(root))
+        .join("leads")
+        .join(format!("{}.md", plan.lead.scope));
+    let manifest = beat_resume_target(lead_session, &manifest_path)?;
+    match crate::lead_goal::resume(&manifest, Path::new(root)) {
         Ok(receipt) => {
             let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
             let payload = serde_json::json!({
@@ -250,26 +254,22 @@ fn resume_resting_goal(
     }
 }
 
-/// The gate and the paths, no provider call: the piece a test can hold. The
-/// lead manifest must name this codex harness and this exact live session;
-/// anything else is a lead the beat wake already covers.
+/// The admission gate, no provider call: the piece a test can hold without
+/// touching the process env. The caller resolves the manifest path (one
+/// space_dir read per pass, not one per waking lead); the gate reads it and
+/// admits only a codex manifest naming this exact live session.
 fn beat_resume_target(
-    plan: &WakePlan,
     lead_session: &str,
-    roots: &BTreeMap<String, String>,
-) -> Option<(PathBuf, crate::lead_termination::LeadManifest)> {
-    let root = roots.get(&plan.lead.holder).filter(|r| !r.is_empty())?;
-    let manifest_path = crate::paths::space_dir(Path::new(root))
-        .join("leads")
-        .join(format!("{}.md", plan.lead.scope));
-    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    manifest_path: &Path,
+) -> Option<crate::lead_termination::LeadManifest> {
+    let content = std::fs::read_to_string(manifest_path).ok()?;
     let manifest = crate::lead_termination::parse_lead_manifest(&content)?;
     if manifest.harness.as_deref() != Some("codex")
         || manifest.harness_session_id.as_deref() != Some(lead_session)
     {
         return None;
     }
-    Some((PathBuf::from(root), manifest))
+    Some(manifest)
 }
 
 /// One wake: deliver to the lead, tell the rungs, receipt the episode.
@@ -586,21 +586,9 @@ mod tests {
         dir
     }
 
-    fn wake_plan(lead: &Team) -> WakePlan<'_> {
-        WakePlan {
-            lead,
-            idle_secs: 3_400,
-            up: Vec::new(),
-            down: Vec::new(),
-            operator: false,
-        }
-    }
-
-    fn write_beat_manifest(root: &Path, scope: &str, harness: &str, session: &str) {
-        let dir = crate::paths::space_dir(root).join("leads");
-        std::fs::create_dir_all(&dir).unwrap();
+    fn write_beat_manifest(path: &Path, scope: &str, harness: &str, session: &str) {
         std::fs::write(
-            dir.join(format!("{scope}.md")),
+            path,
             format!(
                 "---\nscope: {scope}\nharness: {harness}\nharness_session_id: {session}\n---\n"
             ),
@@ -608,50 +596,31 @@ mod tests {
         .unwrap();
     }
 
+    // The gate reads the manifest path its caller resolved, so the tests
+    // need no env pin: the space-dir resolution contract is paths.rs's, and
+    // an env pin here raced the suite's unlocked env mutators in CI.
     #[test]
     fn the_beat_resume_gate_admits_only_this_codex_sessions_manifest() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let spaces = tempfile::tempdir().unwrap();
-        let _spaces = crate::claims::EnvVarGuard::set(
-            "FNO_SPACES_DIR",
-            spaces.path().to_str().expect("tempdir path is utf-8"),
-        );
         let repo = tempfile::tempdir().unwrap();
-        let lead = team("x-aaa", 2, "candor", "s-l2a");
-        let plan = wake_plan(&lead);
-        let roots = BTreeMap::from([("candor".to_string(), repo.path().display().to_string())]);
+        let manifest_path = repo.path().join("x-aaa.md");
         // No manifest, a claude manifest, or another session's manifest:
         // all no signal.
-        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-        write_beat_manifest(repo.path(), "x-aaa", "claude", "s-l2a");
-        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-        write_beat_manifest(repo.path(), "x-aaa", "codex", "s-other");
-        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
-        // The woken codex session's own manifest: admitted, rooted at
-        // the holder's repo.
-        write_beat_manifest(repo.path(), "x-aaa", "codex", "s-l2a");
-        let (root, manifest) =
-            beat_resume_target(&plan, "s-l2a", &roots).expect("admits the woken codex lead");
-        assert_eq!(root, repo.path());
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
+        write_beat_manifest(&manifest_path, "x-aaa", "claude", "s-l2a");
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
+        write_beat_manifest(&manifest_path, "x-aaa", "codex", "s-other");
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
+        // The woken codex session's own manifest: admitted.
+        write_beat_manifest(&manifest_path, "x-aaa", "codex", "s-l2a");
+        let manifest =
+            beat_resume_target("s-l2a", &manifest_path).expect("admits the woken codex lead");
         assert_eq!(manifest.scope, "x-aaa");
     }
 
     #[test]
-    fn an_unknown_holder_or_empty_root_is_no_beat_resume_signal() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let spaces = tempfile::tempdir().unwrap();
-        let _spaces = crate::claims::EnvVarGuard::set(
-            "FNO_SPACES_DIR",
-            spaces.path().to_str().expect("tempdir path is utf-8"),
-        );
-        let lead = team("x-aaa", 2, "stranger", "s-l2a");
-        let plan = wake_plan(&lead);
-        assert!(beat_resume_target(&plan, "s-l2a", &BTreeMap::new()).is_none());
-        let roots = BTreeMap::from([("stranger".to_string(), String::new())]);
-        assert!(beat_resume_target(&plan, "s-l2a", &roots).is_none());
+    fn a_manifest_that_vanished_is_no_beat_resume_signal() {
+        let repo = tempfile::tempdir().unwrap();
+        let manifest_path = repo.path().join("never-written.md");
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
     }
 }
