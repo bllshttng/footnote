@@ -3611,11 +3611,7 @@ mod tests {
                 "created_at": "2026-09-26T00:00:00Z",
                 "inside_leg": leg,
             });
-            std::fs::write(
-                &registry,
-                serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string(),
-            )
-            .unwrap();
+            crate::registry_store::seed_raw(&registry, serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string());
             use std::cell::Cell;
             let base = now_ms();
             let tick = Cell::new(0i64);

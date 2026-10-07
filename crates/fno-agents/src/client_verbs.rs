@@ -4723,11 +4723,10 @@ mod tests {
 
         let valid = r#"{"name":"cx","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         let valid_current = r#"{"name":"cx","harness":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
-        fs::write(
+        crate::registry_store::seed_raw(
             &reg,
             format!(r#"{{"schema_version":3,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         let rows = load_registry_entries(&reg).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["name"], "cx");

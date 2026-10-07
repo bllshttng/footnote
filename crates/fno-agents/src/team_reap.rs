@@ -587,11 +587,10 @@ mod tests {
 
     fn registry_file(dir: &Path, rows: &[serde_json::Value]) -> PathBuf {
         let path = dir.join("registry.json");
-        fs::write(
+        crate::registry_store::seed_raw(
             &path,
             serde_json::json!({"schema_version": 11, "agents": rows}).to_string(),
-        )
-        .unwrap();
+        );
         path
     }
 

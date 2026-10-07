@@ -2092,7 +2092,7 @@ mod tests {
         std::fs::create_dir_all(state_dir.join("locks")).unwrap();
         std::env::set_var("FNO_STATE_DIR", &state_dir);
         let claims_root = td.path().join("claims");
-        let waiters = claims_root.join(".fno/claims/build-waiters");
+        let waiters = claims_root.join(".fno/claim-aux/build-waiters");
         std::fs::create_dir_all(&waiters).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         let workdir = td.path().join("workdir");

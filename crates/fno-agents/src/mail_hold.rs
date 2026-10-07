@@ -2500,7 +2500,10 @@ pub(crate) mod tests {
 
             // A vanished row ends the wait long before the bound: nothing
             // can deliver the file once no row carries the session.
-            std::fs::remove_file(dir.join("registry.json")).unwrap();
+            crate::registry_store::seed_raw(
+                &dir.join("registry.json"),
+                r#"{"schema_version":1,"agents":[]}"#,
+            );
             let started = std::time::Instant::now();
             let code = run_parked_loop(
                 SID,

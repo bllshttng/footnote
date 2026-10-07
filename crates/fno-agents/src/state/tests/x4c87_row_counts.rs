@@ -3,47 +3,16 @@
 use super::*;
 
 #[test]
-fn registry_update_uses_python_shared_lock() {
-    let dir = tmpdir("python-shared-lock");
+fn a_rust_registry_write_moves_the_revision_python_compares() {
+    // Python and Rust writers no longer share a flock: a Python commit names
+    // the revision it read, so every Rust write must move that revision.
+    let dir = tmpdir("revision-cas");
     let path = dir.join("agents/registry.json");
-    let python_lock_path = path.parent().unwrap().join("locks").join("_registry.lock");
-
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let writer_path = path.clone();
-    let writer = std::thread::spawn(move || {
-        update_registry(&writer_path, |_registry| {
-            entered_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        })
-        .unwrap();
-    });
-    entered_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("Rust registry update entered its locked closure");
-    assert!(
-        python_lock_path.parent().unwrap().is_dir(),
-        "Rust update creates the Python lock directory for a fresh registry"
-    );
-
-    let python_lock_probe = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&python_lock_path)
-        .unwrap();
-    let python_lock_is_held = matches!(
-        python_lock_probe.try_lock(),
-        Err(std::fs::TryLockError::WouldBlock)
-    );
-    drop(python_lock_probe);
-
-    release_tx.send(()).unwrap();
-    writer.join().unwrap();
-    assert!(
-        python_lock_is_held,
-        "Rust update must hold the same sidecar as Python update_registry"
-    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let (_, before) = crate::registry_store::read_versioned(&path).unwrap();
+    update_registry(&path, |r| r.entries.push(sample_entry("w1"))).unwrap();
+    let (_, after) = crate::registry_store::read_versioned(&path).unwrap();
+    assert!(after > before, "revision {before} -> {after}");
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -62,9 +31,10 @@ fn registry_update_uses_python_shared_lock() {
 /// block, so the provenance-strip heal must refuse it: the failure is
 /// elsewhere, and the same-schema read stays fatal.
 fn divergent_registry_fixture() -> String {
+    // One session id per row: the table keys rows on it.
     let row = |name: &str, status: &str, extra: &str| {
         format!(
-            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"{extra}}}"#
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-{name:0>12}","status":"{status}","created_at":"2026-08-16T00:00:00Z"{extra}}}"#
         )
     };
     let valid_provenance = r#","spawn_provenance":{"origin":{"kind":"session","parent":{"harness":"claude","session_id":"p-sess","cwd":"/w"},"invocation":null},"owner":{"kind":"session","harness":"claude","session_id":"p-sess","cwd":"/w"}}"#;

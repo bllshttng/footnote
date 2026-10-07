@@ -1037,6 +1037,9 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
         loss_shaped_rows().join(",")
     );
     seed_registry(&home, &body).unwrap();
+    // The seed mints fno ids for session-less rows; compare against the
+    // stored document, not the input text.
+    let seeded = registry_text(&home.registry_json()).unwrap();
 
     let child = start_daemon(&home);
     // The sweep reads the store, computes changes, then refuses the write.
@@ -1047,7 +1050,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
 
     assert_eq!(
         registry_text(&home.registry_json()).unwrap(),
-        body,
+        seeded,
         "a future-schema store must not be rewritten behind the reader"
     );
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -2112,7 +2115,7 @@ async fn drift_warned_on_list_stderr_only() {
 fn write_divergent_registry(home: &AgentsHome) {
     let row = |name: &str, status: &str| {
         format!(
-            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-{name:0>12}","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
     let body = format!(
@@ -2128,7 +2131,7 @@ fn write_divergent_registry(home: &AgentsHome) {
 fn write_valid_registry(home: &AgentsHome) {
     let row = |name: &str| {
         format!(
-            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"live","created_at":"2026-08-16T00:00:00Z"}}"#
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-{name:0>12}","status":"live","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
     // The CURRENT version, not a fixed older one. These rows already carry
@@ -2498,7 +2501,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
     // Raw 3, decoded 2.
     let row = |name: &str, status: &str| {
         format!(
-            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-{name:0>12}","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
     let future_schema = fno_agents::state::REGISTRY_SCHEMA_VERSION + 1;

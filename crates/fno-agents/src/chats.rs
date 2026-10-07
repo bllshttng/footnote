@@ -2198,11 +2198,10 @@ mod tests {
         // A send addressed to a registry name records the resolved session
         // key as to_key, so the recipient reads their mail by their own
         // session id.
-        std::fs::write(
+        crate::registry_store::seed_raw(
             home_pin.join("registry.json"),
             r#"{"agents":[{"name":"rowan","session_id":"sess-b-uuid","harness":"claude"}]}"#,
-        )
-        .unwrap();
+        );
         let named = bus_line("fmail-777777777777", "sess-a", "rowan", "send");
         let Recorded::Message {
             chat_id: named_chat,

@@ -1731,6 +1731,8 @@ mod tests {
             ]}))
             .unwrap(),
         );
+        // A legacy registry the import cannot parse: the table never opens.
+        std::fs::write(dir.path().join("registry.json"), "{ not json").unwrap();
         let cwd = dir.path().to_path_buf();
         let teams = vec![
             json!({"scope": "p", "level": 1}),
@@ -1740,7 +1742,7 @@ mod tests {
             &dir.path().join("graph.json"),
             &cwd,
             None,
-            dir.path(),
+            &dir.path().join("registry.json"),
             &teams,
         )
         .unwrap();

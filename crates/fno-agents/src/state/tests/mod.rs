@@ -138,7 +138,7 @@ fn state_substrate_roundtrips_and_absence_reads_none() {
     assert_eq!(old_row.substrate, None);
 
     // skip-when-None keeps an unstamped row's key off disk entirely.
-    let raw = std::fs::read_to_string(&path).unwrap();
+    let raw = crate::registry_store::read_raw(&path);
     let old_obj = raw.split("old-row").nth(1).unwrap();
     assert!(!old_obj.contains("substrate"));
 
@@ -809,7 +809,7 @@ fn python_written_registry_loads_via_typed_path() {
   ]
 }"#;
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(&path, python_json).unwrap();
+    crate::registry_store::seed_raw(&path, python_json);
 
     let reg = load_registry(&path).unwrap();
     assert_eq!(reg.entries.len(), 1, "Python-written row must be read");
@@ -1520,11 +1520,14 @@ fn empty_registry_file_loads_default_but_corrupt_file_errors() {
     assert!(missing.entries.is_empty());
 
     // Empty file -> empty registry, no error.
-    std::fs::write(&path, "   \n").unwrap();
+    crate::registry_store::seed_raw(&path, "   \n");
     assert!(load_registry(&path).unwrap().entries.is_empty());
 
-    // Corrupt (non-empty, unparseable) file -> error, not silent default.
-    std::fs::write(&path, "{ this is not json").unwrap();
+    // Corrupt (non-empty, unparseable) legacy file -> the import errors, not
+    // a silent default. Only a store not yet imported can hold such bytes.
+    let path = dir.join("fresh").join("registry.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::registry_store::seed_raw(&path, "{ this is not json");
     assert!(
         load_registry(&path).is_err(),
         "corrupt registry must surface an error"
@@ -1542,12 +1545,12 @@ fn update_registry_refuses_to_wipe_a_corrupt_registry() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("registry.json");
     let corrupt = "{\"schema_version\": 3, \"agents\": [ BROKEN";
-    std::fs::write(&path, corrupt).unwrap();
+    crate::registry_store::seed_raw(&path, corrupt);
 
     let result = update_registry(&path, |r| r.entries.push(sample_entry("new-A")));
     assert!(result.is_err(), "update over corrupt registry must error");
     assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
+        crate::registry_store::read_raw(&path),
         corrupt,
         "corrupt registry must be left untouched, not overwritten"
     );
@@ -1569,7 +1572,7 @@ fn update_registry_upgrades_schema_version_on_write() {
         .unwrap();
     update_registry(&path, |r| r.entries.push(sample_entry("w2"))).unwrap();
     let on_disk: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        serde_json::from_str(&crate::registry_store::read_raw(&path)).unwrap();
     assert_eq!(
         on_disk["schema_version"], REGISTRY_SCHEMA_VERSION,
         "Rust write must upgrade the on-disk schema_version"
@@ -1908,7 +1911,7 @@ fn load_registry_reads_a_newer_schema_forward() {
         load_registry(&path).is_ok(),
         "a newer writer must not brick this reader"
     );
-    std::fs::write(&path, r#"{"schema_version":1,"agents":[]}"#).unwrap();
+    crate::registry_store::seed_raw(&path, r#"{"schema_version":1,"agents":[]}"#);
     assert!(
         load_registry(&path).is_ok(),
         "v1 must still read (back-compat)"
@@ -2011,14 +2014,14 @@ fn update_registry_respects_writer_floor_and_preserves_unknown_fields() {
         r#"{{"schema_version":{newer_version},"min_writer_version":{},"writer_rev":"writer-ahead","future_top":"kept","agents":[{{"name":"worker","cwd":"/x","log_path":"/l","harness":"claude","status":"live","created_at":"2026-01-01T00:00:00Z","future_row":"kept"}}]}}"#,
         REGISTRY_SCHEMA_VERSION
     );
-    std::fs::write(&path, additive).unwrap();
+    crate::registry_store::seed_raw(&path, additive);
 
     assert!(
         update_registry(&path, |reg| reg.entries[0].status = AgentStatus::Idle).is_ok(),
         "an additive schema ahead of this writer's floor must remain writable"
     );
     let written: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        serde_json::from_slice(&crate::registry_store::read_raw(&path).into_bytes()).unwrap();
     assert_eq!(written["schema_version"], newer_version);
     assert_eq!(written["min_writer_version"], REGISTRY_SCHEMA_VERSION);
     assert_eq!(written["writer_rev"], env!("FNO_AGENTS_GIT_REV"));
@@ -2031,7 +2034,7 @@ fn update_registry_respects_writer_floor_and_preserves_unknown_fields() {
         newer_version + 1,
         REGISTRY_SCHEMA_VERSION + 1
     );
-    std::fs::write(&path, &breaking).unwrap();
+    crate::registry_store::seed_raw(&path, &breaking);
     let error = update_registry(&path, |_| ()).unwrap_err();
     match &error {
         StateError::WriterTooOld {
@@ -2049,18 +2052,24 @@ fn update_registry_respects_writer_floor_and_preserves_unknown_fields() {
         other => panic!("expected WriterTooOld, got {other:?}"),
     }
     assert!(error.to_string().contains("fno doctor update"));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), breaking);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&crate::registry_store::read_raw(&path)).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&breaking).unwrap()
+    );
 
     let incomplete = format!(
         r#"{{"schema_version":{newer_version},"min_writer_version":{},"writer_rev":"writer-ahead","agents":[{{"name":"future","cwd":"/x","log_path":"/l","harness":"claude","status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},{{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude","status":"live","created_at":"2026-01-01T00:00:00Z"}}]}}"#,
         REGISTRY_SCHEMA_VERSION
     );
-    std::fs::write(&path, &incomplete).unwrap();
+    crate::registry_store::seed_raw(&path, &incomplete);
     assert!(matches!(
         update_registry(&path, |_| ()),
         Err(StateError::WriterTooOld { .. })
     ));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), incomplete);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&crate::registry_store::read_raw(&path)).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&incomplete).unwrap()
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2277,7 +2286,7 @@ fn update_registry_refuses_a_source_ahead_bump_of_the_shared_registry() {
     let path = crate::paths::AgentsHome::from_env().registry_json();
     let older = REGISTRY_SCHEMA_VERSION - 1;
     let body = format!(r#"{{"schema_version":{older},"agents":[]}}"#);
-    std::fs::write(&path, &body).unwrap();
+    crate::registry_store::seed_raw(&path, &body);
 
     let result = update_registry(&path, |reg| reg.entries.clear());
 
@@ -2293,9 +2302,9 @@ fn update_registry_refuses_a_source_ahead_bump_of_the_shared_registry() {
         other => panic!("expected SourceAheadSchemaBump, got {other:?}"),
     }
     assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        body,
-        "the refused write must leave the file byte-identical"
+        serde_json::from_str::<serde_json::Value>(&crate::registry_store::read_raw(&path)).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        "the refused write must leave the document unchanged"
     );
     std::fs::remove_dir_all(&home).ok();
 }
@@ -2318,7 +2327,7 @@ fn update_registry_bumps_a_named_store_that_is_not_the_shared_one() {
     update_registry(&path, |r| r.entries.push(sample_entry("w"))).unwrap();
 
     let on_disk: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        serde_json::from_str(&crate::registry_store::read_raw(&path)).unwrap();
     assert_eq!(on_disk["schema_version"], REGISTRY_SCHEMA_VERSION);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2357,7 +2366,7 @@ fn update_registry_refuses_a_new_handleless_row() {
     // Seed with one legitimate row so the "unchanged on refusal" assertion
     // has real content to check.
     update_registry(&path, |r| r.entries.push(sample_entry("seed"))).unwrap();
-    let before = std::fs::read_to_string(&path).unwrap();
+    let before = crate::registry_store::read_raw(&path);
 
     let result = update_registry(&path, |r| r.entries.push(handleless_entry("ghost")));
     match result {
@@ -2368,7 +2377,7 @@ fn update_registry_refuses_a_new_handleless_row() {
         other => panic!("expected InvariantViolation, got {other:?}"),
     }
     assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
+        crate::registry_store::read_raw(&path),
         before,
         "a refused write must leave the registry unchanged"
     );
@@ -2466,7 +2475,7 @@ fn empty_state_file_treated_as_absent() {
     // but empty file must read as None (-> inconsistent), never an error.
     let dir = tmpdir("empty-state");
     let path = dir.join("state.json");
-    std::fs::write(&path, b"").unwrap();
+    crate::registry_store::seed_raw(&path, b"");
     assert!(load_state(&path).unwrap().is_none());
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2987,7 +2996,7 @@ fn registry_update_snapshots_once_per_interval() {
         registry.entries.push(sample_entry("seed"));
     })
     .unwrap();
-    let before_second_write = std::fs::read(&path).unwrap();
+    let before_second_write = crate::registry_store::read_raw(&path).into_bytes();
 
     update_registry(&path, |_| {}).unwrap();
     update_registry(&path, |registry| {
@@ -3014,8 +3023,8 @@ fn registry_update_snapshots_once_per_interval() {
         "two writes within the interval: one snapshot"
     );
     assert_eq!(
-        std::fs::read(&snaps[0]).unwrap(),
-        before_second_write,
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&snaps[0]).unwrap()).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&before_second_write).unwrap(),
         "the snapshot holds the pre-write bytes"
     );
     std::fs::remove_dir_all(&dir).ok();

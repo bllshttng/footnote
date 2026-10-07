@@ -417,14 +417,13 @@ fn codex_resume_reuses_registry_reasoning_effort() {
     );
     let registry_path = home.registry_json();
     let body = registry_text(&registry_path).unwrap();
-    fs::write(
+    fno_agents::registry_store::seed_raw(
         &registry_path,
         body.replace(
             "\"status\":\"live\"",
             "\"effort\":\"low\",\"status\":\"live\"",
         ),
-    )
-    .unwrap();
+    );
 
     let outcome = dispatch_with_fake_codex(
         &home,

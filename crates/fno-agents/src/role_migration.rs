@@ -839,7 +839,7 @@ mod tests {
         assert!(!kings.exists(), "the emptied legacy directory is removed");
         assert!(tmp
             .path()
-            .join("migrations/role-vocabulary-v1.done")
+            .join("migrations/role-vocabulary-v2.done")
             .exists());
     }
 }

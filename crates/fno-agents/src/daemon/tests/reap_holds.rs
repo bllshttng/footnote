@@ -1184,7 +1184,6 @@ fn ac2_hp_dead_worker_on_in_progress_node_is_kept_and_laddered() {
         let held_sid = "ffff2222-1111-2222-3333-444444444444";
         let claims_dir =
             crate::claims_root::global_claims_dir().expect("tmp_home pinned a claims root");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         let rec = crate::claims::ClaimRecord {
             schema_version: crate::claims::SCHEMA_VERSION,
             key: "node:x-abcd".into(),
@@ -1201,11 +1200,7 @@ fn ac2_hp_dead_worker_on_in_progress_node_is_kept_and_laddered() {
             machine_id: None,
             metadata: Default::default(),
         };
-        std::fs::write(
-            claims_dir.join("node:x-abcd.lock"),
-            serde_yaml_ng::to_string(&rec).unwrap(),
-        )
-        .unwrap();
+        crate::claim_store::seed_at_path(&claims_dir.join("node:x-abcd.lock"), &rec);
         let graph = Some(GraphRead {
             index: HashMap::from([(
                 held_sid.to_string(),
