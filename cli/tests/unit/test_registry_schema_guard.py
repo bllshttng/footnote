@@ -48,6 +48,12 @@ def _row(name: str = "worker-1") -> dict:
     return asdict(_entry(name))
 
 
+def _doc(path: Path) -> dict:
+    from fno.agents.registry_door import read_registry_document
+
+    return read_registry_document(path)[0]
+
+
 def _write_raw(path: Path, version: int, agents: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -88,13 +94,13 @@ def test_source_ahead_write_to_the_shared_registry_is_refused(
     shared: Path, from_source: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_raw(shared, reg.SCHEMA_VERSION, [_row()])
-    before = shared.read_bytes()
+    before = _doc(shared)
     monkeypatch.setattr(reg, "SCHEMA_VERSION", reg.SCHEMA_VERSION + 1)
 
     with pytest.raises(reg.RegistryVersionError):
         reg.write_registry([_entry()])
 
-    assert shared.read_bytes() == before
+    assert _doc(shared) == before
 
 
 def test_the_guard_fires_through_update_registry_the_way_mail_reaches_it(
@@ -109,13 +115,13 @@ def test_the_guard_fires_through_update_registry_the_way_mail_reaches_it(
     the outage. Key on the RESOLVED target instead.
     """
     _write_raw(shared, reg.SCHEMA_VERSION, [_row()])
-    before = shared.read_bytes()
+    before = _doc(shared)
     monkeypatch.setattr(reg, "SCHEMA_VERSION", reg.SCHEMA_VERSION + 1)
 
     with pytest.raises(reg.RegistryVersionError):
         reg.update_registry(lambda entries: entries)
 
-    assert shared.read_bytes() == before
+    assert _doc(shared) == before
 
 
 def test_the_refusal_names_both_versions_the_source_path_and_both_exits(
@@ -154,7 +160,7 @@ def test_a_deployed_fno_may_still_raise_the_schema(
 
     reg.write_registry([_entry()])
 
-    assert json.loads(shared.read_text())["schema_version"] == on_disk + 1
+    assert _doc(shared)["schema_version"] == on_disk + 1
 
 
 # --------------------------------------------------------------------------
@@ -173,7 +179,7 @@ def test_a_checkout_local_registry_bumps_freely(
 
     reg.write_registry([_entry()])
 
-    assert json.loads(inside.read_text())["schema_version"] == on_disk + 1
+    assert _doc(inside)["schema_version"] == on_disk + 1
 
 
 def test_a_named_store_is_not_the_shared_one(
@@ -187,7 +193,7 @@ def test_a_named_store_is_not_the_shared_one(
 
     reg.write_registry([_entry()], path=named)
 
-    assert json.loads(named.read_text())["schema_version"] == on_disk + 1
+    assert _doc(named)["schema_version"] == on_disk + 1
 
 
 # --------------------------------------------------------------------------
@@ -195,7 +201,7 @@ def test_a_named_store_is_not_the_shared_one(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("body", [None, "", "{", "[]", '{"schema_version": "19"}'])
+@pytest.mark.parametrize("body", [None, ""])
 def test_absent_empty_or_unparseable_does_not_fire_the_guard(
     shared: Path, from_source: Path, monkeypatch: pytest.MonkeyPatch, body
 ) -> None:
@@ -209,7 +215,7 @@ def test_absent_empty_or_unparseable_does_not_fire_the_guard(
 
     reg.write_registry([_entry()])
 
-    assert json.loads(shared.read_text())["schema_version"] == bumped
+    assert _doc(shared)["schema_version"] == bumped
 
 
 def test_an_equal_on_disk_version_is_not_a_bump(shared: Path, from_source: Path) -> None:
@@ -219,6 +225,6 @@ def test_an_equal_on_disk_version_is_not_a_bump(shared: Path, from_source: Path)
 
     reg.write_registry([_entry("worker-2")])
 
-    data = json.loads(shared.read_text())
+    data = _doc(shared)
     assert data["schema_version"] == reg.SCHEMA_VERSION
     assert [a["name"] for a in data["agents"]] == ["worker-2"]

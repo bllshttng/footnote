@@ -18,6 +18,7 @@ The shape that fixes it is read forward, delegate safe writes, and say so out lo
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,8 @@ def _row(name: str = "worker-1") -> dict:
         cwd="/Users/x/proj",
         log_path="/Users/x/proj/.fno/log",
         harness="claude",
-        harness_session_id="9a063cd3-69d4-415a-ada5-649b0164189c",
+        # One session per name: the table keys rows on it.
+        harness_session_id=str(uuid.uuid5(uuid.NAMESPACE_URL, name)),
     )
     return asdict(entry)
 
@@ -251,8 +253,11 @@ def test_newer_schema_write_delegates_its_payload_to_registry_commit(
     row["a_field_from_the_future"] = "keep me"
     _write_raw(path, reg.SCHEMA_VERSION + 1, [row])
     calls: list[tuple[str, dict]] = []
+    real_verb_call = rust_binary.verb_call
 
-    def written(verb: str, payload: dict, **_kwargs: object) -> dict:
+    def written(verb: str, payload: dict, **kwargs: object) -> dict:
+        if payload.get("op") == "read":
+            return real_verb_call(verb, payload, **kwargs)
         calls.append((verb, payload))
         return {"status": "written"}
 
@@ -289,7 +294,9 @@ def test_write_still_works_at_the_current_schema(tmp_path: Path) -> None:
 
     reg.write_registry(reg.load_registry(path), path)
 
-    assert json.loads(path.read_text())["schema_version"] == reg.SCHEMA_VERSION
+    from fno.agents.registry_door import read_registry_document
+
+    assert read_registry_document(path)[0]["schema_version"] == reg.SCHEMA_VERSION
 
 
 # --------------------------------------------------------------------------

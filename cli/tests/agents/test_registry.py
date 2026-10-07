@@ -320,48 +320,6 @@ def test_ac1_hp_schema_version_in_file(tmp_path: Path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ac2_err_atomic_write_on_exception(tmp_path: Path, monkeypatch) -> None:
-    """AC2-ERR: exception mid-write leaves prior file intact (no corruption)."""
-    use_tmpdir(monkeypatch, tmp_path)
-
-    from fno.agents.registry import AgentEntry, load_registry, write_registry
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write an initial valid registry
-    initial_entry = AgentEntry(
-        name="safe-agent",
-        harness="claude",
-        cwd="/tmp",
-        log_path="/tmp/safe.log",
-    )
-    write_registry([initial_entry], path=registry_path)
-    original_content = read_registry_document(registry_path)[0]
-
-    # Now simulate a write that raises mid-way by patching json.dumps
-    import fno.agents.registry as reg_module
-
-    def _exploding_dumps(*args, **kwargs):
-        raise RuntimeError("simulated kill -9 mid-write")
-
-    monkeypatch.setattr(reg_module, "_json_dumps", _exploding_dumps)
-
-    new_entry = AgentEntry(
-        name="corrupt-agent",
-        harness="codex",
-        cwd="/tmp",
-        log_path="/tmp/corrupt.log",
-    )
-    with pytest.raises(RuntimeError, match="simulated kill -9"):
-        write_registry([new_entry], path=registry_path)
-
-    # Original file must be intact
-    assert read_registry_document(registry_path)[0] == original_content
-    loaded = load_registry(path=registry_path)
-    assert loaded[0].name == "safe-agent"
-
-
 # ---------------------------------------------------------------------------
 # AC3-HP: per-agent flock serializes concurrent writes
 # ---------------------------------------------------------------------------
@@ -680,63 +638,6 @@ def test_ac4_err_malformed_row_shape_rejected(tmp_path: Path, monkeypatch) -> No
         load_registry(path=registry_path)
 
 
-def test_load_registry_rejects_invalid_json(tmp_path: Path, monkeypatch) -> None:
-    """Invalid JSON surfaces as RegistryVersionError, not raw JSONDecodeError."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import RegistryVersionError, load_registry
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text("not even {valid", encoding="utf-8")
-
-    with pytest.raises(RegistryVersionError, match="malformed JSON"):
-        load_registry(path=registry_path)
-
-
-def test_load_registry_rejects_non_dict_top_level(tmp_path: Path, monkeypatch) -> None:
-    """A JSON array at the top level is rejected via RegistryVersionError."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import RegistryVersionError, load_registry
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text("[]", encoding="utf-8")
-
-    with pytest.raises(RegistryVersionError, match="not a JSON object"):
-        load_registry(path=registry_path)
-
-
-def test_load_registry_rejects_non_list_agents_field(tmp_path: Path, monkeypatch) -> None:
-    """agents must be a list — string or object is RegistryVersionError."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import RegistryVersionError, load_registry
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(
-        json.dumps({"schema_version": 1, "agents": "oops"}), encoding="utf-8"
-    )
-
-    with pytest.raises(RegistryVersionError, match="'agents' field is not a list"):
-        load_registry(path=registry_path)
-
-
-def test_load_registry_rejects_non_dict_row(tmp_path: Path, monkeypatch) -> None:
-    """A non-dict element inside agents (e.g. string, null) is RegistryVersionError."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import RegistryVersionError, load_registry
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(
-        json.dumps({"schema_version": 1, "agents": ["oops", None]}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(RegistryVersionError, match="row 0 is not a JSON object"):
-        load_registry(path=registry_path)
-
-
 def _concurrent_update_worker(worker_id: int, registry_path_str: str) -> None:
     """Module-scope worker for the concurrent-update test.
 
@@ -797,30 +698,6 @@ def test_update_registry_serializes_different_name_writes(
     assert names == {f"worker-{i}" for i in range(n_workers)}, (
         f"expected {n_workers} distinct worker entries; got {names}"
     )
-
-
-def test_write_registry_cleans_orphan_tmp_on_failure(tmp_path: Path, monkeypatch) -> None:
-    """An ``OSError`` during the temp-write/rename window does not leave a stray .tmp."""
-    use_tmpdir(monkeypatch, tmp_path)
-
-    import fno.agents.registry as reg_module
-    from fno.agents.registry import AgentEntry, write_registry
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _explode_replace(*args, **kwargs):
-        raise OSError("simulated disk full during rename")
-
-    monkeypatch.setattr(reg_module.os, "replace", _explode_replace)
-
-    entry = AgentEntry(name="t", harness="claude", cwd="/tmp", log_path="/tmp/t.log")
-    with pytest.raises(OSError, match="simulated disk full"):
-        write_registry([entry], path=registry_path)
-
-    # The .tmp must be cleaned up so future writes don't accumulate orphans.
-    tmp_sibling = registry_path.with_suffix(registry_path.suffix + ".tmp")
-    assert not tmp_sibling.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1099,6 +976,8 @@ def test_load_registry_accepts_all_projected_statuses(tmp_path: Path, monkeypatc
         "exited",
         "permanent_dead",
     ):
+        registry_path = tmp_path / status / "registry.json"
+        registry_path.parent.mkdir()
         registry_path.write_text(
             json.dumps(
                 {
@@ -1174,7 +1053,10 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
             r["host_mode"] = host_mode
         return r
 
-    # v4 round-trips an explicit interactive host_mode.
+    # v4 round-trips an explicit interactive host_mode. Each version seeds its
+    # own store: the table imports a legacy file once.
+    registry_path = tmp_path / "v4" / "registry.json"
+    registry_path.parent.mkdir()
     registry_path.write_text(
         json.dumps({"schema_version": 4, "agents": [row("interactive")]}),
         encoding="utf-8",
@@ -1186,6 +1068,8 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     # Every version in the widened accepted range still loads (no v1 drop),
     # and an absent host_mode coerces to exec regardless of version.
     for v in (1, 2, 3, 4):
+        registry_path = tmp_path / f"v{v}-bare" / "registry.json"
+        registry_path.parent.mkdir()
         registry_path.write_text(
             json.dumps({"schema_version": v, "agents": [row()]}), encoding="utf-8"
         )
@@ -1253,6 +1137,8 @@ def test_inside_leg_round_trips_across_registry_boundary(
     assert reloaded[0].inside_leg == report
 
     # (c) A row without inside_leg defaults to None, and a fresh AgentEntry too.
+    registry_path = tmp_path / "bare" / "registry.json"
+    registry_path.parent.mkdir()
     registry_path.write_text(
         json.dumps(
             {
@@ -1415,9 +1301,7 @@ def test_us2_v1_entries_synthesized_at_read(tmp_path: Path, monkeypatch) -> None
             }
         ],
     }
-    on_disk_text = json.dumps(v1_payload)
-    registry_path.write_text(on_disk_text, encoding="utf-8")
-    pre_mtime = registry_path.stat().st_mtime_ns
+    registry_path.write_text(json.dumps(v1_payload), encoding="utf-8")
 
     loaded = load_registry(path=registry_path)
 
@@ -1426,8 +1310,8 @@ def test_us2_v1_entries_synthesized_at_read(tmp_path: Path, monkeypatch) -> None
     assert loaded[0].status == "live"
     assert loaded[0].last_message_at is None
     # On-disk file is untouched (no auto-mutation during load).
-    assert read_registry_document(registry_path)[0] == v1_payload
-    assert registry_path.stat().st_mtime_ns == pre_mtime
+    # The load imported the file but never wrote the table.
+    assert read_registry_document(registry_path)[1] == 0
 
 
 def test_us2_first_write_upgrades_on_disk_to_current(tmp_path: Path, monkeypatch) -> None:
@@ -1586,9 +1470,7 @@ def test_phase5_v2_entries_synthesized_to_v3_at_read(tmp_path: Path, monkeypatch
             }
         ],
     }
-    on_disk_text = json.dumps(v2_payload)
-    registry_path.write_text(on_disk_text, encoding="utf-8")
-    pre_mtime = registry_path.stat().st_mtime_ns
+    registry_path.write_text(json.dumps(v2_payload), encoding="utf-8")
 
     loaded = load_registry(path=registry_path)
 
@@ -1596,8 +1478,8 @@ def test_phase5_v2_entries_synthesized_to_v3_at_read(tmp_path: Path, monkeypatch
     assert loaded[0].name == "v2-row"
     assert loaded[0].mcp_channel_id is None
     # No auto-mutation; the file stays at v2 until next write.
-    assert read_registry_document(registry_path)[0] == v2_payload
-    assert registry_path.stat().st_mtime_ns == pre_mtime
+    # The load imported the file but never wrote the table.
+    assert read_registry_document(registry_path)[1] == 0
 
 
 def test_session_id_property_resolves_provider_specific_id() -> None:

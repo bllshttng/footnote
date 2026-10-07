@@ -224,7 +224,6 @@ def test_account_only_spawn_records_no_route_path(tmp_path, monkeypatch) -> None
 
 def test_ac7_registry_stores_the_path_never_the_route_contents(tmp_path, monkeypatch) -> None:
     """AC7: the registry file carries a path and no credential."""
-    from fno import paths
 
     _spawn_pane(
         monkeypatch,
@@ -232,7 +231,7 @@ def test_ac7_registry_stores_the_path_never_the_route_contents(tmp_path, monkeyp
         route_env=dict(ROUTE_ENV),
         route_provider="zai",
     )
-    raw = paths.agents_registry_path().read_text(encoding="utf-8")
+    raw = json.dumps(read_registry_document()[0])
     assert "route-settings" in raw  # the path IS recorded
     assert "ANTHROPIC_AUTH_TOKEN" not in raw
     assert "zai-secret-token" not in raw
@@ -440,7 +439,6 @@ def test_ac4_a_routed_codex_pane_records_identity_but_never_a_route_file(
         monkeypatch.delenv(var, raising=False)
 
     from fno.agents import mux_spawn
-    from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
         mux_spawn,
@@ -845,7 +843,6 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
     """The v19 bump rationale: asdict emits the keys, so a stale reader must
     refuse on version, not TypeError on the kwarg."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno import paths
     from fno.agents.registry import AgentEntry, write_registry
 
     write_registry(
@@ -859,7 +856,7 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
             )
         ]
     )
-    raw = paths.agents_registry_path().read_text(encoding="utf-8")
+    raw = json.dumps(read_registry_document()[0])
     assert json.loads(raw)["schema_version"] >= 19
     assert '"launch_account"' in raw
     assert '"related_session_id"' in raw

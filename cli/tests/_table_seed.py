@@ -27,3 +27,21 @@ def seed_claim(key: str, holder: str = "test-holder", **kwargs: Any):
     from fno.claims import acquire_claim
 
     return acquire_claim(key, holder, **kwargs)
+
+
+def seed_legacy_registry(entries: list[Any], path: Path) -> Path:
+    """Write ``entries`` as the pre-table ``registry.json`` the import reads.
+
+    The table door refuses rows that collide on identity, but a legacy file
+    can still hold them; this is the only way to seed that shape. It must run
+    before anything opens the store at ``path``.
+    """
+    import json
+    from dataclasses import asdict
+
+    from fno.agents.registry import SCHEMA_VERSION
+
+    rows = [asdict(e) if not isinstance(e, dict) else e for e in entries]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "agents": rows}))
+    return path

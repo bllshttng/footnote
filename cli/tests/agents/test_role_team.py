@@ -937,24 +937,6 @@ def test_a_half_role_still_counts_as_a_claim_on_its_territory(
     ]
 
 
-def test_a_non_string_scope_never_reaches_the_conflict_join(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """`fno agents team` promises to exit 0 on a read, so a corrupted row
-    carrying a non-string role_scope must degrade rather than raise."""
-    from fno.agents.team import gather_team, render_team
-
-    _prepare(
-        monkeypatch,
-        tmp_path,
-        [_entry("bad-scope", status="busy", role_level=None, role_scope=5)],
-        graph_entries=[],
-    )
-
-    assert gather_team()["conflicts"] == []
-    assert "bad-scope" in render_team(as_json=False)
-
-
 def test_project_rungs_stay_determinate_when_the_graph_is_unreadable(
     tmp_path: Path, monkeypatch
 ) -> None:

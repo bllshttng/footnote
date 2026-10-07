@@ -20,6 +20,7 @@ from fno.agents.registry import (
     update_registry,
     write_registry,
 )
+from tests._table_seed import seed_legacy_registry
 
 
 def _claude(name: str, short: str, uuid: str) -> AgentEntry:
@@ -148,7 +149,7 @@ def _codex(name: str, uuid: str, short: str | None = None) -> AgentEntry:
         name=name,
         cwd="/w",
         log_path=f"/tmp/{name}.log",
-        short_id=short,
+        short_id=short or "",
         harness="codex",
         harness_session_id=uuid,
     )
@@ -277,7 +278,7 @@ def test_ac1_edge_hex_shaped_name_and_short_id_are_ambiguous(tmp_path: Path) -> 
     """AC1-EDGE: a name cannot silently displace another row's short id."""
     row_named = _claude("deadbeef", "aaaa0000", "aaaa0000-0000-0000-0000-000000000000")
     row_short = _claude("other", "deadbeef", "deadbeef-1111-1111-1111-111111111111")
-    reg = _write(tmp_path, row_named, row_short)
+    reg = seed_legacy_registry([row_named, row_short], tmp_path / "registry.json")
     with pytest.raises(AgentResolutionError, match="ambiguous"):
         resolve_agent("deadbeef", path=reg)
 
@@ -289,7 +290,7 @@ def test_ac2_err_ambiguous_short_across_two_entries(tmp_path: Path) -> None:
     # derived prefix differs); row B: uuid whose first 8 hex == "abcd1234".
     a = _claude("aa", "abcd1234", "ffffffff-0000-0000-0000-000000000000")
     b = _claude("bb", "eeee0000", "abcd1234-2222-3333-4444-555566667777")
-    reg = _write(tmp_path, a, b)
+    reg = seed_legacy_registry([a, b], tmp_path / "registry.json")
     with pytest.raises(AgentResolutionError, match="ambiguous"):
         resolve_agent("abcd1234", path=reg)
 
@@ -330,7 +331,7 @@ def test_ac2_err_ambiguous_same_tier_short_collision(tmp_path: Path) -> None:
     as ambiguous rather than first-match."""
     a = _claude("aa", "abcd1234", "11111111-0000-0000-0000-000000000000")
     b = _claude("bb", "abcd1234", "22222222-0000-0000-0000-000000000000")
-    reg = _write(tmp_path, a, b)
+    reg = seed_legacy_registry([a, b], tmp_path / "registry.json")
     with pytest.raises(AgentResolutionError, match="ambiguous"):
         resolve_agent("abcd1234", path=reg)
 
