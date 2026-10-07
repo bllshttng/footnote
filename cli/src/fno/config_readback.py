@@ -21,9 +21,10 @@ _UNKNOWN_LEAF_CAP = 3
 _NEAR_MISS_CAP = 4
 #: Schema errors one refusal names before it points at the file for the rest.
 _REFUSAL_ERROR_CAP = 5
-#: Top-level blocks the walker must not judge: another reader owns `kanban`,
+#: Top-level blocks the walker must not judge: another reader owns `kanban`
+#: and `merge` (the Rust merge gate reads merge.visual_paint_paths directly),
 #: and `providers` is the pre-rename spelling the loader still aliases across.
-_UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
+_UNMODELED_BLOCKS = frozenset({"kanban", "providers", "merge"})
 #: Legacy spellings the loader still honors (config/_watchdog.py:
 #: lift_retire_grace). The walker reads the raw tree, before coercion, so a
 #: key the loader would lift must not report as unknown: warning on a working

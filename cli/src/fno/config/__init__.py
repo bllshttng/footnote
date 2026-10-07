@@ -487,14 +487,6 @@ class BacklogBlock(BaseModel):
         return v
 
 
-class MergeBlock(BaseModel):
-    """Merge-gate settings: visual_paint_paths names repo-relative render
-    surfaces whose PRs hold for visual approval; the Rust merge gate reads
-    the same key. Empty disarms the hold."""
-
-    visual_paint_paths: list[str] = Field(default_factory=list)
-
-
 class PostMergeBlock(BaseModel):
     """Post-merge ritual settings (nested under 'config.post_merge').
 
@@ -3952,7 +3944,6 @@ class ConfigBlock(BaseModel):
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
-    merge: MergeBlock = Field(default_factory=MergeBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
