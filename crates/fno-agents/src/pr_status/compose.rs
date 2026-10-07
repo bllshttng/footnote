@@ -295,6 +295,7 @@ pub(crate) fn compose_payload(inputs: &ComposeInputs) -> (i32, Value, Vec<String
     );
     push_coverage_notes(&coverage, &payload, &mut stderr);
     failures_note(&payload, &mut stderr);
+    push_lander_note(&payload, &mut stderr);
     if let Some(incident) = payload.get("platform_incident") {
         if !incident.is_null() {
             stderr.push(crate::gh_incident::incident_note(incident));
@@ -409,6 +410,44 @@ pub(crate) fn verdict_line(payload: &Value) -> String {
     format!(
         "{pr_slot} {state} {verdict} {settled_slot} {mergeable_slot} {ready} @ {head12}{coverage_at}{history_slot} - {clause_full}{fail_slot}"
     )
+}
+
+/// The finished-PR-has-no-lander report: ready with zero blockers, green,
+/// settled, and mergeable, while the node's claim reads positively not live
+/// (free or stale, the pair the grant verdict's liveness step trusts). A
+/// claim in that state proves nobody is driving the node, so nothing will
+/// perform the merge. The note reports; it never merges, and an unreadable
+/// or merely-unknown claim stays silent (no absence asserted without proof).
+fn push_lander_note(payload: &Map<String, Value>, out: &mut Vec<String>) {
+    if payload.get("ready").and_then(Value::as_bool) != Some(true)
+        || payload.get("settled").and_then(Value::as_bool) != Some(true)
+        || payload.get("verdict").and_then(Value::as_str) != Some("green")
+        || payload.get("pr_state").and_then(Value::as_str) != Some("OPEN")
+        || payload.get("mergeable").and_then(Value::as_str) != Some("MERGEABLE")
+    {
+        return;
+    }
+    let execution = payload
+        .get("merge_execution")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let claim = execution
+        .get("claim_state")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !matches!(claim, "free" | "stale") {
+        return;
+    }
+    let node = execution
+        .get("node_id")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let pr = payload.get("pr").and_then(Value::as_str).unwrap_or("?");
+    out.push(format!(
+        "note: finished PR has no lander: ready with zero blockers, green and settled, \
+but node {node} claim reads {claim} (no live holder), so nothing will merge it. \
+Land it with `fno do pr merge {pr}` or restart the worker (`/fno:target <node>`)."
+    ));
 }
 
 fn rerun_recovery_note(payload: &Map<String, Value>, out: &mut Vec<String>) {
