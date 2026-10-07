@@ -4,7 +4,8 @@
 # Law d-fe66560a: top-level verbs are not allowed at all, hidden ones
 # included. The fno-agents binary's action list may only shrink: a token
 # removed is banked, a token added refuses - a swap refuses too, since it
-# contains an addition. The gap that let a hidden verb in: the verb ratchet
+# contains an addition. The vocabulary migration preserves action identity.
+# The gap that let a hidden verb in: the verb ratchet
 # registers all of fno-agents as ONE baseline leaf, so nothing noticed the
 # list growing. This gate closes that gap for the binary the way
 # check-file-budget.sh closes it for file size.
@@ -117,6 +118,20 @@ base_tokens="$(mktemp)"
 head_tokens="$(mktemp)"
 trap 'rm -f "$base_tokens" "$head_tokens"' EXIT
 tokens_from <<<"$BASE_TEXT" | sort >"$base_tokens"
+# Only the one-time vocabulary migration can preserve a renamed action.
+# Unrelated swaps still introduce an action and refuse.
+python3 - "$base_tokens" "$(dirname "$0")/../../crates/fno-agents/src/role_migration.rs" <<'PYTHON'
+import re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+source = Path(sys.argv[2]).read_text()
+table = source.split('const WORDS:', 1)[1].split('];', 1)[0]
+names = dict(re.findall(r'\("([A-Za-z]+)",\s*"([a-z_]+)"\)', table))
+if len(names) < 20:
+    raise SystemExit('check-client-actions-shrink: vocabulary migration table is truncated')
+text = re.sub('[A-Za-z]+', lambda m: names.get(m[0], m[0]), path.read_text())
+path.write_text(''.join(sorted(text.splitlines(keepends=True))))
+PYTHON
 tokens_from <<<"$HEAD_TEXT" | sort >"$head_tokens"
 
 added="$(comm -13 "$base_tokens" "$head_tokens" | sort -u)"

@@ -16,15 +16,15 @@ cli/tests/agents/test_codex_signal_handling.py::test_create_timeout_sigterms_cod
 cli/tests/agents/test_codex_signal_handling.py::test_wait_with_grace_killpg_terminates_subshells_after_turn_completed::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_codex_signal_handling.py::test_wait_with_grace_killpg_terminates_subshells_after_turn_completed::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_codex_thread_effort_journey.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/agents/test_crown.py::_prepare_crown_cli::pytest.skip  # the team verbs need a fno-agents dev build for the lock-time identity match; the smoke pytest lanes delete the build by design (same contract as native_backlog_door)
+cli/tests/agents/test_role.py::_prepare_role_cli::pytest.skip  # the team verbs need a fno-agents dev build for the lock-time identity match; the smoke pytest lanes delete the build by design (same contract as native_backlog_door)
 cli/tests/agents/test_follow_signal.py::test_subprocess_follow_clean_sigint_exit::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_grok_spawn_journey.py::test_grok_spawn_journey_public_surface_reaches_a_live_row::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_handle_collisions.py::test_codex_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_handle_collisions.py::test_legacy_opencode_census_refuses_partially_unreadable_tree::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_harness_capability_parity.py::test_resolved_rows_match_between_readers::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_king_drain_cache.py::graph::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_king_shape_cli.py::test_shape_court_lands_on_the_manifest_and_echoes::mark.skipif  # on main before this ratchet
-cli/tests/agents/test_king_shape_cli.py::test_shape_is_idempotent_on_a_second_call::mark.skipif  # on main before this ratchet
+cli/tests/agents/test_lead_drain_cache.py::graph::pytest.skip  # on main before this ratchet
+cli/tests/agents/test_lead_shape_cli.py::test_shape_team_lands_on_the_manifest_and_echoes::mark.skipif  # on main before this ratchet
+cli/tests/agents/test_lead_shape_cli.py::test_shape_is_idempotent_on_a_second_call::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_lane_b_thread_spawn.py::_rust_posture_door::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_lane_b_thread_spawn.py::test_lane_b_journey_real_keeper_hosts_the_thread::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_pi_journey.py::test_AC10_HP_live_a_stopped_pi_session_resumes_by_id_and_cwd::mark.skipif  # on main before this ratchet
@@ -93,7 +93,6 @@ cli/tests/integration/test_install_frontdoor_journey.py::_run_fno::pytest.skip  
 cli/tests/integration/test_install_frontdoor_journey.py::_run_native_backlog::pytest.skip  # the journey requires the compiled Rust backlog door
 cli/tests/integration/test_install_frontdoor_journey.py::clean_machine::pytest.skip  # the isolated native journey requires a development build
 cli/tests/integration/test_install_frontdoor_journey.py::test_authorized_target_init_journey::pytest.skip  # smoke-pytest builds the front; local checkouts may lack it
-cli/tests/integration/test_install_frontdoor_journey.py::test_both_command_families_usable_after_init::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_marketplace_lint.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_native_update_repaint.py::_update::pytest.skip  # CI pytest env builds no dev fno-agents binary
 cli/tests/integration/test_provider_usage_live.py::test_live_provider_usage_has_numeric_usage_and_future_resets::pytest.skip  # on main before this ratchet
@@ -115,7 +114,6 @@ cli/tests/integration/test_worktree_cleanup_merged.py::test_done_node_salvage_fa
 cli/tests/integration/test_worktree_cleanup_merged.py::test_aggressive_salvages_the_tracked_diff_to_a_ref_then_prunes::marker.requires_gate  # the sweep under test needs the fno-agents gate binary; CI builders without it skip rather than fail
 cli/tests/integration/test_worktree_cleanup_merged.py::test_balanced_keeps_a_done_tree_with_a_modified_tracked_file::marker.requires_gate  # the sweep under test needs the fno-agents gate binary; CI builders without it skip rather than fail
 cli/tests/integration/test_worktree_ensure.py::<module>::mark.skipif  # on main before this ratchet
-cli/tests/journeys/test_growth_studio_faucet.py::test_resolver_core_byte_identical_to_main::pytest.skip  # on main before this ratchet
 cli/tests/lint/test_shellout_drift.py::test_ac4_hp_real_tree_full_check_passes::mark.skipif  # on main before this ratchet
 cli/tests/lint/test_verb_ratchet.py::test_rust_surface_includes_mux_and_version::mark.skipif  # on main before this ratchet
 cli/tests/lint/test_verb_ratchet.py::test_rust_surface_includes_mux_and_version::pytest.skip  # on main before this ratchet
@@ -124,7 +122,6 @@ cli/tests/relay/test_roundtrip.py::test_live_deliver_via_daemon_worker::pytest.s
 cli/tests/relay/test_roundtrip.py::test_live_deliver_via_daemon_worker::pytest.skip  # on main before this ratchet
 cli/tests/scoreboard/test_scoreboard.py::test_live_ledger_shape_folds_without_crash::pytest.skip  # on main before this ratchet
 cli/tests/test_autonomy_status.py::test_name_codes_check_prints_rows_and_marker::pytest.skip  # on main before this ratchet
-cli/tests/test_lazy_imports.py::test_fno_backlog_ready_via_real_subprocess::pytest.skip  # on main before this ratchet
 cli/tests/test_review_locking.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_advance.py::test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline::mark.xfail  # on main before this ratchet
 cli/tests/unit/test_agent_naming.py::test_max_len_matches_the_daemon_contract::pytest.skip  # on main before this ratchet
@@ -137,7 +134,6 @@ cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_live_
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_unresolved_names_the_witness::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_without_session_id_keeps_legacy_stale::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_coverage_gate.py::test_attestation_chain_reads_a_row_that_rotated_out::pytest.skip  # on main before this ratchet
-cli/tests/unit/test_doctor_lanes.py::test_live_macmon_smoke_answers_on_a_healthy_machine::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_failure_fixtures_wall_clock_bound_never_cost::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_loads::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_evals_bank.py::test_seed_bank_new_eval_tasks_load::pytest.skip  # on main before this ratchet
@@ -174,19 +170,12 @@ cli/tests/unit/test_skill_bundles.py::test_freshness_check_passes_for_committed_
 cli/tests/unit/test_skill_bundles.py::test_generator_fails_on_missing_source::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_generator_handles_mixed_manifest::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_generator_preserves_executable_bit::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_generator_produces_byte_identical_file_bundles::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_manifest_parser_emits_5col_tsv::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_parser_handles_agents_block::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_parser_handles_references_block::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_parser_rejects_agent_missing_rewrite_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_rewrite_fails_loudly_on_unterminated_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_rewrite_rejects_missing_required_fields::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_rewrite_rejects_non_string_tools_entries::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_rewrite_rejects_scalar_tools::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_rewrite_replaces_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_strip_fails_loudly_on_unterminated_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_skill_bundles.py::test_strip_passthrough_when_no_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
-cli/tests/unit/test_skill_bundles.py::test_strip_removes_frontmatter::marker.requires_shelled_yaml  # on main before this ratchet
 cli/tests/unit/test_spawn_account_provenance.py::TestVocabulary.test_the_carrier_word_is_spelled_identically_across_runtimes::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_stale_escalate.py::test_reconcile_channel_end_to_end_against_the_binary::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_stale_escalate.py::test_reconcile_channel_end_to_end_against_the_binary::pytest.skip  # on main before this ratchet

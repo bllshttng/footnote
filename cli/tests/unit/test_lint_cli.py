@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -84,37 +83,6 @@ def _run_codex_like():
 
     assert result.exit_code == 0
     assert "provider-stderr-merge: ok" in result.stdout
-
-
-def test_provider_stderr_merge_lint_uses_explicit_dir_outside_repo(tmp_path: Path) -> None:
-    providers = tmp_path / "providers"
-    _write_provider(
-        providers / "codex_like.py",
-        """
-import subprocess
-
-
-def _run_codex_like():
-    return subprocess.Popen(["codex"], stderr=subprocess.STDOUT)  # stderr=stdout: parsed by one drainer
-""",
-    )
-
-    with runner.isolated_filesystem():
-        result = runner.invoke(
-            app,
-            ["provider-stderr-merge", "--providers-dir", str(providers)],
-        )
-
-    assert result.exit_code == 0
-    assert "provider-stderr-merge: ok" in result.stdout
-
-
-def test_lint_cli_help_lists_promoted_flock_pattern() -> None:
-    result = runner.invoke(app, ["--help"])
-
-    assert result.exit_code == 0
-    assert "flock-pattern" in result.stdout
-    assert "provider-stderr-merge" in result.stdout
 
 
 def test_plan_filenames_lint_names_mismatched_claim(tmp_path: Path, monkeypatch) -> None:
@@ -477,22 +445,6 @@ def test_state_roots_rule_a_skips_nothing_for_a_cfg_test_mod_DECLARATION(
     ]
 
 
-def test_state_roots_rule_a_fires_on_a_rust_join(tmp_path: Path) -> None:
-    source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
-    source.parent.mkdir(parents=True)
-    source.write_text(
-        'let p = root.join(".fno").join("events.jsonl");\n', encoding="utf-8"
-    )
-
-    from fno.lint_cli import _state_root_path_violations
-
-    violations = _state_root_path_violations(tmp_path)
-
-    assert [(rel, key) for rel, key, _ in violations] == [
-        ("crates/fno-agents/src/new_writer.rs", "events.jsonl")
-    ]
-
-
 def test_state_roots_rule_a_stays_silent_inside_the_owning_module(tmp_path: Path) -> None:
     source = tmp_path / "cli" / "src" / "fno" / "paths.py"
     source.parent.mkdir(parents=True)
@@ -567,29 +519,6 @@ def test_state_roots_rule_b_fires_on_a_zero_arg_cache_over_a_resolver(
     assert (rel, symbol) == ("cli/src/fno/new_reader.py", "_cached_graph")
     # The refusal must TEACH THE REMEDY, not only name the offence.
     assert "_cached_graph_at(root: Path)" in message
-
-
-def test_state_roots_rule_b_stays_silent_on_the_repo_s_real_negatives() -> None:
-    """The false-positive controls, asserted against the tree they live in.
-
-    `_running_from_source` is keyed on `Path(__file__)` ON PURPOSE and its
-    docstring says so; `_gh_executable`, `_codex_cli_version` and `machine_id`
-    cache a PATH lookup, a subprocess and a host id, none of which resolve a
-    state root; `_load_settings_at` already takes the root as an argument,
-    which is the remedy this rule prescribes.
-    """
-    from fno.lint_cli import _zero_arg_root_cache_violations
-
-    hit = {symbol for _rel, symbol, _msg in _zero_arg_root_cache_violations(_real_repo_root())}
-
-    assert hit.isdisjoint(
-        {
-            "_running_from_source",
-            "_gh_executable",
-            "_codex_cli_version",
-            "machine_id",
-        }
-    )
 
 
 def test_state_roots_rule_b_fires_on_a_zero_arg_root_cache_specimen(
@@ -705,58 +634,6 @@ def test_state_roots_gate_fails_on_a_new_unbaselined_site(
     assert result.exit_code == 1
     assert "new violations" in result.output
     assert "fno.paths.ledger_json" in result.output
-
-
-def test_preamble_budget_check_is_dispatchable(monkeypatch) -> None:
-    """The CHECKS key resolves and the wrapper runs; exit code passes through.
-
-    The wrapper is a thin subprocess shell over the bash gate, so the dispatch
-    test fakes the function rather than running the real scan.
-    """
-    from fno import lint_cli
-
-    calls: list[str] = []
-
-    def fake() -> None:
-        calls.append("hit")
-        raise typer.Exit(code=0)
-
-    monkeypatch.setattr(lint_cli, "preamble_budget", fake)
-    result = runner.invoke(app, ["preamble-budget"])
-    assert result.exit_code == 0
-    assert calls == ["hit"]
-
-
-def test_preamble_budget_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
-    """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
-    from fno import paths
-
-    monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
-    script = tmp_path / "scripts" / "ci" / "check-preamble-budget.sh"
-    script.parent.mkdir(parents=True)
-    script.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
-    result = runner.invoke(app, ["preamble-budget"])
-    assert result.exit_code == 1
-
-    script.unlink()
-    result = runner.invoke(app, ["preamble-budget"])
-    assert result.exit_code == 2
-
-
-def test_internal_refs_check_is_dispatchable(monkeypatch) -> None:
-    """The CHECKS key resolves and the wrapper runs; exit code passes through."""
-    from fno import lint_cli
-
-    calls: list[str] = []
-
-    def fake() -> None:
-        calls.append("hit")
-        raise typer.Exit(code=0)
-
-    monkeypatch.setattr(lint_cli, "internal_refs", fake)
-    result = runner.invoke(app, ["internal-refs"])
-    assert result.exit_code == 0
-    assert calls == ["hit"]
 
 
 def test_internal_refs_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:

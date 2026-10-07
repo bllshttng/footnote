@@ -37,6 +37,8 @@ pub(super) struct FleetArms {
     watch_expiry: crate::watch_expiry::Arm,
     codex_watch: crate::codex_watch::Arm,
     lead_wake: crate::lead_wake::Arm,
+    notice_route: crate::notice_route::Arm,
+    first_check: crate::first_check::Arm,
     // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
@@ -83,6 +85,8 @@ impl FleetArms {
             watch_expiry: crate::watch_expiry::Arm::default(),
             codex_watch: crate::codex_watch::Arm::default(),
             lead_wake: crate::lead_wake::Arm::new(opts.agents_config_cwd.clone()),
+            notice_route: crate::notice_route::Arm::new(opts.agents_config_cwd.clone()),
+            first_check: crate::first_check::Arm::default(),
             last_gc_sweep: Instant::now(),
             retire_interval_next: crate::gc::seed_retire_interval_cell(&opts.agents_config_cwd),
             gc_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -211,6 +215,11 @@ impl FleetArms {
         // gets the daemon's wake, and its rung-up lead is told. Writes
         // the lead_wake tick row the status table read UNOBSERVED before.
         crate::lead_wake::maybe_tick(&self.lead_wake, ctx.home.clone());
+        // The notice router: lead-scope reconcile warnings become one
+        // deduped mail to the owning lead; the hourly fold turns repeated
+        // failures and banners into one owned node.
+        crate::notice_route::maybe_tick(&self.notice_route, ctx.home.clone());
+        self.first_check.tick(ctx.home.clone());
         // Serve-only liveness tick: the served pair is the sweep's measurement,
         // refreshed every SERVED_LIVENESS_CADENCE; off-loop, one-in-flight.
         let codex_threads_for_liveness = Arc::clone(&ctx.codex_threads);

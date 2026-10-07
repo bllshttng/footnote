@@ -37,7 +37,7 @@ So the verb mails what it wrote. The worker chain runs for the node and again fo
 - the node's graph bindings: ``locked_by_harness_session``, ``session_id``, ``locked_by``, each resolved to an ownership-live registry row. A worker can be live and bound to the node in the graph while holding no claim row at all; the claim is the weakest of the bindings, not the only one.
 - every ownership-live registry row whose ``node`` field names the node, sorted by name.
 
-The role walk goes outward and stops at the first scope with a live role: the node's own id when its ``type`` is ``epic``, then the epic (the owner's ``parent`` for a contained node, else the node's own), then the node's ``project``. Every scope resolves at send time by ``resolve_to_king``.
+The role walk goes outward and stops at the first scope with a live role: the node's own id when its ``type`` is ``epic``, then the epic (the owner's ``parent`` for a contained node, else the node's own), then the node's ``project``. Every scope resolves at send time by ``resolve_to_lead``.
 
 The author is matched by identity, never by name shape: an address that names a registry row is the author when the row's ``harness_session_id`` matches the sender's under ``session_identity_key``; the bare ``endswith`` match stands only for role-prefixed holders that name no row. The author is named in the receipt but never mailed its own note.
 

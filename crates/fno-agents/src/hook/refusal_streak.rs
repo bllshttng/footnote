@@ -3,7 +3,7 @@
 //!
 //! A lead that hit a refused verb retried it 35 times and mailed 53
 //! near-identical status reports in one window (lead comparison 2026-10-03,
-//! internal/fno/evals/kings/20261003-lead-comparison.md). The general rule
+//! internal/fno/evals/leads/20261003-lead-comparison.md). The general rule
 //! that evaluation asked for: count identical refusals per command shape,
 //! and refuse the THIRD attempt with a pointer to park the action and file
 //! or mail the blocker.
@@ -348,12 +348,12 @@ mod tests {
         // the same digest path the payload flow uses.
         let payload_failed = serde_json::json!({
             "tool_name": "Bash", "cwd": "/repo", "session_id": "s-1",
-            "tool_input": {"command": "fno king escalate"},
+            "tool_input": {"command": "fno lead escalate"},
             "tool_response": {"exitCode": 1, "stderr": "refused: the stalled set is empty"}
         });
         let payload_ok = serde_json::json!({
             "tool_name": "Bash", "cwd": "/repo", "session_id": "s-1",
-            "tool_input": {"command": "fno king escalate"},
+            "tool_input": {"command": "fno lead escalate"},
             "tool_response": {"exit_code": 0}
         });
         assert_eq!(session_id(&payload_failed), "s-1");
@@ -370,14 +370,14 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(exit_ok, 0);
         let target = dir.path().join("payloads.json");
-        let key2 = shape_key(Path::new("/repo"), "fno king escalate");
+        let key2 = shape_key(Path::new("/repo"), "fno lead escalate");
         record_at(
             &target,
             3_000,
             &key2,
             true,
             &output_digest(&payload_failed),
-            "fno king escalate",
+            "fno lead escalate",
         );
         record_at(
             &target,
@@ -385,11 +385,11 @@ mod tests {
             &key2,
             true,
             &output_digest(&payload_failed),
-            "fno king escalate",
+            "fno lead escalate",
         );
         assert!(park_reason(&target, 3_002, &key2).is_some());
         // A success payload's digest reads empty and the clear path runs.
-        record_at(&target, 3_003, &key2, false, "", "fno king escalate");
+        record_at(&target, 3_003, &key2, false, "", "fno lead escalate");
         assert!(park_reason(&target, 3_004, &key2).is_none());
     }
 }

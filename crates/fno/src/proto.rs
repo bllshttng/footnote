@@ -219,7 +219,7 @@ fn default_true() -> bool {
 /// deserialize it and an unbumped upgraded client would lose its connection on
 /// the first relocation rather than at handshake.
 ///
-/// v41 also carries the mesh team fields (`AgentRow.crown_level`/`crown_scope`,
+/// v41 also carries the mesh team fields (`AgentRow.role_level`/`role_scope`,
 /// additive + `#[serde(default)]`, documented inline on the fields); the two
 /// changes share the one version bump.
 ///
@@ -330,9 +330,9 @@ fn default_true() -> bool {
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
 /// v88: `AgentLaunchRequest.node` (serde default), the board's target key
 /// binds the launch to its node; floor stays 58.
-/// v89: `AgentRow.crown_title` (serde default), the team's display name from
+/// v89: `AgentRow.role_title` (serde default), the team's display name from
 /// the team-name store file; floor stays 58. v94 renames the never-filled
-/// field to `crown_title` (the role's people title); floor stays 58.
+/// field to `role_title` (the role's people title); floor stays 58.
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
 /// v91: `AgentLaunchRequest.provider` + `extra_flags` (serde default),
@@ -1216,17 +1216,17 @@ pub struct AgentRow {
     /// by this; the mux only renders it, never writes it. `#[serde(default)]`
     /// keeps a v40 reader wire-tolerant (a missing team reads as un-teamed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_level: Option<u32>,
+    pub role_level: Option<u32>,
     /// (v41) The project/epic/node id this row's team rules over, for the inline
     /// `L{level} {scope}` badge. `None` on an un-teamed row or a partial team
     /// (the badge then shows `?`). Rendered verbatim - no graph lookup on the
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_scope: Option<String>,
+    pub role_scope: Option<String>,
     /// (v94) The role's people title read from team_names.json; None when
-    /// the store has none. Replaces the never-filled v89 `crown_title`.
+    /// the store has none. Replaces the never-filled v89 `role_title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_title: Option<String>,
+    pub role_title: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no
     /// recorded parent (a lineage root). Joined against
     /// [`AgentRow::harness_session_id`] to nest children beneath their parent
@@ -3732,9 +3732,9 @@ mod tests {
                         updated_at: None,
                         pr: None,
                         tail: None,
-                        crown_level: None,
-                        crown_scope: None,
-                        crown_title: None,
+                        role_level: None,
+                        role_scope: None,
+                        role_title: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
@@ -3775,9 +3775,9 @@ mod tests {
                         updated_at: None,
                         pr: None,
                         tail: None,
-                        crown_level: None,
-                        crown_scope: None,
-                        crown_title: None,
+                        role_level: None,
+                        role_scope: None,
+                        role_title: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
@@ -3998,8 +3998,8 @@ mod tests {
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
         let row: AgentRow = serde_json::from_str(older).unwrap();
-        assert_eq!(row.crown_level, None, "missing crown_level => None");
-        assert_eq!(row.crown_scope, None, "missing crown_scope => None");
+        assert_eq!(row.role_level, None, "missing role_level => None");
+        assert_eq!(row.role_scope, None, "missing role_scope => None");
         assert!(
             !row.unmeasured,
             "missing unmeasured => false (v46 reader stays wire-tolerant)"
@@ -4040,18 +4040,18 @@ mod tests {
         );
         // A teamed row round-trips losslessly.
         let mut teamed = row.clone();
-        teamed.crown_level = Some(1);
-        teamed.crown_scope = Some("epic-x".into());
+        teamed.role_level = Some(1);
+        teamed.role_scope = Some("epic-x".into());
         teamed.no_pane_reason = Some(AgentNoPaneReason::LivePaneless);
         let wire = serde_json::to_string(&teamed).unwrap();
         let back: AgentRow = serde_json::from_str(&wire).unwrap();
-        assert_eq!(back.crown_level, Some(1));
-        assert_eq!(back.crown_scope.as_deref(), Some("epic-x"));
+        assert_eq!(back.role_level, Some(1));
+        assert_eq!(back.role_scope.as_deref(), Some("epic-x"));
         assert_eq!(back.no_pane_reason, Some(AgentNoPaneReason::LivePaneless));
         // An un-teamed row omits the keys on the wire (skip_serializing_if), so
         // a pre-41 reader never sees an unknown field.
         assert!(
-            !serde_json::to_string(&row).unwrap().contains("crown_level"),
+            !serde_json::to_string(&row).unwrap().contains("role_level"),
             "un-teamed row omits team on the wire"
         );
         assert!(

@@ -195,9 +195,9 @@ fn ask_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
         exited_at: exited_at.map(str::to_string),
         mux: None,
         screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
+        role_level: None,
+        role_scope: None,
+        role_grantor: None,
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
@@ -899,9 +899,9 @@ fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> Reg
         exited_at: None,
         mux: None,
         screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
+        role_level: None,
+        role_scope: None,
+        role_grantor: None,
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
@@ -2811,9 +2811,9 @@ pub(super) fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
             exited_at: None,
             mux: None,
             screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
+            role_level: None,
+            role_scope: None,
+            role_grantor: None,
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
@@ -2881,9 +2881,9 @@ fn seed_bare_row(name: &str) -> RegistryEntry {
             pane_id: 1,
         }),
         screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
+        role_level: None,
+        role_scope: None,
+        role_grantor: None,
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
@@ -3013,9 +3013,9 @@ fn list_row_key_set_matches_shared_contract() {
             session: "main".into(),
             pane_id: 10,
         });
-        e.crown_level = Some(1);
-        e.crown_scope = Some("epic-x".into());
-        e.crown_grantor = Some("lead".into());
+        e.role_level = Some(1);
+        e.role_scope = Some("epic-x".into());
+        e.role_grantor = Some("lead".into());
         // A vendor stamp on a claude-hosted row: the exact shape the
         // provider axis exists to describe, and the one the pre-split
         // alias lied about by carrying "claude" here.
@@ -3124,15 +3124,15 @@ fn list_row_key_set_matches_shared_contract() {
     assert_eq!(row["mux"]["session"], "main");
     assert_eq!(row["mux"]["pane_id"], 10);
     assert_eq!(
-        row["crown"], "L1 epic-x",
+        row["role"], "L1 epic-x",
         "same formatter as Python team_label"
     );
     // The raw team fields need value assertions too, not just presence:
     // hardcoding either to null passes a key-set check and the bare-row
     // null check, which is the "present but always null" lie again.
-    assert_eq!(row["crown_level"], 1);
-    assert_eq!(row["crown_scope"], "epic-x");
-    assert_eq!(row["crown_grantor"], "lead");
+    assert_eq!(row["role_level"], 1);
+    assert_eq!(row["role_scope"], "epic-x");
+    assert_eq!(row["role_grantor"], "lead");
 
     std::fs::remove_dir_all(home.root()).ok();
 }
@@ -3448,7 +3448,7 @@ fn list_row_resolves_opencode_session_id_from_harness_session_id() {
 }
 
 /// An empty team scope renders `?`, not a trailing space. Python tests the
-/// scope for falsiness (`self.crown_scope or '?'`), so matching only on None
+/// scope for falsiness (`self.role_scope or '?'`), so matching only on None
 /// would diverge on the empty string -- and nothing else covers that leg.
 #[test]
 fn list_row_team_label_falls_back_on_an_empty_scope() {
@@ -3456,8 +3456,8 @@ fn list_row_team_label_falls_back_on_an_empty_scope() {
     seed_stream_row(&home, "worker-team", "abc12345");
     state::update_registry(&home.registry_json(), |r| {
         let e = &mut r.entries[0];
-        e.crown_level = Some(1);
-        e.crown_scope = Some(String::new());
+        e.role_level = Some(1);
+        e.role_scope = Some(String::new());
     })
     .unwrap();
     let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
@@ -3466,7 +3466,7 @@ fn list_row_team_label_falls_back_on_an_empty_scope() {
     let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
     let result = response.result().unwrap();
 
-    assert_eq!(result["agents"][0]["crown"], "L1 ?");
+    assert_eq!(result["agents"][0]["role"], "L1 ?");
 
     std::fs::remove_dir_all(home.root()).ok();
 }
@@ -3488,7 +3488,7 @@ fn list_row_emits_absent_optional_fields_as_null() {
     // returns Null for a missing index), which is the very defect being
     // guarded. Assert presence first, then the value.
     let obj = row.as_object().unwrap();
-    for key in ["mux", "crown", "crown_level"] {
+    for key in ["mux", "role", "role_level"] {
         assert!(obj.contains_key(key), "row omits key: {key}");
         assert!(obj[key].is_null(), "key {key} should be null on a bare row");
     }

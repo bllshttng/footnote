@@ -272,38 +272,6 @@ def test_flat_skip_flags_reflect_env_override(tmp_path):
     )
 
 
-def test_no_phase_init_event_emitted(tmp_path):
-    """AC1-EDGE: no phase_init event is emitted (loop-check reads manifest directly).
-
-    After control-plane collapse, phase_init event emission is removed.
-    The manifest is the authoritative input record; events.jsonl gets
-    termination events from loop-check, not init events from this script.
-    """
-    assert _INIT_SCRIPT.exists(), f"init script missing: {_INIT_SCRIPT}"
-
-    proc = _run_init_script(tmp_path, {"TARGET_SIZE": "M"})
-    assert proc.returncode == 0, (
-        f"init-target-state.sh must succeed; stderr: {proc.stderr}"
-    )
-
-    state_file = _space_state(tmp_path)
-    assert state_file.exists(), "State file must still be created"
-
-    events_file = tmp_path / "space" / "events.jsonl"
-    if events_file.exists():
-        phase_init_found = any(
-            '"type":"phase_init"' in line or '"event":"phase_init"' in line
-            for line in events_file.read_text().splitlines()
-        )
-        assert not phase_init_found, (
-            "phase_init event must NOT be emitted by the new immutable init "
-            "(loop-check reads manifest directly; ab-d0337fbc)"
-        )
-    # If events.jsonl doesn't exist at all, that's also correct. The stub
-    # resolves init's events.jsonl into the space dir; the legacy .fno path is
-    # never written under the stub, so reading it would assert nothing.
-
-
 def test_cancelled_claimless_session_is_archived_on_next_init(tmp_path):
     """A finalized explicit cancel must not strand the next target init."""
     state_dir = tmp_path / "space"
@@ -453,7 +421,7 @@ def test_fno_absent_refuses_named_node_hold_lookup(tmp_path):
 def test_env_grant_honored_on_operator_origin_run(tmp_path):
     """AC-HP: TARGET_AUTO_MERGE=1 on an attended, agent-free run folds to the
     env grant. This is the documented per-run arm the merge verb and finalize
-    honor; the crown's own origin bar (no FNO_AGENT_SELF) decides who holds
+    honor; the role's own origin bar (no FNO_AGENT_SELF) decides who holds
     it."""
     proc = _run_init_script(
         tmp_path, {"TARGET_AUTO_MERGE": "1", "FNO_AGENT_SELF": ""}

@@ -35,7 +35,7 @@ const USER_CLASSES: &[&str] = &[
 /// Every predicate name a row may name, `not:`-prefixable. An unknown name
 /// fails the table load test, never the runtime match below.
 const PREDICATES: &[&str] = &[
-    "crowned",
+    "promoted",
     "last_message_decision_ask",
     "turn_filed_question",
     "route_self",
@@ -182,7 +182,7 @@ struct Ctx<'a> {
 
 /// Evaluate the table for one Stop fire. Every harness's Stop rides through
 /// here, owned session or not: the rules a session owes do not depend on a
-/// target or king manifest. Best-effort throughout - a journal read failure
+/// target or lead manifest. Best-effort throughout - a journal read failure
 /// answers no fires rather than blocking an unreadable turn.
 pub fn eval_stop(cwd: &Path, payload: &str) -> Vec<Fire> {
     let journal = crate::law_match::project_events_journal();
@@ -445,7 +445,7 @@ fn predicate(ctx: &Ctx, name: &str, ev: Option<&Value>) -> bool {
         None => (false, name),
     };
     let value = match name {
-        "crowned" => {
+        "promoted" => {
             crate::decision_trace::actor_kind_in(ctx.home, Some(&ctx.session), "hook") == "lead"
         }
         "last_message_decision_ask" => decision_ask(&ctx.last_message),
@@ -811,7 +811,7 @@ mod tests {
 
     const SESSION: &str = "ses_kd63be01";
 
-    /// One engine test's world: a temp agents home (its registry crowns the
+    /// One engine test's world: a temp agents home (its registry roles the
     /// test session when asked), a temp journal, and the canonical handle.
     struct Rig {
         _dir: tempfile::TempDir,
@@ -822,7 +822,7 @@ mod tests {
     }
 
     impl Rig {
-        fn new(crowned: bool) -> Self {
+        fn new(promoted: bool) -> Self {
             let dir = tempfile::TempDir::new().unwrap();
             let home_dir = dir.path().join("agents-home");
             let journal_dir = dir.path().join("journal");
@@ -832,14 +832,14 @@ mod tests {
             std::fs::create_dir_all(&cwd).unwrap();
             std::env::set_var("FNO_AGENTS_HOME", &home_dir);
             let session = crate::identity::canonical_handle(SESSION);
-            if crowned {
+            if promoted {
                 let registry = json!({
                     "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
                     "agents": [{
                         "name": "lead-rig",
                         "status": "live",
-                        "crown_scope": "e-63be",
-                        "crown_level": 2,
+                        "role_scope": "e-63be",
+                        "role_level": 2,
                         "created_at": "2026-10-05T00:00:00Z",
                         "cwd": home_dir.display().to_string(),
                         "harness_session_id": session,
@@ -952,6 +952,11 @@ mod tests {
 
     #[test]
     fn table_loads_and_overrides_disable() {
+        // The override leg points FNO_CONFIG at a file that disables the
+        // ask row; every fire reads config, so a sibling test mid-loop would
+        // see the row off.
+        let lock = crate::claims::test_env_lock();
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         let rows = parse_table().expect("the shipped table loads");
         for id in [
             "chat_ask_unfiled",
@@ -977,7 +982,7 @@ mod tests {
         let fires = eval_stop_in(&rig.cwd, &rig.journal, &rig.home, &rig.payload(ask));
         assert!(
             fires.iter().any(|f| f.rule == "chat_ask_unfiled"),
-            "the crowned row fires under the default config"
+            "the promoted row fires under the default config"
         );
         let config = rig.cwd.join(".fno-config.toml");
         std::fs::write(
@@ -1035,18 +1040,18 @@ mod tests {
             &rig.payload("wave 1 merged clean"),
         );
         assert!(fires.is_empty(), "no ask, no fire");
-        r1_uncrowned_and_cap_legs();
+        r1_unpromoted_and_cap_legs();
         r2_and_r3_legs();
     }
 
-    fn r1_uncrowned_and_cap_legs() {
-        // AC5: uncrowned, no manifest, default config - the same ask allows.
+    fn r1_unpromoted_and_cap_legs() {
+        // AC5: unpromoted, no manifest, default config - the same ask allows.
         let rig = Rig::new(false);
         let ask = "1. merge 2. hold. Your call?";
         let fires = eval_stop_in(&rig.cwd, &rig.journal, &rig.home, &rig.payload(ask));
         assert!(
             fires.is_empty(),
-            "an uncrowned session owes nothing by default"
+            "an unpromoted session owes nothing by default"
         );
 
         // The cap: three blocks per turn key, then allow.

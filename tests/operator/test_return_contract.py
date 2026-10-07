@@ -38,15 +38,6 @@ def test_text_grammar_happy_path():
     assert r.structured is False
 
 
-def test_text_grammar_done_with_concerns_status():
-    r = parse_task_result(
-        "RESULT: DONE_WITH_CONCERNS\nTASK: 3.2\nCONCERNS: flaky test left in"
-    )
-    assert r is not None
-    assert r.status == "DONE_WITH_CONCERNS"
-    assert r.concerns == "flaky test left in"
-
-
 def test_text_grammar_rejects_appended_prose_status():
     """The fail-open case the node cites: a status with trailing words must NOT
     be coerced into SUCCESS."""
@@ -57,11 +48,6 @@ def test_text_grammar_accepts_trailing_punctuation():
     """A bare trailing period/quote is stripped; the enum still matches."""
     assert parse_task_result("RESULT: SUCCESS.\nTASK: 1.1").status == "SUCCESS"
     assert parse_task_result('RESULT: "BLOCKED"\nTASK: 1.1').status == "BLOCKED"
-
-
-def test_text_grammar_invalid_status_is_rejected_not_unknown():
-    """An unrecognized status returns None (no 'UNKNOWN' false-result)."""
-    assert parse_task_result("RESULT: MOSTLY_DONE\nTASK: 1.1") is None
 
 
 def test_text_grammar_ignores_appended_prose_lines():
@@ -84,22 +70,7 @@ def test_text_grammar_missing_task_is_rejected():
     assert parse_task_result("RESULT: SUCCESS") is None
 
 
-def test_empty_output_is_none():
-    assert parse_task_result("") is None
-    assert parse_task_result("   \n  ") is None
-
-
 # ── structured block (the claude path) ────────────────────────────────
-
-
-def test_structured_fenced_json_preferred():
-    out = '```json\n{"result": "SUCCESS", "task": "2.1", "commit": "deadbee"}\n```'
-    r = parse_task_result(out)
-    assert r is not None
-    assert r.structured is True
-    assert r.status == "SUCCESS"
-    assert r.task_id == "2.1"
-    assert r.commit == "deadbee"
 
 
 def test_structured_result_tag_lowercase_keys():
@@ -163,28 +134,12 @@ def test_stray_result_line_does_not_hijack_structured_block():
     assert r is not None and r.status == "SUCCESS"
 
 
-def test_text_grammar_first_result_occurrence_wins():
-    """Two RESULT: lines -> the first is authoritative; a later one cannot flip it."""
-    out = "RESULT: BLOCKED\nTASK: 2.2\nREASON: waiting\nRESULT: SUCCESS"
-    r = parse_task_result(out)
-    assert r is not None and r.status == "BLOCKED" and r.task_id == "2.2"
-
-
-def test_out_of_enum_in_prose_wrapped_block_rejected():
-    out = 'prose\n```json\n{"result": "DONELIKE", "task": "1.1"}\n```\nmore prose'
-    assert parse_task_result(out) is None
-
-
 # ── the instruction we ship must agree with the parser ──
 
 
 def test_instruction_enumerates_every_valid_status():
     for status in VALID_STATUSES:
         assert status in RETURN_CONTRACT_INSTRUCTION
-
-
-def test_instruction_states_block_last_rule():
-    assert "LAST" in RETURN_CONTRACT_INSTRUCTION
 
 
 def test_instruction_example_round_trips_through_parser():

@@ -202,7 +202,7 @@ pub(super) fn gate_inside_leg_onto_row(
             let body = rep_reason.unwrap_or_else(|| state_str.to_string());
             if crate::state::enters(prev_state, rep_state, crate::state::InsideLegState::Blocked) {
                 notify = Some((body, false));
-            } else if e.crown_level.is_none()
+            } else if e.role_level.is_none()
                 && crate::state::enters(prev_state, rep_state, crate::state::InsideLegState::Done)
             {
                 notify = Some((body, true));

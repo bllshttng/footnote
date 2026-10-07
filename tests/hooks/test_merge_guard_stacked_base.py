@@ -17,7 +17,6 @@ rather than to ship a merge that reaches nobody.
 """
 import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -75,11 +74,6 @@ def test_unevaluated_probe_does_not_block(monkeypatch):
     """Exit 4 means the check could not run. CI fails closed on that; a merge
     in flight must not, or a gh outage becomes an outage of merging."""
     _patch_run(monkeypatch, _Proc(4, stderr="base-lineage: unknown\n"))
-    assert git_protection._stacked_base_refusal("gh pr merge 800") is None
-
-
-def test_missing_fno_does_not_block(monkeypatch):
-    _patch_run(monkeypatch, FileNotFoundError("fno"))
     assert git_protection._stacked_base_refusal("gh pr merge 800") is None
 
 

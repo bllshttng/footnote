@@ -501,9 +501,9 @@ fn mail_team(
     emit_delivery(state);
 }
 
-/// The team resolver: the live team whose compiled territory names the
-/// asker's node (or its first block). Reuses the one resolver the drain
-/// and the org read: territory's node_owners over live_teams.
+/// The team resolver: the owner ladder's NodeLead rung over the node (or
+/// its first block). One resolver, shared with the notice router and the
+/// help router; the private node-to-lead read it replaces is deleted.
 pub(crate) fn team_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
     // A literal `none` node is the projection's "no node"; fall through to
     // the blocks, which still name what the answer unblocks.
@@ -512,14 +512,16 @@ pub(crate) fn team_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
         .as_deref()
         .filter(|n| !n.is_empty() && *n != "none")
         .or_else(|| item.blocks.first().map(String::as_str));
-    let teams =
-        crate::territory::live_teams(&crate::paths::AgentsHome::from_env().registry_json()).ok()?;
-    let entries = crate::territory::graph_entries(cwd).ok()?;
-    let projects = Ok(crate::territory::workspace_paths(cwd));
-    let (owners, _failures) = crate::territory::node_owners(&teams, &entries, &projects);
-    node.and_then(|n| owners.get(n))
-        .and_then(|scope| teams.iter().find(|c| c.scope == *scope))
-        .map(|c| c.holder.clone())
+    let world = crate::owner_ladder::world(&crate::paths::AgentsHome::from_env(), cwd).ok()?;
+    let owner = crate::owner_ladder::resolve(
+        &crate::owner_ladder::Ask {
+            node,
+            from_session: None,
+            start: crate::owner_ladder::Rung::NodeLead,
+        },
+        &world,
+    );
+    owner.holder
 }
 
 /// Whether the question id shows up in the asker's transcript after the byte
@@ -668,13 +670,7 @@ fn emit_delivery(state: &mut ReplyState) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    use std::io::Write;
-    let wrote = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut f| writeln!(f, "{row}"))
-        .is_ok();
+    let wrote = crate::day::append_row(&path, &format!("{row}\n")).is_ok();
     if !wrote {
         state.outcome.clear();
     }

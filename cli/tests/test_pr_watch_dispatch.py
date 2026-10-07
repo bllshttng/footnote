@@ -2215,10 +2215,10 @@ class TestTickRecordsAndDeadline:
         def _stall(*_a, **_kw):
             _time.sleep(1.5)
 
-        # king_wake runs first now, so it is the phase that can spend the
+        # lead_wake runs first now, so it is the phase that can spend the
         # wall before any other body starts.
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake", _stall, raising=True)
+            "fno.pr_watch._lead_wake.run_lead_wake", _stall, raising=True)
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
         res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
 
@@ -2227,14 +2227,14 @@ class TestTickRecordsAndDeadline:
         assert len(ends) == 1
         assert ends[0]["outcome"] == "error"
         assert "why" not in ends[0]
-        assert "king_wake" in ends[0]["cut"]
+        assert "lead_wake" in ends[0]["cut"]
         assert ends[0]["duration_s"] >= 1.0
         rows = [d for t, d in events if t == "control_plane_tick"
-                and d.get("arm") == "king_wake"]
+                and d.get("arm") == "lead_wake"]
         assert rows
         # The wall wording, not the slice wording: the env ceiling (1s) is
-        # below the king_wake cap (75s), so the alarm budget was the wall.
-        assert "deadline exceeded in phase king_wake" in rows[-1]["detail"]
+        # below the lead_wake cap (75s), so the alarm budget was the wall.
+        assert "deadline exceeded in phase lead_wake" in rows[-1]["detail"]
 
     def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
         """A bootout's SIGTERM cannot unwind the tick, so the handler writes
@@ -2326,7 +2326,7 @@ class TestTickRecordsAndDeadline:
 
     def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
         """AC3-HP (x-c79d): a phase burning its slice cannot take the arms
-        behind it down. king_wake runs first now, so its cut must leave the
+        behind it down. lead_wake runs first now, so its cut must leave the
         merge, sweep and notify rows intact in the same tick, and the end
         record names the cut."""
         import time as _time
@@ -2337,9 +2337,9 @@ class TestTickRecordsAndDeadline:
             _time.sleep(2)
 
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
-        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "lead_wake", 1)
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake", _stall, raising=True)
+            "fno.pr_watch._lead_wake.run_lead_wake", _stall, raising=True)
         # Determinism, not contract: the arms behind the cut must be cheap, or
         # a loaded runner cuts them too and this reads as a different failure.
         def _notify_row(_roots=None, timeout_s=None, **_kw) -> None:
@@ -2359,31 +2359,31 @@ class TestTickRecordsAndDeadline:
 
         assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
-        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        lead_rows = [d for d in rows if d.get("arm") == "lead_wake"]
         notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
-        assert king_rows, "king_wake wrote no row for its own cut"
-        assert notify_rows, "notify_watch wrote no row after king_wake was cut"
+        assert lead_rows, "lead_wake wrote no row for its own cut"
+        assert notify_rows, "notify_watch wrote no row after lead_wake was cut"
         sweep_rows = [d for d in rows if d.get("arm") == "pr_watch_sweep"]
-        assert sweep_rows, "the sweep wrote no row after king_wake was cut"
+        assert sweep_rows, "the sweep wrote no row after lead_wake was cut"
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") is None
         assert merge_rows[-1]["detail"].startswith("merge kw=cut candidates=0")
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
-        assert ends and ends[-1].get("cut") == ["king_wake"]
+        assert ends and ends[-1].get("cut") == ["lead_wake"]
         # The 1s cap is below the 30s wall, so this cut is slice starvation -
         # one arm lost its turn and the tick carried on to its end record.
-        assert "king_wake" in ends[-1].get("phase_s", {})
+        assert "lead_wake" in ends[-1].get("phase_s", {})
         assert "sweep" in ends[-1].get("phase_s", {})
-        # Saturated = the phase spent its whole slice: the cut king_wake did,
+        # Saturated = the phase spent its whole slice: the cut lead_wake did,
         # the sweep finished early and reads as quiet, not saturated.
-        assert ends[-1].get("saturated") == ["king_wake"]
+        assert ends[-1].get("saturated") == ["lead_wake"]
 
     def test_a_notify_slice_below_its_real_cost_mints_the_starved_row(
         self, monkeypatch, tmp_path
     ):
         """x-0fc2 (12:35Z specimen): the notify_watch phase spent its slice
         on a loaded machine - the roots scan alone measured 2.03s idle over
-        12 roots - and the reign check-in read FAIL on the timeout row. A
+        12 roots - and the term check-in read FAIL on the timeout row. A
         slice below the phase's real cost fires the alarm and names the
         slice, which is the row this test pins."""
         import time as _time
@@ -2396,8 +2396,8 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
         monkeypatch.setitem(prcli._PHASE_CAP_S, "notify_watch", 1)
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "roles": 0},
             raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase", _slow_notify_body,
@@ -2430,8 +2430,8 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
         monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "roles": 0},
             raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase",
@@ -2517,8 +2517,8 @@ class TestTickRecordsAndDeadline:
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") == "error"
         assert merge_rows[-1]["detail"].startswith("merge kw=")
-        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
-        assert king_rows, "king_wake still wrote its row"
+        lead_rows = [d for d in rows if d.get("arm") == "lead_wake"]
+        assert lead_rows, "lead_wake still wrote its row"
 
     def test_a_disabled_watcher_merge_row_reads_disabled(self, monkeypatch, tmp_path):
         """AC6-EDGE: with the tick disabled the merge row says so in its own
@@ -2550,14 +2550,14 @@ class TestTickRecordsAndDeadline:
         def _stall_in_step(_settings, emit, **_kw):
             from fno.pr_watch._dispatch import set_tick_phase
 
-            set_tick_phase("king_wake:truth:epic-x")
+            set_tick_phase("lead_wake:truth:epic-x")
             _time.sleep(2)
-            return {"woke": [], "crowns": 1}
+            return {"woke": [], "roles": 1}
 
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
-        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "lead_wake", 1)
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake", _stall_in_step, raising=True,
+            "fno.pr_watch._lead_wake.run_lead_wake", _stall_in_step, raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase",
                             lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
@@ -2573,16 +2573,16 @@ class TestTickRecordsAndDeadline:
 
         assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
-        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        lead_rows = [d for d in rows if d.get("arm") == "lead_wake"]
         # A slice cut reads starved: "timeout" is a failure token and would
         # render a budget-cut phase as a broken arm.
-        assert king_rows and king_rows[-1].get("skip_reason") == "starved"
-        assert "at king_wake:truth:epic-x" in king_rows[-1].get("detail", ""), (
-            f"the cut must name its sub-step: {king_rows[-1].get('detail')!r}"
+        assert lead_rows and lead_rows[-1].get("skip_reason") == "starved"
+        assert "at lead_wake:truth:epic-x" in lead_rows[-1].get("detail", ""), (
+            f"the cut must name its sub-step: {lead_rows[-1].get('detail')!r}"
         )
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
-        assert ends[-1].get("phase") == "king_wake"
-        assert ends[-1].get("cut") == ["king_wake"]
+        assert ends[-1].get("phase") == "lead_wake"
+        assert ends[-1].get("cut") == ["lead_wake"]
 
     def test_one_roots_scan_feeds_every_phase_that_sweeps(self, monkeypatch, tmp_path):
         """AC3-HP: notify_watch, heal and stranded share the tick's one
@@ -2630,8 +2630,8 @@ class TestTickRecordsAndDeadline:
             raising=True,
         )
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "roles": 0},
             raising=True,
         )
 
@@ -2681,8 +2681,8 @@ class TestTickRecordsAndDeadline:
             raising=True,
         )
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "roles": 0},
             raising=True,
         )
 
@@ -2717,8 +2717,8 @@ class TestTickRecordsAndDeadline:
             raising=True,
         )
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "roles": 0},
             raising=True,
         )
 
@@ -2757,8 +2757,8 @@ class TestTickRecordsAndDeadline:
 
         monkeypatch.setattr("subprocess.run", _fake_run, raising=True)
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "roles": 0},
             raising=True,
         )
 
@@ -3413,7 +3413,7 @@ class TestFleetLegRunsAfterACutPRLeg:
     is cut mid-stall - and still writes its heartbeat.
     """
 
-    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn, king_wake_fn=None):
+    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn, lead_wake_fn=None):
         import typer
         from typer.testing import CliRunner
         from unittest.mock import MagicMock
@@ -3437,8 +3437,8 @@ class TestFleetLegRunsAfterACutPRLeg:
         # Determinism, not contract: the arms between the cut sweep and the
         # recovery phase must be cheap, or a loaded runner cuts recovery too.
         monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            king_wake_fn or (lambda _settings, emit, **_kw: {"woke": [], "crowns": 0}),
+            "fno.pr_watch._lead_wake.run_lead_wake",
+            lead_wake_fn or (lambda _settings, emit, **_kw: {"woke": [], "roles": 0}),
             raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase",
@@ -3510,19 +3510,19 @@ class TestFleetLegRunsAfterACutPRLeg:
         assert payload["refused"] == 1
         assert ("worker_refused", {"short_id": "aaaa1111"}) in events
 
-    def test_recovery_runs_and_records_after_king_wake_itself_is_cut(
+    def test_recovery_runs_and_records_after_lead_wake_itself_is_cut(
         self, monkeypatch, tmp_path
     ):
-        """The phase that failed tonight is king_wake, not the sweep: cut IT
+        """The phase that failed tonight is lead_wake, not the sweep: cut IT
         at its own slice and the fleet legs after it still run and still
         record an outcome."""
         import time as _time
 
         from fno.pr_watch import cli as prcli
 
-        def _stall_in_king_wake(_settings, emit, **_kw):
+        def _stall_in_lead_wake(_settings, emit, **_kw):
             _time.sleep(2)
-            return {"woke": [], "crowns": 0}
+            return {"woke": [], "roles": 0}
 
         swept: list[int] = []
 
@@ -3531,18 +3531,18 @@ class TestFleetLegRunsAfterACutPRLeg:
             return 0
 
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
-        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "lead_wake", 1)
         res, events, hb = self._invoke(
             monkeypatch, tmp_path, lambda **_kw: None, _sweep,
-            king_wake_fn=_stall_in_king_wake,
+            lead_wake_fn=_stall_in_lead_wake,
         )
 
         assert res.exit_code == 0, res.output
-        assert swept == [1], "recovery must run on its own slice after a cut king_wake"
-        assert hb.exists(), "the fleet heartbeat must survive a cut king_wake"
+        assert swept == [1], "recovery must run on its own slice after a cut lead_wake"
+        assert hb.exists(), "the fleet heartbeat must survive a cut lead_wake"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
-        assert ends and ends[-1].get("phase") == "king_wake", ends
-        assert "king_wake" in ends[-1].get("cut", []), ends
+        assert ends and ends[-1].get("phase") == "lead_wake", ends
+        assert "lead_wake" in ends[-1].get("cut", []), ends
         assert "recovery" in ends[-1].get("phase_s", {}), (
             "the phases after the cut must still record an outcome"
         )

@@ -358,7 +358,7 @@ def test_boards_name_status_only_done_blocker_until_completion(tmp_path: Path):
 
 # -- children summaries derive through the same overlay --
 
-# The parent's `children` array is the surface a king surveys an epic with.
+# The parent's `children` array is the surface a lead surveys an epic with.
 # Its `status` must speak the derived truth (open blocker -> blocked), never
 # the stored field, which by design never encodes blocked.
 

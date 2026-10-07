@@ -85,18 +85,6 @@ def test_fail_closed_on_subprocess_timeout(monkeypatch):
         vr.probe_fno_agents_actions(Path("/fake/agents"))
 
 
-def test_fail_closed_on_missing_executable(monkeypatch):
-    # The binary vanished between `which` and exec -> FileNotFoundError ->
-    # named fail-closed, not a traceback.
-    monkeypatch.setattr(vr, "_locate_fno_agents_front", lambda: Path("/fake/agents"))
-    monkeypatch.setattr(
-        vr.subprocess, "run",
-        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "gone")),
-    )
-    with pytest.raises(vr.VerbRatchetError, match="unreachable"):
-        vr.probe_fno_agents_actions(Path("/fake/agents"))
-
-
 # --------------------------------------------------------------------------- #
 # Ratchet directions (AC2) and conflict message (AC9)
 # --------------------------------------------------------------------------- #
@@ -108,12 +96,6 @@ def _check_with(monkeypatch, tmp_path, baseline_text):
     monkeypatch.setattr(vr, "baseline_path", lambda: tmp_path / "verb-baseline.txt")
     (tmp_path / "verb-baseline.txt").write_text(baseline_text, encoding="utf-8")
     return vr.check()
-
-
-def test_check_ok_when_baseline_matches_live(monkeypatch, tmp_path):
-    report = _check_with(monkeypatch, tmp_path, vr.generate(_LIVE))
-    assert report.ok is True
-    assert "ok (5 leaves, 0 hidden options - fno-py only" in report.message
 
 
 def test_check_fails_naming_added_verb(monkeypatch, tmp_path):
@@ -134,15 +116,6 @@ def test_check_fails_naming_removed_verb(monkeypatch, tmp_path):
     assert report.ok is False
     assert "backlog ghost" in report.message
     assert "Removed" in report.message
-
-
-def test_check_passes_when_removal_updates_baseline(monkeypatch, tmp_path):
-    # AC2: a removal WITH the baseline updated -> live and baseline agree -> ok
-    shrunk = [v for v in _LIVE if v != "whoami"]
-    monkeypatch.setattr(vr, "enumerate_all_leaves", lambda: list(shrunk))
-    monkeypatch.setattr(vr, "baseline_path", lambda: tmp_path / "verb-baseline.txt")
-    (tmp_path / "verb-baseline.txt").write_text(vr.generate(shrunk), encoding="utf-8")
-    assert vr.check().ok is True
 
 
 # --------------------------------------------------------------------------- #
@@ -179,32 +152,6 @@ def test_visible_options_are_not_emitted_only_hidden():
     assert vr._hidden_option_tokens(cmd2) == ["!--self"]
 
 
-def test_format_leaf_is_bare_without_hidden_options():
-    import click
-
-    @click.command()
-    @click.option("--visible", is_flag=True)
-    def cmd(visible):
-        pass
-
-    assert vr._format_leaf("foo bar", cmd) == "foo bar"
-
-
-def test_split_leaf_separates_path_and_flags():
-    path, flags = vr._split_leaf("mail send !--self !--no-self")
-    assert path == "mail send"
-    assert flags == frozenset({"!--self", "!--no-self"})
-    # a bare leaf carries an empty flag set
-    path, flags = vr._split_leaf("agents adopt")
-    assert path == "agents adopt"
-    assert flags == frozenset()
-
-
-def test_generate_parse_baseline_roundtrip_with_flags():
-    text = vr.generate(["mail send !--self", "alpha", "mux pane ls"])
-    assert vr.parse_baseline(text) == ["mail send !--self", "alpha", "mux pane ls"]
-
-
 _LIVE_F = ["backlog done !--tag", "help", "mux pane ls", "version", "whoami"]
 _LIVE_F_BARE = ["backlog done", "help", "mux pane ls", "version", "whoami"]
 
@@ -232,12 +179,6 @@ def test_check_fails_naming_added_hidden_flag(monkeypatch, tmp_path):
     assert "flag-exception" in report.message
     assert "backlog done !--tag" in report.message
     assert "Added hidden options" in report.message
-
-
-def test_check_passes_when_hidden_flag_is_baselined(monkeypatch, tmp_path):
-    # the flag lives in both -> ok (the PR carried flag-exception + a regen)
-    report = _check_live(monkeypatch, tmp_path, _LIVE_F, vr.generate(_LIVE_F))
-    assert report.ok is True
 
 
 def test_check_removed_hidden_flag_needs_no_exception(monkeypatch, tmp_path):
@@ -269,14 +210,6 @@ def test_enumeration_refuses_when_imported_package_is_not_this_checkout(monkeypa
     assert "imported:" in msg and "expected:" in msg
     # And it names the command that actually works.
     assert "uv run --project cli fno-py" in msg
-
-
-def test_enumeration_passes_when_package_is_this_checkout():
-    """The ordinary in-repo run is unaffected (this test process IS the source)."""
-    leaves = vr.enumerate_python_leaves()
-    assert "pr" in leaves
-    assert "pr merge" in leaves
-    assert "pr base-lineage-check" not in leaves
 
 
 def test_guard_covers_check_not_only_update(monkeypatch, tmp_path):

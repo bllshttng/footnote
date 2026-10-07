@@ -4,8 +4,8 @@ pub(in crate::client) fn check_fixture(view: &mut View) {
     use serde_json::json;
     let lead = AgentRow {
         name: "finch".into(),
-        crown_scope: Some("team".into()),
-        crown_level: Some(1),
+        role_scope: Some("team".into()),
+        role_level: Some(1),
         ..Default::default()
     };
     let worker = |name: &str, sid: &str, node: &str| AgentRow {

@@ -429,12 +429,12 @@ _RECOVERY_ROOT_FLOOR_S = 3.0
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
-    # The wake pays three fixed reads before its first crown (court, the
+    # The wake pays three fixed reads before its first role (team, the
     # answered journal, the graph), each bounded at 10s, and guards every
     # truth read behind a 15s step floor. The 45s cap measured "budget
-    # spent after 0 of 5 crowns" with truth_reads=0 (2026-09-28 fleet
+    # spent after 0 of 5 roles" with truth_reads=0 (2026-09-28 fleet
     # specimen). 75s fits the fixed reads plus two truth reads.
-    "king_wake": 75,
+    "lead_wake": 75,
     # The notify phase pays the arm subprocess over every catch-up root
     # (armed pass: 23.1s measured over 12 roots 2026-09-27). 15s still cut
     # it mid-arm; 30s fits at the 0.85x deadline.
@@ -561,7 +561,7 @@ def tick() -> None:
     # boundary (SCAN_PROGRESS); this dict holds the rest.
     progress: dict[str, str] = {}
     ceiling_box: dict[str, Optional[int]] = {"v": None}
-    arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
+    arm_interval: dict[str, int] = {"lead_wake": 900, "notify_watch": 300, "watchdog": 600}
     roots_box: dict[str, Optional[list]] = {"v": None}
     phase_caps = dict(_PHASE_CAP_S)
     grant_queue_timeout_s = _GRANT_QUEUE_READ_TIMEOUT_S
@@ -1205,7 +1205,7 @@ def tick() -> None:
             assert cfg is not None
             set_tick_phase("merge")
             interval = int(getattr(cfg, "interval_seconds", 600))
-            head = f"merge kw={'cut' if 'king_wake' in cut else 'ok'}"
+            head = f"merge kw={'cut' if 'lead_wake' in cut else 'ok'}"
             if not tick_enabled:
                 _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="disabled",
                                detail=f"{head} pr_watch disabled")
@@ -1263,46 +1263,46 @@ def tick() -> None:
         # pushed and filed; only UNKNOWN rows get recorded; every other
         # class, LIVE included, is quiet and untouched.
         #
-        # The king wake phase runs BEFORE it: it is cheaper than either leg
-        # (one registry read, one transcript probe per crown, a bus scan) and
+        # The lead wake phase runs BEFORE it: it is cheaper than either leg
+        # (one registry read, one transcript probe per role, a bus scan) and
         # the wake it fires is the thing the stranded sweep would otherwise
         # have to notice too late.
-        def _phase_king_wake(_slice_s: float) -> None:
-            set_tick_phase("king_wake")
+        def _phase_lead_wake(_slice_s: float) -> None:
+            set_tick_phase("lead_wake")
             # The guard is the first statement, before the import: this module is
             # on the launchd hot path and the wake phase pulls the bus and the
             # harness layer, which an unarmed tick must not pay for. The double
-            # getattr matches the phase's own read: a settings stub with no king
+            # getattr matches the phase's own read: a settings stub with no lead
             # block at all (the tick's test harnesses) must read as unarmed.
-            # Double getattr throughout: a settings stub with no king block at all
+            # Double getattr throughout: a settings stub with no lead block at all
             # must read as unarmed (debounce default), never crash the tick.
-            kw_i = int(getattr(getattr(settings, "king", None), "wake_debounce_seconds", 900))
-            arm_interval["king_wake"] = kw_i
-            if getattr(getattr(settings, "king", None), "wake_enabled", False):
+            kw_i = int(getattr(getattr(settings, "lead", None), "wake_debounce_seconds", 900))
+            arm_interval["lead_wake"] = kw_i
+            if getattr(getattr(settings, "lead", None), "wake_enabled", False):
                 try:
-                    from fno.pr_watch._king_wake import run_king_wake
+                    from fno.pr_watch._lead_wake import run_lead_wake
 
-                    wake_summary = run_king_wake(
+                    wake_summary = run_lead_wake(
                         settings,
                         emit=_emit_event,
                         seconds_left_fn=phase_seconds_left,
-                        on_step=lambda s: set_tick_phase(f"king_wake:{s}"),
+                        on_step=lambda s: set_tick_phase(f"lead_wake:{s}"),
                     )
                     woke = ", ".join(
                         f"{w['scope']}:{w['reason']}" for w in wake_summary.get("woke", [])
                     )
                     typer.echo(
-                        f"king wake: crowns={wake_summary.get('crowns', 0)}"
+                        f"lead wake: roles={wake_summary.get('roles', 0)}"
                         + (f" woke={woke}" if woke else "")
                     )
-                    crowns = int(wake_summary.get("crowns", 0) or 0)
+                    roles = int(wake_summary.get("roles", 0) or 0)
                     woke_n = len(wake_summary.get("woke", []) or [])
                     evaluated = int(wake_summary.get("evaluated", 0) or 0)
                     truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
-                    if crowns == 0 and wake_summary.get("court_incomplete"):
-                        skip = "court_read_incomplete"
-                    elif crowns == 0:
-                        skip = "no_crowned_target"
+                    if roles == 0 and wake_summary.get("team_incomplete"):
+                        skip = "team_read_incomplete"
+                    elif roles == 0:
+                        skip = "no_promoted_target"
                     elif woke_n:
                         skip = None
                     elif wake_summary.get("budget_spent"):
@@ -1314,20 +1314,20 @@ def tick() -> None:
                     rc = Counter(str(i.get("refusal") or "?") for i in wake_summary.get("refused") or [])
                     refused_s = ",".join(f"{k}:{rc[k]}" for k in sorted(rc))
                     detail = (
-                        f"crowns={crowns} evaluated={evaluated}/{crowns}"
+                        f"roles={roles} evaluated={evaluated}/{roles}"
                         f" truth_reads={truth_reads}"
                         + (f" woke={woke}" if woke else "")
                         + (f" refused={refused_s}" if refused_s else "")
                         + (f" note={note}" if note else "")
                     )
-                    _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,
+                    _emit_tick_row("lead_wake", interval_s=kw_i, acted=woke_n,
                                    skip_reason=skip, detail=detail)
                 except Exception as exc:  # noqa: BLE001 - never let a wake break the tick
-                    log.warning("pr-watch: king wake phase failed: %s", exc)
-                    _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_failed",
+                    log.warning("pr-watch: lead wake phase failed: %s", exc)
+                    _emit_tick_row("lead_wake", interval_s=kw_i, skip_reason="wake_failed",
                                    detail=str(exc)[:200])
             else:
-                _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_disabled")
+                _emit_tick_row("lead_wake", interval_s=kw_i, skip_reason="wake_disabled")
 
         # The operator-notice sampler: one phase, always run; the
         # Rust arm answers notify_off itself when the [notify] signals list
@@ -1447,12 +1447,12 @@ def tick() -> None:
         # where ticks died. Reconcile owns the outcome-keyed leg and surfaces
         # a proven-stale canonical through its SessionStart hook.
         # Value order, not cost order: behind a fleet-loaded sweep that
-        # saturates its cap, the wake evaluated no crown and the merge read
+        # saturates its cap, the wake evaluated no role and the merge read
         # 38s of grant queue and executed nothing. Both arms read durable
         # state, never the sweep's result, so they run first; the sweep
         # follows as the one arm that resumes per-PR across ticks.
         sweep_started = True
-        _run_phase("king_wake", _phase_king_wake, arm="king_wake")
+        _run_phase("lead_wake", _phase_lead_wake, arm="lead_wake")
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")

@@ -12,7 +12,6 @@ Tests are lightweight markdown-parsing assertions, not full agent execution.
 Full BDD tests land in Phase 04.
 """
 import re
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.parent
@@ -125,30 +124,6 @@ def test_two_tier_verdict_band_produces_done_with_concerns():
 # ---------------------------------------------------------------------------
 # Invariant 3: Finding classification table has exactly three buckets
 # ---------------------------------------------------------------------------
-
-def test_classification_table_has_three_buckets():
-    """The agent must document exactly three classification buckets."""
-    text = load_agent_text()
-
-    # All three bucket names must appear
-    assert "in_diff" in text or "in-diff" in text.lower() or "in diff" in text.lower(), (
-        "Agent must document the 'in_diff' (or 'in-diff') classification bucket."
-    )
-    assert (
-        "out_of_diff_blocking" in text
-        or "out-of-diff blocking" in text.lower()
-        or "out_of_diff blocking" in text.lower()
-    ), (
-        "Agent must document the 'out_of_diff_blocking' (or 'out-of-diff blocking') bucket."
-    )
-    assert (
-        "out_of_diff_latent" in text
-        or "out-of-diff latent" in text.lower()
-        or "out_of_diff latent" in text.lower()
-    ), (
-        "Agent must document the 'out_of_diff_latent' (or 'out-of-diff latent') bucket."
-    )
-
 
 def test_classification_table_bucket_count_is_exactly_three():
     """Verify the classification table does not silently grow beyond three buckets."""

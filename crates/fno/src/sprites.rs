@@ -501,7 +501,7 @@ impl Eye {
     }
 }
 
-/// The only grounded hat: `crown_level >= 1` wears it (registry team fields,
+/// The only grounded hat: `role_level >= 1` wears it (registry team fields,
 /// stamped by the spawn path - never self-declared). The reference's other
 /// six hats key to an executor mapping not yet verified stable and stay
 /// unrendered; a hat with no reading is the decorative-guard failure the

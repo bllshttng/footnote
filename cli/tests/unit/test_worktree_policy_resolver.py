@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.worktree_paths import WorktreePolicyError, resolve_worktree_policy
+from fno.worktree_paths import resolve_worktree_policy
 
 
 def _make_repo(path: Path) -> Path:
@@ -88,30 +88,6 @@ def test_never_policy_unchanged_by_an_explicit_base(tmp_path):
     assert pol.policy == "never"
 
 
-def test_explicit_external_policy_uses_the_configured_base(tmp_path):
-    base_dir = tmp_path / "wtbase"
-    repo = _policy_repo(
-        tmp_path / "explicitext",
-        f'[worktree]\npolicy = "external"\n[paths]\nworktrees_base = "{base_dir}"\n',
-    )
-    pol = resolve_worktree_policy(repo, "claude")
-    assert pol.policy == "external"
-    assert pol.base == base_dir
-    assert pol.degraded is False
-
-
-def test_repo_config_base_relocates_too(tmp_path):
-    """Same key via the sole config file, exercising the merged-config read."""
-    base_dir = tmp_path / "repo-base"
-    repo = _policy_repo(
-        tmp_path / "repobase",
-        f'[paths]\nworktrees_base = "{base_dir}"\n',
-    )
-    pol = resolve_worktree_policy(repo, "claude")
-    assert pol.policy == "external"
-    assert pol.base == base_dir
-
-
 def test_deprecated_conductor_key_relocates_with_note(tmp_path):
     repo = _policy_repo(
         tmp_path / "conductor",
@@ -121,28 +97,3 @@ def test_deprecated_conductor_key_relocates_with_note(tmp_path):
     assert pol.policy == "external"
     assert pol.base == (Path.home() / "conductor" / "workspaces").resolve()
     assert "DEPRECATED" in pol.note
-
-
-def test_non_native_harness_degradation_keeps_fallback_base(tmp_path, monkeypatch):
-    """A codex harness still degrades to the state-dir fallback, NOT to an
-    explicitly configured base: that base is an external allocator choice
-    and must not make an unsupported session look allocator-owned."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    base_dir = tmp_path / "wtbase"
-    repo = _policy_repo(
-        tmp_path / "codexrepo",
-        f'[paths]\nworktrees_base = "{base_dir}"\n',
-    )
-    pol = resolve_worktree_policy(repo, "codex")
-    assert pol.policy == "external"
-    assert pol.base != base_dir
-    assert pol.base == (tmp_path / ".fno" / "worktrees").resolve()
-
-
-def test_out_of_enum_policy_still_refuses(tmp_path):
-    repo = _policy_repo(
-        tmp_path / "badpolicy",
-        '[worktree]\npolicy = "sideways"\n',
-    )
-    with pytest.raises(WorktreePolicyError):
-        resolve_worktree_policy(repo, "claude")

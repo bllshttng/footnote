@@ -128,16 +128,22 @@ def wrap_fno_mail(
     to_session: Optional[str] = None,
     harness: Optional[str] = None,
     held_release: bool = False,
+    subject: Optional[str] = None,
 ) -> str:
-    """Render a normal envelope or pass through a validated held-release turn."""
+    """Render a normal envelope or pass through a validated held-release turn.
+
+    ``subject`` is the sender's --subject; an explicit value wins
+    over the peeled-env fallback so a caller that resolved the flag itself is
+    never overridden by ambient state."""
     payload = locals().copy()
     mode = "held-release" if payload.pop("held_release") else "wrap"
     payload["mode"], payload["from"] = mode, payload.pop("from_")
+    resolved = (payload.pop("subject") or "").strip()
     if mode == "wrap":
         # The front's peeled --subject rides the render too, so the
         # delivered header's third field is the sender's subject, not the
         # body's first sentence. The peel already validated the shape.
-        subject = (os.environ.get("FNO_MAIL_SUBJECT") or "").strip()
-        if subject:
-            payload["subject"] = subject
+        resolved = resolved or (os.environ.get("FNO_MAIL_SUBJECT") or "").strip()
+        if resolved:
+            payload["subject"] = resolved
     return _render_in_rust(payload)

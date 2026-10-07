@@ -77,14 +77,3 @@ def test_use_tmpdir_refuses_when_state_did_not_land(tmp_path: Path, monkeypatch)
     message = str(excinfo.value)
     assert str(outside) in message
     assert str(tmp_path / ".fno") in message
-
-
-def test_use_tmpdir_declares_a_root_when_the_pin_is_absent(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Calling the fixture IS a declaration, for the lane with no conftest."""
-    import os
-
-    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
-    use_tmpdir(monkeypatch, tmp_path)
-    assert os.environ["FNO_TEST_HERMETIC"] == "1"

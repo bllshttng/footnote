@@ -5,7 +5,7 @@ a durable envelope; `mail unread`/`ack` are the per-recipient cursor consume;
 `mail rebuild-render` regenerates the derived markdown from the log. The old
 `fno inbox` namespace (mail's alias for `mail unread`) was retired clean (no
 pointer, no shim). x-afa6 later minted a real `fno inbox` root for an
-unrelated purpose (approvals/notify/outstanding/the king board); mail's old
+unrelated purpose (approvals/notify/outstanding/the lead board); mail's old
 `unread` leaf never came back under it.
 """
 from __future__ import annotations
@@ -113,12 +113,17 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
         app,
         [
             "agents", "mail", "send", "worker-one", marker,
-            "--from-name", "king", "--ruling", "x-511a",
+            "--from-name", "lead", "--ruling", "x-511a",
         ],
     )
 
     assert sent.exit_code == 0, sent.output
-    assert sent.stdout == "msg-ruling1 delivered (hosted)\n"
+    import json as _json
+
+    receipt = _json.loads(sent.stdout)
+    assert set(receipt) == {"msg_id", "subject", "to", "status"}
+    assert receipt["msg_id"] == "msg-ruling1"
+    assert receipt["status"] == "delivered (hosted)"
     assert len(calls) == 1
     import os as _os
     import subprocess as _sp
@@ -189,7 +194,7 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
         app,
         [
             "agents", "mail", "send", "worker-one", marker,
-            "--from-name", "king", "--cwd", str(nested_workdir),
+            "--from-name", "lead", "--cwd", str(nested_workdir),
             "--ruling", "x-511a",
         ],
     )
@@ -209,7 +214,7 @@ def test_send_ruling_unknown_node_refuses_before_mail(
         app,
         [
             "agents", "mail", "send", "worker-one",
-            "This ruling names no real node.", "--from-name", "king",
+            "This ruling names no real node.", "--from-name", "lead",
             "--ruling", "x-dead",
         ],
     )
@@ -416,7 +421,11 @@ def test_project_anycast_send_delivers_repeated_bodies_without_a_ledger(runner, 
     second = runner.invoke(app, args)
 
     assert first.exit_code == 0, first.output
-    assert "queued (durable) for project web" in first.stdout
+    import json as _json
+
+    receipt = _json.loads(first.stdout.strip())
+    assert receipt["to"] == "web"
+    assert "queued (durable)" in receipt["status"]
     assert second.exit_code == 0, second.output
     assert not (paths.bus_dir() / "word-budget").exists()
 
@@ -1274,7 +1283,9 @@ def test_project_send_no_peer_warns_deferred(runner, mailbox):
         app, ["mail", "send", "--to-project", "web", "--from-name", "etl", "quiet?"]
     )
     assert res.exit_code == 0, res.output
-    assert "queued (durable) for project web" in res.stdout
+    receipt = json.loads(res.stdout.strip())
+    assert receipt["to"] == "web"
+    assert "queued (durable)" in receipt["status"]
     assert "project inbox web has no live drain" in (res.stderr or "")
 
 

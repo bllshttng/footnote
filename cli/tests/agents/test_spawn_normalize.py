@@ -244,7 +244,7 @@ def test_value_flag_values_are_never_counted_as_positionals():
     for flag, value in (
         ("--route", "zai,glm-5.2"),
         ("--account", "readyrule"),
-        ("--crown", "level=1,scope=x-1234"),
+        ("--promote", "level=1,scope=x-1234"),
     ):
         out = _norm(["spawn", flag, value, "do the thing"])
         assert out[1] == "--name", f"{flag}: no name minted"

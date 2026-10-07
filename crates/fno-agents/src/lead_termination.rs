@@ -12,7 +12,7 @@ pub(crate) struct LeadManifest {
     /// The teamed session the manifest names; `lead_state`'s split read keys
     /// on it. Empty on manifests written before identity fields existed.
     pub(crate) harness_session_id: Option<String>,
-    /// The harness that teamed this scope, written at coronation
+    /// The harness that teamed this scope, written at promotion
     /// (`FNO_HARNESS`, default `claude`); absent on manifests written before
     /// the field existed.
     pub(crate) harness: Option<String>,

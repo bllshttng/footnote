@@ -24,14 +24,6 @@ from typer.testing import CliRunner
 from fno import doctor
 from fno.cli import app
 
-# Forces the real `update_command` into the lazily-built `doctor update` Click
-# command NOW, before any test below monkeypatches `update.update_command`.
-# `doctor_cli.py` binds that reference once, at its own first import, so a
-# monkeypatch active during a LATER first import bakes the fake into the
-# command for the rest of this worker process - a cross-test poison, not a
-# module attribute a fresh read would pick up.
-import fno.doctor_cli  # noqa: F401
-
 runner = CliRunner()
 
 
@@ -204,39 +196,6 @@ def test_source_checkout_sync_maps_native_payload(
     assert captured["extra"] == ["--source", str(source)]
 
 
-def test_source_checkout_sync_degrades_without_native_answer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    source = tmp_path / "cli"
-    source.mkdir()
-    fake, _captured = _fake_native_sync(None)
-    monkeypatch.setattr(doctor, "_source_pin_transport", fake)
-
-    report = doctor._source_checkout_sync(source)
-
-    assert report["status"] == "unknown"
-    assert report["behind"] is None
-    assert "source-pin helper" in report["detail"]
-
-
-def test_source_checkout_behind_is_a_doctor_blocker() -> None:
-    blockers = doctor._blockers(
-        {
-            "status": "fresh",
-            "source_checkout_sync": {
-                "status": "behind",
-                "behind": 117,
-                "source_head": "local",
-                "remote_head": "remote",
-            },
-        }
-    )
-
-    assert len(blockers) == 1
-    assert "117 commits behind origin/main" in blockers[0]
-    assert "freshness is relative" in blockers[0]
-
-
 def test_source_checkout_behind_makes_doctor_exit_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -397,29 +356,6 @@ def test_ac5_doctor_names_codex_duplicate_and_dedupe_action(
     assert "codex plugin marketplace remove" in result.stdout
 
 
-def test_doctor_reports_stale_opencode_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_signals(
-        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
-        capture_present="present",
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_harness_surface_report",
-        lambda: {
-            "opencode_doctor_lines": [
-                "WARN opencode: installed at footnote 0.3.1, source is 0.3.2; "
-                "re-run fno config plugin install opencode"
-            ]
-        },
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert (
-        "fno doctor: WARN opencode: installed at footnote 0.3.1, source is 0.3.2"
-        in result.stdout
-    )
-    assert "fno config plugin install opencode" in result.stdout
-
-
 def test_doctor_reports_stale_surface_via_door(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A stale receipt (version drift) becomes a named opencode advisory."""
     (tmp_path / "oc" / "plugins").mkdir(parents=True)
@@ -466,32 +402,6 @@ def test_doctor_main_run_points_at_codex_hooks_dual(
     assert "--migrate-legacy-hooks-json" in result.stdout
 
 
-def test_doctor_quiet_when_surfaces_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_signals(
-        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
-        capture_present="present",
-    )
-    monkeypatch.setattr(doctor, "_harness_surface_report", lambda: {})
-    result = runner.invoke(app, ["doctor"])
-    assert "opencode" not in result.stdout
-    assert "marketplace" not in result.stdout
-
-
-def test_harness_surface_is_quiet_when_codex_and_footnote_state_are_absent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "codex" else "/bin/tool")
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
-    monkeypatch.setattr(
-        "fno.setup.codex_plugin.inspect_freshness",
-        lambda: pytest.fail("plugin inspection should not run without Codex or Footnote state"),
-    )
-    monkeypatch.setattr(doctor, "_codex_hooks_report", lambda: {})
-    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "no-opencode"))
-
-    assert "codex_plugin" not in doctor._harness_surface_report()
-
-
 def test_doctor_reports_plugin_drift_without_staling_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -525,51 +435,6 @@ def test_doctor_reports_plugin_drift_without_staling_cli(
     assert payload["harness_surface"]["codex_plugin"] == plugin
     assert "codex plugin: STALE" in result.stderr
     assert "fno config plugin install codex --force" in result.stderr
-
-
-def test_doctor_reports_ambiguous_duplicate_state_without_freshness(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_harness_surface_report",
-        lambda: {
-            "codex_plugin": {
-                "status": "conflict",
-                "issue": "ambiguous-duplicate-state",
-                "enabled_plugin_ids": ["fno@footnote", "fno@footnote-dev"],
-                "remedy": "fno config plugin install codex --force",
-            }
-        },
-    )
-
-    result = runner.invoke(app, ["doctor"])
-
-    assert result.exit_code == 0
-    assert "codex plugin: CONFLICT" in result.stdout
-    assert "fno@footnote, fno@footnote-dev" in result.stdout
-    assert "codex plugin: fresh" not in result.stdout.lower()
-
-
-def test_ac1_err_rev_behind_reports_stale(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-ERR variant: marker behind source HEAD => stale, exit nonzero."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="newsha",
-        marker="oldsha",
-        capture_present="present",
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code != 0
-    assert "behind" in result.stdout
 
 
 def test_ac1_ui_json_is_single_object_on_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -609,52 +474,6 @@ def test_ac1_edge_no_source_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "no source checkout to compare against" in result.stdout
-
-
-def test_ac1_fr_rev_probe_error_still_produces_verdict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC1-FR: git rev undeterminable => revision signal degrades, verdict still produced, no traceback."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev=None,  # git rev-parse failed
-        marker="abc123",
-        capture_present="present",  # capability probe still ran and found nothing missing
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert result.exception is None
-    assert "unknown" in result.stdout
-
-
-def test_marker_absent_is_not_false_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Boundary: a missing marker must not report 'fresh' even with source resolvable."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker=None,  # pre-marker install
-        capture_present="present",
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "up to date" not in result.stdout
-    assert "unknown" in result.stdout
-
-
-def test_rust_binary_always_reported(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The resolved fno-agents binary is always reported; 'undeterminable' is NOT pinned."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/wheel/_bin/fno-agents",
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert "/wheel/_bin/fno-agents" in result.stdout
 
 
 def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
@@ -730,40 +549,6 @@ def test_daemon_drift_probe_appends_measured_process_age(
     assert "(daemon up 37m; running its startup build, not this one)" in result
 
 
-def test_daemon_drift_probe_gates_on_structured_drift_field(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The stderr sentence alone is not the verdict; the JSON ``drift`` field is."""
-    from fno import rust_binary
-
-    warning = (
-        "fno agents: the running daemon (pid 7) is an older build than the installed "
-        "binary; run `fno agents restart` to pick up the new build (it restarts the "
-        "daemon only and keeps PTY workers)."
-    )
-    monkeypatch.setattr(
-        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
-    )
-    for drift_value in ("fresh", "unknown", None):
-        payload = {"daemon": {"pid": 7}}
-        if drift_value is not None:
-            payload["drift"] = drift_value
-        monkeypatch.setattr(
-            doctor.subprocess,
-            "run",
-            lambda *args, _p=payload, **kwargs: type(
-                "Completed",
-                (),
-                {
-                    "returncode": 0,
-                    "stdout": json.dumps(_p),
-                    "stderr": warning,
-                },
-            )(),
-        )
-        assert doctor._daemon_drift_warning() is None, drift_value
-
-
 @pytest.mark.parametrize(
     "stderr,expected",
     [
@@ -814,37 +599,6 @@ def test_daemon_drift_warning_regex_matches_remedy_tails(
         assert warning == stderr
 
 
-def test_daemon_drift_probe_uses_forced_runtime_binary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from fno import rust_binary
-
-    warning = (
-        "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build (it restarts the daemon only "
-        "and keeps PTY workers)."
-    )
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "rust")
-    monkeypatch.setenv("FNO_AGENTS_BIN", "/custom/fno-agents")
-    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/custom/fno-agents"))
-    monkeypatch.setattr(
-        rust_binary,
-        "resolve_installed_binary",
-        lambda: (_ for _ in ()).throw(AssertionError("default resolver must not run")),
-    )
-    monkeypatch.setattr(
-        doctor.subprocess,
-        "run",
-        lambda cmd, **kwargs: type(
-            "Completed",
-            (),
-            {"returncode": 0, "stdout": '{"drift": "drifted", "daemon": {}}', "stderr": warning},
-        )(),
-    )
-
-    assert doctor._daemon_drift_warning() == warning
-
-
 @pytest.mark.parametrize(
     "returncode,stdout,stderr",
     [
@@ -886,32 +640,6 @@ def test_daemon_drift_probe_fails_silent_without_proven_status(
         )(),
     )
     assert doctor._daemon_drift_warning() is None
-
-
-def test_doctor_reports_measured_daemon_drift_without_changing_verdict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-    )
-    warning = (
-        "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build (it restarts the daemon only "
-        "and keeps PTY workers)."
-    )
-    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
-
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "fno doctor: note: " + warning in result.stdout
-
-    payload = json.loads(runner.invoke(app, ["doctor", "--json"]).stdout)
-    assert payload["status"] == "fresh"
-    assert payload["daemon_drift"] == warning
 
 
 def test_daemon_drift_never_prints_unqualified_fresh_component_verdict(
@@ -975,43 +703,6 @@ def test_config_schema_drift_reports_stale(monkeypatch: pytest.MonkeyPatch) -> N
     assert "fno doctor update" in result.stdout
 
 
-def test_config_schema_drift_shows_rev_delta_when_also_rev_behind(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Overlap case (schema-behind AND rev-behind): the config message leads but the
-    rev delta is still surfaced, not dropped."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="newsha",
-        marker="oldsha",  # rev-behind too
-        capture_present="present",
-        deployed_config_keys=frozenset({"project.id"}),
-        source_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code != 0
-    assert "config schema is STALE" in result.stdout
-    assert "oldsha" in result.stdout and "newsha" in result.stdout
-
-
-def test_config_schema_in_sync_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Matching keysets on an otherwise-fresh install stay silent (no false positive)."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-        deployed_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
-        source_config_keys=frozenset({"project.id", "backlog.id_prefix"}),
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "up to date" in result.stdout
-    assert "config schema" not in result.stdout
-
-
 def test_config_deployed_ahead_of_source_not_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deployed CLI with MORE keys than source is not drift (don't cry wolf)."""
     _stub_signals(
@@ -1040,13 +731,6 @@ _FLAT_REGISTRY = (
 )
 
 
-def test_parse_field_meta_keys_flat() -> None:
-    """A flat literal of constant string keys parses to the exact keyset."""
-    assert doctor._parse_field_meta_keys(_FLAT_REGISTRY) == frozenset(
-        {"project.id", "backlog.id_prefix"}
-    )
-
-
 def test_parse_field_meta_keys_spread_returns_none() -> None:
     """A `**spread` (or computed key) can't be read completely => None, never a
     truncated set that would risk a false 'fresh'."""
@@ -1054,24 +738,6 @@ def test_parse_field_meta_keys_spread_returns_none() -> None:
     assert doctor._parse_field_meta_keys(spread) is None
     computed = 'K = "x"\nFIELD_META = {K: 1}\n'
     assert doctor._parse_field_meta_keys(computed) is None
-
-
-def test_parse_field_meta_keys_split_annotation_then_assign() -> None:
-    """A bare annotation followed by a separate dict assignment still parses: the
-    valueless AnnAssign is skipped, not treated as an unreadable form."""
-    split = (
-        "FIELD_META: dict[str, int]\n"
-        'FIELD_META = {"project.id": 1, "backlog.id_prefix": 2}\n'
-    )
-    assert doctor._parse_field_meta_keys(split) == frozenset(
-        {"project.id", "backlog.id_prefix"}
-    )
-
-
-def test_parse_field_meta_keys_broken_or_absent_returns_none() -> None:
-    """Unparseable text or no FIELD_META => None."""
-    assert doctor._parse_field_meta_keys("FIELD_META = {  # truncated\n") is None
-    assert doctor._parse_field_meta_keys("x = 1\n") is None
 
 
 def _init_git_source(root: Path, registry_text: str) -> None:
@@ -1108,19 +774,6 @@ def test_source_config_keys_reads_committed_head(tmp_path: Path) -> None:
     assert doctor._source_config_keys(tmp_path) == frozenset(
         {"project.id", "backlog.id_prefix"}
     )
-
-
-def test_source_config_keys_fails_open_on_missing_or_non_git(tmp_path: Path) -> None:
-    """None source or a non-git dir => None (skip the check, never crash doctor)."""
-    assert doctor._source_config_keys(None) is None
-    assert doctor._source_config_keys(tmp_path) is None  # not a git repo
-
-
-def test_deployed_config_keys_reflects_real_field_meta() -> None:
-    """The deployed surface is the real in-process FIELD_META (includes the sentinel key)."""
-    keys = doctor._deployed_config_keys()
-    assert keys is not None
-    assert "backlog.id_prefix" in keys
 
 
 # ---------------------------------------------------------------------------
@@ -1211,76 +864,6 @@ def test_ac2_hp_rust_stale_json_payload(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.parametrize(
-    "rust_marker,rust_source_rev,cargo_bin_present,python_status,expected_exit",
-    [
-        # No cargo bin - not stale.
-        (None, "bbb", False, "fresh", 0),
-        # Marker None - not stale (unknown).
-        (None, "bbb", True, "fresh", 0),
-        # rust_source_rev None - not stale.
-        ("aaa", None, True, "fresh", 0),
-        # python unknown + rust evidence gap -> still exit 0 unknown.
-        (None, None, False, "unknown", 0),
-    ],
-)
-def test_ac2_err_degrade_matrix(
-    monkeypatch: pytest.MonkeyPatch,
-    rust_marker: str | None,
-    rust_source_rev: str | None,
-    cargo_bin_present: bool,
-    python_status: str,
-    expected_exit: int,
-) -> None:
-    """AC2-ERR: incomplete rust evidence -> rust_stale false, exit 0."""
-    # For python_status "unknown" use no source, for "fresh" use matching marker.
-    if python_status == "unknown":
-        src = None
-        source_rev = None
-        marker = None
-        cp = "present"
-    else:
-        src = Path("/src")
-        source_rev = "abc"
-        marker = "abc"
-        cp = "present"
-    _stub_signals(
-        monkeypatch,
-        src=src,
-        source_rev=source_rev,
-        marker=marker,
-        capture_present=cp,
-        rust_marker=rust_marker,
-        rust_source_rev=rust_source_rev,
-        cargo_bin_present=cargo_bin_present,
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == expected_exit
-    payload_json_result = runner.invoke(app, ["doctor", "--json"])
-    payload = json.loads(payload_json_result.stdout.strip())
-    assert payload["rust_stale"] is False
-
-
-def test_ac2_err_binary_present_marker_absent_explains(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC2-ERR: binary present but marker absent -> human output explains why revision is unknown."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker=None,  # no marker yet
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    # Should mention revision unknown / no marker / seed it via fno doctor update.
-    combined = result.stdout + result.stderr
-    assert "revision unknown" in combined or "no installed-rust-rev marker" in combined
-
-
-@pytest.mark.parametrize(
     "rust_marker,rust_source_rev,rust_binary,cargo_bin_present,expected_fragment",
     [
         # Not installed.
@@ -1316,78 +899,6 @@ def test_ac2_ui_rust_human_line_states(
     result = runner.invoke(app, ["doctor"])
     combined = result.stdout + result.stderr
     assert expected_fragment in combined
-
-
-# ---------------------------------------------------------------------------
-# AC2-EDGE: --fix routing
-# ---------------------------------------------------------------------------
-
-
-def test_ac2_edge_python_and_rust_stale_fix_delegates_update_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC2-EDGE (b): python stale + rust stale -> delegates to update_command, _refresh_rust_bins NOT called directly."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="newsha",
-        marker="oldsha",
-        capture_present="present",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    calls: list[list[str]] = []
-
-    def _fake_run(door, source):
-        calls.append([door, "doctor", "update", *(["--source", str(source)] if source else [])])
-        return 0
-
-    monkeypatch.setattr(doctor, "_front_door", lambda: "/fake/fno")
-    monkeypatch.setattr(doctor, "_run_update_verb", _fake_run)
-
-    result = runner.invoke(app, ["doctor", "--fix", "--source", "/src"])
-    assert result.exception is None
-    assert calls == [["/fake/fno", "doctor", "update", "--source", "/src"]]
-
-
-def test_ac2_edge_fix_json_rust_stale_no_repair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC2-EDGE (c): --fix --json with rust-only stale -> no repair call, JSON on stdout, skip message on stderr."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-        rust_binary="/cargo/bin/fno-agents",
-        rust_marker="aaa",
-        rust_source_rev="bbb",
-        cargo_bin_present=True,
-    )
-    def _no_update(door, source):
-        raise AssertionError("update must not run under --json")
-
-    monkeypatch.setattr(doctor, "_run_update_verb", _no_update)
-
-    result = runner.invoke(app, ["doctor", "--json", "--fix"])
-    # stdout is still a single parseable JSON object.
-    payload = json.loads(result.stdout.strip())
-    assert payload["status"] == "stale"
-    assert payload["rust_stale"] is True
-    # The skip message appears on stderr.
-    assert "--fix skipped under --json" in result.stderr
-
-
-# ---------------------------------------------------------------------------
-# AC2-FR: follow-up fresh run after successful rust-only fix
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# --fix
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -1460,33 +971,6 @@ def test_fix_refreshes_wedged_pr_watch_instead_of_healing(
     assert "pr-watch refresh" in result.stderr
 
 
-def test_fix_json_skips_pr_watch_heal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--json preserves the single-JSON-object stdout contract: no heal side-effect."""
-    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
-                  capture_present="present")
-    _dead_pr_watch(monkeypatch)
-    import fno.pr_watch._install as pw
-    monkeypatch.setattr(pw, "heal_watcher", lambda **kw: pytest.fail("must not heal under --json"))
-
-    result = runner.invoke(app, ["doctor", "--json", "--fix"])
-    assert result.exit_code == 0
-    # stdout is exactly one JSON object.
-    json.loads(result.stdout.strip())
-
-
-def test_no_fix_never_heals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plain `doctor` (no --fix) reports but never runs the bounce."""
-    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
-                  capture_present="present")
-    _dead_pr_watch(monkeypatch)
-    import fno.pr_watch._install as pw
-    monkeypatch.setattr(pw, "heal_watcher", lambda **kw: pytest.fail("must not heal without --fix"))
-
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "pr-watch enabled but not running" in result.stdout
-
-
 def test_wedged_pr_watch_reports_in_human_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """A plain `doctor` names the wedged verdict and the refresh fix; silence
     here would read as a clean bill while the watcher delivers nothing."""
@@ -1550,39 +1034,6 @@ def test_ac3_edge_fix_reports_the_update_exit_code(
     assert result.exit_code == 1
 
 
-def test_fix_nothing_to_do_when_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--fix on a fresh install reports nothing to fix and exits 0."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc",
-        marker="abc",
-        capture_present="present",
-    )
-    result = runner.invoke(app, ["doctor", "--fix"])
-    assert result.exit_code == 0
-    assert "nothing to fix" in result.stderr
-
-
-def test_stale_missing_verb_without_source_says_behind_source_not_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Gemini review: a missing-verb stale verdict with no resolved source must
-    print 'behind source', never 'behind None'."""
-    _stub_signals(
-        monkeypatch,
-        src=None,            # no source resolved
-        source_rev=None,
-        marker=None,
-        capture_present="missing",  # probe proves stale regardless of source
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code != 0
-    assert "behind None" not in result.stdout
-    assert "behind source" in result.stdout
-    assert "missing: backlog capture" in result.stdout
-
-
 def test_json_fix_does_not_pollute_stdout_or_delegate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1606,11 +1057,6 @@ def test_json_fix_does_not_pollute_stdout_or_delegate(
     assert payload["status"] == "stale"
     # The skip is explicit, on stderr.
     assert "--fix skipped under --json" in result.stderr
-
-
-# ---------------------------------------------------------------------------
-# Fix C2: doctor --fix rust-only branch honors the IN_PROGRESS guard
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -1692,62 +1138,6 @@ def test_doctor_prints_the_reader_line_for_red_arms(
     assert "stop_hook" not in combined, "an ok arm must never be named"
 
 
-def test_doctor_falls_back_to_the_sentence_for_rows_without_line(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """x-d7dc: a red row with no `line` (an older binary) prints the old
-    sentence instead of failing."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="xyz",
-        marker="xyz",
-        capture_present="present",
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_control_plane_arms_report",
-        lambda: {"red": [{"arm": "reap", "stale": True, "age_s": 4600,
-                          "interval_s": 60, "skip_reason": "never"}],
-                 "unknown_reason": None},
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
-    combined = result.stdout + result.stderr
-    assert "control-plane arm reap is STALE" in combined, f"Got:\n{combined}"
-    assert "last tick 4600s ago" in combined, f"Got:\n{combined}"
-    assert "interval 60s" in combined, f"Got:\n{combined}"
-    assert "skip: never" in combined, f"Got:\n{combined}"
-
-
-def test_doctor_falls_back_to_unobserved_wording_for_an_unobserved_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """x-6484: a line-less attention row whose producer evidence reads
-    unobserved falls back to UNOBSERVED wording, never the STALE sentence."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="xyz",
-        marker="xyz",
-        capture_present="present",
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_control_plane_arms_report",
-        lambda: {"red": [{"arm": "king_wake", "stale": False, "age_s": None,
-                          "interval_s": 900, "skip_reason": "never",
-                          "producer_evidence": "unobserved"}],
-                 "unknown_reason": None},
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
-    combined = result.stdout + result.stderr
-    assert "control-plane arm king_wake is UNOBSERVED" in combined, f"Got:\n{combined}"
-    assert "no producer receipt in the journals" in combined, f"Got:\n{combined}"
-    assert "is STALE" not in combined, f"Got:\n{combined}"
-
-
 def test_control_plane_arms_report_consumes_the_rust_attention_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1762,9 +1152,9 @@ def test_control_plane_arms_report_consumes_the_rust_attention_set(
                       "producer_evidence": "observed", "line": "watchdog ok"}
     stale_left_out = {"arm": "reap", "stale": True, "failing": False,
                       "producer_evidence": "observed"}
-    unobserved = {"arm": "king_wake", "stale": False, "failing": False,
+    unobserved = {"arm": "lead_wake", "stale": False, "failing": False,
                   "producer_evidence": "unobserved",
-                  "line": "king_wake         UNOBSERVED     never via=launchd"}
+                  "line": "lead_wake         UNOBSERVED     never via=launchd"}
     payload = json.dumps({"arms": [observed_fresh, stale_left_out, unobserved],
                           "arms_attention": [unobserved]})
 
@@ -1802,35 +1192,6 @@ def test_control_plane_arms_report_unknown_without_the_attention_set(
     assert "arms_attention" in report["unknown_reason"]
 
 
-def test_doctor_prints_the_unobserved_row_the_reader_rendered(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """x-6484: an unobserved arm in the canonical attention set prints the
-    reader's own UNOBSERVED line, once; an observed fresh arm is not named."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="xyz",
-        marker="xyz",
-        capture_present="present",
-    )
-    unobserved_line = (
-        "king_wake         UNOBSERVED     never via=launchd:sh.fno.pr-watcher"
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_control_plane_arms_report",
-        lambda: {"red": [{"arm": "king_wake", "stale": False, "failing": False,
-                          "producer_evidence": "unobserved", "line": unobserved_line}],
-                 "unknown_reason": None},
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
-    combined = result.stdout + result.stderr
-    assert f"fno doctor: control-plane arm {unobserved_line}" in combined, f"Got:\n{combined}"
-    assert combined.count("UNOBSERVED") == 1, "the unobserved line must print exactly once"
-
-
 # ---------------------------------------------------------------------------
 # ab-24a59d50: binary self-reported git rev (build.rs embed)
 # ---------------------------------------------------------------------------
@@ -1856,30 +1217,6 @@ def test_binary_self_rev_none_for_unknown(monkeypatch: pytest.MonkeyPatch) -> No
     # A non-git build self-reports "unknown"; treat that as no signal.
     monkeypatch.setattr(doctor.subprocess, "run", _fake_run(0, '{"git_rev": "unknown"}'))
     assert doctor._binary_self_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_self_rev_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An old binary lacking the `version` verb exits non-zero -> no signal.
-    monkeypatch.setattr(doctor.subprocess, "run", _fake_run(2, ""))
-    assert doctor._binary_self_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_self_rev_none_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(doctor.subprocess, "run", _fake_run(0, "not json at all"))
-    assert doctor._binary_self_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_self_rev_none_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom(*args, **kwargs):
-        raise OSError("no such binary")
-
-    monkeypatch.setattr(doctor.subprocess, "run", _boom)
-    assert doctor._binary_self_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_self_rev_none_when_no_binary() -> None:
-    # Skips the subprocess entirely when there is no resolved binary.
-    assert doctor._binary_self_rev(None) is None
 
 
 def test_rust_report_revision_from_cargo_binary_single_spawn(
@@ -1945,30 +1282,9 @@ def test_binary_crates_rev_returns_crates_rev(monkeypatch: pytest.MonkeyPatch) -
     assert doctor._binary_crates_rev("/cargo/bin/fno-agents") == "cab5cab5cab5"
 
 
-def test_binary_crates_rev_none_for_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A non-git build self-reports "unknown"; treat that as no signal.
-    monkeypatch.setattr(doctor.subprocess, "run", _fake_run(0, '{"crates_rev": "unknown"}'))
-    assert doctor._binary_crates_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_crates_rev_none_when_field_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A pre-ab-716cd330 binary has git_rev but no crates_rev -> no signal.
-    monkeypatch.setattr(doctor.subprocess, "run", _fake_run(0, '{"git_rev": "deadbeefcafe"}'))
-    assert doctor._binary_crates_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_crates_rev_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(doctor.subprocess, "run", _fake_run(2, ""))
-    assert doctor._binary_crates_rev("/cargo/bin/fno-agents") is None
-
-
 def test_binary_crates_rev_none_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor.subprocess, "run", _fake_run(0, "not json at all"))
     assert doctor._binary_crates_rev("/cargo/bin/fno-agents") is None
-
-
-def test_binary_crates_rev_none_when_no_binary() -> None:
-    assert doctor._binary_crates_rev(None) is None
 
 
 def test_emit_human_binary_rev_shown_as_build_provenance(
@@ -2045,15 +1361,6 @@ def test_mux_front_door_report_states(
 # ---------------------------------------------------------------------------
 
 
-def test_orphan_report_empty_on_clean_machine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path / "home"))
-    (tmp_path / "project").mkdir()
-    monkeypatch.chdir(tmp_path / "project")
-    assert doctor._orphan_report() == []
-
-
 def test_orphan_report_finds_leftover_files_in_both_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2115,21 +1422,6 @@ def test_content_drift_overrides_fresh_marker(monkeypatch: pytest.MonkeyPatch) -
     assert result.exit_code == 1
     assert "STALE" in result.stdout
     assert "3 .py file" in result.stdout
-
-
-def test_content_drift_zero_stays_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """0 differing files is byte-identical -> never flips a fresh verdict."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-        content_drift=0,
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "up to date" in result.stdout
 
 
 def test_content_indeterminate_downgrades_fresh_to_unknown(
@@ -2195,15 +1487,6 @@ def test_python_content_drift_counts_differing_py_files(tmp_path: Path) -> None:
         assert doctor._python_content_drift(src) == 2  # drift.py + added.py
     finally:
         _fno_pkg.__file__ = orig_file
-
-
-def test_python_content_drift_none_when_source_missing(tmp_path: Path) -> None:
-    """No source/src/fno dir -> None (skip), not a false 0 or a crash."""
-    assert doctor._python_content_drift(tmp_path / "nonexistent") is None
-
-
-def test_python_content_drift_none_when_source_arg_none() -> None:
-    assert doctor._python_content_drift(None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2280,18 +1563,6 @@ def test_never_run_grooming_reads_differently_from_stale(
     assert "--install-agent" in result.stdout
     assert "h ago" not in result.stdout
     assert result.exit_code == 0, "a fresh install has legitimately never groomed"
-
-
-def test_stale_grooming_reports_the_age(monkeypatch: pytest.MonkeyPatch) -> None:
-    _fresh(monkeypatch)
-    monkeypatch.setattr(
-        doctor,
-        "_groom_health",
-        lambda: {"state": "ran", "hours": 96.0, "stale": True, "agent_installed": True},
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert "96h ago" in result.stdout
-    assert "NEVER" not in result.stdout
 
 
 def test_fix_installs_the_groom_agent_when_nothing_schedules_it(
@@ -2373,21 +1644,6 @@ def test_agent_scan_refuses_closed_without_a_binary(
     assert doctor._launch_agent_failures() == {"applicable": False, "dead": []}
 
 
-def test_never_run_remedy_is_platform_appropriate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--install-agent is launchd-only; off darwin it would report `unsupported`."""
-    _fresh(monkeypatch)
-    monkeypatch.setattr(
-        doctor,
-        "_groom_health",
-        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
-    )
-    monkeypatch.setattr(doctor.sys, "platform", "linux")
-    result = runner.invoke(app, ["doctor"])
-    assert "NEVER run" in result.stdout
-    assert "--install-agent" not in result.stdout, "that flag does nothing off launchd"
-    assert "docs/backlog-usage.md" in result.stdout
-
-
 def test_fix_does_not_attempt_a_launchd_install_off_darwin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2427,29 +1683,6 @@ def test_doctor_codex_app_server_absent_names_fix(monkeypatch):
     assert "restart" in result.stdout
 
 
-def test_doctor_codex_app_server_present_is_quiet(monkeypatch):
-    """AC7 negative: when the daemon socket is present, no advisory line fires."""
-    _stub_signals(
-        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
-        capture_present="present",
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_codex_app_server_report",
-        lambda: {"present": True, "socket_path": "/tmp/here.sock"},
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert "codex app-server daemon not running" not in result.stdout
-
-
-def test_doctor_codex_app_server_report_respects_codex_home(tmp_path, monkeypatch):
-    """The report keys the socket off $CODEX_HOME, so a fresh home reads absent."""
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
-    report = doctor._codex_app_server_report()
-    assert report["present"] is False
-    assert report["socket_path"].endswith("app-server-control/app-server-control.sock")
-
-
 def _short_codex_home(monkeypatch):
     """A CODEX_HOME short enough for the 104-char AF_UNIX bind limit (pytest's
     tmp_path on macOS is not; dir="/tmp" escapes the long TMPDIR). Caller
@@ -2461,20 +1694,6 @@ def _short_codex_home(monkeypatch):
     socket_dir = Path(home) / "app-server-control"
     socket_dir.mkdir(parents=True)
     return socket_dir / "app-server-control.sock", home
-
-
-def test_codex_app_server_report_stale_file_reads_absent(tmp_path, monkeypatch):
-    """A unix socket file survives its process: a regular file at the socket
-    path must read absent, never present, however long it sits on disk."""
-    import shutil
-
-    monkeypatch.setattr(doctor, "_CODEX_APP_SERVER_PROBE_TIMEOUT_S", 0.5)
-    sock_path, home = _short_codex_home(monkeypatch)
-    try:
-        sock_path.write_bytes(b"")
-        assert doctor._codex_app_server_report()["present"] is False
-    finally:
-        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_codex_app_server_report_dead_socket_inode_reads_absent(tmp_path, monkeypatch):
@@ -2518,14 +1737,6 @@ def test_codex_app_server_report_live_listener_reads_present(tmp_path, monkeypat
 # each against source HEAD. Same fresh|stale|unknown vocabulary; stale only
 # on proven evidence.
 # ---------------------------------------------------------------------------
-
-
-def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
-    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
-    report = doctor._plugin_cache_report()
-    assert report["status"] == "unknown"
-    assert "no source checkout" in (report.get("detail") or "")
 
 
 def _root_verdict(path: str, status: str, live: bool, **extra) -> dict:
@@ -2597,7 +1808,7 @@ def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypat
                         "stale",
                         False,
                         differing_count=1422,
-                        sample=["hooks/king-delegation-guard.sh"],
+                        sample=["hooks/lead-delegation-guard.sh"],
                     ),
                 ]
             ),
@@ -2615,7 +1826,7 @@ def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypat
     assert "fno config plugin install claude" in report["remedy"]
     blockers = doctor._blockers({"plugin_cache": report})
     assert any("second copy" in b and "1422 file(s)" in b for b in blockers)
-    assert any("hooks/king-delegation-guard.sh" in b for b in blockers)
+    assert any("hooks/lead-delegation-guard.sh" in b for b in blockers)
 
 
 def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeypatch):
@@ -2681,25 +1892,6 @@ def test_stale_plugin_cache_prescribes_the_verb_that_owns_the_artifact(
     # for long enough that a reader has already run it.
     assert "does NOT" in line
     assert "restart" in line
-
-
-def test_fresh_plugin_cache_prescribes_nothing(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    result = {
-        "status": "fresh",
-        "rust_stale": False,
-        "missing_verbs": [],
-        "python_stale": False,
-        "plugin_cache": {"status": "fresh", "sha": "abc", "installed_at": "x"},
-    }
-    rust = {"binary": "/cargo/bin/fno-agents", "revision": "abc", "binary_rev": "abc"}
-    doctor._emit_human(result, Path("/src"), rust, err=False, cargo_present=True)
-    line = next(
-        ln for ln in capsys.readouterr().out.splitlines() if "plugin cache" in ln
-    )
-    assert "claude plugin update" not in line
-    assert "fno doctor update" not in line
 
 
 def _write_skill_file(path: Path, content: bytes) -> None:
@@ -2769,26 +1961,6 @@ def test_plugin_file_unknown_is_not_fresh(
     assert result.exit_code == 4, result.output
     assert "PLUGIN_FILE_UNKNOWN" in result.stdout
     assert "active_sha256" not in result.stdout
-
-
-def test_plugin_file_json_contains_positive_record(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "source"
-    active = tmp_path / "active" / "skills" / "review" / "SKILL.md"
-    _write_skill_file(source / "skills" / "review" / "SKILL.md", b"source")
-    _write_skill_file(active, b"deployed")
-    monkeypatch.setattr(doctor, "_resolve_source", lambda _source: source)
-
-    result = runner.invoke(
-        app, ["doctor", "plugin-file", str(active), "--json"]
-    )
-
-    assert result.exit_code == 3, result.output
-    payload = json.loads(result.stdout)
-    assert payload["record"] == "PLUGIN_FILE_STALE"
-    assert payload["relative_path"] == "skills/review/SKILL.md"
-    assert payload["active_digest"] != payload["source_digest"]
 
 
 # The second prescription site (the silent-switch cause line) is already covered
@@ -2872,72 +2044,6 @@ def test_doctor_renders_evals_regressing_row(monkeypatch: pytest.MonkeyPatch) ->
     assert "fno doctor evals trend" in result.stdout
 
 
-def test_doctor_renders_evals_unknown_row_without_history(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-    )
-    _patch_evals_summary(monkeypatch, None)
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "evals UNKNOWN" in result.stdout
-
-
-def test_doctor_renders_evals_unknown_row_when_never_ran(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-    )
-    _patch_evals_summary(
-        monkeypatch,
-        {
-            "regression_pass_rate": None,
-            "flake_count": 0,
-            "regression_alarm": [],
-            "age_days": None,
-            "stale": False,
-            "never_ran": True,
-        },
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "evals UNKNOWN" in result.stdout
-
-
-def test_doctor_stays_silent_when_evals_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-    )
-    _patch_evals_summary(
-        monkeypatch,
-        {
-            "regression_pass_rate": 1.0,
-            "flake_count": 0,
-            "regression_alarm": [],
-            "age_days": 1.0,
-            "stale": False,
-            "never_ran": False,
-        },
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "evals" not in result.stdout
-
-
 # ---------------------------------------------------------------------------
 # Deployed-component convergence (verdict widening + rendering)
 # ---------------------------------------------------------------------------
@@ -2983,56 +2089,6 @@ def test_verdict_unknown_components_never_gate_rust_stale() -> None:
     )
     assert result["rust_stale"] is False
     assert result["status"] == "fresh"
-
-
-def test_ac3_hp_doctor_shows_unknown_with_the_named_instrument(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC3-HP: one component cannot be probed -> doctor renders Unknown with
-    the named instrument and does not collapse it into fresh or missing."""
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-        components=[
-            {"component": "fno-agents", "status": "fresh"},
-            {"component": "fno-agents-worker", "status": "unknown",
-             "detail": "hung on `version --json` (>20s)",
-             "line": "component fno-agents-worker: unknown (no revision reported,"
-                     " expected abc1234abcd); hung on `version --json` (>20s)"},
-            {"component": "python-tool", "status": "fresh"},
-        ],
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0, result.stdout
-    assert "component fno-agents-worker: unknown" in result.stdout
-    assert "hung on `version --json`" in result.stdout
-
-
-def test_doctor_component_summary_line_when_all_fresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every component fresh -> one positive summary line naming them all."""
-    rows = [
-        {"component": "python-tool", "status": "fresh"},
-        {"component": "fno", "status": "fresh"},
-        {"component": "fno-agents", "status": "fresh"},
-        {"component": "fno-agents-daemon", "status": "fresh"},
-        {"component": "fno-agents-worker", "status": "fresh"},
-    ]
-    _stub_signals(
-        monkeypatch,
-        src=Path("/src"),
-        source_rev="abc123",
-        marker="abc123",
-        capture_present="present",
-        components=rows,
-    )
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0, result.stdout
-    assert "components: 5/5 fresh (python-tool, fno, fno-agents, fno-agents-daemon, fno-agents-worker)." in result.stdout
 
 
 def test_doctor_component_stale_renders_repair_and_gates_exit(

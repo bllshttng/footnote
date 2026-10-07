@@ -38,7 +38,7 @@ from fno.harness_identity import claude_transport_short_id
 #   75-77, 79   capacity refusals, both gates (queue, no-wait, RAM, load)
 #   78          provider cap; the quota lock and the lane faults keep it so
 #               exit-code consumers are unaffected
-#   80, 81      king share, registry schema
+#   80, 81      lead share, registry schema
 #   82, 83      fleet incident stop pair, both gates (byte-parity)
 #   84          state root ungranted. Permanent until a human grants.
 #   85          Python sandbox probe: sandbox unreachable.
@@ -221,7 +221,7 @@ class LiveWorker:
     #: above keeps the RECORDED pid, which for a bg row names the PTY HOST;
     #: cost readers (``agents top``, the process-cost gate) must use this one.
     session_pid: Optional[int] = None
-    #: The session id of the KING that spawned this worker (W4): the
+    #: The session id of the LEAD that spawned this worker (W4): the
     #: row's ``spawned_by_session``, None for an operator-run or legacy row.
     #: Cost is attributed through this field so a shared ceiling can be
     #: divided without minting a second budget record.
@@ -245,8 +245,8 @@ class LiveCensus:
     fno_slot_workers: int = 0
     #: False when the registry read failed: share counts unknown, never zero.
     registry_readable: bool = True
-    #: Crowned sessions via court.crowned_sessions (LD1); the divisor.
-    crowned_sessions: set[str] = field(default_factory=set)
+    #: Promoted sessions via team.promoted_sessions (LD1); the divisor.
+    promoted_sessions: set[str] = field(default_factory=set)
     #: Worker rows per ``spawned_by_session``; None = the LD4 bucket.
     worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
 
@@ -421,16 +421,16 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
         # dedup below (— a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
-        # a crowned row divides the cap and pays no per-king tax.
-        if row.crown_level is None:
+        # a promoted row divides the cap and pays no per-lead tax.
+        if row.role_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             # Already shown as its roster row in the display union. That roster
-            # row carries no lineage of its own, so the KING the fno row
+            # row carries no lineage of its own, so the LEAD the fno row
             # attributes this cost to rides onto it here - without the backfill
             # the one view built to show ownership names '-' for exactly the
-            # rows the king-share gate counts (review finding).
+            # rows the lead-share gate counts (review finding).
             for shown in out.workers:
                 if shown.source == "claude" and shown.name == dedup_key:
                     shown.spawned_by = row.spawned_by_session
@@ -496,11 +496,11 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
 
-    # The divisor reads crowns through the court's own primitive (LD1/AC3).
+    # The divisor reads roles through the team's own primitive (LD1/AC3).
     if out.registry_readable:
-        from fno.agents.court import crowned_sessions
+        from fno.agents.team import promoted_sessions
 
-        out.crowned_sessions = crowned_sessions(rows)
+        out.promoted_sessions = promoted_sessions(rows)
     return out
 
 
@@ -953,7 +953,7 @@ def run_gate(
     :class:`GateRefused` (a SystemExit) on refusal/timeout.
 
     This is a TRANSPORT, not a second gate: the axes (fleet incident, schema,
-    quota lock, provider cap, CPU, slots, RAM, king share) are decided inside
+    quota lock, provider cap, CPU, slots, RAM, lead share) are decided inside
     ``crates/fno-agents/src/spawn_gate.rs``. This side carries the caller's
     identity and raw seed/phase inputs in, then carries refusal data out. The
     refusal event still emits from here (locked decision 5), so journal
@@ -963,7 +963,7 @@ def run_gate(
     # Set before the first branch that can refuse, so every refusal event in
     # this run names the spawn it refused (see _CURRENT_SPAWN).
     _CURRENT_SPAWN.set((name, substrate))
-    # The calling king's session id (W4), resolved through the same
+    # The calling lead's session id (W4), resolved through the same
     # self-identity source that stamps `spawned_by_session` onto the spawned
     # row, so the gate attributes a spawn exactly the way the row will.
     try:

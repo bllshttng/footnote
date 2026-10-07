@@ -1,12 +1,12 @@
 # The retro-interview prompt (canonical)
 
-The template an epic lead runs as a **standard post-epic org step** - epic complete (every wave merged), before final abdication. Load it from [Post-epic: interview the org](once.md#post-epic-interview-the-org).
+The template an epic lead runs as a **standard post-epic org step** - epic complete (every wave merged), before final departure. Load it from [Post-epic: interview the org](once.md#post-epic-interview-the-org).
 
 This is the ceremony the synthesis marked `ADD`: the retro interviews were the best-performing ritual of that evening, yet they were not a ceremony at all - the maintainer hand-asked the Director to interview each builder and had to prod with follow-ups carrying the dogfooding lens. The lens is now baked in, so the interview fires without human prodding. The output turns one epic's chaos into filed, mechanism-bearing graph items instead of folklore.
 
 ## When it fires and who it targets
 
-- **When:** the epic's last wave has merged and you are about to abdicate. One pass, one interview per builder, then exit.
+- **When:** the epic's last wave has merged and you are about to step_down. One pass, one interview per builder, then exit.
 - **Who:** every builder that carried a node in this epic. By the time the epic is done the builders have shipped and released their node claims, so `fno backlog epic status` (which derives `worker` from a live claim) and `top` / `discovered-json` (live sessions only) no longer map node -> builder - they show only who is still up. The durable map is the **ledger** (`fno.paths.ledger_json()`, `~/.fno/ledger.json` by default but honor a `config.paths.ledger_json` / `config.state_dir` override), which records `node -> run -> pr` per shipped node; read it to enumerate the epic's builders. Reaching a specific builder to interview it is then best-effort: mail the still-reachable ones (resolve a live handle from `fno agents discovered-json` / `top`), and for a builder gone to transcript-and-artifacts only, reconstruct its account from its transcript or note it unreachable. Do not treat the ledger's run id as a resumable session handle - it is the target run id, not the provider session id `fno agents resume` takes.
 - The lead interviews because it holds cross-session knowledge a builder lacks. It saw every workspace, so it can ask the sibling-aware follow-up a siloed builder cannot self-generate.
 

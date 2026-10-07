@@ -2358,7 +2358,7 @@ console.log("evictedRowCount: 18 cases ok");
         // snapshot copy tolerates the undefined, which is why only the
         // bridge showed it). Found live on the deployed binary 2026-10-01.
         for key in [
-            "project", "epic", "status", "priority", "size", "king", "kind",
+            "project", "epic", "status", "priority", "size", "lead", "kind",
         ] {
             let line = format!(r#"{}: initial.getAll("{}")"#, key, key);
             assert!(
@@ -2465,9 +2465,9 @@ console.log("backlog page helpers: 9 cases ok");
 const eq = (got, want, what) => {
   if (JSON.stringify(got) !== JSON.stringify(want)) { console.error("FAIL " + what + ": got " + JSON.stringify(got) + ", want " + JSON.stringify(want)); process.exit(1); }
 };
-const any = { project: "p", status: "ready", priority: "p2", size: "M", kind: "bug", tags: ["t1"], king: { name: "k" }, parent: "e1", id: "x-1", slug: "s", title: "T" };
+const any = { project: "p", status: "ready", priority: "p2", size: "M", kind: "bug", tags: ["t1"], lead: { name: "k" }, parent: "e1", id: "x-1", slug: "s", title: "T" };
 const nodes = { "x-1": { details: "needle in details" } };
-const off = { project: [], status: [], priority: [], size: [], kind: [], tag: [], king: [], epic: [], q: "" };
+const off = { project: [], status: [], priority: [], size: [], kind: [], tag: [], lead: [], epic: [], q: "" };
 eq(cardKeeps(any, nodes, off), true, "no filters keep");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { status: ["idea"] })), false, "status filter drops");
 eq(cardKeeps(any, nodes, Object.assign({}, off, { kind: ["bug"] })), true, "kind filter keeps");

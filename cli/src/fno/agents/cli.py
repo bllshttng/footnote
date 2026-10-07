@@ -241,7 +241,7 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
     exists: a `spawn-handover:` claim covers a launch window whose worker can
     die before it boots, and a hand `fno agents claim acquire` from a live process
     takes the key with nothing launched at all. Reporting either as a live
-    worker tells a king the opposite of the truth at the moment the king
+    worker tells a lead the opposite of the truth at the moment the lead
     decides whether to staff the node.
 
     Two markers, both POSITIVE. This never reads an absence as a yes:
@@ -627,7 +627,7 @@ def _spawn_guard_decision(
         # THE node claim, not another reservation. dispatch:<id> is a launch-
         # window mutex on a key nobody reads: five workers were spawned with an
         # explicit --node tonight and not one of them was visible to `fno agents claim
-        # status node:<id>`, so four kings read those nodes as free.
+        # status node:<id>`, so four leads read those nodes as free.
         #
         # --node is the only dispatch path holding the node id as a TYPED
         # argument rather than as prose to be re-derived, which is why the claim
@@ -941,13 +941,13 @@ def cmd_watch(
     raise typer.Exit(rc)
 
 
-@agents_app.command("crown", hidden=True)
-def cmd_crown(
+@agents_app.command("role", hidden=True)
+def cmd_role(
     handle: str = typer.Argument(
         "",
         help=(
-            "Existing registered session handle to crown in place, or the "
-            "current heir when --reclaim is run from an attended shell."
+            "Existing registered session handle to role in place, or the "
+            "current successor when --reclaim is run from an attended shell."
         ),
     ),
     scopes: list[str] = typer.Option(
@@ -955,43 +955,43 @@ def cmd_crown(
         "--scope",
         help=(
             "Territory to grant. Repeat for a multi-project portfolio or a "
-            "set of epics; the crown level is derived and cannot be supplied."
+            "set of epics; the role level is derived and cannot be supplied."
         ),
     ),
     reclaim: bool = typer.Option(
         False,
         "--reclaim",
         help=(
-            "Return the current holder's crown to its recorded grantor without "
+            "Return the current holder's role to its recorded grantor without "
             "creating a session."
         ),
     ),
 ) -> None:
-    """Crown an existing session from an attended shell, from an agent whose
-    own crown strictly contains the requested scope, or add to your own
-    epic-set crown an epic your session created.
+    """Role an existing session from an attended shell, from an agent whose
+    own role strictly contains the requested scope, or add to your own
+    epic-set role an epic your session created.
 
     Run `fno agents register` inside the target session, then run this command
     with its printed handle. Same-scope succession stays on the spawn-time
-    transfer path. A row already holding a crown is re-scoped rather
+    transfer path. A row already holding a role is re-scoped rather
     than refused: the new territory replaces the old in one atomic write, the
     level is derived from the new scope, the registry records the actual
     grantor, and the receipt reports what was vacated. `--reclaim` returns a
-    transferred crown to its recorded grantor and never creates a session.
+    transferred role to its recorded grantor and never creates a session.
     """
     from fno.agents import events
-    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.role import RolePromotionError, promote_existing_session
 
     if reclaim:
-        from fno.agents.crown import reclaim_crown
+        from fno.agents.role import reclaim_role
 
         try:
-            receipt = reclaim_crown(handle or None)
-        except CrownPromotionError as exc:
-            print(f"crown reclaim: {exc}", file=sys.stderr)
+            receipt = reclaim_role(handle or None)
+        except RolePromotionError as exc:
+            print(f"role reclaim: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
         events.emit(
-            "agent_crown_reclaimed",
+            "agent_role_reclaimed",
             reclaimed=receipt["reclaimed"],
             from_holder=receipt["from_holder"],
             scope=receipt["scope"],
@@ -1001,18 +1001,18 @@ def cmd_crown(
         return
 
     if not handle or not scopes:
-        print("crown: HANDLE and at least one --scope are required", file=sys.stderr)
+        print("role: HANDLE and at least one --scope are required", file=sys.stderr)
         raise typer.Exit(code=2)
 
     try:
         receipt = promote_existing_session(handle, scopes)
-    except CrownPromotionError as exc:
-        print(f"crown: {exc}", file=sys.stderr)
+    except RolePromotionError as exc:
+        print(f"role: {exc}", file=sys.stderr)
         raise typer.Exit(code=2) from exc
 
     events.emit(
-        "agent_crowned",
-        name=receipt["crowned"],
+        "agent_promoted",
+        name=receipt["promoted"],
         level=receipt["level"],
         scope=receipt["scope"],
         grantor=receipt["grantor"],
@@ -1023,11 +1023,11 @@ def cmd_crown(
     print(json.dumps(receipt))
 
 
-# The court command moved to fno.agents.court (file budget); the
+# The team command moved to fno.agents.team (file budget); the
 # composition stays on the agents app here.
-from fno.agents.court import register_court_command  # noqa: E402
+from fno.agents.team import register_team_command  # noqa: E402
 
-register_court_command(agents_app)
+register_team_command(agents_app)
 
 
 # Moved to fno.agents.spawn_lineage; re-exported here.
@@ -1325,13 +1325,10 @@ def cmd_spawn(
     promote: list[str] = typer.Option(
         [],
         "--promote",
-        "--crown",
-        "-k",
         help=(
             "Promote the spawned worker to a titled role over a territory: "
             "epic id(s), one project, or several. Contract: "
-            "docs/guides/agents-spawn-flags.md. --crown/-k is the retired "
-            "spelling; it answers for one release."
+            "docs/guides/agents-spawn-flags.md."
         ),
     ),
     hand_off: bool = typer.Option(
@@ -1604,13 +1601,6 @@ def cmd_spawn(
     def _used(flag: str) -> bool:
         return any(t == flag or t.startswith(flag + "=") for t in _args)
 
-    if _used("--crown") or any(
-        t.startswith("-k") and not t.startswith("--") for t in _args
-    ):
-        print(
-            "--crown is now --promote; the old spelling answers for one release.",
-            file=sys.stderr,
-        )
     if _used("--succeed"):
         print(
             "--succeed is now --hand-off; the old spelling answers for one release.",
@@ -1619,7 +1609,7 @@ def cmd_spawn(
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
     seedless = seedless_thread_refusal(
-        harness, substrate, message, resume=resume, crown=bool(promote), name=name, node=node
+        harness, substrate, message, resume=resume, role=bool(promote), name=name, node=node
     )
     if seedless:
         print(f"fno agents spawn: {seedless}", file=sys.stderr)
@@ -1753,13 +1743,13 @@ def cmd_spawn(
         raise typer.Exit(code=2)
 
     # --promote <scope>... : the operator names the TERRITORY, the ladder altitude
-    # derives from it (crown.derive_crown_level), and the grantor is stamped
+    # derives from it (role.derive_role_level), and the grantor is stamped
     # ambiently from this session - never a value the child could forge. The role
     # needs a session that outlives the grant, so `headless` (one answer, then
     # exit) is refused; `pane` and `bg` both qualify. A bg holder loses only the
     # pane PLACEMENT primitives; mail, peek, top, and wait are substrate-blind.
-    crown_level: int | None = None
-    crown_scope: str | None = None
+    role_level: int | None = None
+    role_scope: str | None = None
     if promote:
         if once or substrate == "headless":
             print(
@@ -1769,11 +1759,11 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from fno.agents.crown import CrownScopeError, resolve_crown
+        from fno.agents.role import RoleScopeError, resolve_role
 
         try:
-            crown_level, crown_scope = resolve_crown(list(promote))
-        except CrownScopeError as exc:
+            role_level, role_scope = resolve_role(list(promote))
+        except RoleScopeError as exc:
             print(f"--promote: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
 
@@ -2338,7 +2328,7 @@ def cmd_spawn(
                 account=account or dispatch_account,
                 seed=message,
                 session_phase=session_phase,
-                succession_scope=crown_scope if hand_off else None,
+                succession_scope=role_scope if hand_off else None,
             )
             break
         except GateRefused as exc:
@@ -2412,8 +2402,8 @@ def cmd_spawn(
                     tab=tab,
                     pane=pane,
                     bounded_placement=bounded_placement,
-                    crown_level=crown_level,
-                    crown_scope=crown_scope,
+                    role_level=role_level,
+                    role_scope=role_scope,
                     succession=hand_off,
                     provenance=prov_env,
                     account_env=account_env,
@@ -2676,8 +2666,8 @@ def cmd_spawn(
                 route_provider_id=route_provider or recorded_provider,
                 model_name=model or route_model,
                 account_record_id=dispatch_account or account,
-                crown_level=crown_level,
-                crown_scope=crown_scope,
+                role_level=role_level,
+                role_scope=role_scope,
                 succession=hand_off,
                 route_provider=route_provider,
                 provider_gate=gate,
@@ -2905,7 +2895,7 @@ def cmd_retask(
         typer.echo(json.dumps(receipt))
     else:
         # Same JSON either way (sorted keys are the only difference): the
-        # receipt is machine-parsed by the king loop, so there is no human
+        # receipt is machine-parsed by the lead loop, so there is no human
         # rendering to switch to.
         typer.echo(json.dumps(receipt, sort_keys=True))
     if receipt.get("status") != "retasked":
@@ -3208,7 +3198,7 @@ def cmd_discovered_json(
 def cmd_registry_json() -> None:
     """Internal: emit registry rows DAEMON-FREE, with the served liveness pair.
 
-    Hooks need stored crown, spawn-edge, and origin fields plus the served
+    Hooks need stored role, spawn-edge, and origin fields plus the served
     liveness verdict, derived by the freshness rule. Output is
     ``{"agents": [...]}`` via a client-side registry read. There is no Python
     registry-json left: a missing binary is refused here.
@@ -4815,7 +4805,7 @@ def cmd_gate(
     "yard",
     hidden=True,
     help=(
-        "The yard identity fold: species, rarity tier, crown, and first-sighting "
+        "The yard identity fold: species, rarity tier, role, and first-sighting "
         "per registry citizen.\n\n"
         "Read-only over the agent registry and the graph archive. Consumed by "
         "the mux yard overlay (fail-open shell-out); `--json` is the machine "
@@ -4855,9 +4845,9 @@ def yard(
         return
     for c in citizens:
         mark = " NEW" if c["first_sighting"] else ""
-        crown = f" crown {c['crown_level']}" if c["crown_level"] else ""
+        role = f" role {c['role_level']}" if c["role_level"] else ""
         typer.echo(
-            f"{c['name']:<24} species {c['species']:>2}  {c['rarity']:<9}{crown}{mark}"
+            f"{c['name']:<24} species {c['species']:>2}  {c['rarity']:<9}{role}{mark}"
         )
     n_new = sum(1 for c in citizens if c["first_sighting"])
     typer.echo(f"{len(citizens)} citizens, {n_new} first sighting(s); tiers: {'/'.join(RARITY_TIERS)}")

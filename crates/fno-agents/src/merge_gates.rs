@@ -495,6 +495,16 @@ fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<Str
         breadcrumb("overlap probe unavailable (pr refs unreadable); holding for a rebase");
         return None;
     };
+    base_move_paths_between(probes, cwd, &base, &head)
+}
+
+/// [`base_move_paths`] for a caller that already holds the base ref and head.
+pub(crate) fn base_move_paths_between<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    base: &str,
+    head: &str,
+) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/compare/{head}...{base}"),
@@ -534,15 +544,16 @@ fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<Str
     Some(paths)
 }
 
-/// The PR's own changed file paths, or None (HOLD). An EMPTY list is a real
-/// answer: a PR with no diff cannot overlap anything.
-fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+/// The PR's own changed file paths, the old name of a rename included, or
+/// None (HOLD). An EMPTY list is a real answer: a PR with no diff cannot
+/// overlap anything.
+pub(crate) fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
     let args = vec![
         "api".to_string(),
         format!("repos/{{owner}}/{{repo}}/pulls/{pr}/files"),
         "--paginate".to_string(),
         "--jq".to_string(),
-        ".[] | .filename // empty".to_string(),
+        ".[] | (.filename // empty), (.previous_filename // empty)".to_string(),
     ];
     let (ok, stdout) = probes.run_gh(cwd, &args).ok()?;
     if !ok {
@@ -577,7 +588,7 @@ fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
 
 /// The visual-approval gate: a PR whose changed files touch a configured
 /// paint path holds until an ANSWERED question page names the PR, or a
-/// crown-recorded decision row transcribes the user's chat approval of this
+/// role-recorded decision row transcribes the user's chat approval of this
 /// exact head. The user's look is the only clear, mechanizing the prose
 /// rulings this gate replaces (rebrand and splash PRs merged with no user
 /// look). `merge.visual_paint_paths` lists the lines the gate watches; empty
@@ -625,7 +636,7 @@ pub(crate) fn visual_approval_blocker<P: Probes>(
     // paint files, and the mux shots embedded, deduped per head. Best-effort:
     // a failed filing never softens the hold, it only names the remedy.
     let root = vault_root(cwd);
-    if answered_question_names_pr(&root, pr) || crown_chat_clears_pr(probes, cwd, pr, head) {
+    if answered_question_names_pr(&root, pr) || role_chat_clears_pr(probes, cwd, pr, head) {
         return None;
     }
     let node_id = entry.as_ref().and_then(crate::graph_store::entry_id);
@@ -636,10 +647,10 @@ pub(crate) fn visual_approval_blocker<P: Probes>(
         .unwrap_or_default();
     let mut detail = format!(
         "PR {pr} touches the paint surface the config lists ({}); the user's look is \
-         the only clear: an answered question page naming the PR, or a crown-recorded \
+         the only clear: an answered question page naming the PR, or a role-recorded \
          decision whose rationale attests the chat and whose text names the PR and \
          its head sha (`fno backlog decide <node> 'Approved: PR {pr} at {head}' \
-         --authority crown --rationale 'user in chat: <the user's words>'`). Ask via \
+         --authority role --rationale 'user in chat: <the user's words>'`). Ask via \
          `fno inbox outstanding ask`, then the user answers the page or the lead \
          records the chat approval.",
         touched.join(", ")
@@ -750,7 +761,7 @@ fn visual_question_markdown(
          The visual-approval gate holds PR {pr} at head {head}: its diff touches the \
          paint surface the config lists ({files}). The user's look is the only clear.\n\n\
          ## Options\n\
-         1. Merge as painted. What happens next: the answered page or a crown decision \
+         1. Merge as painted. What happens next: the answered page or a role decision \
          clears the gate and the PR merges{embeds}\n\
          2. Hold for changes. What happens next: say what to change; the worker \
          reshoots and the PR re-asks at its new head\n\n\
@@ -926,12 +937,12 @@ fn row_is_chat_attested(row: &Value) -> bool {
         .is_some_and(|r| r.to_lowercase().contains("user in chat"))
 }
 
-/// True when a live crown decision row transcribes the user's chat approval
-/// of this PR at this head: authority `crown` (the decide door scopes who may
+/// True when a live role decision row transcribes the user's chat approval
+/// of this PR at this head: authority `role` (the decide door scopes who may
 /// mint one), a chat-attested rationale, and text naming both the PR and the
 /// exact head sha the user looked at. Head-scoped like the operator head
 /// grant: a push invalidates the approval. An unreadable index never clears.
-fn crown_chat_clears_pr<P: Probes>(probes: &P, cwd: &Path, pr: u64, head: &str) -> bool {
+fn role_chat_clears_pr<P: Probes>(probes: &P, cwd: &Path, pr: u64, head: &str) -> bool {
     if head.is_empty() {
         return false;
     }
@@ -960,7 +971,7 @@ fn crown_chat_clears_pr<P: Probes>(probes: &P, cwd: &Path, pr: u64, head: &str) 
         .and_then(Value::as_array)
         .is_some_and(|rows| {
             rows.iter().any(|row| {
-                row.get("authority_source").and_then(Value::as_str) == Some("crown")
+                row.get("authority_source").and_then(Value::as_str) == Some("role")
                     && matches!(
                         row.get("lifecycle").and_then(Value::as_str),
                         Some("live") | Some("unscoped")
@@ -1054,7 +1065,7 @@ mod tests {
         );
         assert_eq!(
             parsed.options[0].next,
-            "the answered page or a crown decision clears the gate and the PR merges"
+            "the answered page or a role decision clears the gate and the PR merges"
         );
         assert_eq!(parsed.recommend, Some(1));
         assert!(

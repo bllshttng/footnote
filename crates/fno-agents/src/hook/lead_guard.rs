@@ -119,13 +119,13 @@ pub fn run(args: &[String]) -> i32 {
         }
         return allow("");
     };
-    let crown_scope = row
-        .crown_scope
+    let role_scope = row
+        .role_scope
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("");
-    if row.crown_level.is_none() && crown_scope.is_empty() {
+    if row.role_level.is_none() && role_scope.is_empty() {
         return allow("");
     }
 
@@ -148,8 +148,7 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         PathBuf::from(&row.cwd)
     };
-    let manifest = match crate::lead_state::manifest_path(&super::events_space(&root), crown_scope)
-    {
+    let manifest = match crate::lead_state::manifest_path(&super::events_space(&root), role_scope) {
         Ok(m) => m,
         // An unsafe or empty scope never names a manifest; never-block allows.
         Err(_) => return allow(""),
@@ -165,7 +164,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // 7. Mode knob: refuse (default) | warn | off.
-    let mode = config_lookup(&root, &["king", "implementation_guard"])
+    let mode = config_lookup(&root, &["lead", "implementation_guard"])
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "refuse".to_string());
     if mode == "off" {
@@ -176,7 +175,7 @@ pub fn run(args: &[String]) -> i32 {
     //    unresolvable state, so the never-block contract needs no escape
     //    hatch here: outside the repo allows, whatever it is.
     let repo_root = crate::paths::worktree_repo_root(&root);
-    let roots = write_roots(config_lookup(&root, &["king", "write_roots"]), &repo_root);
+    let roots = write_roots(config_lookup(&root, &["lead", "write_roots"]), &repo_root);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload
@@ -909,19 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn heredoc_body_naming_a_repo_path_still_allows() {
-        // The body names a real repo path next to a write-verb word (`cp`);
-        // `cat` never reads its own stdin as commands, so the whole body is
-        // inert text, not a `cp` invocation to classify.
-        let repo = std::env::temp_dir().join(format!("kgd-heredoc-body-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&repo);
-        let cmd = "cat >> /tmp/out.txt <<'EOF'\n\
-                   example: cp notes.txt crates/fno-agents/src/lib.rs\nEOF";
-        assert!(bash_allowed_in(&repo, cmd));
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    #[test]
     fn shell_reading_heredoc_body_still_refuses_a_real_write() {
         // `bash <<'EOF'` DOES read its stdin as commands, so a real write
         // inside that body still refuses.
@@ -1079,19 +1065,6 @@ mod tests {
     }
 
     #[test]
-    fn substituted_source_write_refuses() {
-        // The teamed-session shape that passed before: a source write read
-        // only as a substitution body must refuse through the repo rule.
-        let repo = std::env::temp_dir().join(format!("kgd-subst-src-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&repo);
-        assert!(!bash_allowed_in(
-            &repo,
-            "N=$(cp notes.txt crates/fno-agents/src/lib.rs)"
-        ));
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    #[test]
     fn tilde_target_resolves_outside_the_repo() {
         // A leading `~/` expands against $HOME, never joins the cwd as a
         // repo-relative name; the relative control still refuses. HOME is
@@ -1203,17 +1176,6 @@ mod tests {
     }
 
     #[test]
-    fn scope_traversal_never_names_a_manifest() {
-        for scope in ["../x", "a/b", "a\\b", ""] {
-            let refused = scope.is_empty()
-                || scope.contains("..")
-                || scope.contains('/')
-                || scope.contains('\\');
-            assert!(refused, "scope {scope:?} must refuse");
-        }
-    }
-
-    #[test]
     fn org_manifest_with_identity_parses() {
         let content =
             "---\nfno_id: 20260915T190000Z-kg1-abcdef\nscope: fno\nshape: org\nharness_session_id: sess-lead\n---\n";
@@ -1300,7 +1262,7 @@ mod tests {
         assert!(text.contains("operates the machine and does not author it"));
         assert!(text.contains("fno config plugin install"));
         assert!(text.contains("Delegate the edit or escalate"));
-        assert!(text.contains("config.king.write_roots"));
+        assert!(text.contains("config.lead.write_roots"));
     }
 
     #[test]

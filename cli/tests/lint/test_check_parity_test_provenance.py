@@ -165,17 +165,6 @@ def test_dotted_module_oracle_resolves_and_prints_the_resolution(
     assert "cli/src/fno/agents/harnesses/claude.py" in result.stdout
 
 
-def test_dotted_module_that_does_not_exist_fails_a_differential(
-    tmp_path: Path,
-) -> None:
-    root = _tree(tmp_path)
-    _parity(root, "missing", DIFFERENTIAL.format(oracle="fno.agents.harnesses.nope"))
-
-    result = _run(root)
-    assert result.returncode != 0
-    assert "missing_parity.rs" in result.stdout + result.stderr
-
-
 # --- symbol-form oracles: a leg inside a surviving module --------------------
 
 

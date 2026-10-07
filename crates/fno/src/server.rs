@@ -9104,11 +9104,11 @@ impl Core {
                             .and_then(|c| c.last_press.take())
                             == Some((pane, event.row, event.col));
                         if clicked {
-                            if let Some(url) = self
-                                .panes
-                                .get(&pane)
-                                .and_then(|e| e.vt.link_at(event.row, event.col))
-                            {
+                            let url = self.panes.get(&pane).and_then(|e| {
+                                let cwd = crate::pane_cwd::live_or_spawn(e.pty.child_pid(), &e.cwd);
+                                e.vt.link_at(event.row, event.col, &cwd)
+                            });
+                            if let Some(url) = url {
                                 self.send_open_link(client_id, url);
                             }
                         }
@@ -9165,7 +9165,7 @@ impl Core {
                         == MouseAction::SelectRelease
                         && c.visible.contains(&pane) =>
                 {
-                    e.vt.link_span(row, col)
+                    self.pane_link_span(pane, row, col)
                         .map(|span| span.cells)
                         .unwrap_or_default()
                 }
@@ -9395,7 +9395,7 @@ impl Core {
                 .unwrap_or("<unknown>");
             // Identity is the id the pane's row answers to - its own fno_id or
             // its harness session id, either spelling - never the name: a
-            // rename (or a succession heir renamed after spawn) leaves the
+            // rename (or a succession successor renamed after spawn) leaves the
             // pane label stale while the ids still name the same live session.
             // The answers_to check is the whole gate.
             let addressed = occupants

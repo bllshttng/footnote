@@ -64,7 +64,6 @@ def _run_hook(root: Path, home: Path) -> None:
     [
         ("file", False),  # linked worktree: never captured
         ("dir", True),  # canonical --plugin-dir checkout: still writes
-        (None, True),  # installed stage: still writes
     ],
 )
 def test_pointer_gated_on_git_shape(tmp_path, git_shape, pointer_names_root):

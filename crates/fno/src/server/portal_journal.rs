@@ -95,13 +95,10 @@ impl Core {
     }
 
     fn append_portal_event(&self, event: serde_json::Value) {
-        if crate::pane_send_audit::append_agents_event(
+        crate::pane_send_audit::queue_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            eprintln!("fno mux: portal event emit failed");
-        }
+            event,
+            None,
+        );
     }
 }

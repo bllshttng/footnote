@@ -27,6 +27,7 @@ pub mod epic_cap;
 pub mod fields;
 pub mod find_cli;
 pub mod findings;
+pub mod freshness;
 pub mod get_cli;
 pub mod idea_cap;
 pub(crate) mod merge_evidence;
@@ -243,9 +244,15 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    // First contact serializes on the store lock: two processes creating the
-    // db race the journal_mode pragma, and busy_timeout does not cover it.
-    let _creation_lock = if path.exists() {
+    // First contact serializes on the store lock until the schema is
+    // stamped: openers racing the journal_mode pragma or the setup DDL hit
+    // SQLITE_BUSY that busy_timeout does not cover. A file that exists is
+    // not enough, since the first opener creates it before setup finishes.
+    let stamped = path.exists()
+        && crate::store_conn::open_read(&path)
+            .and_then(|connection| schema_needs_ensure(&connection))
+            .is_ok_and(|needs| !needs);
+    let _creation_lock = if stamped {
         None
     } else {
         Some(
@@ -288,6 +295,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         if archive_needs_import(&connection, graph)? {
             archive_import_if_needed(&mut connection, graph)?;
         }
+        migrate_role_provenance(&mut connection)?;
         return Ok(connection);
     }
     connection
@@ -313,7 +321,25 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     decisions::import_if_needed(&mut connection, graph)?;
     archive_import_if_needed(&mut connection, graph)?;
     stamp_meta(&connection, "open_setup_version", OPEN_SETUP_VERSION)?;
+    migrate_role_provenance(&mut connection)?;
     Ok(connection)
+}
+
+fn migrate_role_provenance(connection: &mut Connection) -> Result<(), String> {
+    let done: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM graph_meta WHERE key = 'role_provenance_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if done {
+        return Ok(());
+    }
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    nodes::migrate_role_provenance(&tx)?;
+    stamp_meta(&tx, "role_provenance_v1", "1")?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn schema_needs_ensure(connection: &Connection) -> Result<bool, String> {

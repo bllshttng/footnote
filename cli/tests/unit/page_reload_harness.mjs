@@ -132,7 +132,7 @@ new Function("document", "window", "location", "sessionStorage", "setInterval", 
 const stage = process.env.STAGE;
 
 if (stage === "save") {
-  q.value = "crown";
+  q.value = "role";
   chipProject.click();
   row.click();
   head.click();

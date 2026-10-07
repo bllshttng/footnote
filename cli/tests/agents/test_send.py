@@ -186,7 +186,9 @@ def test_dispatch_send_happy_path_live_claude(
 def test_cmd_send_happy_path_stdout_format(
     tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
-    """AC3-HP / AC3-UI: cmd_send stdout is exactly 'msg-<id> delivered (hosted)\\n', exit 0."""
+    """AC3-HP / AC3-UI: cmd_send stdout is the JSON receipt, exit 0."""
+    import json as _json
+
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
@@ -209,10 +211,12 @@ def test_cmd_send_happy_path_stdout_format(
 
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    # "msg-<id> delivered (hosted)"
-    assert out.startswith("fmail-"), f"stdout: {out!r}"
-    assert "delivered (hosted)" in out, f"stdout: {out!r}"
-    assert "queued" not in out, "stdout must not say 'queued' for a live delivery"
+    receipt = _json.loads(out)
+    assert set(receipt) == {"msg_id", "subject", "to", "status"}
+    assert receipt["msg_id"].startswith("fmail-"), f"stdout: {out!r}"
+    assert receipt["to"] == "red"
+    assert "delivered (hosted)" in receipt["status"], f"stdout: {out!r}"
+    assert "queued" not in receipt["status"], "stdout must not say 'queued' for a live delivery"
 
 
 @pytest.mark.parametrize(
@@ -1355,9 +1359,12 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
     )
     assert result.exit_code == 14, (result.stdout or "") + (result.stderr or "")
     out = (result.stdout or "").strip()
-    assert out.startswith("fmail-"), f"stdout: {out!r}"
-    assert "queued (durable)" in out, f"stdout: {out!r}"
-    assert "delivered" not in out, "stdout must not say 'delivered' for durable path"
+    import json as _json
+
+    receipt = _json.loads(out.splitlines()[0])
+    assert receipt["msg_id"].startswith("fmail-"), f"stdout: {out!r}"
+    assert "queued (durable)" in receipt["status"], f"stdout: {out!r}"
+    assert "delivered" not in receipt["status"], "stdout must not say 'delivered' for durable path"
     assert "NOT LANDED" in out, f"the unconfirmed floor must end NOT LANDED: {out!r}"
 
 
@@ -3511,7 +3518,7 @@ def test_team_passthrough_flags_reach_the_writer(
     result = _team_invoke(
         monkeypatch,
         [
-            "team", "--scope", "kings", "shift change",
+            "team", "--scope", "leads", "shift change",
             "--subject", "maintenance", "--expires", "45m", "--urgent",
         ],
     )

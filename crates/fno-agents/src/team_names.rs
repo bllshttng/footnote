@@ -9,7 +9,7 @@
 //!
 //! ```json
 //! {"version": 1, "teams": {"<canonical scope>": {
-//!   "name": "Barnaby", "regnal": 1,
+//!   "name": "Barnaby", "generation": 1,
 //!   "holder_session": "<harness session uuid>" | null,
 //!   "nodes": ["x-aaaa"], "updated_at": "2026-09-23T20:00:00Z",
 //!   "theme": "native backlog", "title": "Lead of native backlog",
@@ -20,7 +20,7 @@
 //!
 //! `holder_session` is the live holder row's `harness_session_id` (law
 //! d-e952ed19: keyed on session id, never the mutable row name), `null`
-//! while a succession heir has not checked in yet. A MISSING file reads as
+//! while a succession successor has not checked in yet. A MISSING file reads as
 //! an empty store; an unreadable or malformed one is an error, never
 //! "no names". Writes take the exclusive sidecar flock and rename a temp
 //! file over the target, the same way the registry does.
@@ -35,7 +35,7 @@ use crate::loopcheck::LeadManifest;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TeamNameRecord {
     pub name: String,
-    pub regnal: u32,
+    pub generation: u32,
     #[serde(default)]
     pub holder_session: Option<String>,
     #[serde(default)]
@@ -58,17 +58,17 @@ pub struct TeamNameRecord {
 }
 
 /// A succession carried but not yet proven: written when `carry_succession`
-/// nulls the holder, cleared when the heir's beat refreshes the record or a
-/// fresh grant forgets it, and reverted by the reap sweep once the heir is
+/// nulls the holder, cleared when the successor's beat refreshes the record or a
+/// fresh grant forgets it, and reverted by the reap sweep once the successor is
 /// provably gone unbound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSuccession {
-    pub heir_name: String,
-    /// The heir row's session id at settle time, so the revert's join keys
+    pub successor_name: String,
+    /// The successor row's session id at settle time, so the revert's join keys
     /// on identity and a rename between write and read cannot break it.
     /// Absent on legacy records, which keep the name join.
     #[serde(default)]
-    pub heir_session: Option<String>,
+    pub successor_session: Option<String>,
     pub predecessor_name: String,
     #[serde(default)]
     pub predecessor_session: Option<String>,
@@ -77,7 +77,7 @@ pub struct PendingSuccession {
 
 /// When a holder's lead began and the term it declared. Keyed on the
 /// session: a re-scope by the same session carries it, a new session (an
-/// heir) or a same-scope re-arm starts fresh.
+/// successor) or a same-scope re-arm starts fresh.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LeadClock {
     pub session: String,
@@ -95,7 +95,7 @@ pub struct LeadClock {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RevertedSuccession {
     pub scope: String,
-    pub heir_name: String,
+    pub successor_name: String,
     pub predecessor_name: String,
     pub predecessor_session: Option<String>,
     pub evidence: String,
@@ -120,17 +120,7 @@ impl Store {
 fn read(path: &Path) -> Result<Store, String> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // One release of dual-read: a store the daemon-start move has
-            // not reached yet still lives under the pre-rename name.
-            if path.file_name().and_then(|n| n.to_str()) == Some("team_names.json") {
-                let legacy = path.with_file_name("team_names.json");
-                if let Ok(bytes) = std::fs::read(&legacy) {
-                    return decode(&bytes, &legacy);
-                }
-            }
-            return Ok(Store::empty());
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::empty()),
         Err(e) => return Err(format!("team names unreadable at {}: {e}", path.display())),
     };
     decode(&bytes, path)
@@ -151,19 +141,6 @@ fn decode(bytes: &[u8], path: &Path) -> Result<Store, String> {
         ));
     }
     Ok(store)
-}
-
-/// One-shot move at daemon start: the pre-rename `team_names.json`
-/// beside the registry becomes `team_names.json`. Best effort (a second
-/// daemon racing the same rename loses cleanly), taken before any reader
-/// runs; readers dual-read the legacy name until every machine has
-/// restarted once.
-pub fn move_legacy_store(home_root: &Path) {
-    let legacy = home_root.join("team_names.json");
-    let current = home_root.join("team_names.json");
-    if legacy.exists() && !current.exists() {
-        let _ = std::fs::rename(&legacy, &current);
-    }
 }
 
 #[cfg(test)]
@@ -208,25 +185,19 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphabetic() || *c == b'\'' || *c == b'-')
 }
 
-/// The regnal display: first letter upper-cased, then ` II` and so on.
-/// Regnal 0 and 1 carry no numeral; past the table the bare number reads.
-const ROMAN: [&str; 19] = [
-    "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV",
-    "XVI", "XVII", "XVIII", "XIX", "XX",
-];
-
-pub fn display(name: &str, regnal: u32) -> String {
+/// Display the person's name without a lineage suffix.
+pub fn display(name: &str, _generation: u32) -> String {
     let mut chars = name.chars();
     let first = chars
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_default();
-    let numeral = match regnal {
-        0 | 1 => String::new(),
-        2..=20 => format!(" {}", ROMAN[(regnal - 2) as usize]),
-        n => format!(" {n}"),
-    };
-    format!("{first}{}{numeral}", chars.as_str())
+    format!("{first}{}", chars.as_str())
+}
+
+/// A hand-off names a person, never a dispatch slug or a numbered label.
+pub fn valid_person_name(name: &str) -> bool {
+    (2..=24).contains(&name.len()) && name.bytes().all(|c| c.is_ascii_alphabetic())
 }
 
 /// The people title for a level (L0 Chief of a portfolio, L1 Head of a
@@ -289,7 +260,7 @@ fn live_names_in(
             if bound.is_some() && bound != team.holder_session.as_deref() {
                 return None;
             }
-            Some((scope.clone(), display(&rec.name, rec.regnal)))
+            Some((scope.clone(), display(&rec.name, rec.generation)))
         })
         .collect()
 }
@@ -329,7 +300,7 @@ pub fn live_titles(
 
 /// Name an un-named live team. Refusals (pattern, a duplicate live name,
 /// an already-named team) name the holder so the lead can pick again.
-/// Success writes regnal 1 bound to the live holder's session and answers
+/// Success writes generation 1 bound to the live holder's session and answers
 /// the display string.
 pub fn name_team(
     store_path: &Path,
@@ -365,7 +336,7 @@ pub fn name_team(
             canon.clone(),
             TeamNameRecord {
                 name: name.to_string(),
-                regnal: 1,
+                generation: 1,
                 holder_session,
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
@@ -401,7 +372,7 @@ fn check_duplicate_name(
             "the name {} is held by {holder} over {held_scope}; pick another name",
             display(
                 &store.teams[held_scope].name,
-                store.teams[held_scope].regnal
+                store.teams[held_scope].generation
             )
         ));
     }
@@ -450,7 +421,7 @@ pub fn rename_team(
         return Ok(None);
     }
     if !apply {
-        let from = display(&record.name, record.regnal);
+        let from = display(&record.name, record.generation);
         let to = display(new_name, 1);
         let names = live_names_in(&prior, &live);
         check_duplicate_name(&prior, &names, &live, &canon, new_name)?;
@@ -470,14 +441,14 @@ pub fn rename_team(
         {
             return Err(format!("team over {canon} changed holder before rename"));
         }
-        let from = display(&current.name, current.regnal);
+        let from = display(&current.name, current.generation);
         let to = display(new_name, 1);
         let record = store
             .teams
             .get_mut(&canon)
             .ok_or_else(|| format!("no named team over {canon}"))?;
         record.name = new_name.to_string();
-        record.regnal = 1;
+        record.generation = 1;
         record.holder_session = Some(session.to_string());
         record.pending_succession = None;
         record.updated_at = now_stamp();
@@ -539,7 +510,7 @@ pub fn ensure_named_team(
 fn holds_live_team(entries: &[crate::state::RegistryEntry], sid: &str) -> bool {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in entries {
-        let raw = row.crown_scope.as_deref().unwrap_or("").trim();
+        let raw = row.role_scope.as_deref().unwrap_or("").trim();
         if raw.is_empty() || !crate::spawn_gate::status_is_liveish(&row.status) {
             continue;
         }
@@ -554,7 +525,7 @@ fn holds_live_team(entries: &[crate::state::RegistryEntry], sid: &str) -> bool {
     false
 }
 
-/// Move the record from `old_scope` to `new_scope`, keeping name, regnal,
+/// Move the record from `old_scope` to `new_scope`, keeping name, generation,
 /// theme and title, when the old record's holder is the live team now
 /// holding `new_scope` (a told-to re-scope). Otherwise refuse and name the
 /// holder.
@@ -586,7 +557,7 @@ pub fn keep_from(
         if rec.holder_session.is_none() || rec.holder_session != team.holder_session {
             return Err(format!(
                 "the name {} over {old} belongs to another holder ({}), not to {} holding {new}",
-                display(&rec.name, rec.regnal),
+                display(&rec.name, rec.generation),
                 rec.holder_session
                     .as_deref()
                     .unwrap_or("(no session bound)"),
@@ -622,11 +593,11 @@ pub fn keep_from(
 
 /// The auto-carry behind an `org promote` re-scope: move the record from the
 /// vacated scope to the landing scope when one is recorded there. No record
-/// at the old scope carries nothing (a first crown is not a drop); a
+/// at the old scope carries nothing (a first role is not a drop); a
 /// same-scope re-grant moves nothing. Registry-free by contract: the caller
-/// just committed the crown and names the holder session and landing level,
+/// just committed the role and names the holder session and landing level,
 /// so this runs inside a settle's apply path without waiting on the registry
-/// lock (a fresh read there starved crowned spawns behind fleet writers).
+/// lock (a fresh read there starved promoted spawns behind fleet writers).
 pub fn carry_rescope(
     store_path: &Path,
     old_scope: &str,
@@ -655,7 +626,7 @@ pub fn carry_rescope(
                     let refusal = format!(
                         "the name {} over {old} belongs to another holder ({bound}), \
                          not to the session now holding {new}",
-                        display(&rec.name, rec.regnal),
+                        display(&rec.name, rec.generation),
                     );
                     store.teams.insert(old, rec);
                     return Err(refusal);
@@ -675,7 +646,7 @@ pub fn carry_rescope(
     })
 }
 
-/// Name an unnamed team from the holder row's own name, so a crown granted
+/// Name an unnamed team from the holder row's own name, so a role granted
 /// to a named row never lands anonymous. Registry-free like [`carry_rescope`]:
 /// the caller just stamped the row live and names its session and level. A
 /// candidate that fails the people-name contract (a dispatch-minted name
@@ -691,7 +662,7 @@ pub fn carry_holder_name(
 ) -> Result<Option<String>, String> {
     let candidate = candidate.trim();
     let session = holder_session.trim();
-    if !valid_name(candidate) || session.is_empty() {
+    if !valid_person_name(candidate) || session.is_empty() {
         // No session identity: the carry cannot bind the name to a holder,
         // so checkin names it instead.
         return Ok(None);
@@ -713,14 +684,14 @@ pub fn carry_holder_name(
         {
             return Err(format!(
                 "the name {} is held over {held}; pick another name",
-                display(&rec.name, rec.regnal),
+                display(&rec.name, rec.generation),
             ));
         }
         store.teams.insert(
             canon.clone(),
             TeamNameRecord {
                 name: candidate.to_string(),
-                regnal: 1,
+                generation: 1,
                 holder_session: Some(session.to_string()),
                 nodes: Vec::new(),
                 updated_at: now_stamp(),
@@ -734,24 +705,53 @@ pub fn carry_holder_name(
     })
 }
 
-/// A succession: regnal + 1, the heir unbound until its first beat binds it.
-/// `pending` records the succession so the reap sweep can revert it when the
-/// heir proves unable to bind; `None` (an old caller) keeps today's shape.
-/// A team with no record succeeds to no record.
+/// Give the promoted colleague a fresh person name. The pending record
+/// keeps the session join, so its first beat resolves across the rename.
 pub fn carry_succession(
     store_path: &Path,
     scope: &str,
     pending: Option<PendingSuccession>,
-) -> Result<(), String> {
+) -> Result<Option<PendingSuccession>, String> {
+    let pending = pending.ok_or(
+        "--hand-off requires --name <Name>; the outgoing lead chooses a fresh person name",
+    )?;
+    if !valid_person_name(&pending.successor_name) {
+        return Err(
+            "--hand-off requires a person name of 2-24 letters, never a dispatch slug".into(),
+        );
+    }
     let canon = crate::territory::canonical_scope(scope);
     update(store_path, |store| {
-        if let Some(rec) = store.teams.get_mut(&canon) {
-            rec.regnal = rec.regnal.saturating_add(1);
-            rec.holder_session = None;
-            rec.pending_succession = pending;
-            rec.updated_at = now_stamp();
+        if store
+            .teams
+            .values()
+            .any(|rec| rec.name.eq_ignore_ascii_case(&pending.successor_name))
+            || pending
+                .predecessor_name
+                .eq_ignore_ascii_case(&pending.successor_name)
+        {
+            return Err(format!(
+                "the name {} is already used; choose a fresh successor name",
+                pending.successor_name
+            ));
         }
-        Ok(())
+        let rec = store.teams.entry(canon).or_insert_with(|| TeamNameRecord {
+            name: String::new(),
+            generation: 0,
+            holder_session: None,
+            nodes: Vec::new(),
+            updated_at: String::new(),
+            theme: None,
+            title: None,
+            pending_succession: None,
+            lead: None,
+        });
+        rec.name = pending.successor_name.clone();
+        rec.generation = rec.generation.saturating_add(1);
+        rec.holder_session = None;
+        rec.pending_succession = Some(pending.clone());
+        rec.updated_at = now_stamp();
+        Ok(Some(pending))
     })
 }
 
@@ -1017,7 +1017,7 @@ pub fn forget(store_path: &Path, scope: &str) -> Result<(), String> {
     })
 }
 
-/// An heir's (or any) beat: bind a null `holder_session` to the live
+/// A successor's (or any) beat: bind a null `holder_session` to the live
 /// holder's session and replace the node list. Returns the pending
 /// succession this beat cleared, so the caller can run the
 /// verify-release-retro transaction over it. Callers treat an error as a
@@ -1041,7 +1041,7 @@ pub fn bind_and_refresh(
             }
         }
         // A beat over the scope by the live holder is the proof the
-        // succession waited for: the heir is alive and reading its team.
+        // succession waited for: the successor is alive and reading its team.
         cleared = rec.pending_succession.take();
         rec.nodes = nodes;
         rec.updated_at = now_stamp();
@@ -1050,14 +1050,14 @@ pub fn bind_and_refresh(
     Ok(cleared)
 }
 
-/// Revert successions whose heir died before binding. A pending record
-/// reverts only when the heir never bound (`holder_session` still null),
-/// the window elapsed, and the heir's registry row is gone (the codex
+/// Revert successions whose successor died before binding. A pending record
+/// reverts only when the successor never bound (`holder_session` still null),
+/// the window elapsed, and the successor's registry row is gone (the codex
 /// bind-window reaper removes rows) or terminal. The predecessor's session
-/// is restored so resume is the recovery path; the regnal stays bumped, a
+/// is restored so resume is the recovery path; the generation stays bumped, a
 /// monotonic lineage counter. `apply: false` reports the same lists and
 /// writes nothing, the sweep's dry-run contract. Answers the reverted rows
-/// and the kept reasons (a live heir keeps its succession).
+/// and the kept reasons (a live successor keeps its succession).
 pub fn revert_stale_pending(
     store_path: &Path,
     registry_path: &Path,
@@ -1095,49 +1095,49 @@ pub fn revert_stale_pending(
     let reg = crate::state::load_registry(registry_path)
         .map_err(|e| format!("registry unreadable for succession revert: {e}"))?;
     for (scope, pending) in stale {
-        // Id-first: a record carrying heir_session resolves through the
+        // Id-first: a record carrying successor_session resolves through the
         // session id (a rename cannot break the join); a legacy record
         // falls back to the name join and its ambiguity refusal, unchanged.
-        let join = match pending.heir_session.as_deref() {
+        let join = match pending.successor_session.as_deref() {
             Some(session) => {
                 crate::agent_ref::resolve(&reg.entries, crate::agent_ref::Key::Id(session), |row| {
                     !crate::lead_state::is_terminal(row)
                 })
             }
-            None => crate::lead_state::live_name_join(&reg.entries, &pending.heir_name),
+            None => crate::lead_state::live_name_join(&reg.entries, &pending.successor_name),
         };
         let evidence = match join {
             crate::lead_state::NameJoin::One(row) => {
                 kept.push(format!(
-                    "{scope}: heir row {} still {:?}",
+                    "{scope}: successor row {} still {:?}",
                     row.name, row.status
                 ));
                 continue;
             }
             crate::lead_state::NameJoin::Ambiguous => {
                 kept.push(format!(
-                    "{scope}: heir row {} name ambiguous; revert refused",
-                    pending.heir_name
+                    "{scope}: successor row {} name ambiguous; revert refused",
+                    pending.successor_name
                 ));
                 continue;
             }
             crate::lead_state::NameJoin::None => {
-                // No live row answers the heir; the raw matches are all
+                // No live row answers the successor; the raw matches are all
                 // terminal by the join's construction, so the first names
                 // why the succession reverts.
-                let raw = match pending.heir_session.as_deref() {
+                let raw = match pending.successor_session.as_deref() {
                     Some(session) => reg.entries.iter().find(|e| {
                         e.harness_session_id.as_deref() == Some(session)
                             || e.related_session_id.as_deref() == Some(session)
                     }),
                     None => reg.entries.iter().find(|e| {
-                        e.name == pending.heir_name
-                            || e.aliases.iter().any(|a| *a == pending.heir_name)
+                        e.name == pending.successor_name
+                            || e.aliases.iter().any(|a| *a == pending.successor_name)
                     }),
                 };
                 match raw {
-                    None => "heir row removed".to_string(),
-                    Some(row) => format!("heir row {:?}", row.status),
+                    None => "successor row removed".to_string(),
+                    Some(row) => format!("successor row {:?}", row.status),
                 }
             }
         };
@@ -1149,6 +1149,7 @@ pub fn revert_stale_pending(
             update(store_path, |store| {
                 if let Some(rec) = store.teams.get_mut(&scope) {
                     if rec.holder_session.is_none() && rec.pending_succession.is_some() {
+                        rec.name = pending.predecessor_name.clone();
                         rec.holder_session = pending.predecessor_session.clone();
                         rec.pending_succession = None;
                         rec.updated_at = now_stamp();
@@ -1158,13 +1159,15 @@ pub fn revert_stale_pending(
                 Ok(())
             })?;
             if !written {
-                kept.push(format!("{scope}: heir bound mid-sweep; revert skipped"));
+                kept.push(format!(
+                    "{scope}: successor bound mid-sweep; revert skipped"
+                ));
                 continue;
             }
         }
         reverted.push(RevertedSuccession {
             scope,
-            heir_name: pending.heir_name,
+            successor_name: pending.successor_name,
             predecessor_name: pending.predecessor_name,
             predecessor_session: pending.predecessor_session,
             evidence,
@@ -1283,10 +1286,21 @@ mod tests {
                 json!([team_row("lead-old", "x-aaaa", 2, "sess-old")]),
             );
             name_team(&store, &registry, "x-aaaa", "barnaby").unwrap();
-            carry_succession(&store, "x-aaaa", None).unwrap();
+            carry_succession(
+                &store,
+                "x-aaaa",
+                Some(PendingSuccession {
+                    successor_name: "Avery".into(),
+                    successor_session: Some("sess-successor".into()),
+                    predecessor_name: "barnaby".into(),
+                    predecessor_session: Some("sess-old".into()),
+                    ts: now_stamp(),
+                }),
+            )
+            .unwrap();
             write_registry(
                 tmp.path(),
-                json!([team_row("lead-heir", "x-aaaa", 2, "sess-heir")]),
+                json!([team_row("Avery", "x-aaaa", 2, "sess-successor")]),
             );
             apply_team_naming(
                 &store,
@@ -1299,7 +1313,8 @@ mod tests {
             )
             .unwrap();
             let rows = crate::state::load_registry(&registry).unwrap();
-            assert_eq!(rows.entries[0].name, "barnaby");
+            assert_eq!(rows.entries[0].name, "avery");
+            assert_ne!(rows.entries[0].name, "barnaby");
         }
 
         fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
@@ -1583,7 +1598,7 @@ mod tests {
                     serde_json::to_string(&json!({
                         "version": 1,
                         "teams": {"x-aaaa": {
-                            "name": "kestrel", "regnal": 2,
+                            "name": "kestrel", "generation": 2,
                             "holder_session": "sess-k",
                             "nodes": [], "updated_at": "2026-09-23T20:00:00Z",
                             "theme": "native backlog"}},
@@ -1598,7 +1613,7 @@ mod tests {
             assert!(dump["teams"].get("x-aaaa").is_none());
             assert_eq!(dump["teams"]["x-bbbb"]["name"], json!("kestrel"));
             assert_eq!(dump["teams"]["x-bbbb"]["holder_session"], json!("sess-k"));
-            assert_eq!(dump["teams"]["x-bbbb"]["regnal"], json!(2));
+            assert_eq!(dump["teams"]["x-bbbb"]["generation"], json!(2));
             assert_eq!(dump["teams"]["x-bbbb"]["theme"], json!("native backlog"));
             assert_eq!(
                 dump["teams"]["x-bbbb"]["title"],
@@ -1608,7 +1623,7 @@ mod tests {
             seed(&store);
             assert!(carry_rescope(&store, "x-aaaa", "x-bbbb", "sess-other", 2).is_err());
             assert!(snapshot(&store).unwrap()["teams"].get("x-aaaa").is_some());
-            // A first crown (no record at the vacated scope) carries nothing,
+            // A first role (no record at the vacated scope) carries nothing,
             // and a same-scope re-grant moves nothing.
             assert!(!carry_rescope(&store, "x-zzzz", "x-cccc", "sess-z", 2).unwrap());
             assert!(!carry_rescope(&store, "x-bbbb", "x-bbbb", "sess-k", 2).unwrap());
@@ -1621,7 +1636,7 @@ mod tests {
             );
             let err = carry_holder_name(&store, "sess-b", 2, "x-bbbb", "kestrel").unwrap_err();
             assert!(err.contains("Kestrel"), "{err}");
-            // A fresh crown with a people-shaped row name names the team from
+            // A fresh role with a people-shaped row name names the team from
             // the row; a hex-shaped name and a sessionless carry stay unnamed.
             assert_eq!(
                 carry_holder_name(&store, "sess-d", 1, "x-dddd", "harriet").unwrap(),
@@ -1629,7 +1644,7 @@ mod tests {
             );
             let dump = snapshot(&store).unwrap();
             assert_eq!(dump["teams"]["x-dddd"]["name"], json!("harriet"));
-            assert_eq!(dump["teams"]["x-dddd"]["regnal"], json!(1));
+            assert_eq!(dump["teams"]["x-dddd"]["generation"], json!(1));
             assert_eq!(dump["teams"]["x-dddd"]["holder_session"], json!("sess-d"));
             assert_eq!(
                 carry_holder_name(&store, "sess-e", 1, "x-eeee", "t-x-9g").unwrap(),
@@ -1681,15 +1696,15 @@ mod tests {
 
     fn team_row(name: &str, scope: &str, level: u8, session: &str) -> serde_json::Value {
         json!({
-            "name": name, "status": "live", "crown_scope": scope,
-            "crown_level": level, "cwd": "/repo", "harness": "claude",
+            "name": name, "status": "live", "role_scope": scope,
+            "role_level": level, "cwd": "/repo", "harness": "claude",
             "harness_session_id": session,
             "created_at": "2026-09-23T20:00:00Z",
         })
     }
 
     #[test]
-    fn naming_binds_regnal_one_to_the_holder_session_and_display_capitalizes() {
+    fn naming_binds_generation_one_to_the_holder_session_and_display_capitalizes() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(tmp.path(), json!([team_row("lead-a", "fno", 1, "sess-a")]));
         let shown = name_team(
@@ -1709,13 +1724,10 @@ mod tests {
             .iter()
             .any(|alias| alias == "lead-a"));
         let dump = snapshot(&store_path(tmp.path())).unwrap();
-        assert_eq!(dump["teams"]["fno"]["regnal"], json!(1));
+        assert_eq!(dump["teams"]["fno"]["generation"], json!(1));
         // The numeral table then the bare number.
         assert_eq!(display("barnaby", 1), "Barnaby");
-        assert_eq!(display("barnaby", 2), "Barnaby II");
-        assert_eq!(display("barnaby", 3), "Barnaby III");
-        assert_eq!(display("barnaby", 20), "Barnaby XX");
-        assert_eq!(display("barnaby", 21), "Barnaby 21");
+        assert_eq!(display("barnaby", 2), "Barnaby");
         assert_eq!(dump["teams"]["fno"]["holder_session"], json!("sess-a"));
     }
 
@@ -1749,16 +1761,16 @@ mod tests {
     /// A succession the predecessor survived leaves the carried
     /// label on its still-live row. ensure_named_team moves the label and
     /// alias off the teamless row in the same transaction that renames the
-    /// heir, instead of refusing.
+    /// successor, instead of refusing.
     #[test]
-    fn a_live_heir_takes_the_carried_label_off_a_teamless_predecessor_row() {
+    fn a_live_successor_takes_the_carried_label_off_a_teamless_predecessor_row() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // The heir holds the live team; the predecessor row is alive but
+        // The successor holds the live team; the predecessor row is alive but
         // teamless, and still carries the label "folio" as its name.
         write_registry(
             tmp.path(),
             json!([
-                team_row("vellum", "fno", 1, "sess-heir"),
+                team_row("vellum", "fno", 1, "sess-successor"),
                 json!({
                     "name": "folio", "status": "live", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-old",
@@ -1769,7 +1781,7 @@ mod tests {
         );
         let store = store_path(tmp.path());
         let registry = registry_path(tmp.path());
-        // The carried record: name folio, regnal 2, unbound until the heir's
+        // The carried record: name folio, generation 2, unbound until the successor's
         // first beat binds it - carry_succession's shape.
         write(
             &store,
@@ -1779,7 +1791,7 @@ mod tests {
                     "fno".into(),
                     TeamNameRecord {
                         name: "Folio".into(),
-                        regnal: 2,
+                        generation: 2,
                         holder_session: None,
                         nodes: Vec::new(),
                         updated_at: now_stamp(),
@@ -1796,18 +1808,18 @@ mod tests {
         ensure_named_team(&store, &registry, "fno").unwrap();
 
         let rows = crate::state::load_registry(&registry).unwrap();
-        let heir = rows
+        let successor = rows
             .entries
             .iter()
-            .find(|e| e.harness_session_id.as_deref() == Some("sess-heir"))
+            .find(|e| e.harness_session_id.as_deref() == Some("sess-successor"))
             .unwrap();
         let old = rows
             .entries
             .iter()
             .find(|e| e.harness_session_id.as_deref() == Some("sess-old"))
             .unwrap();
-        assert_eq!(heir.name, "folio");
-        assert!(heir.aliases.iter().any(|a| a == "vellum"));
+        assert_eq!(successor.name, "folio");
+        assert!(successor.aliases.iter().any(|a| a == "vellum"));
         assert_ne!(old.name, "folio");
         assert!(!old.aliases.iter().any(|a| a == "folio"));
         assert!(crate::state::is_valid_registry_label(&old.name));
@@ -1844,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn carry_succession_bumps_regnal_pends_the_predecessor_and_unbinds_twice() {
+    fn carry_succession_bumps_generation_pends_the_predecessor_and_unbinds_twice() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
@@ -1857,7 +1869,7 @@ mod tests {
             "barnaby",
         )
         .unwrap();
-        // The predecessor's lead clock: the heir must not read it.
+        // The predecessor's lead clock: the successor must not read it.
         stamp_lead(
             &store_path(tmp.path()),
             &LeadManifest {
@@ -1870,62 +1882,56 @@ mod tests {
             None,
         )
         .unwrap();
-        // An unmarked carry (an old caller) keeps the frozen wire shape.
-        carry_succession(&store_path(tmp.path()), "x-aaaa", None).unwrap();
-        let dump = snapshot(&store_path(tmp.path())).unwrap();
-        assert_eq!(dump["teams"]["x-aaaa"]["regnal"], json!(2));
-        assert_eq!(dump["teams"]["x-aaaa"]["holder_session"], json!(null));
-        let raw = std::fs::read_to_string(store_path(tmp.path())).unwrap();
-        assert!(
-            !raw.contains("pending_succession"),
-            "the frozen wire shape must not grow a null key: {raw}"
-        );
+        assert!(carry_succession(&store_path(tmp.path()), "x-aaaa", None).is_err());
+        let before = snapshot(&store_path(tmp.path())).unwrap();
+        assert_eq!(before["teams"]["x-aaaa"]["generation"], json!(1));
+        assert_eq!(before["teams"]["x-aaaa"]["holder_session"], json!("sess-a"));
         // A marked carry pends the succession for the reap sweep's revert.
         carry_succession(
             &store_path(tmp.path()),
             "x-aaaa",
             Some(PendingSuccession {
-                heir_name: "lead-heir".into(),
-                heir_session: None,
+                successor_name: "Avery".into(),
+                successor_session: None,
                 predecessor_name: "lead-a".into(),
                 predecessor_session: Some("sess-a".into()),
                 ts: now_stamp(),
             }),
         )
         .unwrap();
-        // A second succession before the heir checks in reads regnal 3.
+        // A second succession before the successor checks in reads generation 3.
         let dump = snapshot(&store_path(tmp.path())).unwrap();
-        assert_eq!(dump["teams"]["x-aaaa"]["regnal"], json!(3));
+        assert_eq!(dump["teams"]["x-aaaa"]["generation"], json!(2));
         assert_eq!(dump["teams"]["x-aaaa"]["holder_session"], json!(null));
         let pending = &dump["teams"]["x-aaaa"]["pending_succession"];
-        assert_eq!(pending["heir_name"], json!("lead-heir"));
+        assert_eq!(pending["successor_name"], json!("Avery"));
         assert_eq!(pending["predecessor_name"], json!("lead-a"));
         assert_eq!(pending["predecessor_session"], json!("sess-a"));
         assert!(pending["ts"].is_string());
-        // AC3-EDGE: an heir is a new session. The carried clock keys on the
-        // predecessor's session, so the heir's manifest reads from its own
+        // AC3-EDGE: a successor is a new session. The carried clock keys on the
+        // predecessor's session, so the successor's manifest reads from its own
         // arm; the predecessor's term is not read.
-        let heir_manifest = LeadManifest {
+        let successor_manifest = LeadManifest {
             scope: "x-aaaa".into(),
             created_at: Some("2026-09-29T23:00:00Z".into()),
-            harness_session_id: Some("sess-heir".into()),
+            harness_session_id: Some("sess-successor".into()),
             ..Default::default()
         };
-        let view = lead_view_in(&store_path(tmp.path()), &heir_manifest);
+        let view = lead_view_in(&store_path(tmp.path()), &successor_manifest);
         assert_eq!(
             view.created_at.as_deref(),
             Some("2026-09-29T23:00:00Z"),
-            "an heir starts from its own manifest"
+            "a successor starts from its own manifest"
         );
         assert_eq!(view.term, None);
     }
 
     #[test]
-    fn an_heirs_first_beat_binds_the_carried_name_and_refreshes_nodes() {
+    fn an_successors_first_beat_binds_the_carried_name_and_refreshes_nodes() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
-            json!([team_row("lead-heir", "x-aaaa", 2, "sess-heir")]),
+            json!([team_row("Avery", "x-aaaa", 2, "sess-successor")]),
         );
         name_team(
             &store_path(tmp.path()),
@@ -1938,8 +1944,8 @@ mod tests {
             &store_path(tmp.path()),
             "x-aaaa",
             Some(PendingSuccession {
-                heir_name: "lead-heir".into(),
-                heir_session: None,
+                successor_name: "Avery".into(),
+                successor_session: None,
                 predecessor_name: "lead-old".into(),
                 predecessor_session: Some("sess-old".into()),
                 ts: now_stamp(),
@@ -1955,7 +1961,7 @@ mod tests {
         .unwrap();
         assert!(
             cleared.is_some(),
-            "the heir's first beat clears the pending record"
+            "the successor's first beat clears the pending record"
         );
         let again = bind_and_refresh(
             &store_path(tmp.path()),
@@ -1968,11 +1974,11 @@ mod tests {
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(
             dump["teams"]["x-aaaa"]["holder_session"],
-            json!("sess-heir")
+            json!("sess-successor")
         );
         assert_eq!(dump["teams"]["x-aaaa"]["nodes"], json!(["x-bbbb"]));
         // The beat is the proof the succession waited for: the pending
-        // marker clears and the heir's session holds the name.
+        // marker clears and the successor's session holds the name.
         assert!(dump["teams"]["x-aaaa"].get("pending_succession").is_none());
     }
 
@@ -2020,7 +2026,7 @@ mod tests {
                 "old-scope".into(),
                 TeamNameRecord {
                     name: "barnaby".into(),
-                    regnal: 2,
+                    generation: 2,
                     holder_session: Some("sess-a".into()),
                     nodes: vec!["x-1".into()],
                     updated_at: now_stamp(),
@@ -2042,7 +2048,7 @@ mod tests {
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert!(dump["teams"].get("old-scope").is_none());
         assert_eq!(dump["teams"]["new-scope"]["name"], json!("barnaby"));
-        assert_eq!(dump["teams"]["new-scope"]["regnal"], json!(2));
+        assert_eq!(dump["teams"]["new-scope"]["generation"], json!(2));
         // An un-themed record recomputes its scope-derived title.
         assert_eq!(
             dump["teams"]["new-scope"]["title"],
@@ -2058,7 +2064,7 @@ mod tests {
                 "old-scope".into(),
                 TeamNameRecord {
                     name: "barnaby".into(),
-                    regnal: 2,
+                    generation: 2,
                     holder_session: Some("sess-other".into()),
                     nodes: Vec::new(),
                     updated_at: now_stamp(),
@@ -2092,18 +2098,23 @@ mod tests {
 
     // -- pending succession: revert matrix --
 
-    fn pending_record(heir: &str, pred: &str, session: Option<&str>, ts: &str) -> TeamNameRecord {
+    fn pending_record(
+        successor: &str,
+        pred: &str,
+        session: Option<&str>,
+        ts: &str,
+    ) -> TeamNameRecord {
         TeamNameRecord {
             name: "Folio".into(),
-            regnal: 2,
+            generation: 2,
             holder_session: None,
             nodes: Vec::new(),
             updated_at: now_stamp(),
             theme: None,
             title: None,
             pending_succession: Some(PendingSuccession {
-                heir_name: heir.into(),
-                heir_session: None,
+                successor_name: successor.into(),
+                successor_session: None,
                 predecessor_name: pred.into(),
                 predecessor_session: session.map(String::from),
                 ts: ts.into(),
@@ -2117,42 +2128,42 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_pending_succession_reverts_by_heir_evidence() {
+    fn a_stale_pending_succession_reverts_by_successor_evidence() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // The predecessor row survives (exited, resumable); one heir's row
+        // The predecessor row survives (exited, resumable); one successor's row
         // was REMOVED by the bind-window reaper, another went terminal, one
-        // heir is still live, one is inside the window.
+        // successor is still live, one is inside the window.
         write_registry(
             tmp.path(),
             json!([
-                team_row("renamed-heir", "other", 1, "sess-heir"),
+                team_row("renamed-successor", "other", 1, "sess-successor"),
                 json!({
                     "name": "lead-old", "status": "exited", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-old",
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
                 json!({
-                    "name": "heir-terminal", "status": "exited", "cwd": "/repo",
+                    "name": "successor-terminal", "status": "exited", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-t",
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
-                team_row("heir-live", "other", 1, "sess-l"),
+                team_row("successor-live", "other", 1, "sess-l"),
                 json!({
-                    "name": "heir-dup", "status": "live", "cwd": "/repo",
+                    "name": "successor-dup", "status": "live", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-d1",
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
                 json!({
-                    "name": "heir-dup", "status": "live", "cwd": "/repo",
+                    "name": "successor-dup", "status": "live", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-d2",
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
                 json!({
-                    "name": "heir-twin", "status": "failed", "cwd": "/repo",
+                    "name": "successor-twin", "status": "failed", "cwd": "/repo",
                     "harness": "claude", "harness_session_id": "sess-tw1",
                     "created_at": "2026-09-23T20:00:00Z",
                 }),
-                team_row("heir-twin", "other", 1, "sess-tw2"),
+                team_row("successor-twin", "other", 1, "sess-tw2"),
             ]),
         );
         let store = store_path(tmp.path());
@@ -2167,32 +2178,45 @@ mod tests {
                     ),
                     (
                         "x-tttt".into(),
-                        pending_record("heir-terminal", "lead-two", Some("sess-two"), old_ts()),
+                        pending_record(
+                            "successor-terminal",
+                            "lead-two",
+                            Some("sess-two"),
+                            old_ts(),
+                        ),
                     ),
                     (
                         "x-llll".into(),
-                        pending_record("heir-live", "lead-three", Some("sess-3"), old_ts()),
+                        pending_record("successor-live", "lead-three", Some("sess-3"), old_ts()),
                     ),
                     (
                         "x-yyyy".into(),
-                        pending_record("young-heir", "lead-four", Some("sess-4"), &now_stamp()),
+                        pending_record(
+                            "young-successor",
+                            "lead-four",
+                            Some("sess-4"),
+                            &now_stamp(),
+                        ),
                     ),
                     (
                         "x-dupd".into(),
-                        pending_record("heir-dup", "lead-five", Some("sess-5"), old_ts()),
+                        pending_record("successor-dup", "lead-five", Some("sess-5"), old_ts()),
                     ),
                     (
                         "x-twin".into(),
-                        pending_record("heir-twin", "lead-six", Some("sess-6"), old_ts()),
+                        pending_record("successor-twin", "lead-six", Some("sess-6"), old_ts()),
                     ),
-                    // The id tier: a record carrying heir_session keeps its
-                    // succession even though the heir row was RENAMED after
+                    // The id tier: a record carrying successor_session keeps its
+                    // succession even though the successor row was RENAMED after
                     // the settle wrote it.
                     ("x-sess".into(), {
                         let mut pending =
                             pending_record("original-name", "lead-seven", Some("sess-7"), old_ts());
-                        pending.pending_succession.as_mut().unwrap().heir_session =
-                            Some("sess-heir".into());
+                        pending
+                            .pending_succession
+                            .as_mut()
+                            .unwrap()
+                            .successor_session = Some("sess-successor".into());
                         pending
                     }),
                 ]),
@@ -2208,51 +2232,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reverted.len(), 2, "{reverted:?}");
-        // The session-keyed heir keeps its succession through the rename.
+        // The session-keyed successor keeps its succession through the rename.
         assert!(
             kept.iter()
-                .any(|k| k.contains("renamed-heir") && k.contains("still")),
+                .any(|k| k.contains("renamed-successor") && k.contains("still")),
             "{kept:?}"
         );
         assert_eq!(reverted[0].scope, "fno");
-        assert_eq!(reverted[0].heir_name, "jolly-finch");
-        assert_eq!(reverted[0].evidence, "heir row removed");
+        assert_eq!(reverted[0].successor_name, "jolly-finch");
+        assert_eq!(reverted[0].evidence, "successor row removed");
         assert_eq!(reverted[1].scope, "x-tttt");
-        assert!(reverted[1].evidence.contains("heir row"), "{reverted:?}");
+        assert!(
+            reverted[1].evidence.contains("successor row"),
+            "{reverted:?}"
+        );
         assert_eq!(kept.len(), 4, "{kept:?}");
-        assert!(kept.iter().any(|k| k.contains("heir-live")), "{kept:?}");
+        assert!(
+            kept.iter().any(|k| k.contains("successor-live")),
+            "{kept:?}"
+        );
         // A name two live rows answer is ambiguous: keep, never guess.
         assert!(
             kept.iter()
-                .any(|k| k.contains("heir-dup") && k.contains("ambiguous")),
+                .any(|k| k.contains("successor-dup") && k.contains("ambiguous")),
             "{kept:?}"
         );
-        // A dead twin never answers for the live heir.
-        assert!(kept.iter().any(|k| k.contains("heir-twin")), "{kept:?}");
+        // A dead twin never answers for the live successor.
+        assert!(
+            kept.iter().any(|k| k.contains("successor-twin")),
+            "{kept:?}"
+        );
         let dump = snapshot(&store).unwrap();
         // Reverted records name the predecessor again, marker gone.
         assert_eq!(dump["teams"]["fno"]["holder_session"], json!("sess-old"));
         assert!(dump["teams"]["fno"].get("pending_succession").is_none());
         assert_eq!(dump["teams"]["x-tttt"]["holder_session"], json!("sess-two"));
-        // The live heir's record is untouched, and the young one keeps.
+        // The live successor's record is untouched, and the young one keeps.
         assert_eq!(dump["teams"]["x-llll"]["holder_session"], json!(null));
         assert_eq!(
-            dump["teams"]["x-llll"]["pending_succession"]["heir_name"],
-            json!("heir-live")
+            dump["teams"]["x-llll"]["pending_succession"]["successor_name"],
+            json!("successor-live")
         );
         assert_eq!(
-            dump["teams"]["x-yyyy"]["pending_succession"]["heir_name"],
-            json!("young-heir")
+            dump["teams"]["x-yyyy"]["pending_succession"]["successor_name"],
+            json!("young-successor")
         );
         // The ambiguous and twin records keep too.
         assert_eq!(dump["teams"]["x-dupd"]["holder_session"], json!(null));
         assert_eq!(
-            dump["teams"]["x-dupd"]["pending_succession"]["heir_name"],
-            json!("heir-dup")
+            dump["teams"]["x-dupd"]["pending_succession"]["successor_name"],
+            json!("successor-dup")
         );
         assert_eq!(
-            dump["teams"]["x-twin"]["pending_succession"]["heir_name"],
-            json!("heir-twin")
+            dump["teams"]["x-twin"]["pending_succession"]["successor_name"],
+            json!("successor-twin")
         );
 
         // The dry run reports the same revert and writes nothing.
@@ -2262,7 +2295,7 @@ mod tests {
                 version: 1,
                 teams: BTreeMap::from([(
                     "fno".into(),
-                    pending_record("gone-heir", "lead-old", Some("sess-old"), old_ts()),
+                    pending_record("gone-successor", "lead-old", Some("sess-old"), old_ts()),
                 )]),
             },
         )
@@ -2279,8 +2312,8 @@ mod tests {
         let dump = snapshot(&store).unwrap();
         assert_eq!(dump["teams"]["fno"]["holder_session"], json!(null));
         assert_eq!(
-            dump["teams"]["fno"]["pending_succession"]["heir_name"],
-            json!("gone-heir")
+            dump["teams"]["fno"]["pending_succession"]["successor_name"],
+            json!("gone-successor")
         );
         // A forgotten record (a fresh grant) is a no-op for the revert.
         forget(&store, "fno").unwrap();

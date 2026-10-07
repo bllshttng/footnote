@@ -135,7 +135,7 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
     """`--force` keeps the mail semantics: the recipient sees an envelope with a
     sender, a msg-id to reply to, and the authority trailer.
 
-    Crowned topology: x-2dfa gates the trailer on the crown, and the subject
+    Promoted topology: x-2dfa gates the trailer on the role, and the subject
     here is that ``--force`` types the WRAPPED body rather than bare text.
     """
     _entry_row, sent = _install(monkeypatch)

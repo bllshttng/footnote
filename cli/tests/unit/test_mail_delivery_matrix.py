@@ -559,7 +559,7 @@ def test_live_miss_age_suffix_names_unknown_when_no_transcript(
 
 # ---------------------------------------------------------------------------
 # x-1602: the durable receipt carries its drain window, and a live-lane
-# failure renders as legs, never as an error token. A king once read an
+# failure renders as legs, never as an error token. A lead once read an
 # absence inside the drain window, called a working lane broken, and held a
 # fleet-wide standing order an extra cycle; `queued (durable) [io-error]` is
 # the receipt that did it -- no clock, and an error string in a success.
@@ -1107,7 +1107,16 @@ def test_unreadable_store_full_id_live_miss_queues_to_drainable_full_id(
     assert res.exit_code == 14, res.output
     assert attempted == [("claude", send_id), ("codex", send_id)]
     expected_handle = session_identity_key(drain_id)
-    assert f"queued (durable) for {expected_handle}" in res.output
+    import json as _json
+
+    receipt = _json.loads(
+        next(
+            ln
+            for ln in res.output.splitlines()
+            if ln.startswith("{") and "queued (durable)" in ln
+        )
+    )
+    assert receipt["to"] == expected_handle
     drained = _drain_as(runner, monkeypatch, drain_id)
     assert len(drained) == 1
     assert drained[0]["to"] == expected_handle

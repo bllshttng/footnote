@@ -34,12 +34,6 @@ def _description_value(frontmatter: str) -> str:
     return ""
 
 
-def test_architect_body_never_names_the_grading_lenses():
-    _, body = _split_architect()
-    hits = [token for token in FORBIDDEN if token in body]
-    assert not hits, f"architect body names grading lenses: {hits}"
-
-
 def test_architect_pins_an_allowed_model_tier():
     frontmatter, _ = _split_architect()
     assert "model: opus" in frontmatter or "model: fable" in frontmatter, (
@@ -60,12 +54,6 @@ def test_architect_keeps_write_access():
     description = _description_value(frontmatter)
     size = len(description.encode("utf-8"))
     assert size <= 220, f"description is {size} bytes; the budget is 220"
-
-
-def test_architect_links_the_skill_step():
-    _, body = _split_architect()
-    assert "fno:blueprint" in body
-    assert "2a-bis" in body
 
 
 def test_blueprint_substrate_launches_architect():

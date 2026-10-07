@@ -1,21 +1,16 @@
-"""End-to-end integration tests for `fno whoami` / `fno status` against fixtures.
+"""End-to-end tests for `fno whoami` / `fno status` through the console script.
 
-Builds tmp workspaces with realistic fleet/walker/target/session combos,
-runs each command through subprocess (the actual `fno` binary path), and
-asserts output matches expected patterns. Plus the read-only invariant
-verified across repeated invocations. These were formerly `fno agent whoami`
-/ `fno agent status`; the `fno agent` (singular) namespace was retired in
-ab-12dd2a5d.
+Builds tmp workspaces with realistic fleet/walker/target/session combos and
+runs each command through subprocess (the installed `fno-py` entry point).
+The in-process CliRunner suite (test_agent_cli.py) owns the per-branch cases.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).parent / "fixtures" / "agent"
@@ -61,90 +56,6 @@ def _build_full_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return project, fake_home
 
 
-@pytest.mark.parametrize("verb", ["whoami", "status"])
-def test_command_runs_against_full_fixture(tmp_path, verb):
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    result = _fno([verb], cwd=project, env=env)
-    assert result.returncode == 0, (
-        f"fno {verb} failed: rc={result.returncode}\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-    assert result.stdout, f"fno {verb} produced no stdout"
-
-
-@pytest.mark.parametrize("verb", ["whoami", "status"])
-def test_command_json_mode_emits_valid_json(tmp_path, verb):
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    result = _fno([verb, "--json"], cwd=project, env=env)
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    assert payload is not None
-
-
-def test_whoami_full_fixture_shows_all_layers(tmp_path):
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    result = _fno(["whoami"], cwd=project, env=env)
-    assert result.returncode == 0
-    out = result.stdout
-    assert "fleet-fixture-001" in out
-    assert "20260512T010101Z-99999-fixaaa" in out  # target session id
-    assert "claude" in out
-
-
-def test_fno_agent_namespace_absent(tmp_path):
-    """AC2-EDGE: the retired `fno agent` (singular) namespace is gone end-to-end
-    - a clean usage error (non-zero), not a silent wrong result."""
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    result = _fno(["agent", "whoami"], cwd=project, env=env)
-    assert result.returncode != 0
-    assert "No such command 'agent'" in (result.stdout + result.stderr)
-
-
-def test_read_only_invariant_repeated_invocations(tmp_path):
-    """Repeated invocations must not change any read input's md5.
-
-    Covers target-state.md, megawalk-state.md, events.jsonl, and the fleet
-    INDEX - every file the commands open for reading. A regression that opens
-    any of these in `r+` or rewrites them in place would surface here.
-    """
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    # Seed events.jsonl so status has something to tail; this file is
-    # read-only but the invariant must cover it.
-    events = project / ".fno" / "events.jsonl"
-    events.write_text('{"ts":"T1","type":"phase_init","data":{}}\n')
-    fleet_index = (
-        fake_home / ".fno" / "fleet" / "fleet-fixture-001" / "00-INDEX.md"
-    )
-    monitored = [
-        project / ".fno" / "target-state.md",
-        project / ".fno" / "megawalk-state.md",
-        events,
-        fleet_index,
-    ]
-
-    def _hashes() -> dict:
-        return {
-            str(p.relative_to(tmp_path)): hashlib.md5(p.read_bytes()).hexdigest()
-            for p in monitored
-            if p.exists()
-        }
-
-    before = _hashes()
-    for _ in range(25):
-        for verb in ("whoami", "status"):
-            result = _fno([verb], cwd=project, env=env)
-            assert result.returncode == 0, (
-                f"verb {verb} failed: {result.stderr}"
-            )
-    after = _hashes()
-    assert before == after, f"state mutated: {before} -> {after}"
-
-
 def test_end_to_end_journey_consistent_session_id(tmp_path):
     """Run both commands in sequence; each reports the same session_id.
 
@@ -172,30 +83,6 @@ def test_end_to_end_journey_consistent_session_id(tmp_path):
     assert "events_tail" in payload
 
 
-@pytest.mark.parametrize("verb", ["whoami", "status"])
-def test_command_help_resolves(tmp_path, verb):
-    """Both commands respond to --help with rc=0."""
-    result = _fno([verb, "--help"], cwd=REPO_ROOT)
-    assert result.returncode == 0
-    assert "Usage:" in result.stdout
-
-
-def test_no_walker_flag_drops_walker_layer(tmp_path):
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    result = _fno(["whoami", "--no-walker"], cwd=project, env=env)
-    assert result.returncode == 0
-    assert "walker:" not in result.stdout
-
-
-def test_no_fleet_flag_drops_fleet_layer(tmp_path):
-    project, fake_home = _build_full_fixture(tmp_path)
-    env = {"HOME": str(fake_home)}
-    result = _fno(["whoami", "--no-fleet"], cwd=project, env=env)
-    assert result.returncode == 0
-    assert "fleet:" not in result.stdout
-
-
 def test_state_file_override(tmp_path):
     project, fake_home = _build_full_fixture(tmp_path)
     override = tmp_path / "custom.md"
@@ -207,15 +94,3 @@ def test_state_file_override(tmp_path):
     )
     assert result.returncode == 0
     assert "phase=think" in result.stdout
-
-
-def test_malformed_session_state_exits_2(tmp_path):
-    project = tmp_path / "p"
-    fno = project / ".fno"
-    fno.mkdir(parents=True)
-    (fno / "target-state.md").write_text(
-        (FIXTURES / "malformed-state.md").read_text()
-    )
-    result = _fno(["whoami"], cwd=project)
-    assert result.returncode == 2
-    assert "malformed" in result.stderr.lower()

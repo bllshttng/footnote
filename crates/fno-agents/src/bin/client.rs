@@ -43,8 +43,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "component-verdict",
     "provider-cap",
     "source-pin",
-    "court-orphans",
-    "court-fold",
+    "team-orphans",
+    "team-fold",
     "detect",
     "digest",
     "distress-scan",
@@ -59,10 +59,10 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "host",
     "judge",
     "kill-check",
-    "king-checkin",
-    "king-escalation-text",
-    "king-history",
-    "reign-ledger",
+    "lead-checkin",
+    "lead-escalation-text",
+    "lead-history",
+    "term-ledger",
     "route-slot",
     "list",
     "logs",
@@ -98,8 +98,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "registry-json",
     "reentry-plan",
     "rename",
-    "reign-shape",
-    "reign-state",
+    "term-shape",
+    "term-state",
     "report",
     "review-coverage",
     "review-summary",
@@ -136,13 +136,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Transport-only early dispatches, before the runtime builds: the shrink
-    // law (d-fe66560a) bars new client verbs; each module's doc carries its shape.
-    // `backlog`: the grouped backlog dispatcher (see backlog::cli's doc).
-    // Transport-only, unregistered in ALL_CLIENT_ACTIONS (the shrink law
-    // allows no new action): the `fno` front door execs this binary with
-    // `backlog` as the first token, and the folded engines keep their exact
-    // argv contracts for the internal bridges.
     if args.first().map(String::as_str) == Some("backlog") {
         std::process::exit(fno_agents::backlog::cli::run(&args[1..]));
     }
@@ -442,6 +435,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::backlog::style_check::run_cli(&args[1..]);
     }
 
+    // The mail receipt renderer's hidden binary-direct door: the send receipt
+    // prose moved from Python (file budget) with Python keeping transports.
+    // Same `matches!` treatment so the parity guard never sees it.
+    if matches!(verb, "mail-receipt") {
+        return fno_agents::mail_receipt::run_mail_receipt(&args[1..]);
+    }
+
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct
@@ -503,7 +503,7 @@ async fn run(args: Vec<String>) -> i32 {
     // keeps the question fold and the liveness read, this side only renders.
     // Same `matches!` treatment as `component-verdict`, so no advertised fno
     // verb is added.
-    if matches!(verb, "lead-escalation-text" | "king-escalation-text") {
+    if matches!(verb, "lead-escalation-text") {
         return fno_agents::lead_escalation::run_lead_escalation_text(&args[1..]);
     }
 
@@ -539,14 +539,11 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::codex_inject::run_codex_assign_project(&args[1..]).await;
     }
 
-    // `claim` is the HIDDEN debug front over the native claims module
-    // (`fno_agents::claims`): the cross-impl compatibility matrix drives the
-    // Rust side of the lockfile protocol through it, and it doubles as an ops
-    // escape hatch when the Python CLI is unavailable. Matched with `matches!`
-    // (like `mail-inject`) so the routable-verb parity guard does not see it
-    // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno agents claim`
-    // remains the only operator CLI for claims.
+    // Hidden native claim operations; `fno agents claim` owns the operator surface.
     if matches!(verb, "claim") {
+        if args.get(1).map(String::as_str) == Some("birth") {
+            return fno_agents::first_check::run_record(&args[2..]);
+        }
         return fno_agents::claim_verbs::run_claim(&args[1..]);
     }
 
@@ -709,7 +706,7 @@ async fn run(args: Vec<String>) -> i32 {
     // `mail-threads`: the mux Messages tab's thread read model (see
     // mail_threads.rs doc). Direct dispatch like chats; no daemon RPC - a
     // read must work when the daemon is wedged. Hidden from help and from
-    // ALL_CLIENT_ACTIONS, like court-fold.
+    // ALL_CLIENT_ACTIONS, like team-fold.
     if verb == "mail-threads" {
         return fno_agents::mail_threads::run_mail_threads(&args[1..]);
     }
@@ -862,10 +859,10 @@ async fn run(args: Vec<String>) -> i32 {
     // lead_state.rs doc). Direct dispatch, daemon-free reads; the Python
     // `fno agents org shape` shell and escalate's client invoke the binary
     // directly rather than routing through the agents verb set.
-    if matches!(verb, "lead-state" | "reign-state") {
+    if matches!(verb, "lead-state" | "term-state") {
         return fno_agents::lead_state::run_lead_state(&args[1..]);
     }
-    if matches!(verb, "lead-shape" | "reign-shape") {
+    if matches!(verb, "lead-shape" | "term-shape") {
         return fno_agents::lead_state::run_lead_shape_or_term(&args[1..]);
     }
 
@@ -882,14 +879,14 @@ async fn run(args: Vec<String>) -> i32 {
     // dispatcher (the early transport arm); see backlog::cli's doc.
     // `org-vacancies`: the orphan-team sweep for `fno agents org`, daemon-free;
     // `==` dispatch like graph-get, registered in ALL_CLIENT_ACTIONS.
-    if verb == "org-vacancies" || verb == "court-orphans" {
+    if verb == "org-vacancies" || verb == "team-orphans" {
         return fno_agents::lead_state::run_org_vacancies(&args[1..]);
     }
     // `org-fold`: the team scope fold for `fno agents org --nodes` and the
     // local board's org section, daemon-free like org-vacancies; the workers
     // column rides the same native claim verdicts `claim sweep` established,
     // so a fold and the claims surface cannot disagree about who holds a node.
-    if verb == "org-fold" || verb == "court-fold" {
+    if verb == "org-fold" || verb == "team-fold" {
         return fno_agents::org_fold::run_org_fold(&args[1..]);
     }
 
@@ -901,7 +898,7 @@ async fn run(args: Vec<String>) -> i32 {
     // `--verdict` is the same journals read as a tenure verdict (law
     // d-fe66560a: the verdict rides this action as an argument, never a
     // new action).
-    if verb == "lead-history" || verb == "king-history" {
+    if verb == "lead-history" || verb == "lead-history" {
         if args.iter().skip(1).any(|a| a == "--verdict") {
             return fno_agents::lead_history::run_lead_verdict(&args[1..]);
         }
@@ -913,7 +910,7 @@ async fn run(args: Vec<String>) -> i32 {
     // resolves the caller's team scope and Python-owned paths, the native
     // side gathers, prints, diffs and journals the row, reusing the org-fold
     // fold and the lead-history scan in process.
-    if verb == "lead-checkin" || verb == "king-checkin" {
+    if verb == "lead-checkin" || verb == "lead-checkin" {
         return fno_agents::lead_checkin::run_lead_checkin(&args[1..]);
     }
     // `evals-macro`: the macro-eval failure-pattern leaderboard for
@@ -924,11 +921,11 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "evals-macro" {
         return fno_agents::evals_macro::run_evals_macro(&args[1..]);
     }
-    // `lead-rundown`: the lead ledger page for `fno agents king ledger`.
+    // `lead-rundown`: the lead ledger page for `fno agents lead ledger`.
     // Same split as lead-history: Python resolves the org and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
     // in the org JSON, so the page cannot disagree with the org.
-    if verb == "lead-rundown" || verb == "reign-ledger" {
+    if verb == "lead-rundown" || verb == "term-ledger" {
         return fno_agents::rundown::run_lead_ledger(&args[1..]);
     }
     if verb == "bash-census" {
@@ -1046,12 +1043,23 @@ async fn run(args: Vec<String>) -> i32 {
     // `resume --substrate thread` is the pane-to-thread LIFECYCLE move, not a
     // re-entry: it falls through to build_request, which routes it to the
     // daemon's agent.convert, whose agent lock outlives the client.
-    if verb == "resume" && !fno_agents::resume_args::requests_conversion(&args[1..]) {
+    // A row that is not a pane has nothing to convert, so the same flag falls
+    // back to the plain resume, which relaunches an exited session as a thread.
+    let resume_rest = if verb != "resume" {
+        None
+    } else if fno_agents::resume_args::requests_conversion(&args[1..]) {
+        fno_agents::resume_args::reentry_argv_for_unpaned_conversion(
+            &args[1..],
+            &AgentsHome::from_env(),
+        )
+    } else {
+        Some(args[1..].to_vec())
+    };
+    if let Some(rest) = resume_rest {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
         // thread is legal in both contexts (gc_sweep::stop_row_process is
         // the same shape).
-        let rest = args[1..].to_vec();
         let home = AgentsHome::from_env();
         return match std::thread::spawn(move || fno_agents::client_verbs::run_resume(&rest, &home))
             .join()
@@ -3708,8 +3716,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--deny-tools",
         "--account",
         "--harness-arg",
-        "--crown",
-        "--crown-scope",
+        "--role-level",
+        "--role-scope",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3985,10 +3993,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     list.push(v);
                 }
             }
-            // The crown halves the Python seam carries for a crowned codex
+            // The role halves the Python seam carries for a promoted codex
             // thread spawn; the typed parse lives in spawn_axes.
-            "--crown" | "--crown-scope" => {
-                fno_agents::spawn_axes::insert_crown_flag(&a, &mut it, &mut params)?;
+            "--role-level" | "--role-scope" => {
+                fno_agents::spawn_axes::insert_role_flag(&a, &mut it, &mut params)?;
             }
             "--account" => {
                 // per-spawn account selection. Parsed here so the spawn

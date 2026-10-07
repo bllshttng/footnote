@@ -30,6 +30,13 @@ admit() {
         repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
         rc=0
         fno-agents test-run ${mode}-admit --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
+        if [[ "$rc" -eq 86 ]]; then
+            # Slot-busy is policy, not breakage: the door printed the answer
+            # ("commit, push, CI runs it"). Stop the compile or run here;
+            # failing open would build unadmitted under the very saturation
+            # the gate exists to cap.
+            exit 86
+        fi
         if [[ "$rc" -ge 128 ]]; then
             # A signal stopped the wait: cargo is stopping, so compile or
             # run nothing.

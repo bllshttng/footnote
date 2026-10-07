@@ -205,7 +205,7 @@ def _envelope(node: dict, tag: str, details_block: str, tail_block: str) -> str:
 
 def _initiator_handle(node: dict) -> Optional[str]:
     """The reply-to mail handle: the live dispatching session's ambient identity
-    (a court king dispatching its wave outranks the historical filer), else the
+    (a team lead dispatching its wave outranks the historical filer), else the
     node's ``source_session_id`` provenance, else None."""
     live = (os.environ.get("FNO_AGENT_SELF") or "").strip()
     if live:

@@ -94,21 +94,7 @@ pub fn is_gate_event(kind: &str) -> bool {
 /// append-only history), so queries expand a kind to its old spelling and
 /// readers canonicalize the row type through [`event_type_alias`]. This
 /// table never shrinks.
-pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[
-    ("agent_crown_vacated", "agent_team_vacated"),
-    ("crown_succession_reverted", "team_succession_reverted"),
-    ("king_action", "lead_action"),
-    ("king_context_nudge", "lead_context_nudge"),
-    ("king_drain_reserve", "lead_drain_reserve"),
-    ("king_goal_resumed", "lead_goal_resumed"),
-    ("king_loop_check", "lead_loop_check"),
-    ("king_orphan_block", "lead_orphan_block"),
-    ("king_term", "lead_term"),
-    ("king_wake", "lead_wake"),
-    ("reign_armed", "lead_armed"),
-    ("reign_checkin", "lead_checkin"),
-    ("reign_dispatch_exception", "lead_dispatch_exception"),
-];
+pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[("agent_role_vacated", "agent_team_vacated")];
 
 /// The canonical (new) spelling of an event kind: an old stored spelling
 /// maps to its replacement, anything else is itself.
@@ -347,6 +333,52 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 /// schema ensured (v2 created, or v1 migrated) before the connection is
 /// handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
+    if store.exists() {
+        let check = crate::store_conn::open_read(store).and_then(|conn| {
+            let result: String = conn
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
+            if result == "ok" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: database disk image is malformed: integrity check failed: {result}",
+                    store.display()
+                ))
+            }
+        });
+        if let Err(error) = check {
+            let parent = store.parent().unwrap_or_else(|| Path::new("."));
+            let root = if parent.file_name().is_some_and(|name| name == "db") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            let attention = root.join("questions.jsonl");
+            let mut identity = Sha256::new();
+            identity.update(store.as_os_str().as_encoded_bytes());
+            if let Ok(meta) = store.metadata() {
+                identity.update(meta.dev().to_le_bytes());
+                identity.update(meta.ino().to_le_bytes());
+            }
+            let id = format!("q-store-{:x}", identity.finalize());
+            let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "asker": "event-store", "node": "none", "context": {"blocked_because": error, "unknowns": "The original corruption interleaving and live installation safety have not been verified."}, "subject": "event-store-integrity", "blocks": []}});
+            use std::io::Write;
+            let notice = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&attention)
+                .and_then(|mut file| writeln!(file, "{row}"));
+            return Err(match notice {
+                Ok(()) => format!("{error}; write refused; attention: {}", attention.display()),
+                Err(e) => format!(
+                    "{error}; write refused; attention {} failed: {e}",
+                    attention.display()
+                ),
+            });
+        }
+    }
     let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
     observation::ensure_observation_tables(&conn)
@@ -355,6 +387,10 @@ fn open_store(store: &Path) -> Result<Connection, String> {
 }
 
 /// Read-only handle for history readers; a failure names the store path.
+pub(crate) fn upgrade_role_store(store: &Path) -> Result<(), String> {
+    open_store(store).map(|_| ())
+}
+
 pub fn open_read(store: &Path) -> Result<Connection, String> {
     let conn = crate::store_conn::open_read(store)?;
     refuse_newer_schema(&conn, store)?;
@@ -416,6 +452,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
         migrate_caused_by(conn)?;
+        crate::role_migration::upgrade_event_store(conn)?;
         return stamp_coverage_epoch(conn, store);
     }
     let has_events: bool = conn
@@ -463,6 +500,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     tx.commit()
         .map_err(|e| format!("{}: migration: {e}", store.display()))?;
     migrate_caused_by(conn)?;
+    crate::role_migration::upgrade_event_store(conn)?;
     stamp_coverage_epoch(conn, store)
 }
 
@@ -878,7 +916,7 @@ fn is_valid_event_scope(event_type: &str, _data: &serde_json::Value, scope: &str
         return is_canonical_team_scope(scope);
     }
     // A stop_decision with no team scope remains an auditable event: the
-    // correlated session row is what lead admission reads, and a fresh heir
+    // correlated session row is what lead admission reads, and a fresh successor
     // journals exactly there - before init writes the manifest that would
     // carry its scope.
     event_type == "stop_decision"
@@ -1283,7 +1321,7 @@ impl EventQuery {
         };
         let limit_sql = self
             .limit
-            .map(|n| format!(" LIMIT {n}"))
+            .map(|n| format!(" ORDER BY seq LIMIT {n}"))
             .unwrap_or_default();
         let history = if recovery {
             "EXISTS(SELECT 1 FROM recovery_history h WHERE h.event_id = events.event_id)"
@@ -1295,7 +1333,28 @@ impl EventQuery {
         } else {
             "NULL"
         };
-        (format!("SELECT seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch} FROM events{where_sql} ORDER BY seq{limit_sql}"), args)
+        let columns = format!("seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch}");
+        // An indexed filter reads rows out of commit order. The filter then
+        // picks seqs in a subquery, so the sort holds integers only. Sorting
+        // the selected rows sorted every `line` in a temp B-tree, which
+        // spilled gigabytes to disk on each daemon tick. With no indexed
+        // filter, a plain scan is already in seq order.
+        let indexed = !self.types.is_empty()
+            || self.scope.is_some()
+            || self.session_id.is_some()
+            || self.node_id.is_some()
+            || self.pr_number.is_some()
+            || self.head_sha.is_some();
+        let sql = if indexed {
+            format!("SELECT {columns} FROM events WHERE seq IN (SELECT seq FROM events{where_sql}{limit_sql}) ORDER BY seq")
+        } else {
+            let limit = self
+                .limit
+                .map(|n| format!(" LIMIT {n}"))
+                .unwrap_or_default();
+            format!("SELECT {columns} FROM events{where_sql} ORDER BY seq{limit}")
+        };
+        (sql, args)
     }
 }
 

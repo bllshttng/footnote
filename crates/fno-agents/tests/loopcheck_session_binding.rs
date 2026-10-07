@@ -79,7 +79,7 @@ fn row_json_with_node(harness: &str, sid: &str, cwd: &Path, node: &str) -> Strin
 fn row_json_teamed(harness: &str, sid: &str, cwd: &Path) -> String {
     let mut row = row_json(harness, sid, cwd);
     row.insert(row.len() - 1, ',');
-    row.insert_str(row.len() - 1, r#""crown_level":1"#);
+    row.insert_str(row.len() - 1, r#""role_level":1"#);
     row
 }
 

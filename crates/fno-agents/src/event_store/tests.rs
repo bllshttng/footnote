@@ -189,10 +189,8 @@ fn rotation_overwrite_keeps_ingested_history() {
     // new-spelling query.
     append(
         &live,
-        &[
-            json!({"ts": "2026-09-12T08:00:00Z", "type": "reign_checkin",
-                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}}),
-        ],
+        &[json!({"ts": "2026-09-12T08:00:00Z", "type": "lead_checkin",
+                 "source": "loop", "data": {"scope": "x-aaaa", "change": "old spelling"}})],
     );
     sync(&live).unwrap();
     let hits = query_events(
@@ -496,6 +494,47 @@ fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
         .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 0);
+
+    let damaged = dir.path().join("damaged.jsonl");
+    sync(&damaged).unwrap();
+    let store = store_path(&damaged);
+    let conn = Connection::open(&store).unwrap();
+    let root: u64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name='ingest_cursor'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let page_size: u64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&store)
+        .unwrap();
+    file.seek(SeekFrom::Start((root - 1) * page_size)).unwrap();
+    file.write_all(&vec![0; page_size as usize]).unwrap();
+    drop(file);
+    let before = std::fs::read(&store).unwrap();
+    for result in [
+        append_envelope(&damaged, &line, None).map(|_| ()),
+        import_all(&damaged).map(|_| ()),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("integrity check failed") && error.contains("write refused"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&store).unwrap(), before);
+    }
+    let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
+    assert!(attention.contains("event-store-integrity"));
+    let items = crate::attention::project(&attention, &[], "", 0);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].ready, "{:?}", items[0].missing);
 }
 
 #[test]
@@ -567,21 +606,12 @@ fn append_envelope_commits_and_reads_back() {
     assert_eq!(rows[0].line, envelope, "the envelope lands byte-for-byte");
     assert_eq!(rows[0].event_id, receipt.event_id);
     assert!(rows[0].event_id.starts_with("evt:"));
-}
-
-#[test]
-fn append_retry_is_idempotent_hit_not_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    let envelope = checkin("2026-09-17T12:00:00Z", "x-aaaa", "once").to_string();
-    let first = append_envelope(&live, &envelope, None).unwrap();
-    assert!(first.inserted);
     let second = append_envelope(&live, &envelope, None).unwrap();
     assert!(
         !second.inserted,
         "a byte-identical retry is an idempotent hit"
     );
-    assert_eq!(second.event_id, first.event_id);
+    assert_eq!(second.event_id, receipt.event_id);
     assert_eq!(count_events(&store_path(&live)), 1);
     // The other branch of the same identity contract: a row already stored
     // under a requested id, then the SAME id with a DIFFERENT payload, is a
@@ -601,12 +631,12 @@ fn append_refuses_newline_and_bad_scope_and_bad_ts() {
     let live = dir.path().join("events.jsonl");
     assert!(append_envelope(&live, "{\"a\":1}\n{\"b\":2}", None).is_err());
     let bad_scope = json!({"ts": "2026-09-17T12:00:00Z", "type": "lead_checkin",
-        "source": "loop", "data": {"scope": "x-1 ready, two words"}})
+        "source": "loop", "data": {"scope": "x-1 ready, two words", "change": "one"}})
     .to_string();
     let err = append_envelope(&live, &bad_scope, None).unwrap_err();
     assert!(err.contains("canonical team scope"), "err: {err}");
     let bad_ts = json!({"ts": "not-a-time", "type": "lead_checkin",
-        "source": "loop", "data": {}})
+        "source": "loop", "data": {"scope": "x-1", "change": "one"}})
     .to_string();
     let err = append_envelope(&live, &bad_ts, None).unwrap_err();
     assert!(err.contains("RFC3339"), "err: {err}");
@@ -647,10 +677,10 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
     append_envelope(&live, &visitor, None).unwrap();
     assert_eq!(count_type(&store_path(&live), "stop_decision"), 1);
 
-    // A session a manifest does not yet name - a fresh heir
+    // A session a manifest does not yet name - a fresh successor
     // whose only manifest is its predecessor's - journals the same way. The
     // correlated row is what lead admission reads; no manifest needed.
-    let heir = json!({
+    let successor = json!({
         "ts": "2026-09-17T12:00:00Z",
         "type": "stop_decision",
         "source": "hook",
@@ -670,7 +700,7 @@ fn a_stop_decision_without_scope_is_auditable_for_every_session() {
         }
     })
     .to_string();
-    append_envelope(&live, &heir, None).unwrap();
+    append_envelope(&live, &successor, None).unwrap();
     assert_eq!(count_type(&store_path(&live), "stop_decision"), 2);
 
     // A NON-empty scope still validates against the canonical form.
@@ -1024,6 +1054,43 @@ fn journal_text_checked_fast_path_stays_bounded_on_a_huge_journal() {
         elapsed < std::time::Duration::from_secs(5),
         "the cursor fast path keeps the read bounded: {elapsed:?}"
     );
+}
+
+#[test]
+fn a_filtered_read_sorts_seqs_not_lines_and_keeps_limit_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    append(
+        &journal,
+        &[
+            checkin("2026-10-07T00:00:03Z", "s", "first"),
+            checkin("2026-10-07T00:00:01Z", "s", "second"),
+            checkin("2026-10-07T00:00:02Z", "s", "third"),
+        ],
+    );
+    sync(&journal).unwrap();
+    let mut q = EventQuery::of_types(&["lead_checkin"]);
+    let (sql, args) = q.build_sql(false);
+    let conn = open_read(&store_path(&journal)).unwrap();
+    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    let plan: Vec<String> = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(refs.as_slice(), |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+        "{plan:?}"
+    );
+    q.limit = Some(2);
+    let text = journal_text_checked(&journal, &q).unwrap();
+    let kept: Vec<&str> = ["first", "second", "third"]
+        .into_iter()
+        .filter(|c| text.contains(c))
+        .collect();
+    assert_eq!(kept, ["first", "second"], "{text}");
 }
 
 mod coverage;

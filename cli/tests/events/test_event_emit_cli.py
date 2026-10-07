@@ -88,7 +88,7 @@ def test_ac1_hp_canonical_envelope_target_source(runner: CliRunner, tmp_path: Pa
 def test_ac1_hp_explicit_source_overrides_autodetect(runner: CliRunner, tmp_path: Path) -> None:
     """AC1-HP: --source overrides auto-detection.
 
-    reign_checkin declares [loop, daemon, hook], never target, so this also
+    lead_checkin declares [loop, daemon, hook], never target, so this also
     proves the override reaches a source auto-detection could never produce
     on its own (a state file is present, which would auto-detect 'target').
     """
@@ -99,7 +99,7 @@ def test_ac1_hp_explicit_source_overrides_autodetect(runner: CliRunner, tmp_path
         event_cli,
         [
             "emit",
-            "--type", "reign_checkin",
+            "--type", "lead_checkin",
             "--data", json.dumps({"scope": "x-a792", "change": "override test"}),
             "--source", "daemon",
             "--state", str(state),
@@ -127,7 +127,7 @@ def test_ac1_hp_no_state_file_and_no_source_is_refused(runner: CliRunner, tmp_pa
         event_cli,
         [
             "emit",
-            "--type", "reign_checkin",
+            "--type", "lead_checkin",
             "--data", json.dumps({"scope": "x-a792", "change": "no source"}),
             "--state", str(nonexistent_state),
             "--events", str(events),
@@ -136,7 +136,7 @@ def test_ac1_hp_no_state_file_and_no_source_is_refused(runner: CliRunner, tmp_pa
 
     assert result.exit_code != 0
     assert not read_committed_lines(events)
-    assert "reign_checkin declares: daemon, hook, loop" in result.stderr
+    assert "lead_checkin declares: daemon, hook, loop" in result.stderr
 
 
 @pytest.mark.parametrize(

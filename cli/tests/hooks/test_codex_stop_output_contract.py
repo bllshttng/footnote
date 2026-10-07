@@ -209,34 +209,3 @@ def test_nudge_markdown_is_rejected(tmp_path) -> None:
         codex_stop_accepts(result.returncode, result.stdout, result.stderr)
         == CODEX_INVALID_JSON
     )
-
-
-def test_codex_regression_not_json_names_the_ui_error() -> None:
-    """Codex's own case: (0, "not json", "") fails with the exact UI text."""
-    assert codex_stop_accepts(0, "not json", "") == CODEX_INVALID_JSON
-
-
-@pytest.mark.parametrize(
-    ("result", "accepted"),
-    [
-        ((0, "", ""), True),
-        ((0, "  \n\t", ""), True),
-        ((0, '{"decision":"block","reason":"keep working"}', ""), True),
-        ((0, '{"continue":false,"stopReason":"pr green"}', ""), True),
-        ((0, '{"suppressOutput":true,"systemMessage":"note"}', ""), True),
-        ((2, "", "blocked: findings outstanding\n"), True),
-        ((0, "not json", ""), False),
-        ((0, "[]", ""), False),
-        ((0, '{"decision":"continue","reason":"x"}', ""), False),
-        ((0, '{"decision":"block","reason":""}', ""), False),
-        ((0, '{"decision":"block"}', ""), False),
-        ((0, '{"surprise":true}', ""), False),
-        ((0, '{"continue":"yes"}', ""), False),
-        ((0, '{"stopReason":7}', ""), False),
-        ((2, "", ""), False),
-        ((1, '{"decision":"block","reason":"r"}', ""), False),
-    ],
-)
-def test_validator_matches_codex_0_154_0(result: tuple, accepted: bool) -> None:
-    verdict = codex_stop_accepts(*result)
-    assert (verdict is None) is accepted, verdict

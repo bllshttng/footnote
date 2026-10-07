@@ -87,10 +87,10 @@ consolidation:
 surface:
   question: "Which nodes need dispatch?"   # ONE line, phrased as a question
   ruling: d-XXXXXXXX                       # optional: the live law the question is quoted from
-  sweep: "rg -n 'plan_path' crates/fno-agents/src/king_board.rs"  # the exact command run; must return the control below
-  control: crates/fno-agents/src/king_board.rs build_board  # an answerer known BEFORE the sweep ran
+  sweep: "rg -n 'plan_path' crates/fno-agents/src/lead_board.rs"  # the exact command run; must return the control below
+  control: crates/fno-agents/src/lead_board.rs build_board  # an answerer known BEFORE the sweep ran
   answerers:
-    - at: crates/fno-agents/src/king_board.rs build_board (undispatched filter)
+    - at: crates/fno-agents/src/lead_board.rs build_board (undispatched filter)
       # ^ `at:` is `path[:lines] symbol (note)`: the validator greps that symbol,
       #   and each free `name(` call in `reads:`, in every language tree at the
       #   merge base; a reader in another tree that no answerer names is
@@ -100,7 +100,7 @@ surface:
       reads: "inputs.undispatched.rows()"   # the expression the site evaluates, quoted
       feed: "fno backlog undispatched --json"         # the command believed to supply the site
       emits: "31 rows, 31 with plan_path, 0 without (measured 2026-09-02)"
-    - at: crates/fno-agents/src/king_board.rs build_board (unplanned filter)
+    - at: crates/fno-agents/src/lead_board.rs build_board (unplanned filter)
       disposition: out-of-scope
       reason: "already correct; its feed is SRC_READY, measured above"
   count: 2                                 # the PR estimate, stated
@@ -263,6 +263,8 @@ tasks:
 ---
 
 ## Guidelines
+
+**Firm and volatile:** the goal, the acceptance contract, the invariants and the files to read are firm, and the executor trusts them. Line numbers and snippets are volatile as of `code_index.main_sha`. Say so once above the Changes section, and never trust a volatile line - `fno backlog freshness <node> --plan <plan>` names which cited paths moved.
 
 **Length:** 50-100 lines. A larger multi-wave feature still stays one `.md` - use the design-doc mutation path (`/blueprint <design-doc>` after `/think`), which builds its `## Execution Strategy` from the design. Drop `quick` for the fuller section set on an idea input.
 

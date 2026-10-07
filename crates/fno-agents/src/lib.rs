@@ -167,6 +167,7 @@ pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
 pub mod finalize_run_summary;
+pub mod first_check;
 pub mod fleet_incident;
 pub mod fleet_load;
 pub mod fleet_page;
@@ -261,6 +262,7 @@ pub mod mail_envelope;
 pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod mail_receipt;
 pub mod mail_threads;
 pub mod main_ci;
 pub mod main_ci_proof;
@@ -287,6 +289,7 @@ pub mod node_origin;
 pub mod node_reading;
 pub mod node_route;
 pub mod node_seed;
+pub mod notice_route;
 pub mod nudge;
 pub mod occupancy_login;
 pub mod opencode_ask;
@@ -303,6 +306,8 @@ pub mod org_rivals;
 pub mod orphan_reap;
 pub mod osc;
 pub mod otel_ingest;
+pub mod otel_read;
+pub(crate) mod owner_ladder;
 pub mod pane_keeper;
 pub mod pane_rebind;
 pub mod pane_relaunch;
@@ -317,6 +322,7 @@ pub mod planning_lane;
 pub mod plans_dirs;
 pub mod plans_path;
 pub mod plugin_install;
+pub mod pr_admission;
 pub mod pr_body_check;
 pub mod pr_create;
 pub mod pr_draft_ready;
@@ -375,6 +381,7 @@ pub mod revival_check;
 pub mod revive_proof;
 pub mod rm_receipt;
 pub mod rm_tombstone;
+pub mod role_migration;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
@@ -450,6 +457,7 @@ pub mod team_names;
 pub mod team_reap;
 pub mod team_rescope;
 pub mod team_settle;
+pub mod team_spawn;
 pub mod team_split;
 pub mod team_widen;
 pub mod terminal_stop;
@@ -1711,7 +1719,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // same kind through the shared emitter.
     "agent_team_vacated",
     // A succession reverted: the reap sweep restored the predecessor's
-    // session after an heir died unbound past the window (team_reap.rs;
+    // session after a successor died unbound past the window (team_reap.rs;
     // the daemon retire arm and `fno agents reap`).
     "team_succession_reverted",
     // The succession transaction (succession_txn.rs): announce (plus its
@@ -1809,8 +1817,8 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "session_report_stored",
     "session_report_dropped",
     // The same failure the Python identification arm emits: the manifest
-    // rebind at a crowned row's first self-identification did not land.
-    "crown_manifest_arm_failed",
+    // rebind at a promoted row's first self-identification did not land.
+    "role_manifest_arm_failed",
     // Ordered exit teardown (daemon-emitted, inside-out E3.3): a claude row with
     // an inside-leg report is going Exited; the completion is published before
     // the registry clears the report (AC-X2-4).
