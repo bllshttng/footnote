@@ -1194,7 +1194,13 @@ where
         .map(Path::new);
     let snapshot = read_roster(config_dir);
     if !snapshot.is_known() {
-        return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        return live_claude_missing_row(
+            name,
+            short_id,
+            session_uuid,
+            cwd,
+            "the claude roster could not be read",
+        );
     }
     let Some(row) = snapshot.find(short_id) else {
         // A full, warning-free roster that lacks the row is affirmative death
@@ -1210,10 +1216,22 @@ where
             };
             return relaunch_exited_claude(home, name, row_name, short_id, session_uuid, cwd, wake);
         }
-        return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        return live_claude_missing_row(
+            name,
+            short_id,
+            session_uuid,
+            cwd,
+            "the claude roster listing was partial, so a missing row proves nothing",
+        );
     };
     let Some(state) = row.state.as_deref().filter(|state| !state.is_empty()) else {
-        return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        return live_claude_missing_row(
+            name,
+            short_id,
+            session_uuid,
+            cwd,
+            "the roster row reports no state",
+        );
     };
     let state_lower = state.to_ascii_lowercase();
     if matches!(state_lower.as_str(), "working" | "busy") {
@@ -1386,6 +1404,53 @@ fn transcript_exists(claude_home: &ClaudeHome, uuid: &str) -> bool {
     })
 }
 
+/// The newest `custom-title` the user set on this transcript (what claude
+/// shows as the session name), or `None` when it has none.
+fn transcript_custom_title(claude_home: &ClaudeHome, uuid: &str) -> Option<String> {
+    use std::io::BufRead;
+    let file = claude_home.project_dirs().iter().find_map(|projects| {
+        std::fs::read_dir(projects)
+            .ok()?
+            .flatten()
+            .find_map(|slug| {
+                let path = slug.path().join(format!("{uuid}.jsonl"));
+                path.is_file().then_some(path)
+            })
+    })?;
+    let reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
+    let mut title = None;
+    for line in reader.lines().map_while(Result::ok) {
+        if !line.contains("\"custom-title\"") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record["type"] == "custom-title" {
+            if let Some(text) = record["customTitle"].as_str().filter(|t| !t.is_empty()) {
+                title = Some(text.to_string());
+            }
+        }
+    }
+    title
+}
+
+/// The row name a relaunch gives the session. A row that carries a real name
+/// keeps it. An adopted row is named by its short id, which says nothing, so
+/// it takes the name the user gave the conversation in the harness.
+fn relaunch_name(claude_home: &ClaudeHome, row_name: &str, short_id: &str, uuid: &str) -> String {
+    if row_name != short_id && row_name != uuid {
+        return row_name.to_string();
+    }
+    transcript_custom_title(claude_home, uuid)
+        .filter(|title| {
+            title
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+        .unwrap_or_else(|| row_name.to_string())
+}
+
 /// The exited-row relaunch: a full, warning-free roster that lacks
 /// the row is affirmative death no process answered, and the recovery the old
 /// refusal printed is one command. Run it as a child and let the spawn
@@ -1428,13 +1493,16 @@ pub(crate) fn relaunch_exited_claude_with(
     let uuid = match exited_relaunch_transcript(claude_home, short_id, session_uuid) {
         Some(uuid) if transcript_exists(claude_home, &uuid) => uuid,
         _ => {
-            eprintln!(
-                "fno agents resume: no transcript for {name} ({short}) exists to                  seed a relaunch from",
-                short = short_id
+            return live_claude_missing_row(
+                name,
+                short_id,
+                session_uuid,
+                cwd,
+                "no transcript exists to relaunch from",
             );
-            return live_claude_missing_row(name, short_id, session_uuid, cwd);
         }
     };
+    let spawn_name = relaunch_name(claude_home, row_name, short_id, &uuid);
     // A down-route launch refuses when another holder took the node or PR:
     // the same gate the dead arm runs before its relaunch.
     if let Some(code) = crate::resume_gate::gate_and_reserve(home, row_name, &uuid) {
@@ -1450,13 +1518,15 @@ pub(crate) fn relaunch_exited_claude_with(
         "agents",
         "spawn",
         "--name",
-        row_name,
+        &spawn_name,
         "--resume",
         &uuid,
         "--cwd",
         cwd,
         "--substrate",
         "thread",
+        "-H",
+        "claude",
     ]);
     if let Some(message) = message {
         command.arg(message);
@@ -1470,14 +1540,23 @@ pub(crate) fn relaunch_exited_claude_with(
     }
 }
 
-fn live_claude_missing_row(name: &str, short_id: &str, session_id: &str, cwd: &str) -> i32 {
+/// Exit 16: no live process answered and fno could not relaunch the session
+/// itself. The line names the cause in words and the hand-run relaunch; the
+/// code is documented in `resume --help`.
+fn live_claude_missing_row(
+    name: &str,
+    short_id: &str,
+    session_id: &str,
+    cwd: &str,
+    cause: &str,
+) -> i32 {
     let cwd_arg = if cwd.is_empty() {
         String::new()
     } else {
         format!(" --cwd {cwd}")
     };
     eprintln!(
-        "fno agents resume: {name} ({short_id}) is not listed in the claude roster.\nNo process answered for {short_id}. A wake cannot reach a session that has exited.\nRelaunch the conversation instead: fno agents spawn --name {name} --resume {session_id}{cwd_arg}"
+        "fno agents resume: {name} ({short_id}) has no live process, and fno could not relaunch it by itself: {cause}.\nRelaunch it by hand: fno agents spawn --name {name} -H claude --resume {session_id}{cwd_arg}"
     );
     16
 }
@@ -3352,8 +3431,38 @@ mod tests {
             "{launch}"
         );
         assert!(launch.contains("--cwd /tmp/wt"), "{launch}");
-        assert!(launch.contains("--substrate thread"), "{launch}");
+        assert!(launch.contains("--substrate thread -H claude"), "{launch}");
         assert!(launch.contains("continue the work"), "{launch}");
+
+        // An adopted row is named by its short id; the relaunch takes the
+        // newest title the user set in the harness instead.
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"custom-title\",\"customTitle\":\"old-name\"}\n{\"type\":\"custom-title\",\"customTitle\":\"mods-think\"}\n",
+        )
+        .unwrap();
+        std::fs::write(&launch_log, "").unwrap();
+        std::env::set_var("FNO_BIN", bin.join("fno-stub"));
+        let code = relaunch_exited_claude_with(
+            &home,
+            "0a1b2c3d",
+            "0a1b2c3d",
+            "0a1b2c3d",
+            uuid,
+            "/tmp/wt",
+            None,
+            &claude_home,
+        );
+        match &old_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert_eq!(code, 0);
+        let launch = std::fs::read_to_string(&launch_log).unwrap();
+        assert!(
+            launch.contains("agents spawn --name mods-think --resume"),
+            "{launch}"
+        );
 
         // No transcript anywhere: the refusal stands, the child never runs.
         std::fs::remove_file(&transcript).unwrap();

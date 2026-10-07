@@ -496,6 +496,47 @@ fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
         .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 0);
+
+    let damaged = dir.path().join("damaged.jsonl");
+    sync(&damaged).unwrap();
+    let store = store_path(&damaged);
+    let conn = Connection::open(&store).unwrap();
+    let root: u64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name='ingest_cursor'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let page_size: u64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&store)
+        .unwrap();
+    file.seek(SeekFrom::Start((root - 1) * page_size)).unwrap();
+    file.write_all(&vec![0; page_size as usize]).unwrap();
+    drop(file);
+    let before = std::fs::read(&store).unwrap();
+    for result in [
+        append_envelope(&damaged, &line, None).map(|_| ()),
+        import_all(&damaged).map(|_| ()),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("integrity check failed") && error.contains("write refused"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&store).unwrap(), before);
+    }
+    let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
+    assert!(attention.contains("event-store-integrity"));
+    let items = crate::attention::project(&attention, &[], "", 0);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].ready, "{:?}", items[0].missing);
 }
 
 #[test]
@@ -567,21 +608,12 @@ fn append_envelope_commits_and_reads_back() {
     assert_eq!(rows[0].line, envelope, "the envelope lands byte-for-byte");
     assert_eq!(rows[0].event_id, receipt.event_id);
     assert!(rows[0].event_id.starts_with("evt:"));
-}
-
-#[test]
-fn append_retry_is_idempotent_hit_not_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("events.jsonl");
-    let envelope = checkin("2026-09-17T12:00:00Z", "x-aaaa", "once").to_string();
-    let first = append_envelope(&live, &envelope, None).unwrap();
-    assert!(first.inserted);
     let second = append_envelope(&live, &envelope, None).unwrap();
     assert!(
         !second.inserted,
         "a byte-identical retry is an idempotent hit"
     );
-    assert_eq!(second.event_id, first.event_id);
+    assert_eq!(second.event_id, receipt.event_id);
     assert_eq!(count_events(&store_path(&live)), 1);
     // The other branch of the same identity contract: a row already stored
     // under a requested id, then the SAME id with a DIFFERENT payload, is a
