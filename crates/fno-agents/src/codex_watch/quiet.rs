@@ -329,10 +329,8 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
         .filter_map(|e| e.session_id.as_deref())
         .collect();
     let mut stores = crate::gc_inventory::HarnessStoreIndex::default();
-    let loaded = crate::codex_inject::loaded_thread_ids().ok();
-    let codex_daemon_dead = crate::codex_inject::CodexDaemonAdapter::from_environment()
-        .provider_pid_start()
-        .is_some_and(|(pid, start)| !crate::daemon::pid_is_ours(pid, start));
+    let mut loaded = None;
+    let mut codex_daemon_dead = None;
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let dir = home.root().join("quiet-recovery");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -415,11 +413,22 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
             let Some(tail) = tail(&path, episode.pending.as_ref().map(|p| p.0.as_str())) else {
                 return Ok(());
             };
+            let native_codex_thread = entry.harness_name() == "codex" && entry.mux.is_none();
+            let daemon_dead = native_codex_thread
+                && *codex_daemon_dead.get_or_insert_with(|| {
+                    crate::codex_inject::CodexDaemonAdapter::from_environment()
+                        .provider_pid_start()
+                        .is_some_and(|(pid, start)| !crate::daemon::pid_is_ours(pid, start))
+                });
+            let thread_unloaded = native_codex_thread
+                && !daemon_dead
+                && loaded
+                    .get_or_insert_with(crate::codex_inject::loaded_thread_ids)
+                    .as_ref()
+                    .is_ok_and(|roster| !roster.contains(sid));
             let dead = entry.pid.is_some_and(|pid| crate::daemon::pid_is_gone(pid))
-                || (entry.harness_name() == "codex" && codex_daemon_dead)
-                || (entry.harness_name() == "codex"
-                    && entry.mux.is_none()
-                    && loaded.as_ref().is_some_and(|roster| !roster.contains(sid)));
+                || daemon_dead
+                || thread_unloaded;
             let decision = action(
                 &mut episode,
                 &tail,
