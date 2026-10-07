@@ -7422,28 +7422,9 @@ def dispatch_send(
     (``hosted``) send is self-recording in the transcript and is NOT also queued;
     its bus row is audit-only, while the durable bus remains the offline fallback
     tier. Both the live turn and the bus record carry the same ``<fno_mail>``
-    envelope.
-
-    Orchestration:
-
-    1. Validate name / message / from_name (the shared _validate_inputs rules).
-    2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
-    3. Resolve the address to its registry primary key, then acquire that
-       per-agent flock (hold_agent_lock) with timeout. A timeout retries the
-       acquire on a short grace window and queues the message durable when it
-       wins (delivery="durable", reason=LOCK_TIMEOUT_REASON, exit 0); only
-       sustained contention, which leaves the recipient unverified, exits 11
-       with nothing written.
-    4. INSIDE the flock:
-       a. Reload and re-resolve; unknown or changed identity refuses.
-       b. Provider mismatch -> exit 2.
-       c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
-       d. Attempt live delivery via _deliver_live (fire-and-forget).
-       e. On non-hosted, write the durable fallback envelope (the <fno_mail>
-          body), kind=send, addressed to the selected session's canonical handle.
-       f. Emit agent_send_started / agent_send_done (delivery field).
-       g. Bump last_message_at + status stamps via update_registry.
-    5. Return DispatchSendResult(msg_id, delivery).
+    envelope. The steps run in the numbered order the body's inline comments
+    carry; the lock-timeout retry lands durable (exit 0) and only sustained
+    contention exits 11 with nothing written.
 
     Raises:
         DispatchAskError: every documented failure mode.  send never
