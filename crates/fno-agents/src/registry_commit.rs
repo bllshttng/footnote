@@ -90,7 +90,14 @@ pub fn run(args: &[String]) -> i32 {
         return 3;
     }
     let before = transaction.document.clone();
-    match merge(before.clone(), &payload, schema_version, agents) {
+    // The schema repair verb drops newer-schema keys on purpose, so a merge
+    // that carries disk fields forward would undo it.
+    let next = if payload.get("replace").and_then(Value::as_bool) == Some(true) {
+        Ok(json!({"schema_version": schema_version, "agents": agents}))
+    } else {
+        merge(before.clone(), &payload, schema_version, agents)
+    };
+    match next {
         Ok(value) => {
             if let Err(error) =
                 crate::state::validate_registry_document_change(&path, &before, &value)
