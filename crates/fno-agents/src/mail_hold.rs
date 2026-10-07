@@ -270,6 +270,27 @@ fn read_clock(handle: &str) -> Option<Clock> {
     })
 }
 
+/// The clock read's shape: the extend print's fields plus source, with null
+/// fields omitted so a reader keys off a key's absence, not a null check.
+fn clock_json(clock: &Clock) -> serde_json::Value {
+    let stamp = |d: chrono::DateTime<chrono::Utc>| d.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let mut v = serde_json::json!({
+        "window_s": clock.window_s,
+        "clock_kind": clock.clock_kind,
+    });
+    let obj = v.as_object_mut().expect("json! builds an object");
+    if let Some(until) = clock.until {
+        obj.insert("until".to_string(), serde_json::json!(stamp(until)));
+    }
+    if let Some(ceiling) = clock.ceiling {
+        obj.insert("ceiling".to_string(), serde_json::json!(stamp(ceiling)));
+    }
+    if let Some(source) = &clock.source {
+        obj.insert("source".to_string(), serde_json::json!(source));
+    }
+    v
+}
+
 /// Spawn the Python release timer detached (stdio null, own process group):
 /// the third drain trigger that lifts the hold and delivers the digest with
 /// no further input. The timer re-reads the clock every poll, so a re-arm
@@ -1077,6 +1098,8 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut arm_minutes: Option<&String> = None;
     let mut clear_handle: Option<&String> = None;
     let mut extend_handle: Option<&String> = None;
+    let mut read_handle: Option<&String> = None;
+    let mut read_first_handles: Vec<&String> = Vec::new();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--session" => session = iter.next(),
@@ -1092,6 +1115,8 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             "--minutes" => arm_minutes = iter.next(),
             "--clear" => clear_handle = iter.next(),
             "--extend" => extend_handle = iter.next(),
+            "--read" => read_handle = iter.next(),
+            "--read-first" => read_first_handles = iter.by_ref().collect(),
             other => {
                 eprintln!("mail-hold: unknown argument {other:?}");
                 return 2;
@@ -1184,6 +1209,23 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
                 "ceiling": ceiling.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             })
         );
+        return 0;
+    }
+    if let Some(handle) = read_handle {
+        // The clock read Python's read() used to parse out of the file.
+        // Absent and unreadable both answer an empty stdout: on the Python
+        // side each means "no clock", never an error.
+        if let Some(clock) = read_clock(handle) {
+            println!("{}", clock_json(&clock));
+        }
+        return 0;
+    }
+    if !read_first_handles.is_empty() {
+        // First candidate that carries a readable clock, same shape. The
+        // candidate sweep stays in Python (it needs the registry entry).
+        if let Some(clock) = read_first_handles.iter().find_map(|h| read_clock(h)) {
+            println!("{}", clock_json(&clock));
+        }
         return 0;
     }
     if render_digest {

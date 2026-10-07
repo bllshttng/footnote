@@ -111,45 +111,43 @@ def _parse(stamp: str) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _hold_from_state(handle: str, state: dict) -> Hold:
+    """The Hold a ``--read``/``--read-first`` state dict describes.
+
+    ``handle`` is the candidate the caller asked about: the verb's JSON does
+    not echo which key carried the clock, and no reader consumes the field.
+    """
+    until = state.get("until")
+    ceiling = state.get("ceiling")
+    source = state.get("source")
+    window = state.get("window_s")
+    return Hold(
+        handle=handle,
+        until=_parse(until) if isinstance(until, str) else None,
+        window_s=window if isinstance(window, int) else None,
+        clock_kind=state.get("clock_kind", CLOCK_IDLE),
+        ceiling=_parse(ceiling) if isinstance(ceiling, str) else None,
+        source=source if isinstance(source, str) else None,
+    )
+
+
 def read(handle: str) -> Optional[Hold]:
     """This handle's clock, or None when there is no readable one.
 
-    A corrupt or unparseable file reads as None, the same as an absent one.
-    Both mean "no clock", and neither is evidence that a hold is running.
+    A corrupt or unparseable file reads as None, the same as an absent one:
+    the verb answers an empty stdout for both. Both mean "no clock", and
+    neither is evidence that a hold is running.
 
-    Never raises. The catch is deliberately broad because resolving the
-    directory runs the whole path resolver, which loads settings and can fail
-    in ways a file read cannot - a narrow ``(OSError, ValueError)`` here let an
-    ``AttributeError`` from the resolver escape into ``fno agents mail notify-self``,
-    which runs on every ``UserPromptSubmit``. Busy mode must never be able to
-    break the turn-boundary render: an unreadable clock means the mail flows.
+    Never raises. The catch is deliberately broad because this read runs on
+    every ``UserPromptSubmit`` (notify-self's extend and tidy) and at every
+    render: a missing binary or a failed transport must degrade to "no
+    clock", never break the turn-boundary render the old file read served.
     """
     try:
-        raw = json.loads(hold_path(handle).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - see above; a clock read never breaks a caller
+        state = _hold_query(["--read", handle])
+    except Exception:  # noqa: BLE001 - a clock read never breaks a caller
         return None
-    if not isinstance(raw, dict):
-        return None
-    until_raw = raw.get("until")
-    until = _parse(until_raw) if isinstance(until_raw, str) else None
-    if isinstance(until_raw, str) and until is None:
-        return None
-    window = raw.get("window_s")
-    clock_kind = raw.get("clock_kind", CLOCK_IDLE)
-    if clock_kind not in (CLOCK_IDLE, CLOCK_WALL):
-        return None
-    ceiling_raw = raw.get("ceiling")
-    ceiling = _parse(ceiling_raw) if isinstance(ceiling_raw, str) else None
-    if isinstance(ceiling_raw, str) and ceiling is None:
-        return None
-    return Hold(
-        handle=handle,
-        until=until,
-        window_s=window if isinstance(window, int) else None,
-        clock_kind=clock_kind,
-        ceiling=ceiling,
-        source=raw.get("source") if isinstance(raw.get("source"), str) else None,
-    )
+    return _hold_from_state(handle, state) if state else None
 
 
 def arm(handle: str, minutes: int = DEFAULT_MINUTES) -> Hold:
@@ -288,12 +286,17 @@ def candidate_keys(target) -> tuple:
 
 
 def read_any(target) -> Optional[Hold]:
-    """The clock for ``target`` under whichever of its keys carries one."""
-    for key in candidate_keys(target):
-        clock = read(key)
-        if clock is not None:
-            return clock
-    return None
+    """The clock for ``target`` under whichever of its keys carries one.
+
+    One door read over the whole candidate sweep: the sweep itself stays in
+    Python because it needs the registry entry, the FIND moves to the verb.
+    """
+    keys = candidate_keys(target)
+    try:
+        state = _hold_query(["--read-first", *keys])
+    except Exception:  # noqa: BLE001 - a clock read never breaks a caller
+        return None
+    return _hold_from_state(keys[0], state) if state else None
 
 
 def dnd_label(handle) -> Optional[str]:
