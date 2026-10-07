@@ -267,7 +267,17 @@ fn node_rows() {
     assert_eq!(verdict(&[], &stale_claims(), &live).state, ABSENT);
 
     let entries = vec![node_with(NODE, PR, vec![do_row(None, "w1")])];
-    assert_eq!(verdict(&entries, &stale_claims(), &live).state, ABSENT);
+    let v = verdict(&entries, &stale_claims(), &live);
+    assert_eq!(v.state, ABSENT);
+    // The absent reading still names the liveness it saw: a free or stale
+    // claim is the standing proof nobody is driving the node, so the report
+    // can assert "no lander" against it.
+    assert_eq!(v.claim_state.as_deref(), Some("stale"));
+
+    let entries = vec![node_with(NODE, PR, vec![do_row(None, "w1")])];
+    let v = verdict(&entries, &claims_of(vec![(NODE, Free)]), &live);
+    assert_eq!(v.state, ABSENT);
+    assert_eq!(v.claim_state.as_deref(), Some("free"));
 
     let entries = vec![
         json!({"id": "ab-grantunit1", "title": "a", "pr_number": PR}),
