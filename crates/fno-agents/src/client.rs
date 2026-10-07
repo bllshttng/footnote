@@ -288,13 +288,19 @@ pub async fn ensure_daemon(
     eprintln!("(lazy-starting daemon)");
     // Helper closure-free twin used by both early-exit returns below: the
     // daemon's refusal cause is in daemon.stderr.log, not the exit status.
-    fn daemon_exited_early(status: std::process::ExitStatus, log: &std::path::Path) -> ClientError {
-        const TAIL: usize = 2000;
+    // The log is append-only across every daemon start, so only the bytes
+    // past `from` belong to this child; older runs' notes once buried the
+    // one real cause in a 2000-byte tail.
+    fn daemon_exited_early(
+        status: std::process::ExitStatus,
+        log: &std::path::Path,
+        from: u64,
+    ) -> ClientError {
         let detail = std::fs::read(log)
             .ok()
             .map(|raw| {
-                let start = raw.len().saturating_sub(TAIL);
-                String::from_utf8_lossy(&raw[start..]).trim().to_string()
+                let start = usize::try_from(from).unwrap_or(0).min(raw.len());
+                fold_repeated_lines(&String::from_utf8_lossy(&raw[start..]))
             })
             .filter(|text| !text.is_empty());
         ClientError::DaemonExitedEarly(
@@ -318,6 +324,7 @@ pub async fn ensure_daemon(
     // to be read back when the child exits early.
     cmd.stdout(std::process::Stdio::null());
     let stderr_log = home.root().join("daemon.stderr.log");
+    let log_start = std::fs::metadata(&stderr_log).map_or(0, |m| m.len());
     let stderr_sink = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -359,7 +366,7 @@ pub async fn ensure_daemon(
         // appear (code-review on PR 924).
         if let Ok(Some(status)) = child.try_wait() {
             if !status.success() {
-                return Err(daemon_exited_early(status, &stderr_log));
+                return Err(daemon_exited_early(status, &stderr_log, log_start));
             }
             // Exit ZERO without a socket is the race loser's designed ending:
             // it found the lock held, deferred to the winner, and stopped. The
@@ -372,7 +379,7 @@ pub async fn ensure_daemon(
             // immediate idle-exit, a mismatched binary). Report it now rather
             // than spend the whole budget on a socket that will never appear.
             if daemon_lock_is_free(home) {
-                return Err(daemon_exited_early(status, &stderr_log));
+                return Err(daemon_exited_early(status, &stderr_log, log_start));
             }
             return wait_for_socket(&sock, start, budget).await;
         }
@@ -387,6 +394,46 @@ pub async fn ensure_daemon(
     // the wait branch above instead of spawning a competitor for it.
     drop(child);
     Err(ClientError::DaemonStartTimeout(budget))
+}
+
+/// Each distinct line once, in first-seen order, a repeat marked `(xN)`; the
+/// last line of the text stays last, because a refusing process prints its
+/// cause last. At most the final 20 distinct lines survive.
+pub fn fold_repeated_lines(text: &str) -> String {
+    let mut rows: Vec<(&str, usize)> = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+    {
+        match rows.iter_mut().find(|(seen, _)| *seen == line) {
+            Some((_, n)) => *n += 1,
+            None => rows.push((line, 1)),
+        }
+    }
+    if let Some(last) = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .last()
+    {
+        if let Some(i) = rows.iter().position(|(seen, _)| *seen == last) {
+            let row = rows.remove(i);
+            rows.push(row);
+        }
+    }
+    let skip = rows.len().saturating_sub(20);
+    rows[skip..]
+        .iter()
+        .map(|(line, n)| {
+            if *n > 1 {
+                format!("{line} (x{n})")
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Send one request to the daemon (lazy-starting it first) and return the

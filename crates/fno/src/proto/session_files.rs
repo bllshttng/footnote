@@ -2,13 +2,20 @@ use std::path::{Path, PathBuf};
 
 /// Every file a session leaves beside its socket. Removal and manual recovery
 /// both use this list so sidecars cannot drift apart.
-pub fn session_files(socket: &Path) -> [PathBuf; 4] {
+pub fn session_files(socket: &Path) -> [PathBuf; 5] {
     [
         socket.to_path_buf(),
         super::version_sidecar_path(socket),
         super::pid_sidecar_path(socket),
         super::owner_sidecar_path(socket),
+        visible_sidecar_path(socket),
     ]
+}
+
+/// The panes on screen in any attached client (`<name>.visible.json`). It goes
+/// with the server: a list left behind would name panes nobody watches.
+pub fn visible_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("visible.json")
 }
 
 /// Remove all session files during graceful shutdown or stale takeover.

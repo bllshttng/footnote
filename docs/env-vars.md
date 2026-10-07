@@ -238,6 +238,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_UX_SHOTS` | rs | unclear: crates/fno/src/frame_html.rs:356 |
 | `FNO_V4_REHEARSAL_BEFORE` | rs | The node export taken from the rehearsal copy before it migrates; the ignored rehearsal test compares every node against it. |
 | `FNO_V4_REHEARSAL_DB` | rs | A copy of a schema-3 graph.db that the ignored schema-4 rehearsal test migrates. Never the live store. |
+| `FNO_VERBOSE` | rs | Set to 1 to print non-fatal notes that are quiet by default: the registry provenance heal and the loop-runtime global mirror failure. |
 | `FNO_VERIFY_GIT_BIN` | rs | unclear: crates/fno-agents/src/verify_evidence.rs:906 |
 | `FNO_WORKER_ADD_DIRS` | rs | unclear: crates/fno-agents/src/claude_ask.rs:687 |
 | `FNO_WORKER_NAME` | py | unclear: cli/src/fno/agents/cli.py:2314 |
