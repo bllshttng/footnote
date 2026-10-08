@@ -3653,6 +3653,9 @@ Swapouts: 3444531.\n";
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
+        // Only an agent-origin caller reaches the mutex; a typed verb skips it.
+        let prior_agent_self = std::env::var_os("FNO_AGENT_SELF");
+        std::env::set_var("FNO_AGENT_SELF", "gate-sigdeath-test");
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
@@ -3739,6 +3742,10 @@ Swapouts: 3444531.\n";
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_agent_self {
+            Some(value) => std::env::set_var("FNO_AGENT_SELF", value),
+            None => std::env::remove_var("FNO_AGENT_SELF"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
