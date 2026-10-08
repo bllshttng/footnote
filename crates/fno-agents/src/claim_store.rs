@@ -364,8 +364,22 @@ fn record_for(connection: &Connection, key: &str) -> Result<Option<ClaimRecord>,
         .map_err(|e| e.to_string())
 }
 
+/// A read must not mint a store: opening one creates `graph.db` and retires
+/// the claims dir, so a status probe of a root that never held a claim would
+/// write state there (a repo checkout, say).
+fn store_absent(dir: &Path) -> bool {
+    !dir.exists()
+        && database_path_from_directory(dir)
+            .map(|db| !db.exists())
+            .unwrap_or(true)
+}
+
 pub(crate) fn read(key: &str, root: Option<&Path>) -> Result<Option<ClaimRecord>, String> {
-    record_for(&open_for_key(key, root)?, key)
+    let dir = crate::claims_root::claims_dir(key, root)?;
+    if store_absent(&dir) {
+        return Ok(None);
+    }
+    record_for(&open_directory(&dir)?, key)
 }
 
 pub(crate) fn read_at_path(path: &Path) -> Result<Option<ClaimRecord>, String> {
@@ -404,6 +418,9 @@ pub(crate) fn records_in(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
+    if store_absent(dir) {
+        return Ok(Vec::new());
+    }
     let connection = open_directory(dir)?;
     let mut statement = connection
         .prepare(&format!("SELECT {COLUMNS} FROM claims ORDER BY key"))
