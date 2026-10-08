@@ -1627,6 +1627,12 @@ pub(crate) struct Core {
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
+    /// The one outstanding claimed click pair on a mouse-owning pane:
+    /// `(pane, row, col, client)` of a press whose cell carried an fno token
+    /// URI. Consumed by the matching release (which answers OpenLink),
+    /// dropped by any other event (a drag belongs to the app) and by the
+    /// pane's release, the `wheel_gate` pattern.
+    fno_token_claim: Option<(u64, u16, u16, u64)>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
     /// steering path; read by the scoreboard stats answer (v78).
     touch_emit_failures: Arc<AtomicU64>,
@@ -9026,11 +9032,13 @@ impl Core {
 
     /// Route a client's pane-rect mouse event (brief Locked 2, US1/US2/US3).
     /// An app that negotiated SGR mouse reporting owns its mouse: the event is
-    /// SGR-encoded onto its PTY and the mux consumes nothing (AC3-HP). Otherwise
-    /// the mux interprets it - wheel scrolls the pane's history (US1), a left
-    /// drag paints a server-side selection all viewers see (US2), and release
-    /// auto-copies (Warp behavior). Selection is per-pane, independent of focus;
-    /// click-to-focus is a documented candidate, not shipped in v1.
+    /// SGR-encoded onto its PTY and the mux consumes nothing (AC3-HP) - except
+    /// a click pair on an fno token cell, which the mux claims and answers
+    /// itself (see [`Core::claim_fno_token_click`]). Otherwise the mux
+    /// interprets it - wheel scrolls the pane's history (US1), a left drag
+    /// paints a server-side selection all viewers see (US2), and release
+    /// auto-copies (Warp behavior). Selection is per-pane, independent of
+    /// focus; click-to-focus is a documented candidate, not shipped in v1.
     fn mouse(&mut self, client_id: u64, pane: u64, event: MouseEvent) {
         let Some(modes) = self.panes.get(&pane).map(|e| e.vt.modes()) else {
             return;
@@ -9043,6 +9051,13 @@ impl Core {
                 // pass through byte-identical. Gate before the pane borrow (it
                 // needs &mut self.wheel_gate); the top-of-fn early return already
                 // proved the pane live, so no dead-pane state is ever inserted.
+                // An fno-token click pair (`@handle`, a bare `fmail-` id) is
+                // claimed before the PTY sees it: inside fno mux that click
+                // opens the session or the Messages thread, not the pane app's
+                // own gesture.
+                if self.claim_fno_token_click(client_id, pane, &event) {
+                    return;
+                }
                 let forward = match event.kind {
                     MouseKind::WheelUp | MouseKind::WheelDown => {
                         wheel_gate(&mut self.wheel_gate, pane, event.kind, Instant::now())
