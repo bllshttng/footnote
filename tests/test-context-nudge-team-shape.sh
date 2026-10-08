@@ -69,6 +69,10 @@ fi
 export PATH="$AGENTS_BIN_DIR:$PATH"
 export REGISTRY_SEED_BIN="$AGENTS_BIN"
 source "$REPO_ROOT/tests/helpers/registry-seed.sh"
+# Seed at this writer's schema. HOME is the sandbox, so this IS the shared
+# registry, and a source-built writer refuses to raise it from an older one.
+REG_V="$(PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno.agents.registry import SCHEMA_VERSION; print(SCHEMA_VERSION)')"
+export REG_V
 
 SBX="$(mktemp -d)"
 trap 'rm -rf "$SBX" "$BINDIR"' EXIT
@@ -89,7 +93,7 @@ cd "$SBX"
 # time: SERVED_LIVENESS_MAX_AGE_SECS is 120, so a hardcoded stamp would age
 # past the window and the suite would turn red on a clock, not on a defect.
 FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-jq -n --arg ts "$FRESH_TS" '{schema_version: 13, agents: ([
+jq -n --arg ts "$FRESH_TS" '{schema_version: ($ENV.REG_V|tonumber), agents: ([
   {name:"lead-team", harness:"claude", cwd:"'"$SBX"'", log_path:"/tmp/k", status:"live",
    short_id:"'"$LEAD_SID"'", harness_session_id:"'"$LEAD_SID"'",
    role_level:1, role_scope:"'"$SCOPE"'", role_grantor:"human"},
