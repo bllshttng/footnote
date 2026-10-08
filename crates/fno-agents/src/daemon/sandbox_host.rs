@@ -144,18 +144,27 @@ pub fn docker_mount_args(launch: &SandboxLaunch) -> Vec<String> {
 /// `socket` carrier check: a lane that declares the carrier must find a
 /// listener, or the declaration is hiding a worker that can claim, mail, or
 /// spawn nothing - the exact mute-worker harm R3 exists for.
+///
+/// The connect is bounded at 500ms: `UnixStream::connect` has no
+/// connect_timeout, and a wedged listener (full backlog) would hang every
+/// spawn whose carrier is `socket`. The probe rides one detached thread; a
+/// timed-out probe leaves that thread blocked in connect (bounded by the
+/// kernel backlog, not by us), while the caller moves on inside 500ms.
 pub fn supervisor_sock_reachable(path: &Path) -> Result<(), String> {
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
-    let stream = UnixStream::connect(path);
-    // Drop the connection immediately; liveness is the connect, not a round
-    // trip. A half-open probe costs the daemon one accept it discards.
-    drop(stream.inspect(|s| {
-        let _ = s.set_read_timeout(Some(Duration::from_millis(250)));
-    }));
-    match stream {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+    let p = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(UnixStream::connect(&p).map(|_| ()));
+    });
+    match rx.recv_timeout(Duration::from_millis(500)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("{}: {e}", path.display())),
+        Err(_) => Err(format!(
+            "{}: connect timed out after 500ms (listener wedged?)",
+            path.display()
+        )),
     }
 }
 

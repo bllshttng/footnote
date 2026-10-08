@@ -15,6 +15,17 @@ use super::*;
 /// The store row's envelope type (schema: `transcript_record`).
 pub(crate) const TRANSCRIPT_RECORD_TYPE: &str = "transcript_record";
 
+/// The record line's own timestamp: claude rows carry `timestamp`, codex
+/// rows carry `timestamp`, so a retried push re-mints the identical
+/// envelope. `None` sends the caller's fallback.
+fn line_timestamp(line: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
 /// `agent.transcript-append` - store raw transcript lines for one session.
 /// Each record rides the event store's idempotent append (the event id is the
 /// sha256 of the envelope line, so a hook retry is an idempotent hit, never a
@@ -42,9 +53,15 @@ pub(crate) fn handle_transcript_append(ctx: &Ctx, req: &Request) -> Response {
             refused.push("a record carries no `line`".to_string());
             continue;
         };
+        // The envelope's content hash IS the idempotency key, so the ts must
+        // be a pure function of the record: retrying a lost reply re-sends
+        // the same line and must re-mint the same envelope. The record's own
+        // timestamp (the harness wrote it inside the line) wins; `ts` on the
+        // record next; only a record with neither mints now(), and a retry
+        // of such a row is accepted as the rare duplicate.
         let ts = match record.get("ts").and_then(|v| v.as_str()) {
             Some(ts) => ts.to_string(),
-            None => chrono::Utc::now().to_rfc3339(),
+            None => line_timestamp(line).unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         };
         let envelope = json!({
             "ts": ts,
@@ -168,7 +185,7 @@ mod tests {
             "sess-a",
             &[
                 r#"{"type":"assistant","timestamp":"2026-10-08T01:00:00.000Z"}"#,
-                r#"{"type":"user"}"#,
+                r#"{"type":"user","timestamp":"2026-10-08T01:00:01.000Z"}"#,
             ],
         );
         let res = handle_transcript_append(&ctx, &req);
