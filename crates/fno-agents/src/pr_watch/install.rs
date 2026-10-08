@@ -262,12 +262,14 @@ fn current_uid() -> u32 {
 /// `pr-watch-bounce.json` sidecar in the state dir plus a `pr_watch_bounce`
 /// event. Never blocks a cure: any failure is swallowed.
 fn record_bounce(caller: &str, state: &Path) {
-    let ppid = libc::getppid();
+    // SAFETY: the pid getters are async-signal-safe and cannot fail.
+    let ppid = unsafe { libc::getppid() };
     let parent_raw = stdout_of(&["ps", "-o", "command=", "-p", &ppid.to_string()]);
     let parent: String = parent_raw.trim().chars().take(160).collect();
+    let pid = unsafe { libc::getpid() };
     let data = serde_json::json!({
         "caller": caller,
-        "pid": libc::getpid(),
+        "pid": pid,
         "ppid": ppid,
         "parent": parent,
         "deferred": false,
@@ -277,7 +279,7 @@ fn record_bounce(caller: &str, state: &Path) {
     let sidecar = state.join("pr-watch-bounce.json");
     if let Ok(line) = serde_json::to_string(&data) {
         let with_ts = format!("{{\"ts\": {}, {}", epoch_f64(), &line[1..]);
-        let tmp = state.join(format!(".pr-watch-bounce.json.tmp-{}", libc::getpid()));
+        let tmp = state.join(format!(".pr-watch-bounce.json.tmp-{pid}"));
         if std::fs::write(&tmp, with_ts).is_ok() {
             let _ = std::fs::rename(&tmp, &sidecar);
         }
@@ -435,10 +437,6 @@ fn heal_status_line(cwd: &Path) -> String {
     }
     let events = super::status::state_root(cwd).join("events.jsonl");
     crate::heal::status_readout(true, &events)
-}
-
-fn launch_agents_dir() -> PathBuf {
-    super::status::launch_agents_dir()
 }
 
 /// The interactive confirm gate, click-shaped: `{text} [y/N]: ` on stdout,
