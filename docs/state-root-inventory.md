@@ -113,6 +113,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `attention/items.json` | `crates/fno-agents/src/attention_arm.rs` (the `attention` arm) | the attention projection cache plus `questions_dir`, rewritten every beat; the lead check-in reads it and refuses when it is missing or over 600 s old, safe to delete, next beat rebuilds it |
 | `attention/questions.json` | `crates/fno-agents/src/attention_arm.rs` | page settle state (body hashes and since-stamps); deleting it restarts every settle window and cannot double-deliver, because a page's existence proves delivery |
 | `attest/` | `hooks/attest-model.sh`, `hooks/review-hold.sh` | one attestation sidecar per reviewed session |
+| `agents/quiet-recovery/` | `crates/fno-agents/src/codex_watch/quiet.rs` | one episode per native session; resets on new transcript activity; retained as recovery evidence after retirement; deleting a file can repeat its nudge |
 | `backups/` | `crates/fno-agents/src/graph_store.rs` backup rotation (pruned to `GRAPH_BACKUP_KEEP`), and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. A backup at most a tenth the size of its predecessor moves that predecessor to `backups/pre-shrink.<name>`, and pins are never pruned. |
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |
 | `bus/` | `paths.bus_dir()`, written by `cli/src/fno/bus/` (`messages.jsonl`, `cursors/`) | append-only mail log; each consumer's cursor is overwritten |

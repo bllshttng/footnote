@@ -155,6 +155,7 @@ pub struct TurnResult {
     pub turn_id: String,
     pub status: String,
     pub text: String,
+    pub error: Option<Value>,
     pub raw: Value,
 }
 
@@ -874,6 +875,11 @@ pub fn parse_turn_completed_value(value: &Value) -> Option<TurnResult> {
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())?
         .to_string();
+    let error = turn
+        .get("error")
+        .filter(|error| !error.is_null())
+        .or_else(|| params.get("error").filter(|error| !error.is_null()))
+        .cloned();
     let status = turn
         .get("status")
         .or_else(|| params.get("status"))
@@ -892,8 +898,13 @@ pub fn parse_turn_completed_value(value: &Value) -> Option<TurnResult> {
         .join("");
     Some(TurnResult {
         turn_id,
-        status,
+        status: if error.is_some() {
+            "failed".into()
+        } else {
+            status
+        },
         text,
+        error,
         raw: value.clone(),
     })
 }
@@ -1885,6 +1896,7 @@ pub struct TurnReceipt {
     pub turn_id: String,
     pub status: String,
     pub text: String,
+    pub error: Option<Value>,
 }
 
 impl From<TurnResult> for TurnReceipt {
@@ -1893,6 +1905,7 @@ impl From<TurnResult> for TurnReceipt {
             turn_id: result.turn_id,
             status: result.status,
             text: result.text,
+            error: result.error,
         }
     }
 }
@@ -2078,6 +2091,8 @@ struct ActorCtx {
     /// (capped) when their waiter is gone, claimable by `await_turn_end`.
     completed: HashMap<String, TurnReceipt>,
     driving: Option<Driving>,
+    retry: Option<(tokio::time::Instant, Driving)>,
+    failures: u32,
     shared: Arc<ActorShared>,
     on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
     on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
@@ -2096,6 +2111,8 @@ async fn actor_task(
         pending: HashMap::new(),
         completed: HashMap::new(),
         driving: None,
+        retry: None,
+        failures: 0,
         shared,
         on_turn_done,
         on_turn_phase,
@@ -2109,10 +2126,17 @@ async fn actor_task(
     // bounded interrupt-settle wait pauses it.
     let mut next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
     loop {
+        let retry_at = ctx.retry.as_ref().map(|(at, _)| *at);
         tokio::select! {
+            _ = async {
+                match retry_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => ctx.retry_turn(&mut frames).await,
             _ = tokio::time::sleep_until(next_keepalive) => {
                 next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
-                if ctx.driving.is_some() {
+                if ctx.driving.is_some() || ctx.retry.is_some() {
                     // Rewrite `working` while a turn drives so a turn longer
                     // than the report's ttl never ages to Unmeasured. The
                     // check runs in the actor loop, so a tick landing after
@@ -2195,6 +2219,13 @@ impl ActorCtx {
         };
         self.driver.note_turn_completed(&turn_id);
         self.shared.set_turn_id(None);
+        if receipt.status == "failed" || receipt.error.is_some() {
+            (self.on_turn_done)(receipt);
+            (self.on_turn_phase)(ThreadTurnPhase::Working);
+            self.schedule_retry(driving);
+            return;
+        }
+        self.failures = 0;
         for waiter in driving.waiters {
             let _ = waiter.send(Ok(receipt.clone()));
         }
@@ -2215,7 +2246,8 @@ impl ActorCtx {
     }
 
     fn fail_waiters(&mut self, message: &str) {
-        if let Some(driving) = self.driving.take() {
+        let retry = self.retry.take().map(|(_, driving)| driving);
+        if let Some(driving) = self.driving.take().or(retry) {
             self.shared.set_turn_id(None);
             for waiter in driving.waiters {
                 // The error names the turn and reads as a RESTART of the
@@ -2226,6 +2258,30 @@ impl ActorCtx {
                     "{message} (turn {turn}; the daemon-owned thread and its transcript survive)",
                     turn = driving.turn_id,
                 )));
+            }
+        }
+    }
+
+    fn schedule_retry(&mut self, driving: Driving) {
+        self.failures = self.failures.saturating_add(1);
+        let delay = Duration::from_secs((5u64 << self.failures.min(7).saturating_sub(1)).min(300));
+        self.retry = Some((tokio::time::Instant::now() + delay, driving));
+    }
+
+    async fn retry_turn(&mut self, frames: &mut mpsc::Receiver<Value>) {
+        let Some((_, previous)) = self.retry.take() else {
+            return;
+        };
+        let (reply, _discard) = oneshot::channel();
+        self.start_turn(
+            "The previous turn ended on a backend error. Continue the assigned work from the last completed step; preserve existing changes.".into(),
+            reply, None, frames,
+        ).await;
+        if let Some(driving) = self.driving.as_mut() {
+            driving.waiters = previous.waiters;
+        } else {
+            for waiter in previous.waiters {
+                let _ = waiter.send(Err("codex recovery was not confirmed; the unfinished thread remains available to the watchdog".into()));
             }
         }
     }
@@ -2436,6 +2492,7 @@ impl ActorCtx {
         accept: Option<AcceptTx>,
         frames: &mut mpsc::Receiver<Value>,
     ) {
+        let retry = self.retry.take();
         let sent = self.driver.send_turn_start(&body).await;
         let response = match sent {
             Ok(id) => self.await_response(id, frames).await,
@@ -2454,9 +2511,21 @@ impl ActorCtx {
                     turn_id,
                     waiters: vec![reply],
                 });
+                if let Some((_, previous)) = retry {
+                    self.driving
+                        .as_mut()
+                        .expect("accepted turn")
+                        .waiters
+                        .extend(previous.waiters);
+                }
                 (self.on_turn_phase)(ThreadTurnPhase::Working);
             }
             Err(error) => {
+                if let Some((_, previous)) = retry {
+                    for waiter in previous.waiters {
+                        let _ = waiter.send(Err(error.clone()));
+                    }
+                }
                 if let Some(accept) = accept {
                     let _ = accept.send(Err(error.clone()));
                 }
@@ -2466,6 +2535,10 @@ impl ActorCtx {
     }
 
     async fn handle_interrupt(&mut self, frames: &mut mpsc::Receiver<Value>) -> InterruptOutcome {
+        if self.retry.is_some() {
+            self.fail_waiters("codex turn retry interrupted");
+            return InterruptOutcome::NoTurnInFlight;
+        }
         let Some(turn_id) = self.driving.as_ref().map(|driving| driving.turn_id.clone()) else {
             return InterruptOutcome::NoTurnInFlight;
         };
@@ -2492,6 +2565,7 @@ impl ActorCtx {
                             turn_id: turn_id.clone(),
                             status: "interrupted".into(),
                             text: String::new(),
+                            error: None,
                         });
                         InterruptOutcome::Interrupted(receipt)
                     }
@@ -2506,6 +2580,7 @@ impl ActorCtx {
                         turn_id: turn_id.clone(),
                         status: "completed".into(),
                         text: String::new(),
+                        error: None,
                     });
                     InterruptOutcome::Interrupted(receipt)
                 } else {
@@ -3399,6 +3474,20 @@ mod tests {
         .unwrap();
         assert_eq!(result.turn_id, "turn-1");
         assert_eq!(result.text, "recalled TOKEN");
+
+        let failed = parse_turn_completed_value(&serde_json::json!({
+            "method": "turn/completed",
+            "params": {
+                "turn": {"id": "turn-2", "status": "completed", "error": null},
+                "error": {"message": "workspace routing discovery timed out"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.error,
+            Some(serde_json::json!({"message": "workspace routing discovery timed out"}))
+        );
     }
 
     /// AC18: completed turns are parsed ONCE at push and claimed from a map.
