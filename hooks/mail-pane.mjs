@@ -107,10 +107,18 @@ function headerControls($, event, line, turn, requestId) {
   let prefix = line.slice(0, senderAt)
   if (prefix.endsWith('`')) prefix = prefix.slice(0, -1)
   const between = line.slice(senderAt + senderLabel.length, idAt)
-  let bodyLine = afterId.slice(3)
-  const closingFence = bodyLine.indexOf('`')
-  if (closingFence >= 0) {
-    bodyLine = bodyLine.slice(0, closingFence) + bodyLine.slice(closingFence + 1)
+  // The subject stays on the header row; the body after the closing fence
+  // is not shown inline - the id button opens it. The closer is the first
+  // backtick whose remainder is the line end or the " ⏎ " body separator,
+  // matching the producer's split_header_span; a backtick inside the
+  // subject is not a fence.
+  let subject = afterId.slice(3)
+  for (let at = subject.indexOf('`'); at >= 0; at = subject.indexOf('`', at + 1)) {
+    const tail = subject.slice(at + 1)
+    if (!tail || tail.startsWith(' ⏎ ')) {
+      subject = subject.slice(0, at)
+      break
+    }
   }
 
   const { Box, Button, Text } = $.ui.resolve(event)
@@ -130,9 +138,10 @@ function headerControls($, event, line, turn, requestId) {
     onPress: () => openMessage($, turn.id),
   }))
 
+  if (subject) controls.push(Text({ children: [` · ${subject}`] }))
+
   return {
     buttons: Box({ flexDirection: 'row', flexWrap: 'wrap', children: controls }),
-    bodyLine,
   }
 }
 
@@ -560,9 +569,6 @@ export function registerMailPane(on) {
       pending.splice(index, 1)
       flushPlain()
       children.push(result.buttons)
-      if (result.bodyLine) {
-        children.push(Text({ wrap: 'wrap', children: [result.bodyLine] }))
-      }
       hasButtons = true
     }
     flushPlain()
