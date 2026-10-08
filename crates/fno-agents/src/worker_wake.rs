@@ -35,20 +35,20 @@ fn epoch(raw: &str) -> Option<i64> {
 }
 
 fn intentional_stop(text: &str) -> Option<String> {
-    if let Some(start) = text.find("<watching") {
-        let tag = text[start..].split('>').next().unwrap_or_default();
-        let reason =
-            crate::loopcheck::parse_xml_attr(tag, "reason").unwrap_or_else(|| "declared".into());
-        return Some(format!("{reason}_watch"));
-    }
-    if text.contains("<help") {
-        return Some("declared_help".into());
-    }
-    text.contains("<promise>MISSION COMPLETE")
-        .then(|| "mission_complete".into())
+    crate::loopcheck::declared_recovery_hold(text)
 }
 
 fn tail(path: &Path) -> Result<Tail, String> {
+    let (_, cap, unknown) = crate::provider_cap::codex_capped_tail(path);
+    if cap.is_some() {
+        return Ok(Tail {
+            parked: Some("provider_cap".into()),
+            ..Default::default()
+        });
+    }
+    if let Some(reason) = unknown.filter(|reason| reason != "no-assistant-entry-in-transcript") {
+        return Err(reason);
+    }
     let raw = crate::tail_text_strict(path, TAIL_BYTES).ok_or("invalid rollout encoding")?;
     let mut out = Tail::default();
     for line in raw.lines() {
@@ -256,6 +256,10 @@ fn run_pass_with(
                 continue;
             }
         };
+        if let Some(reason) = tail.parked.as_deref() {
+            report_skip(dry_run, row, reason);
+            continue;
+        }
         let Some(last) = tail.last else {
             report_skip(dry_run, row, "timestamp_unmeasured");
             continue;
@@ -761,6 +765,10 @@ mod tests {
             "complete",
             "missing_lead",
             "unknown_liveness",
+            "quota",
+            "quota_code_only",
+            "promise_alt",
+            "aborted",
         ] {
             let mut f = Fixture::new();
             f.write(&[json!({"type": "task_complete"})]);
@@ -771,6 +779,10 @@ mod tests {
                 "unowned" => f.claims.clear(),
                 "missing_lead" => f.row.spawned_by_session = None,
                 "unknown_liveness" => f.life = Life::Unknown,
+                "quota" => f.write(&[json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded", "message":"You've hit your usage limit"}})]),
+                "quota_code_only" => f.write(&[json!({"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}})]),
+                "promise_alt" => f.write(&[json!({"type":"task_complete", "last_agent_message":"<promise>COMPLETE</promise>"})]),
+                "aborted" => f.write(&[json!({"type":"task_complete", "last_agent_message":"<aborted reason=\"operator stop\">"})]),
                 "held" => { f.claims.insert("thread-a".into(), Ok(Some("other-node".into()))); }
                 "unreadable_claim" => { f.claims.insert("thread-a".into(), Err("corrupt claim".into())); }
                 "reassigned" => { f.claims.clear(); f.nodes[0]["sessions"] = json!([{"phase":"execute", "harness":"codex", "session_id":"other-worker", "started_at":"2026-10-06T09:00:00Z"}]); }
