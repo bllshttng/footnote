@@ -297,9 +297,11 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
-    // The role moved to row 1 next to the slug; line 2 keeps model and cost.
+    // The role moved to row 1 next to the slug; a teamed lead never
+    // prices, so its line 2 is the model alone.
     assert!(text.contains("lead-a \u{b7} Lead of mux"), "{text:?}");
-    assert!(text.contains("opus · ~$0.42"), "{text:?}");
+    assert!(text.contains("opus"), "{text:?}");
+    assert!(!text.contains("opus ·"), "{text:?}");
     assert!(text.contains("lead-a"), "{text:?}");
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
