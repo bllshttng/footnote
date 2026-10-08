@@ -28,14 +28,6 @@ fn count_events(store: &Path) -> i64 {
         .unwrap()
 }
 
-/// A timestamp inside the ephemeral TTL window on any run date. A fixed date
-/// expires once the wall clock passes it by the TTL.
-fn fresh_ts() -> String {
-    (chrono::Utc::now() - chrono::Duration::hours(1))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
-}
-
 fn count_type(store: &Path, event_type: &str) -> i64 {
     open_read(store)
         .unwrap()
