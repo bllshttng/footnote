@@ -97,6 +97,10 @@ pub struct FeedRow {
     /// The search answers `l:` through it, else through `owner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead: Option<String>,
+    /// True when `lead` is the LIVE team name resolved at render time;
+    /// omitted (false) when it is the event-time holder's fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_current: bool,
     /// The row's position in the total order, as a six-string JSON array
     /// (`[ts, kind, node, session_id, ref, title]`, absent fields as "").
     /// The `--before` / `--after` flags take one back. Always serialized:
@@ -822,6 +826,14 @@ pub fn project(
     let themes = crate::paths::AgentsHome::from_env_opt()
         .map(|home| crate::team_names::theme_map(&home.team_names_json()))
         .unwrap_or_default();
+    // Scope -> CURRENT team name, read once per fold beside the themes: the
+    // lead column resolves at render time, never from the event-time holder.
+    let lead_names = crate::paths::AgentsHome::from_env_opt()
+        .map(|home| {
+            crate::team_names::live_names(&home.team_names_json(), &home.registry_json())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     let rank = |level: i64, scope: &str| -> String {
         let theme = themes
             .get(crate::territory::canonical_scope(scope).as_str())
@@ -944,6 +956,7 @@ pub fn project(
         &team_events,
         graph_entries,
         &themes,
+        &lead_names,
         &spawn_names,
     );
     for r in &mut rows {
@@ -1048,11 +1061,15 @@ fn parse_team_events(team_raw: &str) -> Vec<TeamEvent> {
 /// clears its scope at its own ts. A row whose node, or that node's graph
 /// parent, sits in a held scope gets `lead {holder} L{level}`; otherwise a
 /// row whose node has a graph parent gets `epic {parent} {parent title}`.
+/// The printed lead name resolves at render time through `lead_names` (the
+/// live team store): a renamed or successed team shows its current name,
+/// the event-time holder only when no live team covers the node.
 fn assign_owners(
     rows: &mut [FeedRow],
     team_events: &[TeamEvent],
     graph_entries: &[Value],
     themes: &std::collections::BTreeMap<String, String>,
+    lead_names: &std::collections::BTreeMap<String, String>,
     spawn_names: &std::collections::HashMap<String, String>,
 ) {
     if rows.is_empty() {
@@ -1141,8 +1158,21 @@ fn assign_owners(
                 .get(crate::territory::canonical_scope(&scope).as_str())
                 .cloned();
             let rank = crate::team_names::title(*level as u32, &scope, theme.as_deref());
-            r.lead = Some(holder.clone());
-            r.owner = Some(format!("{rank} ({holder})"));
+            let canon = crate::territory::canonical_scope(&scope);
+            // Both names: the owner string keeps the lead AT EVENT TIME, the
+            // lead column resolves to the team's CURRENT name, and the flag
+            // tells the two apart on the wire.
+            r.owner = match lead_display(holder) {
+                Some(name) => Some(format!("{rank} ({name})")),
+                None => Some(rank),
+            };
+            r.lead = match lead_names.get(canon.as_str()).filter(|n| !n.is_empty()) {
+                Some(name) => {
+                    r.lead_current = true;
+                    Some((*name).clone())
+                }
+                None => lead_display(holder),
+            };
         } else if r.node.is_none() {
             // A node-less row whose parent session IS a held role holder's
             // session rolls up to that holder: the question a lead's own
@@ -1154,8 +1184,18 @@ fn assign_owners(
                         .get(crate::territory::canonical_scope(scope).as_str())
                         .cloned();
                     let rank = crate::team_names::title(*level as u32, scope, theme.as_deref());
-                    r.lead = Some(holder.clone());
-                    r.owner = Some(format!("{rank} ({holder})"));
+                    let canon = crate::territory::canonical_scope(scope);
+                    r.owner = match lead_display(holder) {
+                        Some(n) => Some(format!("{rank} ({n})")),
+                        None => Some(rank),
+                    };
+                    r.lead = match lead_names.get(canon.as_str()).filter(|n| !n.is_empty()) {
+                        Some(n) => {
+                            r.lead_current = true;
+                            Some((*n).clone())
+                        }
+                        None => lead_display(holder),
+                    };
                 }
             }
         } else if let Some(p) = parent {
@@ -1172,6 +1212,14 @@ fn assign_owners(
 /// True when a team scope (comma-separated node ids) holds `node`.
 fn scope_holds(scope: &str, node: &str) -> bool {
     scope.split(',').any(|seg| seg.trim() == node)
+}
+
+/// The event-time name a feed row prints: the holder when person-shaped.
+/// A dispatch slug carries digits in it and never prints - the row keeps
+/// its rank rollup without a placeholder name. The live store name rides
+/// beside this one and always passes (name_team validates it).
+fn lead_display(stored: &str) -> Option<String> {
+    (!stored.bytes().any(|b| b.is_ascii_digit())).then(|| stored.to_string())
 }
 
 /// The filters the CLI flags express, applied after ordering: `--node`,
@@ -2933,5 +2981,63 @@ mod tests {
             refused.reason.as_deref(),
             Some("no project chosen; pick one on the Project chip")
         );
+    }
+
+    #[test]
+    fn the_lead_column_resolves_the_current_team_name_at_render_time() {
+        let granted = |ts: &str, holder: &str, scope: &str| TeamEvent {
+            ts: ts.into(),
+            action: TeamAction::Granted,
+            holder: holder.into(),
+            scope: scope.into(),
+            level: 2,
+            cause: None,
+            successor: None,
+            actor: None,
+            vacated_scope: None,
+        };
+        let row_under = |ts: &str, node: &str| FeedRow {
+            ts: ts.into(),
+            kind: "question_asked".into(),
+            node: Some(node.into()),
+            ..FeedRow::default()
+        };
+        // x-live was granted to "finch" but the team is now named Quill;
+        // x-old's grant froze a dispatch slug and no live team covers it;
+        // x-gone's team is gone but its stored holder is a person name.
+        let mut rows = vec![
+            row_under("2026-10-07T10:00:00Z", "x-live"),
+            row_under("2026-10-07T10:00:00Z", "x-old"),
+            row_under("2026-10-07T10:00:00Z", "x-gone"),
+        ];
+        let events = vec![
+            granted("2026-10-07T09:00:00Z", "finch", "x-live"),
+            granted("2026-10-07T09:00:00Z", "w-9x4d2-g", "x-old"),
+            granted("2026-10-07T09:00:00Z", "candor", "x-gone"),
+        ];
+        let lead_names = std::collections::BTreeMap::from([("x-live".to_string(), "Quill".into())]);
+        assign_owners(
+            &mut rows,
+            &events,
+            &[],
+            &Default::default(),
+            &lead_names,
+            &Default::default(),
+        );
+        // The renamed team's lead column prints the CURRENT name while the
+        // owner string keeps the lead at event time: both names on the row,
+        // and the flag tells the two apart on the wire.
+        assert_eq!(rows[0].lead.as_deref(), Some("Quill"));
+        assert!(rows[0].lead_current);
+        assert_eq!(rows[0].owner.as_deref(), Some("Lead of x-live (finch)"));
+        // A slug holder with no live team prints no name: rank only, lead
+        // absent - the placeholder never renders.
+        assert_eq!(rows[1].lead, None);
+        assert_eq!(rows[1].owner.as_deref(), Some("Lead of x-old"));
+        // A person-shaped stored holder is the fallback when no live team
+        // covers the node.
+        assert_eq!(rows[2].lead.as_deref(), Some("candor"));
+        assert!(!rows[2].lead_current, "a fallback name is not the live one");
+        assert_eq!(rows[2].owner.as_deref(), Some("Lead of x-gone (candor)"));
     }
 }
