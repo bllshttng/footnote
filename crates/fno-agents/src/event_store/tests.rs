@@ -28,6 +28,14 @@ fn count_events(store: &Path) -> i64 {
         .unwrap()
 }
 
+/// A timestamp inside the ephemeral TTL window on any run date. A fixed date
+/// expires once the wall clock passes it by the TTL.
+fn fresh_ts() -> String {
+    (chrono::Utc::now() - chrono::Duration::hours(1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 fn count_type(store: &Path, event_type: &str) -> i64 {
     open_read(store)
         .unwrap()
@@ -298,10 +306,8 @@ fn ephemeral_journal_is_refused_but_sibling_imports() {
     let sibling = dir.path().join("events.jsonl.ephemeral");
     append(
         &sibling,
-        &[
-            json!({"ts": "2026-09-10T08:00:00Z", "type": "mux_pane_counters",
-              "source": "mux", "data": {"panes": []}}),
-        ],
+        &[json!({"ts": fresh_ts(), "type": "mux_pane_counters",
+              "source": "mux", "data": {"panes": []}})],
     );
     let err = sync(&sibling).unwrap_err();
     assert!(err.contains("ephemeral"), "err: {err}");
@@ -338,7 +344,7 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
                    "head_sha": "abc", "verdict": "pass"}}),
             json!({"ts": "2026-05-01T08:00:00Z", "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
-            json!({"ts": "2026-09-15T08:00:00Z", "type": "mux_pane_counters",
+            json!({"ts": fresh_ts(), "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
         ],
     );
