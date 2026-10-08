@@ -269,7 +269,10 @@ mod tests {
             teach_if_due(&home, "s1", Some(&t2), None, true),
             "a newer boundary re-teaches"
         );
-        assert!(!teach_if_due(&home, "s1", Some(&t2), None, true), "and only once");
+        assert!(
+            !teach_if_due(&home, "s1", Some(&t2), None, true),
+            "and only once"
+        );
         // A harness whose transcript carries no known boundary shape (pi,
         // opencode) reads as "no boundary observed": the stamp silences it
         // forever after the first lesson. A missing transcript leaves the

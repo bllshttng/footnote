@@ -315,8 +315,14 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             .or_else(|| to_row.and_then(|row| row.harness_session_id.clone()));
         if let Some(recipient) = recipient {
             if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
-                if crate::mail_teach::teach_if_due(&home, &recipient, None, registry.as_ref(), true)
-                {
+                let due = crate::mail_teach::teach_if_due(
+                    &home,
+                    &recipient,
+                    None,
+                    registry.as_ref(),
+                    true,
+                );
+                if due {
                     return Ok(format!("{header}\n{}", crate::chats::teach_line()));
                 }
             }
