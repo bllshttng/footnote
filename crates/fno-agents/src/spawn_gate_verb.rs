@@ -617,7 +617,8 @@ mod probe {
         ) {
             if !caller.is_empty() && held >= share {
                 let mut message = format!(
-                    "this lead holds {held} of max_live {cap} across {leads} leads (share {share})"
+                    "this lead holds {held} of {} across {leads} leads (share {share})",
+                    learned.clause()
                 );
                 message.push_str(&crate::spawn_gate::held_rows_suffix(
                     reading.held_rows.as_ref(),

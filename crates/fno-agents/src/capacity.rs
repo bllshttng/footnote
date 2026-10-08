@@ -379,11 +379,14 @@ fn ledger_rows(home: &AgentsHome) -> Vec<Value> {
 }
 
 /// One `[[accounts.records]]` row the fold can use. The billing fields are
-/// optional config: a record that names none folds nothing.
+/// optional config: a record that names none folds nothing. `route_model` is
+/// the model side of the route (`glm-5.3` from `zai/glm-5.3`), the key the
+/// ledger's own model ids match against.
 #[derive(Debug, Clone)]
 pub(crate) struct AccountRecord {
     pub id: String,
     pub provider: String,
+    pub route_model: String,
     pub billing: String,
     pub show: bool,
     pub windows: Vec<String>,
@@ -392,10 +395,12 @@ pub(crate) struct AccountRecord {
 }
 
 /// `[[accounts.records]]` through the same candidate chain
-/// `record_reset_timezones` reads, so one config file is one truth.
+/// `record_reset_timezones` reads, so one config file is one truth. The
+/// chain is walked highest priority first and the first record with an id
+/// wins, the same first-hit-wins rule every config key follows.
 pub(crate) fn account_records(cwd: &std::path::Path) -> Vec<AccountRecord> {
     let paths = crate::agents_config::config_candidates(cwd);
-    let mut out = Vec::new();
+    let mut out: Vec<AccountRecord> = Vec::new();
     for path in &paths {
         let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
@@ -417,8 +422,12 @@ pub(crate) fn account_records(cwd: &std::path::Path) -> Vec<AccountRecord> {
             ) else {
                 continue;
             };
-            let Some(provider) = route.split('/').next().filter(|p| !p.is_empty()) else {
+            if out.iter().any(|known| known.id == id) {
                 continue;
+            }
+            let (provider, route_model) = match route.split_once('/') {
+                Some((p, m)) if !p.is_empty() => (p, m),
+                _ => continue,
             };
             let billing = rec
                 .get("billing")
@@ -441,6 +450,7 @@ pub(crate) fn account_records(cwd: &std::path::Path) -> Vec<AccountRecord> {
             out.push(AccountRecord {
                 id: id.to_string(),
                 provider: provider.to_string(),
+                route_model: route_model.to_string(),
                 billing: billing.to_string(),
                 show: rec
                     .get("show")
@@ -485,7 +495,7 @@ pub(crate) fn fold_windows(
                         let since = window_end(window, zone, now_epoch) - window_len(window);
                         WindowRow {
                             window: window.clone(),
-                            used_tokens: ledger_tokens(ledger, &rec.provider, since),
+                            used_tokens: ledger_tokens(ledger, rec, since),
                             // A 429 lock beats a computed boundary: the
                             // provider already said when the lane refills.
                             reset_epoch: snapshot_reset(snapshot, &rec.provider)
@@ -503,7 +513,7 @@ pub(crate) fn fold_windows(
                 windows: rows,
                 limit_tokens: rec.limit_tokens,
                 spend_usd: match rec.billing.as_str() {
-                    "metered" => Some(ledger_spend(ledger, &rec.provider, now_epoch)),
+                    "metered" => Some(ledger_spend(ledger, rec, now_epoch)),
                     _ => None,
                 },
             }
@@ -567,30 +577,35 @@ fn window_len(window: &str) -> i64 {
 
 /// Ledger tokens whose provider matches, summed per window row. The ledger
 /// has no account axis; the model's route prefix is the provider.
-fn ledger_tokens(ledger: &[Value], provider: &str, since_epoch: i64) -> u64 {
+/// The ledger's model id against the record's route. Real ledger rows carry
+/// BARE model ids (`glm-5.3-flash[1m]`, `claude-opus-5-5`), so the match is
+/// the bare id against the route's model side, by prefix (`glm-5.3` matches
+/// `glm-5.3-flash[1m]`). A model that does carry the provider prefix
+/// (`zai/glm-5.3-flash`) strips it first.
+fn row_matches_record(row: &Value, rec: &AccountRecord) -> bool {
+    let Some(model) = row.get("model").and_then(Value::as_str) else {
+        return false;
+    };
+    let bare = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
+    rec.route_model.is_empty() || bare.starts_with(&rec.route_model)
+}
+
+fn ledger_tokens(ledger: &[Value], rec: &AccountRecord, since_epoch: i64) -> u64 {
     ledger
         .iter()
-        .filter(|row| row_provider(row).as_deref() == Some(provider))
+        .filter(|row| row_matches_record(row, rec))
         .filter(|row| row_started_after(row, since_epoch))
         .filter_map(|row| row.get("tokens_total").and_then(Value::as_u64))
         .sum()
 }
 
-fn ledger_spend(ledger: &[Value], provider: &str, now_epoch: i64) -> f64 {
+fn ledger_spend(ledger: &[Value], rec: &AccountRecord, now_epoch: i64) -> f64 {
     ledger
         .iter()
-        .filter(|row| row_provider(row).as_deref() == Some(provider))
+        .filter(|row| row_matches_record(row, rec))
         .filter(|row| row_started_after(row, month_start(now_epoch)))
         .filter_map(|row| row.get("cost_usd").and_then(Value::as_f64))
         .sum()
-}
-
-fn row_provider(row: &Value) -> Option<String> {
-    row.get("model")
-        .and_then(Value::as_str)
-        .and_then(|model| model.split('/').next())
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
 }
 
 /// Rows whose work started inside the current calendar month (UTC): the
@@ -744,15 +759,25 @@ mod tests {
     #[test]
     fn subscription_record_folds_one_row_per_window() {
         let now = 1_772_064_000; // a Monday 00:00 UTC
-        let ledger = vec![serde_json::json!({
-            "model": "zai/glm-5.3-flash[1m]",
-            "tokens_total": 171_079_597u64,
-            "cost_usd": 5.42,
-            "started": "2026-02-25T17:46:15+00:00",
-        })];
+                                 // The ledger's real shape: BARE model ids, no provider prefix.
+        let ledger = vec![
+            serde_json::json!({
+                "model": "glm-5.3-flash[1m]",
+                "tokens_total": 171_079_597u64,
+                "cost_usd": 5.42,
+                "started": "2026-02-26T00:10:00+00:00",
+            }),
+            serde_json::json!({
+                "model": "zai/glm-5.3-air",
+                "tokens_total": 1_000u64,
+                "cost_usd": 0.01,
+                "started": "2026-02-26T10:00:00+00:00",
+            }),
+        ];
         let records = vec![AccountRecord {
             id: "zai-sub".into(),
             provider: "zai".into(),
+            route_model: "glm-5.3".into(),
             billing: "subscription".into(),
             show: true,
             windows: vec!["5h".into(), "weekly".into()],
@@ -763,7 +788,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].windows.len(), 2, "one row per window");
         assert_eq!(rows[0].windows[0].window, "5h");
-        assert_eq!(rows[0].windows[0].used_tokens, 171_079_597);
+        assert_eq!(rows[0].windows[0].used_tokens, 172_080_597);
         assert!(
             rows[0].windows[0].reset_epoch > now,
             "a 5h window resets in the future"
@@ -778,6 +803,7 @@ mod tests {
         let records = vec![AccountRecord {
             id: "zai-api".into(),
             provider: "zai".into(),
+            route_model: "glm-5.3".into(),
             billing: "metered".into(),
             show: false,
             windows: Vec::new(),

@@ -1876,7 +1876,7 @@ fn decide_gate(
                             } else {
                                 check_lead_share(
                                     registry_path,
-                                    cap,
+                                    &learned,
                                     input.caller_session.as_deref(),
                                     &axes_read,
                                 )
@@ -2693,10 +2693,11 @@ pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
 
 fn check_lead_share(
     registry_path: &Path,
-    cap: usize,
+    learned: &crate::capacity::Effective,
     caller_session: Option<&str>,
     _axes_read: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), Refusal> {
+    let cap = learned.cap;
     let Some(caller) = caller_session.filter(|c| !c.is_empty()) else {
         return Ok(());
     };
@@ -2711,10 +2712,11 @@ fn check_lead_share(
         return Ok(());
     }
     let mut msg = format!(
-        "spawn-gate: lead {} holds {held} of max_live {cap} across {leads} leads (share {share}); \
+        "spawn-gate: lead {} holds {held} of {} across {leads} leads (share {share}); \
          refusing to spawn -- waiting cannot help while your own workers hold the share \
          (--force to bypass)",
-        &caller[..caller.len().min(8)]
+        &caller[..caller.len().min(8)],
+        learned.clause()
     );
     // The held names read before the unattributed bucket: they are the rows
     // the caller can stop, where the bucket names nobody.
@@ -3892,9 +3894,6 @@ Swapouts: 3444531.\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// AC5-TEXT: the shared refusal sentence names the probe field that lists
-    /// every counted row, marks the operator-waiting share, and never again
-    /// blames a population its own recommended reader cannot see.
     /// An unknown effective cap, the shape every fallback clause test wants.
     fn no_state() -> crate::capacity::Effective {
         crate::capacity::Effective {
@@ -3906,6 +3905,9 @@ Swapouts: 3444531.\n";
         }
     }
 
+    /// AC5-TEXT: the shared refusal sentence names the probe field that lists
+    /// every counted row, marks the operator-waiting share, and never again
+    /// blames a population its own recommended reader cannot see.
     #[test]
     fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
         let line = slot_refusal_line(3, &no_state(), 3, &[], 1, "refusing (--no-wait).");
@@ -4251,9 +4253,14 @@ Swapouts: 3444531.\n";
         .unwrap();
         // One lead -> share = cap = 2; the caller holds both rows, so the
         // share refuses and the event must name w1 and w2.
-        let err = check_lead_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
-            .err()
-            .expect("the full share must refuse");
+        let err = check_lead_share(
+            &reg,
+            &no_state(),
+            Some("session-aaaaaaaa"),
+            &serde_json::Map::new(),
+        )
+        .err()
+        .expect("the full share must refuse");
         assert_eq!(err.exit_code, EXIT_LEAD_SHARE);
         assert_eq!(err.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(
