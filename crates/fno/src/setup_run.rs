@@ -194,7 +194,7 @@ pub fn parse_opts(tail: &[OsString]) -> Result<Opts, String> {
             "--yes" => o.yes = true,
             "--once" => o.once = true,
             "--list" => o.list = true,
-            "--json" => o.json = true,
+            "--json" | "-J" => o.json = true,
             "--scope" => {
                 i += 1;
                 let v = tail

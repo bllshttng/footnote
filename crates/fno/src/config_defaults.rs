@@ -44,7 +44,7 @@ pub fn classify(args: &[OsString]) -> Option<Vec<OsString>> {
     for flag in rest {
         match *flag {
             "--defaults" => defaults = true,
-            "--json" => {}
+            "--json" | "-J" => {}
             _ => return None,
         }
     }
