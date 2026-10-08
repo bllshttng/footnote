@@ -35,9 +35,16 @@ collision. A failed commit never falls back to a file write.
 
 `durable` and `gate` rows never auto-expire. `ephemeral` rows leave at the schema floor (`retention.minimum_ephemeral_ttl_hours`, currently 672) in bounded deletes. Rejected and migration rows never expire. An explicit operator deletion is the only other removal.
 
-`telemetry` rows leave after `retention.telemetry_ttl_hours` (168). These are the high-volume readouts: `control_plane_tick`, `inside_leg_report`, `codex_thread_inside_leg`, and the two store-sweep unlink kinds. One of these rows is noise. The shape of many is the signal, and a week keeps enough to read it. The daily prune claims its pass under the write lock, so two syncs never prune at once. It deletes telemetry by kind in 1,000-row batches for at most 3 seconds, so rows stored as `durable` before a kind joined the class expire too. A pass that leaves a backlog runs again in 5 minutes.
+`telemetry` rows leave after `retention.telemetry_ttl_hours` (168). These are the high-volume readouts: `control_plane_tick`, `inside_leg_report`, `codex_thread_inside_leg`, and the two store-sweep unlink kinds. One of these rows is noise. The shape of many is the signal, and a week keeps enough to read it. The daily prune claims its pass under the write lock, so two syncs never prune at once. It deletes telemetry in 1,000-row batches for at most 3 seconds. The match is by kind, so rows stored as `durable` before a kind joined the class expire too. A pass that leaves a backlog runs again in 5 minutes.
 
-`fno doctor event signals [--events <journal>] [--window-hours 24] [--check]` reads those shapes. It flags a type that wrote 1,000 rows in one minute (`burst`), a type at 5 times its prior daily average (`spike`), an arm whose tick detail reported a failure 10 times (`arm_errors`), and more than 12 daemon starts (`daemon_restarts`). It is read-only. With `--check` it exits 3 when any signal fires.
+`fno doctor event signals [--events <journal>] [--window-hours 24] [--check]` reads those shapes. It is read-only and flags four of them:
+
+- `burst`: one type wrote 1,000 rows in one minute.
+- `spike`: one type is at 5 times its prior daily average.
+- `arm_errors`: an arm's tick detail reported a failure 10 times.
+- `daemon_restarts`: the daemon started more than 12 times.
+
+If any signal fires, `--check` exits 3.
 
 ## Poll coalescing and the coverage epoch
 
