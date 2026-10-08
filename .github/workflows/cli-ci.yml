@@ -658,8 +658,9 @@ jobs:
     # Widest of 14 passing runs sampled 2026-09-24: 6.9m. The release build
     # of fno-agents outgrew the 10m cap on cold runners once the crate grew
     # the native decisions listing, and the job died inside cargo before any
-    # budget ran.
-    timeout-minutes: 15
+    # budget ran. Outgrew the 15m cap the same way twice on 2026-10-08 under
+    # fleet load; died inside cargo both times.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
