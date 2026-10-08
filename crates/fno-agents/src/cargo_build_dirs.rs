@@ -199,9 +199,16 @@ pub fn sccache_wedge(
     if rows.iter().any(|row| row.ppid == server_pid) {
         return None;
     }
+    // A client older than the server asked an earlier server: after a restart
+    // the stragglers must not read as stuck on the new one.
+    let server_age = rows.iter().find(|row| row.pid == server_pid)?.elapsed_s;
     let stuck: Vec<u64> = rows
         .iter()
-        .filter(|row| is_sccache_client(&row.command) && row.elapsed_s >= min_client_secs)
+        .filter(|row| {
+            is_sccache_client(&row.command)
+                && row.elapsed_s >= min_client_secs
+                && row.elapsed_s < server_age
+        })
         .map(|row| row.elapsed_s)
         .collect();
     let oldest_client_secs = stuck.iter().copied().max()?;
@@ -1929,8 +1936,14 @@ mod tests {
                 oldest_client_secs: 7000,
             })
         );
-        let compiling = vec![server.clone(), old, row(30, 20, 7000, "rustc --crate-name a")];
+        let compiling = vec![
+            server.clone(),
+            old.clone(),
+            row(30, 20, 7000, "rustc --crate-name a"),
+        ];
         assert_eq!(sccache_wedge(&compiling, SCCACHE_WEDGE_CLIENT_SECS), None);
+        let restarted = vec![row(21, 1, 60, "/opt/homebrew/bin/sccache"), old.clone()];
+        assert_eq!(sccache_wedge(&restarted, SCCACHE_WEDGE_CLIENT_SECS), None);
         let young = vec![server, fresh];
         assert_eq!(sccache_wedge(&young, SCCACHE_WEDGE_CLIENT_SECS), None);
     }
