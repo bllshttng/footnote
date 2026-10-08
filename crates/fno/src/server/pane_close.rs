@@ -197,7 +197,6 @@ impl Core {
             // session uuid, or the spawn failed.
             if let Some((id, argv, name)) = self.reattach_seat_argv(pid) {
                 if let Ok(new_pid) = self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
-                    self.attached.insert(id, new_pid);
                     if self.swap_dead_seat(
                         pid,
                         sid,
@@ -209,6 +208,7 @@ impl Core {
                         "resumed session re-attached",
                         reason,
                     ) {
+                        self.attached.insert(id, new_pid);
                         return Flow::Continue;
                     }
                     // The tab closed under the swap: undo and fall through
