@@ -478,7 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_match_closes_a_declared_child() {
+    fn a_declared_child_closes_on_either_evidence_kind() {
+        // Evidence kind one: the owner PR touched a declared surface.
         let mut entries = vec![
             json!({"id": "x-owner", "pr_number": 9}),
             json!({
@@ -500,6 +501,29 @@ mod tests {
         );
         assert_eq!(out.closed, vec!["x-carried".to_string()]);
         assert!(out.released.is_empty());
+        // Evidence kind two: the PR body bound the child, so the child row
+        // carries this PR number and closes even with no file match.
+        let mut entries = vec![
+            json!({"id": "x-owner", "pr_number": 9}),
+            json!({
+                "id": "x-carried",
+                "contained_in": "x-owner",
+                "pr_number": 9,
+                "containment_surfaces": ["scripts/ci/check-file-budget.sh"]
+            }),
+        ];
+        let files = vec!["crates/fno/src/theme.rs".to_string()];
+        let ev = CascadeEvidence {
+            changed_files: &files,
+            pr_number: 9,
+        };
+        let out = cascade_close_contained(
+            &mut entries,
+            "x-owner",
+            Some("2026-10-01T00:00:00Z"),
+            Some(&ev),
+        );
+        assert_eq!(out.closed, vec!["x-carried".to_string()]);
     }
 
     #[test]
@@ -528,31 +552,6 @@ mod tests {
         assert!(entries[1].get("completed_at").is_none());
         assert!(entries[1].get("contained_in").is_none());
         assert_eq!(entries[1]["released_from"], "x-owner");
-    }
-
-    #[test]
-    fn a_body_bound_child_closes_even_without_a_file_match() {
-        let mut entries = vec![
-            json!({"id": "x-owner", "pr_number": 9}),
-            json!({
-                "id": "x-carried",
-                "contained_in": "x-owner",
-                "pr_number": 9,
-                "containment_surfaces": ["scripts/ci/check-file-budget.sh"]
-            }),
-        ];
-        let files = vec!["crates/fno/src/theme.rs".to_string()];
-        let ev = CascadeEvidence {
-            changed_files: &files,
-            pr_number: 9,
-        };
-        let out = cascade_close_contained(
-            &mut entries,
-            "x-owner",
-            Some("2026-10-01T00:00:00Z"),
-            Some(&ev),
-        );
-        assert_eq!(out.closed, vec!["x-carried".to_string()]);
     }
 
     #[test]
