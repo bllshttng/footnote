@@ -2932,3 +2932,36 @@ fn agent_refusal_names_the_codex_role_form() {
         "opencode keeps the generic refusal"
     );
 }
+
+// -----------------------------------------------------------------------
+// the client-side gate receives the route provider
+// -----------------------------------------------------------------------
+
+// One sequential test, not three: the helper reads process env, and cargo
+// runs a binary's tests on parallel threads, so separate tests mutating
+// FNO_ROUTE_PROVIDER / FNO_ROUTE_SETTINGS_DIR would race each other.
+#[test]
+fn route_provider_for_gate_env_stamp_route_settings_none() {
+    let params = json!({"model": "glm-5.3-flash[1m]"});
+    std::env::set_var("FNO_ROUTE_PROVIDER", "zai");
+    let got = fno_agents::claude_adopt::gate_route_provider(&params);
+    std::env::remove_var("FNO_ROUTE_PROVIDER");
+    assert_eq!(got.as_deref(), Some("zai"), "seam stamp wins");
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("seed.json"),
+        r#"{"env": {"ANTHROPIC_MODEL": "glm-5.3-flash[1m]", "FNO_ROUTE_PROVIDER": "zai"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("FNO_ROUTE_SETTINGS_DIR", temp.path());
+    let got = fno_agents::claude_adopt::gate_route_provider(&params);
+    std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    assert_eq!(got.as_deref(), Some("zai"), "recorded route answers");
+
+    let empty = tempfile::tempdir().unwrap();
+    std::env::set_var("FNO_ROUTE_SETTINGS_DIR", empty.path());
+    let got = fno_agents::claude_adopt::gate_route_provider(&params);
+    std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    assert_eq!(got, None, "unrouted keeps the axis skipped");
+}
