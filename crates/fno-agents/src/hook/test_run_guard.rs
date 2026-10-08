@@ -32,7 +32,6 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::lead_guard::lex;
 use crate::test_run::cargo_test_selects_whole_suite;
@@ -653,18 +652,7 @@ fn refused_segment(
 }
 
 fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if root.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(root))
-    }
+    crate::paths::worktree_toplevel(cwd)
 }
 
 /// True when root is a footnote checkout or worktree of one. Both markers
