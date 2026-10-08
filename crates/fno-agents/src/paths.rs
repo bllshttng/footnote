@@ -548,57 +548,97 @@ pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
 /// fleet of sessions fires hooks at once. The answer for a cwd is stable
 /// within a fire; the short TTL bounds how long a long-lived daemon can
 /// serve a stale root after a repo move. Negative answers cache too: a
-/// non-repo cwd re-forked git on every ask before.
+/// non-repo cwd re-forked git on every ask before. Concurrent misses for
+/// one cwd single-flight on an in-flight marker (the daemon resolves
+/// spawns for the same repo on parallel `spawn_blocking` tasks), while
+/// different cwds never block each other.
 fn canonical_repo_root_cached(
     cwd: &Path,
     resolve: &dyn Fn(&Path) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let now = std::time::Instant::now();
-    {
-        let cache = canonical_root_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((hit, at)) = cache.get(cwd) {
+    let (state, cv) = canonical_root_cache();
+    let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let now = std::time::Instant::now();
+        if let Some((hit, at)) = cache.entries.get(cwd) {
             if now.duration_since(*at) < CANONICAL_ROOT_TTL {
                 return hit.clone();
             }
         }
+        if cache.inflight.contains(cwd) {
+            let (woken, _) = cv
+                .wait_timeout(cache, std::time::Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner());
+            cache = woken;
+            continue;
+        }
+        break;
     }
+    cache.inflight.insert(cwd.to_path_buf());
+    let marker = InflightMarker(cwd.to_path_buf());
+    drop(cache);
     let resolved = resolve(cwd);
-    {
-        let mut cache = canonical_root_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if cache.len() >= CANONICAL_ROOT_CAP {
-            cache.retain(|_, (_, at)| now.duration_since(*at) < CANONICAL_ROOT_TTL);
-        }
-        if cache.len() >= CANONICAL_ROOT_CAP {
-            cache.clear();
-        }
-        cache.insert(cwd.to_path_buf(), (resolved.clone(), now));
+    let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    if cache.entries.len() >= CANONICAL_ROOT_CAP {
+        cache
+            .entries
+            .retain(|_, (_, at)| now.duration_since(*at) < CANONICAL_ROOT_TTL);
     }
+    if cache.entries.len() >= CANONICAL_ROOT_CAP {
+        cache.entries.clear();
+    }
+    cache
+        .entries
+        .insert(cwd.to_path_buf(), (resolved.clone(), now));
+    drop(marker);
     resolved
 }
 
 const CANONICAL_ROOT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const CANONICAL_ROOT_CAP: usize = 256;
 
-fn canonical_root_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<PathBuf, (Option<PathBuf>, std::time::Instant)>,
-> {
+struct RootCache {
+    entries: std::collections::HashMap<PathBuf, (Option<PathBuf>, std::time::Instant)>,
+    /// Cwds a thread is resolving right now. A same-key miss waits on the
+    /// condvar instead of forking its own git; a panic in the resolver still
+    /// clears the marker through `InflightMarker`'s drop.
+    inflight: std::collections::HashSet<PathBuf>,
+}
+
+fn canonical_root_cache() -> &'static (std::sync::Mutex<RootCache>, std::sync::Condvar) {
     use std::sync::OnceLock;
-    static CACHE: OnceLock<
-        std::sync::Mutex<std::collections::HashMap<PathBuf, (Option<PathBuf>, std::time::Instant)>>,
-    > = OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    static CACHE: OnceLock<(std::sync::Mutex<RootCache>, std::sync::Condvar)> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        (
+            std::sync::Mutex::new(RootCache {
+                entries: std::collections::HashMap::new(),
+                inflight: std::collections::HashSet::new(),
+            }),
+            std::sync::Condvar::new(),
+        )
+    })
+}
+
+/// Clears this thread's in-flight marker on every exit path, including a
+/// resolver panic, so waiters can take over the resolution.
+struct InflightMarker(PathBuf);
+
+impl Drop for InflightMarker {
+    fn drop(&mut self) {
+        let (state, cv) = canonical_root_cache();
+        let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
+        cache.inflight.remove(&self.0);
+        cv.notify_all();
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn canonical_root_cache_reset() {
-    canonical_root_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    let (state, _) = canonical_root_cache();
+    let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
+    cache.entries.clear();
+    cache.inflight.clear();
 }
 
 fn canonical_repo_root_uncached(cwd: &Path) -> Option<PathBuf> {
@@ -1425,6 +1465,51 @@ mod tests {
         assert_eq!(*count.borrow(), 2);
         std::fs::remove_dir_all(&repo).ok();
         std::fs::remove_dir_all(&empty).ok();
+    }
+
+    #[test]
+    fn canonical_repo_root_coalesces_concurrent_misses_for_one_cwd() {
+        // The daemon resolves spawns for one repo on parallel spawn_blocking
+        // tasks; without single-flight each miss forks its own git. Four
+        // threads, one cwd: the resolver must run exactly once and every
+        // caller gets the same answer.
+        canonical_root_cache_reset();
+        let repo = tmp("memo-concurrent");
+        std::fs::create_dir_all(&repo).unwrap();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let calls = calls.clone();
+            let repo = repo.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let resolver = |p: &Path| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if p == repo.as_path() {
+                        Some(p.to_path_buf())
+                    } else {
+                        None
+                    }
+                };
+                assert_eq!(
+                    canonical_repo_root_cached(&repo, &resolver),
+                    Some(repo.clone())
+                );
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "concurrent misses for one cwd must single-flight into one resolve"
+        );
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
