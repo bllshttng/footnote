@@ -334,7 +334,7 @@ impl Core {
             .claude_session_uuid
             .as_deref()
             .filter(|u| !u.is_empty())?;
-        let live = crate::agents_view::live_process_argvs()
+        let live = crate::argv_witness::live_process_argvs()
             .iter()
             .any(|a| a.contains(uuid));
         live.then(|| {

@@ -210,7 +210,7 @@ impl Ring {
         let n = split_escape_tail(&dropped, &scan).min(scan.len());
         let ring_extra = n.min(ring_kept);
         let chunk_trim = (n - ring_extra).min(chunk.len());
-        self.dropped += (overflow + ring_extra) as u64;
+        self.dropped += (overflow + ring_extra + chunk_trim) as u64;
         for _ in 0..overflow + ring_extra {
             self.bytes.pop_front();
         }
