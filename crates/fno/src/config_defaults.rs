@@ -240,7 +240,7 @@ pub fn run(tail: &[OsString]) -> i32 {
     let mut json = false;
     for a in tail {
         match a.to_str() {
-            Some("--json") => json = true,
+            Some("--json") | Some("-J") => json = true,
             _ => {
                 eprintln!("usage: fno config get --defaults [--json]");
                 return 2;
