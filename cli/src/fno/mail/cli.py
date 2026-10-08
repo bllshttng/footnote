@@ -2110,7 +2110,7 @@ def _name_lane_send(
     # `from_session` the full id a recipient can answer when two workers share a
     # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
-    def _envelope(to_session: Optional[str] = None, footer: bool = False) -> str:
+    def _envelope(to_session: Optional[str] = None, header_only: bool = False) -> str:
         return wrap_fno_mail(
             message,
             from_=sender,
@@ -2122,14 +2122,13 @@ def _name_lane_send(
             origin=origin,
             to_session=to_session,
             subject=subject,
-            footer=footer,
+            header_only=header_only,
         )
 
     # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
-    # A live turn is header only; the record and floor keep the body.
-    turn_envelope = _envelope(recipient_session, footer=True)
+    turn_envelope = _envelope(recipient_session, header_only=True)
 
     # --force (node): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
@@ -4006,9 +4005,6 @@ def cmd_send(
         return
 
     timeout_override = os.environ.pop("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", None)
-    # The mail verb's live leg is header only; the flag rides the same env
-    # channel the lock-timeout override does, and the finally below reaps it.
-    os.environ["_FNO_MAIL_HEADER_ONLY"] = "1"
     try:
         result = dispatch_send(
             name=name,
@@ -4019,6 +4015,7 @@ def cmd_send(
             from_name=stamp_from(from_name),
             origin=mail_origin,
             subject=subject,
+            header_only=True,
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -4097,8 +4094,6 @@ def cmd_send(
         except UnavailableTokenError as unavailable:
             _unavailable_token_exit(name, unavailable)
         return
-    finally:
-        os.environ.pop("_FNO_MAIL_HEADER_ONLY", None)
 
     # AC3-UI: distinguish delivered vs queued on stdout. A durable demotion
     # carries the live lane's own reason (node), so a miss to a LIVE

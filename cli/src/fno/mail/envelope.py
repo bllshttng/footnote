@@ -129,23 +129,16 @@ def wrap_fno_mail(
     harness: Optional[str] = None,
     held_release: bool = False,
     subject: Optional[str] = None,
-    footer: bool = False,
+    header_only: bool = False,
 ) -> str:
     """Render a normal envelope or pass through a validated held-release turn.
 
     ``subject`` is the sender's --subject; an explicit value wins
     over the peeled-env fallback so a caller that resolved the flag itself is
-    never overridden by ambient state. ``footer`` (legacy name) delivers the
-    header line alone; the bus copy keeps the full body."""
+    never overridden by ambient state."""
     payload = locals().copy()
     mode = "held-release" if payload.pop("held_release") else "wrap"
     payload["mode"], payload["from"] = mode, payload.pop("from_")
-    if payload.pop("footer"):
-        payload["header_only"] = True
-    if os.environ.pop("_FNO_MAIL_HEADER_ONLY", None) == "1":
-        # The mail verb's one registered-agent send; the first wrap consumes
-        # it, so the turn is header only and the record wraps stay full.
-        payload["header_only"] = True
     resolved = (payload.pop("subject") or "").strip()
     if mode == "wrap":
         # The front's peeled --subject rides the render too, so the
