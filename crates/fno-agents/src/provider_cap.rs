@@ -523,6 +523,9 @@ fn migrate_runtime_state_to_state_dir(base: &Path) -> PathBuf {
         .and_then(|()| std::fs::rename(base, &new))
     {
         Ok(()) => new,
+        // A racer's winning rename removed base; answering base would read a
+        // vanished path, so prefer a new that exists.
+        Err(_) if new.exists() => new,
         Err(_) => base.to_path_buf(),
     }
 }

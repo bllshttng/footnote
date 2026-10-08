@@ -81,7 +81,9 @@ RUST_PLACE = re.compile(r'place\(\s*(?:[^,()]|\([^()]*\))+,\s*"([^"]+)"\s*\)')
 
 refused = []
 for line in added_text.splitlines():
-    body = line[1:] if line.startswith("+") else line
+    if not line.startswith("+") or line.startswith("+++"):
+        continue  # -U0: no context lines; deletions never speak here
+    body = line[1:]
     for match in PY_STATE_LEAF.finditer(body):
         leaf = match.group(1)
         if not rowed(leaf) and leaf not in _ROOT_STATE_FILE_ROWS:
@@ -169,7 +171,13 @@ fi
 
 ADDED="$(mktemp)"
 trap 'rm -f "$ADDED"' EXIT
-git diff --diff-filter=A -U0 "origin/${BASE_REF}...HEAD" \
-    -- cli/src/fno hooks scripts crates >"$ADDED"
+# Added lines from every changed file (no --diff-filter: a write added to a
+# MODIFIED file is the common case the gate exists for). -U0 keeps the core's
+# per-line scan exact; deletion lines start with '-' and never match. The
+# gate excludes itself: its self-test strings and header examples quote the
+# exact shapes it refuses.
+git diff -U0 "origin/${BASE_REF}...HEAD" \
+    -- cli/src/fno hooks scripts crates \
+    ':(exclude)scripts/ci/check-state-root-writes.sh' >"$ADDED"
 
 check_lines "$ADDED" "$BASELINE" "$LAYOUT"

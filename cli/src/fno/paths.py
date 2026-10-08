@@ -873,7 +873,9 @@ def _state_subfile_at(root: Path, subfolder: str, name: str, legacy_name: str) -
             new.parent.mkdir(parents=True, exist_ok=True)
             legacy.rename(new)
         except OSError:
-            return _guard_state_path(legacy)
+            # A racer's winning rename removed legacy; answering legacy would
+            # send the write back to the root, so prefer a new that exists.
+            return _guard_state_path(new if new.exists() else legacy)
     return _guard_state_path(new)
 
 
