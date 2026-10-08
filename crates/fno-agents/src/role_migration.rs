@@ -92,6 +92,54 @@ pub fn migrate_node_provenance(value: &mut Value) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Rename the legacy `crown_*` keys on registry table rows to their current
+/// names. The table was imported from a snapshot that still held them, and
+/// the file walk never opens graph.db. A row that holds both spellings keeps
+/// the current one. Returns whether any row changed.
+pub(crate) fn upgrade_registry_rows(rows: &mut [Value]) -> bool {
+    let mut changed = false;
+    for row in rows {
+        let Some(map) = row.as_object_mut() else {
+            continue;
+        };
+        let legacy: Vec<String> = map
+            .keys()
+            .filter(|key| key.starts_with("crown_"))
+            .cloned()
+            .collect();
+        for key in legacy {
+            let Some(value) = map.remove(&key) else {
+                continue;
+            };
+            map.entry(vocabulary(&key)).or_insert(value);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Rewrite the registry table once, so the stored rows carry current keys.
+fn migrate_registry_table(root: &Path) -> Result<(), String> {
+    for path in [
+        root.join("registry.json"),
+        root.join("agents").join("registry.json"),
+    ] {
+        if !path.is_dir() {
+            continue;
+        }
+        let write = crate::registry_store::begin(&path).map_err(|e| e.to_string())?;
+        let mut document = write.document.clone();
+        let changed = document
+            .get_mut("agents")
+            .and_then(Value::as_array_mut)
+            .is_some_and(|rows| upgrade_registry_rows(rows));
+        if changed {
+            write.commit(document).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 fn migrate_value(value: &mut Value, field: &str) -> Result<(), String> {
     match value {
         Value::Object(map) => {
@@ -485,6 +533,7 @@ pub fn run_at(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     walk(root, 0)?;
+    migrate_registry_table(root)?;
     atomic_write(&marker, b"1\n")
 }
 
@@ -635,6 +684,26 @@ pub fn retired_verb(verb: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_table_row_holding_crown_level_reads_back_as_role_level() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agents").join("registry.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::registry_store::replace_document(
+            &path,
+            serde_json::json!({"schema_version":39,"agents":[
+                {"fno_id":"a","crown_level":2,"crown_scope":"epic-alpha","role_scope":"kept"}
+            ]}),
+        );
+        let read = crate::registry_store::read(&path).unwrap();
+        assert_eq!(read["agents"][0]["role_level"], 2);
+        assert_eq!(read["agents"][0]["role_scope"], "kept");
+        assert!(read["agents"][0].get("crown_level").is_none());
+        let text: Value =
+            serde_json::from_str(&crate::registry_read::registry_text(&path).unwrap()).unwrap();
+        assert_eq!(text["agents"][0]["role_level"], 2);
+    }
+
     #[test]
     fn migration_preserves_authority_and_history_refuses_conflicts_and_is_once_only() {
         let tmp = tempfile::tempdir().unwrap();
