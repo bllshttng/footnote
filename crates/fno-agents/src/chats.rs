@@ -1403,8 +1403,8 @@ pub(crate) fn show_at(
     }
     if q.json {
         // The machine view layers the sender identity the reply needs over the
-        // stored row (x-5d19): the registry-resolved name and short_id (a row
-        // renamed after the send still answers under its current name), the
+        // stored row: the registry-resolved name and short_id (a row renamed
+        // after the send still answers under its current name), the
         // collision-safe session id, the fmail id, and the ready reply
         // command. The stored row stays verbatim underneath.
         let mut view = msg.clone();
@@ -2236,8 +2236,8 @@ mod tests {
         assert!(stranger
             .unwrap_err()
             .contains("not addressed to or from the caller"));
-        // show --json layers the reply identity over the stored row (x-5d19):
-        // the registry-resolved name and short_id, the session id, the fmail
+        // show --json layers the reply identity over the stored row: the
+        // registry-resolved name and short_id, the session id, the fmail
         // id, and the ready reply command. The row's fields stay verbatim.
         std::fs::write(
             home_pin.join("registry.json"),

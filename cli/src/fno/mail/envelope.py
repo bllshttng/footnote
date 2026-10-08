@@ -138,9 +138,9 @@ def wrap_fno_mail(
     never overridden by ambient state.
 
     ``footer`` delivers header plus the ``Read: fno agents mail show <id>``
-    line instead of the body (x-5d19): the receiver pulls the body from the
-    bus, so a live turn spends one line on the mail. The bus copy the caller
-    stores keeps the full body either way."""
+    line instead of the body: the receiver pulls the body from the bus, so a
+    live turn spends one line on the mail. The bus copy the caller stores
+    keeps the full body either way."""
     payload = locals().copy()
     mode = "held-release" if payload.pop("held_release") else "wrap"
     payload["mode"], payload["from"] = mode, payload.pop("from_")

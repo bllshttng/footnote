@@ -893,7 +893,7 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
 def test_plain_send_delivers_read_line_on_a_hookless_harness(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    # x-5d19: a plain peer send (no --kind) delivers the header plus the one
+    # A plain peer send (no --kind) delivers the header plus the one
     # read line; the receiver pulls the body from the bus with
     # `fno agents mail show <id>`. The bus row keeps the full body, so the id
     # the footer names resolves to something worth reading.
@@ -992,7 +992,7 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     assert "delivered (hosted)" in sent.output
     assert "queued (durable)" not in sent.output
     assert len(calls) == 1
-    # The live turn is the footer delivery (x-5d19): exactly the header line
+    # The live turn is the footer delivery: exactly the header line
     # and the one read line; the body stays on the bus.
     lines = calls[0][1].splitlines()
     assert len(lines) == 2, calls[0][1]

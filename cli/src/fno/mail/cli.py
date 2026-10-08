@@ -1771,8 +1771,13 @@ def _forced_pane_send(
     authored_words: Optional[int],
     reservation,
     subject: Optional[str] = None,
+    record_body: Optional[str] = None,
 ) -> bool:
     """``mail send --force``: type the wrapped body into the recipient's pane.
+
+    ``record_body`` is what the outbox row stores: the full-body envelope,
+    kept separate from the typed text when the delivered turn is the footer
+    form, so the id the turn carries still resolves to the whole message.
 
     ``--force`` changes only the TRANSPORT. Every mail semantic is kept: the same
     minted ``msg_id`` rides the envelope, the reply handle and authority footer
@@ -1879,7 +1884,7 @@ def _forced_pane_send(
             msg_id=msg_id,
             sender=sender,
             recipient=recipient,
-            body=wrapped,
+            body=record_body or wrapped,
             pane_id=str(pane_id),
             mux_session=str(mux_session) if mux_session else None,
             from_harness=sender_harness,
@@ -2127,10 +2132,10 @@ def _name_lane_send(
     # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
-    # A live turn delivers header plus the one read line (x-5d19); the
-    # receiver pulls the body from the bus with `fno agents mail show <id>`.
-    # The bus record and the durable floor keep the full body, so the id
-    # always resolves to something worth reading.
+    # A live turn delivers header plus the one read line; the receiver pulls
+    # the body from the bus with `fno agents mail show <id>`. The bus record
+    # and the durable floor keep the full body, so the id always resolves to
+    # something worth reading.
     turn_envelope = _envelope(recipient_session, footer=True)
 
     # --force (node): change the TRANSPORT, keep every mail semantic. The
@@ -2179,6 +2184,7 @@ def _name_lane_send(
             authored_words=authored_words,
             reservation=reservation,
             subject=subject,
+            record_body=wrapped,
         )
         return
 

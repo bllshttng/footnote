@@ -110,7 +110,7 @@ fn fence_requested(input: &Value) -> bool {
 }
 
 /// A `footer: true` payload delivers header plus the one read line instead of
-/// the body (x-5d19): the receiver pulls the body from the bus with
+/// the body: the receiver pulls the body from the bus with
 /// `fno agents mail show <id>`, so the delivered turn spends one line, not
 /// the whole message. The bus copy keeps the full body either way.
 fn footer_requested(input: &Value) -> bool {
@@ -519,7 +519,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
-        // Footer delivery (x-5d19): the turn carries the header and the one
+        // Footer delivery: the turn carries the header and the one
         // read line; the body stays on the bus for `fno agents mail show`.
         let footer = render_at(
             &json!({
