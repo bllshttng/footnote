@@ -8,9 +8,11 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::merge_evidence::node_pr_refs;
+use super::supersession::normalize_surface;
 use crate::backlog::workflows::{
-    apply_completion_fields, auto_closed_note, children_all_closed, is_live,
-    reopen_outranks_child_closes, reopen_outranks_merge, reparent_live_children, text_at,
+    apply_completion_fields, auto_closed_note, children_all_closed, is_live, pr_ref_set,
+    release_contained_row, reopen_outranks_child_closes, reopen_outranks_merge,
+    reparent_live_children, text_at,
 };
 
 /// Open epics (parents) that pass `children_all_closed` - closeable now.
@@ -146,13 +148,29 @@ pub(crate) fn sweep_stamp_carried_sessions(entries: &mut [Value]) -> Vec<String>
     stamped
 }
 
+/// The merge evidence a cascade judge reads: the owner PR's changed-file
+/// set and the PR number (a contained child the PR body bound carries this
+/// number).
+pub(crate) struct CascadeEvidence<'a> {
+    pub(crate) changed_files: &'a [String],
+    pub(crate) pr_number: i64,
+}
+
+/// What one cascade pass did: the closed ids and the released ids.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ContainedCascade {
+    pub(crate) closed: Vec<String>,
+    pub(crate) released: Vec<String>,
+}
+
 /// Close every node that shipped inside `node_id`'s PR. With `merged_at`
 /// the child reopen keys on the merge, not the owner's completed_at.
 pub(crate) fn cascade_close_contained(
     entries: &mut [Value],
     node_id: &str,
     merged_at: Option<&str>,
-) -> Vec<String> {
+    evidence: Option<&CascadeEvidence>,
+) -> ContainedCascade {
     let unit_index = entries
         .iter()
         .position(|e| text_at(e, "id") == Some(node_id));
@@ -170,7 +188,18 @@ pub(crate) fn cascade_close_contained(
         "auto-closed: shipped inside {node_id} ({where_word}); cost and session are recorded on {node_id}"
     );
 
+    let changed: BTreeSet<String> = evidence
+        .map(|ev| {
+            ev.changed_files
+                .iter()
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| normalize_surface(p))
+                .collect()
+        })
+        .unwrap_or_default();
+    let owner_refs = pr_ref_set(entries, node_id);
     let mut closed: Vec<String> = Vec::new();
+    let mut released: Vec<String> = Vec::new();
     for e in entries.iter_mut() {
         if text_at(e, "contained_in") != Some(node_id) {
             continue;
@@ -191,6 +220,37 @@ pub(crate) fn cascade_close_contained(
         let Some(nid) = text_at(e, "id").map(str::to_string) else {
             continue; // unidentifiable row: nothing to report, nothing to close
         };
+        // A child that declared surfaces closes only on evidence its work
+        // rode this PR: a changed-file match, or the PR body binding the
+        // child to this PR. Without it the containment releases (the row
+        // keeps its parent, re-dispatches, and carries `released_from`).
+        let declared: Vec<String> = e
+            .get("containment_surfaces")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(normalize_surface)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !declared.is_empty() {
+            let body_bound = evidence
+                .map(|ev| {
+                    ev.pr_number > 0
+                        && e.get("pr_number").and_then(Value::as_i64) == Some(ev.pr_number)
+                })
+                .unwrap_or(false);
+            let matched = evidence
+                .map(|ev| declared.iter().any(|s| changed.contains(s)))
+                .unwrap_or(false);
+            if !matched && !body_bound {
+                release_contained_row(e, node_id, &owner_refs);
+                released.push(nid);
+                continue;
+            }
+        }
         // merged_at is set only when reconcile resolved MERGED from gh, so
         // the child inherits the stamp instead of reading merge_status null
         // (a null made the merge reaper hold the request the node shipped in).
@@ -200,10 +260,13 @@ pub(crate) fn cascade_close_contained(
             .insert("completion_note".into(), json!(note));
         closed.push(nid);
     }
-    closed
+    ContainedCascade { closed, released }
 }
 
 /// Open nodes whose delivery unit is ALREADY done - closeable right now.
+/// A child that declared surfaces is never strandable: with no merged-PR
+/// file set there is no evidence its work rode the owner's PR, so the sweep
+/// releases it (see `sweep_close_stranded_contained`) instead of closing.
 pub(crate) fn strandable_contained_ids(entries: &[Value]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for e in entries {
@@ -223,35 +286,86 @@ pub(crate) fn strandable_contained_ids(entries: &[Value]) -> BTreeSet<String> {
         let Some(nid) = text_at(e, "id") else {
             continue;
         };
-        if owner_done && !reopen_outranks_child_closes(e, std::slice::from_ref(&owner)) {
+        let declared = e
+            .get("containment_surfaces")
+            .and_then(Value::as_array)
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false);
+        if owner_done && !declared && !reopen_outranks_child_closes(e, std::slice::from_ref(&owner))
+        {
             out.insert(nid.to_string());
         }
     }
     out
 }
 
-/// Close every node `strandable_contained_ids` names, grouped by owner so
-/// each node gets the same note the merge-time cascade writes.
-pub(crate) fn sweep_close_stranded_contained(entries: &mut [Value]) -> Vec<String> {
+/// Close (or release) every contained child of a done owner, grouped by
+/// owner so each node gets the same note the merge-time cascade writes.
+/// A declared child gets a release, never a close: with no merged-PR file
+/// set there is no evidence its work rode the owner's PR. The reopen guard
+/// holds a deliberate reopen on both branches.
+pub(crate) fn sweep_close_stranded_contained(entries: &mut [Value]) -> ContainedCascade {
+    let mut out = ContainedCascade::default();
     let stranded = strandable_contained_ids(entries);
-    if stranded.is_empty() {
-        return Vec::new();
-    }
     let mut owners: BTreeSet<String> = BTreeSet::new();
     for e in entries.iter() {
-        if let Some(nid) = text_at(e, "id") {
-            if stranded.contains(nid) {
-                if let Some(owner) = text_at(e, "contained_in") {
-                    owners.insert(owner.to_string());
-                }
+        let Some(nid) = text_at(e, "id") else {
+            continue;
+        };
+        if stranded.contains(nid) {
+            if let Some(owner) = text_at(e, "contained_in") {
+                owners.insert(owner.to_string());
             }
         }
     }
-    let mut closed: Vec<String> = Vec::new();
     for owner in owners {
-        closed.extend(cascade_close_contained(entries, &owner, None));
+        let r = cascade_close_contained(entries, &owner, None, None);
+        out.closed.extend(r.closed);
     }
-    closed
+    // Declared children of a done owner: release, never close.
+    let mut declared_kids: Vec<(String, String)> = Vec::new();
+    for e in entries.iter() {
+        let Some(owner_id) = text_at(e, "contained_in") else {
+            continue;
+        };
+        let declared = e
+            .get("containment_surfaces")
+            .and_then(Value::as_array)
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false);
+        if !declared {
+            continue;
+        }
+        if e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false) {
+            continue;
+        }
+        let Some(owner) = entries.iter().find(|r| text_at(r, "id") == Some(owner_id)) else {
+            continue;
+        };
+        let owner_done = owner
+            .get("completed_at")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if !owner_done || reopen_outranks_child_closes(e, std::slice::from_ref(&owner)) {
+            continue;
+        }
+        let Some(kid) = text_at(e, "id") else {
+            continue;
+        };
+        declared_kids.push((owner_id.to_string(), kid.to_string()));
+    }
+    for (owner_id, kid) in &declared_kids {
+        let owner_refs = pr_ref_set(entries, owner_id);
+        let Some(idx) = entries
+            .iter()
+            .position(|e| text_at(e, "id") == Some(kid.as_str()))
+        else {
+            continue;
+        };
+        release_contained_row(&mut entries[idx], owner_id, &owner_refs);
+        out.released.push(kid.clone());
+    }
+    out
 }
 
 /// Live non-contained node ids whose DIRECT parent exists and is terminal.
@@ -361,8 +475,10 @@ mod tests {
             json!({"id": "x-owner", "pr_number": 9}),
             json!({"id": "x-carried", "contained_in": "x-owner"}),
         ];
-        let closed = cascade_close_contained(&mut entries, "x-owner", Some("2026-10-01T00:00:00Z"));
-        assert_eq!(closed, vec!["x-carried".to_string()]);
+        let closed =
+            cascade_close_contained(&mut entries, "x-owner", Some("2026-10-01T00:00:00Z"), None);
+        assert_eq!(closed.closed, vec!["x-carried".to_string()]);
+        assert!(closed.released.is_empty());
         assert_eq!(entries[1]["status"], "done");
         assert_eq!(entries[1]["merge_status"], "merged");
         assert!(entries[1]["completion_note"]
@@ -382,8 +498,9 @@ mod tests {
                 "reopened_reason": "still needed",
             }),
         ];
-        let closed = cascade_close_contained(&mut entries, "x-owner", Some("2026-10-01T00:00:00Z"));
-        assert!(closed.is_empty());
+        let closed =
+            cascade_close_contained(&mut entries, "x-owner", Some("2026-10-01T00:00:00Z"), None);
+        assert!(closed.closed.is_empty());
         assert!(entries[1].get("completed_at").is_none());
     }
 
@@ -404,11 +521,107 @@ mod tests {
             json!({"id": "x-carried", "contained_in": "x-owner"}),
         ];
         let closed = sweep_close_stranded_contained(&mut entries);
-        assert_eq!(closed, vec!["x-carried".to_string()]);
+        assert_eq!(closed.closed, vec!["x-carried".to_string()]);
         assert!(entries[1]["completion_note"]
             .as_str()
             .unwrap_or_default()
             .contains("shipped inside x-owner"));
+    }
+
+    #[test]
+    fn a_surface_match_closes_a_declared_child() {
+        let mut entries = vec![
+            json!({"id": "x-owner", "pr_number": 9}),
+            json!({
+                "id": "x-carried",
+                "contained_in": "x-owner",
+                "containment_surfaces": ["scripts/ci/check-file-budget.sh"]
+            }),
+        ];
+        let files = vec!["scripts/ci/check-file-budget.sh".to_string()];
+        let ev = CascadeEvidence {
+            changed_files: &files,
+            pr_number: 9,
+        };
+        let out = cascade_close_contained(
+            &mut entries,
+            "x-owner",
+            Some("2026-10-01T00:00:00Z"),
+            Some(&ev),
+        );
+        assert_eq!(out.closed, vec!["x-carried".to_string()]);
+        assert!(out.released.is_empty());
+    }
+
+    #[test]
+    fn a_no_match_releases_the_containment() {
+        let mut entries = vec![
+            json!({"id": "x-owner", "pr_number": 9}),
+            json!({
+                "id": "x-carried",
+                "contained_in": "x-owner",
+                "containment_surfaces": ["scripts/ci/check-file-budget.sh"]
+            }),
+        ];
+        let files = vec!["crates/fno/src/theme.rs".to_string()];
+        let ev = CascadeEvidence {
+            changed_files: &files,
+            pr_number: 9,
+        };
+        let out = cascade_close_contained(
+            &mut entries,
+            "x-owner",
+            Some("2026-10-01T00:00:00Z"),
+            Some(&ev),
+        );
+        assert_eq!(out.released, vec!["x-carried".to_string()]);
+        assert!(out.closed.is_empty());
+        assert!(entries[1].get("completed_at").is_none());
+        assert!(entries[1].get("contained_in").is_none());
+        assert_eq!(entries[1]["released_from"], "x-owner");
+    }
+
+    #[test]
+    fn a_body_bound_child_closes_even_without_a_file_match() {
+        let mut entries = vec![
+            json!({"id": "x-owner", "pr_number": 9}),
+            json!({
+                "id": "x-carried",
+                "contained_in": "x-owner",
+                "pr_number": 9,
+                "containment_surfaces": ["scripts/ci/check-file-budget.sh"]
+            }),
+        ];
+        let files = vec!["crates/fno/src/theme.rs".to_string()];
+        let ev = CascadeEvidence {
+            changed_files: &files,
+            pr_number: 9,
+        };
+        let out = cascade_close_contained(
+            &mut entries,
+            "x-owner",
+            Some("2026-10-01T00:00:00Z"),
+            Some(&ev),
+        );
+        assert_eq!(out.closed, vec!["x-carried".to_string()]);
+    }
+
+    #[test]
+    fn a_declared_child_of_a_done_owner_releases_instead_of_stranding() {
+        let mut entries = vec![
+            json!({"id": "x-owner", "status": "done", "completed_at": "2026-10-01T00:00:00Z"}),
+            json!({
+                "id": "x-carried",
+                "contained_in": "x-owner",
+                "containment_surfaces": ["scripts/ci/check-file-budget.sh"]
+            }),
+        ];
+        let out = sweep_close_stranded_contained(&mut entries);
+        assert_eq!(out.released, vec!["x-carried".to_string()]);
+        assert!(out.closed.is_empty());
+        assert!(entries[1].get("contained_in").is_none());
+        assert_eq!(entries[1]["released_from"], "x-owner");
+        assert!(entries[1].get("completed_at").is_none());
     }
 
     #[test]

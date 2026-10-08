@@ -85,6 +85,7 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
     "cost_usd",
     "cost_sessions",
     "contained_in",
+    "containment_surfaces",
     "plan_path",
     "pr_number",
     "pr_url",
