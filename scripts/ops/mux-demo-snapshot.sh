@@ -88,7 +88,8 @@ EXTRA = {
 }
 d = json.load(sys.stdin)
 for row in d.get("agents", []):
-    e = EXTRA.get(row.get("name"))
+    base = row.get("name", "").split("-")[0]
+    e = EXTRA.get(base)
     if e:
         row["session_cost_cents"], row["session_tokens"], row["last_activity_age_s"], row["compaction_count"] = e
 print(json.dumps(d))
@@ -253,11 +254,12 @@ run --cwd "$ROOT/code/checkout" -- sh -c "$(show docs)"
 
 # The registry rows that name each pane's harness, model and state. The
 # server reads the registry on an interval, so wait a few seconds for it.
-python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${SIDS[@]}" "${PANES[@]}" <<'PY'
+python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${SIDS[@]}" "${PANES[@]}" "${IDS[@]}" <<'PY'
 import json, sys, datetime
 path, server, cwd = sys.argv[1:4]
 sids = sys.argv[4:7]
-ids = [int(p) for p in sys.argv[7:]]
+ids = [int(p) for p in sys.argv[7:12]]
+backlog_ids = sys.argv[12:15]
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def row(name, harness, model, pane, state, sid=None, age_h=4, ctx=34, node=None):
     import datetime as dt
@@ -284,9 +286,9 @@ def thread(name, harness, how):
         "mux": None,
     }
 json.dump({"schema_version": 1, "agents": [
-    row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1], age_h=3, ctx=61, node=ids[0]),
-    row("scout", "claude", "opus", ids[1], "done", sids[0], age_h=4, ctx=34, node=ids[1]),
-    row("reviewer", "opencode", "zen", ids[2], "working", sids[2], age_h=4, ctx=78, node=ids[2]),
+    row(f"archer-{backlog_ids[0]}", "codex", "gpt-6-sol", ids[0], "working", sids[1], age_h=3, ctx=61, node=backlog_ids[0]),
+    row(f"scout-{backlog_ids[1]}", "claude", "opus", ids[1], "done", sids[0], age_h=4, ctx=34, node=backlog_ids[1]),
+    row(f"reviewer-{backlog_ids[2]}", "opencode", "zen", ids[2], "working", sids[2], age_h=4, ctx=78, node=backlog_ids[2]),
     row("pager", "pi", "glm-5", ids[3], "working", age_h=6, ctx=22),
     row("scribe", "claude", "sonnet", ids[4], "done", age_h=18, ctx=45),
     # Paneless threads, so the sideline shows the other states too.
