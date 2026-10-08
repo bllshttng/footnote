@@ -698,7 +698,7 @@ def resolve_seed_node(message: str) -> tuple[Optional[str], Optional[str]]:
     unreadable graph fails open (absence cannot be proven).
     """
     first = message.strip().splitlines()[0].split()
-    if len(first) < 2 or first[1].startswith(("-", "/", "$")):
+    if len(first) < 2 or first[1].startswith(("-", "/", "$")) or first[1] in ("resume", "cancel"):
         return None, None
     if parse_verb_token(first[0]) != ("target", True):
         return None, None
@@ -714,10 +714,9 @@ def resolve_seed_node(message: str) -> tuple[Optional[str], Optional[str]]:
         return match.id, None
     near = list(match.candidates) or search_entries(first[1], entries)
     nearest = "; ".join(f"{e.get('id')} ({e.get('title', '')})" for e in near[:5]) or "none"
-    return None, ("refused: the /target word %r names no backlog node; the worker would"
-                  " carry a prose node and its PR lands on no card. Nearest nodes: %s."
-                  " Spawn with a node id, slug, bare hex, or title word that resolves."
-                  % (first[1], nearest))
+    return None, ("refused: the /target word %r names no backlog node; the worker would carry a"
+                  " prose node and its PR lands on no card. Nearest nodes: %s. Spawn with a node"
+                  " id, slug, bare hex, or title word that resolves." % (first[1], nearest))
 
 
 def verb_fired_marker(message: str) -> Optional[str]:
