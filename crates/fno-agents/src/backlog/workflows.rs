@@ -2002,6 +2002,10 @@ pub fn run_contain(tail: &[String]) -> i32 {
         i += 1;
     }
     if positionals.is_empty() {
+        if !surfaces.is_empty() {
+            eprintln!("Error: --surface needs an owner and at least one task_id");
+            return 2;
+        }
         return forward_to_python("contain", tail);
     }
     let owner_arg = positionals[0].clone();

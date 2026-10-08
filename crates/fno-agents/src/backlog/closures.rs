@@ -264,9 +264,9 @@ pub(crate) fn cascade_close_contained(
 }
 
 /// Open nodes whose delivery unit is ALREADY done - closeable right now.
-/// A child that declared surfaces is never strandable: with no merged-PR
-/// file set there is no evidence its work rode the owner's PR, so the sweep
-/// releases it (see `sweep_close_stranded_contained`) instead of closing.
+/// A child that declared surfaces is named here too: the sweep's cascade
+/// runs with no file evidence, and the gate then releases it instead of
+/// closing (see `cascade_close_contained`).
 pub(crate) fn strandable_contained_ids(entries: &[Value]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for e in entries {
@@ -286,24 +286,17 @@ pub(crate) fn strandable_contained_ids(entries: &[Value]) -> BTreeSet<String> {
         let Some(nid) = text_at(e, "id") else {
             continue;
         };
-        let declared = e
-            .get("containment_surfaces")
-            .and_then(Value::as_array)
-            .map(|rows| !rows.is_empty())
-            .unwrap_or(false);
-        if owner_done && !declared && !reopen_outranks_child_closes(e, std::slice::from_ref(&owner))
-        {
+        if owner_done && !reopen_outranks_child_closes(e, std::slice::from_ref(&owner)) {
             out.insert(nid.to_string());
         }
     }
     out
 }
 
-/// Close (or release) every contained child of a done owner, grouped by
-/// owner so each node gets the same note the merge-time cascade writes.
-/// A declared child gets a release, never a close: with no merged-PR file
-/// set there is no evidence its work rode the owner's PR. The reopen guard
-/// holds a deliberate reopen on both branches.
+/// Close (or release) every node `strandable_contained_ids` names, grouped
+/// by owner so each node gets the same note the merge-time cascade writes.
+/// The cascade runs with no file evidence: a declared child releases, an
+/// undeclared child closes, and the reopen guard holds a deliberate reopen.
 pub(crate) fn sweep_close_stranded_contained(entries: &mut [Value]) -> ContainedCascade {
     let mut out = ContainedCascade::default();
     let stranded = strandable_contained_ids(entries);
@@ -321,49 +314,7 @@ pub(crate) fn sweep_close_stranded_contained(entries: &mut [Value]) -> Contained
     for owner in owners {
         let r = cascade_close_contained(entries, &owner, None, None);
         out.closed.extend(r.closed);
-    }
-    // Declared children of a done owner: release, never close.
-    let mut declared_kids: Vec<(String, String)> = Vec::new();
-    for e in entries.iter() {
-        let Some(owner_id) = text_at(e, "contained_in") else {
-            continue;
-        };
-        let declared = e
-            .get("containment_surfaces")
-            .and_then(Value::as_array)
-            .map(|rows| !rows.is_empty())
-            .unwrap_or(false);
-        if !declared {
-            continue;
-        }
-        if e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false) {
-            continue;
-        }
-        let Some(owner) = entries.iter().find(|r| text_at(r, "id") == Some(owner_id)) else {
-            continue;
-        };
-        let owner_done = owner
-            .get("completed_at")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-        if !owner_done || reopen_outranks_child_closes(e, std::slice::from_ref(&owner)) {
-            continue;
-        }
-        let Some(kid) = text_at(e, "id") else {
-            continue;
-        };
-        declared_kids.push((owner_id.to_string(), kid.to_string()));
-    }
-    for (owner_id, kid) in &declared_kids {
-        let owner_refs = pr_ref_set(entries, owner_id);
-        let Some(idx) = entries
-            .iter()
-            .position(|e| text_at(e, "id") == Some(kid.as_str()))
-        else {
-            continue;
-        };
-        release_contained_row(&mut entries[idx], owner_id, &owner_refs);
-        out.released.push(kid.clone());
+        out.released.extend(r.released);
     }
     out
 }
