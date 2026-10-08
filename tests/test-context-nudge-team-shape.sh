@@ -67,6 +67,8 @@ if [ ! -x "$AGENTS_BIN" ]; then
   exit 1
 fi
 export PATH="$AGENTS_BIN_DIR:$PATH"
+export REGISTRY_SEED_BIN="$AGENTS_BIN"
+source "$REPO_ROOT/tests/helpers/registry-seed.sh"
 
 SBX="$(mktemp -d)"
 trap 'rm -rf "$SBX" "$BINDIR"' EXIT
@@ -95,7 +97,7 @@ jq -n --arg ts "$FRESH_TS" '{schema_version: 13, agents: ([
    short_id:"a", spawned_by_session:"'"$LEAD_SID"'", liveness:"alive", liveness_measured_at:$ts},
   {name:"team-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live",
    short_id:"b", spawned_by_session:"'"$LEAD_SID"'", liveness:"alive", liveness_measured_at:$ts}
-])}' > "$SBX/.fno/agents/registry.json"
+])}' | registry_seed "$SBX/.fno/agents/registry.json"
 
 # Above the lead trigger so the general context nudge fires: its presence is
 # the positive control that the hook RAN in the silent case, separating "team
@@ -185,7 +187,7 @@ write_shape pass
 DEAD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq --arg ts "$DEAD_TS" \
   '.agents |= map(if .name == "team-a" or .name == "team-b" then .liveness = "dead" | .liveness_measured_at = $ts else . end)' \
-  "$SBX/.fno/agents/registry.json" > "$SBX/.fno/agents/registry.json.tmp" && mv "$SBX/.fno/agents/registry.json.tmp" "$SBX/.fno/agents/registry.json"
+  <(registry_cat "$SBX/.fno/agents/registry.json") | registry_seed "$SBX/.fno/agents/registry.json"
 run_hook "$(payload)"
 assert_absent "AC8 control: dead workers never orphan-block" "$OUT" "you spawned are still alive"
 
@@ -203,7 +205,7 @@ jq --arg ts "$FRESH_TS2" --arg cwd "$KINGREPO" \
   '.agents |= map(if .name == "lead-team" then .cwd = $cwd | .liveness_measured_at = $ts
                   elif .name == "team-a" or .name == "team-b" then .liveness = "alive" | .liveness_measured_at = $ts
                   else . end)' \
-  "$SBX/.fno/agents/registry.json" > "$SBX/.fno/agents/registry.json.tmp" && mv "$SBX/.fno/agents/registry.json.tmp" "$SBX/.fno/agents/registry.json"
+  <(registry_cat "$SBX/.fno/agents/registry.json") | registry_seed "$SBX/.fno/agents/registry.json"
 rm -f "$LEADS_DIR/$SCOPE.md"
 printf -- '---\nscope: %s\nshape: team\nharness_session_id: %s\n---\n' "$SCOPE" "$LEAD_SID" > "$KINGREPO_LEADS/$SCOPE.md"
 run_hook "$(payload)"

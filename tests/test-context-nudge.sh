@@ -123,6 +123,8 @@ if [ ! -x "$AGENTS_BIN" ]; then
   exit 1
 fi
 export PATH="$AGENTS_BIN_DIR:$PATH"
+export REGISTRY_SEED_BIN="$AGENTS_BIN"
+source "$REPO_ROOT/tests/helpers/registry-seed.sh"
 # Pin the optional-hook budget: this suite tests nudge LOGIC, and the runner's
 # load (four shards, one box) is a property of the shard, not of the code. A
 # busy-tier 1s bound fired twice on AC20's probe (2026-10-05, three runs) and
@@ -193,7 +195,7 @@ write_registry() {
       harness_session_id:"'"$LEAD_SID"'",
       role_level:$cl, role_scope:$cs, role_grantor:$cg
     }] + $children + $peers )
-  }' > "$SBX/.fno/agents/registry.json"
+  }' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 # A registry with no row for THIS session: the hand-started REPL shape. The
@@ -204,7 +206,7 @@ write_registry_without_self() {
     name:"someone-else", harness:"claude", cwd:"/tmp", log_path:"/tmp/x",
     status:"live", short_id:"other", harness_session_id:"other-sid",
     role_level:null, role_scope:null, role_grantor:null
-  }]}' > "$SBX/.fno/agents/registry.json"
+  }]}' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 write_registry_with_unlinked_child() {
@@ -229,7 +231,7 @@ write_registry_with_unlinked_child() {
       role_level:null, role_scope:null, origin:"operator",
       liveness:"alive", liveness_measured_at:$ts
     }
-  ]}' > "$SBX/.fno/agents/registry.json"
+  ]}' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 # A transcript with one assistant usage line: input_tokens sets the pct against
@@ -541,7 +543,7 @@ FPID=$!
 jq -n --argjson pid "$FPID" '{schema_version: 13, agents: [{
   name:"t-foreign-probe", harness:"codex", cwd:"/tmp", log_path:"/tmp/fp",
   status:"busy", short_id:"fp", harness_session_id:"foreign-probe-sid",
-  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' | registry_seed "$SBX/.fno/agents/registry.json"
 write_transcript "$SBX/low.jsonl" 300000
 run_hook "$(payload "$SBX/low.jsonl")"                 # stop 1: static=1
 assert_absent "AC26: stop 1 no block yet" "$OUT" '"decision":"block"'
@@ -578,7 +580,7 @@ assert_contains "AC26: control arm still advises the commit" "$OUT" 'commit it n
 jq -n --argjson pid "$$" '{schema_version: 13, agents: [{
   name:"t-self-probe", harness:"claude", cwd:"/tmp", log_path:"/tmp/sp",
   status:"live", short_id:"sp", harness_session_id:"'"$LEAD_SID"'",
-  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' | registry_seed "$SBX/.fno/agents/registry.json"
 rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null
 run_hook "$(payload "$SBX/low.jsonl")"
 run_hook "$(payload "$SBX/low.jsonl")"
@@ -867,7 +869,7 @@ write_registry_liveness() {  # write_registry_liveness '<jq children array>'
       harness_session_id:"'"$LEAD_SID"'",
       role_level:1, role_scope:"'"$SCOPE"'", role_grantor:"human"
     }] + $children )
-  }' > "$SBX/.fno/agents/registry.json"
+  }' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 # --- Mixed: 2 alive + 2 dead, both fresh. Prints 2; neither dead name shows. -
