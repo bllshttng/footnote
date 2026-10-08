@@ -109,12 +109,11 @@ fn fence_requested(input: &Value) -> bool {
         || input.get("fence").and_then(Value::as_bool) == Some(true)
 }
 
-/// A `footer: true` payload delivers header plus the one read line instead of
-/// the body: the receiver pulls the body from the bus with
-/// `fno agents mail show <id>`, so the delivered turn spends one line, not
-/// the whole message. The bus copy keeps the full body either way.
-fn footer_requested(input: &Value) -> bool {
-    input.get("footer").and_then(Value::as_bool) == Some(true)
+/// A `header_only: true` payload delivers the header line alone: no body, no
+/// command. The receiver is taught the read verb once per session, not per
+/// mail, and the fmail- prefix is the cue; the bus copy keeps the full body.
+fn header_only_requested(input: &Value) -> bool {
+    input.get("header_only").and_then(Value::as_bool) == Some(true)
 }
 
 /// The fence for `body`: a backtick run one longer than the longest run the
@@ -303,13 +302,12 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let body_text = wrapping.as_deref().unwrap_or("");
     let third = crate::mail_header::header_subject(subject, body_text);
     let header = crate::mail_header::render_header(form, sender, msg_id, &third);
-    let delivered = match (footer_requested(input), wrapping) {
-        // Footer delivery: the turn carries where the body lives, not the
-        // body. Tag mode already has no body to point at, so it stays header
-        // only.
-        (true, Some(_)) => format!("Read: fno agents mail show {msg_id}"),
-        _ => crate::mail_header::delivered_body(subject, body_text),
-    };
+    // Header-only delivery: the turn is the header line alone, and the body
+    // waits on the bus.
+    if header_only_requested(input) {
+        return Ok(header);
+    }
+    let delivered = crate::mail_header::delivered_body(subject, body_text);
     Ok(match wrapping {
         Some(_) if fence_requested(input) => {
             let fence = fence_for(&delivered);
@@ -519,41 +517,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
-        // Footer delivery: the turn carries the header and the one
-        // read line; the body stays on the bus for `fno agents mail show`.
-        let footer = render_at(
+        // Header-only delivery: the turn is the header line alone; the body
+        // stays on the bus.
+        let header_only = render_at(
             &json!({
                 "mode":"wrap", "body":"Fix the gate. Details follow.",
-                "from":"folio-short", "id":"fmail-0123456789ab", "footer":true
+                "from":"folio-short", "id":"fmail-0123456789ab", "header_only":true
             }),
             &path,
         )
         .unwrap();
         assert_eq!(
-            footer,
-            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\nRead: fno agents mail show fmail-0123456789ab"
+            header_only,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`"
         );
-        // The footer fences too, on the pane lane's request.
-        let footer_fenced = render_at(
+        // Header-only ignores a fence request: there is nothing to fence.
+        let header_only_fenced = render_at(
             &json!({
                 "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
-                "id":"fmail-0123456789ab", "footer":true, "fence":true
+                "id":"fmail-0123456789ab", "header_only":true, "fence":true
             }),
             &path,
         )
         .unwrap();
         assert_eq!(
-            footer_fenced,
-            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\n```fno-pane\nRead: fno agents mail show fmail-0123456789ab\n```"
+            header_only_fenced,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`"
         );
-        // No body: tag mode ignores the footer, or the read line would point
-        // at an empty message.
-        let footer_tag = render_at(
-            &json!({"mode":"tag", "from":"folio-short", "id":"msg-6", "footer":true}),
+        // No body: tag mode renders the same header.
+        let header_only_tag = render_at(
+            &json!({"mode":"tag", "from":"folio-short", "id":"msg-6", "header_only":true}),
             &path,
         )
         .unwrap();
-        assert_eq!(footer_tag, "`@folio \u{b7} msg-6 \u{b7} (empty)`");
+        assert_eq!(header_only_tag, "`@folio \u{b7} msg-6 \u{b7} (empty)`");
         // The pane lane's fenced delivery (payload `fence`, or FNO_MAIL_FENCE=1
         // on the pane-prepare child): the body rides a backtick run one longer
         // than any run it holds; the header line stays readable.

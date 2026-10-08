@@ -2128,7 +2128,7 @@ def _name_lane_send(
     # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
-    # A live turn is the footer form; the record and floor keep the body.
+    # A live turn is header only; the record and floor keep the body.
     turn_envelope = _envelope(recipient_session, footer=True)
 
     # --force (node): change the TRANSPORT, keep every mail semantic. The

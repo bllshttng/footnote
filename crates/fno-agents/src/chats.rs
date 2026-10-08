@@ -1405,8 +1405,9 @@ pub(crate) fn show_at(
         // The machine view layers the sender identity the reply needs over the
         // stored row: the registry-resolved name and short_id (a row renamed
         // after the send still answers under its current name), the
-        // collision-safe session id, the fmail id, and the ready reply
-        // command. The stored row stays verbatim underneath.
+        // collision-safe session id, and the fmail id. No command strings: the
+        // receiver answers with its usual send verb. The stored row stays
+        // verbatim underneath.
         let mut view = msg.clone();
         let from_session = msg
             .get("from_session")
@@ -1433,9 +1434,6 @@ pub(crate) fn show_at(
             map.insert("short_id".into(), json!(short_id));
             map.insert("session_id".into(), json!(from_session));
             map.insert("fno_mail_id".into(), json!(id));
-            if !id.is_empty() {
-                map.insert("reply".into(), json!(format!("fno agents mail reply {id}")));
-            }
         }
         return Ok(view.to_string());
     }
@@ -2237,8 +2235,8 @@ mod tests {
             .unwrap_err()
             .contains("not addressed to or from the caller"));
         // show --json layers the reply identity over the stored row: the
-        // registry-resolved name and short_id, the session id, the fmail
-        // id, and the ready reply command. The row's fields stay verbatim.
+        // registry-resolved name and short_id, the session id, and the fmail
+        // id. The row's fields stay verbatim underneath.
         std::fs::write(
             home_pin.join("registry.json"),
             r#"{"agents":[{"name":"rowan","session_id":"sess-a","harness":"claude","short_id":"rowan-short"}]}"#,
@@ -2259,10 +2257,6 @@ mod tests {
         assert_eq!(view["short_id"], "rowan-short");
         assert_eq!(view["session_id"], "sess-a");
         assert_eq!(view["fno_mail_id"], "fmail-444444444444");
-        assert_eq!(
-            view["reply"], "fno agents mail reply fmail-444444444444",
-            "the reply command is ready to run"
-        );
         assert_eq!(view["body"], "hello", "the stored row rides underneath");
         // A send addressed to a registry name records the resolved session
         // key as to_key, so the recipient reads their mail by their own

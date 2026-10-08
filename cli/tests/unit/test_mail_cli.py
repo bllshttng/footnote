@@ -893,10 +893,10 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
 def test_plain_send_delivers_read_line_on_a_hookless_harness(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    # A plain peer send (no --kind) delivers the header plus the one
-    # read line; the receiver pulls the body from the bus with
-    # `fno agents mail show <id>`. The bus row keeps the full body, so the id
-    # the footer names resolves to something worth reading.
+    # A plain peer send (no --kind) delivers the header line alone; the
+    # receiver is taught the read verb once per session, and the fmail-
+    # prefix is the cue. The bus row keeps the full body, so the id the
+    # header names resolves to something worth reading.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     injected: list[str] = []
@@ -914,13 +914,12 @@ def test_plain_send_delivers_read_line_on_a_hookless_harness(
     assert sent.exit_code == 0, sent.output
     assert len(injected) == 1
     # Without a subject the header's third field is the body's first sentence
-    # (AC10-HP); the turn is still exactly header plus the read line.
+    # (AC10-HP); the turn is the header line alone.
     lines = injected[0].splitlines()
-    assert len(lines) == 2, injected[0]
-    header, footer = lines
+    assert len(lines) == 1, injected[0]
+    header = lines[0]
     assert header.startswith("`@web · fmail-")
     msg_id = header.split(" · ")[1]
-    assert footer == f"Read: fno agents mail show {msg_id}"
 
     # The bus copy the id points at holds the full body.
     from fno.bus.log import iter_messages
@@ -992,11 +991,10 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     assert "delivered (hosted)" in sent.output
     assert "queued (durable)" not in sent.output
     assert len(calls) == 1
-    # The live turn is the footer delivery: exactly the header line
-    # and the one read line; the body stays on the bus.
+    # The live turn is header only: one line, no body on the bus floor.
     lines = calls[0][1].splitlines()
-    assert len(lines) == 2, calls[0][1]
-    assert lines[1] == f"Read: fno agents mail show {calls[0][1].split(' · ')[1]}"
+    assert len(lines) == 1, calls[0][1]
+    assert lines[0].startswith("`@web · fmail-")
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])

@@ -536,9 +536,10 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     assert (audit.from_, audit.to, audit.kind) == (
         "11111111", "9a063cd3", "send"
     )
-    # The record keeps the full body; the delivered turn is the footer form.
+    # The record keeps the full body; the delivered turn is header only.
     assert audit.body != injected[0]
-    assert injected[0].splitlines()[1] == f"Read: fno agents mail show {audit.id}"
+    assert injected[0].splitlines() == [injected[0]]
+    assert injected[0].startswith("`@11111111 · ")
 
     from fno.bus.cursor import scan_unread
 

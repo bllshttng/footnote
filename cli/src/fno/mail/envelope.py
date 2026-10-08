@@ -135,11 +135,13 @@ def wrap_fno_mail(
 
     ``subject`` is the sender's --subject; an explicit value wins
     over the peeled-env fallback so a caller that resolved the flag itself is
-    never overridden by ambient state. ``footer`` delivers header plus the
-    read line; the bus copy keeps the full body."""
+    never overridden by ambient state. ``footer`` (legacy name) delivers the
+    header line alone; the bus copy keeps the full body."""
     payload = locals().copy()
     mode = "held-release" if payload.pop("held_release") else "wrap"
     payload["mode"], payload["from"] = mode, payload.pop("from_")
+    if payload.pop("footer"):
+        payload["header_only"] = True
     resolved = (payload.pop("subject") or "").strip()
     if mode == "wrap":
         # The front's peeled --subject rides the render too, so the
