@@ -81,7 +81,6 @@ impl SessionOrigin {
     }
 }
 
-
 /// A uuid safe to use as a path component; the same rule as
 /// `fno::transcript_tail::transcript_uuid_shaped`, mirrored for the same
 /// publish-gate reason as the rest of this file.
@@ -215,12 +214,13 @@ mod parity_tests {
     #[test]
     fn mirror_matches_the_fno_module_on_every_observable() {
         let mine = sample();
-        let theirs: fno::session_origin::SessionOrigin = serde_json::from_value(
-            serde_json::to_value(&mine).unwrap(),
-        )
-        .unwrap();
+        let theirs: fno::session_origin::SessionOrigin =
+            serde_json::from_value(serde_json::to_value(&mine).unwrap()).unwrap();
         assert_eq!(mine.frontmatter(), theirs.frontmatter());
-        assert_eq!(mine.origin_text("aaaaaaaaaaaaaaaa"), theirs.origin_text("aaaaaaaaaaaaaaaa"));
+        assert_eq!(
+            mine.origin_text("aaaaaaaaaaaaaaaa"),
+            theirs.origin_text("aaaaaaaaaaaaaaaa")
+        );
         assert_eq!(
             mine.origin_text("bbbbbbbbbbbbbbbb"),
             theirs.origin_text("bbbbbbbbbbbbbbbb")
@@ -232,7 +232,10 @@ mod parity_tests {
         assert_eq!(this_machine().len(), 16);
         // The path rule refuses the same ids on both sides.
         for bad in ["", "../x", "a/b", &"x".repeat(65)] {
-            let built = SessionOrigin { session_id: bad.into(), ..sample() };
+            let built = SessionOrigin {
+                session_id: bad.into(),
+                ..sample()
+            };
             assert!(write_if_absent(&built).unwrap() == false, "{bad}");
         }
     }
