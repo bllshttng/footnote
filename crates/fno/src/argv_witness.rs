@@ -279,20 +279,6 @@ mod tests {
         );
     }
 
-    /// The rescue predicate: a row whose uuid a live argv names is rescued;
-    /// no uuid, or a uuid no argv names, is not.
-    #[test]
-    fn row_rescued_keys_on_a_live_argv_uuid() {
-        let uuid = "e96c0000-1111-2222-3333-444455556666";
-        let row = serde_json::json!({
-            "claude_session_uuid": uuid,
-        });
-        assert!(row_rescued(&row, &[format!("claude --resume {uuid}")]));
-        assert!(!row_rescued(&row, &["claude attach deadbee1".to_string()]));
-        let bare = serde_json::json!({});
-        assert!(!row_rescued(&bare, &[format!("claude --resume {uuid}")]));
-    }
-
     /// End to end through the stale set: a falsified row whose uuid a live
     /// argv carries is NOT stale; a uuid no argv names still reads stale.
     #[test]
