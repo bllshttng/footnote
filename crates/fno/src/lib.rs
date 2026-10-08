@@ -24,6 +24,7 @@ pub mod chrome;
 pub mod cli_args;
 pub mod client;
 pub mod clipboard;
+pub mod config_defaults;
 pub mod connections_view;
 pub mod context_used;
 pub mod digest_overlay;
@@ -82,6 +83,7 @@ pub mod setup_autowire;
 #[cfg(test)]
 #[path = "setup_autowire_tests.rs"]
 mod setup_autowire_tests;
+pub mod setup_run;
 pub mod sideline_color;
 pub mod spawn_journal;
 pub mod splash;
@@ -101,6 +103,7 @@ pub mod theme;
 pub mod theme_import;
 pub(crate) mod thread_viewer;
 pub mod transcript_tail;
+pub mod transcript_transfer;
 pub mod tree;
 pub mod uninstall;
 pub mod version;

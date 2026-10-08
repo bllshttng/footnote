@@ -37,6 +37,17 @@ from fno.agents.mux_spawn import (
     _write_pane_death_log,
 )
 
+
+@pytest.fixture(autouse=True)
+def _graphless_seed_resolver(monkeypatch):
+    """The seed-word gate fails open on an unreadable graph; pin that here so
+    the plumbing tests' fake node words never depend on the ambient store."""
+
+    def _unreadable(path=None, **_):
+        raise ValueError("graph store unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
+
 MUX = {"session": "main", "pane_id": 81}
 SID = "019cc081-de0d-7283-97cc-751c46742a07"
 AGY_HARNESS = "agy"

@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, type StatName, embody, hatch, restore } from './companion'
+import { type Companion, type Soul, RARITY_STARS, RARITY_THEME, STAT_NAMES, type StatName, embody, hatch, rarityColor, restore } from './companion'
 import { HATCH_FRAMES, HATCH_FRAME_MS, HATCH_MIN_ROUNDS, HATCH_WOBBLE, IDLE_SEQUENCE, PET_HEARTS, RAINBOW, renderFace, renderSprite } from './sprites'
 import { type FeedRow, addressedBy, cleanPersonality, cleanReaction, idlePrompt, lastPrompt, loudReason, type Reason, turnOutput, newsFact, newsPrompt, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
@@ -621,7 +621,7 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
     sprite: sprite(buddy, now),
     name: buddy.name,
     face: renderFace(buddy),
-    color: RARITY_COLORS[buddy.rarity],
+    color: rarityColor(theme, buddy.rarity),
     speech: talking(now) ?? '',
     fleet,
   })
@@ -634,16 +634,21 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
 const BUBBLE_COLUMNS = 34
 
 // Desktop sets text in a proportional font, which collapses the spaces in a sprite. There the
-// sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes a fixed color.
+// sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes the theme's value.
 let desktop = false
-const SVG_COLORS: Record<string, string> = { common: '#8a8a8a', uncommon: '#4caf50', rare: '#3fa7d6', epic: '#b36ae2', legendary: '#e0a526' }
+// Claude Code's theme setting, so the status line and the SVG draw the color the card draws.
+let theme = 'dark'
+const svgColor = (c: Companion) => {
+  const color = rarityColor(theme, c.rarity)
+  return color.startsWith('rgb') ? color : rarityColor('dark', c.rarity)
+}
 const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 function drawArt(ui: any, c: Companion, lines: string[]): any[] {
   if (!desktop) return lines.map(line => ui.Text({ color: RARITY_THEME[c.rarity], children: [line] }))
   const w = Math.ceil(Math.max(...lines.map(l => l.length)) * 8.4) + 2
   const h = lines.length * 17
   const rows = lines.map((l, i) => `<text x="0" y="${i * 17 + 13}" xml:space="preserve">${esc(l)}</text>`).join('')
-  return [ui.Svg({ alt: `${c.name} the ${c.species}`, width: w, height: h, source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" font-family="ui-monospace,Menlo,monospace" font-size="14" fill="${SVG_COLORS[c.rarity]}">${rows}</svg>` })]
+  return [ui.Svg({ alt: `${c.name} the ${c.species}`, width: w, height: h, source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" font-family="ui-monospace,Menlo,monospace" font-size="14" fill="${svgColor(c)}">${rows}</svg>` })]
 }
 
 export function register(on: On) {
@@ -652,6 +657,8 @@ export function register(on: On) {
     feedSince = Math.floor(now / 1000)
     home = (await $.env.get('HOME')) ?? ''
     sessionId = await $.session.id()
+    const themeRow = (await $.config.list().catch(() => undefined))?.find(row => row.key === 'theme')
+    if (typeof themeRow?.value === 'string') theme = themeRow.value
     await load($, now)
     deferred = await oldCopyLive($, now)
     if (deferred) muted = true
@@ -786,6 +793,11 @@ export function register(on: On) {
       $.ui.invalidate('ui.render')
       return { text: (fresh ? HATCH_MARK : CARD_MARK) + card(buddy!, r) }
     }
+  })
+
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    if (typeof e.value === 'string') theme = e.value
+    return next(e)
   })
 
   on('prompt.edit', async ($, e, next) => {

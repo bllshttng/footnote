@@ -93,6 +93,16 @@ fn valid_watch_task_id(task_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
+pub(crate) fn declared_recovery_hold(text: &str) -> Option<String> {
+    match detect_intent_from_text(text) {
+        Intent::Promise => Some("mission_complete".into()),
+        Intent::Aborted { .. } => Some("mission_aborted".into()),
+        Intent::Watching { reason, .. } => Some(format!("{reason}_watch")),
+        Intent::None if text.contains("<help") => Some("declared_help".into()),
+        Intent::None => None,
+    }
+}
+
 pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
     let pattern = format!(r#"{attr}=""#);
     let start = tag_text.find(&pattern)? + pattern.len();

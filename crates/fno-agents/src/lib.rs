@@ -483,6 +483,7 @@ pub mod wake_name;
 pub mod watch_expiry;
 pub mod wave;
 pub mod worked_nodes;
+pub mod worker_wake;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1709,6 +1710,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The lead-wake arm's receipt: one row per daemon wake episode, the
     // dedupe memory the arm folds before it wakes again (lead_wake.rs).
     "lead_wake",
+    "worker_wake",
     // The beat's cron act receipt: the wake resumed a parked codex lead's
     // resting goal, so the beat is a work beat (lead_wake.rs). The same kind
     // the wake-mode loop emits for its dispatch-side resume.
@@ -2011,7 +2013,7 @@ pub(crate) fn tail_bytes(path: &std::path::Path, cap: u64) -> Vec<u8> {
         return Vec::new();
     }
     let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
+    if file.take(len - start).read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
     if start > 0 {

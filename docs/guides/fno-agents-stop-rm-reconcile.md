@@ -182,7 +182,7 @@ A session's state is its transcript plus the repo state it describes. To pick a 
 
 Stop the session on the first machine first. Two writers on one transcript diverge, and fno does not police that. Push the branch.
 
-Copy the transcript folder by whatever moves files for you: any sync tool, AirDrop, scp. fno assumes none of them and sends nothing off the machine. `fno agents history <session-id>` prints the exact path on its `transcript:` line. Claude keys the transcript folder on the cwd, so `$HOME` and the repo path must match on both machines.
+Copy the transcript folder by whatever moves files for you: any sync tool, AirDrop, scp. fno assumes none of them and sends nothing off the machine on its own; the one exception is `fno agents transcript send`, which dials the public magic-wormhole relay end-to-end encrypted when you ask it to. `fno agents history <session-id>` prints the exact path on its `transcript:` line. Claude keys the transcript folder on the cwd, so `$HOME` and the repo path must match on both machines.
 
 On the second machine, check out the branch, then run `fno agents adopt <session-id>` and `fno agents resume <name>`, or `claude --resume <id>` directly. `fno agents history <session-id>` now prints the `transcript:` and `origin:` lines: the full path, and the machine, host, harness and session id the session began with, recorded beside the transcript in `<session-id>.fno.json`.
 

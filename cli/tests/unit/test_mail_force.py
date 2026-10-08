@@ -149,7 +149,16 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
 
     _e, text, kwargs = sent[0]
     assert text.splitlines()[0].startswith("`@lead · fmail-"), text[:80]
-    assert "status?" in text
+    # The typed turn is header only: one line; the body stays on the record.
+    lines = text.splitlines()
+    assert len(lines) == 1, text
+    assert lines[0].startswith("`@lead · fmail-")
+    # The record plane keeps the body: the outbox row stores the full-body
+    # envelope, so the id the read line names resolves to the message.
+    from fno.bus.log import iter_messages
+
+    rows = list(iter_messages())
+    assert rows and "status?" in rows[-1].body, rows
     # The wrappedness marker is the delivered header line; the
     # retired peer-mail footer no longer renders.
     assert "peer mail" not in text
