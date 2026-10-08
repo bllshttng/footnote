@@ -1434,3 +1434,16 @@ def test_live_discovered_ambient_self_queues_canonical_without_inject_or_mux(
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "019fb417"
+
+
+def test_wrong_mail_verb_refuses_naming_the_reader(runner):
+    """A wrong mail verb teaches the reader instead of a near-miss guess.
+
+    Typer's default miss suggests 'unread' for 'read' - a LIST verb, not the
+    capability the caller reaches for. The refusal names the reader door.
+    """
+    got = runner.invoke(app, ["agents", "mail", "read"])
+    out = got.output + (got.stderr or "")
+    assert got.exit_code == 2, out
+    assert "fno agents mail show <id>" in out, out
+    assert "Did you mean" not in out, out
