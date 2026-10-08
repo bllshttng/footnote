@@ -1596,34 +1596,12 @@ def refresh(
     the update chain calls it best-effort and a refresh failure must not fail
     the update.
     """
-    import subprocess
+    from fno.pr.cli import _forward_to_binary
 
-    from fno._subprocess_util import propagate_returncode
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo(
-            "fno do pr watch refresh: the fno-agents binary was not found. "
-            "It ships in the `pip install fno` wheel and with the plugin; "
-            "reinstall fno or run `fno doctor update --rust`, or set "
-            "FNO_AGENTS_BIN to its path.",
-            err=True,
-        )
-        raise typer.Exit(code=127)
-    argv = [
-        str(binary),
-        "pr-watch",
-        "refresh",
-        "--fno-binary",
-        _resolve_fno_binary(),
-        "--caller",
-        caller,
-    ]
+    argv = ["refresh", "--fno-binary", _resolve_fno_binary(), "--caller", caller]
     if force_bounce:
         argv.append("--force-bounce")
-    result = subprocess.run(argv, check=False)
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    _forward_to_binary("pr-watch", argv)
 
 
 # Single-flight window for the SessionStart self-heal: long enough to cover the

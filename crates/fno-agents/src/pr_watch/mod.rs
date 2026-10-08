@@ -3,7 +3,7 @@
 //! one replacing a Python leaf with a forward until the Python package is
 //! gone. One verb per PR, every spelling kept.
 
-mod refresh;
+pub(crate) mod refresh;
 mod render;
 mod status;
 

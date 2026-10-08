@@ -196,6 +196,7 @@ fn stdout_of(argv: &[&str], timeout_s: u64) -> String {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
     else {
         return String::new();
@@ -247,7 +248,7 @@ fn etime_seconds(etime: &str) -> Option<i64> {
         ),
         _ => return None,
     };
-    if !(1..=99).contains(&mm) || !(0..=59).contains(&ss) {
+    if !(0..=99).contains(&mm) || !(0..=59).contains(&ss) {
         return None;
     }
     Some(((dd * 24 + hh) * 60 + mm) * 60 + ss)
@@ -315,7 +316,7 @@ fn record_bounce(caller: &str, deferred: bool, state_root: &Path) {
             "parent": parent,
             "deferred": deferred,
         });
-        let tmp = sidecar.with_name(format!("{BOUNCE_SIDECAR}.tmp"));
+        let tmp = sidecar.with_file_name(format!("{BOUNCE_SIDECAR}.tmp"));
         if std::fs::File::create(&tmp)
             .and_then(|mut f| {
                 writeln!(
@@ -367,6 +368,7 @@ fn run_launchctl_timed(args: &[&str], timeout_s: u64) -> (i32, bool) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .process_group(0)
         .spawn()
     else {
         return (-1, false);
@@ -411,6 +413,9 @@ fn bounce(
     state_root: &Path,
 ) -> (String, i32) {
     let uid = unsafe { libc::getuid() };
+    // The receipt text is a tracked twin of the Python leg's (the
+    // reachable-paths gate reads it); the value matches Python's float default.
+    let timeout_s = LAUNCHCTL_TIMEOUT_S as f64;
     if defer_when_ticking {
         if let Some(pid) = tick_in_flight() {
             if label == LABEL {
@@ -606,7 +611,10 @@ pub(crate) fn leaf_output(args: &[String]) -> (String, i32) {
         .map(|p| p.join("events.jsonl"))
         .unwrap_or_else(|| PathBuf::from(".fno/events.jsonl"));
     let heal = crate::heal::status_readout(armed, &events);
-    (format!("pr-watch refresh: {msg}\n{heal}\n"), rc)
+    // Best-effort contract: the update chain calls refresh on a must-not-fail
+    // tail, so a bounce or plist-write failure reports in the text and the
+    // exit stays 0. Only an unusable invocation exits nonzero.
+    (format!("pr-watch refresh: {msg}\n{heal}\n"), 0)
 }
 
 /// `fno-agents pr-watch refresh` dispatches here from `pr_watch::run`.

@@ -4576,36 +4576,22 @@ def doctor_command(
             from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher
 
             if pw.get("verdict") == "wedged":
-                # The refresh verb (fno-agents pr-watch refresh) is the native
-                # cure; it self-gates on pr_watch.enabled and re-reads the
-                # interval from config, so doctor passes only its identity.
+                # The refresh verb is the native cure; it self-gates on
+                # pr_watch.enabled and re-reads the interval from config.
                 import subprocess
 
                 from fno.rust_binary import resolve_binary
 
                 binary = resolve_binary()
                 if binary is None:
-                    typer.echo(
-                        "fno doctor: --fix pr-watch refresh skipped; fno-agents binary not found",
-                        err=True,
-                    )
+                    said = "skipped; fno-agents binary not found"
                 else:
                     proc = subprocess.run(
-                        [
-                            str(binary),
-                            "pr-watch",
-                            "refresh",
-                            "--force-bounce",
-                            "--caller",
-                            "doctor-fix",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=120,
+                        [str(binary), "pr-watch", "refresh", "--force-bounce", "--caller", "doctor-fix"],
+                        capture_output=True, text=True, check=False, timeout=120,
                     )
                     said = (proc.stdout or "").strip() or f"rc={proc.returncode}"
-                    typer.echo(f"fno doctor: --fix pr-watch refresh: {said}", err=True)
+                typer.echo(f"fno doctor: --fix pr-watch refresh: {said}", err=True)
             else:
                 hmsg, _ = heal_watcher(
                     launch_agents_dir=_LAUNCH_AGENTS_DIR,
