@@ -431,25 +431,24 @@ def read_lanes(
     # arithmetic): the probe carries the live slot count and the learned
     # effective cap, and the CPU-share arithmetic it replaces (an answer of
     # 15 more fit at 90% CPU) is deleted. Delegating to the Rust probe is
-    # the law (d-b6cc1a2a): Python deletes, the gate decides.
+    # the law (d-b6cc1a2a): Python deletes, the gate decides. When the probe
+    # cannot answer, a holding CPU axis still caps at 0 (a spawn-load breach
+    # runs the suite serial); only a silent probe AND an admitting axis
+    # refuses, because then nothing measured is holding anything back.
     from fno.agents.spawn_gate import probe_capacity
 
     probe = probe_capacity(only=["lanes"])
     slots = probe.get("slots")
     effective = probe.get("effective")
-    if not isinstance(slots, int) or not isinstance(effective, int):
-        reading.refusal_reason = (
-            "the gate cannot answer the lane question: the spawn-gate probe "
-            f"carries no effective cap ({probe.get('reason') or 'gate unavailable'})"
-        )
-        return reading
-    answer = max(0, effective - int(slots))
-    cost_source += f"; probe {slots} live, effective cap {effective}"
+    answer: Optional[int] = None
+    if isinstance(slots, int) and isinstance(effective, int):
+        answer = max(0, effective - int(slots))
+        cost_source += f"; probe {slots} live, effective cap {effective}"
 
-    if load_arm.state == DARK or (
-        isinstance(load_arm.value, dict)
-        and load_arm.value.get("verdict") in ("hold", "undecidable", "refuse")
-    ):
+    hold_verdict = isinstance(load_arm.value, dict) and load_arm.value.get(
+        "verdict"
+    ) in ("hold", "undecidable", "refuse")
+    if load_arm.state == DARK or hold_verdict:
         # The CPU axis is not admitting, or never answered: a dark sensor is
         # never headroom, and neither is a hold, an undecidable band, or a
         # refusal (AC12).
@@ -460,6 +459,13 @@ def read_lanes(
             else str(load_arm.value.get("verdict"))
         )
         cost_source += f"; cpu admission {cap_why}, answer capped at 0"
+
+    if answer is None:
+        reading.refusal_reason = (
+            "the gate cannot answer the lane question: the spawn-gate probe "
+            f"carries no effective cap ({probe.get('reason') or 'gate unavailable'})"
+        )
+        return reading
 
     reading.lane_count = answer
     reading.per_lane_cpu_cores = round(per_cpu, 3)
