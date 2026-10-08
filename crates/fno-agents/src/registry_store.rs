@@ -20,16 +20,8 @@ fn failure(path: &Path, error: impl std::fmt::Display) -> StateError {
 }
 
 pub(crate) fn database_path(path: &Path) -> Result<PathBuf, StateError> {
-    let home = path
-        .parent()
-        .ok_or_else(|| failure(path, "registry has no parent"))?;
-    let root = if home.file_name().is_some_and(|name| name == "agents") {
-        home.parent()
-            .ok_or_else(|| failure(path, "agents home has no state root"))?
-    } else {
-        home
-    };
-    Ok(crate::state_layout::place(root, "graph.json").with_extension("db"))
+    crate::registry_read::database_path(path)
+        .ok_or_else(|| failure(path, "registry has no state root"))
 }
 
 fn open(path: &Path) -> Result<Connection, StateError> {

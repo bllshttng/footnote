@@ -435,6 +435,7 @@ pub mod spawn_payload;
 pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
+pub mod registry_read;
 pub mod state_layout;
 pub mod state_layout_sqlite;
 pub mod state_path;

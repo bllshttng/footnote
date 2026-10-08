@@ -258,7 +258,7 @@ pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
                 return EXIT_USAGE;
             }
             let registry = crate::agents_view::registry_path();
-            let raw = match std::fs::read_to_string(&registry) {
+            let raw = match crate::registry_read::registry_text(&registry) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!(

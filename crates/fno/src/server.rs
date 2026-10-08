@@ -2036,7 +2036,7 @@ pub(crate) fn live_attach_ids_snapshot() -> HashSet<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
+    let reg = crate::registry_read::registry_text(&crate::agents_view::registry_path()).ok();
     let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
     let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
     // A reboot writes nothing to the registry, so a row can claim a
@@ -5401,7 +5401,7 @@ impl Core {
         // mapping a failed read to an empty set would delete EVERY worker
         // member and persist the deletion. Ghosts are cheap; deletion on a
         // transient IO error is not.
-        std::fs::read_to_string(agents_view::registry_path())
+        crate::registry_read::registry_text(&crate::agents_view::registry_path())
             .ok()
             .and_then(|raw| agents_view::derive_rows(&raw, 0))
             .map(|rows| rows.into_iter().map(|a| a.name).collect())
@@ -7831,7 +7831,7 @@ impl Core {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let rows = std::fs::read_to_string(agents_view::registry_path())
+        let rows = crate::registry_read::registry_text(&crate::agents_view::registry_path())
             .ok()
             .and_then(|raw| agents_view::derive_rows(&raw, now));
         let Some(rows) = rows else {
@@ -12704,8 +12704,10 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
         .unwrap_or(0);
     // std::fs on a blocking pool (this crate's tokio has no `fs` feature); the
     // same shape the overlay reader uses.
-    let read =
-        tokio::task::spawn_blocking(|| std::fs::read_to_string(agents_view::registry_path())).await;
+    let read = tokio::task::spawn_blocking(|| {
+        crate::registry_read::registry_text(&crate::agents_view::registry_path())
+    })
+    .await;
     match read {
         Ok(Ok(raw)) => agents_view::derive_rows(&raw, now),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
@@ -12725,8 +12727,10 @@ async fn read_guard_agents_for_send() -> Result<Vec<RegistryAgent>, &'static str
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let read =
-        tokio::task::spawn_blocking(|| std::fs::read_to_string(agents_view::registry_path())).await;
+    let read = tokio::task::spawn_blocking(|| {
+        crate::registry_read::registry_text(&crate::agents_view::registry_path())
+    })
+    .await;
     match read {
         Ok(Ok(raw)) => classify_guard_registry(&raw, now),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
