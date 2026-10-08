@@ -241,6 +241,15 @@ pub async fn ensure_daemon(
     home: &AgentsHome,
     daemon_bin: &std::path::Path,
 ) -> Result<(), ClientError> {
+    // A pinned lane (FNO_SUPERVISOR_SOCKET) never forks a daemon of its own:
+    // it reaches the host daemon through the mounted socket or it fails
+    // naming the pin. Forking here would hold state nobody else sees.
+    if sock_pinned() {
+        return match UnixStream::connect(client_sock(home)).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(ClientError::DaemonNotRunning),
+        };
+    }
     let sock = home.supervisor_sock();
     if UnixStream::connect(&sock).await.is_ok() {
         return Ok(());

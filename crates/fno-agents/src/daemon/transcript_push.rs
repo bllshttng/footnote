@@ -77,10 +77,12 @@ pub(crate) fn handle_transcript_append(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// The stored transcript lines for one session, oldest first. `None` when the
-/// store has no row for the session (the file fallback then owns the read)
-/// or the store cannot be read. The judge refused rows are excluded: a
-/// refused row is evidence of a writer bug, never a transcript fact.
+/// The stored transcript lines for one session, oldest first, bounded to the
+/// same tail window the file readers read (a scan needs the newest decisive
+/// rows, never the whole history). `None` when the store has no row for the
+/// session (the file fallback then owns the read) or the store cannot be
+/// read. Judge-refused rows are excluded: a refused row is evidence of a
+/// writer bug, never a transcript fact.
 pub(crate) fn stored_lines(journal: &Path, session_id: &str) -> Option<Vec<String>> {
     let query = crate::event_store::EventQuery {
         types: vec![TRANSCRIPT_RECORD_TYPE.to_string()],
@@ -92,14 +94,28 @@ pub(crate) fn stored_lines(journal: &Path, session_id: &str) -> Option<Vec<Strin
     if rows.is_empty() {
         return None;
     }
-    let mut lines = Vec::with_capacity(rows.len());
+    // Tail window in bytes: keep appending and shed from the front once the
+    // kept lines outgrow the window, so memory tracks the file readers'
+    // [`TAIL_BYTES`] bound, not the session's age.
+    let mut kept: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut kept_bytes = 0u64;
     for row in rows {
         let value: Value = serde_json::from_str(&row.line).ok()?;
         let line = value.get("data")?.get("line")?.as_str()?.to_string();
-        lines.push(line);
+        kept_bytes += line.len() as u64;
+        kept.push_back(line);
+        while kept_bytes > TAIL_WINDOW_BYTES {
+            if let Some(front) = kept.pop_front() {
+                kept_bytes -= front.len() as u64;
+            }
+        }
     }
-    Some(lines)
+    Some(kept.into())
 }
+
+/// The stored-tail window, matched to the file readers' tail so a stored
+/// verdict covers the same rows a file read would.
+const TAIL_WINDOW_BYTES: u64 = 1024 * 1024;
 
 /// The newest stored record's wall-clock ms for one session. `None` when the
 /// store holds nothing for the session or is unreadable.

@@ -17,6 +17,11 @@ use serde_json::Value;
 /// cannot build an unbounded RPC.
 const MAX_PUSH_BYTES: u64 = 512 * 1024;
 
+/// Per-fire record bound: the op commits one store transaction per record,
+/// so the fire size also bounds the store work one turn hook can spend. The
+/// cursor advances only over pushed lines; the remainder rides the next fire.
+const MAX_PUSH_LINES: usize = 128;
+
 /// The cursor path for one transcript: `<tmp>/fno-transcript-push/<16hex>.cursor`,
 /// named by the transcript path so a rotated transcript starts fresh.
 fn cursor_path(transcript: &Path) -> PathBuf {
@@ -50,25 +55,35 @@ fn new_lines_since(transcript: &Path, from: u64) -> Option<(Vec<String>, u64)> {
     Some(complete_lines(&buf, from))
 }
 
-/// The complete lines of `buf`, and the offset after the last newline. Bytes
-/// after the last newline stay unread (a torn line, or a multibyte char
-/// split by the window bound: a newline byte is never part of one), so the
-/// next fire re-reads them from the same offset. A prefix that is not valid
-/// UTF-8 reads as nothing-new and retries: corrupting a line to advance is
-/// worse than stalling, and the file-fallback readers still answer.
+/// The complete lines of `buf`, and the offset after the last one pushed.
+/// Bytes after the last newline stay unread (a torn line, or a multibyte
+/// char split by the window bound: a newline byte is never part of one), so
+/// the next fire re-reads them from the same offset. The record cap stops
+/// the offset mid-window: the remainder rides the next fire. A prefix that
+/// is not valid UTF-8 reads as nothing-new and retries: corrupting a line
+/// to advance is worse than stalling, and the file-fallback readers still
+/// answer.
 fn complete_lines(buf: &[u8], from: u64) -> (Vec<String>, u64) {
-    let Some(idx) = buf.iter().rposition(|&b| b == b'\n') else {
+    let Some(nl) = buf.iter().rposition(|&b| b == b'\n') else {
         return (Vec::new(), from);
     };
-    let Ok(text) = std::str::from_utf8(&buf[..idx]) else {
+    let Ok(text) = std::str::from_utf8(&buf[..nl]) else {
         return (Vec::new(), from);
     };
-    let lines = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(String::from)
-        .collect();
-    (lines, from + idx as u64 + 1)
+    let mut lines = Vec::new();
+    let mut consumed = 0usize;
+    for raw in text.split_inclusive('\n') {
+        if lines.len() >= MAX_PUSH_LINES {
+            break;
+        }
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if !line.trim().is_empty() {
+            lines.push(line.to_string());
+        }
+        consumed += raw.len();
+    }
+    (lines, from + consumed as u64)
 }
 
 /// The cursor offset for one transcript (0 when absent or malformed).
