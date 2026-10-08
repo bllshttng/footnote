@@ -764,6 +764,7 @@ fn run_sync_with_shell(deps: &Deps, cwd: &Path, pr: u64, shell: &ShellRun) -> Sy
     // dies with us.
     let holder = format!("sync-canonical:{pr}:{}:{}", std::process::id(), nanos());
     let make_opts = || crate::claims::AcquireOpts {
+        host: None,
         pid: Some(std::process::id()),
         pid_unavailable: false,
         ttl_ms: Some(CLAIM_TTL_MS),
@@ -1530,6 +1531,7 @@ mod tests {
         );
         // A live other holder (our pid proves live).
         let opts = crate::claims::AcquireOpts {
+            host: None,
             pid: Some(std::process::id()),
             pid_unavailable: false,
             ttl_ms: Some(600_000),
@@ -2089,6 +2091,7 @@ mod tests {
         write_cfg(tmp.path(), CFG_BODY);
         // Hold the lease so the newest sync reads declined.
         let opts = crate::claims::AcquireOpts {
+            host: None,
             pid: Some(std::process::id()),
             pid_unavailable: false,
             ttl_ms: Some(600_000),

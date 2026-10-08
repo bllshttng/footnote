@@ -73,9 +73,26 @@ export FNO_CLAUDE_PROJECTS_DIR="$tmp/projects"
 export FNO_CODEX_SESSIONS_DIR="$tmp/codex"
 export PYTHONPATH="$ROOT/cli/src"
 export PATH="$tmp/bin:$PATH"
+export FNO_AGENTS_BIN="$BIN"
 REGISTRY="$tmp/home/.fno/agents/registry.json"
 
 fail() { echo "FAIL: $1"; exit 1; }
+
+# The registry is a table in graph.db and registry.json is only its migration
+# fence, so every read and reset goes through the registry-commit door.
+reg_rows() {
+  "$VENV_PY" -c 'import json, sys; from pathlib import Path
+from fno.registry_door import read_registry_rows
+print(json.dumps(read_registry_rows(Path(sys.argv[1]))))' "${1:-$REGISTRY}"
+}
+reg_clear() {
+  "$VENV_PY" -c 'import sys; from pathlib import Path
+from fno.registry_door import commit_registry_document, read_registry_document
+path = Path(sys.argv[1])
+document, revision = read_registry_document(path)
+commit_registry_document(path, {"schema_version": document["schema_version"], "agents": [], "replace": True}, revision)' "${1:-$REGISTRY}" \
+    || fail "could not reset the registry table"
+}
 
 # 1. A session-shaped token the store knows resolves and is ADOPTED. `resume
 #    --print-command` is the assertion surface: it proves resolution AND that the
@@ -84,24 +101,24 @@ fail() { echo "FAIL: $1"; exit 1; }
 out=$("$BIN" resume c655c326 --print-command 2>&1) || fail "resume of a stored session: $out"
 grep -q -- "--resume $CLAUDE_UUID" <<<"$out" || fail "dead arm did not build the uuid argv: $out"
 grep -qF "cd $FIXCWD" <<<"$out" || fail "healed row lost its recorded cwd: $out"
-"$VENV_PY" - "$REGISTRY" <<'PY' || fail "adopted row is wrong (see above)"
+reg_rows | "$VENV_PY" -c '
 import json, os, sys
-rows = json.load(open(sys.argv[1]))["agents"]
+rows = json.load(sys.stdin)
 assert len(rows) == 1, rows
 r = rows[0]
 # Store membership proves the session EXISTS, never that it runs.
 assert r["status"] == "orphaned", r
 assert r["short_id"] == "c655c326", r
 assert r["cwd"] == os.environ["FIXCWD"], r
-PY
+' || fail "adopted row is wrong (see above)"
 
 # 2. A name-shaped token never probes: byte-identical refusal, nothing adopted.
-before=$(cat "$REGISTRY")
+before=$(reg_rows)
 err=$("$BIN" logs reviewer 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "name miss exited $rc, want 13"
 [[ "$err" == "no agent matching 'reviewer'; accepted forms: name, canonical handle, transport short id, or full session id" ]] \
   || fail "name miss message drifted: $err"
-[[ "$(cat "$REGISTRY")" == "$before" ]] || fail "a name-shaped miss mutated the registry"
+[[ "$(reg_rows)" == "$before" ]] || fail "a name-shaped miss mutated the registry"
 
 # 3. A broken all-source identity path fails closed with the full-session-id
 #    remedy rather than treating an unchecked short token as a safe miss -- here
@@ -113,37 +130,23 @@ err=$(PATH=/usr/bin:/bin "$BIN" logs deadbeef 2>&1); rc=$?
 [[ "$err" == *"Use the full session id." ]] \
   || fail "broken identity helper omitted the full-id remedy: $err"
 
-# 4. A registry write failure does not block the verb, and does not hide either:
-#    reaching the session wins, but the operator must see that the roster did not
-#    get the row. Skipped when the chmod does not actually deny us (e.g. root).
-rm -f "$REGISTRY"
-chmod 500 "$(dirname "$REGISTRY")"
-if ! { : > "$REGISTRY"; } 2>/dev/null; then
-  out=$("$BIN" resume c655c326 --print-command 2>&1); rc=$?
-  chmod 700 "$(dirname "$REGISTRY")"
-  [[ $rc -eq 0 ]] || fail "unwritable registry blocked the verb (exit $rc): $out"
-  grep -q -- "--resume $CLAUDE_UUID" <<<"$out" || fail "verb did not reach the session: $out"
-  grep -qi "WARN" <<<"$out" || fail "failed registration was silent: $out"
-else
-  chmod 700 "$(dirname "$REGISTRY")"
-fi
-
 # 5. Ambiguity refuses loudly with EVERY candidate and adopts nothing.
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"/repo/two"}}\n' "$TWIN_UUID" \
   > "$tmp/codex/2026/07/20/rollout-2026-07-20T10-00-00-$TWIN_UUID.jsonl"
-rm -f "$REGISTRY"
+reg_clear
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 # The contract code, not merely non-zero: `-ne 0` would also pass on a panic.
 [[ $rc -eq 13 ]] || fail "ambiguous token exited $rc, want 13 (logs' refusal code)"
 grep -q "$CLAUDE_UUID" <<<"$err" || fail "ambiguity message omits the claude candidate: $err"
 grep -q "$TWIN_UUID" <<<"$err" || fail "ambiguity message omits the codex candidate: $err"
-[[ ! -s "$REGISTRY" ]] || fail "an ambiguous token adopted a row"
+[[ "$(reg_rows)" == "[]" ]] || fail "an ambiguous token adopted a row"
 
 # 6. attach resolves through the same wrapper. A healed row's liveness comes from
 #    probing reality (locate_session + socket), never the row's `status`, so this
 #    fixture - a stored session with no live supervisor - must reach the
 #    dead-revivable pointer rather than the pre-heal "no agent matching".
-rm -f "$REGISTRY" "$tmp/codex/2026/07/20/rollout-2026-07-20T10-00-00-$TWIN_UUID.jsonl"
+reg_clear
+rm -f "$tmp/codex/2026/07/20/rollout-2026-07-20T10-00-00-$TWIN_UUID.jsonl"
 err=$("$BIN" attach c655c326 2>&1); rc=$?
 [[ $rc -ne 0 ]] || fail "attach of a dead stored session unexpectedly succeeded: $err"
 grep -q "no agent matching" <<<"$err" && fail "attach did not heal: $err"
@@ -156,7 +159,7 @@ ROW='{"name":"x","harness":"claude","cwd":"/w","log_path":"","short_id":"c655c32
 
 # 7a. Exit code is read BEFORE stdout: a failed helper that prints parseable JSON
 #     must still fail closed, never yield a half-resolved row.
-rm -f "$REGISTRY"   # step 6 adopted the row; the token must be a MISS again
+reg_clear   # step 6 adopted the row; the token must be a MISS again
 stub_fno "echo '$ROW'; exit 1"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "nonzero heal with parseable JSON exited $rc, want 13"
@@ -185,14 +188,14 @@ grep -q "Traceback" <<<"$err" \
 # 7c. An exit-0 helper returning a JSON object that is not a usable row must
 #     fail closed, not resolve: a bare {} would otherwise surface as a confusing
 #     missing-cwd failure after incomplete identity coverage.
-rm -f "$REGISTRY"
+reg_clear
 stub_fno "echo '{}'; exit 0"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "empty JSON object from an exit-0 heal exited $rc, want 13"
 grep -q "all-source identity helper returned an incomplete row" <<<"$err" \
   || fail "empty-object identity helper did not fail closed: $err"
 
-rm -f "$REGISTRY"
+reg_clear
 stub_fno "case \"\$*\" in
   *'agents truth'*) echo '{\"state\":\"done\"}' ;;
   *) echo '[setup] path migration complete'; echo '$ROW' ;;
@@ -208,12 +211,12 @@ restore_fno
 #    Python path resolver does not, so without the forwarded --registry the row
 #    lands in the default file: the verb still works, so nothing warns, but the
 #    roster never gains the row and every later call re-heals.
-rm -f "$REGISTRY"
+reg_clear
 ALT_HOME="$tmp/alt-agents"
 mkdir -p "$ALT_HOME"
 out=$(FNO_AGENTS_HOME="$ALT_HOME" "$BIN" resume c655c326 --print-command 2>&1) || \
   fail "heal under FNO_AGENTS_HOME failed: $out"
-[[ -s "$ALT_HOME/registry.json" ]] || fail "adopted row did not land in FNO_AGENTS_HOME"
-[[ ! -s "$REGISTRY" ]] || fail "adopted row leaked into the default registry"
+[[ "$(reg_rows "$ALT_HOME/registry.json")" != "[]" ]] || fail "adopted row did not land in FNO_AGENTS_HOME"
+[[ "$(reg_rows)" == "[]" ]] || fail "adopted row leaked into the default registry"
 
 echo "PASS"

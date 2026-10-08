@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.registry_door import read_registry_document
 
 ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -223,7 +224,6 @@ def test_account_only_spawn_records_no_route_path(tmp_path, monkeypatch) -> None
 
 def test_ac7_registry_stores_the_path_never_the_route_contents(tmp_path, monkeypatch) -> None:
     """AC7: the registry file carries a path and no credential."""
-    from fno import paths
 
     _spawn_pane(
         monkeypatch,
@@ -231,7 +231,7 @@ def test_ac7_registry_stores_the_path_never_the_route_contents(tmp_path, monkeyp
         route_env=dict(ROUTE_ENV),
         route_provider="zai",
     )
-    raw = paths.agents_registry_path().read_text(encoding="utf-8")
+    raw = json.dumps(read_registry_document()[0])
     assert "route-settings" in raw  # the path IS recorded
     assert "ANTHROPIC_AUTH_TOKEN" not in raw
     assert "zai-secret-token" not in raw
@@ -439,7 +439,6 @@ def test_ac4_a_routed_codex_pane_records_identity_but_never_a_route_file(
         monkeypatch.delenv(var, raising=False)
 
     from fno.agents import mux_spawn
-    from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
         mux_spawn,
@@ -831,10 +830,12 @@ def test_a_legacy_row_without_launch_account_stays_unknown(tmp_path, monkeypatch
         ]
     )
     target = paths.agents_registry_path()
-    raw = json.loads(target.read_text(encoding="utf-8"))
+    raw = read_registry_document(target)[0]
     del raw["agents"][0]["launch_account"]
     del raw["agents"][0]["related_session_id"]
-    target.write_text(json.dumps(raw), encoding="utf-8")
+    from tests._table_seed import seed_registry
+
+    seed_registry(raw.pop("agents"), path=target, replace=True, **raw)
     row = load_registry()[0]
     assert row.launch_account is None
     assert row.related_session_id is None
@@ -844,7 +845,6 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
     """The v19 bump rationale: asdict emits the keys, so a stale reader must
     refuse on version, not TypeError on the kwarg."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno import paths
     from fno.agents.registry import AgentEntry, write_registry
 
     write_registry(
@@ -858,7 +858,7 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
             )
         ]
     )
-    raw = paths.agents_registry_path().read_text(encoding="utf-8")
+    raw = json.dumps(read_registry_document()[0])
     assert json.loads(raw)["schema_version"] >= 19
     assert '"launch_account"' in raw
     assert '"related_session_id"' in raw

@@ -166,7 +166,7 @@ def _naming_real(cmd, **kw):
     """The name verbs run in the binary; a blanket stub answers the mint with
     a spawn receipt. Capture the real run before any test patches it."""
     parts = [str(part) for part in cmd]
-    if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+    if {"name-mint", "name-codes", "name-parse", "registry-commit"} & set(parts):
         return _REAL_RUN(cmd, **kw)
     if {"doctor", "event"} <= set(parts):
         # Event emission rides the same subprocess seam; it is not a spawn.

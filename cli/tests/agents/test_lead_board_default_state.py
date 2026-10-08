@@ -43,8 +43,14 @@ def captured_argv(monkeypatch):
     binary, which `board_argv()` extracts.
     """
     seen: list[list[str]] = []
+    real_run = subprocess.run
+    import fno.rust_binary as rust_binary
+
+    real_binary = rust_binary.resolve_binary()
 
     def fake_run(cmd, *args, **kwargs):
+        if list(cmd[1:2]) == ["registry-commit"]:
+            return real_run([str(real_binary), *cmd[1:]], *args, **kwargs)
         seen.append(cmd)
         if str(cmd[0]) == "/fake/fno-agents":
             return types.SimpleNamespace(

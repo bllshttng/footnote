@@ -269,8 +269,9 @@ def test_ac5_unclaim_releases_stale_claim_and_derives_ready(tmp_graph, claims_ro
     assert node["locked_by"] is None
 
 
+
 def test_unclaim_refuses_missing_node_without_releasing_orphan_claim(claims_root):
-    from fno.claims.io import claim_path
+    from fno.claims.core import claim_status
 
     node_id = f"ab-{os.getpid():08x}"
     key = f"node:{node_id}"
@@ -280,7 +281,7 @@ def test_unclaim_refuses_missing_node_without_releasing_orphan_claim(claims_root
 
     assert result.exit_code != 0, _out(result)
     assert "not found" in _out(result)
-    assert claim_path(key, root=claims_root).exists(), "missing nodes cannot release claims"
+    assert claim_status(key, root=claims_root)["state"] != "free", "missing nodes cannot release claims"
 
 
 # -- AC6-EDGE: a node with a PR is in_review, not requeueable -----------------

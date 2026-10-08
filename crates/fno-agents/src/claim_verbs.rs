@@ -11,7 +11,6 @@
 
 use serde_json::Value;
 #[cfg(test)]
-use std::fs;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -36,6 +35,28 @@ pub fn run_claim(args: &[String]) -> i32 {
         );
         return 2;
     };
+    if op == "read-path" {
+        let Some(path) = args.get(1) else {
+            return 2;
+        };
+        match crate::claim_store::read_at_path(std::path::Path::new(path)) {
+            // The raw record, not the status view: callers hand it back as
+            // --expected-claim, and the observed-row delete compares every
+            // column, so a derived session_id or metadata key never matches.
+            Ok(Some(record)) => {
+                println!("{}", serde_json::to_value(&record).unwrap_or_default());
+                return 0;
+            }
+            Ok(None) => {
+                println!("{}", serde_json::json!({"state":"free"}));
+                return 0;
+            }
+            Err(error) => {
+                eprintln!("claim read-path: {error}");
+                return 2;
+            }
+        }
+    }
     if op == "root" {
         return run_claim_root(&args[1..]);
     }
@@ -111,6 +132,8 @@ pub fn run_claim(args: &[String]) -> i32 {
     let mut holder: Option<String> = None;
     let mut opts = crate::claims::AcquireOpts::default();
     let mut holding_recovery_lock = false;
+    let mut expected_claim = None;
+    let mut claims_directory: Option<PathBuf> = None;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut take = |name: &str| -> Option<String> {
@@ -121,6 +144,7 @@ pub fn run_claim(args: &[String]) -> i32 {
             v
         };
         match a.as_str() {
+            "--claims-dir" => claims_directory = take("--claims-dir").map(PathBuf::from),
             "--holder" => holder = take("--holder"),
             "--pid" => match take("--pid").and_then(|v| v.parse::<u32>().ok()) {
                 Some(p) => opts.pid = Some(p),
@@ -151,6 +175,18 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(r) => opts.root = Some(PathBuf::from(r)),
                 None => return 2,
             },
+            "--expected-claim" => {
+                let Some(raw) = take("--expected-claim") else {
+                    return 2;
+                };
+                match serde_json::from_str::<crate::claims::ClaimRecord>(&raw) {
+                    Ok(record) => expected_claim = Some(record),
+                    Err(e) => {
+                        eprintln!("claim expected record: {e}");
+                        return 2;
+                    }
+                }
+            }
             "--holding-recovery-lock" => holding_recovery_lock = true,
             "--json" | "-J" => {} // output is always JSON; accepted for symmetry
             other => {
@@ -204,12 +240,27 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim force-release requires --reason");
                 return 2;
             };
-            match crate::claim_store::force_release(
-                &key,
-                reason,
-                opts.root.as_deref(),
-                holding_recovery_lock,
-            ) {
+            let result = if let Some(expected) = expected_claim.as_ref() {
+                match claims_directory.as_deref() {
+                    Some(dir) => crate::claim_store::force_release_observed_in_directory(
+                        dir, &key, reason, expected,
+                    ),
+                    None => crate::claim_store::force_release_observed(
+                        &key,
+                        reason,
+                        opts.root.as_deref(),
+                        expected,
+                    ),
+                }
+            } else {
+                crate::claim_store::force_release(
+                    &key,
+                    reason,
+                    opts.root.as_deref(),
+                    holding_recovery_lock,
+                )
+            };
+            match result {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -226,7 +277,11 @@ pub fn run_claim(args: &[String]) -> i32 {
                 .map(|record| claim_status_value(&record))
                 .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
             println!("{payload}");
-            0
+            if state == crate::claims::ClaimState::Corrupted {
+                2
+            } else {
+                0
+            }
         }
         other => {
             eprintln!(
@@ -302,17 +357,25 @@ fn run_claim_session_pid(args: &[String]) -> i32 {
 }
 
 fn run_claim_reap(args: &[String]) -> i32 {
-    let mut root: Option<PathBuf> = None;
+    let mut dirs = Vec::new();
     let mut apply = false;
+    let mut key = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--root" => match it.next() {
-                Some(value) => root = Some(PathBuf::from(value)),
-                None => {
-                    eprintln!("fno-agents: claim reap: --root requires a value");
-                    return 2;
+                Some(v) => {
+                    dirs.extend(crate::claims::claims_dir_for(Some(std::path::Path::new(v))))
                 }
+                None => return 2,
+            },
+            "--claims-dir" => match it.next() {
+                Some(v) => dirs.push(PathBuf::from(v)),
+                None => return 2,
+            },
+            "--key" => match it.next() {
+                Some(v) => key = Some(v.as_str()),
+                None => return 2,
             },
             "--apply" => apply = true,
             "--json" | "-J" => {}
@@ -322,26 +385,46 @@ fn run_claim_reap(args: &[String]) -> i32 {
             }
         }
     }
-    let (session_witness, _drain) = default_session_witness();
-    let recheck_witness = |record: &crate::claims::ClaimRecord| {
-        let (witness, _drain) = default_session_witness();
-        witness(record)
-    };
-    match crate::claim_store::reap_with_session_witness(
-        root.as_deref(),
-        apply,
-        Some(&session_witness),
-        Some(&recheck_witness),
-    ) {
-        Ok(payload) => {
-            println!("{payload}");
-            0
+    if dirs.is_empty() {
+        if let Some(dir) = crate::claims::global_claims_dir() {
+            dirs.push(dir);
         }
-        Err(error) => {
-            eprintln!("fno-agents: claim reap failed: {error}");
-            1
+        if let Ok(dir) = crate::claims_root::claims_dir("local-probe", None) {
+            dirs.push(dir);
         }
     }
+    dirs.sort();
+    dirs.dedup();
+    let (witness, _) = default_session_witness();
+    let recheck = |record: &crate::claims::ClaimRecord| {
+        let (witness, _) = default_session_witness();
+        witness(record)
+    };
+    let mut summary = serde_json::json!({"apply":apply,"scanned":0,"would_reap":0,"reaped":0,"reap_failed":[],"roots":dirs});
+    for dir in &dirs {
+        match crate::claim_store::reap_in_directory(dir, apply, Some(&witness), Some(&recheck), key)
+        {
+            Ok(result) => {
+                for field in ["scanned", "would_reap", "reaped"] {
+                    summary[field] = serde_json::json!(
+                        summary[field].as_u64().unwrap_or(0) + result[field].as_u64().unwrap_or(0)
+                    );
+                }
+                if let Some(errors) = result["reap_failed"].as_array() {
+                    summary["reap_failed"]
+                        .as_array_mut()
+                        .unwrap()
+                        .extend(errors.iter().cloned());
+                }
+            }
+            Err(error) => {
+                eprintln!("fno-agents: claim reap {}: {error}", dir.display());
+                return 1;
+            }
+        }
+    }
+    println!("{summary}");
+    0
 }
 
 /// `fno-agents claim list [--prefix <prefix>] [--include-stale] [--root <dir>]`
@@ -375,7 +458,17 @@ fn run_claim_list(args: &[String]) -> i32 {
             }
         }
     }
-    let rows = match crate::claims::list(prefix.as_deref(), root.as_deref(), include_stale) {
+    // An explicit --root names the one store to read; only the bare form
+    // also folds in the global root.
+    let listed = match root.as_deref() {
+        Some(root) => crate::claims::list_in(
+            &[root.join(crate::claims::CLAIMS_DIRNAME)],
+            prefix.as_deref(),
+            include_stale,
+        ),
+        None => crate::claims::list(prefix.as_deref(), None, include_stale),
+    };
+    let rows = match listed {
         Ok(rows) => rows,
         Err(error) => {
             eprintln!("fno-agents: claim list: {error}");
@@ -388,7 +481,7 @@ fn run_claim_list(args: &[String]) -> i32 {
 }
 
 #[allow(dead_code)]
-fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
+pub(crate) fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
     claim_status_value_with_witness(
@@ -655,38 +748,11 @@ fn run_claim_sweep(args: &[String]) -> i32 {
     0
 }
 
-/// Read every parseable lockfile in one claims directory. The caller applies
-/// the historical prefix filter after parsing the record, so a filename cannot
-/// widen or narrow the decision by lying about its encoded key.
+/// Every claim row in one claims directory's table. The caller applies the
+/// prefix filter after reading the record.
 #[cfg(test)]
 fn claim_records_from_dir(dir: &Path) -> Vec<crate::claims::ClaimRecord> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-    entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-                && entry.file_name().to_string_lossy().ends_with(".lock")
-        })
-        .filter_map(
-            |entry| match crate::claims::read_claim_file(&entry.path()) {
-                Ok(rec) => Some(rec),
-                Err(crate::claims::ReadError::GoneAway) => None,
-                Err(crate::claims::ReadError::Corrupted(error)) => {
-                    eprintln!(
-                        "fno-agents: claim sweep: skipping {}: {error}",
-                        entry.file_name().to_string_lossy()
-                    );
-                    None
-                }
-            },
-        )
-        .collect()
+    crate::claim_store::records_in(dir, None, true).unwrap_or_default()
 }
 
 /// The dispatcher-minted handover holder (mirrors `HANDOVER_HOLDER_PREFIX` in
@@ -1066,7 +1132,13 @@ fn registry_session_live(registry: &SessionRegistryIndex, session: &str) -> Opti
     if registry
         .by_session
         .get(session)
-        .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)))
+        .is_some_and(|&(pid, start)| {
+            registry
+                .rows
+                .get(session)
+                .is_some_and(|row| crate::claims::pid_dies_with_session(row.harness.as_deref()))
+                && crate::daemon::pid_is_ours(pid, Some(start))
+        })
     {
         return Some(crate::claims::basis::REGISTRY_SESSION_LIVE);
     }
@@ -1090,10 +1162,11 @@ const ROW_VERDICT_LIVE: &str = "row-verdict-live";
 /// Absent and Unknown answer false: the door decides liveness, never death.
 fn row_verdict_live(registry: &SessionRegistryIndex, session: &str) -> bool {
     registry.rows.get(session).is_some_and(|entry| {
-        matches!(
-            crate::row_verdict::fno_verdict(entry),
-            crate::row_verdict::RowVerdict::Live(_)
-        )
+        crate::claims::pid_dies_with_session(entry.harness.as_deref())
+            && matches!(
+                crate::row_verdict::fno_verdict(entry),
+                crate::row_verdict::RowVerdict::Live(_)
+            )
     })
 }
 
@@ -1310,10 +1383,9 @@ mod tests {
     }
 
     #[test]
-    fn native_claim_doors_answer_over_lockfiles_without_sqlite() {
+    fn native_claim_doors_answer_over_the_claim_table() {
         // Both doors ride the same harness: acquire over the claims root,
-        // run the verb, and prove the answer came from the lockfile (no
-        // graph.db materialized).
+        // run the verb, and prove the answer came from the table.
         let rows: Vec<(
             &str,
             &str,
@@ -1324,14 +1396,10 @@ mod tests {
                 "node:native-status-test",
                 "target-session:test-session",
                 Some(std::process::id()),
-                Box::new(|key: &str, _holder: &str, temp: &std::path::Path| {
+                Box::new(|key: &str, _holder: &str, _temp: &std::path::Path| {
                     assert_eq!(
                         run_claim(&["status".into(), key.into(), "--json".into()]),
                         0
-                    );
-                    assert!(
-                        !temp.join("graph.db").exists(),
-                        "native status must read the lockfile store without opening SQLite"
                     );
                 }),
             ),
@@ -1342,7 +1410,7 @@ mod tests {
                 Box::new(|key: &str, holder: &str, temp: &std::path::Path| {
                     let claims_dir = crate::claims::claims_dir_for(Some(temp)).unwrap();
                     let path = crate::claims::claim_path(key, Some(temp)).unwrap();
-                    assert!(path.exists());
+                    assert!(crate::claim_store::read_at_path(&path).unwrap().is_some());
                     let holder_session = holder.rsplit(':').next().unwrap();
                     assert_eq!(
                         run_claim(&[
@@ -1356,7 +1424,10 @@ mod tests {
                         ]),
                         0
                     );
-                    assert!(!path.exists(), "the stopped session's lockfile is released");
+                    assert!(
+                        crate::claim_store::read_at_path(&path).unwrap().is_none(),
+                        "the stopped session's claim is released"
+                    );
                 }),
             ),
         ];
@@ -1482,13 +1553,26 @@ mod tests {
             let now = crate::claims::now_ms();
             // No registry row for the handover's worker, so the session
             // witness answers Unresolved: Suspect inside the grace.
-            let yaml = format!(
-                "schema_version: 1\nkey: \"node:x-grace\"\nholder: \"spawn-handover:ghost\"\nacquired_at: {}\npid: 999999\nhost: test-host\nsession_id: \"s-ghost\"\npid_provenance: \"ambient\"\nexpires_at: {}\nreason: \"spawn handover window for node:x-grace\"\n",
-                now - 120_000,
-                now - 60_000
-            );
             let dir = sweep_dir(td.path());
-            fs::write(dir.join("node%3Ax-grace.lock"), yaml).unwrap();
+            crate::claim_store::seed_at_path(
+                &dir.join("node%3Ax-grace.lock"),
+                &crate::claims::ClaimRecord {
+                    schema_version: 1,
+                    key: "node:x-grace".into(),
+                    holder: "spawn-handover:ghost".into(),
+                    acquired_at: now - 120_000,
+                    pid: Some(999_999),
+                    host: "test-host".into(),
+                    pid_unavailable: false,
+                    expires_at: Some(now - 60_000),
+                    reason: Some("spawn handover window for node:x-grace".into()),
+                    harness: None,
+                    session_id: Some("s-ghost".into()),
+                    pid_provenance: Some("ambient".into()),
+                    machine_id: None,
+                    metadata: Default::default(),
+                },
+            );
             let claims = claim_sweep_payload(&dir)["claims"]
                 .as_array()
                 .unwrap()
@@ -1536,29 +1620,6 @@ mod tests {
 
             let all = claim_sweep_payload_from_records(&records, None, &[], true);
             assert_eq!(all["claims"].as_array().unwrap().len(), 3);
-        });
-    }
-
-    #[test]
-    fn claim_sweep_excludes_corrupted_and_newer_schema_lockfiles() {
-        with_registry(serde_json::json!([]), || {
-            let td = tempfile::TempDir::new().unwrap();
-            sweep_acquire(td.path(), "node:x-good");
-            let dir = sweep_dir(td.path());
-            // Corrupted YAML under a sweep-prefixed name.
-            fs::write(dir.join("node%3Ax-bad.lock"), "{not yaml: [").unwrap();
-            // Newer schema writer: parse refuses, sweep excludes (does not crash).
-            fs::write(
-                dir.join("node%3Ax-newer.lock"),
-                "schema_version: 999\nkey: node:x-newer\nholder: h\nacquired_at: 1\npid: 1\nhost: x\n",
-            )
-            .unwrap();
-            // Non-lock and dot files are skipped.
-            fs::write(dir.join("node%3Ax-tmp.partial"), "x").unwrap();
-            let payload = claim_sweep_payload(&dir);
-            let claims = payload["claims"].as_array().unwrap();
-            assert_eq!(claims.len(), 1);
-            assert_eq!(claims[0]["key"], "node:x-good");
         });
     }
 
@@ -1656,7 +1717,6 @@ mod tests {
         // session: rec.session_id names nothing resolvable. The row was
         // RENAMED after mint, so the holder's original label lives in
         // aliases and must resolve identically.
-        let me = std::process::id();
         with_registry(
             serde_json::json!([
                 {
@@ -1666,15 +1726,8 @@ mod tests {
                     "created_at": "2026-09-07T00:00:00Z",
                     "aliases": ["w-thread-orig"],
                     "harness_session_id": "s-worker",
-                },
-                {
-                    "name": "w-proof",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-07T00:00:00Z",
-                    "harness_session_id": "s-worker",
-                    "pid": me,
-                    "pid_start_time": own_pid_start(),
+                    "liveness": "alive",
+                    "liveness_measured_at": z_stamp(10),
                 },
             ]),
             || {
@@ -2145,7 +2198,6 @@ mod tests {
         // so the record carries the DISPATCHER's ambient identity. The
         // subject must be the named worker: a live dispatcher session must
         // never keep a dead worker's lane reading live.
-        let me = std::process::id();
         with_registry(
             serde_json::json!([
                 {
@@ -2154,15 +2206,8 @@ mod tests {
                     "cwd": "/w",
                     "created_at": "2026-09-17T00:00:00Z",
                     "harness_session_id": "s-worker",
-                },
-                {
-                    "name": "w-proof",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-17T00:00:00Z",
-                    "harness_session_id": "s-worker",
-                    "pid": me,
-                    "pid_start_time": own_pid_start(),
+                    "liveness": "alive",
+                    "liveness_measured_at": z_stamp(10),
                 },
             ]),
             || {

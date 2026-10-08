@@ -44,9 +44,7 @@ A	cache_write_input_tokens	py=scripts/metrics/prompt_prefix_cache_probe.py;rs=cr
 A	caller-assigned-cwd-scoped	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
 A	cargo-test:fno-agents-e2e	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	cargo-test:fno-agents-unit	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# CLASSIFY protocol|msg-twin|data
-A	claim corrupted; cannot verify ownership (use `fno agents claim release --force`)	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY protocol|msg-twin|data
 A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
-A	claim recovery mutex busy; retry the resume bind	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY protocol|msg-twin|data
 A	claim requires a positive pid or pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claim_store.rs|crates/fno-agents/src/claims.rs|crates/fno-agents/src/event_store.rs|crates/fno/src/event_store.rs	# CLASSIFY protocol|msg-twin|data
 A	claims unreadable: claim key is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/undispatched.rs	# CLASSIFY protocol|msg-twin|data
@@ -149,7 +147,7 @@ A	inspect the malformed github response and fix the reader; this is not retryabl
 A	its death already released the nodes it contained and nothing re-runs that release	py=cli/src/fno/graph/_contain.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	keeper closed the connection mid-frame	py=cli/src/fno/graph/store.py;rs=crates/fno/src/store_client.rs	# CLASSIFY protocol|msg-twin|data
 A	kept_transcript_unresolved	py=cli/src/fno/agents/retirement.py;rs=crates/fno-agents/src/reap_render.rs	# CLASSIFY protocol|msg-twin|data
-A	key and holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_store.rs|crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
+A	key and holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	lane cap full (max_lanes={max_lanes})	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_lanes_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	launchd:sh.fno.pr-watcher	py=cli/src/fno/pr_watch/cli.py;rs=crates/fno-agents/src/tick_ledger.rs	# CLASSIFY protocol|msg-twin|data
 A	locked_by_harness_session	py=cli/src/fno/backlog/note_notify.py;rs=crates/fno-agents/src/backlog/find_cli.rs|crates/fno-agents/src/backlog/mod.rs|crates/fno-agents/src/backlog/model.rs|crates/fno-agents/src/backlog/nodes.rs|crates/fno-agents/src/backlog/patch.rs|crates/fno-agents/src/backlog/render.rs|crates/fno-agents/src/backlog/update_cli.rs|crates/fno-agents/src/graph_keeper.rs|crates/fno-agents/src/graph_store.rs|crates/fno-agents/src/org_fold.rs|crates/fno/src/backlog_model.rs|crates/fno/src/backlog_view.rs|crates/fno/src/board_reader.rs	# CLASSIFY protocol|msg-twin|data
@@ -198,7 +196,6 @@ A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fn
 A	provider-default(no-difficulty)	py=cli/src/fno/route_resolve.py;rs=crates/fno-agents/src/route_gather.rs	# CLASSIFY protocol|msg-twin|data
 A	provider-runtime-state.json	py=cli/src/fno/paths.py;rs=crates/fno-agents/src/provider_cap.rs|crates/fno-agents/src/route_capacity.rs|crates/fno-agents/src/spawn_gate_lanes.rs	# CLASSIFY protocol|msg-twin|data
 A	provider_outage_reset_grace_seconds	py=cli/src/fno/agents/provider_outage.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
-A	reason must be non-empty for force-release	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_store.rs	# CLASSIFY protocol|msg-twin|data
 A	recompute degraded to unknown: {why}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
 A	recompute produced no row	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
 A	recompute unavailable: {why}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
@@ -267,8 +264,6 @@ A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agent
 A	{} file(s) (footnote {}) -> {}	py=cli/src/fno/setup/integration.py;rs=crates/fno/src/setup_autowire.rs	# CLASSIFY protocol|msg-twin|data
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# offender - carry a reason or fix in this PR
 A	--metadata must be a json object	py=cli/src/fno/claims/cli.py;rs=crates/fno-agents/src/claim_cli/mod.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: the python copy serves the unported leaves (release, status); retires leaf by leaf
-A	claim corrupted; cannot verify ownership (use `fno agents claim release --force`)	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: compare_and_rebind stays until the deletion wave retires it with its python test suite
-A	claim recovery mutex busy; retry the resume bind	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claim_cli/acquire.rs	# CLASSIFY msg-twin|claims-acquire-leaf-port: compare_and_rebind stays until the deletion wave retires it with its python test suite
 A	decision probe: conflicting law rows for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# msg-twin: the draft guard's law read ports the coverage gate's three-state probe wording so a refused draft names the same fault in either runtime
 A	decision probe: single law row carries no decision for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# msg-twin: the draft guard's law read ports the coverage gate's three-state probe wording so a refused draft names the same fault in either runtime
 A	base directory for this skill:	py=scripts/save-session.py;rs=crates/fno-agents/src/skill_drift.rs	# msg-twin: both runtimes parse the transcript invoked_skills attachment prefix; the literal belongs to the harness transcript format, not to either codebase

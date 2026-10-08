@@ -1057,7 +1057,7 @@ mod resolve_tests {
         )
         .unwrap();
         let registry_path = dir.join("registry.json");
-        std::fs::write(&registry_path, registry_rows.to_string()).unwrap();
+        crate::registry_store::seed_raw(&registry_path, registry_rows.to_string());
         (dir.to_path_buf(), registry_path)
     }
 
@@ -1130,12 +1130,17 @@ path = \"/repo/alpha\"
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
         std::env::set_var("FNO_HOME", tmp.path());
-        let (_cwd, registry) = write_fixture(
+        let (_cwd, _) = write_fixture(
             tmp.path(),
             BASE_CONFIG,
             json!({"entries": []}),
-            registry_fixture(),
+            json!({"schema_version": 1, "agents": []}),
         );
+        // The registry shares graph.db with its own root, so it lives under
+        // a second root here: only the graph reads corrupt.
+        let registry = tmp.path().join("registry-root").join("registry.json");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        crate::registry_store::seed_raw(&registry, registry_fixture().to_string());
         // The store is graph.db beside the anchor name; absent reads as an
         // empty store (open creates it), so unreadable = corrupt db file.
         let db = crate::backlog::database_path(&tmp.path().join("graph.json"));
@@ -1169,7 +1174,7 @@ path = \"/repo/alpha\"
         );
         // A MISSING registry reads as an empty one (fail-open, the Python
         // loader's contract); a CORRUPT one is the unknown case.
-        std::fs::write(&tmp.path().join("registry.json"), "{not json").unwrap();
+        crate::registry_store::seed_raw(&tmp.path().join("registry.json"), "{not json");
         let registry = tmp.path().join("registry.json");
         let err = resolve_territories(&tmp.path().to_path_buf(), &registry).unwrap_err();
         assert!(err.0.contains("registry unreadable"), "{err}");

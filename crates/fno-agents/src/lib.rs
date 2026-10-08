@@ -364,6 +364,8 @@ pub mod refusal_trend;
 pub mod registry_commit;
 pub mod registry_guard;
 pub mod registry_json;
+pub mod registry_read;
+pub mod registry_store;
 pub mod release_notes;
 pub mod removals;
 pub mod rename;

@@ -550,13 +550,9 @@ fn release_claim_at_closure(node_id: &str) {
         vec![crate::claims::claims_root_for(&key), None];
     roots.dedup();
     for root in roots {
-        let Ok(path) = crate::claims::claim_path(&key, root.as_deref()) else {
-            continue;
-        };
-        if !path.exists() {
-            continue;
-        }
-        if let Err(e) = std::fs::remove_file(&path) {
+        if let Err(e) =
+            crate::claim_store::force_release(&key, "node closure", root.as_deref(), false)
+        {
             eprintln!("node closure: claim release failed for {key}: {e}");
         }
     }

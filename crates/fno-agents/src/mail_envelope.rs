@@ -594,7 +594,9 @@ mod tests {
         assert_eq!(crate::mail_header::display_body(plain_code), plain_code);
         // A sender row RENAMED after the envelope was written still renders
         // its CURRENT name: the header resolves the stored session id.
-        let renamed_path = tmp.path().join("renamed-registry.json");
+        // Its own root: one graph.db holds one registry table.
+        let renamed_path = tmp.path().join("renamed").join("registry.json");
+        std::fs::create_dir_all(renamed_path.parent().unwrap()).unwrap();
         std::fs::write(
             &renamed_path,
             serde_json::json!({"schema_version": 11, "agents": [

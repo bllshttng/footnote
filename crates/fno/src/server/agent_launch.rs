@@ -267,7 +267,7 @@ enum BirthCheck {
 /// the timeout stays unresolved rather than flattened into a no-birth claim.
 async fn registry_birth_since(cwd: &str, since_secs: u64) -> BirthCheck {
     let raw = match tokio::task::spawn_blocking(|| {
-        std::fs::read_to_string(crate::agents_view::registry_path()).ok()
+        crate::registry_read::registry_text(&crate::agents_view::registry_path()).ok()
     })
     .await
     {

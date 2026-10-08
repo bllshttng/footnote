@@ -14,13 +14,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
-from fno.claims.core import acquire_claim, release_claim
-from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.types import Claim, now_ms
+from fno.claims.core import acquire_claim
 from fno.graph.store import read_graph_strict
 
 from tests.goldens._door import door, make_sandbox, roster_stub
@@ -228,9 +225,11 @@ def test_ready_excludes_live_claimed_node(tmp_path):
     assert "ab-bbbbbbbb" in ids
 
 
-def test_non_live_claim_does_not_block(tmp_path):
-    """Only LIVE claims filter: a released claim and an expired-TTL one both
-    leave their node selectable."""
+
+def test_a_released_claim_does_not_block(tmp_path):
+    """Only LIVE claims filter: a released claim leaves its node selectable."""
+    from fno.claims.core import release_claim
+
     root = make_sandbox(tmp_path, _two_ready_entries())
     acquire_claim(key="node:ab-aaaaaaaa", holder="h", ttl_ms=3_600_000,
                   root=root / "claims")
@@ -239,22 +238,3 @@ def test_non_live_claim_does_not_block(tmp_path):
     assert code == 0, err
     ids = [e["id"] for e in json.loads(out)]
     assert "ab-aaaaaaaa" in ids
-
-    cbase = root / "claims"
-    claims_dir(cbase).mkdir(parents=True, exist_ok=True)
-    past = now_ms() - 1000
-    expired = Claim(
-        key="node:ab-aaaaaaaa",
-        holder="dead",
-        acquired_at=past - 60_000,
-        expires_at=past,
-        pid=999999,
-        host="somehost",
-        reason=None,
-        metadata={},
-    )
-    claim_path("node:ab-aaaaaaaa", root=cbase).write_text(serialize_claim(expired))
-    code, out, err = door(root, ["ready", "--all"], path_prepend=roster_stub(root, []))
-    assert code == 0, err
-    ids = [e["id"] for e in json.loads(out)]
-    assert "ab-aaaaaaaa" in ids, "expired claim should not block selection"

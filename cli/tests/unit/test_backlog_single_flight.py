@@ -26,15 +26,14 @@ from typer.testing import CliRunner
 
 from fno.backlog import advance as adv
 from fno.backlog.single_flight import (
-    Flight,
     acquire_flight,
     advance_flight_key,
     reconcile_flight_key,
 )
 from fno.claims.core import acquire_claim, claim_status
-from fno.claims.io import claim_path
 from fno.cli import app
 from fno.rust_binary import find_dev_binary
+from tests._table_seed import read_claim_row
 
 runner = CliRunner()
 
@@ -191,7 +190,7 @@ time.sleep(120)
 def _wait_for_claim(key: str, root: Path, proc: "subprocess.Popen | None", timeout: float = 8.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if claim_path(key, root=root).exists():
+        if claim_status(key, root=root)["state"] != "free":
             return
         if proc is not None and proc.poll() is not None:
             break
@@ -210,11 +209,11 @@ def test_acquire_flight_takes_a_name_root_and_ttl(iso):
     )
     assert flight is not None and not flight.held
     assert flight.holder.startswith("sync-canonical:7:"), flight.holder
-    lock = claim_status(key, root=root)
+    lock = read_claim_row(key, root)
     assert lock["pid"] == os.getpid()
     assert lock["pid_provenance"] == "holder-process"
     flight.release()
-    assert not claim_path(key, root=root).exists(), "release must drop the lock"
+    assert claim_status(key, root=root)["state"] == "free", "release must drop the lock"
 
 
 @requires_rust

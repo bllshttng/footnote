@@ -21,7 +21,9 @@ def test_session_open_twice_for_the_same_session_refuses(tmp_path):
     code, out, err = door(root, ["session", "open", "x-ccc33000", "--harness", "claude", "--session-id", SESSION_ID])
     assert code == 1, err
     assert out == "", out
-    assert err.startswith(
+    # The sandbox has no harness binary, so the liveness probe may warn first.
+    refusal = [line for line in err.splitlines() if not line.startswith("WARN: ")]
+    assert refusal[0].startswith(
         "session open: node:x-ccc33000 is already open for this session"
     ), err
     assert f"(blueprint-session:{SESSION_ID})" in err

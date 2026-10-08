@@ -16,7 +16,6 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -331,6 +330,9 @@ def test_next_starvation_receipts_explain_the_joined_denominator(
     assert "design" in r.output
 
 
+# --- x-2fe6 AC10-EDGE: the external node claim must land in the GLOBAL root ---
+
+
 def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     tmp_path, monkeypatch
 ):
@@ -342,6 +344,8 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
         "EXT-hi": {"plan_path": "/plans/hi.md"},
         "EXT-lo": {"plan_path": "/plans/lo.md"},
     })
+    from fno.graph.store import read_graph_strict
+
     before = read_graph_strict(g)
 
     r = runner.invoke(
@@ -365,16 +369,14 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     assert strip(after) == strip(before)
     served = {row["id"]: row.get("locked_by") for row in after}
     assert served["EXT-hi"] == "sess-ext-1"
-    # The claim exists in the claims dir under the opaque id.
+    # The claim exists in the claims store under the opaque id.
+    from fno.claims.core import claim_status
+
     claims_root = tmp_path / "claims"
-    locks = list(claims_root.rglob("*EXT-hi*"))
-    assert locks, f"no claim lock for EXT-hi under {claims_root}"
+    assert claim_status("node:EXT-hi")["holder"] == "sess-ext-1"
     # No claim pointer in the sidecar.
     sc = json.loads((Path(str(claims_root)).parent / "sidecars" / "EXT-hi.json").read_text())
     assert "locked_by" not in sc
-
-
-# --- x-2fe6 AC10-EDGE: the external node claim must land in the GLOBAL root ---
 
 
 def test_external_claim_lands_where_every_node_reader_looks(tmp_path, monkeypatch):
@@ -427,12 +429,8 @@ def test_external_claim_lands_where_every_node_reader_looks(tmp_path, monkeypatc
     # would certify the instrument while the target stayed broken. The TTL is
     # what survives the selector's exit, so assert the TTL, not the state.
     assert info["expires_at"], info
-    # And it is the same lockfile the acquire wrote, not a second one.
-    globals_ = list(claims_dir(global_claims_root()).rglob("*EXT-hi*"))
-    assert globals_, f"no lock under the global root {global_claims_root()}"
-    assert not list(claims_dir().rglob("*EXT-hi*")), (
-        "the claim landed in the cwd-default tree, where no node reader looks"
-    )
+    # And it landed under the global root, not the cwd-default tree.
+    assert claim_status(key, root=global_claims_root())["holder"] == "sess-ext-root"
 
 
 def test_the_external_claim_still_blocks_after_its_selector_exits(
@@ -452,9 +450,9 @@ def test_the_external_claim_still_blocks_after_its_selector_exits(
     asks the guard the question a dispatcher asks.
     """
     import json
-    import re
 
-    from fno.claims.core import claim_path, claim_status
+    from fno.claims.core import claim_status
+    from tests._table_seed import update_claim
 
     rows = _rows_basic()
     _wire(monkeypatch, tmp_path, rows, {
@@ -468,17 +466,12 @@ def test_the_external_claim_still_blocks_after_its_selector_exits(
     assert json.loads(r.output)["id"] == "EXT-hi"
 
     key = "node:EXT-hi"
-    path = claim_path(key)
-
     dead = 999_999
     import psutil
 
     while psutil.pid_exists(dead):
         dead += 1
-    text = path.read_text()
-    patched, n = re.subn(r"(?m)^pid:.*$", f"pid: {dead}", text)
-    assert n == 1, f"expected exactly one pid line in the claim: {text!r}"
-    path.write_text(patched)
+    update_claim(key, pid=dead)
 
     # Dead pid INSIDE the TTL is `suspect`, and suspect blocks. Without the TTL
     # the same reading is `stale`, which does not.

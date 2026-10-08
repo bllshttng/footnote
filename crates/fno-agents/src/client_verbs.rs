@@ -408,19 +408,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// duck-typed `getattr`/`row.get` so extra/missing optional fields behave the
 /// same across the two implementations.
 pub(crate) fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
-    let bytes = match fs::read(registry_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("registry read failed: {e}")),
-    };
-    // Strict UTF-8: Python reads the registry with encoding="utf-8" (no
-    // replacement), so invalid bytes are a registry error, not silently mangled
-    // content the verbs then operate on (codex P2). (The trace events.jsonl read
-    // stays lossy on purpose -- Python uses errors="replace" there.)
-    let text =
-        std::str::from_utf8(&bytes).map_err(|e| format!("registry is not valid UTF-8: {e}"))?;
-    let raw: Value =
-        serde_json::from_str(text).map_err(|e| format!("registry is malformed JSON: {e}"))?;
+    let raw = crate::registry_store::read(registry_path).map_err(|e| e.to_string())?;
     let obj = raw
         .as_object()
         .ok_or_else(|| "registry top-level is not a JSON object".to_string())?;
@@ -4720,6 +4708,17 @@ mod tests {
 
     #[test]
     fn registry_rows() {
+        // Each legacy shape gets its own home: the first read imports the
+        // file into the table and fences the path.
+        fn fresh_registry(dir: &std::path::Path, body: impl AsRef<[u8]>) -> std::path::PathBuf {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let home = dir.join(format!("case-{n}")).join("agents");
+            fs::create_dir_all(&home).unwrap();
+            let reg = home.join("registry.json");
+            fs::write(&reg, body).unwrap();
+            reg
+        }
         let dir = std::env::temp_dir().join(format!(
             "fno-cv-reg-{}-{}",
             std::process::id(),
@@ -4735,21 +4734,19 @@ mod tests {
 
         let valid = r#"{"name":"cx","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         let valid_current = r#"{"name":"cx","harness":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
-        fs::write(
+        crate::registry_store::seed_raw(
             &reg,
             format!(r#"{{"schema_version":3,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         let rows = load_registry_entries(&reg).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["name"], "cx");
 
         let valid_g = r#"{"name":"e","provider":"gemini","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":3,"entries":[{valid_g}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         for (floor, expected) in [
@@ -4761,79 +4758,69 @@ mod tests {
         }
 
         // Current, prior, and v1 registry shapes remain readable.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":8,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":5,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":4,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":1,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Newer schema reads forward so one ahead writer cannot brick all readers.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":99,"agents":[{valid_current}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":15,"agents":[{valid_current}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             format!(r#"{{"schema_version":14,"agents":[{valid}]}}"#),
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Missing or non-integer versions are damage.
-        fs::write(&reg, r#"{"agents":[]}"#).unwrap();
+        let reg = fresh_registry(&dir, r#"{"agents":[]}"#);
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
+        let reg = fresh_registry(&dir, r#"{"schema_version":"fourteen","agents":[]}"#);
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown providers load as undispatchable rows; spawn refuses them.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"goose","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Empty provider without a harness is corrupt.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         assert!(load_registry_entries(&reg).is_err());
 
         // Unknown statuses are corrupt.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"codex","cwd":"/x","log_path":"/l","status":"zombie"}]}"#,
-        )
-        .unwrap();
+        );
         assert!(load_registry_entries(&reg).is_err());
 
         // Projected AgentStatus values, including exited, remain readable.
@@ -4847,13 +4834,12 @@ mod tests {
             "permanent_dead",
             "ready",
         ] {
-            fs::write(
-                &reg,
+            let reg = fresh_registry(
+                &dir,
                 format!(
                     r#"{{"schema_version":3,"agents":[{{"name":"x","provider":"codex","cwd":"/x","log_path":"/l","status":"{st}"}}]}}"#
                 ),
-            )
-            .unwrap();
+            );
             assert_eq!(
                 load_registry_entries(&reg).unwrap().len(),
                 1,
@@ -4861,17 +4847,16 @@ mod tests {
             );
         }
 
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":3,"agents":[{"name":"x","provider":"codex","cwd":"/x","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         assert!(load_registry_entries(&reg).is_err());
 
-        fs::write(&reg, r#"{"schema_version":3,"agents":{}}"#).unwrap();
+        let reg = fresh_registry(&dir, r#"{"schema_version":3,"agents":{}}"#);
         assert!(load_registry_entries(&reg).is_err());
 
-        fs::write(&reg, [0xff, 0xfe, 0x00]).unwrap();
+        let reg = fresh_registry(&dir, [0xff, 0xfe, 0x00]);
         assert!(load_registry_entries(&reg).is_err());
 
         fs::remove_dir_all(&dir).ok();
@@ -4885,24 +4870,21 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
-        let reg = dir.join("registry.json");
 
         // Alien harness rows load instead of bricking.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":9,"agents":[{"name":"nh","provider":"newharness","harness":"newharness","harness_session_id":"deadbeefcafef00d","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         let rows = load_registry_entries(&reg).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["provider"], "newharness");
 
         // Provider-less rows load with provider backfilled from harness.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":9,"agents":[{"name":"pv","harness":"claude","harness_session_id":"aaaabbbbccccdddd","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         let rows = load_registry_entries(&reg).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["provider"], "claude");
@@ -4912,40 +4894,36 @@ mod tests {
         assert_eq!(rows[0]["claude_session_uuid"], "aaaabbbbccccdddd");
 
         // AC2-ERR: a diverged row (provider != harness) LOADS (warning only).
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":9,"agents":[{"name":"dv","provider":"claude","harness":"codex","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Heal: a truthy-but-corrupt harness (whitespace) is replaced from the
         // valid provider, so resume (which reads through this) never keys on a
         // corrupt harness.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":9,"agents":[{"name":"heal","provider":"claude","harness":"c x","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         let rows = load_registry_entries(&reg).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["harness"], "claude");
 
         // AC1-ERR: an empty-identity row (empty provider, no harness) still
         // bricks -- the corruption guard survives the relaxation.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":9,"agents":[{"name":"bad","provider":"","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         assert!(load_registry_entries(&reg).is_err());
 
         // Whitespace-bearing identity is corruption, not an alien token.
-        fs::write(
-            &reg,
+        let reg = fresh_registry(
+            &dir,
             r#"{"schema_version":9,"agents":[{"name":"ws","provider":"a b","cwd":"/x","log_path":"/l","status":"live"}]}"#,
-        )
-        .unwrap();
+        );
         assert!(load_registry_entries(&reg).is_err());
 
         fs::remove_dir_all(&dir).ok();

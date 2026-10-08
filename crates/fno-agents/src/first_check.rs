@@ -201,7 +201,7 @@ fn transfer_birth_claim(row: &RegistryEntry, born_at: i64) -> Result<(), String>
     };
     let key = format!("node:{node}");
     let path = claims::claim_path(&key, None)?;
-    if !path.exists() {
+    if crate::claim_store::read_at_path(&path)?.is_none() {
         return Ok(());
     }
     let sid = row.harness_session_id.clone();
@@ -233,12 +233,11 @@ fn transfer(
     opts: &AcquireOpts,
     born_at: Option<i64>,
 ) -> Result<Option<ClaimRecord>, String> {
-    claims::with_recovery_lock(path, || {
-        let mut claim = match claims::read_claim_file(path) {
-            Ok(claim) => claim,
-            Err(claims::ReadError::GoneAway) => return Ok(None),
-            Err(claims::ReadError::Corrupted(e)) => return Err(e),
+    {
+        let Some(observed) = crate::claim_store::read_at_path(path)? else {
+            return Ok(None);
         };
+        let mut claim = observed.clone();
         if claim.session_id.as_deref() != Some(parent) || claim.holder == holder {
             return Ok(None);
         }
@@ -267,9 +266,8 @@ fn transfer(
         claim.session_id = opts.identity.as_ref().map(|(sid, _)| sid.clone());
         claim.harness = opts.identity.as_ref().map(|(_, harness)| harness.clone());
         claim.reason = opts.reason.clone();
-        claims::atomic_replace(path, &claims::serialize_claim(&claim)?)?;
-        Ok(Some(claim))
-    })
+        crate::claim_store::replace_observed_at(path, &observed, &claim)
+    }
 }
 
 pub(crate) fn take_parent_claim(

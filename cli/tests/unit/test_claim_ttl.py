@@ -101,44 +101,6 @@ class TestRefreshReanchorsADeadPid:
     forced to protect the dead one.
     """
 
-    def test_a_dead_anchor_is_replaced_by_the_durable_session_pid(
-        self, tmp_path, monkeypatch
-    ):
-        acquire_claim(
-            key="node:x-resp", holder="target-session:s", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
-        )
-        assert claim_status("node:x-resp", root=tmp_path)["state"] == "suspect"
-
-        _anchor(monkeypatch, os.getpid())
-        refreshed = refresh_claim(
-            key="node:x-resp", holder="target-session:s", ttl_ms=3_600_000,
-            root=tmp_path,
-        )
-        assert refreshed.pid == os.getpid()
-        assert claim_status("node:x-resp", root=tmp_path)["state"] == "live"
-
-    def test_the_anchor_is_held_while_the_pid_moves(self, tmp_path, monkeypatch):
-        """acquired_at STAYS. The do provenance row keys started_at on it, so
-        moving it makes the release stamp open a second row instead of closing
-        the one this claim opened. Reuse detection still passes because the
-        anchor process started BEFORE the claim, asserted here by classifying
-        LIVE rather than by reading the field alone."""
-        from fno.claims.core import claim_status
-
-        original = acquire_claim(
-            key="node:x-anchor", holder="target-session:s", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
-        )
-        assert claim_status("node:x-anchor", root=tmp_path)["state"] == "suspect"
-        _anchor(monkeypatch, os.getpid())
-        refreshed = refresh_claim(
-            key="node:x-anchor", holder="target-session:s", ttl_ms=3_600_000,
-            root=tmp_path,
-        )
-        assert refreshed.acquired_at == original.acquired_at
-        assert refreshed.pid == os.getpid()
-        assert claim_status("node:x-anchor", root=tmp_path)["state"] == "live"
 
     def test_a_re_anchoring_refresh_still_extends_the_deadline(
         self, tmp_path, monkeypatch

@@ -301,7 +301,7 @@ fn a_held_cargo_build_allows_without_touching_loop_state() {
     let home = tmp.path().join("home");
     let _env = setup(tmp.path(), &home);
     let cwd = fs::canonicalize(tmp.path()).unwrap();
-    let waiters = home.join(".fno/claims/build-waiters");
+    let waiters = home.join(".fno/claim-aux/build-waiters");
     fs::create_dir_all(&waiters).unwrap();
     let body = serde_json::json!({
         "pid": std::process::id(),

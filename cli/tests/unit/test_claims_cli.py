@@ -8,9 +8,8 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
+from fno.claims.cli import cli, _parse_ttl
 from fno.claims.core import acquire_claim
-from fno.claims.io import dedup_claims_roots
 
 from .test_claim_reap import _dead_pid  # noqa: F401
 from fno.graph.store import read_graph_strict
@@ -42,7 +41,9 @@ def test_acquire_fresh_key(cwd_tmp):
     result = runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h1"])
     assert result.exit_code == 0
     assert "acquired" in result.output
-    assert (cwd_tmp / ".fno" / "claims" / "node%3Aab-1.lock").exists()
+    from fno.claims.core import claim_status
+
+    assert claim_status("node:ab-1")["holder"] == "h1"
 
 
 def test_acquire_json_output(cwd_tmp):
@@ -267,8 +268,9 @@ def test_list_no_prefix_sees_global_claims_from_different_cwd(tmp_path, monkeypa
     )
     assert acquired.exit_code == 0
     # Sanity: the claim landed under the global root, not the repo-local one.
-    assert (home / ".fno" / "claims" / "node%3Aab-1.lock").exists()
-    assert not (repo / ".fno" / "claims").exists()
+    from fno.claims.core import claim_status
+
+    assert claim_status("node:ab-1", root=home)["holder"] == "h"
 
     listed = runner.invoke(cli, ["list", "--json"])
     assert listed.exit_code == 0
@@ -297,6 +299,9 @@ def test_merge_across_roots_first_root_wins_row_and_totals_together(tmp_path):
     first root) while also being counted stale (from the second root) - an
     internal inconsistency invisible today only because the totals hint text
     happens to be gated on all_rows being empty."""
+    from fno.claims.cli import _merge_claims_across_roots
+    from fno.claims.io import dedup_claims_roots
+
     root_a = tmp_path / "root_a"
     root_b = tmp_path / "root_b"
     acquire_claim("k", "holder-a", pid=os.getpid(), root=root_a)
@@ -304,7 +309,7 @@ def test_merge_across_roots_first_root_wins_row_and_totals_together(tmp_path):
 
     deduped = dedup_claims_roots([root_a, root_b])
     all_rows, row_roots, totals = _merge_claims_across_roots(
-        deduped, prefix="", include_stale=False
+        deduped, prefix="k", include_stale=False
     )
 
     assert [r["key"] for r in all_rows] == ["k"]
@@ -326,6 +331,9 @@ def test_merge_across_roots_live_in_second_root_is_not_hidden_by_first_roots_sta
     counted instead - defeating the exact migration scenario this
     function's own docstring names. The live claim must win regardless of
     which root was scanned first."""
+    from fno.claims.cli import _merge_claims_across_roots
+    from fno.claims.io import dedup_claims_roots
+
     root_a = tmp_path / "root_a"
     root_b = tmp_path / "root_b"
     acquire_claim("k", "holder-a", pid=_dead_pid(), root=root_a)
@@ -333,7 +341,7 @@ def test_merge_across_roots_live_in_second_root_is_not_hidden_by_first_roots_sta
 
     deduped = dedup_claims_roots([root_a, root_b])
     all_rows, row_roots, totals = _merge_claims_across_roots(
-        deduped, prefix="", include_stale=False
+        deduped, prefix="k", include_stale=False
     )
 
     assert [r["key"] for r in all_rows] == ["k"], (
@@ -505,7 +513,6 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
     itself the one choke point every acquire path reaches. It is also the
     default path for every `fno agents spawn --node` worker, so a worker killed
     mid-phase would leave no do row at all."""
-    import fno.paths
     from fno.claims.core import acquire_claim
 
     home = tmp_path / "home"
@@ -574,7 +581,6 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
     terminal still leaves a started row instead of reading unstarted (the
     killed-mid-phase specimen: PR open and green while the node showed only a
     blueprint row)."""
-    import fno.paths
 
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
@@ -610,7 +616,6 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
     ended_at on the SAME row via duplicate-fill - the merge that makes
     acquire-time stamping safe without losing the release window or adding a
     second row."""
-    import fno.paths
 
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
@@ -644,7 +649,6 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
 def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
     """A one-node graph wired as fno.paths.graph_json, with a clean claude
     ambient identity. Returns the graph path."""
-    import fno.paths
 
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
@@ -725,9 +729,7 @@ def test_rollback_do_spares_an_earlier_open_row_from_the_same_session(
     the claim's acquired_at while the row keeps the FIRST started_at (append
     never overwrites), so the rollback's started_at no longer matches and the
     earlier window survives its successor's refusal."""
-    import yaml
-
-    from fno.claims.io import claim_path
+    from tests._table_seed import read_claim_row, update_claim
 
     g = _do_graph(tmp_path, monkeypatch, "ab-rbearly", "sess-rb-3")
     home = tmp_path / "home"
@@ -740,10 +742,8 @@ def test_rollback_do_spares_an_earlier_open_row_from_the_same_session(
     # Stand in for the re-acquire's refreshed acquired_at without a wall-clock
     # sleep: the row's started_at is second-granular, so a same-second re-acquire
     # would not exercise the divergence this test is about.
-    cp = claim_path("node:ab-rbearly", root=home)
-    raw = yaml.safe_load(cp.read_text())
-    raw["acquired_at"] = raw["acquired_at"] + 60_000
-    cp.write_text(yaml.safe_dump(raw, sort_keys=False))
+    acquired = read_claim_row("node:ab-rbearly", root=home)["acquired_at"]
+    update_claim("node:ab-rbearly", root=home, acquired_at=acquired + 60_000)
 
     rel = runner.invoke(
         cli, ["release", "node:ab-rbearly", "--holder", "target-session:s", "--rollback-do"]
@@ -1105,8 +1105,9 @@ def test_a_stub_captured_at_import_never_answers_for_the_cli(cwd_tmp):
             ],
         )
         assert result.exit_code == 0, result.output
-        claim_file = cwd_tmp / ".fno" / "claims" / "node%3AN.lock"
-        assert claim_file.exists(), (
+        from fno.claims.core import claim_status
+
+        assert claim_status("node:N")["holder"] == "target-session:sid-captured", (
             f"acquire printed success but wrote no claim: {result.output}"
         )
     finally:

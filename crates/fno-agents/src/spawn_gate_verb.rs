@@ -1900,7 +1900,7 @@ mod tests {
             "holder_pid": std::process::id(),
         }));
         let claims_dir = claims_root.join(".fno").join("claims");
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         let handed = gate_answer(&json!({
             "mode": "gate",
             "name": "revival-two",
@@ -1918,7 +1918,7 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "hold false leaves no claim behind: {:?}",
-            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+            leftovers.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
         );
         assert_eq!(handed["status"], "admitted", "{handed}");
         assert!(handed["gate_key"].is_string(), "{handed}");
@@ -1958,7 +1958,7 @@ mod tests {
         }));
 
         let claims_dir = dir.join("claims-root").join(".fno").join("claims");
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         std::env::remove_var(crate::paths::HOME_ENV);
         std::env::remove_var("FNO_CLAIMS_ROOT");
         match prior_config {
@@ -1980,7 +1980,7 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "refusals before the mint write nothing: {:?}",
-            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+            leftovers.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -2062,8 +2062,6 @@ mod tests {
         std::fs::create_dir_all(&agents_home).unwrap();
         std::env::set_var(crate::paths::HOME_ENV, &agents_home);
         let root = dir.join("claims-root");
-        let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -2151,7 +2149,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let argv: Vec<String> = [
             "t-reserved-x-4444",
@@ -2166,14 +2163,14 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let code = reserve_spawn_gate(&dir, &argv);
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code, 2);
         assert!(
             leftovers.is_empty(),
             "the ceiling refusal writes no claim: {:?}",
-            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+            leftovers.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -2188,7 +2185,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -2207,16 +2203,12 @@ mod tests {
             "{}.lock",
             crate::claims::encode_key("worker:t-first-x-4444")
         ));
-        std::fs::write(
-            &first,
-            format!(
+        crate::claim_store::seed_yaml_at_path(&first, &format!(
                 "schema_version: {}\nkey: worker:t-first-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 crate::claims::SCHEMA_VERSION,
                 now + 600_000,
                 std::process::id()
-            ),
-        )
-        .unwrap();
+            ));
         let argv: Vec<String> = [
             "t-second-x-4444",
             "--provider",
@@ -2228,7 +2220,7 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let code = reserve_spawn_gate(&dir, &argv);
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code, 2);

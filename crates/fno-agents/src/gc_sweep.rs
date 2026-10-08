@@ -4711,9 +4711,8 @@ mod tests {
         std::fs::write(&claim, b"claim").unwrap();
         age_file(&claim, 40);
         let registry =
-            br#"{"entries":[{"name":"live-worker","created_at":"2026-09-09T00:00:00Z"}]}"#;
-        std::fs::write(home.registry_json(), registry).unwrap();
-
+            br#"{"schema_version":1,"entries":[{"name":"live-worker","cwd":"/x","created_at":"2026-09-09T00:00:00Z"}]}"#;
+        crate::registry_store::seed_raw(&home.registry_json(), registry);
         let summary = reap_state_files(
             &home,
             crate::agents_config::StateReapConfig::default(),
@@ -4723,7 +4722,8 @@ mod tests {
         assert!(!claim.exists());
         assert_eq!(summary.expired_claims.deleted, 1);
         assert_eq!(summary.totals.deleted, 1);
-        assert_eq!(std::fs::read(home.registry_json()).unwrap(), registry);
+        let rows = crate::state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(rows.entries.len(), 1);
         assert!(summary.applied);
         assert!(!summary.dry_run);
         std::fs::remove_dir_all(&base).ok();

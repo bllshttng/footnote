@@ -1394,17 +1394,11 @@ fn parse_blocker_list(value: Option<&str>) -> Vec<String> {
 /// counts as a worker here too.
 pub(crate) fn live_worker(node_id: &str) -> Option<String> {
     let key = format!("node:{node_id}");
-    let Ok(path) = crate::claims::claim_path(&key, None) else {
-        return None;
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return None;
-    };
-    let Ok(rec) = serde_json::from_str::<crate::claims::ClaimRecord>(&text) else {
-        return None;
-    };
-    match crate::claims::classify(&rec, None) {
-        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect => Some(rec.holder),
+    let (state, record) = crate::claims::status(&key, None);
+    match state {
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect => {
+            record.map(|r| r.holder)
+        }
         _ => None,
     }
 }

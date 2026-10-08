@@ -1577,35 +1577,26 @@ fn now_secs() -> u64 {
 /// unparseable lockfile yields fewer entries, never an error - same posture
 /// as `claim_sweep_payload`.
 fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
-    let node_pfx = crate::claims::encode_key("node:");
-    let dispatch_pfx = crate::claims::encode_key("dispatch:");
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
+    let records = match crate::claim_store::records_in(dir, None, true) {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("claim ages {}: {error}", dir.display());
+            return Vec::new();
+        }
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if !name.ends_with(".lock")
-            || !(name.starts_with(&node_pfx) || name.starts_with(&dispatch_pfx))
-        {
-            continue;
-        }
-        let Ok(rec) = crate::claims::read_claim_file(&entry.path()) else {
-            continue; // gone-away or corrupted: skip, never abort
-        };
-        if !(rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")) {
-            continue; // filename lied about its own key: exclude like the sweep does
-        }
-        let state = crate::claims::classify(&rec, None);
-        out.push(ClaimAge {
-            key: rec.key,
-            holder: rec.holder,
-            acquired_at_ms: rec.acquired_at,
-            state,
-        });
-    }
-    out
+    records
+        .into_iter()
+        .filter(|r| r.key.starts_with("node:") || r.key.starts_with("dispatch:"))
+        .map(|rec| {
+            let state = crate::claim_verbs::status_verdict(&rec).0;
+            ClaimAge {
+                key: rec.key,
+                holder: rec.holder,
+                acquired_at_ms: rec.acquired_at,
+                state,
+            }
+        })
+        .collect()
 }
 
 /// The whole needs fold over explicit sources: events read + fold + the three
@@ -1891,7 +1882,7 @@ mod tests {
         // `fno agents needs`. A registry it cannot read also spends no
         // subprocess, which the panicking factory is what asserts.
         let home = refused_home("unreadable", 0);
-        std::fs::write(home.registry_json(), b"{ not json at all").unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), b"{ not json at all");
 
         let items = refused_worker_items_with(&home, |_| {
             panic!("an unreadable registry means no probe to spend")

@@ -54,7 +54,16 @@ pub fn queue_dir_for(claim_path: &Path) -> PathBuf {
 /// A lane dir beside a claim's lockfile: `<claim_path>.<lane>.d`. `queue` is
 /// the shipped FIFO; `priority` and `full` order their waiters the same way.
 pub fn lane_dir_for(claim_path: &Path, lane: &str) -> PathBuf {
-    let mut s = claim_path.as_os_str().to_os_string();
+    let locator = match claim_path
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "claims"))
+    {
+        Some(parent) => {
+            crate::claims_root::auxiliary_dir(parent).join(claim_path.file_name().unwrap())
+        }
+        None => claim_path.to_path_buf(),
+    };
+    let mut s = locator.as_os_str().to_os_string();
     s.push(".");
     s.push(lane);
     s.push(".d");

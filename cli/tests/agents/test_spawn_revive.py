@@ -624,15 +624,10 @@ def test_unknown_orphan_guard_survives_the_caller_dying(revive_ready, monkeypatc
 
     # Rewrite the holder's pid to a dead one: the acquiring `fno agents mail send` has
     # exited, which is exactly when the old lifetime stopped guarding anything.
+    from tests._table_seed import update_claim
+
     root = global_claims_root()
-    path = root / "claims" / f"{CLAIM_KEY.replace(':', '_')}.yaml"
-    if not path.exists():  # layout is an implementation detail; find it
-        path = next(p for p in root.rglob("*") if p.is_file() and "session" in p.name)
-    dead_pid = _reap_a_dead_pid()
-    path.write_text(
-        path.read_text().replace(f"pid: {os.getpid()}", f"pid: {dead_pid}"),
-        encoding="utf-8",
-    )
+    update_claim(CLAIM_KEY, root=root, pid=_reap_a_dead_pid())
 
     assert claim_status(CLAIM_KEY, root=root)["state"] == "suspect"
     with pytest.raises(ClaimHeldByOther):

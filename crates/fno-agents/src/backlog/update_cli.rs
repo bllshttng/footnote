@@ -1307,6 +1307,7 @@ fn apply_mutators(
                         reason: Some("locked-by stamp".into()),
                         metadata: None,
                         pid_provenance: None,
+                        host: None,
                         root: None,
                         events_dir: None,
                         identity: None,

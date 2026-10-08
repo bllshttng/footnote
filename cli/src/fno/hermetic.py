@@ -135,6 +135,9 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # would point test-built artifacts at an arbitrary tree; neutralise re-pins
     # it into the sandbox after this scrub.
     "CARGO_BUILD_BUILD_DIR",
+    # Cargo sets it on processes it launches, and the live-store fence keys
+    # on it; a test must not inherit that from a cargo-run parent.
+    "CARGO_MANIFEST_DIR",
     "STATE_FILE",
     "POSTMORTEMS_DIR",
     "POSTMORTEM_CORRECTIONS_LOG",

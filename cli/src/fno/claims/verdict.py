@@ -11,7 +11,7 @@ from typing import Any, Sequence
 import psutil
 
 from fno.rust_binary import resolve_binary
-from .io import claim_path, claims_dir
+from .io import ClaimGoneAway, claim_path, claims_dir, read_claim_file
 
 
 class ClaimVerdictUnavailable(RuntimeError):
@@ -126,9 +126,13 @@ def claim_verdicts(
     for key in requested:
         if key in verdicts:
             continue
-        if claim_path(key, root=root).exists():
+        locator = (claims_dir_path or claims_dir(root)) / claim_path(key, root=root).name
+        try:
+            read_claim_file(locator)
+        except ClaimGoneAway:
+            verdicts[key] = {"key": key, "state": "free"}
+        else:
             raise ClaimSweepOmission(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
-        verdicts[key] = {"key": key, "state": "free"}
     return verdicts
 
 

@@ -103,7 +103,7 @@ fn render_request(request: &Request) -> Result<Receipt, String> {
     // roster here: inputs_from_rows rebuilds the inputs without one, and
     // the payload allowlist strips `leads_at`.
     let now = now_secs();
-    let agents = std::fs::read_to_string(crate::agents_view::registry_path())
+    let agents = crate::registry_read::registry_text(&crate::agents_view::registry_path())
         .map(|raw| agents_from_registry(&raw, now))
         .unwrap_or_default();
     let graph = backlog_view::graph_path();

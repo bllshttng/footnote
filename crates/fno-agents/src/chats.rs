@@ -165,10 +165,7 @@ fn recipient_key(to: &str) -> String {
         return to.to_string();
     }
     let home = crate::paths::AgentsHome::from_env();
-    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
-        return to.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = crate::registry_store::read(&home.registry_json()) else {
         return to.to_string();
     };
     for row in parsed
@@ -198,10 +195,7 @@ fn sender_key(from: &str, from_session: &str) -> String {
         return from.to_string();
     }
     let home = crate::paths::AgentsHome::from_env();
-    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
-        return from_session.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = crate::registry_store::read(&home.registry_json()) else {
         return from_session.to_string();
     };
     for row in parsed
@@ -2237,11 +2231,10 @@ mod tests {
         // show --json layers the reply identity over the stored row: the
         // registry-resolved name and short_id, the session id, and the fmail
         // id. The row's fields stay verbatim underneath.
-        std::fs::write(
+        crate::registry_store::seed_raw(
             home_pin.join("registry.json"),
-            r#"{"agents":[{"name":"rowan","session_id":"sess-a","harness":"claude","short_id":"rowan-short"}]}"#,
-        )
-        .unwrap();
+            r#"{"schema_version":1,"agents":[{"name":"rowan","cwd":"/x","session_id":"sess-a","harness_session_id":"sess-a","harness":"claude","short_id":"rowan-short"}]}"#,
+        );
         let jq = |caller: &str| ShowQuery {
             thread: false,
             json: true,
@@ -2261,11 +2254,10 @@ mod tests {
         // A send addressed to a registry name records the resolved session
         // key as to_key, so the recipient reads their mail by their own
         // session id.
-        std::fs::write(
+        crate::registry_store::seed_raw(
             home_pin.join("registry.json"),
-            r#"{"agents":[{"name":"rowan","session_id":"sess-b-uuid","harness":"claude"}]}"#,
-        )
-        .unwrap();
+            r#"{"schema_version":1,"agents":[{"name":"rowan","cwd":"/x","harness_session_id":"sess-b-uuid","harness":"claude"}]}"#,
+        );
         let named = bus_line("fmail-777777777777", "sess-a", "rowan", "send");
         let Recorded::Message {
             chat_id: named_chat,

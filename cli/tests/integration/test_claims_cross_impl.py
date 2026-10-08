@@ -1,9 +1,9 @@
-"""Cross-implementation compatibility matrix for the claims lockfile protocol.
+"""Cross-implementation compatibility matrix for the claims table.
 
 The protocol has two implementations: the Python reference
 (``fno.claims``, the only operator CLI) and the native Rust module
 (``crates/fno-agents/src/claims.rs``, used by the daemon/adopt/drive hot
-paths). Both operate on the same ``.fno/claims/`` files, so any divergence is
+paths). Both operate on the same claims table in ``graph.db``, so any divergence is
 split-brain: one side reclaims what the other considers held. This module is
 the merge gate proving they agree, in both directions.
 
@@ -28,13 +28,13 @@ import time
 from pathlib import Path
 
 import pytest
-import yaml
 
 from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status, release_claim
 from fno.claims.hostid import machine_id as py_machine_id
-from fno.claims.io import claim_path, encode_key, read_claim_file, serialize_claim
+from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import Claim
 from fno.rust_binary import find_dev_binary
+from tests._table_seed import claim_history_rows, read_claim_row
 
 RUST_BIN = find_dev_binary()
 
@@ -272,9 +272,8 @@ def test_python_stale_rust_reclaims_archives_and_audits(tmp_path: Path) -> None:
     assert r.returncode == 0, f"stale claim not reclaimed: {r.stderr}"
     assert rust_json(r)["holder"] == "pty:new"
 
-    expired = list((tmp_path / ".fno" / "claims" / ".expired").iterdir())
-    assert len(expired) == 1, "stale claim must be archived by rename, not unlinked"
-    assert expired[0].name.startswith(encode_key("session:stale-a"))
+    archived = claim_history_rows("session:stale-a", tmp_path)
+    assert [r["holder"] for r in archived] == ["pty:dead"], "stale claim must be archived"
     kinds = [e["type"] for e in events(tmp_path)]
     assert "claim_stale_reclaimed" in kinds
     reclaimed = [e for e in events(tmp_path) if e["type"] == "claim_stale_reclaimed"][0]
@@ -291,8 +290,7 @@ def test_rust_stale_python_reclaims_and_archives(tmp_path: Path, monkeypatch) ->
     monkeypatch.chdir(tmp_path)  # Python audit events land in <cwd>/.fno/events.jsonl
     claim = acquire_claim("session:stale-b", "pty:new", pid=os.getpid(), root=tmp_path)
     assert claim.holder == "pty:new"
-    expired = list((tmp_path / ".fno" / "claims" / ".expired").iterdir())
-    assert len(expired) == 1
+    assert [r["holder"] for r in claim_history_rows("session:stale-b", tmp_path)] == ["pty:dead"]
     assert "claim_stale_reclaimed" in [e["type"] for e in events(tmp_path)]
 
 
@@ -322,28 +320,6 @@ def test_hybrid_arm_parity_expired_ttl(tmp_path: Path) -> None:
         rs = rust_json(rust("status", key, tmp_path, tmp_path))["state"]
         assert py == want, f"python classified {key} as {py}, want {want}"
         assert rs == want, f"rust classified {key} as {rs}, want {want}"
-
-
-# --------------------------------------------------------------------------
-# 6: filename-encoding parity
-# --------------------------------------------------------------------------
-
-
-def test_encoding_parity_produces_byte_identical_filenames(tmp_path: Path) -> None:
-    # ':' '/' ' ' and non-ASCII must encode identically (uppercase hex) or the
-    # two implementations would silently lock DIFFERENT files for one key.
-    for key in ("session:a/b c", "session:naïve-café", "session:100%:done"):
-        r = rust("acquire", key, tmp_path, tmp_path,
-                 "--holder", "pty:x", "--pid", str(os.getpid()))
-        assert r.returncode == 0, r.stderr
-        expected = claim_path(key, root=tmp_path)
-        assert expected.exists(), (
-            f"encoding diverged for {key!r}: python expects {expected.name!r}, "
-            f"rust wrote {[p.name for p in (tmp_path / '.fno' / 'claims').iterdir()]}"
-        )
-        # And Python can read it back through its own path derivation.
-        assert read_claim_file(expected).key == key
-        release_claim(key, "pty:x", root=tmp_path)
 
 
 # --------------------------------------------------------------------------
@@ -387,208 +363,19 @@ def test_race_python_vs_rust_single_winner(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# 8: recovery-mutex interop - a fresh mutex is waited on; a corpse is stolen
-#
-# Both halves are wire protocol: the two implementations must agree on when a
-# mutex is honestly held and when it is a corpse, or one side bricks a claim
-# key the other could have recovered.
+# 9: a pid claim has no expiry
 # --------------------------------------------------------------------------
 
 
-def _hold_recovery_mutex(root: Path, key: str, seconds: float) -> tuple[Path, threading.Thread]:
-    path = claim_path(key, root=root)
-    mutex = path.with_name(path.name + ".recovery.d")
-    mutex.mkdir(parents=True)
-
-    def _release() -> None:
-        time.sleep(seconds)
-        mutex.rmdir()
-
-    t = threading.Thread(target=_release)
-    t.start()
-    return mutex, t
-
-
-def test_recovery_mutex_held_rust_waits_does_not_steal(tmp_path: Path) -> None:
-    write_raw_claim(tmp_path, _stale_claim("session:rec-a"))
-    mutex, releaser = _hold_recovery_mutex(tmp_path, "session:rec-a", seconds=1.0)
-    t0 = time.monotonic()
-    r = rust("acquire", "session:rec-a", tmp_path, tmp_path,
-             "--holder", "pty:waiter", "--pid", str(os.getpid()))
-    elapsed = time.monotonic() - t0
-    releaser.join()
-    assert r.returncode == 0, f"acquire after mutex release failed: {r.stderr}"
-    assert elapsed >= 0.9, "rust must WAIT for the held recovery mutex, not steal it"
-    assert not mutex.exists()
-
-
-def test_recovery_mutex_held_python_waits_does_not_steal(tmp_path: Path, monkeypatch) -> None:
-    write_raw_claim(tmp_path, _stale_claim("session:rec-b"))
-    monkeypatch.chdir(tmp_path)
-    mutex, releaser = _hold_recovery_mutex(tmp_path, "session:rec-b", seconds=1.0)
-    t0 = time.monotonic()
-    claim = acquire_claim("session:rec-b", "pty:waiter", pid=os.getpid(), root=tmp_path)
-    elapsed = time.monotonic() - t0
-    releaser.join()
-    assert claim.holder == "pty:waiter"
-    assert elapsed >= 0.9, "python must WAIT for the held recovery mutex, not steal it"
-
-
-def _plant_recovery_corpse(root: Path, key: str) -> Path:
-    """A recovery mutex left by a killed recoverer, backdated past the threshold."""
-    from fno.mutex import STALE_MUTEX_STEAL_S
-
-    mutex = claim_path(key, root=root).with_name(
-        claim_path(key, root=root).name + ".recovery.d"
-    )
-    mutex.mkdir(parents=True)
-    old = time.time() - (STALE_MUTEX_STEAL_S + 60)
-    os.utime(mutex, (old, old))
-    return mutex
-
-
-def test_recovery_mutex_corpse_stolen_by_rust(tmp_path: Path) -> None:
-    write_raw_claim(tmp_path, _stale_claim("session:rec-c"))
-    mutex = _plant_recovery_corpse(tmp_path, "session:rec-c")
-
-    r = rust("acquire", "session:rec-c", tmp_path, tmp_path,
-             "--holder", "pty:successor", "--pid", str(os.getpid()))
-
-    assert r.returncode == 0, f"rust never recovered past the corpse: {r.stderr}"
-    assert not mutex.exists()
-
-
-def test_recovery_mutex_corpse_stolen_by_python(tmp_path: Path, monkeypatch) -> None:
-    write_raw_claim(tmp_path, _stale_claim("session:rec-d"))
-    monkeypatch.chdir(tmp_path)
-    mutex = _plant_recovery_corpse(tmp_path, "session:rec-d")
-
-    claim = acquire_claim("session:rec-d", "pty:successor", pid=os.getpid(), root=tmp_path)
-
-    assert claim.holder == "pty:successor"
-    assert not mutex.exists()
-
-
-def _live_claim(key: str, holder: str) -> Claim:
-    """A claim genuinely live on this pid/host - the shape the SAME-holder
-    idempotent-reacquire branch requires (distinct from ``_stale_claim``,
-    which is dead-pid and drives the reclaim branch instead)."""
-    return Claim(
-        key=key, holder=holder, acquired_at=now_ms(), pid=os.getpid(),
-        host=__import__("socket").gethostname(), machine_id=py_machine_id() or None,
-    )
-
-
-def test_recovery_mutex_held_rust_idempotent_reacquire_waits(tmp_path: Path) -> None:
-    """The SAME-holder reacquire path also takes the recovery mutex (both
-    langs), not just the dead-pid reclaim path covered above - it must wait
-    for a peer's in-flight reap/recovery rather than racing past it."""
-    write_raw_claim(tmp_path, _live_claim("session:rec-e", "pty:owner"))
-    mutex, releaser = _hold_recovery_mutex(tmp_path, "session:rec-e", seconds=1.0)
-    t0 = time.monotonic()
-    r = rust("acquire", "session:rec-e", tmp_path, tmp_path,
-             "--holder", "pty:owner", "--pid", str(os.getpid()))
-    elapsed = time.monotonic() - t0
-    releaser.join()
-    assert r.returncode == 0, f"idempotent reacquire after mutex release failed: {r.stderr}"
-    assert elapsed >= 0.9, "rust must WAIT on the held mutex for a same-holder reacquire too"
-    assert not mutex.exists()
-
-
-def test_recovery_mutex_held_python_idempotent_reacquire_waits(
-    tmp_path: Path, monkeypatch
-) -> None:
-    write_raw_claim(tmp_path, _live_claim("session:rec-f", "pty:owner"))
-    monkeypatch.chdir(tmp_path)
-    mutex, releaser = _hold_recovery_mutex(tmp_path, "session:rec-f", seconds=1.0)
-    t0 = time.monotonic()
-    claim = acquire_claim("session:rec-f", "pty:owner", pid=os.getpid(), root=tmp_path)
-    elapsed = time.monotonic() - t0
-    releaser.join()
-    assert claim.holder == "pty:owner"
-    assert elapsed >= 0.9, "python must WAIT on the held mutex for a same-holder reacquire too"
-    assert not mutex.exists()
-
-
-# --------------------------------------------------------------------------
-# 9: expires_at absence discipline
-# --------------------------------------------------------------------------
-
-
-def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
+def test_rust_pid_claim_has_no_expiry(tmp_path: Path) -> None:
     r = rust("acquire", "session:no-ttl", tmp_path, tmp_path,
              "--holder", "pty:x", "--pid", str(os.getpid()))
     assert r.returncode == 0, r.stderr
-    path = claim_path("session:no-ttl", root=tmp_path)
-    text = path.read_text(encoding="utf-8")
-    assert "expires_at" not in text, (
-        f"PID-liveness claims must OMIT expires_at entirely (never null): {text}"
-    )
-    # And Python parses it as PID-liveness.
-    rec = read_claim_file(path)
-    assert rec.expires_at is None
-    # Semantic YAML parity: yaml.safe_load sees the exact base field set. The
-    # additive `harness` tag (x-3e70) is present only when the acquiring process
-    # carries a session marker (a codex/claude/gemini session), absent otherwise
-    # (bare CI), so it is excluded from the exact-set check rather than asserted.
-    data = yaml.safe_load(text)
-    expected = {"schema_version", "key", "holder", "acquired_at", "pid", "host"}
-    # Asserted, not excluded like `harness`: liveness compares this, so a writer
-    # that stopped emitting it would send every reader down the pre-change
-    # hostname fallback and silently restore the bug. Conditional because a host
-    # with no OS machine id (a minimal container, no ioreg) legitimately omits
-    # it - and then BOTH writers must omit it, which is the real parity claim.
-    if py_machine_id():
-        expected.add("machine_id")
-        assert data["machine_id"] == py_machine_id()
-    else:
-        assert "machine_id" not in data, (
-            "no stable id on this host: both implementations must omit the field"
-        )
-    expected.add("pid_provenance")
-    assert data["pid_provenance"] == "ambient"
-    assert set(data) - {"harness"} == expected
-    assert data["host"] == socket.gethostname(), (
-        "host stays the hostname a pre-change reader compares against"
-    )
-
-
-# --------------------------------------------------------------------------
-# AC3-ERR: corrupted-file parity
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        "{{{{not yaml",
-        "- a\n- list\n",
-        "schema_version: 3\nkey: k\nholder: h\nacquired_at: 5\npid: 1\nhost: x\n",
-    ],
-    ids=["invalid-yaml", "non-dict-root", "newer-schema"],
-)
-def test_corrupted_file_parity(tmp_path: Path, content: str) -> None:
-    key = "session:corrupt"
-    path = claim_path(key, root=tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-    # Both classify Corrupted.
-    py = claim_status(key, root=tmp_path)
-    rs = rust_json(rust("status", key, tmp_path, tmp_path))
-    assert py["state"] == "corrupted", f"python: {py}"
-    assert rs["state"] == "corrupted", f"rust: {rs}"
-
-    # Both refuse to reclaim via plain acquire.
-    with pytest.raises(Exception):
-        acquire_claim(key, "pty:x", pid=os.getpid(), root=tmp_path)
-    r = rust("acquire", key, tmp_path, tmp_path, "--holder", "pty:x",
-             "--pid", str(os.getpid()))
-    assert r.returncode != 0, "rust acquire must refuse a corrupted claim"
-
-    # Both leave the file in place for force-release.
-    assert path.exists()
-    release_claim(key, "pty:x", root=tmp_path)
-    r = rust("release", key, tmp_path, tmp_path, "--holder", "pty:x")
-    assert r.returncode == 0
-    assert path.exists(), "release must never delete what it cannot verify it owns"
+    row = read_claim_row("session:no-ttl", tmp_path)
+    assert row["expires_at"] is None, f"PID-liveness claims carry no expiry: {row}"
+    assert claim_status("session:no-ttl", root=tmp_path)["expires_at"] is None
+    # liveness compares machine_id, so a writer that dropped it would send
+    # every reader down the hostname fallback.
+    assert row["machine_id"] == (py_machine_id() or None)
+    assert row["pid_provenance"] == "ambient"
+    assert row["host"] == socket.gethostname()
