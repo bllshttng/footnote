@@ -341,7 +341,7 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
         });
     }
     let beat_secs = crate::lead_verdict_inputs::checkin_interval_secs(config_cwd);
-    let journals = crate::tick_ledger::journals(home);
+    let journals = wake_journals(home, &registry, &teams);
     let mut beats: BTreeMap<String, Option<i64>> = BTreeMap::new();
     for team in &teams {
         let row = crate::lead_history::previous_beat(
@@ -411,6 +411,47 @@ fn short(text: &str) -> String {
     text.chars().take(160).collect()
 }
 
+/// The wake's journals: the shared pair plus every live team's project
+/// journal. The check-in emitter journals where its caller points it - the
+/// Python lead CLI passes `--emit-path <space>/events.jsonl` - so each
+/// team's project journal holds the rows the shared pair stopped seeing
+/// (2026-09-17). A wake reading only the shared pair baselines a corpus
+/// frozen that day and wakes a lead that journaled minutes ago. A registry
+/// that cannot be read degrades to the shared pair. `scan_scopes` dedupes
+/// live journals by canonical path, so a repeated slug costs nothing.
+fn wake_journals(home: &AgentsHome, registry_path: &Path, teams: &[Team]) -> Vec<PathBuf> {
+    let mut journals = crate::tick_ledger::journals(home);
+    if let Ok(loaded) = crate::state::load_registry(registry_path) {
+        for entry in &loaded.entries {
+            let Some(session) = entry.harness_session_id.as_deref() else {
+                continue;
+            };
+            // The row identity is the holder session id, never the mutable
+            // row name (law d-e952ed19), and one git probe per pass beats
+            // one per registry row.
+            if !teams
+                .iter()
+                .any(|t| t.holder_session.as_deref() == Some(session))
+            {
+                continue;
+            }
+            let root = if entry.project_root.is_empty() {
+                &entry.cwd
+            } else {
+                &entry.project_root
+            };
+            if root.is_empty() {
+                continue;
+            }
+            let journal = crate::paths::space_dir(Path::new(root)).join("events.jsonl");
+            if !journals.contains(&journal) {
+                journals.push(journal);
+            }
+        }
+    }
+    journals
+}
+
 /// The arm as the daemon holds it: cadence stamp plus one-in-flight gate.
 /// The config cwd rides at construction, so the thresholds
 /// (`lead.checkin_interval`) and the territory resolve read the same root
@@ -473,6 +514,82 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Restores the pins `wake_journals` resolves through, holding the shared
+    /// env lock so a parallel test's pin swap cannot flip the resolution
+    /// mid-read (the territory tests' guard shape).
+    struct PinGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl PinGuard {
+        fn take(base: &Path) -> Self {
+            let lock = crate::claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let saved = ["FNO_SPACES_DIR", crate::paths::HOME_ENV]
+                .iter()
+                .map(|var| (*var, std::env::var_os(var)))
+                .collect();
+            std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
+            std::env::set_var(crate::paths::HOME_ENV, base.join("agents"));
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for PinGuard {
+        fn drop(&mut self) {
+            for (var, saved) in &self.saved {
+                match saved {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wake_journals_reads_the_teams_project_journal() {
+        let base = std::env::temp_dir().join(format!("lead-wake-journals-{}", std::process::id()));
+        let _pins = PinGuard::take(&base);
+        std::fs::create_dir_all(base.join("agents")).unwrap();
+        let cwd = base.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry_path = base.join("registry.json");
+        std::fs::write(
+            &registry_path,
+            json!({
+                "schema_version": 15,
+                "agents": [
+                    {"name": "vellum", "status": "live", "cwd": cwd.to_string_lossy(),
+                     "harness_session_id": "sess-head"},
+                    {"name": "worker", "status": "live", "cwd": cwd.to_string_lossy(),
+                     "harness_session_id": "sess-worker"},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let home = AgentsHome::at(base.join("agents"));
+        let teams = vec![team("fno", 1, "vellum", "sess-head")];
+        let journals = wake_journals(&home, &registry_path, &teams);
+        let want = crate::paths::space_dir(&cwd).join("events.jsonl");
+        assert!(
+            journals.contains(&want),
+            "the team's project journal rides the wake's read: {journals:?}"
+        );
+        assert!(journals.contains(&home.events_jsonl()));
+        // A registry that cannot be read degrades to the shared pair.
+        let broken = base.join("registry-broken.json");
+        std::fs::write(&broken, "not json").unwrap();
+        assert_eq!(
+            wake_journals(&home, &broken, &teams),
+            vec![home.events_jsonl(), base.join("events.jsonl")]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn team(scope: &str, level: u8, holder: &str, sid: &str) -> Team {
         Team {
