@@ -299,7 +299,9 @@ fn ephemeral_journal_is_refused_but_sibling_imports() {
     append(
         &sibling,
         &[
-            json!({"ts": "2026-09-10T08:00:00Z", "type": "mux_pane_counters",
+            // Fresh stamp: the 672h ephemeral TTL must never expire the
+            // row mid-test (a fixed date crossed its wall in CI).
+            json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "mux_pane_counters",
               "source": "mux", "data": {"panes": []}}),
         ],
     );
@@ -338,7 +340,9 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
                    "head_sha": "abc", "verdict": "pass"}}),
             json!({"ts": "2026-05-01T08:00:00Z", "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
-            json!({"ts": "2026-09-15T08:00:00Z", "type": "mux_pane_counters",
+            // The fresh survivor derives from now, so it never ages out
+            // of the 672h TTL the way a fixed date does.
+            json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
         ],
     );
