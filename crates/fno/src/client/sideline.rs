@@ -174,16 +174,34 @@ impl View {
     /// click map, so the gestures never disagree on the footer's row: when
     /// the rows overflow, the footer pins directly above the org block, and
     /// the row there is the footer's even though its display row has
-    /// scrolled away. The pinned test reads the same raw region
-    /// `sideline_visible_rows` starts from, so a list that exactly fits
-    /// never reads as pinned here.
+    /// scrolled away. The pinned copy paints at the absolute row `list_rows`
+    /// names in both compositions: a `top +` form held only full-screen and
+    /// read one row up when docked, so hover and click landed on the list
+    /// row behind the buttons. The pinned test reads the
+    /// same raw region `sideline_visible_rows` starts from, so a list that
+    /// exactly fits never reads as pinned here.
     pub(super) fn pinned_footer_row_index(&self, row: u16, top: usize) -> Option<usize> {
-        let list_rows = (self.term.0 as usize)
-            .saturating_sub(1) // the strip row
-            .saturating_sub(self.org_block_rows());
-        let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        // The composition's own row height: full-screen composes into the
+        // slice below the tab strip, docked into the full terminal. The
+        // block count must come from the same height the paint used, or at
+        // the boundary height where the two availability checks disagree
+        // the resolver fires on a row the footer never paints.
+        let rows = if self.sideline_full {
+            (self.term.0 as usize).saturating_sub(TAB_BAR_ROWS as usize)
+        } else {
+            self.term.0 as usize
+        };
+        let (block_rows, _) = self.org_block_layout(rows);
+        let chrome_rows = self.bottom_row_is_chrome() as usize;
+        let list_rows = rows.saturating_sub(block_rows);
+        let raw_rows = list_rows.saturating_sub(chrome_rows).saturating_sub(1); // the strip row
         let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
-        if !pinned || row < top as u16 || row as usize != top + list_rows.saturating_sub(2) {
+        // The pinned copy paints at buffer row `list_rows - 1`, which is
+        // the absolute row `term.0 - block_rows - 1` in both compositions.
+        let footer_row = (self.term.0 as usize)
+            .saturating_sub(block_rows)
+            .saturating_sub(1);
+        if !pinned || row < top as u16 || row as usize != footer_row {
             return None;
         }
         self.painted_rows()
