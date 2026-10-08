@@ -78,6 +78,23 @@ def test_rust_ephemeral_set_equals_schema(schema_ephemeral: set[str]) -> None:
     )
 
 
+def test_rust_telemetry_set_and_ttl_equal_schema() -> None:
+    schema = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
+    declared = {
+        e["name"] for e in schema["event_types"] if e.get("retention") == "telemetry"
+    }
+    text = EVENTS_RS.read_text(encoding="utf-8")
+    start = text.find("pub const TELEMETRY_EVENT_TYPES")
+    assert start != -1, "TELEMETRY_EVENT_TYPES const not found"
+    rust = set(re.findall(r'"([a-z0-9_]+)"', text[start : text.find("];", start)]))
+    assert declared and rust == declared, (
+        f"TELEMETRY_EVENT_TYPES drifted from schema.yaml: "
+        f"only-in-rust={sorted(rust - declared)} only-in-schema={sorted(declared - rust)}"
+    )
+    ttl = re.search(r"pub const TELEMETRY_TTL_HOURS: i64 = (\d+);", text)
+    assert ttl and int(ttl.group(1)) == schema["retention"]["telemetry_ttl_hours"]
+
+
 def test_sibling_suffix_identical_in_both_languages() -> None:
     from fno.events import EPHEMERAL_SUFFIX
 
