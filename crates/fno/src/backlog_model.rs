@@ -1297,17 +1297,13 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
             };
             let command = match &act {
                 SessionAction::Attach => joined.map(|a| format!("fno agents attach {}", a.name)),
-                SessionAction::Resume => sid.map(|sid| {
-                    let mut cmd = format!("fno agents resume {sid} --cross-project");
-                    if let Some(cwd) = node_cwd.as_deref().filter(|c| !c.is_empty()) {
-                        cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
-                    }
-                    cmd
-                }),
+                SessionAction::Resume => {
+                    sid.map(|sid| session_command("resume", sid, node_cwd.as_deref()))
+                }
                 // A session the registry lacks: adopt is the reach that
                 // heals the row from the harness stores.
                 SessionAction::Dim(_) if joined.is_none() => {
-                    sid.map(|sid| format!("fno agents adopt {sid} --cross-project"))
+                    sid.map(|sid| session_command("adopt", sid, node_cwd.as_deref()))
                 }
                 SessionAction::Dim(_) => None,
             };
@@ -1700,6 +1696,17 @@ pub(crate) enum OpenSession {
     Dim(String),
 }
 
+/// The shell line that reaches a session by id: `fno agents <verb> <sid>
+/// --cross-project`, pinned to `cwd` when the caller knows one. The ONE
+/// spelling both [`SessionView`] and [`open_session`] print.
+fn session_command(verb: &str, sid: &str, cwd: Option<&str>) -> String {
+    let mut cmd = format!("fno agents {verb} {sid} --cross-project");
+    if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
+        cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
+    }
+    cmd
+}
+
 /// Resolve the open-session gesture for `sid` against the roster. `cwd`
 /// pins the shell lines' working directory when the caller knows one (the
 /// node's project dir), the same pin [`SessionView`] carries.
@@ -1707,13 +1714,6 @@ pub(crate) fn open_session(agents: &[AgentRow], sid: &str, cwd: Option<&str>) ->
     let joined = agents
         .iter()
         .find(|a| a.harness_session_id.as_deref() == Some(sid));
-    let shell = |verb: &str| {
-        let mut cmd = format!("fno agents {verb} {sid} --cross-project");
-        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
-        }
-        OpenSession::Shell(cmd)
-    };
     match session_action(joined) {
         SessionAction::Attach => match joined.and_then(|a| a.pane_id) {
             Some(pid) => OpenSession::Cmds(vec![crate::proto::Command::FocusPane(pid)]),
@@ -1738,7 +1738,9 @@ pub(crate) fn open_session(agents: &[AgentRow], sid: &str, cwd: Option<&str>) ->
         }]),
         // A session the registry lacks: adopt is the reach that heals the
         // row from the harness stores - the SessionView command's own rule.
-        SessionAction::Dim(_) if joined.is_none() => shell("adopt"),
+        SessionAction::Dim(_) if joined.is_none() => {
+            OpenSession::Shell(session_command("adopt", sid, cwd))
+        }
         SessionAction::Dim(why) => OpenSession::Dim(why),
     }
 }

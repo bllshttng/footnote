@@ -256,10 +256,12 @@ pub(crate) fn build(
         .filter(|s| !s.is_empty())
         .filter(|_| !matches!(dest, Destination::Recovery(_) | Destination::None))
     {
+        // The name rides beside the id only on an EXACT join: a name join
+        // resolves the node's current worker, and printing that name beside
+        // this event's session id would imply the seat and the session are
+        // one row.
         let name = match &dest {
-            Destination::Exact(a) | Destination::NameOnly(a) => {
-                (!a.name.is_empty()).then(|| a.name.clone())
-            }
+            Destination::Exact(a) => (!a.name.is_empty()).then(|| a.name.clone()),
             _ => None,
         };
         let open = crate::backlog_model::open_session(agents, sid, item.cwd.as_deref());
@@ -397,17 +399,22 @@ pub(crate) fn build(
     info("reason", item.reason.clone(), &mut rows);
     info("role", item.role.clone(), &mut rows);
     // owner: the lead AT EVENT TIME, focusable to its holder when the roster
-    // still holds that person (a live join reaches their seat).
+    // still holds that person and the name answers for exactly one live row
+    // (the fleet's fail-closed name rule: an ambiguous name is no target).
     let owner_text = item.owner.as_deref().map(|o| live_owner(o, agents));
     let owner_action = item
         .owner
         .as_deref()
         .and_then(owner_holder)
         .and_then(|holder| {
-            agents
+            let live: Vec<&AgentRow> = agents
                 .iter()
-                .find(|a| a.name == holder && !a.exited)
-                .map(|a| FeedAction::Session(session_hit(a, active_squad)))
+                .filter(|a| a.name == holder && !a.exited)
+                .collect();
+            match live.as_slice() {
+                [a] => Some(FeedAction::Session(session_hit(a, active_squad))),
+                _ => None,
+            }
         });
     match (owner_text, owner_action) {
         (Some(text), Some(action)) => {
@@ -424,13 +431,19 @@ pub(crate) fn build(
         (None, _) => {}
     }
     // now-led-by: the node's CURRENT coverage, the other of the two names.
-    // Enter opens the covering lead's session.
+    // Enter opens the covering lead's session. The narrowest LIVE team
+    // naming the node comes from the shared lead_of resolver - an exited
+    // row with the scope does not answer for it.
     if let Some(node) = item.node.as_deref() {
-        let cover = agents.iter().find(|a| {
-            !a.exited
-                && a.role_scope
-                    .as_deref()
-                    .is_some_and(|s| s.split(',').any(|seg| seg.trim() == node))
+        let live: Vec<AgentRow> = agents.iter().filter(|a| !a.exited).cloned().collect();
+        let cover = crate::backlog_model::lead_of(&live, node, None, None).and_then(|(name, _)| {
+            agents.iter().find(|a| {
+                a.name == name
+                    && !a.exited
+                    && a.role_scope
+                        .as_deref()
+                        .is_some_and(|s| s.split(',').any(|seg| seg.trim() == node))
+            })
         });
         if let Some(a) = cover {
             let title = a.role_title.clone().or_else(|| {

@@ -1205,7 +1205,8 @@ fn scope_holds(scope: &str, node: &str) -> bool {
 /// spelling alone (the owner string's contract).
 fn lead_display(current: Option<&String>, stored: &str) -> Option<String> {
     if let Some(name) = current {
-        return Some(name.clone());
+        // A record mid-write can carry an empty name; nothing prints.
+        return (!name.is_empty()).then(|| name.clone());
     }
     (!stored.bytes().any(|b| b.is_ascii_digit())).then(|| stored.to_string())
 }
