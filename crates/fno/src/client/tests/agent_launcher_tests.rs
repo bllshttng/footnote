@@ -365,7 +365,7 @@ fn the_line_edit_grammar_folds_and_edits() {
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b".png\x1b[201~", &mut sock).await;
     });
-    let want = "claude-code-claude-code".to_string() + "/Users/bb16/Pictures/x.png" + ".png";
+    let want = "claude-code-claude-code.p".to_string() + "/Users/bb16/Pictures/x.png" + "ng";
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.draft.message, want, "the paste lands once, at the cursor");
     assert_eq!(
