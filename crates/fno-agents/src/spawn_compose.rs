@@ -1583,7 +1583,9 @@ fn journal(stage: &Stage, seam: &Seam, fingerprint: &str) {
         "event": {
             "name": stage.scan.name,
             "verb": stage.profile_verb,
-            "seed": stage.scan.seed,
+            // A preview, not the text: the receipt's readers key on name and
+            // fingerprint, and one full seed once made a 500 KB row.
+            "seed": stage.scan.seed.as_deref().map(|s| s.chars().take(200).collect::<String>()),
             "fingerprint": fingerprint,
             "resolved": resolved,
             "applied": seam.applied
