@@ -35,7 +35,7 @@ collision. A failed commit never falls back to a file write.
 
 `durable` and `gate` rows never auto-expire. `ephemeral` rows leave at the schema floor (`retention.minimum_ephemeral_ttl_hours`, currently 672) in bounded deletes. Rejected and migration rows never expire. An explicit operator deletion is the only other removal.
 
-`telemetry` rows leave after `retention.telemetry_ttl_hours` (168). These are the high-volume readouts: `control_plane_tick`, `inside_leg_report`, `codex_thread_inside_leg`, and the two store-sweep unlink kinds. One of these rows is noise. The shape of many is the signal, and a week keeps enough to read it. The daily prune claims its pass under the write lock, so two syncs never prune at once. It deletes telemetry in 1,000-row batches for at most 3 seconds. The match is by kind, so rows stored as `durable` before a kind joined the class expire too. A pass that leaves a backlog runs again in 5 minutes.
+`telemetry` rows leave after `retention.telemetry_ttl_hours` (168). These are the high-volume readouts: `control_plane_tick`, `guard_decision`, `inside_leg_report`, `codex_thread_inside_leg`, and the two store-sweep unlink kinds. One of these rows is noise. The shape of many is the signal, and a week keeps enough to read it. The daily prune claims its pass under the write lock, so two syncs never prune at once. It deletes telemetry in 1,000-row batches for at most 3 seconds. The match is by kind, so rows stored as `durable` before a kind joined the class expire too. A pass that leaves a backlog runs again in 5 minutes.
 
 `fno doctor event signals [--events <journal>] [--window-hours 24] [--check]` reads those shapes. It is read-only and flags four of them:
 

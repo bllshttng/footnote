@@ -73,6 +73,7 @@ pub const GATE_EVENT_TYPES: &[&str] = &["review_attestation", "review_coverage"]
 pub const TELEMETRY_EVENT_TYPES: &[&str] = &[
     "codex_thread_inside_leg",
     "control_plane_tick",
+    "guard_decision",
     "inside_leg_report",
     "store_seat_lock_unlinked",
     "store_socket_unlinked",
