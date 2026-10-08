@@ -184,33 +184,50 @@ impl Core {
             // The channel stays parked: the portal keeps its index and
             // leaf and shows the no-signal screen. No interactive shell is
             // minted, so a dead viewer can never multiply tabs.
+            let idx = seat_portal.expect("seat implies a portal");
             let channel = self
                 .portals
-                .get(&seat_portal.expect("seat implies a portal"))
+                .get(&idx)
                 .map(|portal| portal.row_key.clone())
                 .unwrap_or_default();
-            if let Ok(screen_pid) = self.spawn_parked_screen(&channel, rows, cols, &cwd) {
-                let tab = &mut self.session.squad_mut(sid).expect("live squad").tabs[ti];
-                if tree::replace_leaf(tab, pid, screen_pid) {
-                    // Spawn-first paid off: swap the seat to the parked
-                    // screen and reap the dead viewer last, the repoint
-                    // arm's ordering.
-                    if let Some(portal) = seat_portal.and_then(|idx| self.portals.get_mut(&idx)) {
-                        portal.seat = screen_pid;
-                    }
-                    self.emit_pane_closed(
+            // Resume re-attach first: the attach child ended because the
+            // watched job came back under a new pid (resume/compaction
+            // restart); replay the attach instead of parking the seat. The
+            // parked screen stays the fallback when no live argv names the
+            // session uuid, or the spawn failed.
+            if let Some((id, argv, name)) = self.reattach_seat_argv(pid) {
+                if let Ok(new_pid) = self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
+                    self.attached.insert(id, new_pid);
+                    if self.swap_dead_seat(
                         pid,
                         sid,
-                        "viewer_died",
-                        &format!("{reason} (seat parked)"),
-                    );
-                    self.reap_pane(pid);
-                    self.push_layout(true);
-                    if let Some(idx) = seat_portal {
-                        let line = format!("portal {idx}: no signal - {channel} ended");
-                        self.write_restore_message(screen_pid, &line);
-                        self.notice_all(line);
+                        ti,
+                        idx,
+                        new_pid,
+                        &name,
+                        &format!("portal {idx}: session resumed - re-attached"),
+                        "resumed session re-attached",
+                        reason,
+                    ) {
+                        return Flow::Continue;
                     }
+                    // The tab closed under the swap: undo and fall through
+                    // to the parked screen.
+                    self.reap_pane(new_pid);
+                }
+            }
+            if let Ok(screen_pid) = self.spawn_parked_screen(&channel, rows, cols, &cwd) {
+                if self.swap_dead_seat(
+                    pid,
+                    sid,
+                    ti,
+                    idx,
+                    screen_pid,
+                    &channel,
+                    &format!("portal {idx}: no signal - {channel} ended"),
+                    "seat parked",
+                    reason,
+                ) {
                     return Flow::Continue;
                 }
                 // The tab closed under the swap: undo the screen and fall
@@ -218,6 +235,7 @@ impl Core {
                 self.reap_pane(screen_pid);
             }
         }
+
         // No screen took the seat. The portal is GONE: an operator close
         // removes the entry, and a death whose parked screen failed to
         // spawn loses it too - a portal lives until the operator closes
@@ -299,6 +317,68 @@ impl Core {
             self.reconcile_worker_member_close(&worker_ctx, false);
         }
         flow
+    }
+
+    /// The attach replay for a dead portal seat whose watched session
+    /// lives: `(attach id, argv, row name)` when the seat's row is a claude
+    /// row whose session uuid a live argv names - the resume/compaction
+    /// restart. The registry pid is stale by definition after a resume, so
+    /// liveness is the argv witness, never the pid.
+    pub(super) fn reattach_seat_argv(&self, pid: u64) -> Option<(String, Vec<String>, String)> {
+        let row = crate::thread_viewer::row_for_pane(&self.portals, pid, &self.agents)?;
+        if row.harness.as_deref() != Some("claude") {
+            return None;
+        }
+        let id = row.attach_id.clone()?;
+        let uuid = row
+            .claude_session_uuid
+            .as_deref()
+            .filter(|u| !u.is_empty())?;
+        let live = crate::agents_view::live_process_argvs()
+            .iter()
+            .any(|a| a.contains(uuid));
+        live.then(|| {
+            let (acct, cd) = self.attach_account_ctx(&id);
+            (
+                id.clone(),
+                attach_argv(&id, acct.as_deref(), cd.as_deref()),
+                row.name.clone(),
+            )
+        })
+    }
+
+    /// Seat-swap tail shared by the resume re-attach and the parked
+    /// screen: repoint the tab leaf and the portal seat, name the new
+    /// pane, emit the pane_closed row, reap the dead viewer, announce.
+    /// True when the swap took (the tab held the new leaf).
+    fn swap_dead_seat(
+        &mut self,
+        pid: u64,
+        sid: u64,
+        ti: usize,
+        seat_portal: u8,
+        new_pid: u64,
+        pane_name: &str,
+        line: &str,
+        reason_tag: &str,
+        reason: &str,
+    ) -> bool {
+        let tab = &mut self.session.squad_mut(sid).expect("live squad").tabs[ti];
+        if !tree::replace_leaf(tab, pid, new_pid) {
+            return false;
+        }
+        if let Some(portal) = self.portals.get_mut(&seat_portal) {
+            portal.seat = new_pid;
+        }
+        if let Some(entry) = self.panes.get_mut(&new_pid) {
+            entry.name = Some(pane_name.to_string());
+        }
+        self.emit_pane_closed(pid, sid, "viewer_died", &format!("{reason} ({reason_tag})"));
+        self.reap_pane(pid);
+        self.push_layout(true);
+        self.write_restore_message(new_pid, line);
+        self.notice_all(line.to_string());
+        true
     }
 
     /// Close ONLY the portal seat `seat`: the viewer pane, never the row it

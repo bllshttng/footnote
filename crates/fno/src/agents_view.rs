@@ -1704,6 +1704,58 @@ fn registry_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Every pid in the process table right now.
+#[cfg(target_os = "macos")]
+fn list_pids() -> Vec<u32> {
+    let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0 as libc::pid_t; needed as usize];
+    let bytes = i32::try_from(pids.len() * std::mem::size_of::<libc::pid_t>()).unwrap_or(i32::MAX);
+    let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if found < 0 {
+        return Vec::new();
+    }
+    pids.into_iter()
+        .take(found as usize)
+        .filter(|p| *p > 0)
+        .map(|p| p as u32)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn list_pids() -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.parse::<u32>().ok())
+        .collect()
+}
+
+/// The joined argv of every live process, one pass: the liveness witness a
+/// resumed claude job provides. A resume or compaction ends the recorded
+/// pid and the job returns under a NEW pid whose argv still names the
+/// session uuid (`claude --resume <uuid>`), so argv carries the truth the
+/// registry's pid cannot. Empty on a platform without a reader, where the
+/// caller keeps the pid-only verdict (fail-safe).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn live_process_argvs() -> Vec<String> {
+    list_pids()
+        .into_iter()
+        .filter_map(crate::pane_argv::process_argv)
+        .map(|argv| argv.join(" "))
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn live_process_argvs() -> Vec<String> {
+    Vec::new()
+}
+
 /// POSITIVE falsification of one non-terminal row's liveness by its own
 /// recorded pid. A machine restart writes nothing to the registry,
 /// so every row keeps the status it last had on disk - including "working"
@@ -1750,7 +1802,9 @@ fn row_falsified(row: &serde_json::Value, status: &str) -> bool {
 /// their own recorded pid falsifies (see [`row_falsified`]). The restore-time
 /// liveness read subtracts this set so a reboot's stale "working" rows read
 /// dead instead of respawning. Tolerant of a malformed document: it
-/// contributes nothing, exactly like `derive_rows`.
+/// contributes nothing, exactly like `derive_rows`. One rescue: a row whose
+/// session uuid a LIVE argv names came back under a new pid (resume or
+/// compaction restart) and is NOT stale - the pid died, the session did not.
 pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String> {
     let mut stale = std::collections::HashSet::new();
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(reg_raw) else {
@@ -1763,6 +1817,7 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
     else {
         return stale;
     };
+    let mut falsified: Vec<(&serde_json::Value, &str)> = Vec::new();
     for row in rows {
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let is_claude = row
@@ -1777,6 +1832,24 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
             .filter(|s| !s.is_empty());
         if is_claude && row_falsified(row, status) {
             if let Some(id) = attach_id {
+                falsified.push((row, id));
+            }
+        }
+    }
+    // The resume rescue: a falsified row whose session uuid a LIVE argv
+    // names came back under a new pid. The pid is dead but the session is
+    // not, which is exactly the resume/compaction restart and exactly the
+    // false death the pid-only verdict reports. A reboot leaves no argv
+    // witness, so the reboot falsification still holds.
+    if !falsified.is_empty() {
+        let argvs = live_process_argvs();
+        for (row, id) in falsified {
+            let rescued = row
+                .get("claude_session_uuid")
+                .or_else(|| row.get("harness_session_id"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|uuid| !uuid.is_empty() && argvs.iter().any(|a| a.contains(uuid)));
+            if !rescued {
                 stale.insert(id.to_string());
             }
         }
@@ -2853,6 +2926,41 @@ mod tests {
             stale_live_attach_ids("{not json").is_empty(),
             "a malformed document contributes nothing"
         );
+    }
+
+    /// The resume rescue: a falsified row whose session uuid a live argv
+    /// carries is NOT stale - the job returned under a new pid. A row whose
+    /// uuid no argv names still reads stale (the reboot case).
+    #[test]
+    fn stale_live_attach_ids_resume_rescue() {
+        let mut ghost = crate::pty::ChildGuard::spawn(&mut std::process::Command::new("true"));
+        let ghost_pid = ghost.id();
+        ghost.wait_now();
+        let uuid = "e96c0000-1111-2222-3333-444455556666";
+        let mut witness = crate::pty::ChildGuard::spawn(
+            &mut std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep 25; : # {uuid}")),
+        );
+        let rescued_row = reg(&format!(
+            r#"{{"name":"resumed","cwd":"/w","status":"working","harness":"claude",
+                 "short_id":"eeee0000","pid":{ghost_pid},"pid_start_time":99887766,
+                 "claude_session_uuid":"{uuid}"}}"#
+        ));
+        assert!(
+            !stale_live_attach_ids(&rescued_row).contains("eeee0000"),
+            "a live argv naming the session uuid rescues the row"
+        );
+        let stranded_row = reg(&format!(
+            r#"{{"name":"stranded","cwd":"/w","status":"working","harness":"claude",
+                 "short_id":"eeee0001","pid":{ghost_pid},"pid_start_time":99887766,
+                 "claude_session_uuid":"ffff0000-1111-2222-3333-444455556666"}}"#
+        ));
+        assert!(
+            stale_live_attach_ids(&stranded_row).contains("eeee0001"),
+            "a uuid no live argv names still reads stale"
+        );
+        drop(witness);
     }
 
     /// A LIVE pid whose recorded start time matches stays live; the same pid
