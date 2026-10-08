@@ -1098,6 +1098,9 @@ mod tests {
     #[test]
     fn production_sweep_reverts_an_unbound_successor_and_journals_the_receipt() {
         use serde_json::json;
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_home = std::env::var("FNO_AGENTS_HOME").ok();
         let seeded = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_AGENTS_HOME", seeded.path());
