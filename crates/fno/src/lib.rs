@@ -103,6 +103,7 @@ pub mod theme;
 pub mod theme_import;
 pub(crate) mod thread_viewer;
 pub mod transcript_tail;
+pub mod transcript_transfer;
 pub mod tree;
 pub mod uninstall;
 pub mod version;
