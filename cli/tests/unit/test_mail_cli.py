@@ -979,6 +979,15 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     takes the turn live, so no durable thread is written."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
+    # Pre-mark the read-verb lesson taught for the recipient, so this test's
+    # one-line turn contract stays about the pane rung's routing.
+    from fno.paths import agents_registry_path
+
+    _stamp_dir = agents_registry_path().parent / "mail_teach"
+    _stamp_dir.mkdir(parents=True, exist_ok=True)
+    (_stamp_dir / f"{sid}.json").write_text(
+        json.dumps({"session": sid, "taught_boundary_epoch": 0})
+    )
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=True, pane_sends=True, expect_token=sid
@@ -1435,15 +1444,3 @@ def test_live_discovered_ambient_self_queues_canonical_without_inject_or_mux(
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "019fb417"
 
-
-def test_wrong_mail_verb_refuses_naming_the_reader(runner):
-    """A wrong mail verb teaches the reader instead of a near-miss guess.
-
-    Typer's default miss suggests 'unread' for 'read' - a LIST verb, not the
-    capability the caller reaches for. The refusal names the reader door.
-    """
-    got = runner.invoke(app, ["agents", "mail", "read"])
-    out = got.output + (got.stderr or "")
-    assert got.exit_code == 2, out
-    assert "fno agents mail show <id>" in out, out
-    assert "Did you mean" not in out, out

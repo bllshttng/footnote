@@ -139,6 +139,15 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
     here is that ``--force`` types the WRAPPED body rather than bare text.
     """
     _entry_row, sent = _install(monkeypatch)
+    # Pre-mark the read-verb lesson taught for the recipient, so this test's
+    # one-line turn contract stays about --force's wrap semantics.
+    from fno.paths import agents_registry_path
+
+    _stamp_dir = agents_registry_path().parent / "mail_teach"
+    _stamp_dir.mkdir(parents=True, exist_ok=True)
+    (_stamp_dir / "0199aaaa-1111-7000-8000-aaaaaaaaaaaa.json").write_text(
+        json.dumps({"session": "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "taught_boundary_epoch": 0})
+    )
 
     result = runner.invoke(
         mail_app,

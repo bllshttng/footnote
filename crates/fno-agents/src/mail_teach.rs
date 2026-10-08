@@ -24,10 +24,12 @@ use serde_json::json;
 
 use crate::paths::AgentsHome;
 
-fn teach_path(home: &AgentsHome, session: &str) -> PathBuf {
-    home.root()
-        .join("mail_teach")
-        .join(format!("{session}.json"))
+/// The stamp lives beside the store it reads: under the state root that owns
+/// the registry the session resolves in. A render hands its own registry's
+/// parent, so its due check never reads the ambient env - one root per
+/// store, and a test's tmp registry is its own world.
+fn teach_path_at(root: &Path, session: &str) -> PathBuf {
+    root.join("mail_teach").join(format!("{session}.json"))
 }
 
 fn taught_boundary(path: &Path) -> Option<i64> {
@@ -44,7 +46,7 @@ fn taught_boundary(path: &Path) -> Option<i64> {
 /// path), so a due check costs no second locked load. An unreadable
 /// registry reads as no transcript, never as an error.
 fn resolve_transcript(
-    home: &AgentsHome,
+    root: &Path,
     session: &str,
     explicit: Option<&Path>,
     registry: Option<&crate::state::Registry>,
@@ -56,7 +58,7 @@ fn resolve_transcript(
     let registry = match registry {
         Some(rows) => rows,
         None => {
-            loaded = crate::state::try_load_registry(&home.root().join("registry.json"))
+            loaded = crate::state::try_load_registry(&root.join("registry.json"))
                 .ok()
                 .flatten()?;
             &loaded
@@ -78,16 +80,20 @@ fn resolve_transcript(
 /// newer than the taught one re-teaches; an unreadable transcript only ever
 /// leaves the never-taught case. Best-effort by contract: a state write that
 /// fails still answers, so a carrier can never fail a delivery for it.
-pub fn teach_if_due(
-    home: &AgentsHome,
+///
+/// `root` is the state root owning both the stamp and the registry - the
+/// agents home for the door, the render's own registry parent for the
+/// header-only attach.
+pub fn teach_if_due_at(
+    root: &Path,
     session: &str,
     transcript: Option<&Path>,
     registry: Option<&crate::state::Registry>,
     record: bool,
 ) -> bool {
-    let path = teach_path(home, session);
+    let path = teach_path_at(root, session);
     let taught = taught_boundary(&path);
-    let observed = resolve_transcript(home, session, transcript, registry)
+    let observed = resolve_transcript(root, session, transcript, registry)
         .as_deref()
         .and_then(crate::compaction::newest_boundary_epoch);
     let due = match (taught, observed) {
@@ -183,7 +189,7 @@ pub fn run_mail_teach(args: &[String]) -> i32 {
         }
     };
     let home = AgentsHome::from_env();
-    if teach_if_due(&home, &session, transcript.as_deref(), None, record) {
+    if teach_if_due_at(home.root(), &session, transcript.as_deref(), None, record) {
         println!("{}", crate::chats::teach_line());
     }
     0
@@ -248,29 +254,29 @@ mod tests {
         let home = pin.home();
         let t1 = transcript_with_boundary(&pin.dir, 1_000);
         assert!(
-            teach_if_due(&home, "s1", None, None, false),
+            teach_if_due_at(home.root(), "s1", None, None, false),
             "never taught is due"
         );
         assert!(
-            teach_if_due(&home, "s1", Some(&t1), None, true),
+            teach_if_due_at(home.root(), "s1", Some(&t1), None, true),
             "record stamps the lesson"
         );
         assert_eq!(
-            taught_boundary(&teach_path(&home, "s1")),
+            taught_boundary(&teach_path_at(home.root(), "s1")),
             Some(1_000),
             "the stamp holds the boundary the lesson rode"
         );
         assert!(
-            !teach_if_due(&home, "s1", Some(&t1), None, true),
+            !teach_if_due_at(home.root(), "s1", Some(&t1), None, true),
             "taught stays silent"
         );
         let t2 = transcript_with_boundary(&pin.dir, 2_000);
         assert!(
-            teach_if_due(&home, "s1", Some(&t2), None, true),
+            teach_if_due_at(home.root(), "s1", Some(&t2), None, true),
             "a newer boundary re-teaches"
         );
         assert!(
-            !teach_if_due(&home, "s1", Some(&t2), None, true),
+            !teach_if_due_at(home.root(), "s1", Some(&t2), None, true),
             "and only once"
         );
         // A harness whose transcript carries no known boundary shape (pi,
@@ -279,10 +285,16 @@ mod tests {
         // never-taught case due.
         let plain = pin.dir.join("plain.jsonl");
         std::fs::write(&plain, "{\"type\":\"assistant\"}\n").unwrap();
-        assert!(teach_if_due(&home, "s2", Some(&plain), None, true));
-        assert!(!teach_if_due(&home, "s2", Some(&plain), None, true));
+        assert!(teach_if_due_at(home.root(), "s2", Some(&plain), None, true));
+        assert!(!teach_if_due_at(
+            home.root(),
+            "s2",
+            Some(&plain),
+            None,
+            true
+        ));
         assert!(
-            teach_if_due(&home, "s3", None, None, false),
+            teach_if_due_at(home.root(), "s3", None, None, false),
             "a missing transcript leaves never-taught due"
         );
         // The lesson names the LIVE read verb: the const the dispatch arm

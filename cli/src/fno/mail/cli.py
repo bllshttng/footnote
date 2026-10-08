@@ -52,7 +52,6 @@ from enum import Enum
 from pathlib import Path
 from typing import NoReturn, Optional, TypedDict
 
-import click
 import typer
 
 from fno.agents.harness_map import capabilities as _harness_capabilities
@@ -114,34 +113,7 @@ class StatusSnapshot(TypedDict):
     sent_unclaimed: int
 
 
-class MailVerbRefusalGroup(typer.core.TyperGroup):
-    """A group whose unknown mail verb names the reader.
-
-    Typer's default miss answers ``Did you mean 'unread'?`` - a lesson that
-    sends a reader of a delivered header to a LIST verb. The miss teaches
-    the reader door instead of a near-miss guess.
-    """
-
-    verb_prefix = "agents mail"
-
-    def get_command(self, ctx, cmd_name):  # type: ignore[no-untyped-def]
-        cmd = super().get_command(ctx, cmd_name)
-        if cmd is not None:
-            return cmd
-        raise click.UsageError(
-            f"No such mail verb {cmd_name!r}. An fmail-<id> header in a delivered turn "
-            f"is read with `fno agents mail show <id>`; `fno agents mail unread` lists."
-        )
-
-    def resolve_command(self, ctx, args):  # type: ignore[no-untyped-def]
-        # Typer's TyperGroup.resolve_command appends "Did you mean 'unread'?"
-        # to a miss; for 'read' that lesson is the exact harm this class
-        # exists to remove, so resolve through click and let the refusal stand.
-        return click.Group.resolve_command(self, ctx, args)
-
-
 mail_app = typer.Typer(
-    cls=MailVerbRefusalGroup,
     help="Durable polled mailbox: send/unread/ack/reply/list/drain/status/view.",
     no_args_is_help=True,
 )

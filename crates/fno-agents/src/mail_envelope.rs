@@ -306,25 +306,24 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     // waits on the bus. The live turn is also the teach moment for a harness
     // with no hooks: a session's first header, or its first header after a
     // newer compaction boundary, carries the read-verb lesson once. The
-    // lesson is best-effort - a state write never fails a delivery - and the
-    // render door under test with no declared home stays pure (from_env_opt
-    // answers None there).
+    // lesson is best-effort - a state write never fails a delivery. The
+    // stamp lives beside THIS render's registry, so a due check never reads
+    // the ambient env: one root per store, and a test's tmp registry is its
+    // own world.
     if header_only_requested(input) {
         let recipient = to_session
             .map(str::to_string)
             .or_else(|| to_row.and_then(|row| row.harness_session_id.clone()));
         if let Some(recipient) = recipient {
-            if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
-                let due = crate::mail_teach::teach_if_due(
-                    &home,
-                    &recipient,
-                    None,
-                    registry.as_ref(),
-                    true,
-                );
-                if due {
-                    return Ok(format!("{header}\n{}", crate::chats::teach_line()));
-                }
+            let due = crate::mail_teach::teach_if_due_at(
+                registry_path.parent().unwrap_or(Path::new("/")),
+                &recipient,
+                None,
+                registry.as_ref(),
+                true,
+            );
+            if due {
+                return Ok(format!("{header}\n{}", crate::chats::teach_line()));
             }
         }
         return Ok(header);
@@ -441,11 +440,6 @@ pub fn run(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// Env-mutating tests share the process; the same lock chats.rs uses
-    /// keeps FNO_AGENTS_HOME pins from racing across tests.
-    static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
-        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     fn registry(path: &Path) {
         std::fs::write(
@@ -732,10 +726,10 @@ mod tests {
         // The node's contract, end to end: a hookless-harness session's
         // first header-only turn carries the read-verb lesson (its start),
         // plain deliveries stay header-only, and a simulated compaction
-        // makes exactly the next header carry the lesson once again.
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // makes exactly the next header carry the lesson once again. The
+        // teach stamp lives beside the render's own registry, so no env pin
+        // is involved and no sibling test can see this tmp world.
         let pin = tempfile::TempDir::new().unwrap();
-        std::env::set_var("FNO_AGENTS_HOME", pin.path());
         let registry_body = |with_transcript: bool| {
             let row = if with_transcript {
                 format!(
@@ -761,7 +755,8 @@ mod tests {
             render_at(
                 &json!({
                     "mode":"wrap", "body":"standup notes", "from":"folio-short",
-                    "to":"quill-short", "to_session":"pi-session-1", "id": id
+                    "to":"quill-short", "to_session":"pi-session-1", "id": id,
+                    "header_only":true
                 }),
                 &pin.path().join("registry.json"),
             )
@@ -787,6 +782,5 @@ mod tests {
         std::fs::write(pin.path().join("registry.json"), registry_body(true)).unwrap();
         two_lines(&header_only("msg-3").unwrap());
         assert_eq!(header_only("msg-4").unwrap().lines().count(), 1);
-        std::env::remove_var("FNO_AGENTS_HOME");
     }
 }
