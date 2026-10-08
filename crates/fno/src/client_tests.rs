@@ -2990,12 +2990,14 @@ fn caret_rows() {
     );
     let text = frame_text(&view.compose());
     let lines: Vec<&str> = text.lines().collect();
-    // (x-cd67 US1 owns row 0; US3 Blank spacer at line 1; the strip row
-    // owns line 0 since R15): the strip is line 0, squad 1 leads line 1,
-    // the spacer is line 2, squad 2 follows on line 3.
+    // (US1 owns row 0; US3 Blank spacer; the strip row owns line 0 since
+    // R15): the strip is line 0, the card's `node · PR` head leads line 1
+    // (the head shows at every width now), squad 1 follows on line 2, the
+    // spacer is line 3, squad 2 on line 4.
     assert!(lines[0].contains("A   M"), "{:?}", lines[0]);
-    assert!(lines[1].contains("▾*empty"), "{:?}", lines[1]);
-    assert!(lines[3].contains("▸ notes"), "no tab rows in between");
+    assert!(lines[1].contains("node \u{b7} PR"), "{:?}", lines[1]);
+    assert!(lines[2].contains("▾*empty"), "{:?}", lines[2]);
+    assert!(lines[4].contains("▸ notes"), "no tab rows in between");
 }
 
 // The Backlog section is binary in both directions: a card has no exited state,
