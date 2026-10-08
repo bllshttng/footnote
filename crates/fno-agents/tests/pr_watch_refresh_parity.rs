@@ -56,9 +56,12 @@ fn python_executable() -> PathBuf {
     PathBuf::from("python3")
 }
 
-/// Case directories are the only moving paths; timestamps ride no stdout.
+/// Case directories and the bounce's gui uid are the only machine-dependent
+/// parts of the readout; timestamps ride no stdout.
 fn masked(text: &str, dir: &Path) -> String {
-    text.replace(&dir.display().to_string(), "<CASE>")
+    let uid = regex::Regex::new(r"gui/\d+").unwrap();
+    let rooted = text.replace(&dir.display().to_string(), "<CASE>");
+    uid.replace_all(&rooted, "gui/<UID>").into_owned()
 }
 
 /// One fixture case: a config file, a state root with the events journal,
@@ -206,7 +209,7 @@ fn cases() -> Vec<Case> {
             label: "plain bounce runs the three launchctl steps",
             enabled: true,
             prerender: false,
-            tick_pid: None,
+            tick_pid: Some(0),
             launchctl: vec![(0, false), (0, false), (0, false)],
             force_bounce: false,
         },
@@ -214,7 +217,7 @@ fn cases() -> Vec<Case> {
             label: "unchanged plist skips the bounce",
             enabled: true,
             prerender: true,
-            tick_pid: None,
+            tick_pid: Some(0),
             launchctl: vec![],
             force_bounce: false,
         },

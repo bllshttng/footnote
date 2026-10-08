@@ -47,7 +47,7 @@ def main() -> int:
     ), mock.patch.object(
         m,
         "_tick_in_flight",
-        lambda run=None: int(tick_pid) if tick_pid else None,
+        lambda run=None: int(tick_pid) if tick_pid and int(tick_pid) > 0 else None,
     ):
         msg, _rc = m.refresh_watcher(
             launch_agents_dir=agents_dir,

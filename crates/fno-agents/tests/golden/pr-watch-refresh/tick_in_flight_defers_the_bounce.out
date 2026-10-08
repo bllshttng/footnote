@@ -1,0 +1,2 @@
+pr-watch refresh: tick in flight (pid 4242); bounce deferred
+Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)
