@@ -1583,26 +1583,14 @@ def refresh() -> None:
     and is safe to run by hand. A no-op when ``pr_watch.enabled`` is false, so
     an install that does not use the watcher gets nothing. Never fails loud:
     the update chain calls it best-effort and a refresh failure must not fail
-    the update.
+    the update. Force and caller identity (doctor --fix) are verb-level
+    flags on ``fno-agents pr-watch refresh`` itself; a new flag is a new
+    verb and belongs in crates.
     """
-    from fno.pr_watch import _install as m
+    from fno.pr.cli import _forward_to_binary
 
-    settings = load_settings()
-    if not settings.pr_watch.enabled:
-        typer.echo("pr-watch: disabled; nothing to refresh.")
-        return
-
-    msg, _rc = m.refresh_watcher(
-        launch_agents_dir=_LAUNCH_AGENTS_DIR,
-        fno_binary=_resolve_fno_binary(),
-        interval=settings.pr_watch.interval_seconds,
-        defer_when_ticking=True,
-        caller="refresh",
-    )
-    typer.echo(f"pr-watch refresh: {msg}")
-    from fno.pr_watch._install import heal_status_line
-
-    typer.echo(heal_status_line())
+    argv = ["refresh", "--fno-binary", _resolve_fno_binary(), "--caller", "refresh"]
+    _forward_to_binary("pr-watch", argv)
 
 
 # Single-flight window for the SessionStart self-heal: long enough to cover the

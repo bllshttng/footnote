@@ -64,7 +64,6 @@ crossing	crates/fno-agents/src/provider.rs	let out = match std::process::Command
 crossing	crates/fno-agents/src/provider_cap_verbs.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/provider_cap_verbs.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/reentry.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/restart_run.rs	match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/restart_run.rs	let mux_out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/resume_wake.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/resume_wake.rs	std::process::Command::new(crate::scrape::fno_bin())

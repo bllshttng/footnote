@@ -1,0 +1,2 @@
+pr-watch refresh: bounced gui/<UID>/sh.fno.pr-watcher; awaiting first tick
+Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)

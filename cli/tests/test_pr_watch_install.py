@@ -288,82 +288,33 @@ def _settings_with_pr_watch(enabled: bool):
     return _S()
 
 
-def test_refresh_verb_noop_when_disabled(monkeypatch):
-    """`pr-watch refresh` is a no-op (never touches launchd) when disabled."""
+def test_refresh_leaf_forwards_to_the_binary(monkeypatch, tmp_path):
+    """The refresh leaf is a forward: the binary handshake carries the verb,
+    the caller name, and the plist binary path; rc propagates. The verb
+    contract itself (defer, bounce, disabled skip) is pinned by the Rust
+    parity goldens."""
     from typer.testing import CliRunner
     from fno.cli import app
-    import fno.pr_watch.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(False))
-    import fno.pr_watch._install as m
-    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: pytest.fail("must not refresh when disabled"))
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "resolve_binary", lambda: "/x/fno-agents")
+    spawn: list = []
+    import subprocess
+
+    real_run = subprocess.run
+
+    def _fake_run(argv, **kw):
+        if argv[:3] == ["/x/fno-agents", "pr-watch", "refresh"]:
+            spawn.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="pr-watch refresh: ok\n", stderr="")
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
 
     result = CliRunner().invoke(app, ["pr-watch", "refresh"])
     assert result.exit_code == 0
-    assert "disabled" in result.stdout
-
-
-def test_refresh_verb_refreshes_when_enabled(monkeypatch):
-    """`pr-watch refresh` calls refresh_watcher when enabled and reports the msg."""
-    from typer.testing import CliRunner
-    from fno.cli import app
-    import fno.pr_watch.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
-    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
-    import fno.pr_watch._install as m
-    calls: list = []
-    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: calls.append(kw) or ("bounced x; awaiting first tick", 0))
-
-    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
-    assert result.exit_code == 0
-    assert len(calls) == 1
-    assert calls[0]["fno_binary"] == "/x/fno-py"
-    assert calls[0]["defer_when_ticking"] is True
-    assert calls[0]["caller"] == "refresh"
-    assert "pr-watch refresh:" in result.stdout
-
-
-def test_refresh_verb_defers_while_tick_is_in_flight(monkeypatch, tmp_path):
-    """AC2-HP: a tick mid-flight defers the refresh; the verb reports the
-    deferral and launchd is never touched."""
-    from typer.testing import CliRunner
-    from fno.cli import app
-    import fno.pr_watch.cli as cli_mod
-    import fno.pr_watch._install as m
-
-    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
-    monkeypatch.setattr(cli_mod, "_LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
-    monkeypatch.setattr(m, "_tick_in_flight", lambda: 4242)
-    calls: list = []
-    monkeypatch.setattr(
-        m, "_run_launchctl_timed", lambda *a, **kw: calls.append(a) or (0, False)
-    )
-
-    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
-    assert result.exit_code == 0
-    assert "tick in flight (pid 4242)" in result.stdout
-    assert "bounce deferred" in result.stdout
-    assert calls == [], "a deferred refresh must run no launchctl step"
-
-
-def test_refresh_verb_bounces_when_no_tick_runs(monkeypatch, tmp_path):
-    """AC2-EDGE: no tick in flight, the refresh bounces as today."""
-    from typer.testing import CliRunner
-    from fno.cli import app
-    import fno.pr_watch.cli as cli_mod
-    import fno.pr_watch._install as m
-
-    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
-    monkeypatch.setattr(cli_mod, "_LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
-    monkeypatch.setattr(m, "_tick_in_flight", lambda: None)
-    calls: list = []
-    monkeypatch.setattr(
-        m, "_run_launchctl_timed", lambda *a, **kw: calls.append(a) or (0, False)
-    )
-
-    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
-    assert result.exit_code == 0
-    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
-    assert "bounced" in result.stdout and "awaiting first tick" in result.stdout
+    assert spawn and spawn[0][1:3] == ["pr-watch", "refresh"]
+    assert "--caller" in spawn[0] and "refresh" in spawn[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1085,26 +1036,6 @@ def test_armed_status_with_no_binary_degrades_to_a_line_that_says_so(
 
     line = m.heal_status_line()
     assert line.startswith("Heal: armed; readout unavailable"), line
-
-
-def test_refresh_prints_the_heal_line(tmp_home, monkeypatch):
-    """A fresh refresh output carries the same Heal: readout status prints."""
-    from types import SimpleNamespace
-
-    from typer.testing import CliRunner
-
-    from fno.cli import app
-    import fno.pr_watch.cli as cli_mod
-    import fno.pr_watch._install as m
-
-    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
-    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
-    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: ("bounced", 0))
-    monkeypatch.setattr(m, "heal_status_line", lambda events_path=None: "Heal: armed; never ran")
-
-    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
-    assert result.exit_code == 0
-    assert "Heal: armed; never ran" in result.stdout, result.stdout
 
 
 # ---------------------------------------------------------------------------

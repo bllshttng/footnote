@@ -1,0 +1,2 @@
+pr-watch refresh: plist unchanged; not re-registered (refresh)
+Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)
