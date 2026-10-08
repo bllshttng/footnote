@@ -318,7 +318,6 @@ fn step(
         .filter(|(_, cores)| *cores > 0.0)
         .map(|(runnable, cores)| runnable as f64 / cores)?;
     let mut next = state.clone();
-    let per_core = per_core?;
     if per_core > t.cut_per_core {
         let over = state.over_since.unwrap_or(now_epoch);
         next.over_since = Some(over);
