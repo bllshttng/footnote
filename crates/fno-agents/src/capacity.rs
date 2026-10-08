@@ -695,8 +695,31 @@ mod tests {
         AgentsHome::at(dir)
     }
 
+    /// The ceiling comes from CONFIG, not the test: a runner without an
+    /// agents.max_live in scope takes DEFAULT_MAX_LIVE, and every assert in
+    /// the AIMD test would read against the wrong ceiling. Pin 23 through
+    /// FNO_CONFIG under the shared env lock for the test's duration.
+    fn pin_ceiling_23() -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
+        let lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-capacity-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "[agents]\nmax_live = 23\n").unwrap();
+        std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
+        (lock, dir)
+    }
+
+    fn drop_ceiling_pin(guard: std::sync::MutexGuard<'static, ()>, dir: &std::path::Path) {
+        std::env::remove_var("FNO_CONFIG");
+        let _ = std::fs::remove_dir_all(dir);
+        drop(guard);
+    }
+
     #[test]
     fn sustained_breach_cuts_and_the_clause_names_both_numbers() {
+        let (env_lock, cfg_dir) = pin_ceiling_23();
         let cwd = std::env::temp_dir();
         let now = 1_800_000_000;
         // Natural ticks: the FIRST overload sample arms the clock without
@@ -785,6 +808,7 @@ mod tests {
         let fed = feed(&sample(Some(6), 12.0), &cwd, &home, now + 300).unwrap();
         assert_eq!(fed.effective, 23);
         let _ = std::fs::remove_dir_all(home.root());
+        drop_ceiling_pin(env_lock, &cfg_dir);
     }
 
     #[test]
