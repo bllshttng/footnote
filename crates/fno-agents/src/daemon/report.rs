@@ -323,6 +323,9 @@ pub(super) fn handle_report(ctx: &Ctx, req: &Request) -> Response {
     // after the write: (kind, from, to). `requested_*` are never touched -
     // they stay the spawn request, which is the provenance.
     let mut axis_changes: Vec<(&str, Option<String>, String)> = Vec::new();
+    // Only a report that moves the row's state journals: a same-state
+    // repeat updates the row (its seq and received_at) and stays quiet.
+    let mut state_changed = false;
     if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
         // Match by the pinned session id (fast path). If nothing holds it, a
         // `claude --bg` row may still be waiting for its uuid: backfill it by
@@ -365,6 +368,7 @@ pub(super) fn handle_report(ctx: &Ctx, req: &Request) -> Response {
             }
             let prev_state = entry.inside_leg.as_ref().map(|r| r.state);
             let prev_posture = entry.inside_leg.as_ref().and_then(|r| r.posture.clone());
+            state_changed = prev_state != Some(rep.state);
             if state::enters(prev_state, rep.state, state::InsideLegState::Blocked) {
                 let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
                 notify = Some((entry.name.clone(), body, false));
@@ -423,10 +427,12 @@ pub(super) fn handle_report(ctx: &Ctx, req: &Request) -> Response {
 
     match outcome {
         Outcome::Stored => {
-            let _ = ctx.emitter.emit(
-                "inside_leg_report",
-                &json!({"session_id": session_id, "seq": seq, "state": state_label}),
-            );
+            if state_changed {
+                let _ = ctx.emitter.emit(
+                    "inside_leg_report",
+                    &json!({"session_id": session_id, "seq": seq, "state": state_label}),
+                );
+            }
             // One event per served-axis change, emitted only after
             // the write landed.
             for (kind, from, to) in &axis_changes {

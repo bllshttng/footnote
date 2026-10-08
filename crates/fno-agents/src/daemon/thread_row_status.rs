@@ -138,7 +138,7 @@ pub(super) fn codex_thread_on_status(
 
 /// Land one thread-driver report: off the actor task, through the
 /// shared seq gate, notifying on the done/blocked episode edge exactly as the
-/// claude hook's flush does, and emitting one event per accepted write.
+/// claude hook's flush does, and emitting one event per state change.
 async fn write_thread_inside_leg(
     registry_path: PathBuf,
     emitter: EventEmitter,
@@ -150,11 +150,20 @@ async fn write_thread_inside_leg(
 ) {
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
     let session_for_emit = session_id.clone();
-    let notify = update_registry_offloaded(registry_path, move |registry| {
-        gate_inside_leg_onto_row(registry, &session_id, rep)
+    let (notify, state_changed) = update_registry_offloaded(registry_path, move |registry| {
+        let state_of = |registry: &crate::state::Registry| {
+            registry
+                .entries
+                .iter()
+                .find(|e| entry_holds_session(e, &session_id))
+                .and_then(|e| e.inside_leg.as_ref().map(|r| r.state))
+        };
+        let before = state_of(registry);
+        let notify = gate_inside_leg_onto_row(registry, &session_id, rep);
+        (notify, state_of(registry) != before)
     })
     .await
-    .unwrap_or(None);
+    .unwrap_or((None, false));
     if let Some((body, is_done)) = notify {
         notify_badge(
             name.clone(),
@@ -164,15 +173,18 @@ async fn write_thread_inside_leg(
             notify_on_done,
         );
     }
-    let _ = emitter.emit(
-        "codex_thread_inside_leg",
-        &json!({
-            "name": name,
-            "session_id": session_for_emit,
-            "state": state_str,
-            "seq": seq,
-        }),
-    );
+    // A stale-seq drop or a same-state repeat journals nothing.
+    if state_changed {
+        let _ = emitter.emit(
+            "codex_thread_inside_leg",
+            &json!({
+                "name": name,
+                "session_id": session_for_emit,
+                "state": state_str,
+                "seq": seq,
+            }),
+        );
+    }
 }
 
 /// The ONE seq-gated inside-leg writer core: find the row holding
