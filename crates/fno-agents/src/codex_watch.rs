@@ -423,14 +423,23 @@ mod tests {
         std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         let home = AgentsHome::at(td.path().join("agents"));
         let _ = home.ensure_root();
+        // A codex or opencode pid outlives its session, so a node claim reads
+        // live only through the session witness: the env registry's fresh
+        // served liveness.
+        std::env::set_var(crate::paths::HOME_ENV, home.root());
+        let served_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut codex_entry = crate::state::RegistryEntry::default();
         codex_entry.name = "codex-worker".into();
         codex_entry.harness_session_id = Some("thread-a".into());
         codex_entry.status = crate::AgentStatus::Live;
+        codex_entry.liveness = Some("alive".into());
+        codex_entry.liveness_measured_at = Some(served_at.clone());
         let mut oc_entry = crate::state::RegistryEntry::default();
         oc_entry.name = "oc-worker".into();
         oc_entry.harness_session_id = Some("oc-sess-a".into());
         oc_entry.status = crate::AgentStatus::Live;
+        oc_entry.liveness = Some("alive".into());
+        oc_entry.liveness_measured_at = Some(served_at.clone());
         let mut registry = crate::state::Registry::default();
         registry.entries.push(codex_entry);
         registry.entries.push(oc_entry);

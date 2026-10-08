@@ -1781,7 +1781,9 @@ mod tests {
             "target-session:s-legacy",
             crate::claims::AcquireOpts {
                 pid: Some(std::process::id()),
-                identity: Some(("s-legacy".into(), "codex".into())),
+                // A claude pid dies with its session, so the live pid
+                // vouches for the claim with no session witness.
+                identity: Some(("s-legacy".into(), "claude".into())),
                 root: None,
                 events_dir: Some(temp.path().join("claim-events")),
                 ..Default::default()
