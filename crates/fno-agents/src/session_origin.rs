@@ -63,7 +63,10 @@ impl SessionOrigin {
         )
     }
 
-    /// One line for the history card: where, then what.
+    /// One line for the history card: where, then what. The writer side
+    /// never renders it; the mirror keeps the observable for the parity
+    /// test, so the unused read is deliberate.
+    #[allow(dead_code)]
     pub fn origin_text(&self, mine: &str) -> String {
         let place = if mine.is_empty() {
             format!("{} (this machine's id is unreadable)", self.host)
@@ -128,8 +131,8 @@ pub fn write_if_absent(origin: &SessionOrigin) -> std::io::Result<bool> {
     Ok(written)
 }
 
-// Prune runs only here, on a write into the folder just written: a folder
-// with no new sessions keeps its stale records.
+// ponytail: prune runs only on write in the same folder; a folder with no new
+// sessions keeps its stale records.
 fn prune_beside(dir: &Path, keep: &str) {
     let mine = this_machine();
     if mine.is_empty() {
@@ -188,31 +191,6 @@ fn prune_beside(dir: &Path, keep: &str) {
     }
 }
 
-/// Write a record that arrived from elsewhere beside a local transcript.
-/// No prune: pruning stays the writing machine's job, on its own writes.
-pub fn write_record_beside(transcript: &Path, origin: &SessionOrigin) -> std::io::Result<bool> {
-    let Some(path) = record_path(transcript, &origin.session_id) else {
-        return Ok(false);
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            let bytes = serde_json::to_vec_pretty(origin)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            file.write_all(&bytes)?;
-            Ok(true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
 /// Read the record beside a transcript. Any error is None: a missing,
 /// unreadable or foreign-shaped record means "not recorded", never a failure.
 pub fn read_beside(transcript: &Path, session_id: &str) -> Option<SessionOrigin> {
@@ -263,49 +241,5 @@ mod parity_tests {
             };
             assert!(write_if_absent(&built).unwrap() == false, "{bad}");
         }
-        // A record arriving from elsewhere places identically on both
-        // sides, byte for byte, and the second placement is a no-op.
-        let dir_a = tempfile::tempdir().unwrap();
-        let dir_b = tempfile::tempdir().unwrap();
-        let transcript_a = dir_a.path().join("w.jsonl");
-        let transcript_b = dir_b.path().join("w.jsonl");
-        std::fs::write(
-            &transcript_a,
-            "{}
-",
-        )
-        .unwrap();
-        std::fs::write(
-            &transcript_b,
-            "{}
-",
-        )
-        .unwrap();
-        let origin = SessionOrigin {
-            machine: "aaaaaaaaaaaaaaaa".into(),
-            host: "mac-a".into(),
-            harness: "codex".into(),
-            session_id: "0197bbbb-1234-7abc-9def-0123456789ab".into(),
-            transcript_path: "/gone/w.jsonl".into(),
-            recorded_at: "2026-10-07T00:00:00+00:00".into(),
-        };
-        let theirs: fno::session_origin::SessionOrigin =
-            serde_json::from_value(serde_json::to_value(&origin).unwrap()).unwrap();
-        let mine_written = write_record_beside(&transcript_a, &origin).unwrap();
-        let theirs_written =
-            fno::session_origin::write_record_beside(&transcript_b, &theirs).unwrap();
-        assert_eq!(mine_written, theirs_written);
-        assert_eq!(mine_written, true);
-        let record_name = "0197bbbb-1234-7abc-9def-0123456789ab.fno.json";
-        assert_eq!(
-            std::fs::read(dir_a.path().join(record_name)).unwrap(),
-            std::fs::read(dir_b.path().join(record_name)).unwrap()
-        );
-        // A second placement is a no-op on both sides.
-        assert_eq!(write_record_beside(&transcript_a, &origin).unwrap(), false);
-        assert_eq!(
-            fno::session_origin::write_record_beside(&transcript_b, &theirs).unwrap(),
-            false
-        );
     }
 }

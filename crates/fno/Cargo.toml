@@ -51,6 +51,8 @@ regex = "1"
 # store_client.rs hashes long graph paths for the fallback keeper-socket
 # name; the same crate version fno-agents pins, so one build stack.
 sha2 = "0.10"
+# The session-bundle transfer wire (send/receive over a pairing code).
+magic-wormhole = "0.7.7"
 # The shared event store: the native front door routes `fno doctor event`
 # onto this library; the runtime binary links the same types.
 # Re-verify a picked answer's region fingerprint against the live grid before

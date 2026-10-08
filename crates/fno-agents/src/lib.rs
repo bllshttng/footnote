@@ -471,7 +471,6 @@ pub mod tick_ledger;
 pub mod tool_activity;
 pub mod tracker;
 pub mod transcript_activity;
-pub mod transcript_transfer;
 pub mod truth_probe;
 pub mod update_journal;
 pub mod usage;

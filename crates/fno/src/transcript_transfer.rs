@@ -8,10 +8,8 @@
 //! beside it, and prints the resume hints. fno runs no relay and no daemon
 //! for this: the transfer dials the public magic-wormhole transit directly.
 
-use crate::claude_drive;
-use crate::claude_transcript_paths;
-use crate::codex_store;
 use crate::session_origin::{read_beside, write_record_beside, SessionOrigin};
+use crate::transcript_tail;
 use magic_wormhole::{transfer, transit, Code, MailboxConnection, Wormhole};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -159,45 +157,29 @@ fn print_code(code: &Code) {
     println!("Waiting for the receiver...");
 }
 
-/// Locate one session's transcript and name the store it lives in. Claude
-/// resolves through the cap-and-intel resolver; codex through the rollout
-/// locator. The relative path is the answer's suffix under its store root,
-/// so the receiving machine rebuilds the same location.
+/// Locate one session's transcript and name the store it lives in. One
+/// scan over the transcript roots answers for claude and codex alike. The
+/// relative path is the answer's suffix under its store root, so the
+/// receiving machine rebuilds the same location.
 fn locate(sid: &str) -> Result<(PathBuf, &'static str, PathBuf), String> {
-    let claude_root = claude_drive::claude_projects_dir();
-    if let Some(path) = claude_transcript_paths::resolve_transcript(&claude_root, sid) {
-        let rel = path
-            .strip_prefix(&claude_root)
-            .map_err(|_| format!("{} sits outside the claude store", path.display()))?
-            .to_path_buf();
-        return Ok((path, "claude", rel));
-    }
-    if let Some(path) = codex_store::codex_rollout_path(None, sid) {
-        let root = codex_store::codex_home()
-            .map(|home| home.join("sessions"))
-            .ok_or("the codex home is unreadable")?;
-        let rel = path
-            .strip_prefix(&root)
-            .map_err(|_| format!("{} sits outside the codex store", path.display()))?
-            .to_path_buf();
-        return Ok((path, "codex", rel));
-    }
-    Err(format!(
-        "no transcript for {sid} (claude projects and codex sessions searched)"
-    ))
+    let found = transcript_tail::find_transcripts(std::slice::from_ref(&sid));
+    let Some(path) = found.get(sid) else {
+        return Err(format!(
+            "no transcript for {sid} (claude projects and codex sessions searched)"
+        ));
+    };
+    let (store, rel) = transcript_tail::classify_transcript_path(path).ok_or_else(|| {
+        format!(
+            "{} sits outside the known transcript stores",
+            path.display()
+        )
+    })?;
+    Ok((path.clone(), store, rel))
 }
 
 /// The local root of a store named the way `locate` names it.
 fn store_root(store: &str) -> Option<PathBuf> {
-    match store {
-        "claude" => Some(claude_drive::claude_projects_dir()),
-        "codex" => codex_home_sessions(),
-        _ => None,
-    }
-}
-
-fn codex_home_sessions() -> Option<PathBuf> {
-    codex_store::codex_home().map(|home| home.join("sessions"))
+    transcript_tail::transcript_store_root(store)
 }
 
 async fn run_send(rest: &[String]) -> i32 {
@@ -482,6 +464,22 @@ fn place_bundle(meta: &BundleMeta, transcript: &[u8], origin: Option<SessionOrig
     0
 }
 
+/// The native `fno agents transcript` entry: a fresh runtime at the binary
+/// edge, since the role dispatch is sync.
+pub fn run(rest: &[std::ffi::OsString]) -> i32 {
+    let rest: Vec<String> = rest
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt.block_on(run_transcript(&rest)),
+        Err(e) => {
+            eprintln!("fno agents transcript: {e}");
+            1
+        }
+    }
+}
+
 /// `fno agents transcript send|receive` - move a session bundle over a
 /// pairing code, or through a plain file. No daemon, no registry write.
 pub async fn run_transcript(rest: &[String]) -> i32 {
@@ -554,8 +552,8 @@ mod tests {
         let root = dir.path().join("projects");
         std::fs::create_dir_all(root.join("-repo")).unwrap();
         std::fs::write(root.join("-repo/w.jsonl"), "here").unwrap();
-        let saved = std::env::var_os(claude_drive::PROJECTS_DIR_ENV);
-        std::env::set_var(claude_drive::PROJECTS_DIR_ENV, &root);
+        let saved = std::env::var_os(transcript_tail::CLAUDE_PROJECTS_DIR_ENV);
+        std::env::set_var(transcript_tail::CLAUDE_PROJECTS_DIR_ENV, &root);
         let meta = sample_meta("-repo/w.jsonl");
         assert_eq!(place_bundle(&meta, b"new", None), 1);
         // The refusal wrote nothing: the local transcript is untouched.
@@ -564,8 +562,8 @@ mod tests {
             "here"
         );
         match saved {
-            Some(v) => std::env::set_var(claude_drive::PROJECTS_DIR_ENV, v),
-            None => std::env::remove_var(claude_drive::PROJECTS_DIR_ENV),
+            Some(v) => std::env::set_var(transcript_tail::CLAUDE_PROJECTS_DIR_ENV, v),
+            None => std::env::remove_var(transcript_tail::CLAUDE_PROJECTS_DIR_ENV),
         }
     }
 
@@ -573,8 +571,8 @@ mod tests {
     fn place_bundle_writes_transcript_and_origin_record() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("projects");
-        let saved = std::env::var_os(claude_drive::PROJECTS_DIR_ENV);
-        std::env::set_var(claude_drive::PROJECTS_DIR_ENV, &root);
+        let saved = std::env::var_os(transcript_tail::CLAUDE_PROJECTS_DIR_ENV);
+        std::env::set_var(transcript_tail::CLAUDE_PROJECTS_DIR_ENV, &root);
         let meta = sample_meta("-repo/w.jsonl");
         let origin = SessionOrigin {
             machine: "aaaaaaaaaaaaaaaa".into(),
@@ -592,8 +590,8 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
         assert_eq!(placed.host, "mac-a");
         match saved {
-            Some(v) => std::env::set_var(claude_drive::PROJECTS_DIR_ENV, v),
-            None => std::env::remove_var(claude_drive::PROJECTS_DIR_ENV),
+            Some(v) => std::env::set_var(transcript_tail::CLAUDE_PROJECTS_DIR_ENV, v),
+            None => std::env::remove_var(transcript_tail::CLAUDE_PROJECTS_DIR_ENV),
         }
     }
 }
