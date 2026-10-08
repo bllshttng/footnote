@@ -63,7 +63,10 @@ impl SessionOrigin {
         )
     }
 
-    /// One line for the history card: where, then what.
+    /// One line for the history card: where, then what. The writer side
+    /// never renders it; the mirror keeps the observable for the parity
+    /// test, so the unused read is deliberate.
+    #[allow(dead_code)]
     pub fn origin_text(&self, mine: &str) -> String {
         let place = if mine.is_empty() {
             format!("{} (this machine's id is unreadable)", self.host)

@@ -795,7 +795,7 @@ mod tests {
                 "source": "startup"
             }
         });
-        let resp = handle_session_report(&home, &emitter(&home), &req(params));
+        let resp = handle_session_report(&home, &emitter(&home), &req(params.clone()));
         assert_eq!(response_json(&resp)["result"]["stored"], true);
         let row = &read_rows(&home)[0];
         assert_eq!(
@@ -876,7 +876,7 @@ mod tests {
             "0197bbbb-1234-7abc-9def-0123456789ab",
             json!({"agent_self": "w1", "payload": {"source": "resume", "transcript_path": transcript.to_string_lossy()}}),
         );
-        let resp = handle_session_report(&home, &emitter(&home), &req(params));
+        let resp = handle_session_report(&home, &emitter(&home), &req(params.clone()));
         assert_eq!(response_json(&resp)["result"]["related_filled"], true);
         let row = &read_rows(&home)[0];
         assert_eq!(
