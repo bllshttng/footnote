@@ -106,8 +106,9 @@ def _acquire(key: str, holder: str, pid: int) -> None:
 
 
 def _lock_exists(key: str, root: Path) -> bool:
-    from fno.claims.io import claim_path
-    return claim_path(key, root=root).exists()
+    # root is the FNO_CLAIMS_ROOT the fixture set; the claims table answers.
+    from fno.claims.core import claim_status
+    return claim_status(key)["state"] != "free"
 
 
 def test_unclaim_releases_stale_lockfile(tmp_graph, claims_root, native_backlog_door):
