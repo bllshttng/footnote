@@ -838,7 +838,7 @@ mod tests {
         let (start, end, id) = find_fmail_token(line, end).expect("second");
         assert_eq!(id, "fmail-fedcba987654");
         assert_eq!(
-            &line.chars().collect::<Vec<_>>()[start..end]
+            line.chars().collect::<Vec<_>>()[start..end]
                 .iter()
                 .collect::<String>(),
             id
