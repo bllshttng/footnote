@@ -83,7 +83,7 @@ fn parse_envelope(bytes: &[u8]) -> Result<(BundleMeta, &[u8], Option<SessionOrig
         .filter(|&end| end <= bytes.len())
         .ok_or("truncated bundle")?;
     let transcript = &bytes[at..end];
-    let (origin_len, next) = read_u64(bytes, next).ok_or("truncated bundle")?;
+    let (origin_len, next) = read_u64(bytes, end).ok_or("truncated bundle")?;
     let end = next
         .checked_add(origin_len as usize)
         .filter(|&end| end <= bytes.len())

@@ -4774,7 +4774,7 @@ agents_app.command("resume")(_cmd_resume)
 # Advertised: the one verb over live rows, reap receipts and the
 # ledger. `fno whoami ledger` stays as its hidden alias.
 agents_app.command("history")(history_command)
-agents_app.command("transcript")(transcript_command)
+agents_app.command("transcript", hidden=True)(transcript_command)
 
 
 # Gate verb (Task 2.3): per-provider injection verification gate management
