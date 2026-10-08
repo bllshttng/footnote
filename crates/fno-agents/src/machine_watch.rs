@@ -841,6 +841,22 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
         );
+        // A server that is up but runs no compile for clients parked past the
+        // bound is restarted; the new pid feeds the restart counter next tick.
+        if let Some(wedge) = crate::cargo_build_dirs::sccache_wedge(
+            &sample.procs,
+            crate::cargo_build_dirs::SCCACHE_WEDGE_CLIENT_SECS,
+        ) {
+            crate::cargo_build_dirs::restart_wedged_sccache(wedge.server_pid);
+            let _ = journal.append(
+                "sccache_wedge_restart",
+                serde_json::json!({
+                    "server_pid": wedge.server_pid,
+                    "stuck_clients": wedge.stuck_clients,
+                    "oldest_client_secs": wedge.oldest_client_secs,
+                }),
+            );
+        }
         // Whose load the box is in, from the one footprint answerer the
         // spawn CPU axis already reads: unreadable or fleet-majority keeps
         // today's path, a minority share is outside load.
