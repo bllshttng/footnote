@@ -297,7 +297,9 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     assert!(text.contains("w1"), "{text:?}");
     assert!(text.contains("#42"), "{text:?}");
-    assert!(text.contains("opus · Lead of mux"), "{text:?}");
+    // The role moved to row 1 next to the slug; line 2 keeps model and cost.
+    assert!(text.contains("lead-a \u{b7} Lead of mux"), "{text:?}");
+    assert!(text.contains("opus · ~$0.42"), "{text:?}");
     assert!(text.contains("lead-a"), "{text:?}");
     assert!(text.contains("one message"), "{text:?}");
     assert!(text.contains("26%"), "{text:?}");
@@ -307,7 +309,10 @@ fn card_frame_paints_identity_then_model_and_metrics_on_distinct_lines() {
     );
     assert!(text.contains("3c") && text.contains("~$0.42"), "{text:?}");
     // A worker names its lead, and a teamed row names its role.
-    assert!(text.contains("gpt-6.1-sol · lead-a"), "{text:?}");
+    // The worker's lead moved to row 1 after the slug; line 2 keeps model
+    // and cost.
+    assert!(text.contains("w1 \u{b7} lead-a"), "{text:?}");
+    assert!(text.contains("gpt-6.1-sol · ~$0.42"), "{text:?}");
     // Classification contract, beyond the w1 paint above: a bare pane (no
     // harness) has nothing that could ever land, so every field hides; a
     // teamed lead never prices; a claude row's unserved fields are loading
