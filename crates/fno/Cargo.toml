@@ -53,6 +53,9 @@ regex = "1"
 sha2 = "0.10"
 # The session-bundle transfer wire (send/receive over a pairing code).
 magic-wormhole = "0.7.7"
+# magic-wormhole's transfer reader is a futures AsyncRead, so the cursor
+# and the rest of its io types come from here.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The shared event store: the native front door routes `fno doctor event`
 # onto this library; the runtime binary links the same types.
 # Re-verify a picked answer's region fingerprint against the live grid before

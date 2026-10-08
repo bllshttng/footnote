@@ -15,9 +15,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 6] = b"FNOS1\n";
-const RELAY_HOST: &str = "transit.magic-wormhole.io";
-const RELAY_PORT: u16 = 4001;
-
 /// What the receiving machine needs to rebuild the transcript's location.
 /// Everything but the envelope shape is untrusted input on receive.
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,12 +140,10 @@ fn current_branch() -> String {
 }
 
 fn relay_hints() -> Vec<transit::RelayHint> {
-    let tcp = [transit::DirectHint::new(RELAY_HOST, RELAY_PORT)];
-    vec![transit::RelayHint::new(
-        Some(RELAY_HOST.into()),
-        tcp,
-        std::iter::empty(),
-    )]
+    let hint =
+        transit::RelayHint::from_urls(None, [transit::DEFAULT_RELAY_SERVER.parse().unwrap()])
+            .expect("the default relay URL parses");
+    vec![hint]
 }
 
 fn print_code(code: &Code) {
@@ -182,8 +177,24 @@ fn store_root(store: &str) -> Option<PathBuf> {
     transcript_tail::transcript_store_root(store)
 }
 
+/// `--flag=value` splits into two args, the same shape the client verbs
+/// accept before their walks.
+fn expand_eq(rest: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(rest.len() + 2);
+    for arg in rest {
+        match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                out.push(flag.to_string());
+                out.push(value.to_string());
+            }
+            _ => out.push(arg.clone()),
+        }
+    }
+    out
+}
+
 async fn run_send(rest: &[String]) -> i32 {
-    let mut it = crate::client_verbs::expand_eq(rest).into_iter();
+    let mut it = expand_eq(rest).into_iter();
     let mut sid = String::new();
     let mut file_dest: Option<PathBuf> = None;
     while let Some(a) = it.next() {
@@ -290,7 +301,7 @@ async fn run_send(rest: &[String]) -> i32 {
 }
 
 async fn run_receive(rest: &[String]) -> i32 {
-    let arg = crate::client_verbs::expand_eq(rest).join(" ");
+    let arg = expand_eq(rest).join(" ");
     if arg.is_empty() {
         eprintln!("transcript receive: a wormhole code or a bundle path is required");
         return 2;
@@ -531,8 +542,8 @@ mod tests {
         // envelope still parses.
         assert!(parse_envelope(b"NOTFNOS").is_err());
         assert!(parse_envelope(&envelope[..envelope.len() - 3]).is_err());
-        let (meta, transcript, origin) =
-            parse_envelope(&build_envelope(&sample_meta("w.jsonl"), b"t", None).unwrap()).unwrap();
+        let originless = build_envelope(&sample_meta("w.jsonl"), b"t", None).unwrap();
+        let (meta, transcript, origin) = parse_envelope(&originless).unwrap();
         assert_eq!(transcript, b"t");
         assert!(origin.is_none());
     }
