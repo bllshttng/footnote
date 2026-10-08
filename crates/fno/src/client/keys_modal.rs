@@ -35,12 +35,14 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
     let mut any_row = false;
     let mut edit_row: Option<usize> = None;
     // The prefix line the settings table used to lead with: the whole
-    // table hangs off it, so it is the table's first row (US1).
+    // table hangs off it, so it is the table's first row (US1). Inert
+    // (LD7): a selectable prefix line would take the first selection and
+    // answer Enter with a bell against the subtitle's promise.
     rows.push(PopupRow::Entry {
         glyph: crate::keys::prefix_display(),
         label: "prefix".into(),
         hint: String::new(),
-        enabled: true,
+        enabled: false,
     });
     events.push(None);
     let bindings = key_bindings();
