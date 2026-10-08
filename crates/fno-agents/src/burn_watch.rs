@@ -1991,10 +1991,30 @@ mod tests {
             )
             .unwrap();
 
-        std::fs::remove_file(home.registry_json()).unwrap();
-        std::fs::create_dir(home.registry_json()).unwrap();
+        let store = rusqlite::Connection::open(
+            crate::registry_store::database_path(&home.registry_json()).unwrap(),
+        )
+        .unwrap();
+        let document: String = store
+            .query_row(
+                "SELECT value FROM registry_meta WHERE key='document'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        store
+            .execute(
+                "UPDATE registry_meta SET value='[' WHERE key='document'",
+                [],
+            )
+            .unwrap();
         let registry_error = crate::watch_expiry::run_pass(&home);
-        std::fs::remove_dir(home.registry_json()).unwrap();
+        store
+            .execute(
+                "UPDATE registry_meta SET value=?1 WHERE key='document'",
+                [document],
+            )
+            .unwrap();
 
         legacy_entry.harness_session_id = Some("s-legacy".into());
         registry.entries = vec![legacy_entry];
