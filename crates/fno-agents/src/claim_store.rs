@@ -373,12 +373,26 @@ fn record_for(connection: &Connection, key: &str) -> Result<Option<ClaimRecord>,
 
 /// A read must not mint a store: opening one creates `graph.db` and retires
 /// the claims dir, so a status probe of a root that never held a claim would
-/// write state there (a repo checkout, say).
+/// write state there (a repo checkout, say). Only a store that is cleanly
+/// missing counts: both paths report not-found and the nearest existing
+/// ancestor is a writable dir, so an open would have created it. A path the
+/// probe cannot stat, or one an open could never create, is unreadable state
+/// and goes to the open, which names the fault.
 fn store_absent(dir: &Path) -> bool {
-    !dir.exists()
-        && database_path_from_directory(dir)
-            .map(|db| !db.exists())
-            .unwrap_or(true)
+    let Ok(db) = database_path_from_directory(dir) else {
+        return false;
+    };
+    if !matches!(dir.try_exists(), Ok(false)) || !matches!(db.try_exists(), Ok(false)) {
+        return false;
+    }
+    let Some(ancestor) = dir.ancestors().skip(1).find(|p| p.exists()) else {
+        return false;
+    };
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(ancestor.as_os_str().as_bytes()) else {
+        return false;
+    };
+    ancestor.is_dir() && unsafe { libc::access(c_path.as_ptr(), libc::W_OK | libc::X_OK) } == 0
 }
 
 pub(crate) fn read(key: &str, root: Option<&Path>) -> Result<Option<ClaimRecord>, String> {
