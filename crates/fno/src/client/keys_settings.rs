@@ -5,12 +5,6 @@
 
 use super::*;
 
-/// The editor the keys config opens, named so the button can say what runs:
-/// `$EDITOR`, or vi when none is set (the spawn default).
-pub(super) fn editor_name() -> String {
-    std::env::var("EDITOR").unwrap_or_else(|_| "vi".into())
-}
-
 /// Open the key config in `$EDITOR`, then reload the keymap from config.
 /// Rebuilds whichever surface opened it, so the cursor lands back on a live
 /// view: the settings modal rebuilds its rows, the which-key modal its table

@@ -115,7 +115,7 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         edit_row = Some(rows.len());
         rows.push(PopupRow::FullWidth(format!(
             "[ edit keys in {} ]",
-            keys_settings::editor_name()
+            editor::editor_name()
         )));
         events.push(None);
         // The right-click config note. The mux side works whenever the

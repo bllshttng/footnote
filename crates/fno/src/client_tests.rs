@@ -3979,30 +3979,6 @@ async fn row_menu_bg_split_right_attaches_to_current_route() {
 }
 
 #[tokio::test]
-async fn row_menu_shift_arrow_runs_the_matching_split_cell() {
-    // The split cells advertise shift+arrows under one group label (the
-    // portal picker's gesture); this pins that the menu ANSWERS them:
-    // shift+left folds to ShiftArrow and runs Split(Left) through the same
-    // execute path Enter uses, closing the menu.
-    let mut v = unified_rows_view();
-    let idx = agent_row_at(&v, |a| a.name == "bg-claude");
-    assert!(v.open_row_menu(idx, Anchor::Center));
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_keys(&mut v, b"\x1b[1;2D", &mut buf).await.unwrap();
-    assert!(
-        v.row_menu.is_none(),
-        "the shift+arrow split closes the menu"
-    );
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-            assert_eq!(placement.split, Some(Dir::Left));
-        }
-        other => panic!("expected AttachAgent, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn row_menu_open_here_sends_here_placement() {
     // AC1-UI (x-9f75): "Open Here" on a bg row sends AttachAgent with here:true and the default
     // (CurrentRoute, no split) placement; the menu closes.

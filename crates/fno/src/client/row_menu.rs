@@ -18,6 +18,31 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
     }
 }
 
+/// The key loop's Shift+arrow arm. The split cells answer shift+arrows, the
+/// same gesture the portal picker spells: the key selects the matching Split
+/// cell and runs it through the SAME execute path Enter and a click use. A
+/// menu with no split cell (a live pane row's Move grid) swallows the key -
+/// a modified arrow never dismisses the menu.
+pub(super) async fn run_shift_arrow(
+    view: &mut View,
+    dir: Dir,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let hit = view.row_menu.as_ref().and_then(|m| {
+        m.actions
+            .iter()
+            .position(|a| matches!(a, MenuAction::Split(d) if *d == dir))
+    });
+    let Some(i) = hit else {
+        return Ok(());
+    };
+    if let Some(m) = view.row_menu.as_mut() {
+        m.popup.select(i);
+        m.popup.follow_sel(view.term);
+    }
+    row_menu_execute_selected(view, sock_w).await
+}
+
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
 /// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
 /// Entry sets mirror the row's state so no dead item ever renders: a paneless

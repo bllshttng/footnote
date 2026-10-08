@@ -1479,8 +1479,7 @@ struct KeysModal {
     /// filtering, rows rebuilt per keystroke by [`keys_modal_with_filter`].
     filter: Option<String>,
     /// The row index of the "[ edit keys in ... ]" button (`None` while
-    /// filtering, which drops it). Enter there opens the key config in
-    /// `$EDITOR` instead of dispatching a chord.
+    /// filtering): Enter there opens `$EDITOR`, not a chord.
     edit_row: Option<usize>,
 }
 
@@ -9491,24 +9490,10 @@ async fn row_menu_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
-            // The split cells answer shift+arrows, the same gesture the
-            // portal picker spells: the key runs the matching Split action
-            // through the SAME execute path Enter and a click use. A menu
-            // with no split cell (a live pane row's Move grid) swallows it -
-            // a modified arrow never dismisses the menu.
+            // The split cells answer shift+arrows; a menu with none
+            // swallows the key, never dismisses (row_menu::run_shift_arrow).
             ModalKey::ShiftArrow(dir) => {
-                let hit = view.row_menu.as_ref().and_then(|m| {
-                    m.actions
-                        .iter()
-                        .position(|a| matches!(a, MenuAction::Split(d) if *d == dir))
-                });
-                if let Some(i) = hit {
-                    if let Some(m) = view.row_menu.as_mut() {
-                        m.popup.select(i);
-                        m.popup.follow_sel(view.term);
-                    }
-                    row_menu_execute_selected(view, sock_w).await?;
-                }
+                row_menu::run_shift_arrow(view, dir, sock_w).await?;
             }
             ModalKey::PageUp => {
                 if let Some(m) = view.row_menu.as_mut() {

@@ -21,6 +21,30 @@ fn finder_lists_a_live_paneless_row_as_an_attach() {
     assert!(is_attach_at_portal_zero(&row.hit, "job1"));
 }
 
+#[tokio::test]
+async fn shift_arrow_runs_the_matching_split_cell() {
+    // The split cells advertise shift+arrows under one group label (the
+    // portal picker's gesture); this pins that the menu ANSWERS them:
+    // shift+left folds to ShiftArrow and runs Split(Left) through the same
+    // execute path Enter uses, closing the menu.
+    let mut v = unified_rows_view();
+    let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+    assert!(v.open_row_menu(idx, Anchor::Center));
+    let mut buf: Vec<u8> = Vec::new();
+    row_menu_keys(&mut v, b"\x1b[1;2D", &mut buf).await.unwrap();
+    assert!(
+        v.row_menu.is_none(),
+        "the shift+arrow split closes the menu"
+    );
+    let mut cur = std::io::Cursor::new(buf);
+    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+        ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+            assert_eq!(placement.split, Some(Dir::Left));
+        }
+        other => panic!("expected AttachAgent, got {other:?}"),
+    }
+}
+
 #[test]
 fn nine_live_paneless_rows_are_painted_or_counted() {
     let dir = isolate_view_store("paneless-nine");
