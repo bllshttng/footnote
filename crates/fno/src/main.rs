@@ -68,6 +68,13 @@ enum Role {
     /// fno plugin into each. Native, because it must answer before the wheel
     /// exists on a mid-install machine and forwards would 127 there.
     SetupAutowire,
+    /// `fno config get --defaults [--json]`: the defaults inventory
+    /// `config setup run` composes on. Native, so the inventory answers
+    /// beside the setup verb that reads it.
+    ConfigDefaults(Vec<OsString>),
+    /// `fno config setup run`: the one run-once setup over the one step
+    /// table, with a no-prompt path (`--yes`, non-TTY stdin, agent env).
+    SetupRun(Vec<OsString>),
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
@@ -153,6 +160,7 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    DoctorCost(Vec<OsString>),
     /// `fno doctor lint style ...`: the native style check, exec'd through
     /// the sibling fno-agents `style-check` verb. Args from the check name
     /// onward; Python keeps every other lint check until its port.
@@ -163,6 +171,8 @@ enum Role {
     DoctorUpdate(Vec<OsString>),
     /// `fno agents history ... --graph ...`: the native session-card reader.
     AgentsHistory(Vec<OsString>),
+    /// `fno agents transcript ...`: the native session-bundle transfer.
+    AgentsTranscript(Vec<OsString>),
     /// `fno agents mail show ...`: the native one-message reader, lexically
     /// classified beside agents_history. The Python CLI keeps the rest of
     /// the mail tree; the carried tail runs `fno-agents chats show`.
@@ -259,6 +269,16 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
 /// and `view` is refused by name, because the rename ships no compat shell.
 /// The verb mounts at two paths -- `fno agents mail <verb>` and the hidden
 /// `fno mail <verb>` group -- and both spellings claim and refuse alike.
+/// `fno agents transcript send|receive ...`: the native bundle transfer,
+/// lexically claimed beside agents_history. The Python group registers the
+/// same spelling as a shim that execs here, so both fronts answer once.
+fn classify_agents_transcript(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.len() < 2 || args[0].to_str()? != "agents" || args[1].to_str()? != "transcript" {
+        return None;
+    }
+    Some(args[2..].to_vec())
+}
+
 fn classify_mail_show(args: &[OsString]) -> Option<Role> {
     let (verb, tail): (&str, &[OsString]) = if args.len() >= 3
         && args[0].to_str() == Some("agents")
@@ -278,10 +298,15 @@ fn classify_mail_show(args: &[OsString]) -> Option<Role> {
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
+    #[cfg(not(test))]
+    fno::doctor_cost::default_report(args);
     use cli_args::FrontDoor;
     // The native `doctor event` storage verbs are classified lexically,
     // before clap: the Python CLI still owns the `doctor` tree for every
     // other name, so `fno doctor event emit` must keep forwarding.
+    if let Some(rest) = fno::doctor_cost::classify(args) {
+        return Role::DoctorCost(rest);
+    }
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
     }
@@ -296,6 +321,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::agents_history::classify(args) {
         return Role::AgentsHistory(rest);
+    }
+    if let Some(rest) = classify_agents_transcript(args) {
+        return Role::AgentsTranscript(rest);
     }
     if let Some(role) = classify_mail_show(args) {
         return role;
@@ -331,8 +359,14 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     if let Some(rest) = fno::law_cli::classify_inbox_decide(args) {
         return Role::InboxDecide(rest);
     }
+    if let Some(rest) = fno::setup_run::classify(args) {
+        return Role::SetupRun(rest);
+    }
     if fno::setup_autowire::classify(args).is_some() {
         return Role::SetupAutowire;
+    }
+    if let Some(rest) = fno::config_defaults::classify(args) {
+        return Role::ConfigDefaults(rest);
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -490,6 +524,8 @@ fn main() {
         Role::MuxVersion(json) => fno::version::print_version(json),
         Role::Uninstall(opts) => std::process::exit(fno::uninstall::run_uninstall(opts)),
         Role::SetupAutowire => std::process::exit(fno::setup_autowire::run()),
+        Role::ConfigDefaults(rest) => std::process::exit(fno::config_defaults::run(&rest)),
+        Role::SetupRun(rest) => std::process::exit(fno::setup_run::run(&rest)),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(kill_req) => {
             if kill_req.stale_idle || kill_req.all {
@@ -515,6 +551,7 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::DoctorCost(rest) => std::process::exit(fno::doctor_cost::run(&rest)),
         Role::DoctorLintStyle(rest) => {
             // The argv the sibling answers is the verb name plus the tail
             // the classifier sliced: `style-check --stdin ...`.
@@ -526,6 +563,7 @@ fn main() {
         Role::PathsCli(rest) => std::process::exit(fno::paths_route::run(&rest)),
         Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
+        Role::AgentsTranscript(rest) => std::process::exit(fno::transcript_transfer::run(&rest)),
         Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),
         Role::MailViewRenamed => {
             eprintln!("fno agents mail view was renamed: use fno agents mail show");

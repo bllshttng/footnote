@@ -21,9 +21,24 @@ NARROW = 60
 BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
+# The user's own status line reruns at most this often unless its input changes.
+INNER_MAX_AGE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
 LEAD = "⠀"
-COLORS = {"gray": 90, "green": 32, "cyan": 36, "magenta": 35, "yellow": 33}
+# The ANSI names Claude Code's -ansi themes use for the rarity colors.
+# The bare names are what a mod from before the theme table still writes.
+ANSI_NAMES = {"blackBright": 90, "white": 37, "green": 32, "greenBright": 92, "blue": 34, "blueBright": 94, "magenta": 35, "magentaBright": 95, "yellow": 33, "yellowBright": 93, "gray": 90, "cyan": 36}
+
+
+def sgr(color):
+    """The escape for a frame color: rgb(r,g,b) as 24-bit, ansi:<name> in the terminal's own palette, else dim gray."""
+    color = color or ""
+    if color.startswith("rgb(") and color.endswith(")"):
+        parts = [p.strip() for p in color[4:-1].split(",")]
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            return "\x1b[38;2;" + ";".join(parts) + "m"
+    name = color[5:] if color.startswith("ansi:") else color
+    return f"\x1b[{ANSI_NAMES.get(name, 90)}m"
 
 
 def width(s):
@@ -87,6 +102,43 @@ def wrap(text, n):
     return lines
 
 
+def inner_key(data):
+    """The payload minus the clocks Claude Code advances on every tick, plus the width the rows were sized for."""
+    stable = dict(data)
+    stable["cost"] = {k: v for k, v in (data.get("cost") or {}).items() if not k.endswith("duration_ms")}
+    stable["columns"] = os.environ.get("COLUMNS", "")
+    return json.dumps(stable, sort_keys=True)
+
+
+def cached_inner_rows(stdin, data, session):
+    """The user's status line reruns on a real session change or once its rows age out; other ticks reuse them.
+
+    The age bound keeps a clock or a background git change from going stale for good.
+    A failed run never replaces good rows: the last good rows show and the next tick retries.
+    """
+    if not session:
+        return inner_rows(stdin, data)
+    path = os.path.join(HOME, "frames", f"{session}.inner.json")
+    key = inner_key(data)
+    cached = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("key") == key and time.time() - cached.get("at", 0) < INNER_MAX_AGE_S:
+            return cached["rows"]
+    except (OSError, ValueError, KeyError):
+        pass
+    rows = inner_rows(stdin, data)
+    if not rows:
+        return cached.get("rows") or rows
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"key": key, "at": time.time(), "rows": rows}, f)
+    except OSError:
+        pass
+    return rows
+
+
 def inner_rows(stdin, data):
     try:
         with open(os.path.join(HOME, "inner.json"), encoding="utf-8") as f:
@@ -135,7 +187,7 @@ def layout(left, frame, cols):
         return left
     if cols + 4 < NARROW:
         return face_row(left, frame, cols)
-    color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
+    color = sgr(frame.get("color"))
     art = [r.rstrip() for r in frame.get("sprite", [])]
     while art and not art[0].strip():
         art.pop(0)
@@ -181,7 +233,7 @@ def layout(left, frame, cols):
 
 def face_row(left, frame, cols):
     """The one-line face on the lowest row that has room."""
-    color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
+    color = sgr(frame.get("color"))
     face = f"{frame.get('face', '')} {frame.get('name', '')}"
     if frame.get("speech"):
         face += f": {frame['speech']}"
@@ -220,7 +272,7 @@ def main():
                 f.write(str(int(time.time() * 1000)))
         except OSError:
             pass
-    left = inner_rows(stdin, data)
+    left = cached_inner_rows(stdin, data, session)
     # Claude Code's usable status width runs a few columns under COLUMNS.
     cols = int(os.environ.get("COLUMNS") or 120) - 4
     print("\n".join(layout(left, read_frame(session), cols)))

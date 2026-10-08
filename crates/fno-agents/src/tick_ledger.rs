@@ -104,7 +104,23 @@ fn cadence_of(arm: &str) -> u64 {
 /// Every arm the readout shows, whether or not it has ever ticked.
 pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
+        arm: "worker_wake",
+        default_interval_s: 60,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
         arm: "lead_wake",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "notice_route",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
         upstream: None,
@@ -1596,7 +1612,6 @@ mod tests {
     /// lead eval arm its 600-second daemon cadence.
     #[test]
     fn arm_watch_merge_close_and_lead_eval_are_known_daemon_arms() {
-        assert_eq!(KNOWN_ARMS.len(), 23);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")

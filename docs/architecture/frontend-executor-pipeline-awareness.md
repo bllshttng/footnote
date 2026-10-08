@@ -229,11 +229,10 @@ otherwise proceed without the prerequisite.
 | `agents/frontend-executor.md` | Full rewrite; dispatch envelope, gate artifact tables, all 9 decisions wired |
 | `skills/blueprint/SKILL.md` | PRODUCT.md prereq check + `impeccable_stages` validator |
 | `skills/execute/references/waves.md` | Dispatch-time PRODUCT.md re-check + iteration ceiling |
-| `skills/execute/orchestrator.py` | Iteration ceiling refactor (full-loop, not per-stage) |
+| `skills/execute/orchestrator.py` | Iteration ceiling model (full-loop, not per-stage). Retired later as unused: `agents/frontend-executor.md` owns the ceiling. |
 | `skills/execute/references/executor-resolution.md` | `impeccable_stages` override documentation |
 | `tests/agents/test_frontend_executor.py` | BDD tests: stage selection, verdict, finding classification |
 | `tests/blueprint/test_product_md_check.py` | /blueprint gate tests |
-| `tests/operator/test_iteration_ceiling.py` | Ceiling tests |
 | `tests/operator/test_dispatch_gate.py` | Operator dispatch gate tests |
 | `CLAUDE.md` | Executor table updated; audit/sigma-review boundary documented |
 

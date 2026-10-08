@@ -70,6 +70,7 @@ class SinkResult:
 class TickResult:
     sinks: list[SinkResult] = field(default_factory=list)
     skipped_lines: int = 0
+    rows_read: int = 0  # status rows the pass read; 0 on an unchanged store
     locked_out: bool = False  # another tick held the per-project lock; skipped
     lease_lost: bool = False  # lock was stolen; cursor persistence was aborted
 
@@ -100,51 +101,6 @@ def _parse_line(line: str) -> Optional[dict[str, Any]]:
     return obj if _utc_timestamp(obj["ts"]) is not None else None
 
 
-def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """Return (events with ts >= since_ts, malformed_line_count) from one file.
-
-    The bound is INCLUSIVE so a boundary event sharing the cursor's second is
-    still seen; the per-sink ``(ts, n)`` tiebreak decides whether it is new (see
-    _run_locked). Streams line-by-line; a malformed / ts-less line is skipped and
-    counted (digest.rs posture), never fatal.
-    """
-    events: list[dict[str, Any]] = []
-    skipped = 0
-    since_key = _timestamp_key(since_ts) if since_ts is not None else None
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for raw in fh:
-                ev = _parse_line(raw)
-                if ev is None:
-                    if raw.strip():
-                        skipped += 1
-                    continue
-                if since_key is None or _timestamp_key(ev["ts"]) >= since_key:
-                    events.append(ev)
-    except FileNotFoundError:
-        return [], 0
-    except (OSError, UnicodeDecodeError):
-        # A permission error or a corrupt (non-utf8) byte mid-read must not crash
-        # the tick; return what parsed so far (the cursor simply does not advance
-        # past the unread tail, which retries next tick).
-        return events, skipped
-    return events, skipped
-
-
-def _first_ts(active: Path) -> Optional[str]:
-    """The ts of the active file's first parseable line, or None if empty/absent.
-    Used to decide whether the rotated ``.1`` could still hold un-cursored events."""
-    try:
-        with active.open("r", encoding="utf-8") as fh:
-            for raw in fh:
-                ev = _parse_line(raw)
-                if ev is not None:
-                    return str(ev["ts"])
-    except FileNotFoundError:
-        return None
-    return None
-
-
 def _active_inode(active: Path) -> int:
     """The active file's inode, or -1 (a sentinel distinct from any real inode) when
     absent/unstatable, so 'appeared' and 'vanished' both read as a change."""
@@ -154,7 +110,9 @@ def _active_inode(active: Path) -> int:
         return -1
 
 
-def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
+def _stream_since(
+    active: Path, since_ts: Optional[str], after_seq: Optional[int] = None
+) -> "tuple[list[dict[str, Any]], int, Optional[int]]":
     """Rotation-stable read: snapshot the active file's inode around the read pass.
     A worker rotating the log mid-pass (``events.jsonl`` -> ``.1`` + a fresh active)
     can put old content in both files and inflate the same-``ts`` occurrence index,
@@ -162,21 +120,27 @@ def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str
     changed (or the file appeared/vanished) between the stats, discard and re-run
     the pass ONCE; a second racing rotation returns anyway - at-least-once tolerates
     the duplicate, only the index inflation had a loss path."""
-    result: "tuple[list[dict[str, Any]], int]" = ([], 0)
+    result: "tuple[list[dict[str, Any]], int, Optional[int]]" = ([], 0, None)
     for _ in range(2):
         ino_before = _active_inode(active)
-        result = _stream_pass(active, since_ts)
+        result = _stream_pass(active, since_ts, after_seq)
         if _active_inode(active) == ino_before:
             break  # no rotation raced this pass; its counts are trustworthy
     return result
 
 
-def _stream_pass(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """Read actionable status rows through the native stream owner."""
+def _stream_pass(
+    active: Path, since_ts: Optional[str], after_seq: Optional[int] = None
+) -> "tuple[list[dict[str, Any]], int, Optional[int]]":
+    """Read actionable status rows through the native stream owner. With a
+    store, only rows committed past ``after_seq`` come back, plus the store's
+    high-water seq as the next scan cursor; a store-less journal answers no
+    seq and is read whole."""
     from fno.events.store_client import read_projection
 
-    rows, skipped = read_projection(active, "--status-stream", {"since_ts": since_ts})
-    return rows, skipped
+    rows, skipped, *high = read_projection(
+        active, "--status-stream", {"since_ts": since_ts, "after_seq": after_seq})
+    return rows, skipped, (high[0] if high else None)
 
 
 def _eof_cursor(active: Path) -> "tuple[str, int]":
@@ -219,6 +183,11 @@ def _cursor_path(name: str, project_root: Optional[Path]) -> Path:
 
 def _errors_path(name: str, project_root: Optional[Path]) -> Path:
     return _state_dir(project_root) / f"{name}.errors.jsonl"
+
+
+# One store seq per journal, shared by every sink, rides the cursor file
+# format as ("", seq). The dot keeps it apart from any sink name.
+_SCAN = ".scan"
 
 
 def _read_cursor(name: str, project_root: Optional[Path]) -> "Optional[tuple[str, int]]":
@@ -314,21 +283,33 @@ def _run_locked(
     verify_lease: Callable[[], bool],
 ) -> TickResult:
     active = paths.project_log("events.jsonl", project_root=project_root)
-    eof = _eof_cursor(active)  # (ts, count_at_ts) - the fresh-sink floor
+    scan = (_read_cursor(_SCAN, project_root) or (None, None))[1]
+    cursors = {s.name: _read_cursor(s.name, project_root) for s in sinks}
+    fresh = {name: cur is None for name, cur in cursors.items()}
 
     # Each sink's starting (ts, n) cursor: a fresh sink (no file) starts at EOF so
     # no history is replayed; an existing sink resumes from its stored cursor.
-    fresh: dict[str, bool] = {}
-    start: dict[str, tuple[str, int]] = {}
-    for s in sinks:
-        cur = _read_cursor(s.name, project_root)
-        fresh[s.name] = cur is None
-        start[s.name] = cur if cur is not None else eof
+    # With a scan seq EOF is now, a real ts that survives a lost scan cursor.
+    eof = ("", 0)
+    if scan is not None:
+        eof = (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), 0)
+    elif any(fresh.values()):
+        eof = _eof_cursor(active)  # (ts, count_at_ts) - the fresh-sink floor
+    start = {name: cur if cur is not None else eof for name, cur in cursors.items()}
 
     # Read from the oldest cursor ts INCLUSIVE so every sink sees its own same-ts
     # boundary events; the per-sink (ts, n) tiebreak below decides what is new.
     min_ts = min((c[0] for c in start.values()), key=_timestamp_key)
-    events, skipped = _stream_since(active, min_ts)
+    events, skipped, high = _stream_since(active, min_ts, scan)
+    if scan is None and high is not None and events:
+        # A first store-backed pass: the journal EOF can predate the store's
+        # newest rows, so a fresh sink starts at the store's EOF instead.
+        last_ts = max((e["ts"] for e in events), key=_timestamp_key)
+        last = _timestamp_key(last_ts)
+        store_eof = (last_ts, sum(1 for e in events if _timestamp_key(e["ts"]) == last))
+        for name in start:
+            if fresh[name] and _timestamp_key(start[name][0]) < last:
+                start[name] = store_eof
     # Setup migration appends a worktree segment after the canonical tail, so
     # append order is not necessarily timestamp order. The cursor compares by
     # timestamp; process a stable timestamp ordering so an older migrated row
@@ -390,9 +371,17 @@ def _run_locked(
     # silent re-delivery storm. A fresh sink persists its EOF floor even with zero
     # dispatch so the next tick never backfills.
     if not dry_run:
+        # A held (short-circuited) sink re-reads this window, so the seq stays.
+        # Past an advance no same-ts peer remains, so counts restart at 0.
+        # Cursors land first: a crash between the writes re-delivers.
+        advance = high is not None and high != scan
+        advance = advance and not any(state[s.name].short_circuited for s in sinks)
         for s in sinks:
             st = state[s.name]
-            if st.dispatched or st.dropped or fresh[s.name]:
+            cursor = st.new_cursor
+            if advance and cursor[1]:  # type: ignore[index]
+                cursor = (cursor[0], 0)  # type: ignore[index]
+            if st.dispatched or st.dropped or fresh[s.name] or cursor != st.new_cursor:
                 if not verify_lease():
                     return TickResult(
                         sinks=[state[item.name] for item in sinks],
@@ -400,13 +389,20 @@ def _run_locked(
                         lease_lost=True,
                     )
                 try:
-                    _write_cursor(s.name, st.new_cursor, project_root)  # type: ignore[arg-type]
+                    _write_cursor(s.name, cursor, project_root)  # type: ignore[arg-type]
                 except OSError as exc:
+                    advance = False  # a stale count must not meet the next window
                     _log_error(s.name, project_root, {
                         "sink": s.name, "reason": f"cursor write failed: {exc}",
                         "class": "cursor_write_failed"})
+        if advance and high is not None and verify_lease():
+            try:
+                _write_cursor(_SCAN, ("", high), project_root)
+            except OSError:
+                pass  # the next tick re-reads this window; ts cursors dedupe
 
-    return TickResult(sinks=[state[s.name] for s in sinks], skipped_lines=skipped)
+    return TickResult(
+        sinks=[state[s.name] for s in sinks], skipped_lines=skipped, rows_read=len(events))
 
 
 # ── per-project tick lock ───────────────────────────────────────────────────
@@ -848,11 +844,13 @@ def tick_cmd(
     if result.locked_out:
         typer.echo("status-fanout: another tick holds the lock; skipped")
         return
-    if not result.sinks:
+    # The daemon ticks every few seconds: an idle pass prints nothing.
+    if not result.sinks and dry_run:
         typer.echo("status-fanout: no enabled sinks (no-op)")
-        return
     verb = "would-send" if dry_run else "dispatched"
     for sr in result.sinks:
+        if not (dry_run or sr.matched or sr.dropped or sr.short_circuited):
+            continue
         sent = sr.matched if dry_run else sr.dispatched
         extra = " short-circuited" if sr.short_circuited else ""
         typer.echo(

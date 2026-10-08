@@ -456,10 +456,13 @@ def test_cmd_send_codex_delivered_hosted_stdout(
         ["send", "codex-agent", "hello", "--cwd", str(cwd), "--from-name", "lead"],
     )
     assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    import json as _json
+
     out = (result.stdout or "").strip()
-    assert out.startswith("fmail-"), f"stdout: {out!r}"
-    assert "delivered (hosted)" in out, f"stdout: {out!r}"
-    assert "queued" not in out
+    receipt = _json.loads(out)
+    assert receipt["msg_id"].startswith("fmail-"), f"stdout: {out!r}"
+    assert "delivered (hosted)" in receipt["status"], f"stdout: {out!r}"
+    assert "queued" not in receipt["status"]
 
 
 # ---------------------------------------------------------------------------

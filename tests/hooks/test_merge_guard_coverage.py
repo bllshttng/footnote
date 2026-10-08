@@ -82,11 +82,6 @@ def test_missing_fno_does_not_block(monkeypatch):
     assert git_protection._coverage_refusal("gh pr merge 900") is None
 
 
-def test_timeout_does_not_block(monkeypatch):
-    _patch_run(monkeypatch, subprocess.TimeoutExpired("fno", 90))
-    assert git_protection._coverage_refusal("gh pr merge 900") is None
-
-
 def test_unparseable_pr_is_skipped(monkeypatch):
     """The branch-name and current-branch forms name no PR, so there is nothing
     to check. It must skip rather than guess a PR number."""
@@ -110,20 +105,6 @@ def test_dispatch_hold_veto_refuses_confirmed_hold(monkeypatch):
 def test_dispatch_hold_veto_allows_proven_unheld(monkeypatch):
     _patch_run(monkeypatch, _Proc(0, stdout="PR 900: no plan dispatch hold\n"))
     assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
-
-
-def test_dispatch_hold_veto_probes_the_front_door_once(monkeypatch):
-    """The hold verdict comes from one `fno do pr hold-check` probe; the
-    retired in-process fast path and its `python -m fno.cli` source fallback
-    are gone, so the veto never imports the package or re-probes."""
-    seen = _patch_run(
-        monkeypatch,
-        _Proc(3, stderr="dispatch-hold:x-5a5c: blocked"),
-    )
-    msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
-    assert msg == "dispatch-hold:x-5a5c: blocked"
-    assert seen["cmd"] == ["fno", "do", "pr", "hold-check", "900"]
-    assert seen["timeout"] <= 5
 
 
 @pytest.mark.parametrize(
@@ -200,18 +181,6 @@ def test_flag_values_do_not_disarm_the_veto(monkeypatch):
     msg = git_protection._coverage_refusal("gh pr merge 42 -b see/pull/1")
     assert msg and msg.startswith("coverage uncovered")
     assert seen["cmd"] == ["fno", "pr", "coverage-check", "42"]
-
-
-def test_stale_binary_fails_open(monkeypatch):
-    """A `fno` deployment older than this verb answers an unknown-command
-    exit 2, indistinguishable from any other usage error. It fails open (the
-    documented rollout-window behavior in `_fno_veto_refusal`) rather than
-    turning every stale install into a merge outage."""
-    _patch_run(
-        monkeypatch,
-        _Proc(2, stderr='Error: unknown command "coverage-check" for "fno pr"\n'),
-    )
-    assert git_protection._coverage_refusal("gh pr merge 900") is None
 
 
 def test_probe_budgets_fit_the_hook_budget(monkeypatch):

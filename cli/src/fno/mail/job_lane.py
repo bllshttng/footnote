@@ -17,6 +17,7 @@ def job_lane_send(
     from_name: Optional[str],
     style_exception: Optional[str] = None,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> None:
     """Deliver to a JOB address, resolved to whoever holds the claim RIGHT NOW.
 
@@ -91,6 +92,7 @@ def job_lane_send(
             from_session=sender_session,
             origin=origin,
             to_session=to_session,
+            subject=subject,
         )
 
     # Only the live envelope names a role: a job address outlives its holder,
@@ -122,6 +124,7 @@ def job_lane_send(
                 to_kind="node",
                 word_count=authored_words,
                 to_session=session_id,
+                subject=subject,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -129,7 +132,11 @@ def job_lane_send(
                 f"do not retry: {exc}",
                 file=sys.stderr,
             )
-        print(f"delivered (hosted) to {recipient}{holder_tag} id:{msg_id}")
+        from fno.mail.receipts import json_receipt
+
+        print(json_receipt(
+            msg_id, to=recipient, status=f"delivered (hosted){holder_tag}", subject=subject,
+        ))
         return
 
     owner = DurableOwner.WAKE_DAEMON
@@ -146,6 +153,7 @@ def job_lane_send(
             from_session=sender_session,
             origin=origin,
             word_count=authored_words,
+            subject=subject,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         _release_budget(_reservation)
@@ -154,23 +162,33 @@ def job_lane_send(
             file=sys.stderr,
         )
         raise typer.Exit(code=12) from exc
+    from fno.mail.receipts import json_receipt
+
     if bus_only:
         print(
             "mail: holder is DND (bus-only by delivery policy); queued durable "
             "until a holder drains",
             file=sys.stderr,
         )
-        print(
-            f"{th.thread_id} queued (durable) for {recipient} "
-            f"[bus-only: a holder drains it by policy]{holder_tag}"
-            + durable_window_clause(owner.value)
-        )
+        print(json_receipt(
+            th.thread_id,
+            to=recipient,
+            status=(
+                f"queued (durable) [bus-only: a holder drains it by policy]{holder_tag}"
+                + durable_window_clause(owner.value)
+            ),
+            subject=subject,
+        ))
         return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
           file=sys.stderr)
     suffix = _live_miss_age_suffix(recipient)
-    print(
-        f"{th.thread_id} queued (durable) for {recipient} "
-        f"[job-live-miss{suffix}]{holder_tag}"
-        + durable_window_clause(owner.value)
-    )
+    print(json_receipt(
+        th.thread_id,
+        to=recipient,
+        status=(
+            f"queued (durable) [job-live-miss{suffix}]{holder_tag}"
+            + durable_window_clause(owner.value)
+        ),
+        subject=subject,
+    ))

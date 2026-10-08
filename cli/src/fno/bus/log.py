@@ -38,6 +38,9 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
+#: Audit-only: outage-era traffic backfilled with full provenance, never re-delivered.
+CROSS_SESSION_DELIVERY = "cross-session"
+
 # Size-triggered rotation now lives in the Rust bus-append door
 # (fno-agents announce::append_line), which reads the same
 # FNO_BUS_MAX_BYTES / FNO_BUS_RETAIN envs. A malformed override degrades
@@ -99,6 +102,10 @@ class Envelope:
     # Additive: a row written before this field existed reads back through the
     # legacy meta fallback.
     origin: Optional[str] = None
+    # The sender's --subject. Additive: a row written before this
+    # field existed reads back as None and the envelope header derives its
+    # third field from the body as before.
+    subject: Optional[str] = None
 
     @classmethod
     def new(
@@ -122,6 +129,7 @@ class Envelope:
         to_kind: Optional[str] = None,
         word_count: Optional[int] = None,
         origin: Optional[str] = None,
+        subject: Optional[str] = None,
     ) -> "Envelope":
         mid = id or new_msg_id()
         return cls(
@@ -143,6 +151,7 @@ class Envelope:
             to_kind=to_kind,
             word_count=word_count,
             origin=origin,
+            subject=subject,
         )
 
 
@@ -192,6 +201,8 @@ def to_json_line(env: Envelope) -> str:
         obj["to_kind"] = env.to_kind
     if env.origin:
         obj["origin"] = env.origin
+    if env.subject:
+        obj["subject"] = env.subject
     # `is not None`, not truthiness: a genuine zero-word body (a pasted log
     # masks to nothing) must serialize as 0, not vanish and read back as legacy.
     if env.word_count is not None:
@@ -236,6 +247,7 @@ def from_json_line(line: str) -> Envelope:
         # back to meta so pre-existing lines still render their provenance.
         origin=obj.get("origin")
         or (_meta.get("origin") if isinstance(_meta, dict) else None),
+        subject=obj.get("subject"),
     )
 
 
@@ -401,7 +413,8 @@ def is_deliverable(env: Envelope) -> bool:
     """
     if getattr(env, "kind", None) in CONTROL_KINDS:
         return False
-    return getattr(env, "delivery", None) not in (HOSTED_DELIVERY, TYPED_DELIVERY)
+    delivery = getattr(env, "delivery", None)
+    return delivery not in (HOSTED_DELIVERY, TYPED_DELIVERY, CROSS_SESSION_DELIVERY)
 
 
 def record_hosted_delivery(
@@ -420,6 +433,7 @@ def record_hosted_delivery(
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
     to_session: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> Envelope:
     """Append one audit-only record after confirmed hosted delivery. ``to_session``/
     ``to_harness`` name the session actually injected into, for the landed check
@@ -442,6 +456,7 @@ def record_hosted_delivery(
         to_kind=to_kind,
         word_count=word_count,
         meta=meta or None,
+        subject=subject,
     )
     append(env)
     return env
@@ -463,6 +478,7 @@ def record_typed_delivery(
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
+    subject: Optional[str] = None,
 ) -> Envelope:
     """Append one audit-only record after a ``--force`` pane send typed the body.
 
@@ -492,6 +508,7 @@ def record_typed_delivery(
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,
+        subject=subject,
         meta={
             "transport": "pane",
             "pane_id": str(pane_id),

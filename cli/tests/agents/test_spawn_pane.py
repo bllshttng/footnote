@@ -32,6 +32,17 @@ from fno.paths_testing import use_tmpdir
 from fno.agents.mux_spawn import MuxSpawnResult
 from tests.agents._fake_claude import stub_codex_sandbox_probe  # noqa: F401  re-exported for test_spawn_pane_codex_receipt
 
+
+@pytest.fixture(autouse=True)
+def _graphless_seed_resolver(monkeypatch):
+    """The seed-word gate fails open on an unreadable graph; pin that here so
+    the plumbing tests' fake node words never depend on the ambient store."""
+
+    def _unreadable(path=None, **_):
+        raise ValueError("graph store unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
+
 AGY_HARNESS = "agy"
 CODEX_HARNESS = "codex"
 OPENCODE_HARNESS = "opencode"

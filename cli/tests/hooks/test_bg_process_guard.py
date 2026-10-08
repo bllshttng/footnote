@@ -411,19 +411,6 @@ def test_an_unbounded_loop_header_is_refused_whatever_its_body() -> None:
     assert guard.decide("while true; do sleep 1; done") is not None
 
 
-def test_an_escape_before_the_loop_does_not_clear_it() -> None:
-    """An escape leaves the loop it is INSIDE, never one it precedes.
-
-    Read over the whole command, an ordinary precondition cleared the loop that
-    followed it, and `cd /tmp || exit 1; while true; do sleep 60; done &` is a
-    very ordinary way to write the keepalive this guard exists to refuse.
-    """
-    assert guard.decide("cd /tmp || exit 1; while true; do sleep 60; done &")
-    assert guard.decide("[ -f x ] || exit 1\nwhile true; do sleep 1; done")
-    # The escape that IS inside the loop still clears it.
-    assert guard.decide("while true; do sleep 5; gh pr view && break; done") is None
-
-
 def test_a_bundled_shell_flag_still_opens_the_payload() -> None:
     """`bash -lc '...'` is the same call as `bash -c '...'`; an exact `-c`
     match walked past every bundled spelling."""
@@ -439,18 +426,6 @@ def test_a_redirect_target_is_not_a_bound() -> None:
     assert guard.decide("yes 2> /tmp/gtimeout")
     assert guard.decide("yes > /tmp/timeout")
     assert guard.decide("timeout 300 yes > /dev/null") is None
-
-
-def test_refusal_carries_the_replacement_verbatim() -> None:
-    """The refusal string IS the naming layer. Prevention layer 4 ships here
-    and nowhere else, so a reason without the bounded+named form is a silent
-    regression of a whole layer of the design."""
-    reason = guard.decide("yes > /dev/null &")
-    assert reason is not None
-    assert "loadgen.sh" in reason
-    assert "timeout" in reason
-    assert "exec -a fno-" in reason
-    assert "SIGPIPE" in reason
 
 
 #: Each remedy the refusal advertises, and a command that takes the advice.

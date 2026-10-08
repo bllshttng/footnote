@@ -61,6 +61,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | arm | scheduler | hosted by | what it does | default interval |
 |---|---|---|---|---|
 | `lead_wake` | `daemon` | `fno-agents-daemon` | wakes a lead one minute past its check-in beat and tells the rung up | 300 s |
+| `worker_wake` | `daemon` | `fno-agents-daemon` | nudges ended Codex turns or resumes proven-dead sessions on unfinished work, preserving intentional waits | 60 s |
 | `lead_wake` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the python-served pre-rename spelling of `lead_wake` | 900 s |
 | `watchdog` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the fleet watchdog classifier over lanes | 600 s |
 | `pr_watch_sweep` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | scans open-PR backlog nodes and fires `/fno:ship pr check` | 600 s |
@@ -83,6 +84,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `lead_eval` | `daemon` | `fno-agents-daemon` | writes missing eval parts for ended Claude leads | 600 s |
 | `fleet_page` | `daemon` | `fno-agents-daemon` | renders fleet.html | 1800 s |
 | `attention` | `daemon` | `fno-agents-daemon` | selects attention rows into the status payload | 30 s |
+| `notice_route` | `daemon` | `fno-agents-daemon` | routes reconcile warnings to the owning lead and folds repeated failures into one node | 300 s |
 | `heal` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the PR auto-heal drive, gated on `auto_heal.enabled` | 600 s |
 | `evals` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the eval bank's demand leg | per `evals.schedule_days` |
 | `stranded` | `launchd:sh.fno.pr-watcher` | the pr-watch tick | the stranded-session sweep | one tick in three |

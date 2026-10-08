@@ -2190,8 +2190,8 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
     .await;
 }
 
-/// AC2-EDGE: with no fenced tokens, the frames are today's frames - no
-/// `config` key anywhere, and the row stays slim.
+/// With no fenced tokens, worker resilience defaults reach the frame while
+/// the registry stores no synthetic harness arguments.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
     let behavior = crate::codex_fake_daemon::Behavior::quick();
@@ -2209,9 +2209,13 @@ async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
             .find(|f| f["method"] == "thread/start")
             .and_then(|f| f.get("params").cloned())
             .expect("a thread/start frame");
-        assert!(
-            start.get("config").is_none(),
-            "no fenced tokens, no config key - today's frame: {start}"
+        assert_eq!(
+            start["config"],
+            json!({
+                "model_providers.openai.stream_max_retries": 20,
+                "model_providers.openai.stream_idle_timeout_ms": 600_000
+            }),
+            "unfenced workers receive only the resilience defaults: {start}"
         );
 
         let registry = load_registry_offloaded(home.registry_json())

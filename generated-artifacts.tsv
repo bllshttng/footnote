@@ -22,6 +22,9 @@ docs/harnesses/verb-matrix.md	crates/fno-agents/src/harness_capabilities.toml an
 .codex/agents/*.toml	agents/*.md	python3 scripts/sync-codex-agents.py
 docs/configuration-guide.md	SettingsModel and cli/src/fno/config/registry.py	cd cli && uv run fno-py config schema --markdown --write
 docs/config.example.toml	SettingsModel and cli/src/fno/config/registry.py	cd cli && uv run fno-py config schema --toml --write
+crates/fno/config.example.toml	SettingsModel and cli/src/fno/config/registry.py	cd cli && uv run fno-py config schema --toml --write
 *Cargo.lock	the sibling Cargo.toml	cargo build in that crate
 docs/loops.md	crates/fno-agents/src/tick_ledger.rs KNOWN_ARMS	cargo run --manifest-path crates/fno-agents/Cargo.toml -- loops table --markdown > docs/loops.md
+crates/fno/src/otel_read.rs	crates/fno-agents/src/otel_read.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
+docs/reference/otel-schema.md	crates/fno-agents/src/otel_schema.sql	python3 scripts/docs/generate-otel-schema.py
 crates/fno/src/role_migration.rs	crates/fno-agents/src/role_migration.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml

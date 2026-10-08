@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, type StatName, embody, hatch, restore } from './companion'
+import { type Companion, type Soul, RARITY_STARS, RARITY_THEME, STAT_NAMES, type StatName, embody, hatch, rarityColor, restore } from './companion'
 import { HATCH_FRAMES, HATCH_FRAME_MS, HATCH_MIN_ROUNDS, HATCH_WOBBLE, IDLE_SEQUENCE, PET_HEARTS, RAINBOW, renderFace, renderSprite } from './sprites'
 import { type FeedRow, addressedBy, cleanPersonality, cleanReaction, idlePrompt, lastPrompt, loudReason, type Reason, turnOutput, newsFact, newsPrompt, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
@@ -17,6 +17,10 @@ const FEED_WINDOW_S = 600
 const FLEET_MS = 300_000
 // A buddy that drew within this window has someone looking at it.
 const SEEN_MS = 5_000
+// The status line runs in every live session, hidden mux panes too, so a draw does not mean a
+// person is there. In an fno mux pane the mux names the panes on screen; elsewhere a key typed
+// in this session's prompt box within this window stands in for that.
+const TYPED_MS = 600_000
 // The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
 const FRAME_REFRESH_MS = 10_000
 const PANE_ID = 'buddy'
@@ -34,6 +38,12 @@ let tick = 0
 let bubble: { text: string; at: number } | null = null
 let pettedAt = -Infinity
 let drawnAt = -Infinity
+let typedAt = -Infinity
+// The mux's on-screen file and this session's pane in it; '' outside an fno mux pane.
+let muxVisible = ''
+let muxPane = 0
+// Null when there is no mux answer to read.
+let onScreen: boolean | null = null
 let paneDrawnAt = -Infinity
 let paneAsked = false
 let reactedAt = -Infinity
@@ -92,6 +102,43 @@ async function load($: EngineInterface, now: number): Promise<void> {
     personalityDone = false
     void givePersonality($)
   }
+}
+
+// The soul is shared by every session on the machine. A roll or a new personality in one
+// session rewrites it; the others take it here, so all sessions show the same buddy.
+async function syncSoul($: EngineInterface): Promise<void> {
+  const saved = (await $.store.get('soul')) as Soul | undefined
+  if (!buddy || !saved?.seed) return
+  if (saved.seed === buddy.seed && saved.name === buddy.name && saved.personality === buddy.personality) return
+  if (saved.seed !== buddy.seed) {
+    recent = []
+    lastSaid = ''
+    // Drop the old buddy's line but keep its time, so the swap does not start an idle call.
+    if (bubble) bubble = { text: '', at: bubble.at }
+  }
+  buddy = embody(saved)
+}
+
+// A model call is spent only where a person can see the answer.
+function attended(now: number): boolean {
+  return onScreen ?? now - typedAt < TYPED_MS
+}
+
+async function readOnScreen($: EngineInterface): Promise<void> {
+  if (!muxVisible) return
+  try {
+    onScreen = (JSON.parse(await $.fs.read(muxVisible)).panes ?? []).includes(muxPane)
+  } catch {
+    // An older mux writes no file: fall back to typing.
+    onScreen = null
+  }
+}
+
+// Idle talk is one line for the whole machine: the first attended session past the gap says it.
+async function claimIdle($: EngineInterface, now: number): Promise<boolean> {
+  if (now - (Number(await $.store.get('idleAt')) || -Infinity) < IDLE_TALK_MS) return false
+  await $.store.set('idleAt', now)
+  return true
 }
 
 // An fno release from before the move still loads its own copy of the buddy, which stamps fno's
@@ -437,6 +484,14 @@ async function remember($: EngineInterface, c: Companion, why: string, line: str
   try {
     old = (await $.fs.read(path)).split('\n').filter(Boolean)
   } catch {}
+  // Two writes that cross can leave a torn row; drop it here so it does not stay in the file.
+  old = old.filter(row => {
+    try {
+      return JSON.parse(row) && true
+    } catch {
+      return false
+    }
+  })
   const rows = [...old, JSON.stringify({ at: new Date(now).toISOString(), name: c.name, why, line })].slice(-OBSERVATIONS_KEPT)
   await $.fs.write(path, rows.join('\n') + '\n').catch(() => {})
 }
@@ -473,13 +528,18 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
   if (!rows) return
   const before = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now)).bank
   const after = await rerolls($, now, rows.filter(row => row.kind === 'node_shipped').map(row => Date.parse(row.ts)).filter(Number.isFinite))
+  // Every session counts ships, so none is missed; an attended one tells them, once for the machine.
+  if (!attended(now)) return
+  let since = Math.max(feedSince, Number(await $.store.get('newsSince')) || 0)
   let line: string | null = null
   for (const row of rows) {
     const at = Math.floor(Date.parse(row.ts) / 1000)
-    if (!(at >= feedSince)) continue
-    feedSince = Math.max(feedSince, at + 1)
+    if (!(at >= since)) continue
+    since = Math.max(since, at + 1)
     line = newsFact(row) ?? line
   }
+  feedSince = since
+  await $.store.set('newsSince', since)
   const earned = after.bank > before ? `+1 reroll (${after.bank}/${REROLL_BANK})` : ''
   if (line && buddy) {
     const c = buddy
@@ -561,7 +621,7 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
     sprite: sprite(buddy, now),
     name: buddy.name,
     face: renderFace(buddy),
-    color: RARITY_COLORS[buddy.rarity],
+    color: rarityColor(theme, buddy.rarity),
     speech: talking(now) ?? '',
     fleet,
   })
@@ -574,16 +634,21 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
 const BUBBLE_COLUMNS = 34
 
 // Desktop sets text in a proportional font, which collapses the spaces in a sprite. There the
-// sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes a fixed color.
+// sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes the theme's value.
 let desktop = false
-const SVG_COLORS: Record<string, string> = { common: '#8a8a8a', uncommon: '#4caf50', rare: '#3fa7d6', epic: '#b36ae2', legendary: '#e0a526' }
+// Claude Code's theme setting, so the status line and the SVG draw the color the card draws.
+let theme = 'dark'
+const svgColor = (c: Companion) => {
+  const color = rarityColor(theme, c.rarity)
+  return color.startsWith('rgb') ? color : rarityColor('dark', c.rarity)
+}
 const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 function drawArt(ui: any, c: Companion, lines: string[]): any[] {
   if (!desktop) return lines.map(line => ui.Text({ color: RARITY_THEME[c.rarity], children: [line] }))
   const w = Math.ceil(Math.max(...lines.map(l => l.length)) * 8.4) + 2
   const h = lines.length * 17
   const rows = lines.map((l, i) => `<text x="0" y="${i * 17 + 13}" xml:space="preserve">${esc(l)}</text>`).join('')
-  return [ui.Svg({ alt: `${c.name} the ${c.species}`, width: w, height: h, source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" font-family="ui-monospace,Menlo,monospace" font-size="14" fill="${SVG_COLORS[c.rarity]}">${rows}</svg>` })]
+  return [ui.Svg({ alt: `${c.name} the ${c.species}`, width: w, height: h, source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" font-family="ui-monospace,Menlo,monospace" font-size="14" fill="${svgColor(c)}">${rows}</svg>` })]
 }
 
 export function register(on: On) {
@@ -592,12 +657,18 @@ export function register(on: On) {
     feedSince = Math.floor(now / 1000)
     home = (await $.env.get('HOME')) ?? ''
     sessionId = await $.session.id()
+    const themeRow = (await $.config.list().catch(() => undefined))?.find(row => row.key === 'theme')
+    if (typeof themeRow?.value === 'string') theme = themeRow.value
     await load($, now)
     deferred = await oldCopyLive($, now)
     if (deferred) muted = true
     // A buddy that is off runs nothing at start: no process, no settings read.
     if (!muted) {
       stateDir = await resolveStateDir($)
+      // The fno mux sets both in each pane it hosts, and writes <mux dir>/<session>.visible.json.
+      const mux = await $.env.get('FNO_SESSION')
+      muxPane = Number(await $.env.get('FNO_PANE')) || 0
+      if (mux && muxPane && stateDir) muxVisible = `${(await $.env.get('FNO_MUX_DIR')) || `${stateDir}/mux`}/${mux}.visible.json`
       const settings = await readSettings($)
       wrapped = isOurs(settings?.statusLine)
       if (wrapped && stateDir) await installWrapper($).catch(() => {})
@@ -611,12 +682,14 @@ export function register(on: On) {
       tick += 1
       if (!buddy || muted) return
       const at = await $.clock.now()
-      if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS) {
-        // Stamp first so a slow call is not asked twice; the line shows when it arrives.
-        bubble = { text: '', at }
-        react($, 'idle').catch(() => {})
-      }
       if (tick % 4 === 0) {
+        await readOnScreen($)
+        if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS && attended(at) && (await claimIdle($, at))) {
+          // Stamp first so a slow call is not asked twice; the line shows when it arrives.
+          bubble = { text: '', at }
+          react($, 'idle').catch(() => {})
+        }
+        await syncSoul($).catch(() => {})
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
         if (wrapped && !was) await $.ui.close({ id: PANE_ID }).catch(() => {})
@@ -722,10 +795,20 @@ export function register(on: On) {
     }
   })
 
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    if (typeof e.value === 'string') theme = e.value
+    return next(e)
+  })
+
+  on('prompt.edit', async ($, e, next) => {
+    typedAt = await $.clock.now()
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (buddy && !muted && !e.agentId && !e.isAborted) {
       const now = await $.clock.now()
-      if (now - drawnAt < SEEN_MS) {
+      if (now - drawnAt < SEEN_MS && attended(now)) {
         const messages = await $.session.messages()
         const why: Reason = addressedBy(lastPrompt(messages), buddy.name) ? 'addressed' : loudReason(turnOutput(messages)) ?? 'turn'
         if (why !== 'turn' || now - reactedAt >= REACT_GAP_MS) {

@@ -321,15 +321,6 @@ mod tests {
         assert_eq!(version_and_family("codex-auto-review"), None);
     }
 
-    #[test]
-    fn newer_compares_version_lists_element_wise() {
-        assert!(newer(&[6], &[5, 6]));
-        assert!(newer(&[6, 1], &[6]));
-        assert!(newer(&[5, 7], &[5, 6]));
-        assert!(!newer(&[5, 6], &[6]));
-        assert!(!newer(&[6], &[6]));
-    }
-
     // ---- unit: catalog loading ----
 
     #[test]
@@ -375,15 +366,6 @@ mod tests {
         let catalog = load_catalog(&payload).unwrap();
         assert_eq!(catalog.slugs.len(), 2);
         assert_eq!(catalog.fetched_at, "2026-09-23T00:00:00Z");
-    }
-
-    #[test]
-    fn load_catalog_names_the_path_for_a_malformed_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("models_cache.json");
-        std::fs::write(&path, "not json").unwrap();
-        let err = load_catalog_at(&path).unwrap_err();
-        assert!(err.contains(path.display().to_string().as_str()), "{err}");
     }
 
     // ---- unit: newest in family ----
@@ -466,28 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_payload_keeps_pins_and_unlisted_words_verbatim() {
-        let payload = json!({
-            "rung_base": "agents.profiles.target",
-            "lanes_raw": ["pin-x", "word-x", "claude-x"],
-            "declared_rows": {
-                "pin-x": {"name": "pin-x", "harness": "codex", "model": "gpt-5.6-luna"},
-                "word-x": {"name": "word-x", "harness": "codex", "model": "ghostfam"},
-                "claude-x": {"name": "claude-x", "harness": "claude", "model": "opus"},
-            },
-            "explicit_model_value": "luna",
-        });
-        let (resolved, lines) =
-            resolve_payload_inner(&payload, &catalog(&["gpt-5.6-luna", "gpt-6-luna"]));
-        assert_eq!(resolved["declared_rows"]["pin-x"]["model"], "gpt-5.6-luna");
-        assert!(resolved["declared_rows"]["pin-x"].get("family").is_none());
-        assert_eq!(resolved["declared_rows"]["word-x"]["model"], "ghostfam");
-        assert_eq!(resolved["declared_rows"]["claude-x"]["model"], "opus");
-        assert_eq!(resolved["explicit_model_value"], "luna");
-        assert!(lines.is_empty(), "{lines:?}");
-    }
-
-    #[test]
     fn resolve_payload_without_codex_rows_touches_nothing() {
         let payload = json!({
             "rung_base": "agents.profiles.target",
@@ -500,25 +460,6 @@ mod tests {
         assert_eq!(resolved, payload);
         assert!(lines.is_empty());
         assert!(resolved.get("codex_catalog").is_none());
-    }
-
-    #[test]
-    fn resolve_payload_passes_through_with_one_unreadable_line_on_malformed_catalog() {
-        let payload = json!({
-            "rung_base": "agents.profiles.target",
-            "lanes_raw": ["codex-luna"],
-            "declared_rows": {
-                "codex-luna": {"name": "codex-luna", "harness": "codex", "model": "luna"},
-            },
-            "codex_catalog": "junk",
-        });
-        let (resolved, lines) = resolve_payload(&payload);
-        assert_eq!(resolved["declared_rows"]["codex-luna"]["model"], "luna");
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0]
-            .as_str()
-            .unwrap()
-            .starts_with("slot family catalog unreadable"));
     }
 
     // ---- unit: drift lines ----

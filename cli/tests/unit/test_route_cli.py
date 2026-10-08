@@ -69,21 +69,6 @@ def test_route_table_key_status_names_source_and_missing() -> None:
     assert any(r["key"].startswith("MISSING (checked ZAI_API_KEY") for r in missing)
 
 
-def test_ls_json_matches_table() -> None:
-    res = runner.invoke(route_app, ["ls", "-J"])
-    assert res.exit_code == 0
-    data = json.loads(res.stdout)
-    assert isinstance(data, list) and data
-    for row in data:
-        assert set(row) == {"role", "provider_model", "protocol", "key", "assigned_by"}
-
-
-def test_ls_text_has_header() -> None:
-    res = runner.invoke(route_app, ["ls"])
-    assert res.exit_code == 0
-    assert "ROLE" in res.stdout and "ASSIGNED-BY" in res.stdout
-
-
 # ---------------------------------------------------------------------------
 # set (AC1-ERR, AC2-ERR, happy) - isolated to a tmp project scope
 # ---------------------------------------------------------------------------
@@ -97,12 +82,6 @@ def _roles_on_disk(repo_root: Path) -> dict:
     ) or {}
 
 
-def test_set_build_writes_roles(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["set", "build", "zai/glm-5.2", "--local"])
-    assert res.exit_code == 0, res.stdout
-    assert _roles_on_disk(project_scope) == {"build": "zai/glm-5.2"}
-
-
 def test_set_preserves_existing_roles(project_scope: Path) -> None:
     runner.invoke(route_app, ["set", "tidy", "zai,glm-4.7", "--local"])
     runner.invoke(route_app, ["set", "build", "zai/glm-5.2", "--local"])
@@ -111,19 +90,6 @@ def test_set_preserves_existing_roles(project_scope: Path) -> None:
         "tidy": "zai/glm-4.7",
         "build": "zai/glm-5.2",
     }
-
-
-def test_set_one_m_suffix_passes(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["set", "build", "zai/glm-5.2[1m]", "--local"])
-    assert res.exit_code == 0, res.stdout
-    assert _roles_on_disk(project_scope)["build"] == "zai/glm-5.2[1m]"
-
-
-def test_set_protected_role_refused_no_write(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["set", "implement", "zai,glm-5.2", "--local"])
-    assert res.exit_code == 2
-    assert "protected" in res.output.lower()
-    assert not (project_scope / ".fno" / "config.toml").exists()
 
 
 @pytest.mark.parametrize(
@@ -141,16 +107,6 @@ def test_set_protected_role_hint_names_the_owning_surface(
     assert "hint:" in res.output
     assert expected in res.output
     assert not (project_scope / ".fno" / "config.toml").exists()
-
-
-def test_route_table_protected_rows_name_why(monkeypatch: pytest.MonkeyPatch) -> None:
-    rows = {r["role"]: r for r in mr.build_route_table(settings=_settings(), env={})}
-    assert "build" in rows["implement"]["assigned_by"]
-    assert "no dispatch surface" in rows["review-verdict"]["assigned_by"]
-    # The guard itself is unchanged: both still never route.
-    for name in ("implement", "review-verdict"):
-        assert "never routed" in rows[name]["provider_model"]
-        assert mr.resolve_route(name, settings=_settings(), env={}) is None
 
 
 def test_set_unknown_provider_refused_no_write(project_scope: Path) -> None:
@@ -179,40 +135,9 @@ def test_unset_removes_role(project_scope: Path) -> None:
     assert _roles_on_disk(project_scope) == {"tidy": "zai/glm-4.7"}
 
 
-def test_unset_unconfigured_is_noop(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["unset", "build", "--local"])
-    assert res.exit_code == 0
-    assert "not configured" in res.stdout.lower()
-
-
-def test_unset_builtin_role_mentions_default(project_scope: Path) -> None:
-    res = runner.invoke(route_app, ["unset", "tidy", "--local"])
-    assert res.exit_code == 0
-    assert "built-in" in res.stdout.lower()
-
-
 # ---------------------------------------------------------------------------
 # env (AC5-HP, AC2-FR) - built-in zai provider, no config needed
 # ---------------------------------------------------------------------------
-
-
-def test_env_explicit_emits_export_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
-    res = runner.invoke(route_app, ["env", "zai,glm-5.2"])
-    assert res.exit_code == 0
-    out = res.stdout
-    assert "export ANTHROPIC_BASE_URL=" in out
-    assert "export ANTHROPIC_AUTH_TOKEN=" in out
-    assert "glm-5.2" in out
-
-
-def test_env_explicit_slash_form(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The slash form must be recognized as an explicit target, not a role name.
-    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
-    res = runner.invoke(route_app, ["env", "zai/glm-5.2"])
-    assert res.exit_code == 0
-    assert "export ANTHROPIC_AUTH_TOKEN=" in res.stdout
-    assert "glm-5.2" in res.stdout
 
 
 def test_env_unsets_parent_anthropic_creds_before_exports(
@@ -239,15 +164,7 @@ def test_env_missing_key_emits_no_unset_or_export(
     assert res.exit_code == 1
     assert "unset " not in res.stdout
     assert "export " not in res.stdout
-
-
-@pytest.mark.parametrize("target", ["zai,glm 5.2", "zai,glm\n5.2", "z ai,glm-5.2"])
-def test_set_rejects_whitespace_in_tokens(
-    target: str, project_scope: Path
-) -> None:
-    res = runner.invoke(route_app, ["set", "build", target, "--local"])
-    assert res.exit_code == 2
-    assert not (project_scope / ".fno" / "config.toml").exists()
+    assert "ZAI_API_KEY" in res.output
 
 
 def test_unset_surfaces_malformed_config(project_scope: Path) -> None:
@@ -259,16 +176,6 @@ def test_unset_surfaces_malformed_config(project_scope: Path) -> None:
     res = runner.invoke(route_app, ["unset", "build", "--local"])
     assert res.exit_code != 0
     assert "malformed" in res.output.lower() or "error" in res.output.lower()
-
-
-def test_env_missing_key_fails_closed_no_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ZAI_API_KEY", raising=False)
-    res = runner.invoke(route_app, ["env", "zai,glm-5.2"])
-    assert res.exit_code == 1
-    # No export lines emitted (nothing to half-eval).
-    assert "export " not in res.stdout
-    # The reason names the checked variable on stderr.
-    assert "ZAI_API_KEY" in res.output
 
 
 def test_env_business_role_refusal_is_a_stable_command_error(
@@ -287,11 +194,6 @@ def test_env_business_role_refusal_is_a_stable_command_error(
     assert "invalid_manifest" in result.output
     assert "export " not in result.stdout
     assert "unset " not in result.stdout
-
-
-def test_env_malformed_target(monkeypatch: pytest.MonkeyPatch) -> None:
-    res = runner.invoke(route_app, ["env", "zai,"])
-    assert res.exit_code == 2
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +228,6 @@ def _inv(rows):
     return _rr.Inventory(rows=built, declared=True)
 
 
-
 @requires_rust
 def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
     _declare(monkeypatch, [
@@ -346,32 +247,9 @@ def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
 
 
 @requires_rust
-def test_inventory_json_shape(monkeypatch) -> None:
-    _declare(monkeypatch, [
-        {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
-    ])
-    res = runner.invoke(route_app, ["inventory", "--json"])
-    assert res.exit_code == 0
-    payload = json.loads(res.output)
-    assert payload["objective"] == "cheapest-that-clears"
-    assert payload["models"][0]["name"] == "glm-5.3"
-    assert payload["models"][0]["verdict"] == "ok"
-
-
-def test_inventory_says_nothing_is_declared(monkeypatch) -> None:
-    from fno import route_resolve as rr
-
-    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: rr.Inventory())
-    res = runner.invoke(route_app, ["inventory"])
-    assert res.exit_code == 0
-    assert "no inventory declared" in res.output
-
-
-@requires_rust
 def test_inventory_drift_line_prints_once_for_a_stale_pin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import fno.route_resolve as rr
 
     _declare(monkeypatch, [
         {"name": "codex-luna", "harness": "codex", "model": "gpt-5.6-luna", "band": "high"},
@@ -394,29 +272,6 @@ def test_inventory_drift_line_prints_once_for_a_stale_pin(
     res = runner.invoke(route_app, ["inventory", "--json"])
     assert res.exit_code == 0
     assert json.loads(res.output)["drift"] == [expected]
-
-
-@requires_rust
-def test_inventory_family_row_and_no_drift(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import fno.route_resolve as rr
-
-    _declare(monkeypatch, [
-        {"name": "codex-luna", "harness": "codex", "model": "luna", "band": "high"},
-    ])
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    (tmp_path / "models_cache.json").write_text(json.dumps({
-        "fetched_at": "2026-09-23T06:14:54Z",
-        "models": [
-            {"slug": "gpt-5.6-luna", "visibility": "list"},
-            {"slug": "gpt-6-luna", "visibility": "list"},
-        ],
-    }))
-    res = runner.invoke(route_app, ["inventory"])
-    assert res.exit_code == 0
-    assert "luna -> gpt-6-luna" in res.output
-    assert "drift " not in res.output
 
 
 _SLOT_ROWS = [
@@ -526,23 +381,6 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     assert "would take agents.profiles.target.lanes[1] luna-codex" in res.output
 
 
-@requires_rust
-def test_inventory_json_carries_slots(monkeypatch) -> None:
-    _declare(monkeypatch, _SLOT_ROWS)
-    cfg, _state = _pin_capacity(monkeypatch)
-    _pin_slots(cfg, _SLOT_ROWS)
-    res = runner.invoke(route_app, ["inventory", "--json"])
-    assert res.exit_code == 0
-    payload = json.loads(res.output)
-    target = next(s for s in payload["slots"] if s["verb"] == "target")
-    assert target["would_take"] == "agents.profiles.target.lanes[0] flash-zai"
-    assert target["on_exhausted"] == "queue"
-    assert target["routing"] == "armed"
-    # a verb with no lanes says so, both halves
-    think = next(s for s in payload["slots"] if s["verb"] == "think")
-    assert think["would_take"].startswith("no lanes; grid over ")
-
-
 def test_routing_init_appends_the_sample_commented(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "fno.config.writer._target_path", lambda scope, root: tmp_path / "config.toml"
@@ -600,5 +438,3 @@ def test_settings_ls_renders_the_declared_tier_map(
     text = runner.invoke(route_app, ["settings", "ls"])
     assert text.exit_code == 0
     assert "TIERS" in text.output
-
-

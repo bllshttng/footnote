@@ -48,7 +48,7 @@ def prepare_forced_entry(entry, *, recipient: str, reservation):
     return transport_entry, mux_session, pane_id, True
 
 
-def send_by_thread_identity(name: str, *, message: str, from_name, harness, style_exception, origin):
+def send_by_thread_identity(name: str, *, message: str, from_name, harness, style_exception, origin, subject=None):
     """Force-send to a thread by its durable identity when discovery missed it."""
     from fno.mail import cli as mail_cli
     from fno.harness_identity import canonical_handle
@@ -59,5 +59,5 @@ def send_by_thread_identity(name: str, *, message: str, from_name, harness, styl
     session = next((getattr(entry, f, None) for f in ("harness_session_id", "fno_id", "session_id")), None)
     if not session or mail_cli._self_recipient(name, resolved_session_id=session):
         return False
-    mail_cli._name_lane_send(message, from_name=from_name, resolved=None, token=None, recipient=canonical_handle(session), provider=getattr(entry, "harness", None) or harness, style_exception=style_exception, force=True, origin=origin)
+    mail_cli._name_lane_send(message, from_name=from_name, resolved=None, token=None, recipient=canonical_handle(session), provider=getattr(entry, "harness", None) or harness, style_exception=style_exception, force=True, origin=origin, subject=subject)
     return True

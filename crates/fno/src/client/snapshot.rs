@@ -273,6 +273,9 @@ fn png(svg: &str, frame: &Frame, out: &Path) -> Result<(), String> {
     }
     let status = cmd
         .arg("--headless=new")
+        // Without its own profile dir a headless shot exits 2 whenever the
+        // user's own Chrome is running, which is most of the time.
+        .arg(format!("--user-data-dir={}", dir.join("profile").display()))
         .arg("--disable-gpu")
         .arg("--hide-scrollbars")
         .arg("--force-device-scale-factor=2")

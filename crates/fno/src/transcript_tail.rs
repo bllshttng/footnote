@@ -112,10 +112,36 @@ fn codex_sessions_dir() -> PathBuf {
         .join("sessions")
 }
 
+/// The store a transcript path lives in, and its path relative to that
+/// store's root. The pair travels in a transfer bundle, so the receiving
+/// machine rebuilds the same location under its own root.
+pub fn classify_transcript_path(path: &Path) -> Option<(&'static str, PathBuf)> {
+    let claude = claude_projects_dir();
+    if let Ok(rel) = path.strip_prefix(&claude) {
+        return Some(("claude", rel.to_path_buf()));
+    }
+    let codex = codex_sessions_dir();
+    if let Ok(rel) = path.strip_prefix(&codex) {
+        return Some(("codex", rel.to_path_buf()));
+    }
+    None
+}
+
+/// The local root of one transcript store, named the way
+/// `classify_transcript_path` names it. A store this machine does not run
+/// returns None.
+pub fn transcript_store_root(store: &str) -> Option<PathBuf> {
+    match store {
+        "claude" => Some(claude_projects_dir()),
+        "codex" => Some(codex_sessions_dir()),
+        _ => None,
+    }
+}
+
 /// A uuid safe to use as a path component. Registry content is untrusted and
 /// lands in a path join, so anything but the transcript filename shape is
 /// refused before it can escape the projects dir.
-fn transcript_uuid_shaped(uuid: &str) -> bool {
+pub(crate) fn transcript_uuid_shaped(uuid: &str) -> bool {
     !uuid.is_empty() && uuid.len() <= 64 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 

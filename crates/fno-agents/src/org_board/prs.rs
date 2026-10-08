@@ -82,7 +82,8 @@ pub(crate) fn read_prs(
         "--limit".to_string(),
         max_pr_reads.to_string(),
         "--json".to_string(),
-        "number,title,mergeable,statusCheckRollup,headRefName,url,body".to_string(),
+        "number,title,mergeable,statusCheckRollup,headRefName,isCrossRepository,url,body"
+            .to_string(),
     ];
     let bound = Budget::spawn_bound(deadline);
     let listing = if bound.is_zero() {
@@ -119,6 +120,9 @@ pub(crate) fn read_prs(
     let mut ready: Vec<Value> = Vec::new();
     for pr in &rows {
         if s_str(pr, "mergeable") != Some("MERGEABLE") {
+            continue;
+        }
+        if pr.get("isCrossRepository").and_then(Value::as_bool) == Some(true) {
             continue;
         }
         let rollup = pr
@@ -504,6 +508,9 @@ pub(crate) fn pr_binding_verdicts<'a>(
         };
         let head = s_str(row, "headRefName").unwrap_or("");
         if head.is_empty() {
+            continue;
+        }
+        if row.get("isCrossRepository").and_then(Value::as_bool) == Some(true) {
             continue;
         }
         let keys = pr_binding_keys(
@@ -1103,6 +1110,9 @@ mod tests {
             json!({"number": 1, "headRefName": "feature/x-aaaa", "url": "https://github.com/o/r/pull/1"}),
             json!({"number": 2, "headRefName": "docs/faq", "url": "https://github.com/o/r/pull/2", "body": ""}),
             json!({"number": 3, "headRefName": "x-aaaa-and-x-bbbb", "url": "https://github.com/o/r/pull/3"}),
+            // A cross-repo row on a node branch yields no verdict at all:
+            // outside code never enters fleet automation.
+            json!({"number": 4, "headRefName": "x-aaaa", "url": "https://github.com/o/r/pull/4", "isCrossRepository": true}),
         ];
         let verdicts = pr_binding_verdicts(&rows, &entries);
         let got: Vec<(i64, &str, Option<&str>)> = verdicts
@@ -1125,5 +1135,6 @@ mod tests {
         let (_, warnings) = classify_pr_bindings(&rows, &entries);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("pr_node_binding_untracked: #2 docs/faq"));
+        assert!(!verdicts.iter().any(|v| v.number == 4));
     }
 }

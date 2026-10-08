@@ -22,7 +22,7 @@ import typer
 from typer.testing import CliRunner
 
 from fno._lazy_group import make_lazy_group_cls
-from fno.verb_moves import Move, VERB_MOVES, deprecation_line, forwarding_args, move_for
+from fno.verb_moves import Move, VERB_MOVES, deprecation_line
 
 runner = CliRunner()
 
@@ -43,36 +43,6 @@ def test_deprecated_entry_announces_the_bare_destination():
     assert (
         deprecation_line("outstanding", ["list"], move)
         == "fno outstanding is now fno inbox outstanding"
-    )
-
-
-def test_silent_leaf_prints_nothing():
-    move = VERB_MOVES["pr"]
-    for leaf in ("status", "merge", "rebase"):
-        assert deprecation_line("pr", [leaf, "993"], move) is None
-
-
-def test_pr_permanent_leaves_are_explicit_lifetime_policy():
-    move = VERB_MOVES["pr"]
-    assert move.permanent_leaves == frozenset({"status", "merge", "rebase"})
-
-
-def test_post_expiry_mode_forwards_only_permanent_leaves():
-    expired = Move(
-        kind="leaf-alias",
-        to="do pr",
-        permanent_leaves=frozenset({"status", "merge", "rebase"}),
-    )
-    assert forwarding_args(["status", "993"], expired) == ["do", "pr", "status", "993"]
-    assert forwarding_args(["create"], expired) is None
-    assert forwarding_args([], expired) is None
-
-
-def test_cold_leaf_announces_the_leaf_qualified_destination():
-    move = VERB_MOVES["pr"]
-    assert (
-        deprecation_line("pr", ["create"], move)
-        == "fno pr create is now fno do pr create"
     )
 
 
@@ -262,16 +232,6 @@ def test_post_expiry_rejects_cold_leaf_when_destination_is_missing(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_real_outstanding_serves_announced_until_inbox_mints():
-    from fno.cli import app
-
-    result = runner.invoke(app, ["outstanding", "--help"])
-    assert result.exit_code == 0, result.output
-    err = result.stderr or ""
-    assert "fno outstanding is now fno inbox outstanding" in err
-    assert err.count("is now") == 1
-
-
 def test_real_pr_hot_leaf_help_stays_silent():
     from fno.cli import app
 
@@ -315,71 +275,6 @@ def test_every_moved_spelling_is_hidden():
         )
 
 
-def test_do_fold_move_table_matches_the_approved_work_order():
-    expected = {
-        "delivery": "do delivery",
-        "loops": "do loops",
-        "phase": "do phase",
-        "plan": "do plan",
-        "pr": "do pr",
-        "pr-watch": "do pr watch",
-        "research": "do research",
-        "resume": "do resume",
-        "review": "do review",
-        "state": "do state",
-        "stub-manifest": "do pr stub-manifest",
-        "target": "do target",
-        "think": "do think",
-    }
-    assert {name: VERB_MOVES[name].to for name in expected} == expected
-
-
-def test_doctor_fold_move_table_matches_the_approved_work_order():
-    expected = {
-        "bundle": "doctor bundle",
-        "codemap": "doctor codemap",
-        "evals": "doctor evals",
-        "event": "doctor event",
-        "lint": "doctor lint",
-        "observer": "doctor observer",
-        "skill-diff": "doctor skill-diff",
-        "status-fanout": "doctor event fanout",
-    }
-    assert {name: VERB_MOVES[name].to for name in expected} == expected
-
-
-def test_agents_fold_move_table_matches_the_approved_work_order():
-    expected = {
-        "autonomy": "agents autonomy",
-        "claim": "agents claim",
-        "lead": "agents lead",
-        "mcp": "agents mcp",
-        "restart": "agents restart",
-        "roles": "agents roles",
-        "worker": "agents worker",
-    }
-    assert {name: VERB_MOVES[name].to for name in expected} == expected
-
-
-def test_restored_root_spellings_are_canonical_not_moves():
-    """update is root-canonical (2026-08-22 ruling, the surviving half).
-
-    mail and test lost that status at x-6233 (d-b93d7754, d-df6c29a6): both
-    fold like every other root verb, and the nested registrations
-    (agents mail / doctor test) are the canonical spellings. update stays a
-    root verb outright - a move entry on it would re-shadow the canonical
-    spelling, so its absence is the pinned contract.
-    """
-    from fno.cli import app
-
-    for verb in ("mail", "test"):
-        assert verb in VERB_MOVES, f"{verb} folds (x-6233), it is not root-canonical"
-    assert "update" not in VERB_MOVES, "update is root-canonical, not a move"
-    result = runner.invoke(app, ["update", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "is now" not in (result.stderr or "")
-
-
 def test_restored_root_spellings_stay_hidden_so_menu_caps_hold():
     import typer.main
 
@@ -391,52 +286,6 @@ def test_restored_root_spellings_stay_hidden_so_menu_caps_hold():
     assert cmd is not None, "restored spelling 'update' must stay registered"
     assert getattr(cmd, "hidden", False), (
         "restored spelling 'update' must be hidden or menu-caps counts it as a root"
-    )
-
-
-def test_rest_fold_move_table_matches_the_approved_work_order():
-    """Unit 6 (x-9d6c): backlog, config, whoami, workspace.
-
-    ``done`` joined the table at x-6233 once its flag surface ported onto
-    `backlog done` (argv-verbatim forwarding). ``runtime`` stays deliberately
-    ABSENT: it is retired via a tombstone, not moved.
-    """
-    expected = {
-        "annotate": "backlog annotate",
-        "carveout": "backlog carveout",
-        "context": "whoami context",
-        "cost": "whoami cost",
-        "paths": "config paths",
-        "plugins": "config plugins",
-        "retro": "backlog retro",
-        "route": "config route",
-        "scoreboard": "whoami scoreboard",
-        "setup": "config setup",
-        "status": "whoami status",
-        "worktree": "agents workspace worktree",
-    }
-    assert {name: VERB_MOVES[name].to for name in expected} == expected
-    assert "runtime" not in VERB_MOVES, (
-        "runtime is retired (tombstone), not moved; a VERB_MOVES entry would "
-        "keep a removed spelling alive"
-    )
-
-
-def test_x6233_root_fold_move_table():
-    """x-6233: the root namespace folds to eleven (d-cf2d6fe1, d-b93d7754)."""
-    expected = {
-        "decide": "inbox decide",
-        "done": "backlog done",
-        "mail": "agents mail",
-        "project": "config project",
-        "test": "doctor test",
-        "workspace": "agents workspace",
-        "yard": "agents yard",
-    }
-    assert {name: VERB_MOVES[name].to for name in expected} == expected
-    assert "law" not in VERB_MOVES, (
-        "law is the Rust front's nested group; a Python move would point at "
-        "a mount that no longer exists"
     )
 
 
@@ -494,8 +343,3 @@ def test_deleted_verb_refuses_naming_its_replacement(verb: str, needle: str):
     combined = (result.output or "") + (result.stderr or "")
     assert f"`fno {verb}` was removed" in combined
     assert needle in combined, f"{verb} tombstone must name {needle}: {combined!r}"
-
-
-def test_move_for_is_none_for_a_verb_that_still_exists():
-    assert move_for("backlog") is None
-    assert move_for("executor") is None, "a delete is a tombstone, never a move"

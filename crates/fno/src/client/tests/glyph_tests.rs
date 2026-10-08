@@ -82,30 +82,23 @@ fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
 }
 
 #[test]
-fn pane_activity_folds_to_working_empty_idle_or_unmeasured_never_blind_idle() {
-    // (x-d401, AC1-HP/EDGE) The render fold. With no badge, the pane's own
-    // OSC 133 reading decides: Running -> Working, Idle -> Idle, Empty ->
-    // Empty, and Unmeasured or absent -> Unmeasured. The old `None =>
-    // Idle` fold rendered four working panes and thirty empty shells as
-    // the same circle; the absent reading must render as the marked
-    // absence `?`, never as a measured idle.
+fn pane_activity_folds_to_working_or_live_shells_never_marked() {
+    // The 2026-10-06 shell ruling supersedes the old marked-absence fold:
+    // with no badge, a shell tab is live. Running reads Working; Idle,
+    // Empty, Unmeasured or an absent reading all read Idle, never a `?` or
+    // `empty` mark. A reading still decides Working when one exists.
     use crate::vt::ShellActivity as SA;
     assert_eq!(
         pane_state(None, false, Some(SA::Running)),
         PaneState::Working
     );
     assert_eq!(pane_state(None, false, Some(SA::Idle)), PaneState::Idle);
-    assert_eq!(pane_state(None, false, Some(SA::Empty)), PaneState::Empty);
+    assert_eq!(pane_state(None, false, Some(SA::Empty)), PaneState::Idle);
     assert_eq!(
         pane_state(None, false, Some(SA::Unmeasured)),
-        PaneState::Unmeasured,
-        "an un-integrated pane reads as no-reading, not idle"
+        PaneState::Idle
     );
-    assert_eq!(
-        pane_state(None, false, None),
-        PaneState::Unmeasured,
-        "an absent field reads as no-reading, not idle"
-    );
+    assert_eq!(pane_state(None, false, None), PaneState::Idle);
     // A present badge still wins: the registry worker's own report beats
     // the vt reading for its row.
     assert_eq!(

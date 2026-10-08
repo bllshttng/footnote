@@ -67,7 +67,14 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     let gh = bin_dir.join("gh");
     fs::write(
         &gh,
-        "#!/bin/sh\nprintf 'gh %s\\n' \"$*\" >> \"$GH_CALLS_LOG\"\nexit 1\n",
+        "#!/bin/sh\n\
+         printf 'gh %s\\n' \"$*\" >> \"$GH_CALLS_LOG\"\n\
+         for a in \"$@\"; do case \"$a\" in\n\
+         \x20 repos/o/r/pulls/358)\n\
+         \x20    echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'\n\
+         \x20    exit 0 ;;\n\
+         esac; done\n\
+         exit 1\n",
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
@@ -111,6 +118,9 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          \x20   sys.exit(1)\n\
          if args[:3] == ['agents', 'claim', 'release']:\n\
          \x20   sys.exit(1 if os.environ.get('FNO_STUB_CLAIM_RELEASE_FAIL') else 0)\n\
+         if args[:2] == ['backlog', 'decisions'] and '--json' in args:\n\
+         \x20   sys.stdout.write(json.dumps({'decisions': []}))\n\
+         \x20   sys.exit(0)\n\
          sys.exit(1)\n",
     )
     .unwrap();
@@ -1291,6 +1301,8 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
          \x20\x20 'do pr info'*)\n\
          \x20\x20   if [ -f \"$FNO_STUB_PR_INFO\" ]; then cat \"$FNO_STUB_PR_INFO\"; exit 0; fi\n\
          \x20\x20   exit 1 ;;\n\
+         \x20\x20 'backlog decisions'*)\n\
+         \x20\x20   echo '{\"decisions\": []}'; exit 0 ;;\n\
          esac\n",
     );
     let path = format!(
@@ -1444,10 +1456,13 @@ fn finalize_skips_stamp_when_no_node() {
 /// Like GH_PR_358 but records every argv, so a `pr merge` call is observable.
 const GH_PR_358_LOGGING: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$2\" in view) echo '{\"number\": 358, \"url\": \"https://github.com/o/r/pull/358\"}' ;; esac\n";
 
 const GH_OPTIONAL_REVIEWED: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$*\" in\n\
        *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\",\"commit\":{\"oid\":\"abc123def456abc123def456abc123def456abc1\"}}],\"comments\":[]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1455,6 +1470,7 @@ const GH_OPTIONAL_REVIEWED: &str = "#!/bin/sh\n\
 
 const GH_OPTIONAL_OUTSTANDING: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$*\" in\n\
        *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[],\"comments\":[]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1462,6 +1478,7 @@ const GH_OPTIONAL_OUTSTANDING: &str = "#!/bin/sh\n\
 
 const GH_OPTIONAL_USAGE_LIMITED: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$*\" in\n\
        *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1469,6 +1486,7 @@ const GH_OPTIONAL_USAGE_LIMITED: &str = "#!/bin/sh\n\
 
 const GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$*\" in\n\
        *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\",\"commit\":{\"oid\":\"abc123def456abc123def456abc123def456abc1\"}}],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1476,6 +1494,7 @@ const GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT: &str = "#!/bin/sh\n\
 
 const GH_OPTIONAL_READ_FAILS: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$*\" in\n\
        *reviews,comments*) echo 'review API unavailable' >&2; exit 1 ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1483,6 +1502,7 @@ const GH_OPTIONAL_READ_FAILS: &str = "#!/bin/sh\n\
 
 const GH_OPTIONAL_MALFORMED: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
      case \"$*\" in\n\
        *reviews,comments*) echo '{}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1840,6 +1860,7 @@ fn finalize_withholds_arm_when_optional_review_is_stale() {
     configure_optional_codex(&env);
     let gh = "#!/bin/sh\n\
          echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
          case \"$*\" in\n\
            *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\",\"commit\":{\"oid\":\"9999999999999999999999999999999999999999\"}}],\"comments\":[]}' ;;\n\
            *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
@@ -1869,6 +1890,7 @@ fn finalize_arms_when_optional_clean_pass_comment_pins_the_head() {
     write_covered_event(&env);
     let gh = "#!/bin/sh\n\
          echo \"gh $*\" >> calls.log\n\
+     for a in \"$@\"; do case \"$a\" in *'pulls/358'*) echo '{\"head\":{\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"repo\":{\"full_name\":\"o/r\"}},\"author_association\":\"OWNER\",\"user\":{\"login\":\"o\"}}'; exit 0 ;; esac; done\n\
          case \"$*\" in\n\
            *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"createdAt\":\"2026-08-17T00:00:00Z\",\"body\":\"Codex Review: Didn’t find any major issues. Bravo. Reviewed commit: abc123def456abc123def456abc123def456abc1\"}]}' ;;\n\
            *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\

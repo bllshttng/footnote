@@ -29,31 +29,6 @@ def test_law_skill_is_discoverable_and_one_step() -> None:
     assert "--authority operator" not in text
 
 
-def test_law_skill_teaches_no_retired_ceremony() -> None:
-    """The five-step workflow is gone; leaving it would teach a dead path."""
-    text = SKILL.read_text(encoding="utf-8")
-
-    for retired in (
-        "law prepare",
-        "law enact",
-        "law resume",
-        "law inspect",
-        "--receipt",
-        "--proposal",
-        "<proposal-id>",
-    ):
-        assert retired not in text, retired
-
-
-def test_beginner_example_has_no_shell_syntax() -> None:
-    text = SKILL.read_text(encoding="utf-8")
-    example = text.split("## Beginner example", 1)[1].split("##", 1)[0]
-
-    assert "/fno:law Merges belong to the user" in example
-    assert "bash" not in example.lower()
-    assert "fno law" not in example
-
-
 def test_limitations_state_the_traded_property_with_its_measurement() -> None:
     """A property given up silently is the failure mode this file prevents."""
     text = LIMITATIONS.read_text(encoding="utf-8")

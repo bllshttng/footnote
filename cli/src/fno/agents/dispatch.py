@@ -6869,6 +6869,7 @@ def _deliver_live(
     sender_entry: "Optional[AgentEntry]" = None,
     reason_out: "Optional[list]" = None,
     family1_state: Optional[str] = None,
+    header_only: bool = False,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node).
@@ -6880,28 +6881,21 @@ def _deliver_live(
     generic live-miss. A side-channel, not a second return value, so callers
     and test mocks that read this as a plain bool are unaffected.
 
-    ``family1_state`` (node, change 2) is the caller's ALREADY-COMPUTED
-    :func:`_registered_family1_state` classification for ``entry`` -- passed in
-    rather than recomputed here, since ``dispatch_send`` already resolves it
-    before calling this function and a second call would re-read the recipient
-    transcript for no new information. ``"working"`` (mid-turn, per
-    :func:`_registered_family1_state`) scales the claude control.sock confirm
-    budget so a long tool call has room to yield before we give up.
+    ``family1_state`` is the caller's already-computed registered-state class
+    for ``entry``, passed in so the recipient transcript is not re-read;
+    ``"working"`` scales the claude confirm budget; ``header_only`` wraps the
+    turn as the header line alone (records and durable copies keep the body).
 
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
     self-recording (``grep <fno_mail>`` reconstructs a2a history). Every live
     transport below carries the same wrapped turn, ``agy`` mux entries included.
 
-    For claude peers: the ``control.sock`` inject via the ``fno-agents
-    mail-inject`` verb (G1) is the live primitive for adopted
-    ``claude --bg`` sessions, replacing the dead per-worker messaging socket; the
-    switchboard / MCP fast lanes still apply first for stream-json / MCP-routed
-    peers.
-
-    For codex/gemini peers: the daemon ``agent.deliver`` RPC, now carrying the
-    ``<fno_mail>`` envelope. Daemon-down or any failure demotes to durable with a
-    stderr notice; the durable envelope the caller writes is the recovery record.
+    For claude peers the ``control.sock`` inject via the ``fno-agents
+    mail-inject`` verb (G1) is the live primitive (the switchboard / MCP fast
+    lanes still apply first for stream-json / MCP-routed peers); for
+    codex/gemini peers the daemon ``agent.deliver`` RPC carries the envelope,
+    and its failure demotes to durable with a stderr notice.
     """
     wrapped = body
     if mail is not None:
@@ -6917,6 +6911,8 @@ def _deliver_live(
             from_session=mail.from_session,
             origin=mail.origin,
             to_session=mail.to_session,
+            subject=mail.subject,
+            header_only=header_only,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -7169,6 +7165,7 @@ def _queue_durable_fallback(
     mail_ctx: "Optional[_MailCtx]" = None,
     owner: Optional[str] = None,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Write the <fno_mail> envelope to the durable bus.
 
@@ -7223,6 +7220,7 @@ def _queue_durable_fallback(
             id=msg_id,
             origin=origin,
             to_session=entry.harness_session_id,
+            subject=subject,
         )
     else:
         # The envelope body and the thread row must name the same sender.
@@ -7238,6 +7236,7 @@ def _queue_durable_fallback(
         id=mail_ctx.id,
         from_session=mail_ctx.from_session,
         origin=mail_ctx.origin,
+        subject=mail_ctx.subject,
     )
     from fno import rust_binary
 
@@ -7258,6 +7257,7 @@ def _queue_durable_fallback(
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
             word_count=rust_binary.style_word_count(message),
+            subject=mail_ctx.subject,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         events.emit(
@@ -7402,6 +7402,8 @@ def dispatch_send(
     *,
     registry_stamp_timeout_seconds: float = 1.0,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
+    header_only: bool = False,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -7411,28 +7413,9 @@ def dispatch_send(
     (``hosted``) send is self-recording in the transcript and is NOT also queued;
     its bus row is audit-only, while the durable bus remains the offline fallback
     tier. Both the live turn and the bus record carry the same ``<fno_mail>``
-    envelope.
-
-    Orchestration:
-
-    1. Validate name / message / from_name (the shared _validate_inputs rules).
-    2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
-    3. Resolve the address to its registry primary key, then acquire that
-       per-agent flock (hold_agent_lock) with timeout. A timeout retries the
-       acquire on a short grace window and queues the message durable when it
-       wins (delivery="durable", reason=LOCK_TIMEOUT_REASON, exit 0); only
-       sustained contention, which leaves the recipient unverified, exits 11
-       with nothing written.
-    4. INSIDE the flock:
-       a. Reload and re-resolve; unknown or changed identity refuses.
-       b. Provider mismatch -> exit 2.
-       c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
-       d. Attempt live delivery via _deliver_live (fire-and-forget).
-       e. On non-hosted, write the durable fallback envelope (the <fno_mail>
-          body), kind=send, addressed to the selected session's canonical handle.
-       f. Emit agent_send_started / agent_send_done (delivery field).
-       g. Bump last_message_at + status stamps via update_registry.
-    5. Return DispatchSendResult(msg_id, delivery).
+    envelope. The steps run in the numbered order the body's inline comments
+    carry; the lock-timeout retry lands durable (exit 0) and only sustained
+    contention exits 11 with nothing written.
 
     Raises:
         DispatchAskError: every documented failure mode.  send never
@@ -7666,6 +7649,7 @@ def dispatch_send(
                 id=msg_id,
                 origin=origin,
                 to_session=existing.harness_session_id,
+                subject=subject,
             )
             reservation = _reserve_send_budget(
                 sender=mail_ctx.from_,
@@ -7698,6 +7682,7 @@ def dispatch_send(
                         msg_id=msg_id,
                         mail_ctx=mail_ctx,
                         owner=durable_owner,
+                        subject=subject,
                     )
                 except Exception:
                     if not live_attempted:
@@ -7769,6 +7754,7 @@ def dispatch_send(
                         sender_entry=sender_entry,
                         reason_out=_live_reason,
                         family1_state=family1_state,
+                        header_only=header_only,
                     )
                     if _live_delivered:
                         delivery = "hosted"
@@ -7784,6 +7770,7 @@ def dispatch_send(
                             id=mail_ctx.id,
                             from_session=mail_ctx.from_session,
                             to_session=mail_ctx.to_session,
+                            subject=mail_ctx.subject,
                         )
                         from fno import rust_binary
                         try:
@@ -7799,6 +7786,7 @@ def dispatch_send(
                                 from_model=mail_ctx.model,
                                 to_kind="session",
                                 word_count=rust_binary.style_word_count(message),
+                                subject=mail_ctx.subject,
                             )
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(
@@ -8005,6 +7993,7 @@ def dispatch_send(
                     to=timeout_recipient,
                     id=msg_id,
                     origin=origin,
+                    subject=subject,
                 )
                 reservation = _reserve_send_budget(
                     sender=timeout_mail_ctx.from_,
@@ -8029,6 +8018,7 @@ def dispatch_send(
                             msg_id=msg_id,
                             reason=queue_reason,
                             mail_ctx=timeout_mail_ctx,
+                            subject=subject,
                         )
                     except Exception:
                         from fno.mail import budget
@@ -8265,6 +8255,7 @@ def dispatch_send_to_project(
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     origin: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
 
@@ -8308,6 +8299,7 @@ def dispatch_send_to_project(
             lock_timeout=lock_timeout,
             from_name=from_name,
             origin=origin,
+            subject=subject,
         )
         return replace(result, recipient=res.recipient, to_project=project)
 
@@ -8357,6 +8349,7 @@ def dispatch_send_to_project(
             # project-inbox lane; the project's own drain owns it.
             owner=DurableOwner.INBOX_DRAIN.value,
             origin=origin,
+            subject=subject,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         budget.release(reservation)

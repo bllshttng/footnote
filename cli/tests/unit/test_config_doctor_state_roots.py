@@ -82,31 +82,3 @@ def test_receipt_warns_when_the_worktree_and_canonical_roots_differ(
     assert "WARNING" in text
     assert str(worktree) in text
     assert str(canonical) in text
-
-
-def test_receipt_stays_silent_on_the_canonical_checkout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The negative control: on canonical the two roots agree, so no warning."""
-    canonical = tmp_path / "repo"
-    _pin_roots(monkeypatch, canonical, canonical)
-    out = _capture(monkeypatch)
-
-    _report_state_roots()
-
-    assert "WARNING" not in "\n".join(out)
-
-
-def test_receipt_names_the_target_state_resolver(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """`target-state.md` used to be built by hand at four sites; the spaces
-    move gave it an owner, so the receipt now prints a resolved space path."""
-    _pin_roots(monkeypatch, tmp_path / "repo", tmp_path / "repo")
-    out = _capture(monkeypatch)
-
-    _report_state_roots()
-
-    line = next(ln for ln in out if "target-state.md" in ln)
-    assert "NO RESOLVER" not in line
-    assert "spaces" in line

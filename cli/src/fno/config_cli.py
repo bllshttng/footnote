@@ -1679,44 +1679,56 @@ def schema(
     if toml:
         rendered = schema_gen.render_example_toml()
         target = _repo_root() / "docs" / "config.example.toml"
+        # The Rust defaults inventory embeds its own copy of the same render:
+        # cargo publish packs only the crate, so an include_str! escape into
+        # docs/ fails the tarball compile. One renderer, two committed
+        # copies, both checked.
+        extra_target = _repo_root() / "crates" / "fno" / "config.example.toml"
         regen = "fno config schema --toml --write"
     else:
         rendered = schema_gen.render_markdown()
         target = _repo_root() / "docs" / "configuration-guide.md"
+        extra_target = None
         regen = "fno config schema --markdown --write"
 
     if check:
-        try:
-            current = target.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            # Unreadable or non-UTF-8 committed file -> treat as stale (differs
-            # from the freshly rendered text), prompting a regenerate.
-            current = None
-        if current != rendered:
-            typer.echo(
-                f"error: {target} is stale; run `{regen}`",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
+        targets = [target] + ([extra_target] if extra_target else [])
+        for t in targets:
+            try:
+                current = t.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # Unreadable or non-UTF-8 committed file -> treat as stale
+                # (differs from the freshly rendered text), prompting a
+                # regenerate.
+                current = None
+            if current != rendered:
+                typer.echo(
+                    f"error: {t} is stale; run `{regen}`",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
         typer.echo(f"{target} is up to date")
         return
 
     if write:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic temp + replace so a write error never truncates the committed
-        # file (AC5-FR). Write to a temp in the same dir, then os.replace.
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(rendered)
-            os.replace(tmp, target)
-        except Exception:
+        targets = [target] + ([extra_target] if extra_target else [])
+        for t in targets:
+            t.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic temp + replace so a write error never truncates the
+            # committed file (AC5-FR). Write to a temp in the same dir, then
+            # os.replace.
+            fd, tmp = tempfile.mkstemp(dir=str(t.parent), suffix=".tmp")
             try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        typer.echo(f"wrote {target}")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(rendered)
+                os.replace(tmp, t)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            typer.echo(f"wrote {t}")
         return
 
     typer.echo(rendered)

@@ -27,6 +27,7 @@ pub mod epic_cap;
 pub mod fields;
 pub mod find_cli;
 pub mod findings;
+pub mod freshness;
 pub mod get_cli;
 pub mod idea_cap;
 pub(crate) mod merge_evidence;
@@ -243,9 +244,15 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    // First contact serializes on the store lock: two processes creating the
-    // db race the journal_mode pragma, and busy_timeout does not cover it.
-    let _creation_lock = if path.exists() {
+    // First contact serializes on the store lock until the schema is
+    // stamped: openers racing the journal_mode pragma or the setup DDL hit
+    // SQLITE_BUSY that busy_timeout does not cover. A file that exists is
+    // not enough, since the first opener creates it before setup finishes.
+    let stamped = path.exists()
+        && crate::store_conn::open_read(&path)
+            .and_then(|connection| schema_needs_ensure(&connection))
+            .is_ok_and(|needs| !needs);
+    let _creation_lock = if stamped {
         None
     } else {
         Some(

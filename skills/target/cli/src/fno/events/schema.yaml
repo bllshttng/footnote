@@ -1254,6 +1254,26 @@ event_types:
           description: "The refusing session's id, when ambient identity is present. Pairs a refusal with a later passing send for the retry-rate query."
     consumers: [operator]
 
+  - name: backlog_freshness_verdict
+    description: "One row per fno backlog freshness run: the premise and plan verdicts it read against current main, so the false-positive rate is measurable before any verdict is ever allowed to block (v1 warns only)."
+    sources: [backlog]
+    data:
+      required: [node, main_sha, premise, plan]
+      properties:
+        node:
+          type: string
+          description: "The node id the verb resolved and read."
+        main_sha:
+          type: string
+          description: "The origin/main commit the verdicts were measured against (empty when main was unresolvable)."
+        premise:
+          type: string
+          description: "The premise verdict: shipped, partly_shipped, changed, holds, or unmeasured:<why>."
+        plan:
+          type: [string, "null"]
+          description: "The plan verdict: void, drifted, fresh, or unmeasured:<why>; null when the run read no plan."
+    consumers: [operator, fno backlog]
+
   - name: backlog_reopened
     description: "fno backlog reopen cleared a node's completion. Every reopen carries a reason: a node that was done and now is not needs a why, or the graph records a state change nobody can account for."
     sources: [backlog]
@@ -2590,6 +2610,53 @@ event_types:
         duration_ms:
           type: integer
 
+  - name: codex_turn_error
+    description: "A Codex app-server turn failed. Its unfinished work remains working while the actor schedules a continuation."
+    sources: [daemon]
+    data:
+      required: [name, backend, turn_id, turn_status]
+      properties:
+        name: { type: string }
+        backend: { type: string }
+        turn_id: { type: string }
+        turn_status: { type: string, enum: [failed] }
+        session_id: { type: string }
+        error: { type: object }
+
+  - name: quiet_worker_nudge
+    description: "A quiet unfinished worker received a nudge. Its transcript marker confirms read on a later sweep."
+    sources: [daemon]
+    data:
+      required: [session_id, node, stage, marker, delivery]
+      properties:
+        session_id: { type: string }
+        node: { type: string }
+        stage: { type: integer, enum: [1, 2] }
+        marker: { type: string }
+        delivery: { type: string, enum: [handed, queued, failed, read] }
+        exit: { type: integer }
+        receipt: { type: string }
+        error: { type: string }
+
+  - name: quiet_worker_recovery
+    description: "An unfinished worker recovery attempt was accepted or refused."
+    sources: [daemon]
+    data:
+      required: [session_id, node, reason]
+      properties:
+        session_id: { type: string }
+        node: { type: string }
+        reason: { type: string }
+        delivery: { type: string, enum: [read] }
+
+  - name: quiet_worker_error
+    description: "The daemon could not inspect or escalate one quiet unfinished worker."
+    sources: [daemon]
+    data:
+      required: [name, reason]
+      properties:
+        name: { type: string }
+        reason: { type: string }
   - name: agent_followup_started
     description: "An fno-agents followup ask started against a live registry entry."
     sources: [daemon, agents]
@@ -7763,8 +7830,8 @@ event_types:
     consumers: [operator]
 
   - name: lead_goal_resumed
-    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
-    sources: [loop]
+    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch. The wake-mode loop emits it on its dispatch-side resume, and the daemon's check-in beat arm emits it with reason beat."
+    sources: [loop, daemon]
     data:
       required: [session_id, scope, resumed, successor, provider_receipt]
       properties:
@@ -8038,28 +8105,29 @@ event_types:
   - name: done_ahead_of_main
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: lead_spawned_successor
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: lead_wake_refused
+
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: lead_wake
     description: "One lead-wake arm episode: the daemon woke a lead past its check-in beat and told the rung-up leads. The arm folds the newest row per scope as its dedupe memory (lead_wake.rs)."
     sources: [daemon]
     data:
       required: [scope, level, idle_secs, beat_secs, acted]
+  - name: worker_wake
+    description: "The daemon nudged an ended Codex worker turn on an open node. The session and last activity timestamp identify one quiet episode."
+    sources: [daemon]
+    data: {required: [session_id, node, last_activity_ms, via]}
   - name: mcp_channel_demoted_to_socket
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: mcp_channel_envelope_drift
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]

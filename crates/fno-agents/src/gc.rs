@@ -808,12 +808,18 @@ pub struct ProcRow {
 /// The conjunction IS the gate, and every clause is load-bearing, because the
 /// cost of a false positive is killing a process a person is using:
 ///
-/// - **argv names a reparable family.** Either the `fno-py` entrypoint, or a
+/// - **argv names a reparable family.** Either the `fno-py` entrypoint, a
 ///   stdio MCP server in the codegraph family (measured 2026-10-02: every
 ///   `claude bg-spare` held one `codegraph serve --mcp` server plus a
 ///   `--liftoff-only` worker, 24 servers at 5.6 GB, and after their session
-///   died they sat on init unreaped). Matched on whitespace-separated TOKENS,
-///   never substrings: `--mcp-config` contains the string and is not this.
+///   died they sat on init unreaped), or Claude Code pool machinery whose
+///   daemon died: a `claude bg-pty-host` / `claude bg-spare` pair orphaned to
+///   init (2026-10-07: 28 pty hosts, most 0.0% CPU for hours, three 12-33h
+///   orphans of dead daemons still resident; the 2026-10-03 load
+///   investigation named the idle baseline). A live daemon's pool is never
+///   matched: its hosts have a real parent. Matched on whitespace-separated
+///   TOKENS, never substrings: `--mcp-config` contains the string and is not
+///   this.
 /// - **parent pid 1.** A live foreground `fno` has a real parent. Without this
 ///   clause the gate matches every ordinary command an operator is running.
 /// - **older than the threshold.** Without it the sweep races a child whose
@@ -825,7 +831,9 @@ pub fn is_reapable_orphan(row: &ProcRow, older_than: Duration, live_pids: &[u32]
         && row.age_secs >= older_than.as_secs()
         && !live_pids.contains(&row.pid)
         && row.pid != std::process::id()
-        && (names_fno_py(&row.args) || names_stdio_mcp_server(&row.args))
+        && (names_fno_py(&row.args)
+            || names_stdio_mcp_server(&row.args)
+            || is_claude_spare(&row.args))
 }
 
 fn names_fno_py(args: &str) -> bool {
@@ -2427,6 +2435,35 @@ mod tests {
             Duration::from_secs(5400),
             &[4242]
         ));
+    }
+
+    /// A Claude Code pool pair whose daemon died sits on init holding its
+    /// blank: 2026-10-07 measured 28 pty hosts, most 0.0% CPU for hours, and
+    /// three 12-33h orphans. They are the idle baseline the 2026-10-03 load
+    /// investigation named, so the pair joins the reparable families. A live
+    /// daemon's pool has a real parent and never matches (the ppid clause).
+    #[test]
+    fn an_orphaned_claude_pool_pair_is_reapable_and_a_live_daemons_pool_is_not() {
+        let host = orphan(
+            "claude bg-pty-host --bg-pty-host /tmp/cc-daemon-501/ab/spare/f.pty.sock 200 50 -- /x/claude --bg-spare /tmp/cc-daemon-501/ab/spare/f.claim.sock",
+            1,
+            43_200,
+        );
+        let spare = orphan(
+            "claude --bg-spare /tmp/cc-daemon-501/ab/spare/s.claim.sock",
+            1,
+            43_200,
+        );
+        assert!(is_reapable_orphan(&host, Duration::from_secs(5400), &[]));
+        assert!(is_reapable_orphan(&spare, Duration::from_secs(5400), &[]));
+        // The same pair under a live daemon (a real parent) is the pool
+        // doing its job; never matched.
+        let live = orphan(
+            "claude --bg-spare /tmp/cc-daemon-501/ab/spare/s.claim.sock",
+            99_000,
+            86_400,
+        );
+        assert!(!is_reapable_orphan(&live, Duration::from_secs(5400), &[]));
     }
 
     /// The argv clause matches a TOKEN, not a substring, in both reparable

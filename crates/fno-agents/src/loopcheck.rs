@@ -224,10 +224,10 @@ use gh_read::{
     GraphqlQuota,
 };
 pub(crate) use gh_read::{coverage_adapter, is_graphql_read};
+pub(crate) use intent::{declared_recovery_hold, extract_assistant_text, parse_xml_attr};
 use intent::{detect_intent, extract_last_assistant_message, Intent};
 #[cfg(test)]
 use intent::{detect_intent_from_text, INTENT_LOOKBACK_ENTRIES};
-pub(crate) use intent::{extract_assistant_text, parse_xml_attr};
 use local_attestation::{
     author_is_bot, author_is_known_bot, in_scope_chain, line_carries_keyed_findings,
     local_attestation_verdict, local_latest_attestations, local_refused_verdicts,

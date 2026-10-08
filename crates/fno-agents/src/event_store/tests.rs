@@ -39,6 +39,14 @@ fn count_type(store: &Path, event_type: &str) -> i64 {
         .unwrap()
 }
 
+/// An ephemeral row that must survive import sits one hour old: import
+/// prunes on a fresh store, so any fixed ts crosses the retention floor
+/// and the row vanishes.
+fn fresh_ts() -> String {
+    (chrono::Utc::now() - chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 #[test]
 fn a_cause_stores_reads_back_and_migrates_in_place() {
     let dir = tempfile::tempdir().unwrap();
@@ -298,10 +306,8 @@ fn ephemeral_journal_is_refused_but_sibling_imports() {
     let sibling = dir.path().join("events.jsonl.ephemeral");
     append(
         &sibling,
-        &[
-            json!({"ts": "2026-09-10T08:00:00Z", "type": "mux_pane_counters",
-              "source": "mux", "data": {"panes": []}}),
-        ],
+        &[json!({"ts": fresh_ts(), "type": "mux_pane_counters",
+              "source": "mux", "data": {"panes": []}})],
     );
     let err = sync(&sibling).unwrap_err();
     assert!(err.contains("ephemeral"), "err: {err}");
@@ -338,7 +344,7 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
                    "head_sha": "abc", "verdict": "pass"}}),
             json!({"ts": "2026-05-01T08:00:00Z", "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
-            json!({"ts": "2026-09-15T08:00:00Z", "type": "mux_pane_counters",
+            json!({"ts": fresh_ts(), "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
         ],
     );
@@ -494,8 +500,75 @@ fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
         .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 0);
+}
 
+#[test]
+fn corrupt_pages_refuse_writes_at_statement_time_and_file_attention() {
+    let dir = tempfile::tempdir().unwrap();
     let damaged = dir.path().join("damaged.jsonl");
+    // Seed one stored row so the append must traverse the events b-tree.
+    append(
+        &damaged,
+        &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "seed")],
+    );
+    sync(&damaged).unwrap();
+    let store = store_path(&damaged);
+    let conn = Connection::open(&store).unwrap();
+    let root: u64 = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name='events'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let page_size: u64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&store)
+        .unwrap();
+    file.seek(SeekFrom::Start((root - 1) * page_size)).unwrap();
+    file.write_all(&vec![0; page_size as usize]).unwrap();
+    drop(file);
+    let line = checkin("2026-09-10T12:00:01Z", "x-aaaa", "damaged").to_string();
+    let before = std::fs::read(&store).unwrap();
+    let error = append_envelope(&damaged, &line, None).unwrap_err();
+    assert!(
+        error.contains("database disk image is malformed") && error.contains("write refused"),
+        "{error}"
+    );
+    // The damaged page region itself must survive untouched (a lazy DDL
+    // commit may still checkpoint elsewhere in the file), and the file
+    // must never SHRINK.
+    let after = std::fs::read(&store).unwrap();
+    let page_start = ((root - 1) * page_size) as usize;
+    let page_end = page_start + page_size as usize;
+    assert_eq!(&after[page_start..page_end], &before[page_start..page_end]);
+    assert!(after.len() >= before.len());
+    let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
+    assert!(attention.contains("event-store-integrity"));
+    let items = crate::attention::project(&attention, &[], "", 0);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].ready, "{:?}", items[0].missing);
+}
+
+#[test]
+fn import_refuses_touching_damage_an_append_never_reads() {
+    // No integrity sweep runs on any open (that scan per guard row drove the
+    // fleet load storm): each door hits page damage only when a statement
+    // touches it. Damage the ingest_cursor page: the import reads the cursor
+    // and refuses, while the append never reads it and still lands.
+    let dir = tempfile::tempdir().unwrap();
+    let damaged = dir.path().join("damaged.jsonl");
+    // Seed the journal and store so the import opens the cursor with real
+    // work in front of it, then damage the cursor's page.
+    append(
+        &damaged,
+        &[checkin("2026-09-10T11:00:00Z", "x-aaaa", "seed")],
+    );
     sync(&damaged).unwrap();
     let store = store_path(&damaged);
     let conn = Connection::open(&store).unwrap();
@@ -518,23 +591,18 @@ fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
     file.seek(SeekFrom::Start((root - 1) * page_size)).unwrap();
     file.write_all(&vec![0; page_size as usize]).unwrap();
     drop(file);
-    let before = std::fs::read(&store).unwrap();
-    for result in [
-        append_envelope(&damaged, &line, None).map(|_| ()),
-        import_all(&damaged).map(|_| ()),
-    ] {
-        let error = result.unwrap_err();
-        assert!(
-            error.contains("integrity check failed") && error.contains("write refused"),
-            "{error}"
-        );
-        assert_eq!(std::fs::read(&store).unwrap(), before);
-    }
+    let line = checkin("2026-09-10T12:00:00Z", "x-aaaa", "offpath").to_string();
+    append_envelope(&damaged, &line, None).unwrap();
+    assert_eq!(count_events(&store), 2);
+    let error = import_all(&damaged).unwrap_err();
+    assert!(
+        error.contains("database disk image is malformed") && error.contains("write refused"),
+        "{error}"
+    );
     let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
     assert!(attention.contains("event-store-integrity"));
     let items = crate::attention::project(&attention, &[], "", 0);
     assert_eq!(items.len(), 1);
-    assert!(items[0].ready, "{:?}", items[0].missing);
 }
 
 #[test]
@@ -1091,6 +1159,43 @@ fn a_filtered_read_sorts_seqs_not_lines_and_keeps_limit_order() {
         .filter(|c| text.contains(c))
         .collect();
     assert_eq!(kept, ["first", "second"], "{text}");
+}
+
+#[test]
+fn a_lost_row_is_dead_lettered_by_type_and_busy_locks_are_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    let store = store_path(&journal);
+    // Junk in the store file fails the open's schema probe, so the commit
+    // errors and the row is lost for real.
+    std::fs::write(&store, b"junk".repeat(50)).unwrap();
+    let envelope = json!({
+        "ts": "2026-10-07T00:00:00Z",
+        "type": "claim_released",
+        "source": "fno-loop",
+        "data": {
+            "session_id": "s-1",
+            "key": "node:x-1:claude:s-1",
+            "holder": "s-1",
+            "pid": 4242,
+            "host": "test-host",
+            "acquired_at": "2026-10-06T00:00:00Z",
+            "duration_held_ms": 60000,
+        },
+    })
+    .to_string();
+    let error = append_envelope(&journal, &envelope, None).unwrap_err();
+    // The open's schema probe fails NOTADB, so the diagnostic is the bare
+    // named() string, not the corrupt-image form.
+    assert!(error.contains("file is not a database"), "{error}");
+
+    let sidecar = PathBuf::from(format!("{}.lost.jsonl", store.display()));
+    let line = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(line.contains("\"type\":\"claim_released\""), "{line}");
+
+    assert!(lock_busy(".../events.db: database is locked"));
+    assert!(!lock_busy(".../events.db: file is not a database"));
+    assert!(!lock_busy(""));
 }
 
 mod coverage;

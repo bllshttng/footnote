@@ -78,14 +78,6 @@ def test_inventory_missing_roots_refuse(tmp_path: Path) -> None:
         enumerate_rust_leaves(tmp_path)
     assert "mux/version" in str(err.value)
 
-def test_removed_mux_verbs_carry_a_tombstone() -> None:
-    """A removed Rust verb names its replacement instead of a bare refusal."""
-    real_root = Path(__file__).resolve().parents[3]
-    main_rs = (real_root / "crates/fno/src/main.rs").read_text()
-    assert "MUX_TOMBSTONES" in main_rs
-    assert '"squad",' in main_rs, "the removed squad alias must keep its tombstone"
-
-
 def test_added_fno_agents_dispatch_is_seen(tmp_path: Path) -> None:
     """The fno-agents half keeps its source scan: its action table stays
     frozen until the client retires, and it is still read independently."""

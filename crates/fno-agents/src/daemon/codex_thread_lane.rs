@@ -103,10 +103,11 @@ pub(super) async fn spawn_codex_thread_lane(
                 .collect()
         })
         .unwrap_or_default();
-    let carry = match crate::codex_thread::parse_harness_args(&harness_args) {
+    let mut carry = match crate::codex_thread::parse_harness_args(&harness_args) {
         Ok(carry) => carry,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
+    worker_retry_config(&mut carry.config);
     let mut state_dirs = state_dirs;
     for dir in carry.add_dirs {
         if !state_dirs.iter().any(|existing| existing == &dir) {
@@ -127,6 +128,54 @@ pub(super) async fn spawn_codex_thread_lane(
     // as a fallback would be the exact outcome this resolves away. The ensure
     // shells out (git + the worktree ensure), so it runs on the blocking
     // pool, off the async executor every hosted thread shares.
+    if role.is_some()
+        || matches!(
+            seed.split_whitespace().next(),
+            Some("$fno:lead" | "/fno:lead")
+        )
+    {
+        let home = ctx.home.clone();
+        let blocker = tokio::task::spawn_blocking(move || {
+            crate::graph_store::read_rows_where(
+                &crate::gc_sweep::graph_path(&home),
+                &crate::backlog::RowQuery {
+                    fields: Some(
+                        ["id", "slug", "status", "merge_status"]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .map(|rows| codex_lead_recovery_blocker(&rows).map(str::to_string))
+            .map_err(|e| e.to_string())
+        })
+        .await;
+        match blocker {
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(blocker))) => {
+                return thread_spawn_refusal(
+                    ctx,
+                    req,
+                    name,
+                    provider,
+                    &format!(
+                        "Codex lead spawn refused while fleet recovery is unfinished: {blocker}"
+                    ),
+                )
+            }
+            error => {
+                return thread_spawn_refusal(
+                    ctx,
+                    req,
+                    name,
+                    provider,
+                    &format!("Codex lead spawn refused: recovery gate unreadable ({error:?})"),
+                )
+            }
+        }
+    }
     let cwd = match resolve_target_cwd(cwd, node, &seed).await {
         Ok(cwd) => cwd,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
@@ -301,6 +350,39 @@ pub(super) async fn spawn_codex_thread_lane(
     )
 }
 
+pub(super) fn worker_retry_config(config: &mut serde_json::Map<String, Value>) {
+    for (key, value) in [
+        ("model_providers.openai.stream_max_retries", 20),
+        ("model_providers.openai.stream_idle_timeout_ms", 600_000),
+    ] {
+        let field = key.rsplit('.').next().expect("provider field");
+        if config.get(key).is_some()
+            || config
+                .get("model_providers.openai")
+                .and_then(|provider| provider.get(field))
+                .is_some()
+            || config
+                .get("model_providers")
+                .and_then(|providers| providers.get("openai"))
+                .and_then(|provider| provider.get(field))
+                .is_some()
+        {
+            continue;
+        }
+        config.entry(key.to_string()).or_insert(json!(value));
+    }
+}
+
+fn codex_lead_recovery_blocker(rows: &[Value]) -> Option<&str> {
+    rows.iter()
+        .find(|row| {
+            row.get("slug").and_then(Value::as_str) == Some("codex-turn-that-ends-error-is")
+                && row.get("status").and_then(Value::as_str) != Some("done")
+                && row.get("merge_status").and_then(Value::as_str) != Some("merged")
+        })
+        .and_then(|row| row.get("id").and_then(Value::as_str))
+}
+
 /// The role a spawn request carries: `Some((level, scope))` or None, both
 /// halves required. This door bounds the TYPE the registry row stores (a
 /// u32 level 0..=2, a nonblank scope); the territory, succession and
@@ -371,4 +453,27 @@ async fn resolve_target_cwd(cwd: &Path, node: Option<&str>, seed: &str) -> Resul
         ));
     }
     Ok(ensured)
+}
+
+#[cfg(test)]
+mod recovery_guard_tests {
+    use super::*;
+
+    #[test]
+    fn lead_recovery_guard_names_the_unfinished_binding_and_releases_on_done() {
+        let mut rows = vec![
+            json!({"id": "recovery-node", "slug": "codex-turn-that-ends-error-is", "status": "in_progress"}),
+        ];
+        assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
+        rows[0]["status"] = json!("done");
+        assert_eq!(codex_lead_recovery_blocker(&rows), None);
+        rows[0]["status"] = json!("in_progress");
+        rows[0]["deferred_kind"] = json!("operator_request");
+        assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
+        rows[0]["status"] = json!("deferred");
+        assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
+        rows[0]["merge_status"] = json!("merged");
+        assert_eq!(codex_lead_recovery_blocker(&rows), None);
+        assert_eq!(codex_lead_recovery_blocker(&[]), None);
+    }
 }

@@ -118,7 +118,12 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
     )
 
     assert sent.exit_code == 0, sent.output
-    assert sent.stdout == "msg-ruling1 delivered (hosted)\n"
+    import json as _json
+
+    receipt = _json.loads(sent.stdout)
+    assert set(receipt) == {"msg_id", "subject", "to", "status"}
+    assert receipt["msg_id"] == "msg-ruling1"
+    assert receipt["status"] == "delivered (hosted)"
     assert len(calls) == 1
     import os as _os
     import subprocess as _sp
@@ -416,7 +421,11 @@ def test_project_anycast_send_delivers_repeated_bodies_without_a_ledger(runner, 
     second = runner.invoke(app, args)
 
     assert first.exit_code == 0, first.output
-    assert "queued (durable) for project web" in first.stdout
+    import json as _json
+
+    receipt = _json.loads(first.stdout.strip())
+    assert receipt["to"] == "web"
+    assert "queued (durable)" in receipt["status"]
     assert second.exit_code == 0, second.output
     assert not (paths.bus_dir() / "word-budget").exists()
 
@@ -881,6 +890,44 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     assert payload == []
 
 
+def test_plain_send_delivers_read_line_on_a_hookless_harness(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    # A plain peer send (no --kind) delivers the header line alone; the
+    # receiver is taught the read verb once per session, and the fmail-
+    # prefix is the cue. The bus row keeps the full body, so the id the
+    # header names resolves to something worth reading.
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    injected: list[str] = []
+
+    def _capture(recipient, text, **_k):
+        injected.append(text)
+        return True
+
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _capture)
+
+    sent = runner.invoke(
+        app,
+        ["mail", "send", "9a063cd3", "secret body words", "--from-name", "web"],
+    )
+    assert sent.exit_code == 0, sent.output
+    assert len(injected) == 1
+    # Without a subject the header's third field is the body's first sentence
+    # (AC10-HP); the turn is the header line alone.
+    lines = injected[0].splitlines()
+    assert len(lines) == 1, injected[0]
+    header = lines[0]
+    assert header.startswith("`@web · fmail-")
+    msg_id = header.split(" · ")[1]
+
+    # The bus copy the id points at holds the full body.
+    from fno.bus.log import iter_messages
+
+    row = next(m for m in iter_messages() if m.id == msg_id)
+    assert "secret body words" in row.body
+
+
 # ---------------------------------------------------------------------------
 # a2a US7b / AC3-HP: the mux PaneSend live rung. A resolved session that is
 # mux-hosted (fno owns its PTY) delivers live through its pane instead of
@@ -944,7 +991,10 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     assert "delivered (hosted)" in sent.output
     assert "queued (durable)" not in sent.output
     assert len(calls) == 1
-    assert "ping" in calls[0][1]  # the wrapped <fno_mail> envelope, not raw text
+    # The live turn is header only: one line, no body on the bus floor.
+    lines = calls[0][1].splitlines()
+    assert len(lines) == 1, calls[0][1]
+    assert lines[0].startswith("`@web · fmail-")
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
@@ -1274,7 +1324,9 @@ def test_project_send_no_peer_warns_deferred(runner, mailbox):
         app, ["mail", "send", "--to-project", "web", "--from-name", "etl", "quiet?"]
     )
     assert res.exit_code == 0, res.output
-    assert "queued (durable) for project web" in res.stdout
+    receipt = json.loads(res.stdout.strip())
+    assert receipt["to"] == "web"
+    assert "queued (durable)" in receipt["status"]
     assert "project inbox web has no live drain" in (res.stderr or "")
 
 

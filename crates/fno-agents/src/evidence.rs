@@ -1068,7 +1068,9 @@ mod tests {
     // test body: set_var is process-global and cargo runs tests in parallel.
     #[test]
     fn decision_id_arm_refuses_unknown_ids_and_a_dead_store() {
-        let _env_lock = crate::claims::test_env_lock();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_home = std::env::var("FNO_HOME").ok();
         let seeded = tempfile::tempdir().expect("tmp");
         std::env::set_var("FNO_HOME", seeded.path());

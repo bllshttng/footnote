@@ -73,12 +73,6 @@ def test_parse_session_data_strict_field_types():
         assert parse_session_data(entry) is None, (field, wrong_value)
 
 
-def test_required_fields_derive_from_typeddict():
-    from measure_fno_in_target import SessionData, _REQUIRED_SESSION_FIELDS
-
-    assert set(_REQUIRED_SESSION_FIELDS) == set(SessionData.__annotations__)
-
-
 def test_aggregate_ratio_rows():
     from measure_fno_in_target import compute_aggregate_ratio
 

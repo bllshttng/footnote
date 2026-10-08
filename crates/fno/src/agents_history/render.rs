@@ -282,6 +282,29 @@ pub(super) fn card(
         ));
     }
 
+    lines.push(match transcript.and_then(|facts| facts.path.as_deref()) {
+        Some(path) => format!("transcript: {} (this machine)", path.display()),
+        None => match registry.and_then(|row| str_at(row, "transcript_path")) {
+            Some(path) => {
+                format!("transcript: {path} (registry row; not found on this machine)")
+            }
+            None => "transcript: not found on this machine (claude projects and codex sessions searched)"
+                .into(),
+        },
+    });
+    lines.push(
+        match transcript
+            .and_then(|facts| facts.path.as_deref())
+            .and_then(|path| crate::session_origin::read_beside(path, sid))
+        {
+            Some(origin) => format!(
+                "origin:     {}",
+                origin.origin_text(&crate::session_origin::this_machine())
+            ),
+            None => "origin:     not recorded (no origin file beside the transcript; sessions started before this change, resumed sessions with a new id, and harnesses that report no transcript have none)"
+                .into(),
+        },
+    );
     lines.push(format!(
         "resume:     {}",
         resume_line(sid, registry, newest_receipt, harness, &model)
