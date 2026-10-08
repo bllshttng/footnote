@@ -292,13 +292,10 @@ mod tests {
             "{line}"
         );
         assert!(line.contains("zai 5h 63%, wk 1.1M tok"), "{line}");
-        assert!(!line.contains("hidden"), "{line}");
-    }
-
-    #[test]
-    fn token_counts_shrink_to_a_human_word() {
+        // The formatter's other shapes, pinned on the same rendered line's
+        // contract: k-form tokens and a raw sub-k count.
         assert_eq!(human_tokens(40_000), "40k tok");
-        assert_eq!(human_tokens(1_100_000), "1.1M tok");
         assert_eq!(human_tokens(900), "900 tok");
+        assert!(!line.contains("hidden"), "{line}");
     }
 }

@@ -429,9 +429,9 @@ def read_lanes(
 
     # The lane answer IS the gate's own cap read (one decider, no second
     # arithmetic): the probe carries the live slot count and the learned
-    # effective cap, and the CPU-share arithmetic it replaces (the x-fe65
-    # answer of 15 more fit at 90% CPU) is deleted. Delegating to the Rust
-    # probe is the law (d-b6cc1a2a): Python deletes, the gate decides.
+    # effective cap, and the CPU-share arithmetic it replaces (an answer of
+    # 15 more fit at 90% CPU) is deleted. Delegating to the Rust probe is
+    # the law (d-b6cc1a2a): Python deletes, the gate decides.
     from fno.agents.spawn_gate import probe_capacity
 
     probe = probe_capacity(only=["lanes"])

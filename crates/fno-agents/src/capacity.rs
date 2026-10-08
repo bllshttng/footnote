@@ -708,19 +708,17 @@ mod tests {
             learned.clause()
         );
         assert!(learned.clause().contains("CPU-bound since"));
-        let _ = std::fs::remove_dir_all(home.root());
-    }
 
-    #[test]
-    fn missing_state_falls_back_to_the_ceiling_and_says_so() {
-        let home = tmp_home("fallback");
-        let learned = effective(&home, 23);
+        // A machine with no state at all takes the ceiling and says so.
+        let bare = tmp_home("fallback");
+        let learned = effective(&bare, 23);
         assert_eq!(learned.cap, 23);
         assert!(!learned.known);
         assert_eq!(
             learned.clause(),
             "max_live 23 (effective cap unknown, using ceiling)"
         );
+        let _ = std::fs::remove_dir_all(bare.root());
         let _ = std::fs::remove_dir_all(home.root());
     }
 
@@ -795,12 +793,10 @@ mod tests {
         );
         assert_eq!(rows[0].windows[1].window, "weekly");
         assert!(rows[0].windows[1].reset_epoch > now);
-    }
 
-    #[test]
-    fn a_hidden_record_stays_in_state_but_flagged_out_of_gauges() {
-        let now = 1_800_000_000;
-        let records = vec![AccountRecord {
+        // A hidden metered record stays in the state, flagged out of every
+        // gauge, with spend and no window.
+        let hidden = AccountRecord {
             id: "zai-api".into(),
             provider: "zai".into(),
             route_model: "glm-5.3".into(),
@@ -809,8 +805,8 @@ mod tests {
             windows: Vec::new(),
             limit_tokens: None,
             reset_timezone: None,
-        }];
-        let rows = fold_windows(&records, &[], None, now);
+        };
+        let rows = fold_windows(&[hidden], &ledger, None, now);
         assert!(
             rows[0].windows.is_empty(),
             "metered accounts show no window"
