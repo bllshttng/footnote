@@ -264,6 +264,7 @@ pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
 pub mod mail_receipt;
+pub mod mail_teach;
 pub mod mail_threads;
 pub mod main_ci;
 pub mod main_ci_proof;

@@ -1527,6 +1527,21 @@ fn usage() -> i32 {
     2
 }
 
+/// The read verb for an `fmail-<id>` header, spelled once here so the
+/// teaching line and the dispatch arm cannot drift apart: a rename edits this
+/// const and every carrier that prints the line follows.
+pub const MAIL_READ_VERB: &str = "show";
+
+/// The one-line lesson carried once per session at session start, again after
+/// each compaction, and on a hookless session's first delivered header. Every
+/// carrier prints THIS string, so no carrier hardcodes the verb.
+pub fn teach_line() -> String {
+    format!(
+        "mail: an `fmail-<id>` header in a delivered turn is unread mail on the bus; \
+         read it with `fno agents mail {MAIL_READ_VERB} <id>`"
+    )
+}
+
 /// Verb entrypoint reached from bin/client.rs's direct dispatch. `pub`: the
 /// bin target sees the lib as an external crate (the announce.rs note).
 pub fn run_chats(args: &[String]) -> i32 {
@@ -1728,7 +1743,7 @@ pub fn run_chats(args: &[String]) -> i32 {
                 }
             }
         }
-        "show" => {
+        MAIL_READ_VERB => {
             let mut id: Option<String> = None;
             let mut q = ShowQuery {
                 thread: false,
