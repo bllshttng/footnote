@@ -73,6 +73,7 @@ READ_ALLOWLIST = (
     # The read-only registry door's db-path builder, the same graph anchor
     # swapped to its db sibling; the read is of the registry table only.
     "crates/fno-agents/src/registry_read.rs",
+    "crates/fno/src/registry_read.rs",  # the generated copy of the same door
     # Unit-test fixture module, included cfg(test) from spawn_gate.rs: its
     # graph.json literals write hermetic tempdir fixtures, never store reads.
     "crates/fno-agents/src/spawn_gate_territory_tests.rs",
