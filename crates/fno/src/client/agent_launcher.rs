@@ -1642,14 +1642,14 @@ fn move_word_right(draft: &mut LaunchDraft) {
 fn move_line_start(draft: &mut LaunchDraft) {
     let cur = draft.cursor_chars;
     let before: Vec<char> = draft.message.chars().take(cur).collect();
-    let row = before.iter().rev().take_while(|c| *c != '\n').count();
+    let row = before.iter().rev().take_while(|c| **c != '\n').count();
     draft.cursor_chars = cur - row;
 }
 
 fn move_line_end(draft: &mut LaunchDraft) {
     let cur = draft.cursor_chars;
     let after: Vec<char> = draft.message.chars().skip(cur).collect();
-    let rest = after.iter().take_while(|c| *c != '\n').count();
+    let rest = after.iter().take_while(|c| **c != '\n').count();
     draft.cursor_chars = cur + rest;
 }
 
@@ -4360,10 +4360,10 @@ impl Launcher {
             .sum();
         let x = sl.message.x + PROMPT_GUTTER as u16 + disp_col as u16;
         let in_sheet = cur_row >= sl.start_chunk && x < sl.message.x + sl.message.width;
-        (in_sheet).then(|| {
+        in_sheet.then(|| {
             let y = sl.message.y + (cur_row - sl.start_chunk) as u16;
             (y, x)
-        })?
+        })
     }
 
     /// Paint the sheet: the chrome frame first, then the body Buffer
