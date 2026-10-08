@@ -1035,7 +1035,7 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "registry-json" {
         return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
     }
-    if verb == "worker-wake" {
+    if matches!(verb, "worker-wake") {
         return fno_agents::worker_wake::run_dry_run(&args[1..], &AgentsHome::from_env());
     }
     // sessions-map: the daemon-free session-to-node join the top view reads
