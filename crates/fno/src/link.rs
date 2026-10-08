@@ -496,9 +496,12 @@ pub fn find_handle_token(text: &str, skip: usize) -> Option<(usize, usize, Strin
             .copied()
             .take_while(|c| is_name(*c))
             .collect();
-        // The name proper starts with a letter or digit: `@-x` and `@_` are
-        // punctuation, not handles. A trailing `-` is punctuation too.
-        if !raw.starts_with(|c: char| c.is_ascii_alphanumeric()) || raw.len() > 64 {
+        // The name proper starts with a letter or digit and is at least two
+        // characters: `@-x`, `@_` and a lone `@a` are punctuation or a
+        // fragment, not handles (and `@a` sits inside malformed mail
+        // headers, which resolve nothing). A trailing `-` is punctuation too.
+        if !raw.starts_with(|c: char| c.is_ascii_alphanumeric()) || raw.len() < 2 || raw.len() > 64
+        {
             continue;
         }
         let name = raw.trim_end_matches('-');
@@ -853,7 +856,7 @@ mod tests {
         assert_eq!(name, "aa");
         assert_eq!(find_handle_token(two, end), Some((8, 11, "bb".into())));
         // The char before @ continues a word: emails and mid-word @s never match.
-        for bad in ["user@example.com", "see bob@host", "@", "@-x"] {
+        for bad in ["user@example.com", "see bob@host", "@", "@-x", "@a"] {
             assert!(
                 find_handle_token(bad, 0).is_none(),
                 "{bad} resolves nothing"
