@@ -330,7 +330,7 @@ pub fn run(tail: &[String]) -> i32 {
 /// model's async gather, the role roster read once beside it.
 fn gather_inputs(graph: &Path) -> Result<crate::backlog_model::Inputs, String> {
     let now = crate::search_query::now_secs();
-    let agents = std::fs::read_to_string(crate::agents_view::registry_path())
+    let agents = crate::registry_read::registry_text(&crate::agents_view::registry_path())
         .ok()
         .and_then(|raw| crate::agents_view::derive_rows(&raw, now as u64))
         .map(|rows: Vec<crate::agents_view::RegistryAgent>| {

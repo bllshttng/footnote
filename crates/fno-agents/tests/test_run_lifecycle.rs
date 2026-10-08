@@ -1894,7 +1894,7 @@ fn the_build_door_queues_in_arrival_order() {
 
     let queue_dir = root
         .join(".fno")
-        .join("claims")
+        .join("claim-aux")
         .join("build%3Acargo.lock.queue.d");
     let tickets = std::fs::read_dir(&queue_dir)
         .expect("the queue dir must exist once waiters queue")

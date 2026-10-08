@@ -277,3 +277,8 @@ mod tests {
         assert_eq!(dir, expected);
     }
 }
+
+/// Host-local diagnostics and admission tickets beside the retired claims path.
+pub(crate) fn auxiliary_dir(claims_dir: &Path) -> PathBuf {
+    claims_dir.with_file_name("claim-aux")
+}

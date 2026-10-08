@@ -1787,8 +1787,7 @@ mod tests {
             );
         })
         .unwrap();
-        let rows: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        let rows: serde_json::Value = crate::registry_store::read(&registry).unwrap();
         let lead = &rows["agents"][0];
         assert_eq!(lead["status"], "live", "{lead}");
         assert!(

@@ -12,10 +12,8 @@ unrealistic results.
 from __future__ import annotations
 
 import multiprocessing as mp
-import os
 import socket
 from pathlib import Path
-from typing import Optional
 
 import psutil
 import pytest
@@ -26,7 +24,7 @@ from fno.claims.core import (
     claim_status,
     release_claim,
 )
-from fno.claims.io import claim_path, claims_dir, serialize_claim
+from fno.claims.io import claim_path, serialize_claim
 from fno.claims.types import Claim, now_ms
 
 _PROCESS_START_TIMEOUT_SECONDS = 30.0
@@ -227,24 +225,12 @@ def test_serial_acquire_release_across_processes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_claims_dir_resolves_to_canonical_root_from_linked_worktree(
-    tmp_path, monkeypatch
-):
-    """AC1-HP: claims_dir() with no root arg lands in ONE shared directory.
-
-    Scenario: a git repo with a linked worktree. When cwd is the LINKED
-    worktree and both FNO_CLAIMS_ROOT and FNO_REPO_ROOT are unset,
-    claims_dir() must resolve to the repo's space (<spaces>/<slug>/claims/,
-    keyed on the canonical root), NOT to <linked-worktree>/.fno/claims/.
-
-    This verifies Locked Decision 9: claims are cross-worktree coordination
-    state and must share a single directory regardless of which worktree the
-    caller runs from. The space replaced the canonical checkout as the shared
-    location (x-b1ee): the invariant survives, the path moved.
-    """
+def test_claims_resolve_to_one_root_across_linked_worktrees(tmp_path, monkeypatch):
+    """A claim taken from a linked worktree with no root is visible from the
+    canonical checkout: claims are cross-worktree coordination state."""
+    import os
     import subprocess
 
-    # -- Build an isolated git repo in tmp_path/canonical -------------------
     canonical = tmp_path / "canonical"
     canonical.mkdir()
     subprocess.run(["git", "init", str(canonical)], check=True, capture_output=True)
@@ -255,57 +241,22 @@ def test_claims_dir_resolves_to_canonical_root_from_linked_worktree(
         env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t.com",
              "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t.com"},
     )
-
-    # -- Add a linked worktree at tmp_path/linked ----------------------------
     linked = tmp_path / "linked"
     subprocess.run(
         ["git", "-C", str(canonical), "worktree", "add", str(linked), "--detach"],
         check=True,
         capture_output=True,
     )
-
-    # -- Patch cwd to the linked worktree; clear env vars --------------------
     monkeypatch.chdir(linked)
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
 
-    # -- Acquire a claim via root=None (exercises the fallback path) ---------
-    from fno.claims.core import acquire_claim, release_claim
-    from fno.claims.io import claims_dir
-    from fno.paths import space_dir
-
-    claim = acquire_claim(key="worktree-test-claim", holder="test-holder", root=None)
+    acquire_claim(key="worktree-test-claim", holder="test-holder", root=None)
     try:
-        resolved = claims_dir(root=None)
-        expected = space_dir(canonical) / "claims"
-
-        # The claim file must land in the CANONICAL repo's space, not the
-        # linked worktree.
-        assert resolved == expected, (
-            f"claims_dir() resolved to {resolved!r}, expected the canonical "
-            f"repo's space claims dir {expected!r}."
-        )
-        assert not str(resolved).startswith(str(linked)), (
-            f"claims_dir() resolved to the linked worktree {linked!r} - "
-            "cross-worktree coordination invariant violated."
-        )
-
-        # The lock file must physically exist in that shared dir.
-        from fno.claims.io import claim_path
-        lock = claim_path("worktree-test-claim", root=None)
-        assert lock.exists(), f"lock file missing at {lock}"
-        assert str(lock).startswith(str(expected)), (
-            f"lock file at {lock!r} is not under the space claims dir {expected!r}"
-        )
-
-        # Also verify: reading from the CANONICAL worktree sees the claim
-        # (root=None from a different cwd, same space).
-        from fno.claims.core import claim_status
         monkeypatch.chdir(canonical)
         status = claim_status("worktree-test-claim", root=None)
-        assert status.get("state") in ("live", "stale"), (
-            f"claim not visible from canonical worktree: status={status!r}"
-        )
+        assert status.get("state") in ("live", "stale"), status
+        assert status.get("holder") == "test-holder", status
     finally:
         release_claim(key="worktree-test-claim", holder="test-holder", root=None)
 
@@ -316,51 +267,20 @@ def test_claims_dir_resolves_to_canonical_root_from_linked_worktree(
 
 
 def test_release_then_reacquire_holder_flip(tmp_path):
-    """T1: parent releases node claim, child acquires it - exactly one live claim.
-
-    Closes the release->reacquire seam in the handoff unwind protocol: after
-    a parent generation releases node:<id>, the successor (child) must be able
-    to acquire it and become the sole live holder. Uses the real claims library
-    with production-style holder strings (target-session:<sid>).
-    """
+    """Parent releases a node claim, the child acquires it, and the child is
+    the sole live holder."""
     key = "node:ab-deadbeef"
-    parent_holder = "target-session:20260605T120000Z-11111-parent"
-    child_holder = "target-session:20260605T120001Z-22222-child"
-    root = tmp_path
+    parent = "target-session:20260605T120000Z-11111-parent"
+    child = "target-session:20260605T120001Z-22222-child"
 
-    # Parent acquires
-    acquire_claim(key=key, holder=parent_holder, root=root)
+    acquire_claim(key=key, holder=parent, root=tmp_path)
+    before = claim_status(key, root=tmp_path)
+    assert (before.get("state"), before.get("holder")) == ("live", parent), before
+    release_claim(key=key, holder=parent, root=tmp_path)
+    acquire_claim(key=key, holder=child, root=tmp_path)
+    after = claim_status(key, root=tmp_path)
+    assert (after.get("state"), after.get("holder")) == ("live", child), after
+    from fno.claims.core import list_claims
 
-    # Verify parent holds it
-    status_before = claim_status(key, root=root)
-    assert status_before.get("state") == "live", (
-        f"expected parent to hold claim after acquire; got {status_before!r}"
-    )
-    assert status_before.get("holder") == parent_holder, (
-        f"expected holder={parent_holder!r}; got {status_before.get('holder')!r}"
-    )
-
-    # Parent releases
-    release_claim(key=key, holder=parent_holder, root=root)
-
-    # Child acquires
-    acquire_claim(key=key, holder=child_holder, root=root)
-
-    # Exactly one live claim file must exist
-    from fno.claims.io import claims_dir
-    lock_files = list(claims_dir(root=root).glob("*.lock"))
-    assert len(lock_files) == 1, (
-        f"expected exactly one .lock file after holder flip; found {[str(f) for f in lock_files]}"
-    )
-
-    # The live claim must be held by the child
-    status_after = claim_status(key, root=root)
-    assert status_after.get("state") == "live", (
-        f"expected live claim after child acquire; got {status_after!r}"
-    )
-    assert status_after.get("holder") == child_holder, (
-        f"expected holder={child_holder!r} after flip; got {status_after.get('holder')!r}"
-    )
-
-    # Clean up
-    release_claim(key=key, holder=child_holder, root=root)
+    assert [row["key"] for row in list_claims(root=tmp_path)] == [key]
+    release_claim(key=key, holder=child, root=tmp_path)

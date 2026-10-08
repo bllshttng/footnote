@@ -1201,13 +1201,12 @@ def _read_raw_registry(target: Path) -> Optional[dict]:
     Read once by ``write_registry`` and shared by its schema, row-loss, and
     existing-name checks.
     """
+    from fno.registry_door import RegistryDoorError, read_registry_document
+
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return read_registry_document(target)[0]
+    except RegistryDoorError:
         return None
-    if not isinstance(raw, dict):
-        return None
-    return raw
 
 
 # Re-exported under the registry's own name so a caller (and a test that
@@ -1230,7 +1229,8 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
     compare, which shared resolver to compare the target against, and the
     remedy to name. Read that module before changing either.
     """
-    if raw is None:
+    # An empty table is the old absent file: no reader to strand yet.
+    if raw is None or not raw.get("agents"):
         return
     try:
         shared = paths.agents_registry_path()
@@ -1338,16 +1338,22 @@ def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: 
 
 
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
-    """Atomically write the registry to disk.
+    """Write the registry rows through the native table door.
 
-    Serialization happens before the temp file is opened so an exception in
-    ``_json_dumps`` cannot corrupt the existing file. The encoded text is
-    written to ``<path>.tmp`` and renamed into place via ``os.replace``.
-    On a post-serialization failure (e.g. ENOSPC during ``write_text``),
-    the orphan ``.tmp`` is unlinked so it doesn't accumulate on retry.
+    The table revision read here guards the write: a writer that landed
+    between the read and the commit makes the door refuse.
     """
+    from fno.registry_door import (
+        RegistryDoorError,
+        commit_registry_document,
+        read_registry_document,
+    )
+
     target = _registry_path(path)
-    raw = _read_raw_registry(target)
+    try:
+        raw, revision = read_registry_document(target)
+    except RegistryDoorError as exc:
+        raise RegistryVersionError(str(exc)) from exc
     _refuse_source_ahead_schema_bump(raw, target)
     _refuse_probe_or_row_loss_write(target, raw, entries)
     existing = _existing_row_names(raw)
@@ -1359,29 +1365,10 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
         "schema_version": SCHEMA_VERSION,
         "agents": [asdict(e) for e in entries],
     }
-    on_disk = raw.get("schema_version") if raw else None
-    if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
-        from fno import rust_binary
-
-        try:
-            answer = rust_binary.verb_call("registry-commit", {"path": str(target), **payload})
-        except rust_binary.VerbUnavailable as exc:
-            raise RegistryVersionError(f"registry-commit refused {target}: {exc}") from exc
-        if answer.get("status") != "written":
-            detail = answer.get("message") or answer.get("reason") or "unknown refusal"
-            raise RegistryVersionError(f"registry-commit refused {target}: {detail}")
-        return
-    # Bare-name call resolves via module globals at call time, so
-    # ``monkeypatch.setattr(reg_module, "_json_dumps", ...)`` works.
-    text = _json_dumps(payload, indent=2, sort_keys=False)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, target)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+        commit_registry_document(target, payload, revision)
+    except RegistryDoorError as exc:
+        raise RegistryVersionError(str(exc)) from exc
 
 
 #: Constructor keys of ``AgentEntry``, derived rather than listed so a new
@@ -1506,9 +1493,15 @@ def repair_registry_schema(
     """
     target = _registry_path(path)
     with _hold_registry_lock(target, timeout=lock_timeout):
+        from fno.registry_door import (
+            RegistryDoorError,
+            commit_registry_document,
+            read_registry_document,
+        )
+
         try:
-            raw = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raw, revision = read_registry_document(target)
+        except RegistryDoorError as exc:
             raise RegistryRepairRefused(
                 f"refusing to repair {target}: could not read it ({exc})."
             ) from exc
@@ -1518,21 +1511,16 @@ def repair_registry_schema(
         _refuse_probe_or_row_loss_write(target, raw, raw["agents"])
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup = target.with_name(f"{target.name}.bak.schema-repair-{stamp}")
-        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        backup.write_text(_json_dumps(raw, indent=2, sort_keys=False), encoding="utf-8")
         raw["schema_version"] = to_version
         raw["agents"] = [
             {k: v for k, v in row.items() if k in _INIT_FIELD_NAMES}
             for row in raw["agents"]
         ]
-        tmp = target.with_suffix(target.suffix + ".tmp")
         try:
-            tmp.write_text(
-                _json_dumps(raw, indent=2, sort_keys=False), encoding="utf-8"
-            )
-            os.replace(tmp, target)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+            commit_registry_document(target, {**raw, "replace": True}, revision)
+        except RegistryDoorError as exc:
+            raise RegistryRepairRefused(f"refusing to repair {target}: {exc}") from exc
         return replace(plan, backup=backup)
 
 
@@ -1712,16 +1700,13 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     alien harness never bricks the shared read, and dispatch capability is
     gated at the spawn/ask seam.
     """
-    target = _registry_path(path)
-    if not target.exists():
-        return []
+    from fno.registry_door import RegistryDoorError, read_registry_document
 
+    target = _registry_path(path)
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RegistryVersionError(
-            f"registry at {target} is malformed JSON: {exc}"
-        ) from exc
+        raw = read_registry_document(target)[0]
+    except RegistryDoorError as exc:
+        raise RegistryVersionError(f"registry at {target} is unreadable: {exc}") from exc
 
     if not isinstance(raw, dict):
         raise RegistryVersionError(
@@ -2615,18 +2600,17 @@ def registry_rows_by_cwd(
     legitimate empty fleet (ok); one that exists and fails to parse reads
     every candidate unmeasurable.
     """
-    import json
     import os
 
     from fno.paths import agents_registry_path
 
     override = os.environ.get("WORKTREE_STATUS_REGISTRY")
     target = Path(override) if override else (path or agents_registry_path())
-    if not target.exists():
-        return {}, True
+    from fno.registry_door import RegistryDoorError, read_registry_document
+
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        data = read_registry_document(target)[0]
+    except RegistryDoorError:
         return {}, False
     if not isinstance(data, dict):
         return {}, False

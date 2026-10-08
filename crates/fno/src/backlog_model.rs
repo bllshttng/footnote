@@ -2029,7 +2029,7 @@ fn any_session_live(inp: &Inputs, ids: &[String]) -> bool {
 /// leaves the slot empty and names itself on `errors`, never an empty board.
 pub fn read_search_sources(inp: &mut Inputs, want_questions: bool) {
     if inp.sessions.is_empty() {
-        let read = std::fs::read_to_string(crate::agents_view::registry_path())
+        let read = crate::registry_read::registry_text(&crate::agents_view::registry_path())
             .map_err(|e| e.to_string())
             .and_then(|raw| {
                 crate::agents_view::derive_rows(&raw, inp.read_at.max(0) as u64)

@@ -882,5 +882,5 @@ def test_agents_registry_path_follows_declared_agents_home(
     )
     write_registry([entry])
 
-    assert (declared / "registry.json").is_file()
+    assert (declared / "registry.json").exists()
     assert not (tmp_path / ".fno" / "agents" / "registry.json").exists()

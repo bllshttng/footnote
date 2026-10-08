@@ -163,6 +163,18 @@ pub fn classify_with_basis_and_exclusivity(
     {
         return (ClaimState::Stale, basis::TTL_EXPIRED);
     }
+    if !is_expired(rec, now)
+        && !pid_dies_with_session(rec.harness.as_deref())
+        && rec.session_id.as_deref().is_some_and(|s| !s.is_empty())
+        && (rec.key.starts_with("node:") || rec.key.starts_with("task:"))
+        && is_same_machine(&rec.host, rec.machine_id.as_deref())
+    {
+        return match session_witness.map(|witness| witness(rec)) {
+            Some(SessionLiveness::Live(cause)) => (ClaimState::Live, cause),
+            Some(SessionLiveness::Absent) => (ClaimState::Stale, basis::SESSION_ABSENT),
+            Some(SessionLiveness::Unresolved) | None => (ClaimState::Suspect, basis::PID_SHARED),
+        };
+    }
     if is_expired(rec, now) {
         // A review hold is a lease on the review; the holder's session answers another question.
         if rec.key.starts_with("review:branch:") {

@@ -140,6 +140,9 @@ LAYERS = (
             "fno.harness_identity",
             "fno.harness_names",
             "fno.rust_binary",
+            # The registry table door: claims, identity and agents all read
+            # the registry through it.
+            "fno.registry_door",
             # Where a session's transcript is and what it says about itself.
             # Asked by the agents runtime (`fno agents truth`) and by the graph
             # writer that stamps a node's session rows - opposite sides of the

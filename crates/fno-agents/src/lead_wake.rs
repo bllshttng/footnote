@@ -341,11 +341,10 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
         });
     }
     let beat_secs = crate::lead_verdict_inputs::checkin_interval_secs(config_cwd);
-    let journals = crate::tick_ledger::journals(home);
     let mut beats: BTreeMap<String, Option<i64>> = BTreeMap::new();
     for team in &teams {
         let row = crate::lead_history::previous_beat(
-            &journals,
+            &team_beat_journals(home, &registry, team),
             &team.scope,
             team.holder_session.as_deref(),
             false,
@@ -358,7 +357,7 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
             .and_then(parse_ts);
         beats.insert(team.scope.clone(), ts);
     }
-    let wakes = wake_receipts(&journals, &teams);
+    let wakes = wake_receipts(&crate::tick_ledger::journals(home), &teams);
     let projects = junior_projects(config_cwd, &registry);
     let plans = plan_wakes(&teams, &projects, &beats, &wakes, beat_secs, now);
     if plans.is_empty() {
@@ -409,6 +408,40 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
 
 fn short(text: &str) -> String {
     text.chars().take(160).collect()
+}
+
+/// The journals for one team's beat lookup: the shared pair plus the team's
+/// own project journal. The check-in emitter journals where its caller
+/// points it - the Python lead CLI passes `--emit-path <space>/events.jsonl`
+/// - so the shared pair stopped seeing the rows (2026-09-17). The registry
+/// row is keyed on the holder session id, never the mutable row name (law
+/// d-e952ed19). Isolated per team on purpose: `scan_scopes` errors the WHOLE
+/// list when one store cannot be opened, so a shared list would turn one
+/// corrupt project journal into a blind pass for every team; here only that
+/// team's read degrades. An unreadable registry degrades to the shared pair.
+fn team_beat_journals(home: &AgentsHome, registry_path: &Path, team: &Team) -> Vec<PathBuf> {
+    let mut journals = crate::tick_ledger::journals(home);
+    if let Ok(loaded) = crate::state::load_registry(registry_path) {
+        for entry in &loaded.entries {
+            if entry.harness_session_id.as_deref() != team.holder_session.as_deref() {
+                continue;
+            }
+            let root = if entry.project_root.is_empty() {
+                &entry.cwd
+            } else {
+                &entry.project_root
+            };
+            if root.is_empty() {
+                continue;
+            }
+            let journal = crate::paths::space_dir(Path::new(root)).join("events.jsonl");
+            if !journals.contains(&journal) {
+                journals.push(journal);
+            }
+            break;
+        }
+    }
+    journals
 }
 
 /// The arm as the daemon holds it: cadence stamp plus one-in-flight gate.
@@ -473,6 +506,91 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Restores the pins `wake_journals` resolves through, holding the shared
+    /// env lock so a parallel test's pin swap cannot flip the resolution
+    /// mid-read (the territory tests' guard shape).
+    struct PinGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl PinGuard {
+        fn take(base: &Path) -> Self {
+            let lock = crate::claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let saved = ["FNO_SPACES_DIR", crate::paths::HOME_ENV]
+                .iter()
+                .map(|var| (*var, std::env::var_os(var)))
+                .collect();
+            std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
+            std::env::set_var(crate::paths::HOME_ENV, base.join("agents"));
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for PinGuard {
+        fn drop(&mut self) {
+            for (var, saved) in &self.saved {
+                match saved {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn team_beat_journals_reads_the_teams_project_journal() {
+        let base = std::env::temp_dir().join(format!("lead-wake-journals-{}", std::process::id()));
+        let _pins = PinGuard::take(&base);
+        std::fs::create_dir_all(base.join("agents")).unwrap();
+        let cwd = base.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry_path = base.join("registry.json");
+        std::fs::write(
+            &registry_path,
+            json!({
+                "schema_version": 15,
+                "agents": [
+                    {"name": "vellum", "status": "live", "cwd": cwd.to_string_lossy(),
+                     "created_at": "2026-10-08T00:00:00Z",
+                     "harness_session_id": "sess-head"},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let home = AgentsHome::at(base.join("agents"));
+        let head = team("fno", 1, "vellum", "sess-head");
+        let journals = team_beat_journals(&home, &registry_path, &head);
+        let want = crate::paths::space_dir(&cwd).join("events.jsonl");
+        assert!(
+            journals.contains(&want),
+            "the team's project journal rides the beat lookup: {journals:?}"
+        );
+        assert!(journals.contains(&home.events_jsonl()));
+        // A session with no registry row reads the shared pair only.
+        let stranger = team("x-zzz", 2, "stranger", "sess-none");
+        assert_eq!(
+            team_beat_journals(&home, &registry_path, &stranger),
+            vec![home.events_jsonl(), base.join("events.jsonl")]
+        );
+        // A registry that cannot be read degrades to the shared pair. It gets
+        // its own folder: the store keys a registry by its folder, so a
+        // sibling of registry.json would read the table imported from it.
+        let broken_home = base.join("broken");
+        std::fs::create_dir_all(&broken_home).unwrap();
+        let broken = broken_home.join("registry.json");
+        std::fs::write(&broken, "not json").unwrap();
+        assert_eq!(
+            team_beat_journals(&home, &broken, &head),
+            vec![home.events_jsonl(), base.join("events.jsonl")]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn team(scope: &str, level: u8, holder: &str, sid: &str) -> Team {
         Team {

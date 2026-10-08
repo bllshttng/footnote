@@ -35,7 +35,6 @@ import pytest
 
 import json as _json
 
-import pytest
 
 from tests.fixtures.graph_seed import seed_graph
 
@@ -2732,7 +2731,6 @@ def test_dependents_dispatch_independent_of_next_selection(iso, monkeypatch):
 def test_direct_dependents_tags_same_and_cross_project(monkeypatch):
     """RC1 unit: _direct_dependents returns BOTH same- and cross-project ready
     dependents, each tagged with cross_project (no longer excludes same-project)."""
-    import fno.graph.store as store
     import fno.paths as paths
 
     entries = [
@@ -2760,7 +2758,6 @@ def test_cmd_advance_resolves_closed_project_from_graph(monkeypatch):
     import fno.backlog.advance as advmod
     import fno.backlog.reconcile_dispatch as recmod
     import fno.graph.cli as gcli
-    import fno.graph.store as store
 
     monkeypatch.setattr(
         advmod, "advance",
@@ -3742,7 +3739,6 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
         "model": "glm-5.3-flash[1m]",
     }
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
-    monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
     # The grid consult (fno-agents route-slot) precedes the mint (x-57fe moved
     # the mint after it); the refusal-under-test is naming, so the consult is
     # stubbed out and the fail-closed lambda below keeps naming verbs only.

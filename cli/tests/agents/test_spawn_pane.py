@@ -1474,7 +1474,6 @@ def test_node_spawn_persists_projects_and_supplies_watchdog_identity(
     tmp_path: Path, monkeypatch
 ) -> None:
     """The production pane mint proves the node beyond constructed rows."""
-    from fno import paths
     from fno.agents import watchdog
     from fno.agents.format import serialize_entry
     from fno.agents.harnesses import claude as claude_mod
@@ -1487,7 +1486,9 @@ def test_node_spawn_persists_projects_and_supplies_watchdog_identity(
         provenance={"FNO_NODE": "x-cafe", "FNO_SLUG": "node-projection"},
     )
 
-    persisted = json.loads(paths.agents_registry_path().read_text(encoding="utf-8"))
+    from fno.registry_door import read_registry_document
+
+    persisted = read_registry_document()[0]
     persisted_row = persisted["agents"][0]
     assert persisted_row["node"] == "x-cafe"
 

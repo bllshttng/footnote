@@ -25,16 +25,26 @@ import pytest
 from fno.agents import registry as reg
 
 
+_SESSIONS = iter(range(1, 10_000))
+
+
 def _row(name: str, **extra) -> dict:
+    # Each row its own session: the registry table keys rows on it.
     row = {
         "name": name,
         "cwd": "/Users/x/proj",
         "log_path": "/Users/x/proj/.fno/log",
         "harness": "claude",
-        "harness_session_id": "9a063cd3-69d4-415a-ada5-649b0164189c",
+        "harness_session_id": f"9a063cd3-69d4-415a-ada5-{next(_SESSIONS):012d}",
     }
     row.update(extra)
     return row
+
+
+def _document(path: Path) -> dict:
+    from fno.registry_door import read_registry_document
+
+    return read_registry_document(path)[0]
 
 
 def _poisoned(path: Path, version: int, rows: list[dict]) -> None:
@@ -67,7 +77,7 @@ def test_apply_backs_up_restores_the_version_and_keeps_every_row(
 
     plan = reg.repair_registry_schema(reg.SCHEMA_VERSION, path=path, apply=True)
 
-    data = json.loads(path.read_text())
+    data = _document(path)
     assert data["schema_version"] == reg.SCHEMA_VERSION
     assert [a["name"] for a in data["agents"]] == ["worker-1", "worker-2", "worker-3"]
     assert all("a_field_from_the_future" not in a for a in data["agents"])
@@ -88,12 +98,12 @@ def test_a_dry_run_reports_the_drop_and_writes_nothing(tmp_path: Path) -> None:
         reg.SCHEMA_VERSION + 1,
         [_row("worker-1", a_field_from_the_future=None)],
     )
-    before = path.read_bytes()
+    before = _document(path)
 
     plan = reg.repair_registry_schema(reg.SCHEMA_VERSION, path=path)
 
     assert plan.dropped == {"worker-1": ["a_field_from_the_future"]}
-    assert path.read_bytes() == before
+    assert _document(path) == before
     assert list(tmp_path.glob("*.bak.*")) == []
 
 
@@ -112,7 +122,7 @@ def test_a_row_carrying_real_newer_schema_data_refuses(tmp_path: Path) -> None:
             _row("worker-2", a_field_from_the_future="a real value"),
         ],
     )
-    before = path.read_bytes()
+    before = _document(path)
 
     with pytest.raises(reg.RegistryRepairRefused) as excinfo:
         reg.repair_registry_schema(reg.SCHEMA_VERSION, path=path, apply=True)
@@ -120,7 +130,7 @@ def test_a_row_carrying_real_newer_schema_data_refuses(tmp_path: Path) -> None:
     message = str(excinfo.value)
     assert "worker-2" in message
     assert "a_field_from_the_future" in message
-    assert path.read_bytes() == before
+    assert _document(path) == before
     assert list(tmp_path.glob("*.bak.*")) == []
 
 
@@ -144,7 +154,7 @@ def test_duplicate_row_names_each_get_their_own_report_line(tmp_path: Path) -> N
         "twin": ["a_field_from_the_future"],
         "twin (row 1)": ["another_future_field"],
     }
-    data = json.loads(path.read_text())
+    data = _document(path)
     assert len(data["agents"]) == 2
     assert all(len(a) == len(_row("twin")) for a in data["agents"])
 
@@ -216,7 +226,7 @@ def test_the_cli_verb_is_registered_hidden_and_dry_runs_by_default(
         reg.SCHEMA_VERSION + 1,
         [_row("worker-1", a_field_from_the_future=None)],
     )
-    before = path.read_bytes()
+    before = _document(path)
 
     result = CliRunner().invoke(
         agents_app,
@@ -226,7 +236,7 @@ def test_the_cli_verb_is_registered_hidden_and_dry_runs_by_default(
     assert result.exit_code == 0, result.output
     assert "worker-1" in result.output
     assert "a_field_from_the_future" in result.output
-    assert path.read_bytes() == before
+    assert _document(path) == before
 
     applied = CliRunner().invoke(
         agents_app,
@@ -240,7 +250,7 @@ def test_the_cli_verb_is_registered_hidden_and_dry_runs_by_default(
         ],
     )
     assert applied.exit_code == 0, applied.output
-    assert json.loads(path.read_text())["schema_version"] == reg.SCHEMA_VERSION
+    assert _document(path)["schema_version"] == reg.SCHEMA_VERSION
 
 
 def test_the_cli_verb_exits_non_zero_when_it_refuses(tmp_path: Path) -> None:
@@ -268,4 +278,4 @@ def test_the_cli_verb_exits_non_zero_when_it_refuses(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
-    assert json.loads(path.read_text())["schema_version"] == reg.SCHEMA_VERSION + 1
+    assert _document(path)["schema_version"] == reg.SCHEMA_VERSION + 1

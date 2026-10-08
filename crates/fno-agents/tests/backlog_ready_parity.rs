@@ -680,22 +680,21 @@ fn materialize(case: &Case) -> (Materialized, Ctx) {
         }
     }
     for node_id in case.claims {
-        let lock = serde_json::json!({
-            "schema_version": 1,
-            "key": format!("node:{node_id}"),
-            "holder": format!("parity-{node_id}"),
-            "acquired_at": now_ms,
-            "pid": std::process::id(),
-            "host": "parity-host",
-            "expires_at": now_ms + 3_600_000,
-        });
-        std::fs::write(
-            dir.path()
-                .join("claims-root/.fno/claims")
-                .join(format!("node:{node_id}.lock")),
-            serde_yaml_ng::to_string(&lock).unwrap(),
-        )
-        .unwrap();
+        let held = fno_agents::claims::acquire(
+            &format!("node:{node_id}"),
+            &format!("parity-{node_id}"),
+            fno_agents::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                ttl_ms: Some(3_600_000),
+                root: Some(dir.path().join("claims-root")),
+                events_dir: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(held, fno_agents::claims::AcquireOutcome::Acquired(_)),
+            "{held:?}"
+        );
     }
     std::fs::write(
         dir.path().join("config.toml"),

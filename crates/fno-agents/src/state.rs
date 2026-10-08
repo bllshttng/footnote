@@ -20,7 +20,7 @@
 use crate::identity::session_handle_tier;
 use crate::AgentStatus;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -755,8 +755,16 @@ pub fn rfc3339_like_to_secs(s: &str) -> Option<u64> {
 /// Python's `AgentEntry` as `mux: Optional[dict]` (X3 rule).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MuxRef {
+    /// Defaulted so a structurally impossible `{}` ref still decodes; the
+    /// reconcile pass is what clears it.
+    #[serde(default)]
     pub session: String,
+    #[serde(default)]
     pub pane_id: u64,
+}
+
+fn legacy_row_status() -> AgentStatus {
+    AgentStatus::Live
 }
 
 /// One registry row. Optional fields default to `None`; fields not modeled
@@ -1023,9 +1031,13 @@ pub struct RegistryEntry {
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc_session_id: Option<String>,
+    /// Pre-v2 rows carry no status; Python reads them as `live`.
+    #[serde(default = "legacy_row_status")]
     pub status: AgentStatus,
     #[serde(default)]
     pub last_message_at: Option<String>,
+    /// Python's `AgentEntry` defaults it, so a hand-seeded row may omit it.
+    #[serde(default)]
     pub created_at: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `pid: Optional[int]`: skip when absent so a round-tripped
@@ -1970,46 +1982,14 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
 /// partial read) must refuse to serve, never publish the dropped subset as the
 /// complete roster.
 pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), StateError> {
-    // Lock the SAME sidecar `update_registry` locks (shared mode here), not the
-    // data file. Python `fno` writers use `<agents>/locks/_registry.lock`; Rust
-    // must use that exact path or the two implementations can read and replace
-    // snapshots concurrently. Locking the data file directly would not exclude
-    // either sidecar-based writer and would reintroduce the rename-invalidates-
-    // fd footgun.
-    // Acquire the lock FIRST, then decide existence: a `!path.exists()` check
-    // before the lock could race a concurrent writer creating registry.json and
-    // return a stale empty registry (Codex P2). The open-after-lock below is the
-    // authoritative existence check.
-    let lock = acquire_shared(&registry_lock_path(path))?;
-    let result = match OpenOptions::new().read(true).open(path) {
-        Ok(file) => read_registry_tolerant(path, &file),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let _ = lock.unlock();
-            return Ok((Registry::default(), 0));
-        }
-        Err(e) => {
-            let _ = lock.unlock();
-            return Err(e.into());
-        }
-    };
-    let _ = lock.unlock();
-    result
+    decode_registry_value(path, crate::registry_store::read(path)?)
 }
 
 /// Best-effort registry read for metadata that must not hold up delivery.
 /// A writer owning the lock never blocks the read: publishes are atomic
 /// (tempfile + rename), so the unlocked read still sees one whole registry.
 pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
-    let lock = try_acquire_shared(&registry_lock_path(path))?;
-    let result = match OpenOptions::new().read(true).open(path) {
-        Ok(file) => read_registry_tolerant(path, &file),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
-        Err(error) => Err(error.into()),
-    };
-    if let Some(lock) = lock {
-        let _ = lock.unlock();
-    }
-    result.map(|(registry, _)| Some(registry))
+    load_registry(path).map(Some)
 }
 
 /// The raw on-disk row count the typed decode is reconciled against:
@@ -2056,13 +2036,11 @@ pub fn registry_row_divergence_msg(path: &Path, raw_rows: usize, decoded_rows: u
 /// successful empty roster. The one exception stays the forward-schema retry
 /// below, where every dropped row is announced; the daemon's startup assertion
 /// still refuses that partial read before serving.
-fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usize), StateError> {
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-    if buf.trim().is_empty() {
-        return Ok((Registry::default(), 0));
-    }
-    let probe: serde_json::Value = serde_json::from_str(&buf)?;
+pub(crate) fn decode_registry_value(
+    path: &Path,
+    probe: serde_json::Value,
+) -> Result<(Registry, usize), StateError> {
+    let buf = serde_json::to_string(&probe)?;
     let raw_rows = registry_raw_row_count(&probe);
     let mut reg: Registry = match serde_json::from_str::<Registry>(&buf) {
         Ok(reg) => {
@@ -2569,8 +2547,17 @@ fn newest_snapshot(snapshots: &Path) -> Option<(std::time::Duration, u64)> {
 /// `<dir>/registry-snapshots/` and rotate. A failure anywhere never fails the
 /// write: a missing snapshot is the status quo, and the 2026-09-27 overwrite
 /// showed what recovering from a month-old backup costs instead.
-fn snapshot_registry(path: &Path) {
-    let Ok(bytes) = std::fs::read(path) else {
+pub(crate) fn snapshot_registry(path: &Path, document: &serde_json::Value) {
+    // A registry with no rows has nothing to recover. Snapshotting it would
+    // also set the size baseline the collapse check divides by.
+    let rows = document.get("agents").or_else(|| document.get("entries"));
+    if !rows
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|r| !r.is_empty())
+    {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec(document) else {
         return;
     };
     let Some(dir) = path.parent() else {
@@ -2626,18 +2613,8 @@ pub fn update_registry<F, T>(path: &Path, f: F) -> Result<T, StateError>
 where
     F: FnOnce(&mut Registry) -> T,
 {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Lock on a stable sidecar so the rename of the data file never invalidates
-    // the lock fd (renaming the locked file out from under a held flock is the
-    // classic footgun; locking the sidecar sidesteps it entirely).
-    let lock_path = registry_lock_path(path);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let lock = acquire_exclusive(&lock_path)?;
-    let (mut registry, raw_rows) = read_existing_registry(path)?;
+    let transaction = crate::registry_store::begin(path)?;
+    let (mut registry, raw_rows) = decode_registry_value(path, transaction.document.clone())?;
     let min_writer = effective_min_writer(&registry);
     // A read-forward writer may update additive schemas when it can preserve
     // unknown keys. Refuse when the declared floor is newer or row decoding
@@ -2663,8 +2640,8 @@ where
     let before_entries = registry.entries.clone();
     let before = before_entries
         .iter()
-        .map(|entry| (entry.name.clone(), identity_signature(entry)))
-        .collect::<BTreeMap<_, _>>();
+        .map(identity_signature)
+        .collect::<BTreeSet<_>>();
     let out = f(&mut registry);
     // Every transition into Exited carries its date, whichever closure wrote
     // it. A row already Exited with no stamp stays unstamped: a stamp written
@@ -2757,7 +2734,7 @@ where
     // pre-write `before` snapshot already built above for identity checks --
     // a pre-existing violating row is never re-validated (AC3-FR).
     for entry in &registry.entries {
-        if !before.contains_key(&entry.name) {
+        if !before_entries.iter().any(|b| b.name == entry.name) {
             if let Err(msg) = validate_resolvable_handle(entry) {
                 return Err(StateError::InvariantViolation(msg));
             }
@@ -2776,14 +2753,12 @@ where
     // Rolling snapshot of the bytes this write replaces, under the lock so a
     // racing writer cannot snapshot a half-read state. Best effort: never
     // fails the write.
-    snapshot_registry(path);
-    write_json_atomic(path, &registry)?;
+    transaction.commit(serde_json::to_value(&registry)?)?;
     // Removal accounting runs AFTER the write persisted: a removal
     // that failed to persist never happened, and announcing it would be a
     // false alarm. Within the accounting the receipt still precedes its own
     // event.
     account_for_removed_rows(path, &before_entries, &registry.entries);
-    let _ = lock.unlock();
     // The store projection runs WITHOUT the registry flock: a slow or
     // fenced graph.db must never stall the fleet's registry writes behind
     // it, and rows whose identity did not change project nothing.
@@ -3225,7 +3200,7 @@ fn identity_signature(entry: &RegistryEntry) -> IdentitySignature {
 }
 
 fn validate_changed_identities(
-    before: &BTreeMap<String, IdentitySignature>,
+    before: &BTreeSet<IdentitySignature>,
     entries: &[RegistryEntry],
 ) -> Result<(), String> {
     use crate::identity::{canonical_handle, legacy_suffix_handle, session_handle_tier};
@@ -3254,7 +3229,9 @@ fn validate_changed_identities(
     };
 
     for (index, candidate) in entries.iter().enumerate() {
-        if before.get(&candidate.name) == Some(&identity_signature(candidate)) {
+        // Keyed by the whole signature, not the name: duplicate names in a
+        // legacy document must each stay exempt while unchanged.
+        if before.contains(&identity_signature(candidate)) {
             continue;
         }
         let mut chosen = BTreeSet::from([candidate.name.clone()]);
@@ -3303,14 +3280,6 @@ pub fn effective_min_writer(registry: &Registry) -> u32 {
     registry
         .min_writer_version
         .unwrap_or(registry.schema_version)
-}
-
-fn read_existing_registry(path: &Path) -> Result<(Registry, usize), StateError> {
-    match OpenOptions::new().read(true).open(path) {
-        Ok(file) => read_registry_tolerant(path, &file),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// Load a per-agent `state.json`. `Ok(None)` when the file is absent (recovery
@@ -3400,13 +3369,6 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
 /// Lock shared with Python's `fno.agents.registry._registry_lock_path`.
 /// Registry readers and writers use this one path across languages; per-file
 /// state records continue to use [`lock_path`].
-fn registry_lock_path(path: &Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("locks")
-        .join("_registry.lock")
-}
-
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory
 /// lock, blocking until acquired. The returned `File` holds the lock until it
 /// is unlocked or dropped.
@@ -3456,23 +3418,6 @@ fn acquire_shared(lock_file: &Path) -> Result<File, StateError> {
         .open(lock_file)?;
     file.lock_shared()?;
     Ok(file)
-}
-
-fn try_acquire_shared(lock_file: &Path) -> Result<Option<File>, StateError> {
-    if let Some(parent) = lock_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_file)?;
-    match file.try_lock_shared() {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateError> {
@@ -3618,3 +3563,37 @@ mod substitution_tests {
 #[cfg(test)]
 #[path = "state_lookup_tests.rs"]
 mod lookup_tests;
+
+pub(crate) fn validate_registry_document_change(
+    path: &Path,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> Result<(), StateError> {
+    let (before, before_count) = decode_registry_value(path, before.clone())?;
+    let (after, after_count) = decode_registry_value(path, after.clone())?;
+    if before_count != before.entries.len()
+        || after_count != after.entries.len()
+        || effective_min_writer(&before) > REGISTRY_SCHEMA_VERSION
+    {
+        return Err(StateError::InvariantViolation(
+            "registry write cannot preserve every row at this writer version".into(),
+        ));
+    }
+    refuse_source_ahead_schema_bump(path, before.schema_version)?;
+    crate::registry_guard::check_env(
+        path,
+        crate::registry_guard::count_live(&before.entries),
+        crate::registry_guard::count_live(&after.entries),
+    )
+    .map_err(StateError::WriteGuard)?;
+    let identities = before.entries.iter().map(identity_signature).collect();
+    validate_changed_identities(&identities, &after.entries)
+        .map_err(StateError::InvariantViolation)?;
+    for entry in &after.entries {
+        validate_single_live_ref(entry).map_err(StateError::InvariantViolation)?;
+        if !before.entries.iter().any(|old| old.name == entry.name) {
+            validate_resolvable_handle(entry).map_err(StateError::InvariantViolation)?;
+        }
+    }
+    Ok(())
+}

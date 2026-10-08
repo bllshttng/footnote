@@ -12,6 +12,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CARGO` | rs | Names the cargo binary the `cargo_build_dirs` lane runs `cargo metadata` through; the PATH scan and `$CARGO_HOME/bin/cargo` are the fallbacks. |
 | `CARGO_BUILD_BUILD_DIR` | rs | unclear: crates/fno-agents/src/hook/stop.rs:519 |
 | `CARGO_HOME` | py+rs | Cargo install root; the default is ~/.cargo. |
+| `CARGO_MANIFEST_DIR` | rs | Set by cargo on processes it launches; the live-store fence then refuses to open a store under the operator home `.fno`. |
 | `CENSUS_DEFERRED_FILE` | py | unclear: cli/src/fno/test_cmd.py:2250 |
 | `CENSUS_KILL_BOUND_S` | py | unclear: cli/src/fno/test_cmd.py:2297 |
 | `CI` | py+rs | unclear: cli/src/fno/llm.py:40 |

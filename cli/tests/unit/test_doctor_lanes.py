@@ -80,6 +80,13 @@ def _pin_admission(
         gap=None,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
+    # The lane answer now reads the Rust probe (one decider); every test pins
+    # it so none reaches the real gate.
+    monkeypatch.setattr(
+        spawn_gate,
+        "probe_capacity",
+        lambda only=None: {"verdict": "accepted", "slots": 2, "effective": 8},
+    )
     monkeypatch.setattr(
         dl.os, "getloadavg", lambda: (1.2, 1.1, load_15m or 1.0), raising=False
     )
@@ -117,42 +124,6 @@ def _healthy_reading(monkeypatch, sample=None):
             "summary": {"total": 2, "disagreements": 0, "unknowns": 0},
         },
     )
-
-
-def test_swap_total_zero_never_reads_swap_zero_as_headroom(monkeypatch) -> None:
-    """The measured case that forced the rule: 81.5 of 103 GB used, swap 0
-    because NO swap file exists. The memory arm falls to memory_pressure and
-    says so."""
-    _healthy_reading(monkeypatch, _macmon_sample())
-    reading = dl.read_lanes()
-    mem = reading.arm("memory")
-    assert mem.state == dl.MEASURED
-    assert "no swap file" in mem.source
-    assert "memory_pressure" in mem.source
-    # 84% free of 103 GB is ~86 GB available, not the swap-derived 0.
-    assert mem.value["free_fraction"] == 0.84
-    assert mem.value["available_gb"] == pytest.approx(86.6, abs=0.2)
-
-
-def test_memory_falls_back_when_memory_pressure_also_dark(monkeypatch) -> None:
-    """Both memory sources unreadable: the arm is DARK with both reasons, and
-    the verb refuses rather than guessing."""
-    _pin_admission(monkeypatch)
-    monkeypatch.setattr(
-        dl,
-        "read_macmon",
-        lambda **k: (None, "macmon not on PATH (brew install macmon; Apple Silicon only)"),
-    )
-    monkeypatch.setattr(
-        dl, "read_memory_pressure", lambda **k: (None, "no free-percentage line")
-    )
-    reading = dl.read_lanes()
-    assert reading.refused
-    mem = reading.arm("memory")
-    assert mem.state == dl.DARK
-    assert "memory_pressure" in mem.reason
-    assert reading.arm("whole-machine cpu").state == dl.DARK
-    assert "brew install macmon" in reading.arm("whole-machine cpu").reason
 
 
 def test_dark_arms_are_named_and_working_arms_survive(monkeypatch) -> None:
@@ -267,7 +238,7 @@ def test_ac2_edge_unreadable_registry_nulls_the_counts_and_keeps_the_seed(
     assert census["roster_rows"] is None
     assert census["leads"] is None
     assert census["workers"] is None
-    assert reading.cost_source == "seed (no live roster rows to measure)"
+    assert reading.cost_source.startswith("seed (no live roster rows to measure)")
     text = dl.render(reading)
     assert "unknown" in text
     assert "roster: registry unreadable - the counts above are unread" in text

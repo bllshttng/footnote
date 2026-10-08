@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.registry_door import read_registry_document
 
 
 def _events(tmp_path: Path) -> list[dict]:
@@ -1006,14 +1007,13 @@ def test_observation_of_a_recorded_id_is_a_no_op(tmp_path: Path, monkeypatch) ->
     """Case 2: the same id again writes nothing - every later SessionStart of
     a healthy worker lands here, so it stays silent."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import load_registry
 
     _spawned_row()
-    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    before = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     entry, outcome = _observe("target-x-f0c2", BIRTH)
     assert outcome == "no-op"
     assert entry.harness_session_id == BIRTH
-    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    after = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     assert after == before, "a no-op observation must not rewrite the file"
 
 
@@ -1066,16 +1066,15 @@ def test_observation_refuses_a_third_distinct_id_and_names_both(
     """The cap: primary and related already hold two different ids, so a
     third writes NOTHING and the refusal names both recorded ids."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import load_registry
 
     _spawned_row()
     _observe("target-x-f0c2", FORK)
-    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    before = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     entry, outcome = _observe("target-x-f0c2", THIRD)
     assert outcome == "refused-cap"
     assert entry.harness_session_id == BIRTH
     assert entry.related_session_id == FORK, "the refusal carries both ids"
-    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    after = read_registry_document(tmp_path / ".fno" / "agents" / "registry.json")[0]
     assert after == before, "a refused observation changes nothing on disk"
 
 
@@ -1172,7 +1171,7 @@ def test_both_ids_resolve_to_the_one_row(tmp_path: Path, monkeypatch) -> None:
     """Both ids address the row: the full uuids AND their canonical handles,
     primary and related alike - 'valid forever' means addressable."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import load_registry, resolve_agent
+    from fno.agents.registry import resolve_agent
 
     _spawned_row()
     _observe("target-x-f0c2", FORK)
@@ -1285,14 +1284,16 @@ def test_heal_mux_ref_idempotent_noop_writes_nothing(tmp_path, monkeypatch):
     from fno.agents.registry import _registry_path
 
     registry_path = _registry_path(None)
-    before = registry_path.read_bytes()
+    from fno.registry_door import read_registry_document
+
+    before = read_registry_document(registry_path)
     emitted: list = []
     monkeypatch.setattr(events, "emit", lambda *a, **k: emitted.append((a, k)))
 
     moved = heal_mux_ref(name="t-worker", harness="claude", mux_session="main", pane_id=31)
 
     assert moved is None
-    assert registry_path.read_bytes() == before, "an idempotent heal rewrote the file"
+    assert read_registry_document(registry_path) == before, "an idempotent heal rewrote the table"
     assert emitted == []
 
 

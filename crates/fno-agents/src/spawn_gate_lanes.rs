@@ -695,23 +695,14 @@ pub(crate) fn provider_live_slot_claims(
         Some(dir) => dir,
         None => return Ok((0, Vec::new())),
     };
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
+    let keys = match crate::claim_store::records_in(&dir, Some("worker:"), true) {
+        Ok(records) => records.into_iter().map(|r| r.key),
         Err(_) => return Ok((0, Vec::new())),
     };
     let counted: HashSet<&str> = counted_names.iter().map(String::as_str).collect();
     let mut count = 0usize;
     let mut reserved: Vec<(String, i64)> = Vec::new();
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let fname = fname.to_string_lossy().into_owned();
-        if !fname.starts_with("worker%3A") || !fname.ends_with(".lock") {
-            continue;
-        }
-        let key = match urldecode(&fname[..fname.len() - ".lock".len()]) {
-            Some(key) => key,
-            None => continue,
-        };
+    for key in keys {
         let name = key.strip_prefix("worker:").unwrap_or(&key);
         if counted.contains(name) {
             continue;
@@ -758,25 +749,6 @@ pub(crate) fn provider_live_slot_claims(
         }
     }
     Ok((count, reserved))
-}
-
-/// Minimal percent-decoder for claim filenames (inverse of
-/// `claims::encode_key`); `None` on malformed escapes.
-fn urldecode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -907,13 +879,8 @@ pub(crate) fn check_registry_schema(
     warnings: &mut Vec<String>,
 ) -> Result<(), crate::spawn_gate::Refusal> {
     use crate::spawn_gate::{Refusal, EXIT_REGISTRY_SCHEMA};
-    let raw = match std::fs::read_to_string(registry_path) {
-        Ok(raw) => raw,
-        Err(_) => return Ok(()), // fresh machine / unreadable: skip
-    };
-    let doc: Value = match serde_json::from_str(&raw) {
-        Ok(doc) => doc,
-        Err(_) => return Ok(()), // a torn registry is not a spawn-time verdict
+    let Ok(doc) = crate::registry_store::read(registry_path) else {
+        return Ok(()); // fresh machine / unreadable: skip
     };
     let Some(on_disk) = doc.get("schema_version").and_then(Value::as_u64) else {
         return Ok(());
@@ -1212,6 +1179,68 @@ fn chrono_like_iso(epoch_s: f64) -> String {
         .unwrap_or_else(|| "unknown (no reset was readable)".to_string())
 }
 
+/// The lead-share axis: one lead holding more than its share of the
+/// effective cap refuses its own spawn, naming the rows it can stop. Lives
+/// beside `share_reading`, the count it refuses on.
+pub(crate) fn check_lead_share(
+    registry_path: &Path,
+    learned: &crate::capacity::Effective,
+    caller_session: Option<&str>,
+    _axes_read: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), crate::spawn_gate::Refusal> {
+    let cap = learned.cap;
+    let Some(caller) = caller_session.filter(|c| !c.is_empty()) else {
+        return Ok(());
+    };
+    let reading = share_reading(registry_path, cap, Some(caller));
+    let (Some(leads), Some(share), Some(held)) = (reading.leads, reading.share, reading.held)
+    else {
+        // An unreadable registry leaves every count unknown; nothing to
+        // enforce and no zero to fail open on.
+        return Ok(());
+    };
+    if held < share {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "spawn-gate: lead {} holds {held} of {} across {leads} leads (share {share}); \
+         refusing to spawn -- waiting cannot help while your own workers hold the share \
+         (--force to bypass)",
+        &caller[..caller.len().min(8)],
+        learned.clause()
+    );
+    // The held names read before the unattributed bucket: they are the rows
+    // the caller can stop, where the bucket names nobody.
+    msg.push_str(&crate::spawn_gate::held_rows_suffix(
+        reading.held_rows.as_ref(),
+    ));
+    if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
+        let shown: Vec<String> = rows.iter().take(5).cloned().collect();
+        msg.push_str(&format!(
+            "; {} live row(s) name nobody and sit in the unattributed bucket ({}{})",
+            rows.len(),
+            shown.join(", "),
+            if rows.len() > 5 { "..." } else { "" }
+        ));
+    }
+    eprintln!("{msg}");
+    Err(
+        crate::spawn_gate::Refusal::code(crate::spawn_gate::EXIT_LEAD_SHARE)
+            .ev("reason", serde_json::json!("lead_share"))
+            .ev("lead", serde_json::json!(caller))
+            .ev("held", serde_json::json!(held))
+            .ev("share", serde_json::json!(share))
+            .ev("max_live", serde_json::json!(cap))
+            .ev("leads", serde_json::json!(leads))
+            .ev(
+                "held_rows",
+                serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
+            ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1507,7 +1536,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-lanes-pclaim-{}", std::process::id()));
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let agents = dir.join("agents");
         std::fs::create_dir_all(&agents).unwrap();
@@ -1545,11 +1573,7 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
         let lock = claims_dir.join(format!("{}.lock", claims::encode_key("worker:a")));
-        std::fs::write(
-            &lock,
-            format!("schema_version: {}\nkey: worker:a\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, std::process::id()),
-        )
-        .unwrap();
+        crate::claim_store::seed_yaml_at_path(&lock, &format!("schema_version: {}\nkey: worker:a\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, std::process::id()));
         std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.join("projects"));
         let me = std::process::id();
         write_registry(
@@ -1600,7 +1624,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-lanes-claim-{}", std::process::id()));
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
 
         // Untagged live reservation: warned, skipped.
@@ -1610,11 +1633,7 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
         let untagged = claims_dir.join(format!("{}.lock", claims::encode_key("worker:untagged")));
-        std::fs::write(
-            &untagged,
-            format!("schema_version: {}\nkey: worker:untagged\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\n", claims::SCHEMA_VERSION, std::process::id()),
-        )
-        .unwrap();
+        crate::claim_store::seed_yaml_at_path(&untagged, &format!("schema_version: {}\nkey: worker:untagged\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\n", claims::SCHEMA_VERSION, std::process::id()));
         let mut warnings = Vec::new();
         let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 0);
@@ -1630,11 +1649,7 @@ mod tests {
         // the counted pair names it. This fixture writes no expires_at, so
         // the pair carries 0.
         let tagged = claims_dir.join(format!("{}.lock", claims::encode_key("worker:tagged")));
-        std::fs::write(
-            &tagged,
-            format!("schema_version: {}\nkey: worker:tagged\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, std::process::id()),
-        )
-        .unwrap();
+        crate::claim_store::seed_yaml_at_path(&tagged, &format!("schema_version: {}\nkey: worker:tagged\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, std::process::id()));
         warnings.clear();
         let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 1, "a live zai-tagged claim counts");
@@ -1645,11 +1660,7 @@ mod tests {
         // A Suspect reservation (dead pid inside its TTL) counts too, so one
         // orphaned probe row cannot wedge the whole lane count behind an Err.
         let suspect = claims_dir.join(format!("{}.lock", claims::encode_key("worker:suspect")));
-        std::fs::write(
-            &suspect,
-            format!("schema_version: {}\nkey: worker:suspect\nholder: h\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, now + 600_000, dead_pid()),
-        )
-        .unwrap();
+        crate::claim_store::seed_yaml_at_path(&suspect, &format!("schema_version: {}\nkey: worker:suspect\nholder: h\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, now + 600_000, dead_pid()));
         assert!(matches!(
             claims::status("worker:suspect", Some(&root)).0,
             claims::ClaimState::Suspect
@@ -1685,7 +1696,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-lanes-resv-{}", std::process::id()));
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1695,17 +1705,13 @@ mod tests {
             "{}.lock",
             claims::encode_key("worker:t-reserved-x-4444")
         ));
-        std::fs::write(
-            &lock,
-            format!(
+        crate::claim_store::seed_yaml_at_path(&lock, &format!(
                 "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 claims::SCHEMA_VERSION,
                 now + 600_000,
                 dead_pid(),
                 claims::hostname()
-            ),
-        )
-        .unwrap();
+            ));
         let mut warnings = Vec::new();
         let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 1, "a live reservation spends a lane slot");
@@ -1727,7 +1733,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-lanes-redeem-{}", std::process::id()));
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1742,16 +1747,12 @@ mod tests {
                 .then_some("  reserved_by: lead-1\n")
                 .unwrap_or_default();
             let lock = claims_dir.join(format!("{}.lock", claims::encode_key(key)));
-            std::fs::write(
-                &lock,
-                format!(
+            crate::claim_store::seed_yaml_at_path(&lock, &format!(
                     "schema_version: {}\nkey: {key}\nholder: {holder}\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n{reserved_line}",
                     claims::SCHEMA_VERSION,
                     now + 600_000,
                     std::process::id()
-                ),
-            )
-            .unwrap();
+                ));
         }
         let mut warnings = Vec::new();
         let (n, _) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
@@ -1777,7 +1778,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-lanes-expired-{}", std::process::id()));
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1787,18 +1787,14 @@ mod tests {
             "{}.lock",
             claims::encode_key("worker:t-expired-x-4444")
         ));
-        std::fs::write(
-            &lock,
-            format!(
+        crate::claim_store::seed_yaml_at_path(&lock, &format!(
                 "schema_version: {}\nkey: worker:t-expired-x-4444\nholder: lead-1\nacquired_at: {}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 claims::SCHEMA_VERSION,
                 now - 700_000,
                 now - 100_000,
                 dead_pid(),
                 claims::hostname()
-            ),
-        )
-        .unwrap();
+            ));
         let mut warnings = Vec::new();
         let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 0, "an expired reservation is Stale and skipped");
@@ -1841,7 +1837,7 @@ mod tests {
 
         // A MISSING registry reads as an empty fleet (readable zeros), the
         // Python load_registry's [] arm - unlike a damaged one, which nulls.
-        let missing = dir.join("nope.json");
+        let missing = dir.join("empty/registry.json");
         let reading = share_reading(&missing, 6, Some("x"));
         assert_eq!(reading.leads, Some(0));
         assert_eq!(reading.share, Some(1));
@@ -1918,29 +1914,34 @@ mod tests {
     fn registry_schema_floor_controls_forward_read_and_latches_skew_event() {
         let dir = std::env::temp_dir().join(format!("fno-lanes-schema-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let reg = dir.join("registry.json");
-        std::fs::write(
-            &reg,
+        // A registry path's parent owns its table, so each document gets its own dir.
+        let put = |sub: &str, doc: String| {
+            let home = dir.join(sub);
+            std::fs::create_dir_all(&home).unwrap();
+            let reg = home.join("registry.json");
+            std::fs::write(&reg, doc).unwrap();
+            reg
+        };
+        let reg = put(
+            "additive",
             format!(
                 r#"{{"schema_version":{},"min_writer_version":{},"writer_rev":"writer-a","entries":[]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION + 1,
                 crate::state::REGISTRY_SCHEMA_VERSION,
             ),
-        )
-        .unwrap();
+        );
         let mut warnings = Vec::new();
         assert!(check_registry_schema(&reg, &mut warnings).is_ok());
         assert!(warnings.is_empty());
 
         let min_writer = crate::state::REGISTRY_SCHEMA_VERSION + 1;
-        std::fs::write(
-            &reg,
+        let reg = put(
+            "floor",
             format!(
                 r#"{{"schema_version":{},"min_writer_version":{min_writer},"writer_rev":"writer-a","entries":[]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION + 1
             ),
-        )
-        .unwrap();
+        );
         let err = check_registry_schema(&reg, &mut warnings).unwrap_err();
         assert_eq!(err.exit_code, crate::spawn_gate::EXIT_REGISTRY_SCHEMA);
         let receipt = err.receipt.unwrap();
@@ -1963,7 +1964,7 @@ mod tests {
         assert_eq!(receipt["writer_rev"], "writer-a");
         assert_eq!(receipt["reader_rev"], env!("FNO_AGENTS_GIT_REV"));
         assert_eq!(receipt["remedy"], "fno doctor update");
-        let journal = dir.join("events.jsonl");
+        let journal = dir.join("floor/events.jsonl");
         let event_rows = crate::events::committed_journal_text(&journal)
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -1977,27 +1978,25 @@ mod tests {
             .unwrap();
         assert_eq!(event["source"], "rust");
 
-        let latch = dir.join("version-skew.last");
+        let latch = dir.join("floor/version-skew.last");
         std::fs::remove_file(&latch).unwrap();
         std::fs::create_dir(&latch).unwrap();
         assert!(check_registry_schema(&reg, &mut warnings).is_err());
 
-        std::fs::write(
-            &reg,
-            r#"{"schema_version":4294967296,"min_writer_version":4294967296}"#,
-        )
-        .unwrap();
+        let reg = put(
+            "huge",
+            r#"{"schema_version":4294967296,"min_writer_version":4294967296}"#.to_string(),
+        );
         assert!(check_registry_schema(&reg, &mut warnings).is_err());
 
-        std::fs::write(
-            &reg,
+        let reg = put(
+            "current",
             format!(
                 r#"{{"schema_version":{},"min_writer_version":{},"entries":[]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
                 crate::state::REGISTRY_SCHEMA_VERSION
             ),
-        )
-        .unwrap();
+        );
         warnings.clear();
         assert!(check_registry_schema(&reg, &mut warnings).is_ok());
         let _ = std::fs::remove_dir_all(&dir);

@@ -120,9 +120,8 @@ impl CapSnapshot {
 /// fields (`observed_model`, `launch_account`, `account_record_id`) survive a
 /// typed read that would silently drop them.
 fn registry_rows(registry_path: &std::path::Path) -> Result<Vec<Value>, String> {
-    let raw =
-        std::fs::read_to_string(registry_path).map_err(|e| format!("registry unreadable: {e}"))?;
-    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("registry unparseable: {e}"))?;
+    let v = crate::registry_store::read(registry_path)
+        .map_err(|e| format!("registry unreadable: {e}"))?;
     Ok(v.get("agents")
         .and_then(Value::as_array)
         .cloned()

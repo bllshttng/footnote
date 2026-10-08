@@ -513,6 +513,18 @@ def test_render_team_table_names_scope_holder_and_agreement(
 # --- the manifest limb (x-f0d2): manifest is the durable record, row the cache
 
 
+def _door_passthrough() -> str:
+    """Script prelude: hand the registry door to the real binary."""
+    from fno import rust_binary
+
+    real = str(rust_binary.find_dev_binary() or rust_binary.resolve_binary())
+    return (
+        "import os\n"
+        "if 'registry-commit' in sys.argv:\n"
+        f"    os.execv({real!r}, [{real!r}, *sys.argv[1:]])\n"
+    )
+
+
 def _stub_term_reader(monkeypatch, tmp_path: Path, payload: dict, orphans=None, sweep_fail=False) -> None:
     """Answer lead-state with a canned payload and org-vacancies with a
     canned array (test_role_team pins the RENDER, not the reader;
@@ -525,7 +537,8 @@ def _stub_term_reader(monkeypatch, tmp_path: Path, payload: dict, orphans=None, 
     body = (
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
-        f"TERM = {json.dumps(json.dumps(payload))}\n"
+        + _door_passthrough()
+        + f"TERM = {json.dumps(json.dumps(payload))}\n"
         f"FAIL = {repr(bool(sweep_fail))}\n"
         f"ORPHANS = {json.dumps(orphans or [])}\n"
         "if 'org-vacancies' not in sys.argv:\n"
@@ -928,15 +941,14 @@ def test_a_non_string_scope_never_reaches_the_conflict_join(
     tmp_path: Path, monkeypatch
 ) -> None:
     """`fno agents team` promises to exit 0 on a read, so a corrupted row
-    carrying a non-string role_scope must degrade rather than raise."""
+    carrying a non-string role_scope must degrade rather than raise. The
+    table refuses to store such a row, so the reader hands it in directly."""
+    import fno.agents.registry as registry_mod
     from fno.agents.team import gather_team, render_team
 
-    _prepare(
-        monkeypatch,
-        tmp_path,
-        [_entry("bad-scope", status="busy", role_level=None, role_scope=5)],
-        graph_entries=[],
-    )
+    _prepare(monkeypatch, tmp_path, [], graph_entries=[])
+    bad = _entry("bad-scope", status="busy", role_level=None, role_scope=5)
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *a, **k: [bad])
 
     assert gather_team()["conflicts"] == []
     assert "bad-scope" in render_team(as_json=False)
@@ -1055,7 +1067,8 @@ def _stub_team_fold(monkeypatch, tmp_path: Path, scope_nodes: dict, fail: bool =
     body = (
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
-        f"NODES = {scope_nodes!r}\n"
+        + _door_passthrough()
+        + f"NODES = {scope_nodes!r}\n"
         f"FAIL = {repr(bool(fail))}\n"
         "TERM = json.dumps({'promoted': True, 'scope': 'x', 'shape': 'pass',\n"
         "    'manifest_session': 's', 'registry_session': 's', 'live': True,\n"

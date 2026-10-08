@@ -537,7 +537,7 @@ mod tests {
         )
         .unwrap();
 
-        let before_registry = std::fs::read(home.registry_json()).unwrap();
+        let before_registry = crate::registry_store::read(&home.registry_json()).unwrap();
         let before_teams = std::fs::read(home.team_names_json()).unwrap();
         let duplicate = respond(
             &home,
@@ -554,7 +554,7 @@ mod tests {
             .message
             .contains("the name Bob is held by raven over y-test"));
         assert_eq!(
-            std::fs::read(home.registry_json()).unwrap(),
+            crate::registry_store::read(&home.registry_json()).unwrap(),
             before_registry
         );
         assert_eq!(std::fs::read(home.team_names_json()).unwrap(), before_teams);
@@ -636,7 +636,7 @@ mod tests {
             Some("/rename bob")
         );
 
-        let before_registry = std::fs::read(home.registry_json()).unwrap();
+        let before_registry = crate::registry_store::read(&home.registry_json()).unwrap();
         let before_teams = std::fs::read(home.team_names_json()).unwrap();
         let refused = respond(
             &home,
@@ -648,7 +648,7 @@ mod tests {
         );
         assert!(matches!(refused.payload, ResponsePayload::Err(_)));
         assert_eq!(
-            std::fs::read(home.registry_json()).unwrap(),
+            crate::registry_store::read(&home.registry_json()).unwrap(),
             before_registry
         );
         assert_eq!(std::fs::read(home.team_names_json()).unwrap(), before_teams);

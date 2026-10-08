@@ -344,11 +344,9 @@ def _roster_name_for_session(session_id: str) -> str:
     if not sid:
         return ""
     try:
-        import json
+        from fno.registry_door import read_registry_document
 
-        from fno.paths import agents_registry_path
-
-        raw = json.loads(agents_registry_path().read_text(encoding="utf-8"))
+        raw = read_registry_document()[0]
     except Exception:  # noqa: BLE001 - identity must degrade, never crash
         return ""
     rows = raw.get("agents") if isinstance(raw, dict) else None

@@ -117,10 +117,24 @@ fn claim_session_absent_demotes_a_shared_session_prover_pid_to_suspect() {
 #[test]
 fn claim_session_absent_releases_an_unexpired_node_claim_with_a_dead_session_prover_pid() {
     let now = now_ms();
-    let rec = session_prover_node_record(dead_pid() as i32, now);
     let witness: SessionWitness = &|_| SessionLiveness::Absent;
-    assert_eq!(
-        classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-        (ClaimState::Stale, basis::SESSION_ABSENT)
-    );
+    let mut codex = session_prover_node_record(std::process::id() as i32, now);
+    codex.harness = Some("codex".into());
+    for rec in [
+        session_prover_node_record(dead_pid() as i32, now),
+        codex.clone(),
+    ] {
+        assert_eq!(
+            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
+            (ClaimState::Stale, basis::SESSION_ABSENT)
+        );
+    }
+    let unknown: SessionWitness = &|_| SessionLiveness::Unresolved;
+    for expires in [codex.expires_at, None] {
+        codex.expires_at = expires;
+        assert_eq!(
+            classify_with_basis_and_exclusivity(&codex, Some(now), &probe_pid, None, Some(unknown)),
+            (ClaimState::Suspect, basis::PID_SHARED)
+        );
+    }
 }

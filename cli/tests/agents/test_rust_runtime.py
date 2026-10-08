@@ -1823,14 +1823,13 @@ def test_fleet_incident_journey_stop_gates_and_clear_reopens(tmp_path, monkeypat
     # real writer runs and must not refuse.
     bus_dir = tmp_path / "bus"
     bus_dir.mkdir()
-    (home / "registry.json").write_text(json.dumps({
-        "schema_version": 1,
-        "agents": [{
+    from tests._table_seed import seed_registry
+
+    seed_registry(path=home / "registry.json", rows=[{
             "name": "red", "harness": "claude", "status": "live",
             "harness_session_id": "abcd1234-1111-7222-8333-444455556666",
             "cwd": "/tmp", "log_path": "/tmp/red.log",
-        }],
-    }))
+    }])
     announce_env = {
         **os.environ,
         "FNO_AGENTS_HOME": str(home),

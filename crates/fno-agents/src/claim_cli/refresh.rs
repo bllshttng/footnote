@@ -123,10 +123,6 @@ fn run_global(a: &LeafArgs, key: &str, holder: &str) -> i32 {
             return 2;
         }
     };
-    if !path.exists() {
-        eprintln!("claim missing: {}", path.display());
-        return 3;
-    }
     let record = match claims::read_claim_file(&path) {
         Ok(r) => r,
         Err(claims::ReadError::GoneAway) => {

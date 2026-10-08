@@ -23,7 +23,7 @@ fn claim_with_harness_key_round_trips() {
         harness: None,
         ..rec.clone()
     };
-    assert!(!serialize_claim(&none).unwrap().contains("harness"));
+    assert!(!serde_yaml_ng::to_string(&none).unwrap().contains("harness"));
 }
 
 // ---- session_id tag ----------------------------------------------------
@@ -48,7 +48,9 @@ fn claim_with_session_id_key_round_trips() {
         session_id: None,
         ..rec.clone()
     };
-    assert!(!serialize_claim(&none).unwrap().contains("session_id"));
+    assert!(!serde_yaml_ng::to_string(&none)
+        .unwrap()
+        .contains("session_id"));
 }
 
 // AC1: resolve_identity resolves session_id and harness from one call, so

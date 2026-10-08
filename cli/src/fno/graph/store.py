@@ -1919,15 +1919,12 @@ def release_node_claim_at_closure(node_id: str, *, rung: str) -> None:
     never a failed graph mutation - closure outranks release, and the
     reaper's node-aware settlement is the backstop.
     """
-    from fno.claims.core import claim_path, force_release_claim, native_claims_root
+    from fno.claims.core import force_release_claim, native_claims_root
     from fno.claims.io import dedup_claims_roots
 
     key = f"node:{node_id}"
     try:
         for raw_root, _dir in dedup_claims_roots([native_claims_root(key), None]):
-            path = claim_path(key, root=raw_root)
-            if not path.exists():
-                continue
             force_release_claim(key, reason=f"node closed ({rung})", root=raw_root)
     except Exception as exc:  # noqa: BLE001 - closure must not fail on this
         print(

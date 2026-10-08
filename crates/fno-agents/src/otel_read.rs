@@ -34,17 +34,18 @@ pub fn session_cost_usd(db: &Path, session: &str) -> Option<f64> {
 }
 
 fn workers(registry: &Path, now: &DateTime<Utc>) -> Result<(BTreeSet<String>, usize), String> {
-    let bytes = match std::fs::read(registry) {
+    let bytes = match crate::registry_read::registry_text(registry) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok((BTreeSet::new(), 0))
         }
         Err(error) => return Err(format!("worker registry unreadable: {error}")),
     };
-    let value: Value = serde_json::from_slice(&bytes)
+    let value: Value = serde_json::from_str(&bytes)
         .map_err(|error| format!("worker registry invalid: {error}"))?;
     let entries = value
-        .get("entries")
+        .get("agents")
+        .or_else(|| value.get("entries"))
         .and_then(Value::as_array)
         .ok_or_else(|| "worker registry has no entries array".to_string())?;
     let mut live = BTreeSet::new();

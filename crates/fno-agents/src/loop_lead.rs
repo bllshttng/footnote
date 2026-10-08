@@ -1189,11 +1189,10 @@ mod tests {
             "role_grantor": scope.map(|_| "human"),
         });
         let path = dir.join("registry.json");
-        fs::write(
+        crate::registry_store::seed_raw(
             &path,
             serde_json::json!({"schema_version": 11, "agents": [row]}).to_string(),
-        )
-        .unwrap();
+        );
         path
     }
 

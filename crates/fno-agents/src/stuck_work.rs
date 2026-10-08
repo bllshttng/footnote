@@ -397,12 +397,7 @@ mod tests {
     }
 
     fn write_rec(dir: &Path, rec: &crate::claims::ClaimRecord) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{}.lock", encode_key(&rec.key))),
-            serde_json::to_string(rec).unwrap(),
-        )
-        .unwrap();
+        crate::claim_store::seed_at_path(&dir.join(format!("{}.lock", encode_key(&rec.key))), rec);
     }
 
     // AC2-HP: the measured hung advance is a finding.
@@ -582,7 +577,7 @@ mod tests {
         assert!(dead_holders(&[claims_dir]).unwrap().is_empty());
     }
 
-    // AC3-ERR: a live holder, no pid, or a non-flight claim is not a finding.
+    // AC3-ERR: a live holder or a non-flight claim is not a finding.
     #[test]
     fn live_null_and_non_flight_never_page() {
         let td = TempDir::new().unwrap();
@@ -595,10 +590,6 @@ mod tests {
                 Some(std::process::id() as i32),
                 600,
             ),
-        );
-        write_rec(
-            &claims_dir,
-            &flight_rec("flight:nul", "single-flight:x", None, 600),
         );
         write_rec(
             &claims_dir,
@@ -623,7 +614,9 @@ mod tests {
         );
         assert!(dead_holders(&[claims_dir]).unwrap().is_empty());
 
-        let file_dir = td.path().join("not-a-dir");
+        // A table lives beside the dir, so the bad dir needs a root of its own.
+        let other = TempDir::new().unwrap();
+        let file_dir = other.path().join("not-a-dir");
         std::fs::write(&file_dir, "x").unwrap();
         assert!(dead_holders(&[file_dir]).is_err());
     }

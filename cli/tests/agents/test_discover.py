@@ -3282,10 +3282,13 @@ def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(tmp_
 def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
     """The registry spans providers, so its own dedup must carry harness."""
     from fno.agents import discover
-    from fno.agents.registry import AgentEntry, write_registry
+    from fno.agents.registry import AgentEntry
+    from tests._table_seed import seed_legacy_registry
 
     reg = tmp_path / "registry.json"
-    write_registry(
+    # Two harness rows sharing one session id predate the identity
+    # invariant; only a legacy registry file can still hold them.
+    seed_legacy_registry(
         [
             AgentEntry(
                 name="claude-side",
@@ -3303,7 +3306,7 @@ def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
                 harness_session_id=_SHARED_SID,
             ),
         ],
-        path=reg,
+        reg,
     )
 
     hits, read_ok = discover._reachable_from_registry(_SHARED_SID, reg)
@@ -3315,10 +3318,13 @@ def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
 def test_discover_live_sessions_keeps_cross_harness_rows_distinct(tmp_path, monkeypatch):
     """Candidates are the union of every harness's source; the merge must not
     fold two of them into one row that absorbs the other's cwd."""
-    from fno.agents.registry import AgentEntry, write_registry
+    from fno.agents.registry import AgentEntry
+    from tests._table_seed import seed_legacy_registry
 
     reg = tmp_path / "registry.json"
-    write_registry(
+    # Two harness rows sharing one session id predate the identity
+    # invariant; only a legacy registry file can still hold them.
+    seed_legacy_registry(
         [
             AgentEntry(
                 name="claude-side",
@@ -3336,7 +3342,7 @@ def test_discover_live_sessions_keeps_cross_harness_rows_distinct(tmp_path, monk
                 harness_session_id=_SHARED_SID,
             ),
         ],
-        path=reg,
+        reg,
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
 

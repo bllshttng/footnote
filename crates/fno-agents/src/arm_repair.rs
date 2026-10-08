@@ -765,13 +765,10 @@ mod tests {
             machine_id: Some(machine_id()),
             metadata: Default::default(),
         };
-        let dir = root.join(".fno/claims");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{}.lock", encode_key(key))),
-            serde_json::to_string(&rec).unwrap(),
-        )
-        .unwrap();
+        let path = root
+            .join(".fno/claims")
+            .join(format!("{}.lock", encode_key(key)));
+        crate::claim_store::seed_at_path(&path, &rec);
     }
 
     fn holder_finding(root: &Path, key: &str, holder: &str) -> Finding {

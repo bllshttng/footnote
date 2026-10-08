@@ -587,11 +587,10 @@ mod tests {
 
     fn registry_file(dir: &Path, rows: &[serde_json::Value]) -> PathBuf {
         let path = dir.join("registry.json");
-        fs::write(
+        crate::registry_store::seed_raw(
             &path,
             serde_json::json!({"schema_version": 11, "agents": rows}).to_string(),
-        )
-        .unwrap();
+        );
         path
     }
 
@@ -690,8 +689,7 @@ mod tests {
         assert_eq!(vacated[0]["data"]["inheritor"], "operator");
         assert!(vacated[0]["data"]["evidence"].as_str().is_some());
         // AC7: the terminal row's stale team fields cleared in the same write.
-        let rows: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        let rows: serde_json::Value = crate::registry_store::read(&registry).unwrap();
         let stale = &rows["agents"][0];
         assert!(stale["role_scope"].is_null(), "{stale}");
         assert!(stale["role_level"].is_null(), "{stale}");
@@ -733,8 +731,7 @@ mod tests {
         );
         assert!(read_events(&dir).is_empty());
         // The terminal row keeps its team fields: nothing was vacated.
-        let rows: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        let rows: serde_json::Value = crate::registry_store::read(&registry).unwrap();
         assert_eq!(rows["agents"][0]["role_scope"], "zed");
         fs::remove_dir_all(&dir).ok();
     }
@@ -935,8 +932,7 @@ mod tests {
             "a refused vacate leaves the manifest standing"
         );
         assert!(read_events(&dir).is_empty());
-        let rows: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        let rows: serde_json::Value = crate::registry_store::read(&registry).unwrap();
         assert!(rows["agents"][0]["role_scope"].is_null(), "{rows}");
         fs::remove_dir_all(&dir).ok();
     }
@@ -1062,8 +1058,7 @@ mod tests {
         assert!(manifest.with_extension("cancelled").exists());
         assert!(read_events(&dir).is_empty());
         // The terminal row keeps its team fields: only the apply clears them.
-        let rows: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        let rows: serde_json::Value = crate::registry_store::read(&registry).unwrap();
         assert_eq!(rows["agents"][0]["role_scope"], "zed");
         fs::remove_dir_all(&dir).ok();
     }
@@ -1080,7 +1075,7 @@ mod tests {
             "claude",
         );
         let registry = dir.join("registry.json");
-        fs::write(&registry, "{not json").unwrap();
+        crate::registry_store::seed_raw(&registry, "{not json");
         let emitter = events_of(&dir);
         let out = sweep(
             &dir,

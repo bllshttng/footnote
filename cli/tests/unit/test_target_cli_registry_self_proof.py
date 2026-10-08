@@ -301,7 +301,6 @@ def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
     naming its id resolves instead of reading the worker's own fresh row as
     contention. A second live thread row on the same cwd restores the
     refusal: the exactly-one contract is the bystander guard."""
-    import json
     import os
 
     from fno.harness_identity import HARNESS_SESSION_MARKERS
@@ -323,7 +322,9 @@ def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
     }
     path = agents_registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"schema_version": 37, "agents": [row]}))
+    from tests._table_seed import seed_registry
+
+    seed_registry([row], path=path)
     for marker, _harness in HARNESS_SESSION_MARKERS:
         monkeypatch.delenv(marker, raising=False)
     monkeypatch.setattr(
@@ -358,8 +359,7 @@ def test_redispatched_worker_cwd_record_proves_self(tmp_path, monkeypatch):
     # Bystander guard: two live thread rows on one cwd answer nothing, so the
     # marker is refused and names the holder again.
     sibling_row = dict(row, name="w-x1a5a-sibling", harness_session_id=sibling)
-    path.write_text(
-        json.dumps({"schema_version": 37, "agents": [row, sibling_row]}))
+    seed_registry([row, sibling_row], path=path)
     result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
     assert result.exit_code == 0, result.output
     fields = _fields(result)

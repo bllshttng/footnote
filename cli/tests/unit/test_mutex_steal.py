@@ -9,29 +9,23 @@ waiter spun against the corpse for eight days.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
 import socket
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psutil
 import pytest
 
 from fno import mutex
-from fno.claims.core import acquire_claim
-from fno.claims.io import claim_path, claims_dir, serialize_claim
+from fno.claims.io import claim_path, serialize_claim
 from fno.claims.types import Claim, now_ms
-from fno.events import append_event, mission_started
+from fno.events import mission_started
 from fno.mutex import (
     STALE_MUTEX_STEAL_S,
     acquire_dir_mutex,
-    release_dir_mutex,
-    renew_dir_mutex,
     steal_if_stale,
 )
 
@@ -341,19 +335,6 @@ class TestRecoveryMutex:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(serialize_claim(stale))
         return path
-
-    def test_AC4_HP_recovery_corpse_no_longer_bricks_a_claim(self, tmp_path):
-        """The permanence mechanism of the 8-day outage: a dead recoverer."""
-        path = self._write_stale_claim(tmp_path, "k")
-        recovery_lock = path.with_name(path.name + ".recovery.d")
-        recovery_lock.mkdir()
-        _age(recovery_lock, STALE_MUTEX_STEAL_S + 60)
-
-        new = acquire_claim("k", HOLDER_B, root=tmp_path)
-
-        assert new.holder == HOLDER_B
-        assert not recovery_lock.exists()
-        assert any((claims_dir(tmp_path) / ".expired").iterdir())
 
     def test_AC4_ERR_dangling_recovery_lock_does_not_spin(self, tmp_path):
         """acquire_dir_mutex must not follow symlinks either.

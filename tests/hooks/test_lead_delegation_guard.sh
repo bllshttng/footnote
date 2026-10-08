@@ -64,6 +64,8 @@ chmod +x "$TMP/bin/fno"
 # version.
 mkdir -p "$TMP/realbin"
 ln -s "$BIN" "$TMP/realbin/fno-agents"
+export REGISTRY_SEED_BIN="$BIN"
+source "$REPO_ROOT/tests/helpers/registry-seed.sh"
 export PATH="$TMP/realbin:$PATH"
 export KGD_FNO_CALLS="$TMP/fno-calls.log"
 : > "$KGD_FNO_CALLS"
@@ -85,7 +87,7 @@ SID="sess-lead"
 SRC_FILE="$TMP/repo/src/main.py"
 mkdir -p "$TMP/repo/src"
 
-registry_fixture() { printf '{"schema_version":26,"agents":[%s]}\n' "$1" > "$FNO_AGENTS_HOME/registry.json"; }
+registry_fixture() { printf '{"schema_version":26,"agents":[%s]}\n' "$1" | registry_seed "$FNO_AGENTS_HOME/registry.json"; }
 manifest_fixture() {
   local shape="$1" mside="${2:-$SID}"
   printf -- '---\nfno_id: 20260915T190000Z-kg1-abcdef\nscope: fno\nshape: %s\nharness_session_id: %s\n---\n' "$shape" "$mside" \
@@ -256,8 +258,11 @@ OUT="$(run_guard "$(printf '{"tool_name":"Edit","session_id":"sess-nobody","tran
 # Unreadable, not empty: an empty agents array is a valid registry (the silent
 # no-row path above). A registry that fails to parse must allow with a stderr
 # line - never a silent no-owner.
-printf 'not json at all' > "$FNO_AGENTS_HOME/registry.json"
-OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+# The fixture registry is already imported, so the unreadable one is a fresh
+# home whose legacy file never parses: the import refuses it.
+mkdir -p "$TMP/badhome"
+printf 'not json at all' > "$TMP/badhome/registry.json"
+OUT="$(FNO_AGENTS_HOME="$TMP/badhome" run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
 [[ $RC -eq 0 && "$OUT" == "{}" && -n "$ERR" ]] \
   && pass "AC3: unreadable registry allows with a stderr line" \
