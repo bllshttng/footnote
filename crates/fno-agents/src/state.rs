@@ -2821,14 +2821,22 @@ fn project_identity(registry_path: &Path, before: &[RegistryEntry], entries: &[R
 /// resolving. `token` resolves through the same tiers the sibling verbs accept
 /// (`find_name_or_full_session_id`: label, full session id + canonical handle,
 /// related/predecessor ids) plus the transport short id and a prior label held
-/// as an alias.
+/// as an alias. A label held only by terminal rows is vacated and taken; a
+/// live, orphaned or failed holder refuses.
 pub fn rename_agent(
     path: &Path,
     token: &str,
     new_name: &str,
     node: Option<&str>,
 ) -> Result<(String, String), String> {
-    rename_agent_displacing(path, token, new_name, node, |_, _| false)
+    rename_agent_displacing(path, token, new_name, node, |row, _| row_is_terminal(row))
+}
+
+/// A terminal row (Exited, PermanentDead) never answers to any label again,
+/// so its label is free for the taking. Orphaned and Failed keep blocking -
+/// restart policy may still revive them.
+pub(crate) fn row_is_terminal(row: &RegistryEntry) -> bool {
+    matches!(row.status, AgentStatus::Exited | AgentStatus::PermanentDead)
 }
 
 /// [`rename_agent`] with label displacement: when the target label is held
@@ -2837,7 +2845,7 @@ pub fn rename_agent(
 /// receives the row and the transaction's own entries, so its verdict reads
 /// the state under the lock, not a pre-transaction snapshot. The role
 /// check-in takes a carried label back from a predecessor row that holds no
-/// live role; every other caller keeps the plain refusal.
+/// live role; plain [`rename_agent`] displaces only terminal rows.
 pub fn rename_agent_displacing(
     path: &Path,
     token: &str,

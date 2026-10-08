@@ -667,6 +667,60 @@ fn rename_agent_refuses_duplicate_and_unknown_and_grammar() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A terminal row (Exited, PermanentDead) never answers to its label again,
+/// so plain rename takes the label instead of refusing; an orphaned or failed
+/// row may still come back and keeps blocking.
+#[test]
+fn rename_vacates_a_terminal_rows_label_instead_of_refusing() {
+    let dir = tmpdir("rename-terminal-label");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        let mut a = sample_entry("worker-a");
+        a.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+        registry.entries.push(a);
+        let mut dead = sample_entry("quill");
+        dead.harness_session_id = Some("bbbbbbbb-0000-0000-0000-222222222222".into());
+        dead.status = AgentStatus::Exited;
+        registry.entries.push(dead);
+        let mut flaky = sample_entry("phoenix");
+        flaky.harness_session_id = Some("cccccccc-0000-0000-0000-333333333333".into());
+        flaky.status = AgentStatus::Failed;
+        registry.entries.push(flaky);
+    })
+    .unwrap();
+
+    rename_agent(&path, "worker-a", "quill", None).unwrap();
+    let reg = load_registry(&path).unwrap();
+    let taker = reg
+        .entries
+        .iter()
+        .find(|e| e.harness_session_id.as_deref() == Some("aaaaaaaa-0000-0000-0000-111111111111"))
+        .unwrap();
+    assert_eq!(taker.name, "quill");
+    assert!(taker.aliases.iter().any(|a| a == "worker-a"));
+    let dead = reg
+        .entries
+        .iter()
+        .find(|e| e.harness_session_id.as_deref() == Some("bbbbbbbb-0000-0000-0000-222222222222"))
+        .unwrap();
+    assert_ne!(dead.name, "quill");
+    assert!(!dead.aliases.iter().any(|a| a == "quill"));
+    assert!(is_valid_registry_label(&dead.name));
+
+    let refused = rename_agent(
+        &path,
+        "aaaaaaaa-0000-0000-0000-111111111111",
+        "phoenix",
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("already names another worker"),
+        "{refused}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn rename_agent_by_old_label_after_rename_still_lands_on_the_row() {
     // The "changed before rename" guard needs identity present but the
