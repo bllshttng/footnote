@@ -143,6 +143,18 @@ impl Core {
         // (node -> holder) with the graph's node -> pr map. The row-name join
         // below is primary; this remains the fallback for harness-native claims
         // whose holder equals the worker name.
+        // Holder name -> node id: the live-claim reverse of `backlog_holders`.
+        // A spawn row whose payload named a title, not a node id, still shows
+        // the node it holds (and the PR beside it) through its claim.
+        // Real node ids only: the name guess resolves against the served
+        // backlog, so a name that merely parses like a node paints nothing.
+        let backlog_ids: std::collections::HashSet<&str> =
+            self.backlog.iter().map(|c| c.id.as_str()).collect();
+        let node_by_holder: HashMap<&str, String> = self
+            .backlog_holders
+            .iter()
+            .map(|(node, holder)| (holder.as_str(), node.clone()))
+            .collect();
         let pr_by_holder: HashMap<&str, u64> = self
             .backlog_holders
             .iter()
@@ -254,11 +266,15 @@ impl Core {
                                 context_measured_at: a.context_measured_at,
                                 started_at: a.started_at,
                                 mail_unread: a.mail_unread,
-                                node: a.node.clone().or_else(|| {
-                                    agents_view::node_id_candidates(&a.name)
-                                        .into_iter()
-                                        .find(|n| n.contains('-'))
-                                }),
+                                node: a
+                                    .node
+                                    .clone()
+                                    .or_else(|| node_by_holder.get(a.name.as_str()).cloned())
+                                    .or_else(|| {
+                                        agents_view::node_id_candidates(&a.name)
+                                            .into_iter()
+                                            .find(|n| backlog_ids.contains(n.as_str()))
+                                    }),
                                 harness_title: a.harness_title.clone(),
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
@@ -461,11 +477,15 @@ impl Core {
                         context_measured_at: a.context_measured_at,
                         started_at: a.started_at,
                         mail_unread: a.mail_unread,
-                        node: a.node.clone().or_else(|| {
-                            agents_view::node_id_candidates(&a.name)
-                                .into_iter()
-                                .find(|n| n.contains('-'))
-                        }),
+                        node: a
+                            .node
+                            .clone()
+                            .or_else(|| node_by_holder.get(a.name.as_str()).cloned())
+                            .or_else(|| {
+                                agents_view::node_id_candidates(&a.name)
+                                    .into_iter()
+                                    .find(|n| backlog_ids.contains(n.as_str()))
+                            }),
                         harness_title: a.harness_title.clone(),
                         answerable: None,
                         attach_id: None,
@@ -545,11 +565,15 @@ impl Core {
                         context_measured_at: a.context_measured_at,
                         started_at: a.started_at,
                         mail_unread: a.mail_unread,
-                        node: a.node.clone().or_else(|| {
-                            agents_view::node_id_candidates(&a.name)
-                                .into_iter()
-                                .find(|n| n.contains('-'))
-                        }),
+                        node: a
+                            .node
+                            .clone()
+                            .or_else(|| node_by_holder.get(a.name.as_str()).cloned())
+                            .or_else(|| {
+                                agents_view::node_id_candidates(&a.name)
+                                    .into_iter()
+                                    .find(|n| backlog_ids.contains(n.as_str()))
+                            }),
                         harness_title: a.harness_title.clone(),
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },

@@ -37,6 +37,10 @@ pub enum SectionKey {
     Squad(String),
     /// The `~ elsewhere` catch-all for agents matched to no squad.
     Elsewhere,
+    /// A group-by mode's section (a lead name, a cwd base, a status band).
+    /// Keyed by the rendered label; the operator's fold choice survives a
+    /// restart the same way a squad's does.
+    Group(String),
 }
 
 impl SectionKey {
@@ -48,6 +52,7 @@ impl SectionKey {
         match self {
             SectionKey::Squad(cwd) => format!("squad:{cwd}"),
             SectionKey::Elsewhere => "elsewhere".into(),
+            SectionKey::Group(label) => format!("group:{label}"),
         }
     }
 
@@ -59,7 +64,11 @@ impl SectionKey {
             // key alone.
             _ => s
                 .strip_prefix("squad:")
-                .map(|cwd| SectionKey::Squad(cwd.into())),
+                .map(|cwd| SectionKey::Squad(cwd.into()))
+                .or_else(|| {
+                    s.strip_prefix("group:")
+                        .map(|l| SectionKey::Group(l.into()))
+                }),
         }
     }
 }
@@ -212,6 +221,20 @@ struct StoreFile {
     /// Newest fleet announcement timestamp seen in the notifications panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bell_seen_at: Option<serde_json::Value>,
+    /// The sideline agents view's group-by axis. Default absent = workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_group: Option<serde_json::Value>,
+    /// The card's `node · PR` header row. Default absent = true (shown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    card_head: Option<serde_json::Value>,
+    /// The manual reorder sequence (agent names, display order). Default
+    /// absent = empty (everything sorts by name at the manual column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manual_order: Option<serde_json::Value>,
+    /// Pinned agent names, in pin order; they lead every sort. Default
+    /// absent = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pinned: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -234,6 +257,34 @@ pub enum OrgMode {
     Tree,
     Table,
     Graph,
+}
+
+/// The sideline agents view's group-by axis: the workspace tree the view
+/// shipped with, the workers' team lead, the cwd base, or fixed status bands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentGroup {
+    /// The squad tree, unchanged.
+    #[default]
+    Workspace,
+    /// One section per team lead; unteamed rows share one `~ unteamed` band.
+    Team,
+    /// One section per cwd base.
+    Cwd,
+    /// Fixed bands: Needs input / Working / Completed, counts in the header.
+    Status,
+}
+
+impl AgentGroup {
+    /// One press of the group key: the cycle the sideline paints.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Workspace => Self::Team,
+            Self::Team => Self::Cwd,
+            Self::Cwd => Self::Status,
+            Self::Status => Self::Workspace,
+        }
+    }
 }
 impl OrgMode {
     pub fn next(self) -> Self {
@@ -502,6 +553,12 @@ pub enum AgentSortColumn {
     LastMessage,
     Pr,
     Age,
+    /// Session start time (newest first by default).
+    Created,
+    /// The freshest activity stamp (newest first by default).
+    Modified,
+    /// The operator's manual reorder sequence.
+    Manual,
 }
 
 /// Direction for one active table column.
@@ -540,11 +597,14 @@ impl AgentSort {
 
     pub const fn default_for(column: AgentSortColumn) -> Self {
         let direction = match column {
-            AgentSortColumn::Age => SortDirection::Descending,
+            AgentSortColumn::Age | AgentSortColumn::Created | AgentSortColumn::Modified => {
+                SortDirection::Descending
+            }
             AgentSortColumn::Status
             | AgentSortColumn::Agent
             | AgentSortColumn::LastMessage
-            | AgentSortColumn::Pr => SortDirection::Ascending,
+            | AgentSortColumn::Pr
+            | AgentSortColumn::Manual => SortDirection::Ascending,
         };
         Self { column, direction }
     }
@@ -600,6 +660,26 @@ impl AgentSort {
                 direction: Ascending,
             },
             (Age, Ascending) => Self {
+                column: Created,
+                direction: Descending,
+            },
+            (Created, Descending) => Self {
+                column: Created,
+                direction: Ascending,
+            },
+            (Created, Ascending) => Self {
+                column: Modified,
+                direction: Descending,
+            },
+            (Modified, Descending) => Self {
+                column: Modified,
+                direction: Ascending,
+            },
+            (Modified, Ascending) => Self {
+                column: Manual,
+                direction: Ascending,
+            },
+            (Manual, _) => Self {
                 column: Status,
                 direction: Ascending,
             },
@@ -751,6 +831,74 @@ pub fn save_preset(density: Density, sort: AgentSort, width: u16) {
         file.density = serde_json::to_value(density).ok();
         file.sort = serde_json::to_value(sort).ok();
         file.width = serde_json::to_value(width).ok();
+    });
+}
+
+pub fn load_agent_group() -> AgentGroup {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return AgentGroup::default();
+    }
+    read_raw()
+        .agent_group
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_agent_group(group: AgentGroup) {
+    mutate(|file| {
+        file.agent_group = serde_json::to_value(group).ok();
+    });
+}
+
+pub fn load_card_head() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return true;
+    }
+    read_raw()
+        .card_head
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(true)
+}
+
+pub fn save_card_head(on: bool) {
+    mutate(|file| {
+        file.card_head = serde_json::to_value(on).ok();
+    });
+}
+
+pub fn load_manual_order() -> Vec<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return Vec::new();
+    }
+    read_raw()
+        .manual_order
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_manual_order(order: &[String]) {
+    mutate(|file| {
+        file.manual_order = serde_json::to_value(order).ok();
+    });
+}
+
+pub fn load_pinned() -> Vec<String> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return Vec::new();
+    }
+    read_raw()
+        .pinned
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_pinned(pins: &[String]) {
+    mutate(|file| {
+        file.pinned = serde_json::to_value(pins).ok();
     });
 }
 
