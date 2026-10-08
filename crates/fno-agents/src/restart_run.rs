@@ -331,28 +331,18 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     // The verb self-gates on pr_watch.enabled and prints its own skip line
     // then, so this is not behind --force, matching the keeper cycle above.
     // Receipt lands BEFORE the summary, which stays the last stdout line.
-    match std::process::Command::new(crate::scrape::fno_bin())
-        .args(["do", "pr", "watch", "refresh"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            let said = if out.stderr.is_empty() {
-                String::from_utf8_lossy(&out.stdout)
-            } else {
-                String::from_utf8_lossy(&out.stderr)
-            };
-            let said = said.trim();
-            if said.is_empty() {
-                say("fno agents restart: pr-watch refreshed.");
-            } else {
-                say(&format!("fno agents restart: {said}"));
-            }
+    let (said, rc) = crate::pr_watch::refresh::leaf_output(&[]);
+    let said = said.trim();
+    if rc == 0 {
+        if said.is_empty() {
+            say("fno agents restart: pr-watch refreshed.");
+        } else {
+            say(&format!("fno agents restart: {said}"));
         }
-        Ok(out) => eprintln!(
-            "fno agents restart: pr-watch refresh failed (rc={}); run `fno do pr watch refresh` by hand.",
-            out.status.code().unwrap_or(-1)
-        ),
-        Err(e) => eprintln!("fno agents restart: pr-watch refresh not run: {e}."),
+    } else {
+        eprintln!(
+            "fno agents restart: pr-watch refresh failed (rc={rc}); run `fno do pr watch refresh` by hand."
+        );
     }
     // The mux leg: pane-less stale-wire servers heal automatically; --mux
     // adds stale-with-panes and every current-wire session. The shared
