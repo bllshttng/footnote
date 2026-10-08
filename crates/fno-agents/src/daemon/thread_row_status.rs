@@ -53,8 +53,10 @@ pub(super) fn codex_thread_on_done(
             .await
             .ok()
             .flatten();
-            if let Some(session_id) = session_id.as_deref() {
-                crate::mail_hold::conversation_turn_end(session_id);
+            if !failed && status == "completed" {
+                if let Some(session_id) = session_id.as_deref() {
+                    crate::mail_hold::conversation_turn_end(session_id);
+                }
             }
             let mut payload = json!({
                 "name": name,

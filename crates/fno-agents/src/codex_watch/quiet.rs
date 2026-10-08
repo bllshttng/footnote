@@ -404,9 +404,11 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
             let native_codex_thread = entry.harness_name() == "codex" && entry.mux.is_none();
             let daemon_dead = native_codex_thread
                 && *codex_daemon_dead.get_or_insert_with(|| {
-                    crate::codex_inject::CodexDaemonAdapter::from_environment()
-                        .provider_pid_start()
-                        .is_some_and(|(pid, start)| !crate::daemon::pid_is_ours(pid, start))
+                    let adapter = crate::codex_inject::CodexDaemonAdapter::from_environment();
+                    adapter.provider_pid_start().map_or_else(
+                        || !adapter.socket_up(),
+                        |(pid, start)| !crate::daemon::pid_is_ours(pid, Some(start)),
+                    )
                 });
             let thread_unloaded = native_codex_thread
                 && !daemon_dead

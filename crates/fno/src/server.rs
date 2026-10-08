@@ -7715,7 +7715,7 @@ impl Core {
         self.place_adopted_leftovers(home_sid);
         if policy == crate::digest_overlay::MuxRestorePolicy::Resume {
             let (tx, _rx) = oneshot::channel::<ServerMsg>();
-            self.workspace_restore_start(false, None, tx);
+            self.workspace_restore_start(false, None, None, tx);
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU

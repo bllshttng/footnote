@@ -107,7 +107,7 @@ pub struct Behavior {
     /// Close the connection on `turn/start` without answering: the ack-loss
     /// shape the seed lane must read as in-flight, never as a failed delivery.
     pub unacked_turn_start: bool,
-    pub failed_turns: usize,
+    pub failed_turns: u32,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
