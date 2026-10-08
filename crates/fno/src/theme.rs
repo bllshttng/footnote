@@ -896,8 +896,9 @@ mod tests {
 
     #[test]
     fn the_focused_chip_is_a_terminal_following_inverse_under_every_theme() {
-        // x-fe43: all chips read at one dim weight, so Tab's landing spot is
-        // the only tell, and it told nothing. The focused chip is the one
+        // The focused-chip ruling: all chips read at one dim weight, so
+        // Tab's landing spot is the only tell, and it told nothing. The
+        // focused chip is the one
         // filled chip: the terminal's own pair swapped (INVERSE), bold
         // label, under EVERY theme - no theme picks a fill that washes out
         // on the disagreeing ground.

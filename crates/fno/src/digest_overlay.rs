@@ -153,7 +153,7 @@ pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
 /// The third tuple leg is the inference flag: `true` when no config named a
 /// theme, so the theme was CHOSEN FOR the terminal. An inferred light theme
 /// (paper) does not repaint the ground: the operator's own light bg and fg
-/// stay exactly as the terminal had them (the x-41c8 ruling) - the theme
+/// stay exactly as the terminal had them (the theme-ground ruling) - the theme
 /// contributes only the chrome colors, which were tuned against a light
 /// ground. An EXPLICIT paper pick still paints: the operator named it.
 pub fn theme_for(

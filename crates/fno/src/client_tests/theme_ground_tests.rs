@@ -32,7 +32,7 @@ fn apply_theme_stages_the_ground_repaint_and_the_drain_applies_it() {
     // The kill switch off stages nothing - the takeover never ran.
     assert!(theme_ground::ground_repaint(&theme, false).is_none());
 
-    // x-41c8: the INFERRED light pick (no config named a theme; COLORFGBG
+    // The INFERRED light pick (no config named a theme; COLORFGBG
     // picked paper) never repaints the ground - the terminal's own light bg
     // and fg stay. An explicit paper pick and the dark default keep it.
     let paper = Theme::from_name("footnote-paper").0;

@@ -275,9 +275,11 @@ fn paste_rows() {
 }
 
 #[test]
-fn line_edit_keys_fold_to_one_key_each() {
-    // x-41c8: the Cmd line-edit grammar. Each byte spelling folds to exactly
-    // one key, never Esc-then-something.
+fn the_line_edit_grammar_folds_and_edits() {
+    // The Cmd line-edit grammar, three sections: each byte spelling folds to
+    // exactly one key, never Esc-then-something; the keys edit the draft
+    // (word motion, Home/End, word kill); and a pasted path lands once, at
+    // the cursor, even when the paste arrives split across reads.
     let cases: &[(&[u8], super::agent_launcher::LKey)] = &[
         (b"\x1b\x7f", super::agent_launcher::LKey::KillWord),
         (b"\x15", super::agent_launcher::LKey::KillLeft),
@@ -297,10 +299,7 @@ fn line_edit_keys_fold_to_one_key_each() {
         let mut esc = LauncherEsc::default();
         assert_eq!(esc.fold(bytes), vec![want.clone()], "{bytes:?}");
     }
-}
 
-#[test]
-fn word_and_line_edits_move_and_kill_the_draft() {
     let mut v = view_with_launcher();
     type_message(&mut v, "launch the /Users/bb16/x.png thing");
     let cur = |v: &View| v.launcher.as_ref().unwrap().draft.cursor_chars;
@@ -336,7 +335,6 @@ fn word_and_line_edits_move_and_kill_the_draft() {
         "the word and its trailing space are gone"
     );
     // Word motion is row-aware through a newline.
-    type_message(&mut v, "");
     v.launcher.as_mut().unwrap().draft.message.clear();
     v.launcher.as_mut().unwrap().draft.cursor_chars = 0;
     type_message(&mut v, "ab\ncd");
@@ -348,20 +346,14 @@ fn word_and_line_edits_move_and_kill_the_draft() {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1bb", &mut sock).await;
     });
     assert_eq!(cur(&v), 3, "word left stays on the `cd` word");
-}
 
-#[test]
-fn paste_inserts_once_at_the_cursor_mid_text() {
-    // x-41c8: a pasted path lands once, at the cursor, even when the paste
-    // arrives split across reads.
-    let mut v = view_with_launcher();
+    // The paste section: a fresh draft, cursor parked mid-word.
+    v.launcher.as_mut().unwrap().draft.message.clear();
+    v.launcher.as_mut().unwrap().draft.cursor_chars = 0;
     type_message(&mut v, "claude-code-claude-code.png");
     type_message(&mut v, "\x1b[D\x1b[D");
     let mid = "claude-code-claude-code.png".chars().count() - 2;
     assert_eq!(v.launcher.as_ref().unwrap().draft.cursor_chars, mid);
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(
             &mut v,
@@ -385,9 +377,9 @@ fn paste_inserts_once_at_the_cursor_mid_text() {
 
 #[test]
 fn the_editor_cursor_routes_to_the_real_terminal_cursor() {
-    // x-41c8: no painted cursor glyph; draw_overlay reports the cell for the
+    // No painted cursor glyph: draw_overlay reports the cell for the
     // terminal's own cursor, and the closed launcher reports none.
-    let mut v = view_with_launcher();
+    let v = view_with_launcher();
     let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
     let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
     let (r, c) =

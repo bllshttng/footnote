@@ -41,8 +41,8 @@ pub(super) fn ground_repaint(theme: &Theme, paint: bool) -> Option<PendingGround
 /// The ground-paint rule: an INFERRED light theme (no config named one; the
 /// COLORFGBG ladder picked paper) never repaints the ground. The terminal's
 /// own light bg and fg stay as the user had them; the theme contributes the
-/// chrome colors only (the x-41c8 ruling). An explicit theme pick, the dark
-/// default, and the `paint_background` kill switch keep their behavior.
+/// chrome colors only (the theme-ground ruling). An explicit theme pick, the
+/// dark default, and the `paint_background` kill switch keep their behavior.
 pub(super) fn ground_paint_allowed(paint_enabled: bool, inferred: bool, theme: &Theme) -> bool {
     paint_enabled && !(inferred && crate::theme::is_light(theme))
 }

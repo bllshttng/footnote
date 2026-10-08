@@ -4345,8 +4345,8 @@ impl Launcher {
     /// The editor's cursor cell in SCREEN coordinates (row, col): the one
     /// place the terminal's real cursor sits while the sheet is open. The
     /// terminal renders it in its own configured cursor color, so the
-    /// cursor follows the terminal theme on dark and light grounds alike
-    /// (x-41c8). `None` = the sheet did not lay out.
+    /// cursor follows the terminal theme on dark and light grounds alike.
+    /// `None` = the sheet did not lay out.
     pub(crate) fn editor_cursor_cell(&self, sl: &SheetLayout) -> Option<(u16, u16)> {
         let wrap_w = sl.framed_w.saturating_sub(2).saturating_sub(PROMPT_GUTTER);
         let chunks = wrap_message(&self.draft.message, wrap_w);
@@ -4431,8 +4431,8 @@ impl Launcher {
         for (f, r) in &sl.chips {
             let never = *f == Focus::Worktree && self.draft.policy_never(&view.launcher_catalog);
             // Tab must SHOW where it landed: the focused chip carries the
-            // filled inverse block (x-fe43: the accent text alone read at
-            // the same weight as every other chip), the `never` box
+            // filled inverse block (the accent text alone read at the same
+            // weight as every other chip), the `never` box
             // included - focus names where the keyboard sits, not what the
             // box will do (Enter still refuses there).
             // An UNfocused `never` box is the disabled grammar: dim.
@@ -4460,8 +4460,8 @@ impl Launcher {
         // dim placeholder naming the shape. No painted cursor glyph: the
         // terminal's REAL cursor marks the insert point (it is routed to
         // [`Self::editor_cursor_cell`]), so its color follows the terminal
-        // theme on every ground - the x-41c8 ask. The flags editor takes the
-        // same rows while it holds the keyboard.
+        // theme on every ground. The flags editor takes the same rows while
+        // it holds the keyboard.
         let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
         let chunks = wrap_message(&self.draft.message, wrap_w);
         for k in 0..sl.editor_rows {
