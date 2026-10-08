@@ -15,7 +15,7 @@ use super::binding::bind_pr_rows;
 use super::closures::{
     cascade_close_contained, strandable_contained_ids, strandable_epic_ids, strandable_orphan_ids,
     sweep_close_done_epics, sweep_close_stranded_contained, sweep_reparent_stranded_orphans,
-    sweep_stamp_carried_sessions, CascadeEvidence, ContainedCascade,
+    sweep_stamp_carried_sessions, CascadeEvidence,
 };
 use super::drift_emit::{
     emit_gate_escape_for_record, emit_human_touch_for_record, emit_session_satisfied_for_record,
@@ -1400,7 +1400,7 @@ fn close_mutator(
             changed_files: &files,
             pr_number: record.pr_number,
         };
-        let contained = cascade_close_contained(
+        let mut contained = cascade_close_contained(
             entries,
             &record.node_id,
             record.merged_at.as_deref(),
@@ -1421,7 +1421,7 @@ fn close_mutator(
     if !full_sweep {
         return;
     }
-    let contained = sweep_close_stranded_contained(entries);
+    let mut contained = sweep_close_stranded_contained(entries);
     result
         .borrow_mut()
         .contained_closed

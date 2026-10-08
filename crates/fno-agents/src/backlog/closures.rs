@@ -242,9 +242,7 @@ pub(crate) fn cascade_close_contained(
                         && e.get("pr_number").and_then(Value::as_i64) == Some(ev.pr_number)
                 })
                 .unwrap_or(false);
-            let matched = evidence
-                .map(|ev| declared.iter().any(|s| changed.contains(s)))
-                .unwrap_or(false);
+            let matched = declared.iter().any(|s| changed.contains(s));
             if !matched && !body_bound {
                 release_contained_row(e, node_id, &owner_refs);
                 released.push(nid);
