@@ -179,21 +179,142 @@ impl Ring {
     fn push(&mut self, chunk: &[u8]) {
         if chunk.len() >= self.cap {
             // One chunk bigger than the whole ring: keep its tail.
-            self.dropped += self.bytes.len() as u64 + (chunk.len() - self.cap) as u64;
-            self.bytes.clear();
-            self.bytes.extend(&chunk[chunk.len() - self.cap..]);
+            let keep_from = chunk.len() - self.cap;
+            let mut dropped_stream: Vec<u8> = std::mem::take(&mut self.bytes).into();
+            self.dropped += dropped_stream.len() as u64 + keep_from as u64;
+            dropped_stream.extend_from_slice(&chunk[..keep_from]);
+            let kept = &chunk[keep_from..];
+            let extra = split_escape_tail(&dropped_stream, kept).min(kept.len());
+            self.dropped += extra as u64;
+            self.bytes.extend(&kept[extra..]);
             return;
         }
         let overflow = (self.bytes.len() + chunk.len()).saturating_sub(self.cap);
-        self.dropped += overflow as u64;
-        for _ in 0..overflow {
+        if overflow == 0 {
+            self.bytes.extend(chunk);
+            return;
+        }
+        // The cut can land inside an escape sequence whose ESC went out with
+        // the dropped prefix; extend the drop through the sequence so a
+        // replay never opens mid-sequence (the raw `[54;3H` bug). The scan
+        // spans the chunk too, since its head may complete the sequence.
+        let dropped: Vec<u8> = self.bytes.iter().take(overflow).copied().collect();
+        let ring_kept = self.bytes.len() - overflow;
+        let mut scan = self
+            .bytes
+            .iter()
+            .skip(overflow)
+            .copied()
+            .collect::<Vec<u8>>();
+        scan.extend_from_slice(chunk);
+        let n = split_escape_tail(&dropped, &scan).min(scan.len());
+        let ring_extra = n.min(ring_kept);
+        let chunk_trim = (n - ring_extra).min(chunk.len());
+        self.dropped += (overflow + ring_extra + chunk_trim) as u64;
+        for _ in 0..overflow + ring_extra {
             self.bytes.pop_front();
         }
-        self.bytes.extend(chunk);
+        self.bytes.extend(&chunk[chunk_trim..]);
     }
 
     fn snapshot(&self) -> Vec<u8> {
         self.bytes.iter().copied().collect()
+    }
+}
+
+/// Leading bytes of `kept` that still belong to an escape sequence whose
+/// start the cut removed: the extra drop so a replay never opens
+/// mid-sequence. Only the sequence the LAST ESC in `dropped` opened can
+/// straddle the cut: anything earlier is closed or was aborted by that
+/// ESC. Forms: CSI (`ESC [` + params/intermediates + one final byte),
+/// OSC (`ESC ]` ... BEL or `ESC \`), intermediates (`ESC ( B`), and the
+/// plain two-byte form (`ESC 7`). A C0 control inside a CSI executes and
+/// the sequence continues, so it does not end the scan. An unterminated
+/// OSC drops the whole kept head: a replayed open OSC would swallow the
+/// replay into its string. ponytail: DCS/APC/PM (`ESC P`, `ESC ^`, `ESC _`)
+/// are not tracked; a cut inside one still replays its tail.
+fn split_escape_tail(dropped: &[u8], kept: &[u8]) -> usize {
+    let Some(i) = dropped.iter().rposition(|&b| b == 0x1b) else {
+        return 0; // no ESC in the dropped prefix: kept opens on a boundary
+    };
+    let tail = &dropped[i + 1..];
+    let total_tail = tail.len();
+    // at(p): the virtual stream (tail ++ kept), indexed from the ESC's end.
+    let at = |p: usize| -> Option<u8> {
+        if p < total_tail {
+            Some(tail[p])
+        } else {
+            kept.get(p - total_tail).copied()
+        }
+    };
+    // The sequence closed inside dropped: nothing of kept belongs to it.
+    let end = |p: usize| -> usize {
+        if p < total_tail {
+            0
+        } else {
+            p - total_tail + 1
+        }
+    };
+    let Some(intro) = at(0) else {
+        // A bare trailing ESC: its final byte is kept[0] when final-shaped.
+        return match kept.first() {
+            Some(&b) if (0x30..=0x7e).contains(&b) => 1,
+            _ => 0,
+        };
+    };
+    match intro {
+        b'[' => {
+            // CSI: params/intermediates (0x20-0x3f) then one final byte.
+            let mut p = 1;
+            while let Some(b) = at(p) {
+                match b {
+                    0x1b => return 0, // a new ESC aborts the open CSI
+                    0x20..=0x3f => p += 1,
+                    0x40..=0x7e => return end(p),
+                    _ => p += 1, // C0 executes, CSI continues
+                }
+            }
+            kept.len()
+        }
+        b']' => {
+            // OSC: until BEL, or ESC-backslash; another ESC aborts.
+            let mut p = 1;
+            while let Some(b) = at(p) {
+                match b {
+                    0x07 => return end(p),
+                    0x1b => {
+                        return match at(p + 1) {
+                            Some(b'\\') => end(p + 1),
+                            Some(_) => 0,
+                            None => kept.len(),
+                        }
+                    }
+                    _ => p += 1,
+                }
+            }
+            kept.len()
+        }
+        b if (0x20..=0x2f).contains(&b) => {
+            // Intermediates then one final byte (`ESC ( B` shape). The final
+            // check runs before the increment so end() gets the final byte's
+            // own index.
+            let mut p = 0;
+            while let Some(b) = at(p) {
+                if b == 0x1b {
+                    return 0;
+                }
+                if (0x30..=0x7e).contains(&b) {
+                    return end(p);
+                }
+                p += 1;
+            }
+            kept.len()
+        }
+        // Two-byte form (`ESC 7`): the intro IS the final byte. It sits in
+        // dropped when total_tail >= 1 (closed, drop nothing); the
+        // total_tail == 0 case is the bare-trailing-ESC arm's kept[0].
+        b if (0x30..=0x7e).contains(&b) => end(0),
+        _ => 0, // DEL/control intro: not a sequence this scanner tracks
     }
 }
 
@@ -965,6 +1086,38 @@ mod tests {
             ring.dropped, 17,
             "3 old + 4 overflow + 10 displaced, all counted"
         );
+    }
+
+    /// The `[54;3H` bug: a cut whose ESC went out with the dropped prefix
+    /// used to leave the sequence tail as the replay's opening text. The
+    /// drop now extends through the split sequence; a complete sequence
+    /// before the cut replays intact.
+    #[test]
+    fn ring_cut_at_an_escape_sequence_replays_from_the_boundary() {
+        let mut ring = Ring::new(8);
+        ring.push(b"\x1b[54;3");
+        ring.push(b"Hwold");
+        assert_eq!(ring.snapshot(), b"wold");
+        assert_eq!(ring.dropped, 7, "3 prefix + 3 split + the final H, counted");
+        let mut ring = Ring::new(8);
+        ring.push(b"\x1b[2J\x1b[Hok");
+        ring.push(b"XY");
+        assert_eq!(ring.snapshot(), b"\x1b[HokXY");
+        assert_eq!(ring.dropped, 4, "ESC[2J went out whole with the prefix");
+    }
+
+    /// Direct scanner cases: a sequence completing inside `dropped` drops
+    /// nothing of `kept`; an unterminated OSC drops the whole kept head.
+    #[test]
+    fn split_escape_tail_forms() {
+        assert_eq!(split_escape_tail(b"abc\x1b[54;3H", b"rest"), 0);
+        assert_eq!(split_escape_tail(b"\x1b]0;ti", b"tle rest"), 8);
+        assert_eq!(split_escape_tail(b"\x1b]0;t\x07tail", b"kept"), 0);
+        assert_eq!(split_escape_tail(b"abc\x1b", b"7rest"), 1);
+        assert_eq!(split_escape_tail(b"abc", b"kept"), 0);
+        assert_eq!(split_escape_tail(b"\x1b]0;t\x1b", b"\\z"), 1);
+        // The intermediate form drops exactly through its final byte.
+        assert_eq!(split_escape_tail(b"abc\x1b(", b"Brest"), 1);
     }
 
     #[test]

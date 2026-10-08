@@ -58,7 +58,7 @@ pub(crate) fn stale_live_attach_ids_for_restore() -> std::collections::HashSet<S
     }
     crate::registry_read::registry_text(&crate::agents_view::registry_path())
         .ok()
-        .map(|raw| agents_view::stale_live_attach_ids(&raw))
+        .map(|raw| crate::argv_witness::stale_live_attach_ids(&raw))
         .unwrap_or_default()
 }
 

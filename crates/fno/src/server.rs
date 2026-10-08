@@ -2049,7 +2049,7 @@ pub(crate) fn live_attach_ids_snapshot() -> HashSet<String> {
     // attach` into sessions that no longer exist. Rows with no recorded pid
     // keep their status-field verdict (fail-safe, `row_falsified`).
     if let Some(raw) = reg.as_deref() {
-        let stale = agents_view::stale_live_attach_ids(raw);
+        let stale = crate::argv_witness::stale_live_attach_ids(raw);
         live.retain(|id| !stale.contains(id));
     }
     for (_account, path) in agents_view::isolated_roster_paths() {
