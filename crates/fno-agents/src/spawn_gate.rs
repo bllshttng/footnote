@@ -4200,9 +4200,16 @@ Swapouts: 3444531.\n";
         .unwrap();
         // One lead -> share = cap = 2; the caller holds both rows, so the
         // share refuses and the event must name w1 and w2.
+        let cap_two = crate::capacity::Effective {
+            cap: 2,
+            ceiling: 2,
+            known: false,
+            reason: None,
+            since: None,
+        };
         let err = spawn_gate_lanes::check_lead_share(
             &reg,
-            &no_state(),
+            &cap_two,
             Some("session-aaaaaaaa"),
             &serde_json::Map::new(),
         )

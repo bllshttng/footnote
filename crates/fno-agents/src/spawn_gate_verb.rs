@@ -1670,7 +1670,7 @@ mod tests {
         assert_eq!(answer["reason"], "lead_share");
         assert_eq!(
             answer["message"],
-            "this lead holds 2 of max_live 2 across 1 leads (share 2); the rows charged to you are w1, w2"
+            "this lead holds 2 of max_live 2 (effective cap unknown, using ceiling) across 1 leads (share 2); the rows charged to you are w1, w2"
         );
         assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
         let _ = std::fs::remove_dir_all(&dir);
