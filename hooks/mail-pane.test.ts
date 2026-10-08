@@ -305,10 +305,17 @@ test('delivered header keeps the subject on the control row and drops the inline
 
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const message = await $.ui.mount(userMessage(
-    `\`@maya · ${MESSAGE_ID} · pane stalled on a watch\` ⌎ pane shows an hour of waiting`,
+    `\`@maya · ${MESSAGE_ID} · pane stalled on a watch\` ⏎ pane shows an hour of waiting`,
   ))
   if (!await message.find({ key: `mail-sender-${REQUEST_ID}-${MESSAGE_ID}` })) throw new Error('sender button missing')
   if (!await message.find({ type: 'Text', text: /pane stalled on a watch/ })) throw new Error('subject left the header row')
   if (await message.find({ type: 'Text', text: /pane shows an hour/ })) throw new Error('inline body rendered outside the pane')
   await message.unmount()
+
+  const fenced = await $.ui.mount(userMessage(
+    `\`@maya · ${MESSAGE_ID} · run \`make\` now\` ⏎ rebuild finished`,
+  ))
+  if (!await fenced.find({ type: 'Text', text: /run `make` now/ })) throw new Error('subject with an inline backtick was truncated')
+  if (await fenced.find({ type: 'Text', text: /rebuild finished/ })) throw new Error('inline body rendered outside the pane')
+  await fenced.unmount()
 })

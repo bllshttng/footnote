@@ -108,10 +108,18 @@ function headerControls($, event, line, turn, requestId) {
   if (prefix.endsWith('`')) prefix = prefix.slice(0, -1)
   const between = line.slice(senderAt + senderLabel.length, idAt)
   // The subject stays on the header row; the body after the closing fence
-  // is not shown inline - the id button opens it.
+  // is not shown inline - the id button opens it. The closer is the first
+  // backtick whose remainder is the line end or the " ⏎ " body separator,
+  // matching the producer's split_header_span; a backtick inside the
+  // subject is not a fence.
   let subject = afterId.slice(3)
-  const closingFence = subject.indexOf('`')
-  if (closingFence >= 0) subject = subject.slice(0, closingFence)
+  for (let at = subject.indexOf('`'); at >= 0; at = subject.indexOf('`', at + 1)) {
+    const tail = subject.slice(at + 1)
+    if (!tail || tail.startsWith(' ⏎ ')) {
+      subject = subject.slice(0, at)
+      break
+    }
+  }
 
   const { Box, Button, Text } = $.ui.resolve(event)
   const controls = []
