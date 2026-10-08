@@ -38,37 +38,37 @@ fn new_lines_since(transcript: &Path, from: u64) -> Option<(Vec<String>, u64)> {
     let mut file = std::fs::File::open(transcript).ok()?;
     let len = file.metadata().ok()?.len();
     if len <= from {
-        if len < from {
-            let _ = std::fs::write(cursor_path(transcript), b"0");
-        }
-        return Some((Vec::new(), from));
+        // A shrunk file (rotation) restarts the read from 0: the offset the
+        // caller receives is the CURSOR, and run() writes it back on ack.
+        let next = if len < from { 0 } else { from };
+        return Some((Vec::new(), next));
     }
     let end = len.min(from + MAX_PUSH_BYTES);
     let _ = file.seek(SeekFrom::Start(from));
-    read_exact_to_string(&mut file, end - from).map(|text| complete_lines(&text, from))
-}
-
-fn read_exact_to_string(file: &mut std::fs::File, want: u64) -> Option<String> {
-    let mut buf = vec![0u8; want as usize];
+    let mut buf = vec![0u8; (end - from) as usize];
     file.read_exact(&mut buf).ok()?;
-    String::from_utf8(buf).ok()
+    Some(complete_lines(&buf, from))
 }
 
-/// The complete lines of `text`, and the offset after the last newline.
-/// Returns the empty vec and the original offset when the window holds no
-/// newline (one line longer than the bound: waits for a bigger bound).
-fn complete_lines(text: &str, from: u64) -> (Vec<String>, u64) {
-    match text.rfind('\n') {
-        Some(idx) => {
-            let lines = text[..idx]
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(String::from)
-                .collect();
-            (lines, from + idx as u64 + 1)
-        }
-        None => (Vec::new(), from),
-    }
+/// The complete lines of `buf`, and the offset after the last newline. Bytes
+/// after the last newline stay unread (a torn line, or a multibyte char
+/// split by the window bound: a newline byte is never part of one), so the
+/// next fire re-reads them from the same offset. A prefix that is not valid
+/// UTF-8 reads as nothing-new and retries: corrupting a line to advance is
+/// worse than stalling, and the file-fallback readers still answer.
+fn complete_lines(buf: &[u8], from: u64) -> (Vec<String>, u64) {
+    let Some(idx) = buf.iter().rposition(|&b| b == b'\n') else {
+        return (Vec::new(), from);
+    };
+    let Ok(text) = std::str::from_utf8(&buf[..idx]) else {
+        return (Vec::new(), from);
+    };
+    let lines = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(String::from)
+        .collect();
+    (lines, from + idx as u64 + 1)
 }
 
 /// The cursor offset for one transcript (0 when absent or malformed).

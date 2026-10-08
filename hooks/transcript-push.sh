@@ -13,7 +13,8 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 # shellcheck source=lib/agents-bin.sh
 source "$HOOK_DIR/lib/agents-bin.sh" 2>/dev/null || exit 0
-BIN="$(fno_agents_bin "$PWD")"
+REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+BIN="$(fno_agents_bin "$REPO_ROOT")"
 # No binary -> nothing to report to; stay silent (the lane is best-effort).
 [[ -z "$BIN" ]] && exit 0
 with_timeout 2 "$BIN" hook transcript-push
