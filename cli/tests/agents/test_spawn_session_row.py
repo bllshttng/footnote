@@ -31,6 +31,19 @@ from tests._native_door import run_native
 from fno.paths_testing import use_tmpdir
 
 
+@pytest.fixture
+def graphless_seed_resolver(monkeypatch):
+    """The seed-word gate fails open on an unreadable graph; tests that spawn
+    a composed seed without a fixture graph ask for this so the gate never
+    depends on the ambient store. This suite pins the `--node` seam itself
+    and reads real row files for its assertions, so it stays module-scoped."""
+
+    def _unreadable(path=None, **_):
+        raise ValueError("graph store unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
+
+
 NODE = "x-4ab1"
 FULL_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
@@ -203,7 +216,7 @@ def test_spawn_review_label_or_seed_is_refused(
 
 
 def test_spawn_with_prose_and_node_composes_a_labeled_seed(
-    workdir_claude, resolvable_uuid, loop_admission_ready
+    workdir_claude, resolvable_uuid, loop_admission_ready, graphless_seed_resolver
 ) -> None:
     """Arbitrary prose with a `--node` is no longer unlabelable: the verb
     seam composes the node's command in front, so the seed names the verb
