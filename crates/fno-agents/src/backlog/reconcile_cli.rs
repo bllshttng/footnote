@@ -337,6 +337,25 @@ fn once_at(args: &Args, graph_path: &Path) -> i32 {
 
     let mut sweep = partition_and_probe(records, &entries, full_sweep, args.dry_run);
 
+    if !full_sweep {
+        // Scoped runs skip auto-discovery, so the merged-PR file set a
+        // surface-gated cascade judges must be fetched here: records the
+        // listing cache surfaced carry no changed files.
+        for record in &sweep.closeable {
+            if !record.changed_files.is_empty()
+                || supersession_files.contains_key(&record.pr_number)
+            {
+                continue;
+            }
+            let repo = super::pr_link::repo_slug_from_url(record.pr_url.as_deref());
+            if let Ok(ctx) =
+                super::merge_state::fetch_pr_closure_context(record.pr_number, repo.as_deref())
+            {
+                supersession_files.insert(record.pr_number, ctx.changed_files);
+            }
+        }
+    }
+
     // The promise gate + reopen guard partition the closeable set.
     let (gated, mut promise_held, promise_warnings, reopen_expired) =
         promise_gate_leg(&sweep.closeable, &entries, args.json_out, &mut stderr_log);
@@ -373,7 +392,9 @@ fn once_at(args: &Args, graph_path: &Path) -> i32 {
         .unwrap_or_default();
 
     // The dry-run preview simulates the exact close on a throwaway copy.
-    let preview = args.dry_run.then(|| preview_leg(&entries, &sweep));
+    let preview = args
+        .dry_run
+        .then(|| preview_leg(&entries, &sweep, &supersession_files));
 
     // Full sweep only: stamp `reverted` on nodes a merged revert PR names.
     let reverted = revert_leg(
@@ -2015,7 +2036,11 @@ struct Preview {
     sim: Option<Vec<Value>>,
 }
 
-fn preview_leg(entries: &[Value], sweep: &Sweep) -> Preview {
+fn preview_leg(
+    entries: &[Value],
+    sweep: &Sweep,
+    supersession_files: &HashMap<i64, Vec<String>>,
+) -> Preview {
     let nothing_pending = sweep.closeable.is_empty()
         && sweep.strandable_epics.is_empty()
         && sweep.strandable_contained.is_empty()
@@ -2048,8 +2073,16 @@ fn preview_leg(entries: &[Value], sweep: &Sweep) -> Preview {
         }
         apply_completion_fields(&mut sim[index], false);
         reparented.extend(reparent_live_children(&mut sim, &record.node_id));
+        let files: Vec<String> = if record.changed_files.is_empty() {
+            supersession_files
+                .get(&record.pr_number)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            record.changed_files.clone()
+        };
         let evidence = CascadeEvidence {
-            changed_files: &record.changed_files,
+            changed_files: &files,
             pr_number: record.pr_number,
         };
         let contained_pass = cascade_close_contained(
@@ -2059,6 +2092,7 @@ fn preview_leg(entries: &[Value], sweep: &Sweep) -> Preview {
             Some(&evidence),
         );
         contained.extend(contained_pass.closed);
+        released_preview.extend(contained_pass.released);
         acc.extend(cascade_close_parents(&mut sim, &record.node_id));
     }
     if sweep.strandable_epics.is_empty()

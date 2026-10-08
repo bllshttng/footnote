@@ -1975,7 +1975,20 @@ fn refuse_dead_owner(owner: &Value, context: &str) -> Option<String> {
 /// repo-relative paths its work is expected to touch; the merge cascade
 /// closes on a match and releases the containment without one.
 pub fn run_contain(tail: &[String]) -> i32 {
-    if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
+    if tail.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "Usage: fno backlog contain <owner> <task_id>... [--surface <repo-relative-path>]..."
+        );
+        println!();
+        println!("Fold existing nodes into an owner in one locked mutation.");
+        println!("A contained child ships inside the owner's PR and closes with it.");
+        println!("--surface stamps the declared work files on each contained child.");
+        println!("Pass it once per path.");
+        println!("A declared child closes on the owner's merge only when the merged PR touches a declared surface, or the PR body binds the child.");
+        println!("With neither, the cascade releases the containment and the child stays open.");
+        return 0;
+    }
+    if tail.is_empty() {
         return forward_to_python("contain", tail);
     }
     let mut positionals: Vec<&String> = Vec::new();
