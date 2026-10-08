@@ -71,6 +71,9 @@ READ_ALLOWLIST = (
     # The claims store's db-path builder (the layout place of the graph
     # anchor, swapped to its db sibling), never a read.
     "crates/fno-agents/src/claim_store.rs",
+    # The refresh verb's plist template names the polled store in its
+    # launchd comment; the verb itself reads no graph.
+    "crates/fno-agents/src/pr_watch/refresh.rs",
     # The registry store's db-path builder, the same graph anchor swapped
     # to its db sibling, never a read.
     "crates/fno-agents/src/registry_store.rs",

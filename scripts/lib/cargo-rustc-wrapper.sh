@@ -191,7 +191,23 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     # and fno doctor test sets a new build dir per run, which would split
     # the cache key per worktree.
     unset CARGO_BUILD_BUILD_DIR CARGO_BUILD_TARGET_DIR CARGO_TARGET_DIR
-    exec sccache "$@"
+    # A wedged server leaves this client parked at 0 percent CPU for hours
+    # while holding the build-dir lock. The bound ends the wait and the
+    # compile runs on bare rustc; the daemon's machine-watch tick restarts the
+    # server. 0 turns the bound off.
+    client_bound="${FNO_SCCACHE_CLIENT_TIMEOUT_SECS:-3600}"
+    if [[ "$client_bound" != "0" ]]; then
+        # shellcheck source=scripts/lib/with-timeout.sh
+        source "$REPO_ROOT/scripts/lib/with-timeout.sh"
+        sccache_rc=0
+        with_timeout "$client_bound" sccache "$@" || sccache_rc=$?
+        if [[ "$sccache_rc" -ne 124 ]]; then
+            exit "$sccache_rc"
+        fi
+        echo "cargo-rustc-wrapper: sccache gave no answer in ${client_bound}s; compiling with bare rustc" >&2
+    else
+        exec sccache "$@"
+    fi
 fi
 
 compiler="$1"

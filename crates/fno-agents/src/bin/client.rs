@@ -689,6 +689,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::compaction::run_compaction(&args[1..]);
     }
 
+    // `mail-teach`: the fmail read verb's once-per-session lesson state
+    // (see mail_teach.rs doc). Direct dispatch like compaction - a hook
+    // carrier must resolve under the same session-start and post-compact
+    // budgets where the daemon is beside the point.
+    if verb == "mail-teach" {
+        return fno_agents::mail_teach::run_mail_teach(&args[1..]);
+    }
+
     // `provider-cap`: the armed cap actor's read + decide verbs (see
     // provider_cap.rs doc). Direct dispatch, no daemon RPC: a status read
     // computes on demand when no fresh daemon snapshot exists, and a decision

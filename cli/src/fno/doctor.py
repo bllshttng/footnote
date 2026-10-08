@@ -4573,20 +4573,23 @@ def doctor_command(
         # current binary first.
         pw = result.get("pr_watch") or {}
         if pw.get("verdict") in ("dead", "wedged") and not json_out:
-            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher, refresh_watcher
+            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher
 
             if pw.get("verdict") == "wedged":
-                from fno.pr_watch.cli import _resolve_fno_binary
+                # The refresh verb is the native cure; it self-gates on pr_watch.enabled.
+                import subprocess
+                from fno.rust_binary import resolve_binary
 
-                rmsg, _ = refresh_watcher(
-                    launch_agents_dir=_LAUNCH_AGENTS_DIR,
-                    fno_binary=_resolve_fno_binary(),
-                    interval=int(pw.get("interval_seconds") or 600),
-                    defer_when_ticking=True,
-                    caller="doctor-fix",
-                    force_bounce=True,
-                )
-                typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
+                binary = resolve_binary()
+                if binary is None:
+                    said = "skipped; fno-agents binary not found"
+                else:
+                    proc = subprocess.run(
+                        [str(binary), "pr-watch", "refresh", "--force-bounce", "--caller", "doctor-fix"],
+                        capture_output=True, text=True, check=False, timeout=120,
+                    )
+                    said = (proc.stdout or "").strip() or f"rc={proc.returncode}"
+                typer.echo(f"fno doctor: --fix pr-watch refresh: {said}", err=True)
             else:
                 hmsg, _ = heal_watcher(
                     launch_agents_dir=_LAUNCH_AGENTS_DIR,

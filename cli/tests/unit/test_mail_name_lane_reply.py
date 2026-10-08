@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.paths import agents_registry_path
 from fno.paths_testing import use_tmpdir
 
 
@@ -513,6 +514,13 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     # The inject succeeds -> hosted delivery, no deferral warning on stderr.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    # Pre-mark the read-verb lesson taught for the reply's recipient, so this
+    # test's one-line turn contract stays about routing, not the lesson.
+    _stamp_dir = agents_registry_path().parent / "mail_teach"
+    _stamp_dir.mkdir(parents=True, exist_ok=True)
+    (_stamp_dir / f"{sid}.json").write_text(
+        json.dumps({"session": sid, "taught_boundary_epoch": 0})
+    )
     injected: list[str] = []
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_claude",

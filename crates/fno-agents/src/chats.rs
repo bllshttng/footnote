@@ -756,6 +756,14 @@ fn ensure_index(conn: &Connection, chats_dir: &Path) -> Result<(), String> {
             continue;
         };
         let chat_file = entry.path().join("messages.jsonl");
+        // A dir with no messages.jsonl is not a chat - the envelope-backup
+        // dirs the migration leaves behind (.backup-envelopes-*) name one,
+        // and scanning one died every later show with a NotFound. The
+        // vanished-file sweep below still drops any index row that points
+        // at a deleted chat.
+        if !chat_file.is_file() {
+            continue;
+        }
         let stored: Option<(i64, Option<String>)> = conn
             .query_row(
                 "SELECT msg_count, last_line_hash FROM chats WHERE chat_id = ?1",
@@ -1521,6 +1529,21 @@ fn usage() -> i32 {
     2
 }
 
+/// The read verb for an `fmail-<id>` header, spelled once here so the
+/// teaching line and the dispatch arm cannot drift apart: a rename edits this
+/// const and every carrier that prints the line follows.
+pub const MAIL_READ_VERB: &str = "show";
+
+/// The one-line lesson carried once per session at session start, again after
+/// each compaction, and on a hookless session's first delivered header. Every
+/// carrier prints THIS string, so no carrier hardcodes the verb.
+pub fn teach_line() -> String {
+    format!(
+        "mail: an `fmail-<id>` header in a delivered turn is unread mail on the bus; \
+         read it with `fno agents mail {MAIL_READ_VERB} <id>`"
+    )
+}
+
 /// Verb entrypoint reached from bin/client.rs's direct dispatch. `pub`: the
 /// bin target sees the lib as an external crate (the announce.rs note).
 pub fn run_chats(args: &[String]) -> i32 {
@@ -1722,7 +1745,7 @@ pub fn run_chats(args: &[String]) -> i32 {
                 }
             }
         }
-        "show" => {
+        MAIL_READ_VERB => {
             let mut id: Option<String> = None;
             let mut q = ShowQuery {
                 thread: false,
@@ -1934,6 +1957,31 @@ mod tests {
             home_pin.parent().unwrap().join("chats"),
             "without the pin the ladder returns (never the pinned dir)"
         );
+    }
+
+    #[test]
+    fn ensure_index_skips_a_dir_that_is_not_a_chat() {
+        // A `.backup-envelopes-*` dir the envelope migration leaves behind
+        // holds no messages.jsonl; scanning one turned every later show into
+        // a NotFound (the live 2026-10-08 report). A non-chat dir is
+        // skipped, and the real chat beside it still indexes.
+        let pin = temp_root("ensure-index");
+        let chats = pin.join("chats");
+        std::fs::create_dir_all(chats.join(".backup-envelopes-20261005T175648Z")).unwrap();
+        std::fs::create_dir_all(chats.join("chat-0badc0de1234abcd")).unwrap();
+        std::fs::write(
+            chats
+                .join("chat-0badc0de1234abcd")
+                .join("messages.jsonl"),
+            "{\"type\":\"message\",\"id\":\"fmail-0badc0de1234\",\"from\":\"folio\",\"from_session\":\"folio\",\"to\":\"quill\",\"kind\":\"send\",\"ts\":\"2026-10-08T15:00:00Z\",\"body\":\"hello\"}\n",
+        )
+        .unwrap();
+        let conn = open_index(&pin.join("index.db")).unwrap();
+        ensure_index(&conn, &chats).expect("a backup dir must not kill the scan");
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM chats", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "only the real chat indexes");
     }
 
     #[test]

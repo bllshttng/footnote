@@ -586,19 +586,14 @@ fn release_dead(key: &str, holder: &str, root: &Path) -> bool {
     dead && crate::claims::release(key, holder, Some(root), None).is_ok()
 }
 
-/// The production runner for `heal`: the launchd refresh under a 120 s bound,
-/// and the install spawned detached from the canonical checkout.
+/// The production runner for `heal`: the launchd refresh in process (each
+/// launchctl step inside the verb is timeout-guarded), and the install
+/// spawned detached from the canonical checkout.
 pub fn run_repair(action: &str, cwd: &Path) -> bool {
     match action {
         "refresh" => {
-            let mut cmd = vec![crate::scrape::fno_py().to_string_lossy().into_owned()];
-            cmd.extend(["do", "pr", "watch", "refresh"].map(str::to_string));
-            crate::org_board::budget::run_with_timeout(
-                &cmd,
-                cwd,
-                std::time::Duration::from_secs(120),
-            )
-            .is_ok()
+            let (_, rc) = crate::pr_watch::refresh::leaf_output(&[]);
+            rc == 0
         }
         "install" => {
             let Some(root) = crate::paths::canonical_repo_root(cwd) else {

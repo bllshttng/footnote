@@ -180,6 +180,10 @@ enum Role {
     /// `fno agents mail view`: refused by name; the verb is now `show`
     /// (no compat shell, the same rule as a removed mux verb).
     MailViewRenamed,
+    /// A reader-shaped guess (`read`, `open`, `fetch`, `cat`) at the mail
+    /// tree: refused by name, pointing at the reader, before the Python
+    /// fallback answers with typer's near-miss guess.
+    MailWrongVerb(String),
     /// `fno config paths <native-verb>`: the native paths verb. Args from the
     /// verb name onward; the worker's --paths-exec lane answers, the other
     /// paths verbs still forward to Python (one verb per PR,
@@ -293,6 +297,7 @@ fn classify_mail_show(args: &[OsString]) -> Option<Role> {
     match verb {
         "show" => Some(Role::MailShow(tail.to_vec())),
         "view" => Some(Role::MailViewRenamed),
+        "read" | "open" | "fetch" | "cat" => Some(Role::MailWrongVerb(verb.to_string())),
         _ => None,
     }
 }
@@ -569,6 +574,13 @@ fn main() {
             eprintln!("fno agents mail view was renamed: use fno agents mail show");
             std::process::exit(2);
         }
+        Role::MailWrongVerb(verb) => {
+            eprintln!(
+                "no mail verb {verb:?}. An `fmail-<id>` header in a delivered turn is read \
+                 with `fno agents mail show <id>`"
+            );
+            std::process::exit(2);
+        }
         Role::AgentsAlias(fno::agents_alias::Org::Forward(argv)) => bootstrap::forward(&argv),
         Role::AgentsAlias(fno::agents_alias::Org::Help(text)) => {
             println!("{text}");
@@ -723,6 +735,16 @@ mod tests {
         assert!(matches!(
             decide_role(&os(&["agents", "mail", "view", "--all"]), false),
             Role::MailViewRenamed
+        ));
+        // A reader-shaped guess refuses by name instead of reaching the
+        // Python fallback's near-miss suggestion.
+        assert!(matches!(
+            decide_role(&os(&["agents", "mail", "read", "fmail-x"]), false),
+            Role::MailWrongVerb(ref v) if v == "read"
+        ));
+        assert!(matches!(
+            decide_role(&os(&["mail", "cat", "fmail-x"]), false),
+            Role::MailWrongVerb(_)
         ));
         // The hidden `fno mail <verb>` mount claims and refuses alike.
         assert_eq!(

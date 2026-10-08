@@ -473,7 +473,34 @@ pub fn ensure_named_team(
     let Some(rec) = store.teams.get(&canon) else {
         return Ok(false);
     };
-    if rec.holder_session.is_some() && rec.holder_session != team.holder_session {
+    // A recorded holder whose session is terminal - or whose row no registry
+    // row answers for any more - has vacated: the term died with the
+    // session, so the name belongs to the live team again. Unbind the stale
+    // session here, or the holder guard below reports the team unnamed
+    // forever. A live holder elsewhere stays untouched - keep_from and
+    // rename_team still read it.
+    let mut holder_bound = rec.holder_session.clone();
+    if let Some(sid) = holder_bound.as_deref() {
+        let registry = crate::state::load_registry(registry_path).map_err(|e| e.to_string())?;
+        let holder_vacated = registry
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some(sid))
+            .map_or(true, crate::state::row_is_terminal);
+        if holder_vacated {
+            update(store_path, |store| {
+                if let Some(rec) = store.teams.get_mut(&canon) {
+                    if rec.holder_session.as_deref() == Some(sid) {
+                        rec.holder_session = None;
+                        rec.updated_at = now_stamp();
+                    }
+                }
+                Ok(())
+            })?;
+            holder_bound = None;
+        }
+    }
+    if holder_bound.is_some() && holder_bound != team.holder_session {
         return Ok(false);
     }
     let label = rec.name.to_ascii_lowercase();
@@ -485,6 +512,9 @@ pub fn ensure_named_team(
     // lock is as fresh as the two files allow.
     let displaceable = |row: &crate::state::RegistryEntry,
                         entries: &[crate::state::RegistryEntry]| {
+        if crate::state::row_is_terminal(row) {
+            return true;
+        }
         let Some(sid) = row.harness_session_id.as_deref() else {
             return false;
         };
@@ -1830,6 +1860,122 @@ mod tests {
             .filter(|e| e.name == "folio" || e.aliases.iter().any(|a| a == "folio"))
             .count();
         assert_eq!(label_holders, 1);
+    }
+
+    /// The predecessor EXITED (a retired lead) and the record still names its
+    /// session as holder. A dead holder has vacated: the succession takes the
+    /// label back and unbinds the stale session instead of reporting the team
+    /// unnamed.
+    #[test]
+    fn an_exited_predecessors_label_and_stale_holder_do_not_block_the_succession() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_registry(
+            tmp.path(),
+            json!([
+                team_row("vellum", "fno", 1, "sess-successor"),
+                json!({
+                    "name": "folio", "status": "exited", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-old",
+                    "short_id": "oldrow21",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+            ]),
+        );
+        let store = store_path(tmp.path());
+        let registry = registry_path(tmp.path());
+        write(
+            &store,
+            &Store {
+                version: 1,
+                teams: BTreeMap::from([(
+                    "fno".into(),
+                    TeamNameRecord {
+                        name: "Folio".into(),
+                        generation: 2,
+                        holder_session: Some("sess-old".into()),
+                        nodes: Vec::new(),
+                        updated_at: now_stamp(),
+                        theme: None,
+                        title: None,
+                        pending_succession: None,
+                        lead: None,
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(ensure_named_team(&store, &registry, "fno").unwrap(), true);
+
+        let rows = crate::state::load_registry(&registry).unwrap();
+        let successor = rows
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some("sess-successor"))
+            .unwrap();
+        let old = rows
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some("sess-old"))
+            .unwrap();
+        assert_eq!(successor.name, "folio");
+        assert_ne!(old.name, "folio");
+        assert!(!old.aliases.iter().any(|a| a == "folio"));
+        let label_holders = rows
+            .entries
+            .iter()
+            .filter(|e| e.name == "folio" || e.aliases.iter().any(|a| a == "folio"))
+            .count();
+        assert_eq!(label_holders, 1);
+        let dump = snapshot(&store).unwrap();
+        assert_eq!(dump["teams"]["fno"]["holder_session"], json!(null));
+    }
+
+    /// The same succession shape when the predecessor's row was reaped
+    /// outright: the record names a session no registry row answers for. A
+    /// holder nobody can resolve has vacated like an exited one.
+    #[test]
+    fn a_reaped_holders_stale_session_does_not_block_the_succession() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_registry(
+            tmp.path(),
+            json!([team_row("vellum", "fno", 1, "sess-successor")]),
+        );
+        let store = store_path(tmp.path());
+        let registry = registry_path(tmp.path());
+        write(
+            &store,
+            &Store {
+                version: 1,
+                teams: BTreeMap::from([(
+                    "fno".into(),
+                    TeamNameRecord {
+                        name: "Folio".into(),
+                        generation: 2,
+                        holder_session: Some("sess-gone".into()),
+                        nodes: Vec::new(),
+                        updated_at: now_stamp(),
+                        theme: None,
+                        title: None,
+                        pending_succession: None,
+                        lead: None,
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(ensure_named_team(&store, &registry, "fno").unwrap(), true);
+
+        let rows = crate::state::load_registry(&registry).unwrap();
+        let successor = rows
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some("sess-successor"))
+            .unwrap();
+        assert_eq!(successor.name, "folio");
+        let dump = snapshot(&store).unwrap();
+        assert_eq!(dump["teams"]["fno"]["holder_session"], json!(null));
     }
 
     #[test]
