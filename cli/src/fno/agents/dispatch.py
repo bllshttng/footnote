@@ -6918,7 +6918,6 @@ def _deliver_live(
             origin=mail.origin,
             to_session=mail.to_session,
             subject=mail.subject,
-            header_only=os.environ.pop("_FNO_MAIL_HEADER_ONLY", None) == "1",
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets

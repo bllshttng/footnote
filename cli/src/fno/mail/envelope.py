@@ -142,6 +142,10 @@ def wrap_fno_mail(
     payload["mode"], payload["from"] = mode, payload.pop("from_")
     if payload.pop("footer"):
         payload["header_only"] = True
+    if os.environ.pop("_FNO_MAIL_HEADER_ONLY", None) == "1":
+        # The mail verb's one registered-agent send; the first wrap consumes
+        # it, so the turn is header only and the record wraps stay full.
+        payload["header_only"] = True
     resolved = (payload.pop("subject") or "").strip()
     if mode == "wrap":
         # The front's peeled --subject rides the render too, so the
