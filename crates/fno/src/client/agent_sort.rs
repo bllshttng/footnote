@@ -5,6 +5,13 @@
 
 use super::*;
 
+/// The persisted manual-order and pin lists the Manual column and the
+/// pin-first rank read. Borrowed per sort pass.
+pub(super) struct AgentOrder<'a> {
+    pub manual: &'a [String],
+    pub pinned: &'a [String],
+}
+
 #[allow(clippy::type_complexity)]
 pub(super) fn append_sorted_agent_group<'a>(
     out: &mut Vec<(DisplayRow<'a>, usize)>,
@@ -12,6 +19,7 @@ pub(super) fn append_sorted_agent_group<'a>(
     sort: AgentSort,
     needs: &HashMap<String, NeedKind>,
     now_secs: u64,
+    order: &AgentOrder<'_>,
 ) {
     let mut subtrees: Vec<(
         Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
@@ -34,10 +42,11 @@ pub(super) fn append_sorted_agent_group<'a>(
             needs.get(a.name.as_str()).copied(),
             needs.get(b.name.as_str()).copied(),
             now_secs,
+            order,
         )
     });
     for (items, _) in subtrees {
-        let items = sort_lineage_level(items, sort, needs, now_secs);
+        let items = sort_lineage_level(items, sort, needs, now_secs, order);
         for (rows, _) in items {
             out.extend(rows);
         }
@@ -54,6 +63,7 @@ fn sort_lineage_level<'a>(
     sort: AgentSort,
     needs: &HashMap<String, NeedKind>,
     now_secs: u64,
+    order: &AgentOrder<'_>,
 ) -> Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)> {
     let Some(root_depth) = items
         .first()
@@ -79,13 +89,14 @@ fn sort_lineage_level<'a>(
             needs.get(a[0].1.name.as_str()).copied(),
             needs.get(b[0].1.name.as_str()).copied(),
             now_secs,
+            order,
         )
     });
     // The root survived `drain(1..)` at index 0; the sorted child runs
     // append after it, so the level keeps its head and its order.
     items.extend(
         runs.into_iter()
-            .flat_map(|run| sort_lineage_level(run, sort, needs, now_secs)),
+            .flat_map(|run| sort_lineage_level(run, sort, needs, now_secs, order)),
     );
     items
 }
@@ -97,7 +108,11 @@ fn compare_agent_rows(
     need_a: Option<NeedKind>,
     need_b: Option<NeedKind>,
     now_secs: u64,
+    order: &AgentOrder<'_>,
 ) -> Ordering {
+    // Pin rank leads every column: a pinned row keeps its seat first. The
+    // name lists are tiny (tens of entries), so the linear scans stay cheap.
+    let pin = order_rank(&a.name, order.pinned).cmp(&order_rank(&b.name, order.pinned));
     let order = match sort.column {
         AgentSortColumn::Status => {
             let a_key = attention_key(a, need_a);
@@ -131,8 +146,20 @@ fn compare_agent_rows(
         AgentSortColumn::Age => {
             cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
         }
+        AgentSortColumn::Created => cmp_optional(a.started_at, b.started_at, sort.direction),
+        AgentSortColumn::Modified => cmp_optional(a.updated_at, b.updated_at, sort.direction),
+        AgentSortColumn::Manual => {
+            order_rank(&a.name, order.manual).cmp(&order_rank(&b.name, order.manual))
+        }
     };
-    order
+    pin.then(order)
+}
+
+/// A name's seat in a persisted order list, `usize::MAX` when absent - so
+/// listed names sort before unlisted ones and the unlisted keep name order
+/// stability behind them.
+fn order_rank(name: &str, list: &[String]) -> usize {
+    list.iter().position(|n| n == name).unwrap_or(usize::MAX)
 }
 
 fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {

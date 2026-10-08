@@ -706,3 +706,125 @@ fn client_agent_row_renders_dnd_as_presence_not_liveness() {
         "a manual hold keeps DND, riding identity without liveness: {manual_row:?}"
     );
 }
+
+#[test]
+fn group_by_axes_build_labelled_bands_with_rollups() {
+    // the non-workspace group axes emit labelled bands with rollup
+    // counts, members in layout order (the run sort orders inside each band),
+    // and blank separators between bands.
+    let mut lead = agent_row("lead", 4, Some(AgentBadge::Working), false);
+    lead.role_level = Some(2);
+    lead.harness_session_id = Some("sess-lead".into());
+    let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
+    w1.lineage_kind = Some("child".into());
+    w1.spawned_by_session = Some("sess-lead".into());
+    w1.cwd_base = Some("footnote".into());
+    let mut w2 = agent_row("w2", 6, Some(AgentBadge::Blocked), false);
+    w2.cwd_base = Some("other".into());
+    let mut v = wide_view(vec![lead, w1, w2]);
+
+    v.agent_group = AgentGroup::Team;
+    let rows = v.display_rows();
+    let labels: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Header { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["lead", "~ unteamed"],
+        "team bands in paint order"
+    );
+    let agents: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Agent(a) => Some(a.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(agents, vec!["lead", "w1", "w2"], "members under their lead");
+
+    v.agent_group = AgentGroup::Status;
+    let rows = v.display_rows();
+    let labels: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Header { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["Needs input", "Working"],
+        "status bands, empty Completed omitted"
+    );
+    let agents: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Agent(a) => Some(a.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        agents,
+        vec!["w2", "lead", "w1"],
+        "blocked first, working after"
+    );
+
+    v.agent_group = AgentGroup::Cwd;
+    let rows = v.display_rows();
+    let labels: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Header { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["(no cwd)", "footnote", "other"],
+        "cwd bands, unspecified cwd last-shown by layout order"
+    );
+}
+
+#[test]
+fn manual_sort_and_pins_reorder_the_run() {
+    // the Manual column reads the persisted reorder sequence, and a
+    // pinned row leads every column.
+    let mk = |name: &str, pane: u64| agent_row(name, pane, Some(AgentBadge::Working), false);
+    let mut v = wide_view(vec![mk("a", 4), mk("b", 5), mk("c", 6)]);
+    v.manual_order = vec!["c".into(), "a".into(), "b".into()];
+    v.agent_sort = AgentSort {
+        column: AgentSortColumn::Manual,
+        direction: SortDirection::Ascending,
+    };
+    let agents: Vec<&str> = v
+        .display_rows()
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Agent(a) => Some(a.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(agents, vec!["c", "a", "b"], "manual order holds");
+
+    // A pin outranks the column: c stays first even on the status sort.
+    let mut v = wide_view(vec![mk("a", 4), mk("b", 5), mk("c", 6)]);
+    v.pinned_agents = vec!["c".into()];
+    v.agent_sort = AgentSort::Attention;
+    let agents: Vec<&str> = v
+        .display_rows()
+        .iter()
+        .filter_map(|r| match r {
+            DisplayRow::Agent(a) => Some(a.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        agents.first(),
+        Some(&"c"),
+        "the pinned row leads the status sort: {agents:?}"
+    );
+}

@@ -248,6 +248,21 @@ mod tests {
             !label_of(&menu, "Remove hold"),
             "a DND row does not offer Remove hold"
         );
+        // the entry carries its in-menu key (`h`), drawn from the
+        // live menu table so a rebind moves the glyph with the dispatch.
+        let mut held = focus_agent(3);
+        held.dnd = true;
+        let menu = build_row_menu(&held, test_anchor());
+        let hint = menu
+            .popup
+            .rows
+            .iter()
+            .find_map(|r| match r {
+                PopupRow::Entry { label, hint, .. } if label == "Remove DND" => Some(hint.clone()),
+                _ => None,
+            })
+            .expect("the removal entry renders");
+        assert_eq!(hint, "h", "Remove hold / DND advertises its menu key");
         let plain = focus_agent(3);
         let menu = build_row_menu(&plain, test_anchor());
         assert!(

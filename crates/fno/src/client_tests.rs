@@ -2990,12 +2990,12 @@ fn caret_rows() {
     );
     let text = frame_text(&view.compose());
     let lines: Vec<&str> = text.lines().collect();
-    // (x-cd67 US1 owns row 0; US3 Blank spacer at line 1; the strip row
-    // owns line 0 since R15): the strip is line 0, squad 1 leads line 1,
-    // the spacer is line 2, squad 2 follows on line 3.
+    // The strip is line 0; the always-on card head leads line 1, squad 1
+    // line 2, spacer line 3, squad 2 line 4.
     assert!(lines[0].contains("A   M"), "{:?}", lines[0]);
-    assert!(lines[1].contains("▾*empty"), "{:?}", lines[1]);
-    assert!(lines[3].contains("▸ notes"), "no tab rows in between");
+    assert!(lines[1].contains("node \u{b7} PR"), "{:?}", lines[1]);
+    assert!(lines[2].contains("▾*empty"), "{:?}", lines[2]);
+    assert!(lines[4].contains("▸ notes"), "no tab rows in between");
 }
 
 // The Backlog section is binary in both directions: a card has no exited state,
@@ -9326,9 +9326,7 @@ async fn confirm_keys_enter_sends_stop_then_remove_agent() {
 
 #[test]
 fn display_rows_footer_keeps_empty_session_actionable() {
-    // AC3-EDGE: zero squads/agents/cards still yields the footer, so
-    // prefix+w always has a row to open on and Enter opens the create
-    // overlay.
+    // AC3-EDGE: zero squads/agents/cards still yields the footer, so prefix+w always has a row to open on and Enter opens create.
     let v = View::new(
         (30, 100),
         "main".into(),
@@ -9342,8 +9340,9 @@ fn display_rows_footer_keeps_empty_session_actionable() {
             focus_node: None,
         },
     );
-    assert_eq!(v.display_rows().len(), 1, "footer only");
-    assert!(matches!(v.row_action(0), Some(ChromeHit::OpenCreate)));
+    // Head is display row 0 (always shown); the footer follows.
+    assert_eq!(v.display_rows().len(), 2, "head + footer");
+    assert!(matches!(v.row_action(1), Some(ChromeHit::OpenCreate)));
 }
 
 #[tokio::test]

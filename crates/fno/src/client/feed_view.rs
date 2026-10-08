@@ -285,7 +285,10 @@ pub(crate) fn feed_panel_rows(
     // session (tail 8), lead, summary. The narrowest panel keeps time, kind,
     // node and summary; a wider one adds lead, harness, area, session back
     // in that drop order (AC11).
-    let mut used = 10usize + 17usize + 9usize; // marker+time, kind, node
+    // Date plus time needs a 15-column cell; below 48 columns the panel
+    // keeps the compact HH:MM so kind, node and a summary sliver survive.
+    let show_date = w >= 48;
+    let mut used = (if show_date { 16usize } else { 10usize }) + 17usize + 9usize;
     let fits = |needed: usize, used: &mut usize| {
         if *used + needed <= w {
             *used += needed;
@@ -348,7 +351,11 @@ pub(crate) fn feed_panel_rows(
                 let mut row = Vec::new();
                 cell(
                     &mut row,
-                    format!(" {marker} {:<5} ", short_ts(&item.ts)),
+                    format!(
+                        " {marker} {:<width$} ",
+                        short_ts(&item.ts, show_date),
+                        width = if show_date { 11 } else { 5 },
+                    ),
                     selected,
                     selected,
                 );
@@ -385,11 +392,9 @@ pub(crate) fn feed_panel_rows(
                     cell(&mut row, format!("{:<8} ", sid), false, false);
                 }
                 if show_lead {
-                    let lead = item
-                        .lead
-                        .as_deref()
-                        .or(item.owner.as_deref())
-                        .unwrap_or("-");
+                    // The lead column names a lead or nothing: the epic
+                    // rollup lives in the owner grouping, never here.
+                    let lead = item.lead.as_deref().unwrap_or("-");
                     let lead: String = lead.chars().take(12).collect();
                     cell(&mut row, format!("{:<12} ", lead), false, false);
                 }
@@ -587,22 +592,30 @@ pub(crate) fn widest_title(items: &[FeedItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// `HH:MM` in the operator's zone; an unparseable ts shows raw.
-pub(crate) fn short_ts_in<Tz: chrono::TimeZone>(ts: &str, tz: &Tz) -> String
+/// Compact local time in the operator's zone. With `with_date`, anything
+/// older than today carries its date (`MM-DD HH:MM`) so a scrolling feed
+/// never presents last week as this morning; without it, every row reads
+/// `HH:MM` (the narrow panel's budget). An unparseable ts shows raw.
+pub(crate) fn short_ts_in<Tz: chrono::TimeZone>(ts: &str, tz: &Tz, with_date: bool) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
     match chrono::DateTime::parse_from_rfc3339(ts) {
-        Ok(t) => tz
-            .from_utc_datetime(&t.naive_utc())
-            .format("%H:%M")
-            .to_string(),
+        Ok(t) => {
+            let local = tz.from_utc_datetime(&t.naive_utc());
+            let today = chrono::Utc::now().with_timezone(tz).date_naive();
+            let older = local.date_naive() != today;
+            match (with_date, older) {
+                (true, true) => local.format("%m-%d %H:%M").to_string(),
+                _ => local.format("%H:%M").to_string(),
+            }
+        }
         Err(_) => ts.to_string(),
     }
 }
 
-fn short_ts(ts: &str) -> String {
-    short_ts_in(ts, &chrono::Local)
+fn short_ts(ts: &str, with_date: bool) -> String {
+    short_ts_in(ts, &chrono::Local, with_date)
 }
 
 /// The feed panel's width until the operator drags its border once; persisted

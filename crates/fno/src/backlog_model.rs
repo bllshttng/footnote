@@ -1297,17 +1297,13 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
             };
             let command = match &act {
                 SessionAction::Attach => joined.map(|a| format!("fno agents attach {}", a.name)),
-                SessionAction::Resume => sid.map(|sid| {
-                    let mut cmd = format!("fno agents resume {sid} --cross-project");
-                    if let Some(cwd) = node_cwd.as_deref().filter(|c| !c.is_empty()) {
-                        cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
-                    }
-                    cmd
-                }),
+                SessionAction::Resume => {
+                    sid.map(|sid| session_command("resume", sid, node_cwd.as_deref()))
+                }
                 // A session the registry lacks: adopt is the reach that
                 // heals the row from the harness stores.
                 SessionAction::Dim(_) if joined.is_none() => {
-                    sid.map(|sid| format!("fno agents adopt {sid} --cross-project"))
+                    sid.map(|sid| session_command("adopt", sid, None))
                 }
                 SessionAction::Dim(_) => None,
             };
@@ -1682,6 +1678,76 @@ pub(crate) fn session_action(a: Option<&AgentRow>) -> SessionAction {
         return SessionAction::Resume;
     }
     SessionAction::Dim("not resumable".into())
+}
+
+/// What opening one session does, the ONE answer every surface shares (the
+/// provenance popup today; the backlog board, the questions overlay and
+/// the sideline are the surfaces wired to the same step next). Derived from
+/// [`session_action`], the node view's own action cell, so no surface grows
+/// a second opinion about what a session link can do.
+pub(crate) enum OpenSession {
+    /// Send these wire commands: focus a live pane, portal a live paneless
+    /// row, or the row-menu resume door.
+    Cmds(Vec<crate::proto::Command>),
+    /// No wire door: this shell line reaches the session (an adopt for a
+    /// session the registry lacks). Copyable; Enter repeats it.
+    Shell(String),
+    /// Nothing can open; the reason renders where the link would.
+    Dim(String),
+}
+
+/// The shell line that reaches a session by id: `fno agents <verb> <sid>
+/// --cross-project`, pinned to `cwd` when the caller knows one. The ONE
+/// spelling both [`SessionView`] and [`open_session`] print.
+fn session_command(verb: &str, sid: &str, cwd: Option<&str>) -> String {
+    let mut cmd = format!("fno agents {verb} {sid} --cross-project");
+    if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
+        cmd.push_str(&format!(" --cwd {}", sh_quote(cwd)));
+    }
+    cmd
+}
+
+/// Resolve the open-session gesture for `sid` against the roster. The
+/// shell lines carry no cwd pin: a resume relaunches in the row's recorded
+/// directory and an adopt heals the row in place.
+pub(crate) fn open_session(agents: &[AgentRow], sid: &str) -> OpenSession {
+    let joined = agents
+        .iter()
+        .find(|a| a.harness_session_id.as_deref() == Some(sid));
+    match session_action(joined) {
+        SessionAction::Attach => match joined.and_then(|a| a.pane_id) {
+            Some(pid) => OpenSession::Cmds(vec![crate::proto::Command::FocusPane(pid)]),
+            // A live row with no seat reaches a portal, the agent_hit door:
+            // the attach id when the harness gave one, the session id
+            // otherwise (Follow/Locate rows carry no attach id).
+            None => OpenSession::Cmds(vec![crate::proto::Command::AttachAgent {
+                // The portal resolver answers an attach id or the registry
+                // NAME, never a session id: the same fallback agent_hit
+                // makes for Follow/Locate rows.
+                id: joined
+                    .and_then(|a| a.attach_id.clone())
+                    .or_else(|| joined.map(|a| a.name.clone()))
+                    .unwrap_or_else(|| sid.to_string()),
+                placement: crate::proto::PanePlacement {
+                    portal: Some(0),
+                    ..crate::proto::PanePlacement::default()
+                },
+            }]),
+        },
+        // The row-menu resume path: the shared per-harness door whose claude
+        // plan runs adopt, then resume, then respawn; every other harness
+        // plain resumes.
+        SessionAction::Resume => OpenSession::Cmds(vec![crate::proto::Command::RespawnAgent {
+            name: joined.map(|a| a.name.clone()).unwrap_or_else(|| sid.into()),
+        }]),
+        // A session the registry lacks: adopt is the reach that heals the
+        // row from the harness stores - the SessionView command's own rule.
+        // No cwd pin: adopt heals the row in place (the resume relaunches).
+        SessionAction::Dim(_) if joined.is_none() => {
+            OpenSession::Shell(session_command("adopt", sid, None))
+        }
+        SessionAction::Dim(why) => OpenSession::Dim(why),
+    }
 }
 
 /// POSIX single-quote a path for the resume line, so a cwd with spaces or

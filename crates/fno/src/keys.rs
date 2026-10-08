@@ -481,6 +481,12 @@ pub enum Event {
     /// table - but the preference still persists, so the choice survives a
     /// round trip through slim.
     ToggleAgentSort,
+    /// Cycle the sideline agents view's group-by axis: workspace -> team ->
+    /// cwd -> status (prefix+G). Persisted like the density.
+    CycleAgentGroup,
+    /// Show or hide the card's `node · PR` header row (prefix+Y). The header
+    /// shows at every width now; this is the operator's off switch.
+    ToggleCardHead,
     /// Show/hide the status row (prefix+s). Client-local (US4, AC4-FR).
     ToggleStatus,
     /// Reveal each visible pane's stable id while the key repeats.
@@ -1367,6 +1373,20 @@ fn default_bindings() -> Vec<KeyBinding> {
             Global,
             "sort table columns",
         ),
+        b(
+            b'W',
+            "cycle-agent-group",
+            CycleAgentGroup,
+            Global,
+            "group agents by workspace, lead, cwd, or status",
+        ),
+        b(
+            b'Y',
+            "toggle-card-head",
+            ToggleCardHead,
+            Global,
+            "show or hide the card header row",
+        ),
         b(b's', "toggle-status", ToggleStatus, Global, "toggle status"),
         b(
             b'S',
@@ -1564,6 +1584,13 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "close-portal",
         key: b'c',
     },
+    // `h` lifts the hold the row wears (Remove hold / Remove DND - one
+    // entry, the mark names itself). Free in menu scope: the popup's own
+    // navigation runs on arrows, and `h` is no other menu byte.
+    MenuKeyBinding {
+        action: "release-hold",
+        key: b'h',
+    },
 ];
 
 /// The one resolver both menu-scope projections read: the binding registered
@@ -1695,6 +1722,21 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         (
             "X".into(),
             "reap all exited agents".into(),
+            KeySection::SidelineRows,
+        ),
+        (
+            "h".into(),
+            "remove hold / DND (inside the row menu)".into(),
+            KeySection::SidelineRows,
+        ),
+        (
+            ".".into(),
+            "pin or unpin the row (inside the row selector)".into(),
+            KeySection::SidelineRows,
+        ),
+        (
+            "shift+up/down".into(),
+            "reorder the row manually (inside the row selector)".into(),
             KeySection::SidelineRows,
         ),
         // Enter reaches portal 0; P opens the next free portal so a

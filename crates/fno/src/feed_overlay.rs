@@ -86,6 +86,11 @@ pub struct FeedItem {
     /// the owner spelling.
     #[serde(default)]
     pub lead: Option<String>,
+    /// True when `lead` names the LIVE team the projection resolved at
+    /// render time; false when it is the event-time holder's fallback. The
+    /// now-led-by link lights only on the live name.
+    #[serde(default)]
+    pub lead_current: bool,
     /// Which slice of the fleet the row is (mail, backlog, ship, agents,
     /// mux, fleet, ci), stamped by the projection.
     #[serde(default)]

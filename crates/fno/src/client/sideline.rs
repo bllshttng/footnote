@@ -58,6 +58,9 @@ fn head_label(column: AgentSortColumn) -> &'static str {
         AgentSortColumn::LastMessage => "last msg",
         AgentSortColumn::Pr => "pr",
         AgentSortColumn::Age => "age",
+        AgentSortColumn::Created => "created",
+        AgentSortColumn::Modified => "mod",
+        AgentSortColumn::Manual => "manual",
     }
 }
 
@@ -755,7 +758,7 @@ impl View {
                     cells[r * cols].c = CARD_EDGE_BAR;
                     cells[r * cols].fg = crate::theme::dim_fg(&self.theme);
                 }
-                self.paint_card_identity(cells, r, cols, text_w, drow);
+                self.paint_card_identity(cells, r, cols, text_w, drow, highlit);
                 if let DisplayRow::CardMetrics(a) = drow {
                     self.paint_card_activity(cells, r, cols, text_w, a, card_indent + depth * 2);
                 }
@@ -964,7 +967,14 @@ impl View {
                 let suffix_width = suffix.width();
                 let base_width = name_w.saturating_sub(prefix_width);
                 let label = if card {
-                    card_line::slug(a, &self.backlog)
+                    // Row 1 carries the role vocabulary: a lead's
+                    // people title after its slug (`sorrel · lead of mux`), a
+                    // worker's lead after its thread slug (`t-x0eee · sorrel`).
+                    let slug = card_line::slug(a, &self.backlog);
+                    match self.lead_label(a) {
+                        Some(role) => format!("{slug} \u{b7} {role}"),
+                        None => slug,
+                    }
                 } else {
                     a.name.clone()
                 };
@@ -1073,6 +1083,15 @@ impl View {
                         ),
                     ]
                 } else {
+                    // A sort with no column of its own (created, modified,
+                    // manual) still has to be visible: its label and arrow
+                    // ride the age cell, the rightmost sortable slot.
+                    let fallback = matches!(
+                        self.agent_sort.column,
+                        AgentSortColumn::Created
+                            | AgentSortColumn::Modified
+                            | AgentSortColumn::Manual
+                    );
                     head_sorts(false)
                         .into_iter()
                         .map(|sort| {
@@ -1081,6 +1100,13 @@ impl View {
                                 // No space before the age arrow: right-aligned or
                                 // spaced, it sits under the density button's two
                                 // overlay columns and the toggle reads dead.
+                                Some(AgentSortColumn::Age) if fallback => {
+                                    format!(
+                                        "{}{}",
+                                        head_label(self.agent_sort.column),
+                                        arrow(self.agent_sort.column)
+                                    )
+                                }
                                 Some(AgentSortColumn::Age) => {
                                     format!("age{}", arrow(AgentSortColumn::Age))
                                 }
@@ -1088,7 +1114,8 @@ impl View {
                                 Some(c) => format!("{} {}", head_label(c), arrow(c)),
                             };
                             let right = sort == Some(AgentSortColumn::Status)
-                                || sort == Some(AgentSortColumn::Pr);
+                                || sort == Some(AgentSortColumn::Pr)
+                                || sort == Some(AgentSortColumn::Age);
                             rt_cell(text, Color::Default, cell_flags::DIM, right)
                         })
                         .collect()
@@ -1157,6 +1184,13 @@ impl View {
                 }
             }
         }
+        // The card's `node · PR` caption rides at every width now,
+        // gated by the persisted toggle (prefix+Y). Extended inserts its own
+        // head before this runs, so the guard keeps one head, never two.
+        if self.show_card_head && !matches!(out_rows.first(), Some(DisplayRow::TableHead)) {
+            out_rows.insert(0, DisplayRow::TableHead);
+            out_depths.insert(0, 0);
+        }
         (out_rows, out_depths)
     }
 
@@ -1183,6 +1217,7 @@ impl View {
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint_card_identity(
         &self,
         cells: &mut [Cell],
@@ -1190,6 +1225,7 @@ impl View {
         cols: usize,
         text_w: usize,
         drow: &DisplayRow<'_>,
+        highlit: bool,
     ) {
         let DisplayRow::Agent(agent) = drow else {
             return;
@@ -1206,6 +1242,8 @@ impl View {
             )
         };
         let spans = card_line::identity_spans(agent, text_w);
+        // Read before the ifs below move the span fields.
+        let identity_free = spans.node.is_none() && spans.pr.is_none();
         // On the chosen card the accent fill owns the line: the node and PR
         // spans read in the fill's base tone (brand-on-brand text would
         // vanish - the composed contrast test pins this at 3:1).
@@ -1254,6 +1292,49 @@ impl View {
                 cell.flags = 0;
             }
         }
+        // A lead's row 1 right side is the team roll-up: the
+        // section header's per-state count strip, over the workers beneath
+        // it. It yields to node · PR the way every right-edge occupant does:
+        // a lead holding a PR keeps its PR there, no roll-up this paint.
+        if agent.role_level.is_some() && identity_free {
+            // The lead's own glyph carries its state on the left; the strip
+            // counts the workers beneath it, so the lead row is out.
+            let members = self
+                .layout
+                .agents
+                .iter()
+                .filter(|x| {
+                    !std::ptr::eq(*x, *agent)
+                        && super::agent_group::team_lead_name(self, x).as_deref()
+                            == Some(agent.name.as_str())
+                })
+                .map(|x| agent_lattice_state(x));
+            let rollup = section_rollup(members);
+            if !rollup.is_empty() {
+                let pairs: String = rollup
+                    .iter()
+                    .map(|(s, n)| format!("{}{n}", lattice_glyph(*s).0))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let w = crate::chrome::str_cols(&pairs);
+                let start = text_w.saturating_sub(w);
+                // The strip yields to the surface that owns the line: the
+                // chosen fill's or the band's own fg there, dim only at
+                // rest (the composed contrast test pins 3:1 on both).
+                let rollup_fg = if on_chosen_fill {
+                    fill_fg
+                } else if highlit {
+                    crate::theme::band_style(&self.theme).0
+                } else {
+                    crate::theme::dim_fg(&self.theme)
+                };
+                for (cell, ch) in line[start..].iter_mut().zip(pairs.chars()) {
+                    cell.c = ch;
+                    cell.fg = rollup_fg;
+                    cell.flags = 0;
+                }
+            }
+        }
     }
 
     /// The activity ramp's failure colors: each glyph cell wears ok, warn
@@ -1289,16 +1370,14 @@ impl View {
         }
     }
 
-    /// Line 2 keeps model, lead and cost left, with created and activity
-    /// ages right. Cost is served-only: a promoted lead never prices, and an
+    /// Line 2 keeps model and cost left, with created and activity ages
+    /// right. The lead name that used to ride this line moved to row 1
+    ///. Cost is served-only: a promoted lead never prices, and an
     /// unserved cost renders nothing rather than a placeholder.
     pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
         let mut segments: Vec<String> = Vec::new();
         if let Some(model) = card_line::model_label(a) {
             segments.push(model);
-        }
-        if let Some(k) = self.lead_label(a) {
-            segments.push(k);
         }
         if let Some(cents) = a.session_cost_cents {
             segments.push(row_meter::cost_cell(cents));
@@ -1377,11 +1456,11 @@ impl View {
         }
     }
 
-    /// The lead label for line 2 of a card: the teamed row itself shows its
-    /// people title, else its team scope; a worker walks its lineage to the
-    /// first teamed ancestor and shows [`team_display_name`]. No teamed
-    /// ancestor, or a lineage cycle (capped at one step per agent), labels
-    /// nothing.
+    /// The lead label for row 1 of a card: the teamed row itself
+    /// shows its people title, else its team scope; a worker walks its
+    /// lineage to the first teamed ancestor and shows [`team_display_name`].
+    /// No teamed ancestor, or a lineage cycle (capped at one step per agent),
+    /// labels nothing.
     pub(super) fn lead_label(&self, a: &AgentRow) -> Option<String> {
         if a.role_level.is_some() {
             if let Some(title) = a.role_title.as_deref().filter(|t| !t.is_empty()) {
@@ -1389,24 +1468,9 @@ impl View {
             }
             return a.role_scope.clone();
         }
-        let mut parent = lineage_parent(a);
-        let mut steps = 0;
-        while let Some(pid) = parent {
-            if steps >= self.layout.agents.len() {
-                return None;
-            }
-            let row = self
-                .layout
-                .agents
-                .iter()
-                .find(|r| r.harness_session_id.as_deref() == Some(pid))?;
-            if row.role_level.is_some() {
-                return Some(team_display_name(row).to_string());
-            }
-            parent = lineage_parent(row);
-            steps += 1;
-        }
-        None
+        // A worker's lead name: the same walk the group bands run, so a
+        // row-1 label and its band can never disagree on the lead.
+        super::agent_group::team_lead_name(self, a)
     }
 }
 
@@ -1419,12 +1483,6 @@ fn row_age(a: &AgentRow, now: u64) -> String {
         (None, Some(u)) => humanize_age(Some(now.saturating_sub(u))),
         (None, None) => humanize_age(None),
     }
-}
-
-/// The name a teamed row shows on its workers' cards. Today the lead's
-/// handle; the team's own name replaces it when the wire carries one.
-fn team_display_name(lead: &AgentRow) -> &str {
-    &lead.name
 }
 
 /// The one cwd-base noise rule, shared by both tag sites: a worktree named
