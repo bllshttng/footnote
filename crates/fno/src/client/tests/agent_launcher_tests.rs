@@ -345,7 +345,7 @@ fn the_line_edit_grammar_folds_and_edits() {
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1bb", &mut sock).await;
     });
-    assert_eq!(cur(&v), 3, "word left stays on the `cd` word");
+    assert_eq!(cur(&v), 0, "word left is flat: over the newline onto `ab`");
 
     // The paste section: a fresh draft, cursor parked mid-word.
     v.launcher.as_mut().unwrap().draft.message.clear();
