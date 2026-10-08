@@ -593,7 +593,7 @@ pub(crate) fn leaf_output(args: &[String]) -> (String, i32) {
     let state_root = crate::pr_watch::status::state_root(&cwd);
     let fno_binary =
         fno_binary.unwrap_or_else(|| crate::scrape::fno_py().to_string_lossy().into_owned());
-    let (msg, rc) = refresh_watcher(
+    let (msg, _rc) = refresh_watcher(
         &launch_agents_dir,
         &fno_binary,
         interval,

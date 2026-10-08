@@ -1217,7 +1217,7 @@ def test_inside_leg_round_trips_across_registry_boundary(
         write_registry,
     )
 
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path = tmp_path / "agents-fixture" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
     report = {
@@ -1299,7 +1299,7 @@ def test_screen_state_round_trips_across_registry_boundary(
         write_registry,
     )
 
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path = tmp_path / "agents-fixture" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
     verdict = {
@@ -1360,7 +1360,7 @@ def test_stop_record_round_trips_across_registry_boundary(
         write_registry,
     )
 
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path = tmp_path / "agents-fixture" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
     stop = {"by": "stop-verb", "at": "2026-09-15T00:00:00Z", "reason": None}
@@ -1446,7 +1446,7 @@ def test_us2_first_write_upgrades_on_disk_to_current(tmp_path: Path, monkeypatch
     _as_deployed(monkeypatch)
     from fno.agents.registry import SCHEMA_VERSION, load_registry, write_registry
 
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path = tmp_path / "agents-fixture" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
         json.dumps(
@@ -2278,7 +2278,7 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     _as_deployed(monkeypatch)
     from fno.agents.registry import load_registry, write_registry
 
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path = tmp_path / "agents-fixture" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
         json.dumps(
