@@ -31,6 +31,18 @@ from tests._native_door import run_native
 from fno.paths_testing import use_tmpdir
 
 
+@pytest.fixture(autouse=True)
+def _graphless_seed_resolver(monkeypatch):
+    """The seed-word gate fails open on an unreadable graph; pin that here so
+    a composed seed never depends on the ambient store: this suite pins the
+    `--node` seam itself and reads real row files for its assertions."""
+
+    def _unreadable(path=None, **_):
+        raise ValueError("graph store unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
+
+
 NODE = "x-4ab1"
 FULL_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
