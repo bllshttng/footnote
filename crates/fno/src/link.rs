@@ -833,7 +833,7 @@ mod tests {
         }
         // A second occurrence on one line answers from the skip offset.
         let line = "fmail-0123456789ab and fmail-fedcba987654";
-        let (start, end, id) = find_fmail_token(line, 0).expect("first");
+        let (start, end, _id) = find_fmail_token(line, 0).expect("first");
         assert_eq!((start, end), (0, 18));
         let (start, end, id) = find_fmail_token(line, end).expect("second");
         assert_eq!(id, "fmail-fedcba987654");
@@ -852,7 +852,7 @@ mod tests {
             Some((3, 8, "nemo".into()))
         );
         let two = "@aa and @bb";
-        let (start, end, name) = find_handle_token(two, 0).expect("first");
+        let (_start, end, name) = find_handle_token(two, 0).expect("first");
         assert_eq!(name, "aa");
         assert_eq!(find_handle_token(two, end), Some((8, 11, "bb".into())));
         // The char before @ continues a word: emails and mid-word @s never match.
