@@ -1575,14 +1575,7 @@ def install(
 
 
 @cli.command()
-def refresh(
-    force_bounce: bool = typer.Option(
-        False,
-        "--force-bounce",
-        help="Bounce even when the rendered plist is unchanged (doctor --fix).",
-    ),
-    caller: str = typer.Option("refresh", "--caller", help="Name the bounce receipt's sender."),
-) -> None:
+def refresh() -> None:
     """Re-render the plist onto the current binary and bounce the watcher.
 
     Non-interactive, no confirm prompt: this is the tail of ``fno doctor update`` (so
@@ -1590,13 +1583,13 @@ def refresh(
     and is safe to run by hand. A no-op when ``pr_watch.enabled`` is false, so
     an install that does not use the watcher gets nothing. Never fails loud:
     the update chain calls it best-effort and a refresh failure must not fail
-    the update.
+    the update. Force and caller identity (doctor --fix) are verb-level
+    flags on ``fno-agents pr-watch refresh`` itself; a new flag is a new
+    verb and belongs in crates.
     """
     from fno.pr.cli import _forward_to_binary
 
-    argv = ["refresh", "--fno-binary", _resolve_fno_binary(), "--caller", caller]
-    if force_bounce:
-        argv.append("--force-bounce")
+    argv = ["refresh", "--fno-binary", _resolve_fno_binary(), "--caller", "refresh"]
     _forward_to_binary("pr-watch", argv)
 
 
