@@ -366,7 +366,8 @@ fn ordinary_acquire(
     };
     match outcome {
         AcquireOutcome::Acquired(claim) => {
-            if key.starts_with("node:") {
+            // A launch-window claim is not work: the worker's handover opens the row.
+            if key.starts_with("node:") && !a.holder.starts_with(HANDOVER_HOLDER_PREFIX) {
                 stamp_do_on_acquire(key, &claim, &a.holder);
             }
             if a.json_output {
