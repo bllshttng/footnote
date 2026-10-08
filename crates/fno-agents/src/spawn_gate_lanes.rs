@@ -1213,6 +1213,64 @@ fn chrono_like_iso(epoch_s: f64) -> String {
 }
 
 #[cfg(test)]
+/// The lead-share axis: one lead holding more than its share of the
+/// effective cap refuses its own spawn, naming the rows it can stop. Lives
+/// beside `share_reading`, the count it refuses on.
+pub(crate) fn check_lead_share(
+    registry_path: &Path,
+    learned: &crate::capacity::Effective,
+    caller_session: Option<&str>,
+    _axes_read: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), Refusal> {
+    let cap = learned.cap;
+    let Some(caller) = caller_session.filter(|c| !c.is_empty()) else {
+        return Ok(());
+    };
+    let reading = spawn_gate_lanes::share_reading(registry_path, cap, Some(caller));
+    let (Some(leads), Some(share), Some(held)) = (reading.leads, reading.share, reading.held)
+    else {
+        // An unreadable registry leaves every count unknown; nothing to
+        // enforce and no zero to fail open on.
+        return Ok(());
+    };
+    if held < share {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "spawn-gate: lead {} holds {held} of {} across {leads} leads (share {share}); \
+         refusing to spawn -- waiting cannot help while your own workers hold the share \
+         (--force to bypass)",
+        &caller[..caller.len().min(8)],
+        learned.clause()
+    );
+    // The held names read before the unattributed bucket: they are the rows
+    // the caller can stop, where the bucket names nobody.
+    msg.push_str(&crate::spawn_gate::held_rows_suffix(reading.held_rows.as_ref()));
+    if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
+        let shown: Vec<String> = rows.iter().take(5).cloned().collect();
+        msg.push_str(&format!(
+            "; {} live row(s) name nobody and sit in the unattributed bucket ({}{})",
+            rows.len(),
+            shown.join(", "),
+            if rows.len() > 5 { "..." } else { "" }
+        ));
+    }
+    eprintln!("{msg}");
+    Err(crate::spawn_gate::Refusal::code(crate::spawn_gate::EXIT_LEAD_SHARE)
+        .ev("reason", serde_json::json!("lead_share"))
+        .ev("lead", serde_json::json!(caller))
+        .ev("held", serde_json::json!(held))
+        .ev("share", serde_json::json!(share))
+        .ev("max_live", serde_json::json!(cap))
+        .ev("leads", serde_json::json!(leads))
+        .ev(
+            "held_rows",
+            serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
+        ))
+}
+
+// ---------------------------------------------------------------------------
+
 mod tests {
     use super::*;
 
