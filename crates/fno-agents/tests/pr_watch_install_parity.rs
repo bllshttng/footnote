@@ -266,6 +266,13 @@ fn rust_leg(dir: &Path, case: &Case) -> Golden {
     for arg in case_args(case) {
         cmd.arg(arg);
     }
+    // The Python leaf always passes the resolved binary; the stub path is the
+    // fixture's stand-in for it, the same value FNO_TEST_FNO_BINARY hands the
+    // oracle.
+    cmd.args([
+        "--fno-binary",
+        &dir.join("stub").join("fno-py").display().to_string(),
+    ]);
     for (k, v) in pin_env(dir, case) {
         cmd.env(k, v);
     }
