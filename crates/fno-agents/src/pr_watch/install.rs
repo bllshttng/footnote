@@ -412,15 +412,12 @@ pub(crate) fn retire_legacy_postmerge_agents(launch_agents_dir: &Path) -> Vec<St
 }
 
 /// `com.fno.postmerge*.plist` without a glob crate: the prefix, the suffix,
-/// and at least one char between them.
+/// and `*` matching zero or more characters, the way Python's glob did.
 fn glob_match_postmerge(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".plist") else {
         return false;
     };
-    match stem.strip_prefix("com.fno.postmerge") {
-        Some(rest) => !rest.is_empty(),
-        None => false,
-    }
+    stem.strip_prefix("com.fno.postmerge").is_some()
 }
 
 /// The `Heal:` readout line the install leaf prints last: unarmed answers

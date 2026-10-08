@@ -271,7 +271,12 @@ fn rust_leg(dir: &Path, case: &Case) -> Golden {
     }
     cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.current_dir(dir);
+    // All three handles piped: wait_with_output captures only piped handles,
+    // and an inherited stdout would land the verb's bytes on the test console
+    // with an empty Output.stdout.
     cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("pr-watch install runs");
     if let Some(answer) = case.stdin {
         use std::io::Write;
@@ -321,7 +326,10 @@ fn python_oracle(dir: &Path, case: &Case) -> Golden {
     }
     cmd.env("PYTHONPATH", pythonpath());
     cmd.current_dir(dir);
+    // Same three-pipe rule as the Rust leg: unpiped handles read as empty.
     cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("oracle runs");
     if let Some(answer) = case.stdin {
         use std::io::Write;
