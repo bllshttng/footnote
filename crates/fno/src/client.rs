@@ -9791,6 +9791,9 @@ async fn aux_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
+            // No split cells on a settings page either: the folded
+            // Shift+arrow is inert, never a dismissal.
+            ModalKey::ShiftArrow(_) => {}
             ModalKey::PageUp => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
