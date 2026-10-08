@@ -1077,6 +1077,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
+ "futures-util",
  "libc",
  "magic-wormhole",
  "portable-pty",
