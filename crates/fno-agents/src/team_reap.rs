@@ -1098,6 +1098,13 @@ mod tests {
     #[test]
     fn production_sweep_reverts_an_unbound_successor_and_journals_the_receipt() {
         use serde_json::json;
+        // The env mutation rides the same lock the settle tests hold: a
+        // parallel FNO_AGENTS_HOME re-point mid-sweep otherwise lets another
+        // test's fleet announce land in this test's journal (a second
+        // team_succession_announced row, failing the exactly-one assert).
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_home = std::env::var("FNO_AGENTS_HOME").ok();
         let seeded = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_AGENTS_HOME", seeded.path());
