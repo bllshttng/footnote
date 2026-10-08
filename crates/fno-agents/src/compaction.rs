@@ -273,6 +273,20 @@ fn visit_boundaries(transcript: &Path, mut visit: impl FnMut(i64, &str)) -> Resu
     Ok(())
 }
 
+/// The newest boundary's epoch, for readers that compare positions rather
+/// than render timestamps. An unreadable transcript reads as "no boundary
+/// observed" - the caller decides whether that means teach or stay silent.
+pub fn newest_boundary_epoch(transcript: &Path) -> Option<i64> {
+    let mut newest: Option<i64> = None;
+    visit_boundaries(transcript, |epoch, _| {
+        if newest.is_none_or(|last| epoch > last) {
+            newest = Some(epoch);
+        }
+    })
+    .ok()?;
+    newest
+}
+
 /// The newest boundary in a transcript with no stamp to compare against.
 fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
     let mut newest: Option<(i64, String)> = None;

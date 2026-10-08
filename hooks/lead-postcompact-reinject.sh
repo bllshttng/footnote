@@ -303,6 +303,22 @@ if [[ -n "$LEAD_MANIFEST" && -f "$LEAD_MANIFEST" ]]; then
 The /loop heartbeat and stop arm survive a compact: verify the loop receipt. The daemon mails this team when a covered PR settles green or its node closes (\`lead_settle\`), so no watch is armed or re-armed. Re-read the lead skill's Arm the beat section on a wake; mail, board, team liveness, main CI, capacity and \`fno agents org verdict\` are demand reads, not beats. Claude's self-injected command is \`/loop <lead.checkin_interval> <lead.checkin_text>\`. The check-in beat is one verb: \`fno agents org checkin\` gathers the readings, prints them, diffs the last beat, and journals \`lead_checkin\` itself; then act on the printout. Levers in order: mail the stalled worker, \`fno backlog encounter <id> --evidence\` and \`fno backlog update <id> --priority\` (rank is the user's pin and refuses you), undefer or supersede, ask the user. Dispatch only on a red dispatching arm, journaled as \`lead_dispatch_exception\`."
     fi
 fi
+# The read-verb lesson rides the post-compact brief: a compaction boundary
+# newer than the taught one re-teaches it once, and the door prints nothing
+# when the session is current. Best-effort - a stale or absent binary
+# teaches nothing and never blocks the brief.
+if [[ -r "$SOURCE_ROOT/hooks/lib/agents-bin.sh" ]]; then
+    # shellcheck source=../hooks/lib/agents-bin.sh
+    source "$SOURCE_ROOT/hooks/lib/agents-bin.sh"
+    TEACH_BIN="$(fno_agents_bin "$SOURCE_ROOT")"
+    if [[ -n "$TEACH_BIN" && -x "$TEACH_BIN" && -n "$SID" ]]; then
+        TEACH="$("$TEACH_BIN" mail-teach --session "$SID" --mark 2>/dev/null || true)"
+        [[ -n "$TEACH" ]] && CONTEXT="${CONTEXT}
+
+$TEACH"
+    fi
+fi
+
 postcompact_emit "$(postcompact_carrier "$SOURCE")" "$CONTEXT"
 
 exit 0

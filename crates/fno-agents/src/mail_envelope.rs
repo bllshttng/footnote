@@ -303,8 +303,29 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let third = crate::mail_header::header_subject(subject, body_text);
     let header = crate::mail_header::render_header(form, sender, msg_id, &third);
     // Header-only delivery: the turn is the header line alone, and the body
-    // waits on the bus.
+    // waits on the bus. The live turn is also the teach moment for a harness
+    // with no hooks: a session's first header, or its first header after a
+    // newer compaction boundary, carries the read-verb lesson once. The
+    // lesson is best-effort - a state write never fails a delivery. The
+    // stamp lives beside THIS render's registry, so a due check never reads
+    // the ambient env: one root per store, and a test's tmp registry is its
+    // own world.
     if header_only_requested(input) {
+        let recipient = to_session
+            .map(str::to_string)
+            .or_else(|| to_row.and_then(|row| row.harness_session_id.clone()));
+        if let Some(recipient) = recipient {
+            let due = crate::mail_teach::teach_if_due_at(
+                registry_path.parent().unwrap_or(Path::new("/")),
+                &recipient,
+                None,
+                registry.as_ref(),
+                true,
+            );
+            if due {
+                return Ok(format!("{header}\n{}", crate::chats::teach_line()));
+            }
+        }
         return Ok(header);
     }
     let delivered = crate::mail_header::delivered_body(subject, body_text);
@@ -698,5 +719,72 @@ mod tests {
             "envelope render waited for the registry lock"
         );
         assert_eq!(rendered, "`@folio \u{b7} msg-9 \u{b7} hello`\nhello");
+    }
+
+    #[test]
+    fn hookless_lifecycle_teaches_once_per_session_and_again_after_compaction() {
+        // The node's contract, end to end: a hookless-harness session's
+        // first header-only turn carries the read-verb lesson (its start),
+        // plain deliveries stay header-only, and a simulated compaction
+        // makes exactly the next header carry the lesson once again. The
+        // teach stamp lives beside the render's own registry, so no env pin
+        // is involved and no sibling test can see this tmp world.
+        let pin = tempfile::TempDir::new().unwrap();
+        // The first render imports registry.json into the store and retires
+        // the file into a fence directory, so the registry is written EXACTLY
+        // once, with transcript_path set from the start. The simulated
+        // compaction rewrites the TRANSCRIPT - a plain file the row already
+        // points at - from boundaryless to carrying a boundary.
+        let transcript = pin.path().join("pi-transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-08T15:00:00Z\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pin.path().join("registry.json"),
+            format!(
+                "{{\"schema_version\":{}, \"agents\":[{{\"name\":\"folio\", \"short_id\":\"folio-short\", \"status\":\"live\", \"harness\":\"claude\", \"cwd\":\"/repo\", \
+                 \"harness_session_id\":\"7c9e6679-7423-40de-944b-e07fc1f90ae7\", \"created_at\":\"2026-09-23T20:00:00Z\"}}, \
+                 {{\"name\":\"quill\", \"short_id\":\"quill-short\", \"status\":\"busy\", \"harness\":\"pi\", \"cwd\":\"/repo\", \
+                 \"harness_session_id\":\"pi-session-1\", \"created_at\":\"2026-09-23T20:00:00Z\", \
+                 \"transcript_path\":\"{}\"}}]}}",
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                transcript.display()
+            ),
+        )
+        .unwrap();
+
+        let header_only = |id: &str| {
+            render_at(
+                &json!({
+                    "mode":"wrap", "body":"standup notes", "from":"folio-short",
+                    "to":"quill-short", "to_session":"pi-session-1", "id": id,
+                    "header_only":true
+                }),
+                &pin.path().join("registry.json"),
+            )
+        };
+        let two_lines = |text: &str| {
+            assert_eq!(text.lines().count(), 2, "{text}");
+            assert!(
+                text.lines().nth(1).unwrap().contains("fno agents mail"),
+                "{text}"
+            );
+        };
+
+        two_lines(&header_only("msg-1").unwrap());
+        assert_eq!(header_only("msg-2").unwrap().lines().count(), 1);
+        let compacted_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"2026-10-08T15:00:00Z\"}}\n\
+                 {{\"type\":\"summary\",\"subtype\":\"compact_boundary\",\"timestamp\":\"{compacted_at}\"}}\n"
+            ),
+        )
+        .unwrap();
+        two_lines(&header_only("msg-3").unwrap());
+        assert_eq!(header_only("msg-4").unwrap().lines().count(), 1);
     }
 }

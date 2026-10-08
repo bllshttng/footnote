@@ -25,3 +25,16 @@ OUTPUT=$(hook_run_optional fno agents mail drain-self 2>/dev/null || true)
 [[ -z "$OUTPUT" ]] && exit 0
 
 printf '%s\n' "$OUTPUT"
+
+# The read-verb lesson rides the drain, once per session and again after
+# each compaction: the door prints the line only when the session's teach
+# state says due, and --mark stamps it in the same breath. Best-effort - a
+# stale or absent binary teaches nothing and never blocks session start.
+if [[ -r "$HOOK_DIR/lib/agents-bin.sh" ]]; then
+    # shellcheck source=../hooks/lib/agents-bin.sh
+    source "$HOOK_DIR/lib/agents-bin.sh"
+    TEACH_BIN="$(fno_agents_bin "$HOOK_DIR/..")"
+    if [[ -n "$TEACH_BIN" && -x "$TEACH_BIN" ]]; then
+        hook_run_optional "$TEACH_BIN" mail-teach --self --mark 2>/dev/null || true
+    fi
+fi
