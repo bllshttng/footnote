@@ -890,6 +890,45 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     assert payload == []
 
 
+def test_plain_send_delivers_read_line_on_a_hookless_harness(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    # x-5d19: a plain peer send (no --kind) delivers the header plus the one
+    # read line; the receiver pulls the body from the bus with
+    # `fno agents mail show <id>`. The bus row keeps the full body, so the id
+    # the footer names resolves to something worth reading.
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    injected: list[str] = []
+
+    def _capture(recipient, text, **_k):
+        injected.append(text)
+        return True
+
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _capture)
+
+    sent = runner.invoke(
+        app,
+        ["mail", "send", "9a063cd3", "secret body words", "--from-name", "web"],
+    )
+    assert sent.exit_code == 0, sent.output
+    assert len(injected) == 1
+    # Without a subject the header's third field is the body's first sentence
+    # (AC10-HP); the turn is still exactly header plus the read line.
+    lines = injected[0].splitlines()
+    assert len(lines) == 2, injected[0]
+    header, footer = lines
+    assert header.startswith("`@web · fmail-")
+    msg_id = header.split(" · ")[1]
+    assert footer == f"Read: fno agents mail show {msg_id}"
+
+    # The bus copy the id points at holds the full body.
+    from fno.bus.log import iter_messages
+
+    row = next(m for m in iter_messages() if m.id == msg_id)
+    assert "secret body words" in row.body
+
+
 # ---------------------------------------------------------------------------
 # a2a US7b / AC3-HP: the mux PaneSend live rung. A resolved session that is
 # mux-hosted (fno owns its PTY) delivers live through its pane instead of
@@ -953,7 +992,11 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     assert "delivered (hosted)" in sent.output
     assert "queued (durable)" not in sent.output
     assert len(calls) == 1
-    assert "ping" in calls[0][1]  # the wrapped <fno_mail> envelope, not raw text
+    # The live turn is the footer delivery (x-5d19): exactly the header line
+    # and the one read line; the body stays on the bus.
+    lines = calls[0][1].splitlines()
+    assert len(lines) == 2, calls[0][1]
+    assert lines[1] == f"Read: fno agents mail show {calls[0][1].split(' · ')[1]}"
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])

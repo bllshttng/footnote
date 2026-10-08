@@ -149,7 +149,11 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
 
     _e, text, kwargs = sent[0]
     assert text.splitlines()[0].startswith("`@lead · fmail-"), text[:80]
-    assert "status?" in text
+    # The typed turn is the footer delivery (x-5d19): exactly the header
+    # line and the one read line; the body stays on the bus copy.
+    lines = text.splitlines()
+    assert len(lines) == 2, text
+    assert lines[1] == f"Read: fno agents mail show {text.split(' · ')[1]}"
     # The wrappedness marker is the delivered header line; the
     # retired peer-mail footer no longer renders.
     assert "peer mail" not in text

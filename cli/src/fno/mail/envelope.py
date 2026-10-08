@@ -129,15 +129,23 @@ def wrap_fno_mail(
     harness: Optional[str] = None,
     held_release: bool = False,
     subject: Optional[str] = None,
+    footer: bool = False,
 ) -> str:
     """Render a normal envelope or pass through a validated held-release turn.
 
     ``subject`` is the sender's --subject; an explicit value wins
     over the peeled-env fallback so a caller that resolved the flag itself is
-    never overridden by ambient state."""
+    never overridden by ambient state.
+
+    ``footer`` delivers header plus the ``Read: fno agents mail show <id>``
+    line instead of the body (x-5d19): the receiver pulls the body from the
+    bus, so a live turn spends one line on the mail. The bus copy the caller
+    stores keeps the full body either way."""
     payload = locals().copy()
     mode = "held-release" if payload.pop("held_release") else "wrap"
     payload["mode"], payload["from"] = mode, payload.pop("from_")
+    if payload.pop("footer"):
+        payload["footer"] = True
     resolved = (payload.pop("subject") or "").strip()
     if mode == "wrap":
         # The front's peeled --subject rides the render too, so the

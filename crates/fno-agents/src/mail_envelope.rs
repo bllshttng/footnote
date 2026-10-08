@@ -109,6 +109,14 @@ fn fence_requested(input: &Value) -> bool {
         || input.get("fence").and_then(Value::as_bool) == Some(true)
 }
 
+/// A `footer: true` payload delivers header plus the one read line instead of
+/// the body (x-5d19): the receiver pulls the body from the bus with
+/// `fno agents mail show <id>`, so the delivered turn spends one line, not
+/// the whole message. The bus copy keeps the full body either way.
+fn footer_requested(input: &Value) -> bool {
+    input.get("footer").and_then(Value::as_bool) == Some(true)
+}
+
 /// The fence for `body`: a backtick run one longer than the longest run the
 /// body holds, minimum three, so no body line can close it.
 fn fence_for(body: &str) -> String {
@@ -295,7 +303,13 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let body_text = wrapping.as_deref().unwrap_or("");
     let third = crate::mail_header::header_subject(subject, body_text);
     let header = crate::mail_header::render_header(form, sender, msg_id, &third);
-    let delivered = crate::mail_header::delivered_body(subject, body_text);
+    let delivered = match (footer_requested(input), wrapping) {
+        // Footer delivery: the turn carries where the body lives, not the
+        // body. Tag mode already has no body to point at, so it stays header
+        // only.
+        (true, Some(_)) => format!("Read: fno agents mail show {msg_id}"),
+        _ => crate::mail_header::delivered_body(subject, body_text),
+    };
     Ok(match wrapping {
         Some(_) if fence_requested(input) => {
             let fence = fence_for(&delivered);
@@ -505,6 +519,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
+        // Footer delivery (x-5d19): the turn carries the header and the one
+        // read line; the body stays on the bus for `fno agents mail show`.
+        let footer = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate. Details follow.",
+                "from":"folio-short", "id":"fmail-0123456789ab", "footer":true
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            footer,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\nRead: fno agents mail show fmail-0123456789ab"
+        );
+        // The footer fences too, on the pane lane's request.
+        let footer_fenced = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
+                "id":"fmail-0123456789ab", "footer":true, "fence":true
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            footer_fenced,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`\n```fno-pane\nRead: fno agents mail show fmail-0123456789ab\n```"
+        );
+        // No body: tag mode ignores the footer, or the read line would point
+        // at an empty message.
+        let footer_tag = render_at(
+            &json!({"mode":"tag", "from":"folio-short", "id":"msg-6", "footer":true}),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(footer_tag, "`@folio \u{b7} msg-6 \u{b7} (empty)`");
         // The pane lane's fenced delivery (payload `fence`, or FNO_MAIL_FENCE=1
         // on the pane-prepare child): the body rides a backtick run one longer
         // than any run it holds; the header line stays readable.

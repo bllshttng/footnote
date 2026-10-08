@@ -2109,7 +2109,7 @@ def _name_lane_send(
     # `from_session` the full id a recipient can answer when two workers share a
     # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
-    def _envelope(to_session: Optional[str] = None) -> str:
+    def _envelope(to_session: Optional[str] = None, footer: bool = False) -> str:
         return wrap_fno_mail(
             message,
             from_=sender,
@@ -2121,11 +2121,17 @@ def _name_lane_send(
             origin=origin,
             to_session=to_session,
             subject=subject,
+            footer=footer,
         )
 
     # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
+    # A live turn delivers header plus the one read line (x-5d19); the
+    # receiver pulls the body from the bus with `fno agents mail show <id>`.
+    # The bus record and the durable floor keep the full body, so the id
+    # always resolves to something worth reading.
+    turn_envelope = _envelope(recipient_session, footer=True)
 
     # --force (node): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
@@ -2160,7 +2166,7 @@ def _name_lane_send(
             )
             raise typer.Exit(code=1)
         _forced_pane_send(
-            wrapped,
+            turn_envelope,
             entry=entry,
             recipient=recipient,
             sender=sender,
@@ -2216,7 +2222,7 @@ def _name_lane_send(
             if probe_agent == "codex":
                 _codex_probe_reason: list = []
                 injected = _mail_inject_codex(
-                    probe_target, wrapped, reason_out=_codex_probe_reason
+                    probe_target, turn_envelope, reason_out=_codex_probe_reason
                 )
                 if injected:
                     to_harness = "codex"
@@ -2224,7 +2230,7 @@ def _name_lane_send(
                     live_reason = ";".join(_codex_probe_reason) or None
             else:
                 _probe_reason: list = []
-                injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
+                injected = _mail_inject_claude(probe_target, turn_envelope, reason_out=_probe_reason)
                 if injected:
                     to_harness = "claude"
                 if not injected:
@@ -2232,7 +2238,7 @@ def _name_lane_send(
                 if not injected and probe_agent is None:
                     _both_reason: list = []
                     injected = _mail_inject_codex(
-                        probe_target, wrapped, reason_out=_both_reason
+                        probe_target, turn_envelope, reason_out=_both_reason
                     )
                     if injected:
                         to_harness = "codex"
@@ -2260,7 +2266,7 @@ def _name_lane_send(
                     pass
                 else:
                     injected, woken_as, wake_lane = _wake_rung(
-                        token_reachable, wrapped
+                        token_reachable, turn_envelope
                     )
                     if wake_lane:
                         lanes.append(wake_lane)
@@ -2284,14 +2290,14 @@ def _name_lane_send(
         if provider == "claude":
             _resolved_reason: list = []
             injected = _mail_inject_claude(
-                resolved.session_id, wrapped, reason_out=_resolved_reason
+                resolved.session_id, turn_envelope, reason_out=_resolved_reason
             )
             if not injected:
                 live_reason = ";".join(_resolved_reason) or None
         elif provider == "codex":
             _resolved_codex_reason: list = []
             injected = _mail_inject_codex(
-                resolved.session_id, wrapped, reason_out=_resolved_codex_reason
+                resolved.session_id, turn_envelope, reason_out=_resolved_codex_reason
             )
             if not injected:
                 live_reason = ";".join(_resolved_codex_reason) or None
@@ -2305,7 +2311,7 @@ def _name_lane_send(
             _resolved_keeper_reason: list = []
             injected = _mail_inject_keeper(
                 resolved.session_id,
-                wrapped,
+                turn_envelope,
                 harness=lane_harness,
                 reason_out=_resolved_keeper_reason,
             )
@@ -2335,7 +2341,7 @@ def _name_lane_send(
                     # Name the failure values, never bool(): bool("unconfirmed")
                     # would read an unclassified frame as delivered.
                     delivered = _mux_pane_send(
-                        entry, wrapped, guarded=False, confirm=True
+                        entry, turn_envelope, guarded=False, confirm=True
                     )
                     injected = delivered not in (False, "unconfirmed")
 
