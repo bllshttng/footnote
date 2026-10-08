@@ -128,8 +128,8 @@ pub fn write_if_absent(origin: &SessionOrigin) -> std::io::Result<bool> {
     Ok(written)
 }
 
-// ponytail: prune runs only on write in the same folder; a folder with no new
-// sessions keeps its stale records.
+// Prune runs only here, on a write into the folder just written: a folder
+// with no new sessions keeps its stale records.
 fn prune_beside(dir: &Path, keep: &str) {
     let mine = this_machine();
     if mine.is_empty() {

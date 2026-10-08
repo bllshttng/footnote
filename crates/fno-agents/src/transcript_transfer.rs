@@ -193,7 +193,7 @@ fn codex_home_sessions() -> Option<PathBuf> {
     codex_store::codex_home().map(|home| home.join("sessions"))
 }
 
-fn run_send(rest: &[String]) -> i32 {
+async fn run_send(rest: &[String]) -> i32 {
     let mut it = crate::client_verbs::expand_eq(rest).into_iter();
     let mut sid = String::new();
     let mut file_dest: Option<PathBuf> = None;
@@ -264,8 +264,7 @@ fn run_send(rest: &[String]) -> i32 {
     }
     let send_name = format!("{sid}.fno-session");
     let size = envelope.len() as u64;
-    let rt = tokio::runtime::Handle::current();
-    let result = rt.block_on(async move {
+    let sent = async move {
         let mailbox = MailboxConnection::create(transfer::APP_CONFIG, 2)
             .await
             .map_err(|e| e.to_string())?;
@@ -288,8 +287,8 @@ fn run_send(rest: &[String]) -> i32 {
         )
         .await
         .map_err(|e| e.to_string())
-    });
-    match result {
+    };
+    match sent.await {
         Ok(()) => {
             println!("Sent.");
             0
@@ -301,7 +300,7 @@ fn run_send(rest: &[String]) -> i32 {
     }
 }
 
-fn run_receive(rest: &[String]) -> i32 {
+async fn run_receive(rest: &[String]) -> i32 {
     let arg = crate::client_verbs::expand_eq(rest).join(" ");
     if arg.is_empty() {
         eprintln!("transcript receive: a wormhole code or a bundle path is required");
@@ -326,8 +325,7 @@ fn run_receive(rest: &[String]) -> i32 {
                 return 2;
             }
         };
-        let rt = tokio::runtime::Handle::current();
-        match rt.block_on(receive_over_wormhole(code)) {
+        match receive_over_wormhole(code).await {
             Ok(bytes) => bytes,
             Err(e) => {
                 eprintln!("transcript receive: {e}");
@@ -407,6 +405,44 @@ fn place_bundle(meta: &BundleMeta, transcript: &[u8], origin: Option<SessionOrig
             return 1;
         }
     }
+    // The lexical check above cannot see a symlinked directory component
+    // that already exists under the root, so canonicalize both sides and
+    // compare; and create_new refuses a symlink at the final component,
+    // which a plain write would follow.
+    let canon_root = match root.canonicalize() {
+        Ok(canon) => canon,
+        Err(e) => {
+            eprintln!("transcript receive: {}: {e}", root.display());
+            return 1;
+        }
+    };
+    let Some(parent) = dest.parent() else {
+        eprintln!("transcript receive: {} has no parent", dest.display());
+        return 1;
+    };
+    let canon_parent = match parent.canonicalize() {
+        Ok(canon) => canon,
+        Err(e) => {
+            eprintln!("transcript receive: {}: {e}", parent.display());
+            return 1;
+        }
+    };
+    if !canon_parent.starts_with(&canon_root) {
+        eprintln!(
+            "transcript receive: {} escapes the {} store through a symlink",
+            dest.display(),
+            meta.harness
+        );
+        return 1;
+    }
+    if let Err(e) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)
+    {
+        eprintln!("transcript receive: {}: {e}", dest.display());
+        return 1;
+    }
     if let Err(e) = std::fs::write(&dest, transcript) {
         eprintln!("transcript receive: {}: {e}", dest.display());
         return 1;
@@ -425,10 +461,17 @@ fn place_bundle(meta: &BundleMeta, transcript: &[u8], origin: Option<SessionOrig
     if !meta.branch.is_empty() {
         println!("branch on the sending machine: {}", meta.branch);
     }
-    println!(
-        "next: check out that branch here, then claude --resume {} (same harness) or a handoff for a different one",
-        meta.session_id
-    );
+    if meta.harness == "codex" {
+        println!(
+            "next: check out that branch here, then fno agents adopt {} and fno agents resume; a different harness goes through a handoff doc",
+            meta.session_id
+        );
+    } else {
+        println!(
+            "next: check out that branch here, then claude --resume {} (same harness) or a handoff for a different one",
+            meta.session_id
+        );
+    }
     0
 }
 
@@ -436,8 +479,8 @@ fn place_bundle(meta: &BundleMeta, transcript: &[u8], origin: Option<SessionOrig
 /// pairing code, or through a plain file. No daemon, no registry write.
 pub async fn run_transcript(rest: &[String]) -> i32 {
     match rest.first().map(String::as_str) {
-        Some("send") => run_send(&rest[1..]),
-        Some("receive") => run_receive(&rest[1..]),
+        Some("send") => run_send(&rest[1..]).await,
+        Some("receive") => run_receive(&rest[1..]).await,
         _ => {
             eprintln!("usage: fno agents transcript send <session-id> [--file <path>]");
             eprintln!("       fno agents transcript receive <code|path>");
