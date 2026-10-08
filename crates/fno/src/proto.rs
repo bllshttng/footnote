@@ -3084,7 +3084,7 @@ pub fn pid_confirmed_dead(pid: i32) -> bool {
 mod owner_sidecar;
 pub use owner_sidecar::{owner_sidecar_path, write_owner_sidecar};
 mod session_files;
-pub use session_files::{remove_session_files, session_files};
+pub use session_files::{remove_session_files, session_files, visible_sidecar_path};
 
 // The startup-marker family lives in the child module below, named by the
 // question it answers; the file-budget gate keeps this over-budget file

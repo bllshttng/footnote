@@ -422,6 +422,33 @@ t15_slot_busy_refuses_the_run() {
   rm -rf "$stub_dir"
 }
 
+t16_wrapper_exports_never_stop_idle_timeout() {
+  local stub_dir out_file err_file rc idle
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  cat > "$stub_dir/sccache" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "${SCCACHE_IDLE_TIMEOUT-unset}"
+STUB
+  chmod +x "$stub_dir/sccache"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  PATH="$stub_dir:$PATH" "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  rc=$?
+  idle="$(cat "$out_file")"
+
+  [[ "$rc" -eq 0 ]] || { fail "T16: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
+  [[ "$idle" == "0" ]] \
+    || { fail "T16: the compiler saw SCCACHE_IDLE_TIMEOUT=$idle, expected 0"; rm -rf "$stub_dir"; return; }
+
+  PATH="$stub_dir:$PATH" SCCACHE_IDLE_TIMEOUT=3 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  idle="$(cat "$out_file")"
+  [[ "$idle" == "3" ]] \
+    || fail "T16: an operator override SCCACHE_IDLE_TIMEOUT=3 became $idle; it must survive"
+  pass "T16 the wrapper exports the never-stop idle timeout and keeps an override"
+  rm -rf "$stub_dir"
+}
+
 t01_sccache_present_announces_on_probe
 t02_sccache_absent_ordinary_compile_silent
 t03_compile_asks_admission_and_probe_does_not
@@ -437,6 +464,7 @@ t12_missing_verb_is_named_and_journaled
 t13_run_door_missing_verb_is_named
 t14_slot_busy_refuses_the_compile
 t15_slot_busy_refuses_the_run
+t16_wrapper_exports_never_stop_idle_timeout
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then

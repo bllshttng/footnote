@@ -11,16 +11,30 @@
 # Contract:
 #   idle machine (load1 <= cores)             -> HOOK_BUDGET_IDLE_SECS (3)
 #   loaded machine (load1 > cores)            -> HOOK_BUDGET_BUSY_SECS (1)
-#   load unreadable                           -> idle budget, fail open; the
-#                                                wall-clock bound still caps
-# There is NO skip tier: five CI suites broke under runner load when a
+#   overloaded (load1 >= 8x cores)            -> hook_overloaded is true and
+#                                                the hook exits 0 before any
+#                                                work (no budget can help)
+#   load unreadable                           -> idle budget, never skip; fail
+#                                                open; the wall-clock bound
+#                                                still caps
+# There is no zero-budget tier: five CI suites broke under runner load when a
 # threshold read as zero, because the plugin's own hook contracts require the
 # read to RUN (a failed read prints its report, an exit code carries the
-# answer, a suite measures the cap). Load still SHORTENS the budget to 1s,
-# and a fired bound reads as silence: exit 0 with empty output, never an
-# error a turn could inherit. The bound rides with_timeout from
-# scripts/lib/with-timeout.sh, the one wall-clock bound in this tree, so stock
-# macOS (no coreutils timeout) is covered. Never reintroduce a
+# answer, a suite measures the cap). Unreadable load still runs. The skip
+# tier is the one exception, and only for a READABLE load: at 8+ waiting jobs
+# per core the hook's own preamble (bash startup, the source chain, the
+# probe's forks) can pass the harness's 4s outer cap on its own, so running
+# the read guarantees a killed hook, discarded output, a red harness warning
+# and a delayed turn. Skipping instead leaves every cursor untouched: mail
+# stays pending, an announcement is re-seen, an offer is re-scanned next
+# turn (2026-10-06 screenshots: five prompt hooks timed out on every prompt
+# at 16-60 jobs per core). CI stays green because every suite that runs a
+# real hook pins FNO_HOOK_BUDGET_SKIP_PER_CORE past any runner load;
+# production leaves it unset. Load still SHORTENS the budget to 1s, and a
+# fired bound reads as silence: exit 0 with empty output, never an error a
+# turn could inherit. The bound rides with_timeout from
+# scripts/lib/with-timeout.sh, the one wall-clock bound in this tree, so
+# stock macOS (no coreutils timeout) is covered. Never reintroduce a
 # timeout(1)/gtimeout(1) preference in front of it.
 #
 # Gates that DECIDE - target-stop-hook.sh, the PreToolUse write guards,
@@ -30,6 +44,10 @@
 
 HOOK_BUDGET_IDLE_SECS=3
 HOOK_BUDGET_BUSY_SECS=1
+# Skip tier: at this many waiting jobs per core the hook's own preamble can
+# pass the harness's outer cap on its own. FNO_HOOK_BUDGET_SKIP_PER_CORE
+# pins it; a suite that runs a real hook pins it past any runner load.
+HOOK_BUDGET_SKIP_PER_CORE=8
 
 _hook_budget_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
@@ -38,16 +56,24 @@ source "$_hook_budget_dir/with-timeout.sh" 2>/dev/null || return 1
 # One-minute load average, empty when unreadable. /proc/loadavg on Linux;
 # sysctl on macOS prints "{ 3.24 2.90 2.71 }", so the tier picks field 2.
 hook_load1() {
+    local load=""
     if [[ -r /proc/loadavg ]]; then
-        set -- $(cat /proc/loadavg 2>/dev/null)
-        printf '%s' "${1:-}"
-        return 0
+        # A redirection, not $(cat): the probe must not pay a fork, because
+        # under the overload hook_overloaded measures, forks are what is slow.
+        read -r load _ < /proc/loadavg 2>/dev/null || load=""
+    else
+        set -- $(sysctl -n vm.loadavg 2>/dev/null)
+        # macOS prints "{ 3.24 2.90 2.71 }": the braces word-split into their
+        # own tokens (5 fields), so the one-minute average is field 2. A bare
+        # 3-tuple or a glued brace is covered for safety. The old 3-or-4 case
+        # matched none of these, so on macOS the probe read as EMPTY and the
+        # busy tier never engaged.
+        case $# in
+            3) load="$1" ;;
+            4 | 5) load="$2" ;;
+        esac
     fi
-    set -- $(sysctl -n vm.loadavg 2>/dev/null)
-    case $# in
-        3) printf '%s' "$1" ;;
-        4) printf '%s' "$2" ;;
-    esac
+    printf '%s' "$load"
 }
 
 hook_cores() {
@@ -83,6 +109,26 @@ hook_budget_secs() {
         '' | *[!0-9]*) printf '%s' "$HOOK_BUDGET_IDLE_SECS" ;;
         *) printf '%s' "$budget" ;;
     esac
+}
+
+# hook_overloaded: true when load1 is readable and past the skip threshold
+# (8x cores; FNO_HOOK_BUDGET_SKIP_PER_CORE pins it). Unreadable load is
+# NEVER overloaded: the zero-threshold CI break in the contract above is why
+# an unmeasurable tier must run, not skip. The caller exits 0 on true,
+# before any work.
+hook_overloaded() {
+    local load
+    load=$(hook_load1)
+    case "$load" in
+        '' | *[!0-9.]*) return 1 ;;
+    esac
+    local threshold
+    threshold="${FNO_HOOK_BUDGET_SKIP_PER_CORE:-$HOOK_BUDGET_SKIP_PER_CORE}"
+    case "$threshold" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    awk -v l="$load" -v c="$(hook_cores)" -v k="$threshold" \
+        'BEGIN { exit !(l >= c * k) }'
 }
 
 # hook_run_optional CMD [ARGS...]: run an optional hook's query under the

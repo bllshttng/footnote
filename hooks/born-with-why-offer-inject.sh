@@ -33,6 +33,10 @@ export PATH
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/hook-budget.sh
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
+# Overload skip BEFORE the cursor: past the threshold the preamble alone can
+# pass the harness cap, and a death mid-scan would burn the one-way slice.
+# The cursor stays put, so the offer re-surfaces next turn.
+hook_overloaded && exit 0
 OFFER_BUDGET="$(hook_budget_secs)"
 # shellcheck source=../scripts/lib/events-lock.sh
 source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0

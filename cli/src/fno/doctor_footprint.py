@@ -27,6 +27,11 @@ SUSTAINED_CPU_CAPACITY_FRACTION = 0.1
 SUSTAINED_CPU_FLOOR_CORES = 0.25
 DAEMON_ALLOWANCE = 1
 PS_TIMEOUT_SECONDS = 5.0
+#: The sccache fields the latest process-table fetch carried: server pid and
+#: trailing-hour restarts, counted by the daemon's watch tick. One slot,
+#: refreshed by _read_ps - the census door answers table and fields in one
+#: call. The verb reads it at emit time; the cause-only lane never does.
+_LAST_SCCACHE: tuple[int | None, int | None] = (None, None)
 _NO_LOAD_SNAPSHOT = object()
 #: Exit codes. A capacity breach keeps 3 (existing readers depend on it); the
 #: leak alarm gets its own code so ``echo $?`` answers WHICH alarm fired. The
@@ -709,12 +714,19 @@ def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | 
     """The process table over the Rust door: `fno-agents census --ps` keeps
     the table in memory, so a seatbelt that refuses the setuid `ps` exec
     still gets a reading, and a read-only sandbox needs no temp file."""
+    global _LAST_SCCACHE
+    # A failed fetch answers "unknown" below, never yesterday's server: the
+    # stash resets before the read, so a dead census door cannot print a
+    # stale pid as live.
+    _LAST_SCCACHE = (None, None)
     error, payload = call_binary_json("census", ["--ps"], timeout=timeout)
     if error is not None or not isinstance(payload, dict):
         return None, f"process table unavailable: {error or 'census --ps returned no table'}"
     table = payload.get("ps")
     if not isinstance(table, str):
         return None, "process table unavailable: census --ps returned no table"
+    pid, restarts = payload.get("sccache_server_pid"), payload.get("sccache_restarts_1h")
+    _LAST_SCCACHE = (pid if isinstance(pid, int) else None, restarts if isinstance(restarts, int) else None)
     return table, None
 
 
@@ -1034,6 +1046,9 @@ def _emit_result(
     )
     if note is not None:
         payload["degraded"] = note
+    if not cause_only:
+        payload["sccache_server_pid"] = _LAST_SCCACHE[0]
+        payload["sccache_restarts_1h"] = _LAST_SCCACHE[1]
     if json_output:
         typer.echo(json.dumps(payload, sort_keys=True))
     else:
@@ -1076,6 +1091,13 @@ def _emit_result(
                 f"({reading.direct_process_count} direct, roster unavailable)"
             )
         typer.echo(f"transient calls: {reading.transient_call_count}")
+        sccache_pid = payload.get("sccache_server_pid")
+        if sccache_pid is not None:
+            restarts = payload.get("sccache_restarts_1h")
+            suffix = "unknown" if restarts is None else restarts
+            typer.echo(f"sccache server: pid {sccache_pid}, restarts last hour: {suffix}")
+        else:
+            typer.echo("sccache server: none running")
         if reading.spare_pool_process_count:
             typer.echo(
                 f"claude spare pool: {reading.spare_pool_process_count} processes, "

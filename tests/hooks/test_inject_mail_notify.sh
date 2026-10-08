@@ -22,6 +22,14 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 TMP="$(mktemp -d -t inject-mail-notify-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
+# The overload skip must never fire in a suite: the stub verb must run on
+# every boundary, and a loaded runner must not read as overload. Pin past
+# any runner load (the skip tier's own contract in hook-budget.sh). The
+# journeys pin a generous read budget inside run_journey (they boot real fno
+# through uv, so host load must not decide the budget); the timeout cases
+# keep the live tier on purpose.
+export FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000
+
 # A fake `fno` on PATH controls boundary behavior. $FNO_STUB_OUT is what the
 # atomic verb prints, while failure and sleep knobs exercise error posture.
 mkdir -p "$TMP/bin"
@@ -232,6 +240,7 @@ REAL_FNO
     output="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
       "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
       FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
+      FNO_HOOK_BUDGET_SECS=8 \
       PATH="$TMP/real-bin:$PATH" bash "$HOOK" </dev/null 2>/dev/null)"
     if context="$(printf '%s\n' "$output" | jq -er '.hookSpecificOutput.additionalContext' 2>/dev/null)"; then
       pass "journey $label: exact hook emits valid UserPromptSubmit JSON"

@@ -469,7 +469,7 @@ pub(super) fn run(home: &AgentsHome) -> Result<(), String> {
                     };
                     // A transport ack is only handed. The next transcript read
                     // confirms read before this attempt can advance the ladder.
-                    episode.pending = Some((marker, now, stage));
+                    episode.pending = Some((marker.clone(), now, stage));
                     let (code, out, error) = command(
                         &[
                             "fno",

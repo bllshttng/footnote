@@ -16,6 +16,10 @@ pub const LOAD_PER_CORE_BAND: f64 = 10.0;
 /// admission for 30 minutes. Named for the notify-signals file pattern.
 pub const MACHINE_BRAKE_NAME: &str = "machine-brake.json";
 pub const MACHINE_BRAKE_HOLD_SECS: u64 = 1800;
+/// The sccache server's last seen pid and restart timestamps, one row per
+/// tick: a pid change is one restart. The footprint verb reads it.
+pub const SCCACHE_WATCH_NAME: &str = "sccache-watch.json";
+const SCCACHE_RESTART_CAP: usize = 64;
 pub const RUNAWAY_LOAD_PER_CORE: f64 = 4.0;
 pub const RUNAWAY_LOAD_HOLD_SECS: u64 = 600;
 pub const HOT_ESCALATION_SECS: u64 = 1800;
@@ -523,6 +527,82 @@ fn write_brake_file(
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
+fn sccache_watch_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_SCCACHE_WATCH").filter(|v| !v.is_empty()) {
+        return PathBuf::from(v);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("."));
+    crate::state_layout::place(&PathBuf::from(home).join(".fno"), SCCACHE_WATCH_NAME)
+}
+
+fn read_sccache_watch() -> serde_json::Value {
+    std::fs::read_to_string(sccache_watch_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({"last_pid": null, "restarts": []}))
+}
+
+fn sccache_now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// One tick of the restart counter: a different nonzero pid than last seen
+/// appends one restart; absence records nothing, so a dead server between
+/// ticks costs one entry when it returns, not one per idle probe. Best-effort
+/// both ways: an unreadable or unwritable file degrades the reading, never
+/// the tick.
+pub fn observe_sccache_pid(pid: Option<u32>) {
+    #[cfg(test)]
+    if std::env::var_os("FNO_SCCACHE_WATCH").is_none() {
+        return;
+    }
+    let mut state = read_sccache_watch();
+    if let Some(new) = pid {
+        let last = state.get("last_pid").and_then(serde_json::Value::as_u64);
+        if last.is_some_and(|last| last != new as u64) {
+            if let Some(prints) = state.get_mut("restarts").and_then(|v| v.as_array_mut()) {
+                prints.push(serde_json::json!(sccache_now_epoch()));
+                while prints.len() > SCCACHE_RESTART_CAP {
+                    prints.remove(0);
+                }
+            }
+        }
+    }
+    // Absence never overwrites last_pid: the common death passes through an
+    // absent tick before the new server appears, and that reappearance must
+    // count against the pid the server died with.
+    if let Some(new) = pid {
+        state["last_pid"] = serde_json::json!(new);
+    }
+    let _ = std::fs::write(
+        sccache_watch_path(),
+        serde_json::to_string(&state).unwrap_or_default(),
+    );
+}
+
+/// Restarts within the trailing hour: the footprint verb's sccache line.
+pub fn sccache_restarts_1h() -> usize {
+    #[cfg(test)]
+    if std::env::var_os("FNO_SCCACHE_WATCH").is_none() {
+        return 0;
+    }
+    let now = sccache_now_epoch();
+    read_sccache_watch()
+        .get("restarts")
+        .and_then(serde_json::Value::as_array)
+        .map(|prints| {
+            prints
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .filter(|ts| now.saturating_sub(*ts) <= 3600)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 fn notice_body(reason: &str, sample: &MachineSample) -> String {
     let mut body = reason.to_string();
     let mut sessions: Vec<&serde_json::Value> = sample
@@ -750,6 +830,13 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         ) {
             tracing::warn!(%error, "machine process snapshot failed");
         }
+        // One long-lived sccache server per machine: a server that died under
+        // load is revived within a tick, and the pid change feeds the restart
+        // counter the footprint verb reads. The sample's own table answers the
+        // probe, so the tick spends no extra process walk.
+        let sccache_pid = crate::cargo_build_dirs::sccache_row_pid(&sample.procs);
+        crate::cargo_build_dirs::ensure_sccache_server_unless(sccache_pid.is_some());
+        observe_sccache_pid(sccache_pid);
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
@@ -1282,5 +1369,52 @@ mod tests {
         assert_eq!(outcome.acted, 0, "second notice is throttled");
         assert_eq!(notify_calls, 1);
         assert_eq!(brake_calls, 2);
+    }
+
+    #[test]
+    fn sccache_restarts_count_a_reappearance_with_a_new_pid() {
+        let path = std::env::temp_dir().join(format!(
+            "fno-sccache-watch-test-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("FNO_SCCACHE_WATCH", &path);
+        // First sighting is not a restart; absence must not wipe the pid the
+        // server died with, or the reappearance a tick later would go uncounted.
+        for pid in [None, Some(100), Some(100), None, Some(200), None, Some(300)] {
+            observe_sccache_pid(pid);
+        }
+        assert_eq!(sccache_restarts_1h(), 2);
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["last_pid"], 300);
+        // The never-stop idle default rides fill_sccache_env so daemon-spawned
+        // builds and the wrapper agree; an operator's shorter override survives.
+        // Skipped where sccache is absent: the fill gates on the binary.
+        if crate::cargo_build_dirs::sccache_bin().is_some() {
+            let saved_idle = std::env::var_os("SCCACHE_IDLE_TIMEOUT");
+            let saved_dir = std::env::var_os("SCCACHE_DIR");
+            std::env::remove_var("SCCACHE_IDLE_TIMEOUT");
+            std::env::remove_var("SCCACHE_DIR");
+            crate::cargo_build_dirs::fill_sccache_env(std::path::Path::new("/any/worktree"));
+            assert_eq!(std::env::var("SCCACHE_IDLE_TIMEOUT").unwrap(), "0");
+            std::env::set_var("SCCACHE_IDLE_TIMEOUT", "3");
+            crate::cargo_build_dirs::fill_sccache_env(std::path::Path::new("/any/worktree"));
+            assert_eq!(std::env::var("SCCACHE_IDLE_TIMEOUT").unwrap(), "3");
+            match saved_dir {
+                Some(value) => std::env::set_var("SCCACHE_DIR", value),
+                None => std::env::remove_var("SCCACHE_DIR"),
+            }
+            match saved_idle {
+                Some(value) => std::env::set_var("SCCACHE_IDLE_TIMEOUT", value),
+                None => std::env::remove_var("SCCACHE_IDLE_TIMEOUT"),
+            }
+        }
+        std::env::remove_var("FNO_SCCACHE_WATCH");
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -47,6 +47,9 @@ except Exception:
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# The overload skip must never fire in a suite: a loaded runner must not read
+# as overload. Pin past any runner load (hook-budget.sh's skip contract).
+export FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000
 git -C "$WORK" init -q || fail "git init failed"
 
 # A brand-new checkout has no .fno directory. The missing-journal fast path must
@@ -640,6 +643,22 @@ ctx="$(printf '%s' "$out" | extract_ctx)"
 [[ "$ctx" != *"x-cold00001"* ]] || fail "cold: listed past the cap"
 [[ "${#ctx}" -lt 600 ]] || fail "cold: reminder is ${#ctx} chars; the cap is not holding"
 pass "cold: cold-start slice names the newest few plus a count"
+
+# ── Overload skip: exit BEFORE the cursor, never burn the slice ──────
+# Threshold 0 pins the skip on inside a subshell (the suite-wide pin above
+# stays intact). A pending offer sits in the file, so the ONLY safe skip is
+# one that leaves the cursor exactly where it was: the offer re-surfaces
+# next turn. This is the data-loss guard for the skip tier.
+offered_line "2026-06-30T18:00:00Z" "x-skip0001" >> "$EVENTS"
+cursor_before="$(tr -d ' \n' < "$CURSOR")"
+out="$( export FNO_HOOK_BUDGET_SKIP_PER_CORE=0
+    cd "$WORK" && PATH="$WORK/bin:$PATH" FNO_STUBDIR="$STUBDIR" \
+        bash "$HOOK" </dev/null 2>/dev/null )"
+[[ -z "$out" ]] || fail "skip: emitted output while overloaded: $out"
+[[ "$(tr -d ' \n' < "$CURSOR")" == "$cursor_before" ]] \
+    || fail "skip: cursor advanced while overloaded (slice destroyed)"
+pass "skip: overloaded run exits before the cursor; the offer re-surfaces"
+run_hook >/dev/null 2>&1   # drain the skipped offer for the wiring check
 
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
