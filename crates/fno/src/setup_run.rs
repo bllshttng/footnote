@@ -670,7 +670,6 @@ pub fn run(tail: &[OsString]) -> i32 {
         print_list(&opts);
         return 0;
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root = repo_root();
     // Validate the argv (including --only) before --once can return early.
     let steps = match select_steps(&opts, &root) {
