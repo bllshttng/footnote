@@ -467,14 +467,3 @@ else
 fi
 
 echo "setup-worktree: linked shared state from $CANONICAL into $WORKTREE"
-
-if command -v fno >/dev/null 2>&1; then
-  # Two-step deploy window: the installed fno can predate the fold, so try the
-  # canonical spelling first and fall back to the retired root one.
-  if ! fno agents workspace worktree cleanup --cargo-targets --apply \
-      && ! fno workspace worktree cleanup --cargo-targets --apply; then
-    echo "setup-worktree: cargo target cleanup failed; worktree remains usable" >&2
-  fi
-else
-  echo "setup-worktree: cargo target cleanup skipped; fno is unavailable" >&2
-fi
