@@ -534,6 +534,74 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
 /// subprocess on the mux attach path and, unlike this one, cannot see a repo
 /// whose git dir lives outside the checkout. Change one and check the other.
 pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
+    // Production shape: the memo + the git resolver. The resolver is a fn
+    // parameter on the memo body so the fork-once contract is assertable
+    // hermetically, without PATH games a parallel test could race.
+    canonical_repo_root_cached(cwd, &canonical_repo_root_uncached)
+}
+
+/// Memoized per process: one hook fire re-asks the same cwd many times
+/// (every guard decision re-resolves the events space), and each miss was
+/// a `git worktree list` fork. Measured 2026-10-08: 18 forks per
+/// PreToolUse fire, 7 per Stop fire, 4 inside every `state path events`
+/// child - the per-user fork burst that hits kern.maxprocperuid when a
+/// fleet of sessions fires hooks at once. The answer for a cwd is stable
+/// within a fire; the short TTL bounds how long a long-lived daemon can
+/// serve a stale root after a repo move. Negative answers cache too: a
+/// non-repo cwd re-forked git on every ask before.
+fn canonical_repo_root_cached(
+    cwd: &Path,
+    resolve: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let now = std::time::Instant::now();
+    {
+        let cache = canonical_root_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((hit, at)) = cache.get(cwd) {
+            if now.duration_since(*at) < CANONICAL_ROOT_TTL {
+                return hit.clone();
+            }
+        }
+    }
+    let resolved = resolve(cwd);
+    {
+        let mut cache = canonical_root_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= CANONICAL_ROOT_CAP {
+            cache.retain(|_, (_, at)| now.duration_since(*at) < CANONICAL_ROOT_TTL);
+        }
+        if cache.len() >= CANONICAL_ROOT_CAP {
+            cache.clear();
+        }
+        cache.insert(cwd.to_path_buf(), (resolved.clone(), now));
+    }
+    resolved
+}
+
+const CANONICAL_ROOT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const CANONICAL_ROOT_CAP: usize = 256;
+
+fn canonical_root_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<PathBuf, (Option<PathBuf>, std::time::Instant)>,
+> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (Option<PathBuf>, std::time::Instant)>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn canonical_root_cache_reset() {
+    canonical_root_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+fn canonical_repo_root_uncached(cwd: &Path) -> Option<PathBuf> {
     let mut cmd = std::process::Command::new("git");
     cmd.arg("-C")
         .arg(cwd)
@@ -1313,6 +1381,50 @@ mod tests {
             "a bare repo must resolve to None (safe-side fallback), not a wrong parent"
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn canonical_repo_root_memoizes_one_resolve_per_cwd_per_ttl_window() {
+        // The fork-storm contract: repeated asks for one cwd resolve once.
+        // Negative answers cache the same way, so a non-repo cwd stops
+        // re-forking git too. Hermetic by injection; no PATH mutation that a
+        // parallel test's git spawn could race.
+        canonical_root_cache_reset();
+        let repo = tmp("memo");
+        let empty = tmp("memo-empty");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        use std::cell::RefCell;
+        let count = RefCell::new(0u32);
+        let resolver = |p: &Path| {
+            *count.borrow_mut() += 1;
+            if p == empty.as_path() {
+                None
+            } else {
+                Some(p.to_path_buf())
+            }
+        };
+        assert_eq!(
+            canonical_repo_root_cached(&repo, &resolver),
+            Some(repo.clone())
+        );
+        assert_eq!(*count.borrow(), 1);
+        assert_eq!(
+            canonical_repo_root_cached(&repo, &resolver),
+            Some(repo.clone()),
+            "same cwd inside the TTL window must hit the memo"
+        );
+        assert_eq!(*count.borrow(), 1);
+        assert_eq!(canonical_repo_root_cached(&empty, &resolver), None);
+        assert_eq!(*count.borrow(), 2);
+        assert_eq!(
+            canonical_repo_root_cached(&empty, &resolver),
+            None,
+            "a miss must cache too, or a non-repo cwd re-forks git per ask"
+        );
+        assert_eq!(*count.borrow(), 2);
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&empty).ok();
     }
 
     #[test]
