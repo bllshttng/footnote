@@ -22,38 +22,58 @@ Each emitted field carries `{path, type, default, tier, question, default_source
 
 ## Modes
 
-| Command | Scope | Fields asked |
-|---------|-------|--------------|
-| `/setup` | global (`~/.fno/config.toml`) | the `always` tier (the real decisions) |
-| `/setup advanced` | global | `always` + `advanced` (progressive disclosure) |
-| `/setup local` | project (`.fno/config.toml`) | same questions, written project-scoped |
+| Command | Layers asked | Questions |
+|---------|--------------|-----------|
+| `/setup` | global + project (always both) | the one step table (`fno config setup run --list --json`) |
+| `/setup advanced` | both | the step table plus the advanced config tier (`fno config setup plan --advanced`) |
 
-There is no separate "full" mode and no hand-maintained question table: `advanced`
-is just "ask the advanced tier too". Keys whose tier is `never` are always
-defaulted and never surfaced.
+There is no `/setup local` and no choose-one: both layers run in one pass, and setup writes only keys whose value differs from the default. There is also no hand-maintained question table: the step table lives in `fno config setup run`, and the advanced config tier still comes from the schema walker.
+
+## Dependency matrix
+
+Each dependency, who needs it, what breaks without it, and how setup gets it:
+
+| Dependency | Who needs it | Breaks without it | How setup covers it |
+|------------|--------------|-------------------|---------------------|
+| bash, curl, the plugin tree | everyone | nothing installs | always present; the zero-binary `bootstrap.sh` reports the gaps |
+| uv | everyone (release path) | no `fno` CLI at all | `scripts/install/fno.sh ensure_uv` installs it, then the wheel with prebuilt binaries |
+| the `fno` wheel + Rust binaries | everyone | every verb | the installer provisions both; `harness-wiring` runs right after |
+| `gh` auth | PR work only | no PR, review, or merge: local-only (plan, build, commit) | `gh-auth` probes `gh auth status`; a miss lands in `needs_human` because login opens a browser |
+| harness CLIs (claude, codex, ...) | whoever uses them | that harness gets no `/fno:*` commands | `harness-wiring` wires each CLI found on PATH and names every outcome |
+| cargo + the crates | contributors only | no source builds (release users never need it) | the three `contributor` steps are `report`: they print the commands, never run them |
 
 ## Step -1: the CLI itself
 
 Run `command -v fno`. A failure means the footnote CLI is not installed, and every step below fails with it. Tell the user what the installer does, then ask. It installs uv from astral.sh, which edits the shell profile. Then it installs the `fno` package from PyPI into the tool bin directory. On a yes run `bash "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/postinstall.sh"` and let it finish. Output ending `installer exit 0` means done. Cap the wait at 5 minutes. A non-zero exit line is a failed install: report the output tail to the user and stop. Never run any install without the user's yes. The session-start hook never installs anything itself.
 
-## Step 0: Check existing settings
+## Step 0: Get the step table
 
 ```bash
-GLOBAL_PATH="$HOME/.fno/config.toml"; LOCAL_PATH=".fno/config.toml"
-[[ -f "$GLOBAL_PATH" ]] && echo "global exists" || echo "no global"
-[[ -f "$LOCAL_PATH" ]]  && echo "local exists"  || echo "no local"
+fno config setup run --list --json
 ```
 
-If the target file already exists, AskUserQuestion: "Found existing settings. Update in place, or start fresh?" Skip the question when the user already requested an in-place update (or invoked `/setup local` on an existing file). Updating is non-destructive: `fno config set` preserves every key it does not touch (and any unknown/extra keys), so you only overwrite the answers the user changes.
+Each step carries `{id, layer (global|project|contributor), kind (act|report|human), question, effect}`. `act` steps can write config through `fno config set`. `report` steps only ever print a command. `human` steps need a person at a browser. Both layers are always offered: there is no global-or-project choice any more.
 
-## Step 1: Get the question plan
+## Step 1: Ask, then run
+
+For each `act` step, ask the user its `question`, naming the `effect` (an AskUserQuestion choice, `Accept` / `Keep default`). Collect every accepted id. `report` and `human` steps are never asked. Their text relays as-is.
+
+Then run the accepted steps in one pass, no-prompt:
 
 ```bash
-fno config setup plan              # /setup and /setup local
-fno config setup plan --advanced   # /setup advanced
+fno config setup run --yes --only <accepted-ids-comma-separated> --json
 ```
 
-Parse the JSON. Before asking, read each field's current value from the target file (`fno config get <path>`). A field with a present, valid value uses it as the pre-filled answer, so only missing consequential choices are asked fresh. For each remaining field, ask using its `question` text. Use the `default` and `default_source` as an inference hint:
+Relay the JSON report verbatim: `done`, `skipped`, `needs_human`, `paths` (absolute), `restart_needed`. A `needs_human` row is a real blocker for that step (gh login opens a browser). Do not silently retry it. Do not summarize it away. When nothing needs a human, the run writes a done marker per layer. A later `--once` never papers over a blocked step.
+
+The config detail questions (a value, not a yes/no: the Obsidian vault name, the project vision) still come from the schema plan:
+
+```bash
+fno config setup plan              # the ~4-6 "always" decisions, as JSON
+fno config setup plan --advanced   # /setup advanced adds this tier
+```
+
+Before asking, read each field's current value from the target file (`fno config get <path>`). A field with a present, valid value uses it as the pre-filled answer, so only missing consequential choices are asked fresh. For each remaining field, ask using its `question` text. Use the `default` and `default_source` as an inference hint:
 
 - `repo-slug`  -> default from `basename $(git rev-parse --show-toplevel)`.
 - `readme`     -> infer a one-line vision from the README's first paragraph.
@@ -65,11 +85,11 @@ Question pages need no setup: the attention arm writes one page per open questio
 
 ## Step 2: Write each answer through `fno config set`
 
-Write the GLOBAL scope by default; pass `--local` for `/setup local`:
+Write the GLOBAL scope by default; pass `--local` to pin a value to this repo's `.fno/config.toml` (the project layer):
 
 ```bash
 fno config set <path> <value>            # global
-fno config set <path> <value> --local    # project-scoped (/setup local)
+fno config set <path> <value> --local    # project layer
 ```
 
 `fno config set` coerces and schema-validates the value, then writes atomically

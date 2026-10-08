@@ -3,14 +3,14 @@
 A CLI-only install of footnote (`curl fno.sh | sh`, `uv`, `brew`, `cargo`) lands
 the `fno` binary but **not** the ``/fno:*`` slash commands - those come from the
 Claude Code plugin / Gemini extension / Codex marketplace integration. This
-module installs that integration for each CLI the user checks in the setup
-wizard. It runs side-effecting installers and writes no settings.yaml config
-(that is ``run_wizard``'s job); the two concerns stay cleanly separated.
+module installs that integration for each CLI the user checks in. It runs
+side-effecting installers and writes no settings.yaml config (that is
+``fno config setup run``'s job); the two concerns stay cleanly separated.
 
-The core (``run_cli_integration``) is interactive-agnostic, mirroring
-``run_wizard``: a ``select_fn`` is injected so the same code drives a terminal
-checklist, the Claude Code multi-select UI, and tests. Adapters take an
-injectable subprocess runner so tests never shell out for real.
+The core (``run_cli_integration``) is interactive-agnostic: a ``select_fn`` is
+injected so the same code drives a terminal checklist, the Claude Code
+multi-select UI, and tests. Adapters take an injectable subprocess runner so
+tests never shell out for real.
 """
 from __future__ import annotations
 
