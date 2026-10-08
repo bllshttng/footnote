@@ -1775,10 +1775,6 @@ def _forced_pane_send(
 ) -> bool:
     """``mail send --force``: type the wrapped body into the recipient's pane.
 
-    ``record_body`` is what the outbox row stores: the full-body envelope,
-    kept separate from the typed text when the delivered turn is the footer
-    form, so the id the turn carries still resolves to the whole message.
-
     ``--force`` changes only the TRANSPORT. Every mail semantic is kept: the same
     minted ``msg_id`` rides the envelope, the reply handle and authority footer
     travel with it, and an outbox row records the send. Before this existed, a
@@ -2132,10 +2128,7 @@ def _name_lane_send(
     # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
-    # A live turn delivers header plus the one read line; the receiver pulls
-    # the body from the bus with `fno agents mail show <id>`. The bus record
-    # and the durable floor keep the full body, so the id always resolves to
-    # something worth reading.
+    # A live turn is the footer form; the record and floor keep the body.
     turn_envelope = _envelope(recipient_session, footer=True)
 
     # --force (node): change the TRANSPORT, keep every mail semantic. The
@@ -4023,6 +4016,7 @@ def cmd_send(
             from_name=stamp_from(from_name),
             origin=mail_origin,
             subject=subject,
+            footer=True,
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
