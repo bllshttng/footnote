@@ -78,6 +78,7 @@ pub mod search_query;
 pub mod served_liveness;
 pub mod server;
 pub mod server_stats;
+pub mod session_origin;
 pub mod setup_autowire;
 #[cfg(test)]
 #[path = "setup_autowire_tests.rs"]

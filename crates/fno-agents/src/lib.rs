@@ -410,6 +410,7 @@ pub mod session_backfill;
 pub mod session_cost;
 pub mod session_join;
 pub mod session_names_fold;
+pub(crate) mod session_origin;
 pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
@@ -1544,6 +1545,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "merge_reaper_stopped",
     "agent_inconsistent",
     "agent_ask_done",
+    "codex_turn_error",
+    "quiet_worker_nudge",
+    "quiet_worker_recovery",
+    "quiet_worker_error",
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",

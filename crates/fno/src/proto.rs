@@ -373,7 +373,8 @@ fn default_true() -> bool {
 /// v107: `AgentRow.activity`, the sideline ramp's served intervals; floor stays 58.
 /// v107 adds `BacklogCard.link` (serde default), the node's stored GitHub-or-Linear
 /// URL the node tap opens when no plan lives in the vault; floor stays 58.
-pub const PROTO_VERSION: u32 = 108;
+/// v109: `WorkspaceRestore.member_session` targets one exact native session.
+pub const PROTO_VERSION: u32 = 109;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -806,6 +807,8 @@ pub enum ControlVerb {
         dry_run: bool,
         #[serde(default)]
         harness: Option<String>,
+        #[serde(default)]
+        member_session: Option<String>,
     },
     /// (v71) Re-project `squads.json` into the server's member list ->
     /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an
@@ -3983,7 +3986,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 108);
+        assert_eq!(PROTO_VERSION, 109);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

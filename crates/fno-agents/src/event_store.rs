@@ -298,17 +298,26 @@ pub fn import_all(live: &Path) -> Result<SyncReceipt, String> {
 
 fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
     let store = store_path(live);
+    let result = import_sources(&store, sources);
+    match result {
+        Ok(receipt) => Ok(receipt),
+        Err(error) if corrupt_image(&error) => Err(refuse_corrupt_store(&store, &error)),
+        Err(error) => Err(error),
+    }
+}
+
+fn import_sources(store: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
     if let Some(parent) = store.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", store.display()))?;
     }
-    let mut conn = open_store(&store)?;
+    let mut conn = open_store(store)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut total = FileTally::default();
     for source in sources {
-        let tally = import_file(&tx, source, &store, now_ms)?;
+        let tally = import_file(&tx, source, store, now_ms)?;
         total.ingested += tally.ingested;
         total.corrupt += tally.corrupt;
         total.coalesced += tally.coalesced;
@@ -320,7 +329,7 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
         .map_err(|e| format!("{}: {e}", store.display()))?;
     prune(&mut conn, now_ms).map_err(|e| format!("{}: {e}", store.display()))?;
     Ok(SyncReceipt {
-        store,
+        store: store.to_path_buf(),
         ingested: total.ingested,
         corrupt: total.corrupt,
         coalesced: total.coalesced,
@@ -333,51 +342,11 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 /// handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
     crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
-    if store.exists() {
-        let check = crate::store_conn::open_read(store).and_then(|conn| {
-            let result: String = conn
-                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-                .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
-            if result == "ok" {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}: database disk image is malformed: integrity check failed: {result}",
-                    store.display()
-                ))
-            }
-        });
-        if let Err(error) = check {
-            let parent = store.parent().unwrap_or_else(|| Path::new("."));
-            let root = if parent.file_name().is_some_and(|name| name == "db") {
-                parent.parent().unwrap_or(parent)
-            } else {
-                parent
-            };
-            let attention = root.join("questions.jsonl");
-            let mut identity = Sha256::new();
-            identity.update(store.as_os_str().as_encoded_bytes());
-            if let Ok(meta) = store.metadata() {
-                identity.update(meta.dev().to_le_bytes());
-                identity.update(meta.ino().to_le_bytes());
-            }
-            let id = format!("q-store-{:x}", identity.finalize());
-            let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "asker": "event-store", "node": "none", "context": {"blocked_because": error, "unknowns": "The original corruption interleaving and live installation safety have not been verified."}, "subject": "event-store-integrity", "blocks": []}});
-            use std::io::Write;
-            let notice = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&attention)
-                .and_then(|mut file| writeln!(file, "{row}"));
-            return Err(match notice {
-                Ok(()) => format!("{error}; write refused; attention: {}", attention.display()),
-                Err(e) => format!(
-                    "{error}; write refused; attention {} failed: {e}",
-                    attention.display()
-                ),
-            });
-        }
-    }
+    // No integrity sweep here. quick_check walks every page, so per-open it is
+    // O(store size), and this opener sits on the per-fire hook append path: a
+    // 673 MB store scanned 4-5 times per Bash call drove the fleet load storm.
+    // SQLite surfaces page damage as statement errors instead, and
+    // `refuse_corrupt_store` turns those into the same loud refusal.
     let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
     observation::ensure_observation_tables(&conn)
@@ -385,9 +354,58 @@ fn open_store(store: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// The SQLite diagnostics that mean stored pages are unreadable. Distinct
+/// from busy/locked: a corrupt image must never be written again, so the
+/// caller refuses instead of retrying.
+fn corrupt_image(error: &str) -> bool {
+    error.contains("database disk image is malformed")
+        || error.contains("file is not a database")
+        || error.contains("malformed database schema")
+}
+
+/// File the operator attention row for a corrupt store and decorate the
+/// error with the refusal. The question id hashes the store identity, so
+/// every door that hits the damage dedupes into one attention item.
+fn refuse_corrupt_store(store: &Path, error: &str) -> String {
+    let parent = store.parent().unwrap_or_else(|| Path::new("."));
+    let root = if parent.file_name().is_some_and(|name| name == "db") {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    };
+    let attention = root.join("questions.jsonl");
+    let mut identity = Sha256::new();
+    identity.update(store.as_os_str().as_encoded_bytes());
+    if let Ok(meta) = store.metadata() {
+        identity.update(meta.dev().to_le_bytes());
+        identity.update(meta.ino().to_le_bytes());
+    }
+    let id = format!("q-store-{:x}", identity.finalize());
+    let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "asker": "event-store", "node": "none", "context": {"blocked_because": error, "unknowns": "The original corruption interleaving and live installation safety have not been verified."}, "subject": "event-store-integrity", "blocks": []}});
+    use std::io::Write;
+    let notice = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&attention)
+        .and_then(|mut file| writeln!(file, "{row}"));
+    match notice {
+        Ok(()) => format!("{error}; write refused; attention: {}", attention.display()),
+        Err(e) => format!(
+            "{error}; write refused; attention {} failed: {e}",
+            attention.display()
+        ),
+    }
+}
+
 /// Read-only handle for history readers; a failure names the store path.
 pub(crate) fn upgrade_role_store(store: &Path) -> Result<(), String> {
-    open_store(store).map(|_| ())
+    open_store(store).map(|_| ()).map_err(|error| {
+        if corrupt_image(&error) {
+            refuse_corrupt_store(store, &error)
+        } else {
+            error
+        }
+    })
 }
 
 pub fn open_read(store: &Path) -> Result<Connection, String> {
@@ -1119,6 +1137,9 @@ pub fn append_envelope(
         }
     }
     report_lost_row(&store, &ty, &last_error);
+    if corrupt_image(&last_error) {
+        return Err(refuse_corrupt_store(&store, &last_error));
+    }
     Err(last_error)
 }
 
@@ -1958,10 +1979,19 @@ pub struct GcReceipt {
 /// store is not created.
 pub fn gc_ephemeral(journal: &Path, cutoff_ms: i64, dry_run: bool) -> Result<GcReceipt, String> {
     let store = store_path(journal);
+    let result = gc_ephemeral_inner(&store, cutoff_ms, dry_run);
+    match result {
+        Ok(receipt) => Ok(receipt),
+        Err(error) if corrupt_image(&error) => Err(refuse_corrupt_store(&store, &error)),
+        Err(error) => Err(error),
+    }
+}
+
+fn gc_ephemeral_inner(store: &Path, cutoff_ms: i64, dry_run: bool) -> Result<GcReceipt, String> {
     if !store.exists() {
         return Ok(GcReceipt::default());
     }
-    let conn = open_store(&store)?;
+    let conn = open_store(store)?;
     let named = |e: rusqlite::Error| format!("{}: {e}", store.display());
     let (scanned, malformed) = conn
         .query_row(
