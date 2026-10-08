@@ -1764,7 +1764,8 @@ pub(crate) use report::{find_uuid_backfill_row, UuidBackfill};
 use report::{flush_buffered_inside_leg, handle_report};
 pub(crate) use thread_row_status::notify_transition;
 use thread_row_status::{
-    codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row, notify_badge,
+    codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row, journals_transition,
+    notify_badge,
 };
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {

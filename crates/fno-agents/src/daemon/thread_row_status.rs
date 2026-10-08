@@ -150,17 +150,8 @@ async fn write_thread_inside_leg(
 ) {
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
     let session_for_emit = session_id.clone();
-    let (notify, state_changed) = update_registry_offloaded(registry_path, move |registry| {
-        let state_of = |registry: &crate::state::Registry| {
-            registry
-                .entries
-                .iter()
-                .find(|e| entry_holds_session(e, &session_id))
-                .and_then(|e| e.inside_leg.as_ref().map(|r| r.state))
-        };
-        let before = state_of(registry);
-        let notify = gate_inside_leg_onto_row(registry, &session_id, rep);
-        (notify, state_of(registry) != before)
+    let (notify, journal) = update_registry_offloaded(registry_path, move |registry| {
+        gate_inside_leg_onto_row_journaled(registry, &session_id, rep)
     })
     .await
     .unwrap_or((None, false));
@@ -174,7 +165,7 @@ async fn write_thread_inside_leg(
         );
     }
     // A stale-seq drop or a same-state repeat journals nothing.
-    if state_changed {
+    if journal {
         let _ = emitter.emit(
             "codex_thread_inside_leg",
             &json!({
@@ -185,6 +176,19 @@ async fn write_thread_inside_leg(
             }),
         );
     }
+}
+
+/// Whether a stored report journals: a state change, or a blocked report
+/// whose reason changed (a new question the subscribe feed must surface).
+/// A same-state repeat updates the row and stays quiet.
+pub(super) fn journals_transition(
+    prev: Option<&crate::state::InsideLegReport>,
+    next: &crate::state::InsideLegReport,
+) -> bool {
+    prev.is_none_or(|p| {
+        p.state != next.state
+            || (next.state == crate::state::InsideLegState::Blocked && p.reason != next.reason)
+    })
 }
 
 /// The ONE seq-gated inside-leg writer core: find the row holding
@@ -201,6 +205,17 @@ pub(super) fn gate_inside_leg_onto_row(
     session_uuid: &str,
     rep: crate::state::InsideLegReport,
 ) -> Option<(String, bool)> {
+    gate_inside_leg_onto_row_journaled(registry, session_uuid, rep).0
+}
+
+/// [`gate_inside_leg_onto_row`] plus whether the stored report journals
+/// ([`journals_transition`]); `false` on a stale-seq drop or no such row.
+fn gate_inside_leg_onto_row_journaled(
+    registry: &mut crate::state::Registry,
+    session_uuid: &str,
+    rep: crate::state::InsideLegReport,
+) -> (Option<(String, bool)>, bool) {
+    let mut journal = false;
     let (state_str, rep_state, rep_reason) = (
         inside_leg_state_str(rep.state),
         rep.state,
@@ -214,6 +229,7 @@ pub(super) fn gate_inside_leg_onto_row(
     {
         let newer = e.inside_leg.as_ref().is_none_or(|cur| cur.yields_to(&rep));
         if newer {
+            journal = journals_transition(e.inside_leg.as_ref(), &rep);
             let prev_state = e.inside_leg.as_ref().map(|r| r.state);
             let body = rep_reason.unwrap_or_else(|| state_str.to_string());
             if crate::state::enters(prev_state, rep_state, crate::state::InsideLegState::Blocked) {
@@ -234,7 +250,7 @@ pub(super) fn gate_inside_leg_onto_row(
             e.screen_state = None;
         }
     }
-    notify
+    (notify, journal)
 }
 
 /// Which channel a badge transition may use. A done badge is a desk event:
