@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// An unknown effective cap at the given ceiling: what the refusal sentence
+/// tests want when no capacity state exists.
+fn cap_ceiling(ceiling: usize) -> crate::capacity::Effective {
+    crate::capacity::Effective {
+        cap: ceiling,
+        ceiling,
+        known: false,
+        reason: None,
+        since: None,
+    }
+}
+
 struct SuccessionFixture {
     _lock: std::sync::MutexGuard<'static, ()>,
     dir: std::path::PathBuf,
@@ -356,7 +368,14 @@ fn slot_refusal_line_names_the_release_remedy() {
         ..suspect.clone()
     };
 
-    let line = slot_refusal_line(4, 3, 3, &[live.clone(), suspect.clone()], 0, "tail.");
+    let line = slot_refusal_line(
+        4,
+        &cap_ceiling(3),
+        3,
+        &[live.clone(), suspect.clone()],
+        0,
+        "tail.",
+    );
     assert!(
         line.contains("fno agents claim release worker:w-res --force"),
         "{line}"
@@ -368,11 +387,11 @@ fn slot_refusal_line_names_the_release_remedy() {
 
     // All-live reservations name no remedy: releasing a live worker's slot
     // would leave it running uncounted.
-    let line = slot_refusal_line(4, 3, 3, &[live], 0, "tail.");
+    let line = slot_refusal_line(4, &cap_ceiling(3), 3, &[live], 0, "tail.");
     assert!(!line.contains("claim release"), "{line}");
 
     // Registry-only saturation names no remedy.
-    let line = slot_refusal_line(3, 3, 3, &[], 0, "tail.");
+    let line = slot_refusal_line(3, &cap_ceiling(3), 3, &[], 0, "tail.");
     assert!(!line.contains("claim release"), "{line}");
 }
 

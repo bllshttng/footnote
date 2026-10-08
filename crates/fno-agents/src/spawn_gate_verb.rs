@@ -355,7 +355,9 @@ mod probe {
             .map(|a| a.iter().filter_map(Value::as_str).any(|s| s == "lanes"))
             .unwrap_or(false);
 
-        let cap = agents_config::max_live(&config_cwd) as usize;
+        let ceiling = agents_config::max_live(&config_cwd) as usize;
+        let learned = crate::capacity::effective(&home, ceiling);
+        let cap = learned.cap;
         let floor_gb = agents_config::min_free_gb(&config_cwd);
         let swap_cap = agents_config::max_swap_pct(&config_cwd);
 
@@ -466,6 +468,18 @@ mod probe {
         let (slot_row_entries, slot_reservations) =
             spawn_gate::slot_reading(&registry_path, &mut warnings);
         let slots = slot_row_entries.len() + slot_reservations.len();
+        // The capacity fields ride EVERY verdict: saturation is when the
+        // probe is most useful, so the numbers are in place before any
+        // refusal returns, not only on the accepted tail.
+        out.insert("effective".into(), json!(cap));
+        out.insert("effective_ceiling".into(), json!(ceiling));
+        if !learned.known {
+            out.insert(
+                "effective_note".into(),
+                json!("effective cap unknown, using ceiling"),
+            );
+        }
+        out.insert("slots".into(), json!(slots));
         let mut slot_rows_json: Vec<Value> = slot_row_entries
             .iter()
             .map(|r| {
@@ -494,7 +508,7 @@ mod probe {
             if slots >= cap {
                 return refuse_with(
                     "max_live",
-                    format!("{slots} live worker slots >= max_live {cap}"),
+                    format!("{slots} live worker slots >= {}", learned.clause()),
                     json!({"count": slots, "max_live": cap}),
                     &[fleet_row(slots, cap)],
                     out,
@@ -615,7 +629,8 @@ mod probe {
         ) {
             if !caller.is_empty() && held >= share {
                 let mut message = format!(
-                    "this lead holds {held} of max_live {cap} across {leads} leads (share {share})"
+                    "this lead holds {held} of {} across {leads} leads (share {share})",
+                    learned.clause()
                 );
                 message.push_str(&crate::spawn_gate::held_rows_suffix(
                     reading.held_rows.as_ref(),
@@ -682,7 +697,6 @@ mod probe {
         out.insert("lanes".into(), lanes.clone());
         out.insert("live_workers".into(), json!(slots));
         out.insert("max_live".into(), json!(cap));
-        out.insert("slots".into(), json!(slots));
         out.insert("share".into(), share_json(&reading));
         if let Some(payload_adm) = &cpu {
             out.insert("share_low".into(), json!(payload_adm.share_low));
@@ -1656,7 +1670,7 @@ mod tests {
         assert_eq!(answer["reason"], "lead_share");
         assert_eq!(
             answer["message"],
-            "this lead holds 2 of max_live 2 across 1 leads (share 2); the rows charged to you are w1, w2"
+            "this lead holds 2 of max_live 2 (effective cap unknown, using ceiling) across 1 leads (share 2); the rows charged to you are w1, w2"
         );
         assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
         let _ = std::fs::remove_dir_all(&dir);

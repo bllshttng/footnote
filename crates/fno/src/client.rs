@@ -1325,7 +1325,7 @@ enum SweepMsg {
     Failed(String),
 }
 
-mod meter;
+pub(crate) mod meter;
 use meter::spawn_meter_sampler;
 
 mod confirm;

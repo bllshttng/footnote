@@ -625,7 +625,7 @@ pub(crate) fn slot_reading(
 /// the release verb for the first suspect one; all-live saturation names none.
 fn slot_refusal_line(
     slots: usize,
-    cap: usize,
+    learned: &crate::capacity::Effective,
     rows: usize,
     claims: &[SlotReservation],
     waiting: usize,
@@ -648,9 +648,10 @@ fn slot_refusal_line(
         None => String::new(),
     };
     format!(
-        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {n} headless \
+        "{slots} live worker slots >= {cap_clause} ({rows} registry rows, {n} headless \
          reservations{waiting_note}); every counted row: fno agents gate-status, field \
          slot_rows{remedy}; {tail}",
+        cap_clause = learned.clause(),
         n = claims.len()
     )
 }
@@ -1395,7 +1396,9 @@ fn decide_gate(
         maybe_emit_spawn_cap_escape();
         return Ok(GateGuard::default());
     }
-    let cap = agents_config::max_live(config_cwd) as usize;
+    let ceiling = agents_config::max_live(config_cwd) as usize;
+    let learned = crate::capacity::effective_from_env(ceiling);
+    let cap = learned.cap;
     let floor_gb = agents_config::min_free_gb(config_cwd);
     let swap_cap = agents_config::max_swap_pct(config_cwd);
     // AC7: the retired trigger (max_load_per_cpu) is not read here;
@@ -1871,9 +1874,9 @@ fn decide_gate(
                                     serde_json::json!("skipped (teamed succession)"),
                                 );
                             } else {
-                                check_lead_share(
+                                spawn_gate_lanes::check_lead_share(
                                     registry_path,
-                                    cap,
+                                    &learned,
                                     input.caller_session.as_deref(),
                                     &axes_read,
                                 )
@@ -1958,7 +1961,7 @@ fn decide_gate(
                             }
                             let line = slot_refusal_line(
                                 slots,
-                                cap,
+                                &learned,
                                 live.len(),
                                 &reservations,
                                 waiting.len(),
@@ -2002,7 +2005,7 @@ fn decide_gate(
                             }
                             let line = slot_refusal_line(
                                 slots,
-                                cap,
+                                &learned,
                                 live.len(),
                                 &reservations,
                                 waiting.len(),
@@ -2686,57 +2689,6 @@ pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
         }
         None => String::new(),
     }
-}
-
-fn check_lead_share(
-    registry_path: &Path,
-    cap: usize,
-    caller_session: Option<&str>,
-    _axes_read: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), Refusal> {
-    let Some(caller) = caller_session.filter(|c| !c.is_empty()) else {
-        return Ok(());
-    };
-    let reading = spawn_gate_lanes::share_reading(registry_path, cap, Some(caller));
-    let (Some(leads), Some(share), Some(held)) = (reading.leads, reading.share, reading.held)
-    else {
-        // An unreadable registry leaves every count unknown; nothing to
-        // enforce and no zero to fail open on.
-        return Ok(());
-    };
-    if held < share {
-        return Ok(());
-    }
-    let mut msg = format!(
-        "spawn-gate: lead {} holds {held} of max_live {cap} across {leads} leads (share {share}); \
-         refusing to spawn -- waiting cannot help while your own workers hold the share \
-         (--force to bypass)",
-        &caller[..caller.len().min(8)]
-    );
-    // The held names read before the unattributed bucket: they are the rows
-    // the caller can stop, where the bucket names nobody.
-    msg.push_str(&held_rows_suffix(reading.held_rows.as_ref()));
-    if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
-        let shown: Vec<String> = rows.iter().take(5).cloned().collect();
-        msg.push_str(&format!(
-            "; {} live row(s) name nobody and sit in the unattributed bucket ({}{})",
-            rows.len(),
-            shown.join(", "),
-            if rows.len() > 5 { "..." } else { "" }
-        ));
-    }
-    eprintln!("{msg}");
-    Err(Refusal::code(EXIT_LEAD_SHARE)
-        .ev("reason", serde_json::json!("lead_share"))
-        .ev("lead", serde_json::json!(caller))
-        .ev("held", serde_json::json!(held))
-        .ev("share", serde_json::json!(share))
-        .ev("max_live", serde_json::json!(cap))
-        .ev("leads", serde_json::json!(leads))
-        .ev(
-            "held_rows",
-            serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
-        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -3889,12 +3841,23 @@ Swapouts: 3444531.\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An unknown effective cap, the shape every fallback clause test wants.
+    fn no_state() -> crate::capacity::Effective {
+        crate::capacity::Effective {
+            cap: 23,
+            ceiling: 23,
+            known: false,
+            reason: None,
+            since: None,
+        }
+    }
+
     /// AC5-TEXT: the shared refusal sentence names the probe field that lists
     /// every counted row, marks the operator-waiting share, and never again
     /// blames a population its own recommended reader cannot see.
     #[test]
     fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
-        let line = slot_refusal_line(3, 2, 3, &[], 1, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, &no_state(), 3, &[], 1, "refusing (--no-wait).");
         assert!(line.contains("fno agents gate-status"), "{line}");
         assert!(line.contains("slot_rows"), "{line}");
         assert!(
@@ -3904,7 +3867,7 @@ Swapouts: 3444531.\n";
         assert!(!line.contains("--status quiet"), "{line}");
         assert!(!line.contains("fno agents top"), "{line}");
 
-        let line = slot_refusal_line(3, 2, 3, &[], 0, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, &no_state(), 3, &[], 0, "refusing (--no-wait).");
         assert!(!line.contains("wait on an operator question"), "{line}");
     }
 
@@ -4237,9 +4200,21 @@ Swapouts: 3444531.\n";
         .unwrap();
         // One lead -> share = cap = 2; the caller holds both rows, so the
         // share refuses and the event must name w1 and w2.
-        let err = check_lead_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
-            .err()
-            .expect("the full share must refuse");
+        let cap_two = crate::capacity::Effective {
+            cap: 2,
+            ceiling: 2,
+            known: false,
+            reason: None,
+            since: None,
+        };
+        let err = spawn_gate_lanes::check_lead_share(
+            &reg,
+            &cap_two,
+            Some("session-aaaaaaaa"),
+            &serde_json::Map::new(),
+        )
+        .err()
+        .expect("the full share must refuse");
         assert_eq!(err.exit_code, EXIT_LEAD_SHARE);
         assert_eq!(err.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(
