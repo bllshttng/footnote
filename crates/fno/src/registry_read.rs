@@ -45,6 +45,7 @@ pub fn registry_text(path: &Path) -> std::io::Result<String> {
         let row = row.map_err(|e| invalid(e.to_string()))?;
         agents.push(serde_json::from_str::<Value>(&row).map_err(|e| invalid(e.to_string()))?);
     }
+    crate::role_migration::upgrade_registry_rows(&mut agents);
     document
         .as_object_mut()
         .ok_or_else(|| invalid("registry metadata is not an object".into()))?
