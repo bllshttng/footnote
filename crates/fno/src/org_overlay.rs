@@ -496,8 +496,25 @@ impl Panel {
     }
 
     /// Memory in use with its graph: one line in both views, since a full
-    /// machine swaps long before its CPU line looks alarming.
+    /// machine swaps long before its CPU line looks alarming. The figure is
+    /// the capacity state's own (one reader with the meter); the fold's
+    /// arms stay the fallback when no state exists yet.
     fn memory_line(&self, org: &Org) -> String {
+        if let Some(state) = crate::client::meter::capacity_state() {
+            if let Some(mem) = state.get("memory") {
+                if let (Some(fraction), Some(total)) = (
+                    mem.get("used_fraction").and_then(|v| v.as_f64()),
+                    mem.get("total_gb").and_then(|v| v.as_f64()),
+                ) {
+                    return format!(
+                        "  memory    {} {:.0}% used, {:.1} GB free",
+                        spark(&self.mem_history),
+                        fraction * 100.0,
+                        ((1.0 - fraction) * total).max(0.0)
+                    );
+                }
+            }
+        }
         match (
             org.arm_num("memory", "free_fraction"),
             org.arm_num("memory", "available_gb"),

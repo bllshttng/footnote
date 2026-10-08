@@ -1,7 +1,10 @@
-//! The whole-machine resource meter: one `macmon` sample per refresh,
-//! rendered as a status-row segment. Split out of `client.rs` (file budget).
+//! The whole-machine resource meter: one `macmon` sample per refresh for CPU
+//! and watts; the memory figure and the capacity line come from the learned
+//! capacity state the machine_watch tick writes (one reader, one number).
 //! `config.mux.load_readout` picks plain words (the default) or the raw
 //! numbers; the sampler re-reads it each time the meter is switched on.
+
+use std::path::PathBuf;
 
 /// Spawn the meter sampler: one bounded `macmon pipe -s 1` sample per refresh
 /// interval, the one-line reading sent to the UI loop. Exits when the view's
@@ -47,66 +50,259 @@ async fn sample_macmon_line(detailed: bool) -> String {
         Ok(Ok(out)) => parse_macmon_sample(&out.stdout, detailed),
         _ => None,
     };
-    parsed.unwrap_or_else(|| "meter: sensor unavailable".into())
+    match parsed {
+        Some(cpu) => {
+            let state = capacity_state();
+            let mut line = cpu;
+            line.push_str(&memory_segment(state.as_ref(), detailed));
+            line.push_str(&capacity_segment(state.as_ref()));
+            line
+        }
+        None => "meter: sensor unavailable".into(),
+    }
 }
 
+/// CPU and watts only: the memory figure reads from the capacity state, so
+/// the meter and the org overlay can never disagree about it.
 fn parse_macmon_sample(raw: &[u8], detailed: bool) -> Option<String> {
     let text = std::str::from_utf8(raw).ok()?;
     let line = text.lines().find(|l| l.trim_start().starts_with('{'))?;
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let cpu = value.get("cpu_usage_pct")?.as_f64()?;
-    let mem = value.get("memory")?;
-    let total = mem.get("ram_total")?.as_f64()?;
-    let usage = mem.get("ram_usage")?.as_f64()?;
     // macmon's measured contract is a 0-1 fraction; no percent spelling to
     // rescue (the lanes arm pins the same contract).
     let cpu_pct = cpu * 100.0;
     let watts = value.get("sys_power").and_then(|p| p.as_f64());
-    if !detailed && total > 0.0 {
-        let mut line = format!(
-            "CPU {cpu_pct:.0}% busy · memory {:.0}% full",
-            usage / total * 100.0
-        );
-        if let Some(w) = watts {
+    let mut line = if detailed {
+        format!("cpu {cpu_pct:.0}%")
+    } else {
+        format!("CPU {cpu_pct:.0}% busy")
+    };
+    if let Some(w) = watts {
+        if detailed {
+            line.push_str(&format!(" {w:.0}W"));
+        } else {
             line.push_str(&format!(" · {w:.0} W"));
         }
-        return Some(line);
-    }
-    let mut line = format!(
-        "cpu {cpu_pct:.0}% mem {:.0}G/{:.0}G",
-        usage / 1e9,
-        total / 1e9
-    );
-    if let Some(w) = watts {
-        line.push_str(&format!(" {w:.0}W"));
     }
     Some(line)
 }
 
+/// The capacity state file the tick writes, read through the same home chain
+/// the registry resolves: `FNO_AGENTS_HOME` > `$HOME/.fno/agents`, the
+/// machine-keyed file the fno-agents tick persists. `None` when missing or
+/// unreadable: the gauge says "cap unknown", never a stale guess.
+pub(crate) fn capacity_state() -> Option<serde_json::value::Value> {
+    // Under test with no declared home there IS no state to read: the
+    // ambient `$HOME/.fno/agents` is the real machine's, and a gauge test
+    // must never depend on it.
+    if cfg!(test) && std::env::var_os("FNO_AGENTS_HOME").is_none() {
+        return None;
+    }
+    let root = match std::env::var_os("FNO_AGENTS_HOME") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".fno").join("agents"))?,
+    };
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("agents"))?,
+    };
+    let mut key = crate::agents_view::machine_id();
+    if key.is_empty() {
+        key = crate::agents_view::hostname();
+    }
+    if key.is_empty() {
+        key = "unknown-host".into();
+    }
+    let raw = std::fs::read_to_string(root.join("capacity").join(format!("{key}.json"))).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// The memory segment: the state's own figure, or nothing - a missing
+/// reader renders no number, never a zero.
+fn memory_segment(state: Option<&serde_json::Value>, detailed: bool) -> String {
+    let Some(state) = state else {
+        return String::new();
+    };
+    let Some(mem) = state.get("memory") else {
+        return String::new();
+    };
+    let (Some(total), Some(fraction)) = (
+        mem.get("total_gb").and_then(|v| v.as_f64()),
+        mem.get("used_fraction").and_then(|v| v.as_f64()),
+    ) else {
+        return String::new();
+    };
+    if detailed {
+        let used = mem
+            .get("compressor_occupied_gb")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(fraction * total);
+        format!(" · mem {used:.0}G/{total:.0}G")
+    } else {
+        format!(" · memory {:.0}% full", fraction * 100.0)
+    }
+}
+
+/// The capacity segment: workers live, the learned cap under its ceiling,
+/// then each visible account's windows. No state renders "cap unknown" and
+/// no number (AC6).
+fn capacity_segment(state: Option<&serde_json::Value>) -> String {
+    let Some(state) = state else {
+        return " · cap unknown".into();
+    };
+    let (Some(effective), Some(ceiling)) = (
+        state.get("effective").and_then(|v| v.as_u64()),
+        state.get("ceiling").and_then(|v| v.as_u64()),
+    ) else {
+        return " · cap unknown".into();
+    };
+    let mut line = match state.get("workers_live").and_then(|v| v.as_u64()) {
+        Some(workers) => format!(" · workers {workers} live, cap {effective} of {ceiling}"),
+        None => format!(" · cap {effective} of {ceiling}"),
+    };
+    if let Some(reason) = state.get("reason").and_then(|v| v.as_str()) {
+        if !reason.is_empty() {
+            line.push_str(&format!(", {reason}"));
+        }
+    }
+    if let Some(accounts) = state.get("accounts").and_then(|v| v.as_array()) {
+        for account in accounts {
+            if account.get("show").and_then(|v| v.as_bool()) != Some(true) {
+                continue;
+            }
+            let Some(provider) = account.get("provider").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(windows) = account.get("windows").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let parts: Vec<String> = windows.iter().filter_map(window_part).collect();
+            if parts.is_empty() {
+                continue;
+            }
+            line.push_str(&format!(" · {provider} {}", parts.join(", ")));
+        }
+    }
+    line
+}
+
+/// One window's readout: a percent against the account's own token limit
+/// when it sets one, raw tokens otherwise. `weekly` prints as `wk` (the
+/// gauge convention).
+fn window_part(window: &serde_json::Value) -> Option<String> {
+    let name = window.get("window").and_then(|v| v.as_str())?;
+    let label = match name {
+        "weekly" => "wk",
+        other => other,
+    };
+    let used = window.get("used_tokens").and_then(|v| v.as_u64())?;
+    match window
+        .get("limit_tokens")
+        .or_else(|| window.get("account_limit_tokens"))
+        .and_then(|v| v.as_u64())
+        .filter(|limit| *limit > 0)
+    {
+        Some(limit) => Some(format!(
+            "{label} {:.0}%",
+            used as f64 / limit as f64 * 100.0
+        )),
+        None => Some(format!("{label} {}", human_tokens(used))),
+    }
+}
+
+/// 40000 -> "40k tok"; 1_100_000 -> "1.1M tok".
+fn human_tokens(used: u64) -> String {
+    let unit_value = |value: f64, unit: &str| {
+        if value >= 10.0 {
+            format!("{value:.0}{unit} tok")
+        } else {
+            format!("{value:.1}{unit} tok")
+        }
+    };
+    if used >= 1_000_000 {
+        unit_value(used as f64 / 1_000_000.0, "M")
+    } else if used >= 1_000 {
+        unit_value(used as f64 / 1_000.0, "k")
+    } else {
+        format!("{used} tok")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_macmon_sample;
+    use super::{capacity_segment, human_tokens, memory_segment, parse_macmon_sample};
+    use serde_json::json;
 
     #[test]
-    fn a_dark_macmon_sample_never_renders_a_number() {
-        // An empty or unparseable pipe parses to None; `sample_macmon_line`
-        // renders that as the unavailable line, never a zero.
-        assert_eq!(parse_macmon_sample(b"", false), None);
-        assert_eq!(parse_macmon_sample(b"not json\n", true), None);
+    fn macmon_keeps_cpu_and_watts_and_drops_the_memory_math() {
         let raw = br#"{"cpu_usage_pct":0.45,"sys_power":53.5,"memory":{"ram_total":103079215104,"ram_usage":30702266368}}"#;
-        let good = parse_macmon_sample(raw, true).expect("a healthy sample parses");
-        assert!(good.contains("cpu 45%"), "{good}");
-        // Decimal GB (bytes / 1e9), matching the Python arm's convention.
-        assert!(good.contains("mem 31G/103G"), "{good}");
-        assert!(good.contains("54W"), "{good}");
-        // The simple readout (the default) says the same reading in words.
         let simple = parse_macmon_sample(raw, false).unwrap();
-        assert_eq!(simple, "CPU 45% busy · memory 30% full · 54 W");
-        // A missing memory block parses to None, which renders as the
-        // unavailable line - never a zero.
+        assert_eq!(simple, "CPU 45% busy · 54 W");
         assert_eq!(
-            parse_macmon_sample(br#"{"cpu_usage_pct":0.45}"#, false),
-            None
+            parse_macmon_sample(br#"{"cpu_usage_pct":0.45}"#, false).unwrap(),
+            "CPU 45% busy"
         );
+        let detailed = parse_macmon_sample(raw, true).unwrap();
+        assert_eq!(detailed, "cpu 45% 54W");
+        assert_eq!(parse_macmon_sample(b"", false), None);
+    }
+
+    #[test]
+    fn the_meter_and_the_overlay_print_the_same_state_memory_figure() {
+        let state = json!({
+            "ceiling": 23,
+            "effective": 14,
+            "memory": {"used_fraction": 0.64, "total_gb": 96.0,
+                       "compressor_occupied_gb": 61.4, "compressor_stored_gb": 41.0},
+            "workers_live": 15,
+            "accounts": [],
+        });
+        let memory = memory_segment(Some(&state), false);
+        assert_eq!(memory, " · memory 64% full");
+        // The overlay reads the same field (org_overlay::memory_line), so
+        // one sample renders one percent in both places (AC5).
+        let overlay_pct = (state["memory"]["used_fraction"].as_f64().unwrap() * 100.0).round();
+        assert_eq!(format!("{overlay_pct:.0}% full"), "64% full");
+    }
+
+    #[test]
+    fn no_capacity_state_renders_cap_unknown_and_no_memory_number() {
+        assert_eq!(capacity_segment(None), " · cap unknown");
+        assert_eq!(memory_segment(None, false), "");
+        let bare = json!({"ceiling": 23});
+        assert_eq!(capacity_segment(Some(&bare)), " · cap unknown");
+        assert_eq!(memory_segment(Some(&bare), false), "");
+    }
+
+    #[test]
+    fn the_capacity_line_names_workers_cap_reason_and_windows() {
+        let state = json!({
+            "ceiling": 23,
+            "effective": 14,
+            "reason": "CPU-bound",
+            "workers_live": 15,
+            "accounts": [
+                {"provider": "zai", "show": true, "windows": [
+                    {"window": "5h", "used_tokens": 40000, "limit_tokens": 64000},
+                    {"window": "weekly", "used_tokens": 1100000}]},
+                {"provider": "hidden", "show": false, "windows": [
+                    {"window": "5h", "used_tokens": 9}]},
+            ],
+        });
+        let line = capacity_segment(Some(&state));
+        assert!(
+            line.contains("workers 15 live, cap 14 of 23, CPU-bound"),
+            "{line}"
+        );
+        assert!(line.contains("zai 5h 63%, wk 1.1M tok"), "{line}");
+        assert!(!line.contains("hidden"), "{line}");
+    }
+
+    #[test]
+    fn token_counts_shrink_to_a_human_word() {
+        assert_eq!(human_tokens(40_000), "40k tok");
+        assert_eq!(human_tokens(1_100_000), "1.1M tok");
+        assert_eq!(human_tokens(900), "900 tok");
     }
 }
