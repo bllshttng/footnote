@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { embody, restore, rollBones } from './companion'
+import { embody, rarityColor, restore, rollBones } from './companion'
 import { fleetLine, refill } from './register'
 import { newsFact, summarizeTurn } from './voice'
 
@@ -88,6 +88,7 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   const mine = { type: 'command', command: '~/bin/my-status', padding: 2 }
   const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: mine })]])
   const { clock, saved } = boot(on, OLD_CONFIG, new Map(), files)
+  on('config.list', () => ({ value: [{ key: 'theme', value: 'light' }] }))
   on('process.run', ($: any, e: any) =>
     e.argv.join(' ') === 'fno config get state_dir'
       ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
@@ -103,6 +104,11 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   await clock.advance(600)
   const frame = JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!)
   expect(frame).toMatchObject({ name: 'Quip', speech: 'Quip is back. did you miss me?' })
+  // The status line draws the color the card's theme key has in the person's theme.
+  const rarity = embody(restore(OLD_CONFIG, 0)!).rarity
+  expect(frame.color).toBe(rarityColor('light', rarity))
+  expect(rarityColor('dark', 'rare')).toBe('rgb(177,185,249)')
+  expect(rarityColor('custom:mine', 'rare')).toBe('rgb(177,185,249)')
 
   // A roll in another session rewrites the shared soul; this session draws the new buddy.
   saved.set('soul', { seed: 'other-seed', name: 'Zed', personality: 'a blob', hatchedAt: 1 })
