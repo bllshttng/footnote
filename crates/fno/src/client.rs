@@ -1031,8 +1031,9 @@ pub(crate) struct View {
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `footnote-superscript` is
     /// the default; a terminal reporting a light background defaults to
-    /// `footnote-paper`, and `terminal` stays available as the no-op that
-    /// inherits the emulator's own colors.
+    /// `footnote-paper`, whose ground an inferred pick never paints (the
+    /// terminal keeps its own bg and fg, the x-41c8 ruling), and `terminal`
+    /// stays available as the no-op that inherits the emulator's own colors.
     theme: Theme,
     /// The user's own themes, latched at startup (theme_ground::launch_theme).
     user_themes: Vec<(String, Theme)>,
@@ -4942,6 +4943,10 @@ impl View {
         let (rows, cols) = self.term;
         let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
         let mut cells = vec![Cell::default(); rows * cols];
+        // The composer sheet's editor cursor cell, when the launcher drew
+        // this frame and no picker holds the keyboard: the terminal's real
+        // cursor belongs there (x-41c8), ahead of any pane's cursor.
+        let mut launcher_cursor = None;
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
         backlog_style::node_spans_begin();
@@ -5012,7 +5017,11 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if agent_launcher::draw_overlay(self, &mut cells, rows, cols) {
+        } else if {
+            let cell = agent_launcher::draw_overlay(self, &mut cells, rows, cols);
+            launcher_cursor = cell;
+            cell.is_some()
+        } {
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -5203,10 +5212,15 @@ impl View {
             messages_view::paint_full(self, &mut cells, rows, cols);
         }
 
-        // Terminal cursor: the FOCUSED pane's, offset into its rect - the
-        // one place the cursor may sit (AC1-UI/AC5-UI).
+        // Terminal cursor: the composer sheet's editor while it is open (the
+        // keyboard owner), else the FOCUSED pane's, offset into its rect -
+        // the one place the cursor may sit (AC1-UI/AC5-UI).
         let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
-        if self.selector.is_none()
+        if let Some((r, c)) = launcher_cursor {
+            cur_r = r;
+            cur_c = c;
+            cur_vis = true;
+        } else if self.selector.is_none()
             && self.answers.is_none()
             && self.yard.is_none()
             && self.digest.is_none()

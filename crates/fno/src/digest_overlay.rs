@@ -149,7 +149,20 @@ pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
 /// written. The `mux.theme.brand` / `mux.theme.needs_you` role overrides
 /// fold in here and at the settings modal's swap, so they hold under every
 /// theme.
-pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
+///
+/// The third tuple leg is the inference flag: `true` when no config named a
+/// theme, so the theme was CHOSEN FOR the terminal. An inferred light theme
+/// (paper) does not repaint the ground: the operator's own light bg and fg
+/// stay exactly as the terminal had them (the x-41c8 ruling) - the theme
+/// contributes only the chrome colors, which were tuned against a light
+/// ground. An EXPLICIT paper pick still paints: the operator named it.
+pub fn theme_for(
+    cwd: &Path,
+) -> (
+    crate::theme::Theme,
+    Option<crate::keys::KeymapWarning>,
+    bool,
+) {
     // The user's own themes resolve by name here, and their parse problems
     // ride the same notice even when no config key names one: a theme the
     // picker will list must not fail silently.
@@ -158,20 +171,25 @@ pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::Keymap
         // An empty value is "no preference", the same as the unset key: it
         // rides the light-background ladder instead of pinning the dark
         // default.
-        Some(name) if !name.trim().is_empty() => crate::theme::Theme::from_name_in(name, &user),
+        Some(name) if !name.trim().is_empty() => {
+            let (t, w) = crate::theme::Theme::from_name_in(name, &user);
+            (t, w, false)
+        }
         _ => {
             let env = std::env::var("COLORFGBG").ok();
             (
                 crate::theme::Theme::default_for(colorfgbg_is_light(env.as_deref())),
                 None,
+                true,
             )
         }
     };
-    let (t, warn) = theme_role_overrides(cwd, resolved);
+    let (t, warn, inferred) = resolved;
+    let (t, warn) = theme_role_overrides(cwd, (t, warn));
     if let Some(w) = warn {
         user_warns.push(w);
     }
-    (t, join_warnings(user_warns))
+    (t, join_warnings(user_warns), inferred)
 }
 
 /// The user's own themes: the import's theme folder, then config

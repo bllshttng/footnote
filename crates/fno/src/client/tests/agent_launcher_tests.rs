@@ -275,6 +275,142 @@ fn paste_rows() {
 }
 
 #[test]
+fn line_edit_keys_fold_to_one_key_each() {
+    // x-41c8: the Cmd line-edit grammar. Each byte spelling folds to exactly
+    // one key, never Esc-then-something.
+    let cases: &[(&[u8], super::agent_launcher::LKey)] = &[
+        (b"\x1b\x7f", super::agent_launcher::LKey::KillWord),
+        (b"\x15", super::agent_launcher::LKey::KillLeft),
+        (b"\x1bb", super::agent_launcher::LKey::WordLeft),
+        (b"\x1bf", super::agent_launcher::LKey::WordRight),
+        (b"\x1b[1;3D", super::agent_launcher::LKey::WordLeft),
+        (b"\x1b[1;3C", super::agent_launcher::LKey::WordRight),
+        (b"\x1b[1;5D", super::agent_launcher::LKey::Left),
+        (b"\x1b[D", super::agent_launcher::LKey::Left),
+        (b"\x1b[H", super::agent_launcher::LKey::Home),
+        (b"\x1b[F", super::agent_launcher::LKey::End),
+        (b"\x1bOH", super::agent_launcher::LKey::Home),
+        (b"\x1bOF", super::agent_launcher::LKey::End),
+        (b"\x1b[127;3u", super::agent_launcher::LKey::KillWord),
+    ];
+    for (bytes, want) in cases {
+        let mut esc = LauncherEsc::default();
+        assert_eq!(esc.fold(bytes), vec![want.clone()], "{bytes:?}");
+    }
+}
+
+#[test]
+fn word_and_line_edits_move_and_kill_the_draft() {
+    let mut v = view_with_launcher();
+    type_message(&mut v, "launch the /Users/bb16/x.png thing");
+    let cur = |v: &View| v.launcher.as_ref().unwrap().draft.cursor_chars;
+    let text = |v: &View| v.launcher.as_ref().unwrap().draft.message.clone();
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Option+Left (ESC b) from the end lands on `thing`'s first char.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1bb", &mut sock).await;
+    });
+    assert_eq!(cur(&v), 29, "one word left");
+    // Cmd+Left/Right spell as Home/End.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[H", &mut sock).await;
+    });
+    assert_eq!(cur(&v), 0, "Home jumps to the row start");
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[F", &mut sock).await;
+    });
+    assert_eq!(cur(&v), 34, "End jumps to the row end");
+    // Two Option+Right from the row start land after `the`; the word kill
+    // takes `the ` in one press.
+    rt.block_on(async {
+        let _ =
+            super::agent_launcher::launcher_keys(&mut v, b"\x1b[H\x1bf\x1bf\x1b\x7f", &mut sock)
+                .await;
+    });
+    assert_eq!(cur(&v), 6, "cursor after the kill");
+    assert_eq!(
+        text(&v),
+        "launch /Users/bb16/x.png thing",
+        "the word and its trailing space are gone"
+    );
+    // Word motion is row-aware through a newline.
+    type_message(&mut v, "");
+    v.launcher.as_mut().unwrap().draft.message.clear();
+    v.launcher.as_mut().unwrap().draft.cursor_chars = 0;
+    type_message(&mut v, "ab\ncd");
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[H", &mut sock).await;
+    });
+    assert_eq!(cur(&v), 3, "Home lands on the second row's head");
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1bb", &mut sock).await;
+    });
+    assert_eq!(cur(&v), 3, "word left stays on the `cd` word");
+}
+
+#[test]
+fn paste_inserts_once_at_the_cursor_mid_text() {
+    // x-41c8: a pasted path lands once, at the cursor, even when the paste
+    // arrives split across reads.
+    let mut v = view_with_launcher();
+    type_message(&mut v, "claude-code-claude-code.png");
+    type_message(&mut v, "\x1b[D\x1b[D");
+    let mid = "claude-code-claude-code.png".chars().count() - 2;
+    assert_eq!(v.launcher.as_ref().unwrap().draft.cursor_chars, mid);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(
+            &mut v,
+            b"\x1b[200~/Users/bb16/Pictures/x",
+            &mut sock,
+        )
+        .await;
+    });
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b".png\x1b[201~", &mut sock).await;
+    });
+    let want = "claude-code-claude-code".to_string() + "/Users/bb16/Pictures/x.png" + ".png";
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, want, "the paste lands once, at the cursor");
+    assert_eq!(
+        l.draft.cursor_chars,
+        mid + "/Users/bb16/Pictures/x.png".chars().count(),
+        "the cursor rides the paste's tail"
+    );
+}
+
+#[test]
+fn the_editor_cursor_routes_to_the_real_terminal_cursor() {
+    // x-41c8: no painted cursor glyph; draw_overlay reports the cell for the
+    // terminal's own cursor, and the closed launcher reports none.
+    let mut v = view_with_launcher();
+    let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
+    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+    let (r, c) =
+        super::agent_launcher::draw_overlay(&v, &mut cells, rows_n, cols).expect("cursor cell");
+    assert_ne!(
+        cells[r as usize * cols + c as usize].c,
+        '\u{258f}',
+        "the fake glyph is gone; the terminal draws its own cursor"
+    );
+    let frame = v.compose();
+    assert!(
+        frame.cursor_visible,
+        "the open composer owns the terminal cursor"
+    );
+    let plain = plain_view();
+    let mut cells2 = vec![crate::proto::Cell::default(); rows_n * cols];
+    assert!(
+        super::agent_launcher::draw_overlay(&plain, &mut cells2, rows_n, cols).is_none(),
+        "no sheet, no cursor claim"
+    );
+}
+
+#[test]
 fn submit_refusal_rows() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[

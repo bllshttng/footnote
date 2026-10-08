@@ -32,6 +32,27 @@ fn apply_theme_stages_the_ground_repaint_and_the_drain_applies_it() {
     // The kill switch off stages nothing - the takeover never ran.
     assert!(theme_ground::ground_repaint(&theme, false).is_none());
 
+    // x-41c8: the INFERRED light pick (no config named a theme; COLORFGBG
+    // picked paper) never repaints the ground - the terminal's own light bg
+    // and fg stay. An explicit paper pick and the dark default keep it.
+    let paper = Theme::from_name("footnote-paper").0;
+    assert!(
+        !theme_ground::ground_paint_allowed(true, true, &paper),
+        "inferred paper must not paint"
+    );
+    assert!(
+        theme_ground::ground_paint_allowed(true, false, &paper),
+        "explicit paper still paints"
+    );
+    assert!(
+        theme_ground::ground_paint_allowed(true, true, &theme),
+        "the dark default keeps its paint"
+    );
+    assert!(
+        !theme_ground::ground_paint_allowed(false, false, &paper),
+        "the kill switch still wins"
+    );
+
     // The drain applies all three effects.
     let mut v = two_pane_view();
     v.pending_ground = Some(theme_ground::PendingGround {

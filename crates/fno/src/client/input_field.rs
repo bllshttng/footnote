@@ -65,6 +65,57 @@ impl InputField {
                         self.cursor = self.text[..start].chars().count();
                     }
                 }
+                // The launcher fold's word keys reach the settings fields
+                // too: one byte grammar, one editing grammar.
+                LKey::KillWord => {
+                    let before: Vec<char> = self.text.chars().take(self.cursor).collect();
+                    let ws = before
+                        .iter()
+                        .rev()
+                        .take_while(|c| c.is_whitespace())
+                        .count();
+                    let word = before[..before.len() - ws]
+                        .iter()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .count();
+                    let drop = ws + word;
+                    let at = self.byte_at(self.cursor - drop);
+                    self.text.replace_range(at..self.byte_at(self.cursor), "");
+                    self.cursor -= drop;
+                }
+                LKey::Home => self.cursor = 0,
+                LKey::End => self.cursor = self.text.chars().count(),
+                LKey::WordLeft | LKey::WordRight => {
+                    let cur = self.cursor;
+                    let (taken, rev) = if matches!(key, LKey::WordLeft) {
+                        (self.text.chars().take(cur).collect::<Vec<_>>(), true)
+                    } else {
+                        (self.text.chars().skip(cur).collect::<Vec<_>>(), false)
+                    };
+                    let ws = if rev {
+                        taken.iter().rev().take_while(|c| c.is_whitespace()).count()
+                    } else {
+                        taken.iter().take_while(|c| c.is_whitespace()).count()
+                    };
+                    let word = if rev {
+                        taken[..taken.len() - ws]
+                            .iter()
+                            .rev()
+                            .take_while(|c| c.is_alphanumeric() || **c == '_')
+                            .count()
+                    } else {
+                        taken[ws..]
+                            .iter()
+                            .take_while(|c| c.is_alphanumeric() || **c == '_')
+                            .count()
+                    };
+                    self.cursor = if rev {
+                        cur - ws - word
+                    } else {
+                        cur + ws + word
+                    };
+                }
                 LKey::Left => self.cursor = self.cursor.saturating_sub(1),
                 LKey::Right => self.cursor = (self.cursor + 1).min(self.text.chars().count()),
                 LKey::Enter | LKey::CtrlJ => {
