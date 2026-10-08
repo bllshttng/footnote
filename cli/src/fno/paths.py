@@ -859,12 +859,12 @@ def global_events_json() -> Path:
 
 
 def _state_subfile_at(root: Path, subfolder: str, name: str, legacy_name: str) -> Path:
-    """The move ladder against an explicit root: answer
+    """The move ladder against an explicit root (so a must-not-raise caller
+    can name ``~/.fno`` without loading settings): answer
     ``<root>/<subfolder>/<name>``, renaming the legacy root spelling into it
-    on first resolve.
-
-    Split out so a caller on a must-not-raise path (the provider 429 lock)
-    can name the ``~/.fno`` fallback without loading settings.
+    on first resolve. The rename never clobbers an existing ``state/`` file
+    (merge-capable readers fold the legacy remainder themselves) and keeps
+    the caller on the legacy path when it cannot land.
     """
     new = root / subfolder / name
     legacy = root / legacy_name
@@ -879,65 +879,37 @@ def _state_subfile_at(root: Path, subfolder: str, name: str, legacy_name: str) -
 
 def state_runtime_file(name: str, legacy_name: Optional[str] = None) -> Path:
     """A rewritten runtime-state file under ``state/``, reading the legacy
-    root spelling while it exists.
-
-    The tidiness law (docs/state-root-inventory.md) moves every root file a
-    named subfolder can hold, and ``state/`` is the home for rewritten
-    runtime state: newer bytes win and a deleted file rebuilds on the next
-    write. The pr-watch, fleet-sweep, provider-runtime, failover,
-    health-throttle, recovery-nudge and watchdog-sweep writers lived at the
-    root; this is their one resolver, so the location follows
-    :func:`state_dir` and no caller hand-builds the path.
-
-    First resolve renames a legacy root file into ``state/`` (the
-    spaces-migration pattern: the mover is the resolver, so no second
-    mechanism can drift). The rename never clobbers: a ``state/`` file that
-    already exists wins (merge-capable readers like the provider runtime
-    fold the legacy remainder themselves), and a rename that cannot land
-    keeps the caller on the legacy path rather than splitting the state
-    across two spellings; the next resolve retries. ``legacy_name`` names a
-    root file whose spelling the move also changed (the dot-stamps drop
-    their dot under ``state/``).
+    root spelling while it exists. The one resolver for the pr-watch,
+    fleet-sweep, provider-runtime, failover, health-throttle, recovery-nudge
+    and watchdog-sweep state the tidiness law moved off the root
+    (docs/state-root-inventory.md): the resolver is the mover, so no second
+    mechanism can drift. ``legacy_name`` carries a root file whose spelling
+    the move also changed (the dot-stamps drop their dot).
     """
     return _state_subfile_at(state_dir(), "state", name, legacy_name or name)
 
 
 def logs_file(name: str) -> Path:
-    """A log file under ``logs/``, reading the legacy root spelling while it
-    exists. Same ladder as :func:`state_runtime_file`: the tidiness law
-    moves root logs under ``logs/``, and the resolver is the mover.
+    """A log file under ``logs/``: the same ladder as
+    :func:`state_runtime_file` for the root logs the tidiness law moved.
     """
     return _state_subfile_at(state_dir(), "logs", name, name)
 
 
-# The inventory doc's remaining root-file rows (docs/state-root-inventory.md).
-# This is the fence a root-level write passes: :func:`root_state_file` refuses
-# any leaf not listed here. SHRINK-ONLY, like the doc rows it mirrors: a
-# writer that moves into a subfolder deletes its name here and its row there
-# in the same PR. The parity test in cli/tests/test_state_root_inventory.py
-# keeps every name matched by a doc row, so a listed name whose row died
-# fails CI.
+# The inventory doc's remaining root-file rows: the fence a root-level write
+# passes. SHRINK-ONLY like the rows it mirrors - a writer that moves deletes
+# its name here and its doc row in the same PR (the parity test in
+# cli/tests/test_state_root_inventory.py refuses a name no row matches).
 _ROOT_STATE_FILE_ROWS: frozenset = frozenset(
     {
-        "config.toml",
-        "config.toml.lock",
-        "config.toml.bak",
-        "settings.yaml",
-        "settings.yaml.lock",
-        "ledger.json",
-        "ledger.md",
-        "events.jsonl",
-        "events.jsonl.1",
-        "events.jsonl.ephemeral",
-        "decisions.jsonl",
-        "decisions.jsonl.compact",
-        "decisions.jsonl.corrupt",
+        "config.toml", "config.toml.lock", "config.toml.bak",
+        "settings.yaml", "settings.yaml.lock",
+        "ledger.json", "ledger.md",
+        "events.jsonl", "events.jsonl.1", "events.jsonl.ephemeral",
+        "decisions.jsonl", "decisions.jsonl.compact", "decisions.jsonl.corrupt",
         "questions.jsonl",
-        "my-priorities.md",
-        "my-priorities.md.lock",
-        ".env",
-        ".gitignore",
-        ".path-migration-done",
+        "my-priorities.md", "my-priorities.md.lock",
+        ".env", ".gitignore", ".path-migration-done",
     }
 )
 
@@ -945,12 +917,10 @@ _ROOT_STATE_FILE_ROWS: frozenset = frozenset(
 def root_state_file(name: str) -> Path:
     """A root-level state file, refusing any leaf the inventory does not row.
 
-    Root rows are SHRINK-ONLY (docs/state-root-inventory.md, "The rule"), so
-    a NEW root-level write has no row and this door refuses it, naming the
-    remedy. The remaining root writers (the config pair, the journal
-    locators, the operator lane, the benchmark cache) route through here so
-    the day one moves, the row, the fence entry and the accessor's spelling
-    leave in one change.
+    Root rows are shrink-only, so a NEW root-level write has no row and this
+    door refuses it, naming the remedy. The remaining root writers route
+    through here so the day one moves, the row, the fence entry and the
+    accessor leave in one change.
     """
     if name not in _ROOT_STATE_FILE_ROWS:
         raise ValueError(

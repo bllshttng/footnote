@@ -291,16 +291,13 @@ def think_spawn_on_decompose_wave0(
 
 
 def _daily_counter_path() -> Path:
-    """``~/.fno/state/think-spawn-daily.json`` - the global per-day spawn counter.
-
-    Per-install (not per-project): the firehose guard bounds total bg /think
-    sessions a day regardless of which repo or node triggered them. Resolved
-    under ``global_claims_root()`` (the SAME ``$FNO_CLAIMS_ROOT``-honoring base
-    as the dispatch dedup tokens) so the counter isolates with the claims in
-    tests and travels with them in production. First resolve renames the
-    legacy root spelling (the same move ladder
-    :func:`fno.paths.state_runtime_file` runs, rebuilt here because this base
-    follows the claims root, not ``state_dir()``).
+    """``~/.fno/state/think-spawn-daily.json`` - the global per-day spawn
+    counter, per-install (not per-project): the firehose guard bounds total
+    bg /think sessions a day. Resolved under ``global_claims_root()`` (the
+    same ``$FNO_CLAIMS_ROOT``-honoring base as the dispatch dedup tokens) so
+    it isolates with the claims in tests. First resolve renames the legacy
+    root spelling - the ``paths.state_runtime_file`` ladder, rebuilt here
+    because this base follows the claims root, not ``state_dir()``.
     """
     from fno.claims.io import global_claims_root
 
