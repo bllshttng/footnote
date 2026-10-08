@@ -360,6 +360,7 @@ fn run_claim_reap(args: &[String]) -> i32 {
     let mut dirs = Vec::new();
     let mut apply = false;
     let mut key = None;
+    let mut budget = REAP_BUDGET;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -377,6 +378,13 @@ fn run_claim_reap(args: &[String]) -> i32 {
                 Some(v) => key = Some(v.as_str()),
                 None => return 2,
             },
+            "--budget-secs" => match it.next().and_then(|v| v.parse::<u64>().ok()) {
+                Some(secs) => budget = std::time::Duration::from_secs(secs),
+                None => {
+                    eprintln!("fno-agents: claim reap: --budget-secs requires whole seconds");
+                    return 2;
+                }
+            },
             "--apply" => apply = true,
             "--json" | "-J" => {}
             other => {
@@ -385,6 +393,30 @@ fn run_claim_reap(args: &[String]) -> i32 {
             }
         }
     }
+    let summary = reap_roots(dirs, apply, key, budget);
+    println!("{summary}");
+    i32::from(
+        summary["root_errors"]
+            .as_array()
+            .is_some_and(|e| !e.is_empty()),
+    )
+}
+
+/// How long one reap pass may run. The reconcile beat runs the reap inside
+/// its own bound, and a pass past that bound was killed before it printed,
+/// so nothing was ever reaped. Rows the bound leaves unread are `deferred`,
+/// and the next pass reads the oldest rows first.
+pub(crate) const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Reap every claims root in `dirs` (the global and repo-local roots when it
+/// is empty) under one shared deadline. A root that cannot be read is named
+/// in `root_errors`, and the other roots still reap.
+pub(crate) fn reap_roots(
+    mut dirs: Vec<PathBuf>,
+    apply: bool,
+    key: Option<&str>,
+    budget: std::time::Duration,
+) -> Value {
     if dirs.is_empty() {
         if let Some(dir) = crate::claims::global_claims_dir() {
             dirs.push(dir);
@@ -395,17 +427,22 @@ fn run_claim_reap(args: &[String]) -> i32 {
     }
     dirs.sort();
     dirs.dedup();
-    let (witness, _) = default_session_witness();
-    let recheck = |record: &crate::claims::ClaimRecord| {
-        let (witness, _) = default_session_witness();
-        witness(record)
-    };
-    let mut summary = serde_json::json!({"apply":apply,"scanned":0,"would_reap":0,"reaped":0,"reap_failed":[],"roots":dirs});
+    let deadline = std::time::Instant::now() + budget;
+    let mut summary = serde_json::json!({"apply":apply,"scanned":0,"would_reap":0,"reaped":0,"deferred":0,"reap_failed":[],"root_errors":[],"roots":dirs});
     for dir in &dirs {
-        match crate::claim_store::reap_in_directory(dir, apply, Some(&witness), Some(&recheck), key)
+        // One batch answers a chunk's sessions, and a second batch over the
+        // chunk's candidates is the fresh look before a delete. A lazy
+        // witness spawned one truth probe per session, which made a 400-row
+        // pass run for minutes.
+        let primed = |records: &[crate::claims::ClaimRecord]| {
+            let records: Vec<&crate::claims::ClaimRecord> = records.iter().collect();
+            let (witness, _) = session_witness_primed_within(&records, Some(deadline));
+            Some(Box::new(witness) as crate::claim_store::BoxedWitness<'static>)
+        };
+        match crate::claim_store::reap_in_directory(dir, apply, primed, primed, key, Some(deadline))
         {
             Ok(result) => {
-                for field in ["scanned", "would_reap", "reaped"] {
+                for field in ["scanned", "would_reap", "reaped", "deferred"] {
                     summary[field] = serde_json::json!(
                         summary[field].as_u64().unwrap_or(0) + result[field].as_u64().unwrap_or(0)
                     );
@@ -417,14 +454,13 @@ fn run_claim_reap(args: &[String]) -> i32 {
                         .extend(errors.iter().cloned());
                 }
             }
-            Err(error) => {
-                eprintln!("fno-agents: claim reap {}: {error}", dir.display());
-                return 1;
-            }
+            Err(error) => summary["root_errors"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(format!("{}: {error}", dir.display()))),
         }
     }
-    println!("{summary}");
-    0
+    summary
 }
 
 /// `fno-agents claim list [--prefix <prefix>] [--include-stale] [--root <dir>]`
@@ -851,6 +887,20 @@ pub(crate) fn session_witness_primed_for<'a>(
     std::rc::Rc<std::cell::RefCell<Option<&'static str>>>,
 ) {
     let records: Vec<&crate::claims::ClaimRecord> = records.into_iter().collect();
+    session_witness_primed_within(&records, None)
+}
+
+/// [`session_witness_primed_for`] with the batch bounded by `deadline`. A
+/// page the deadline cuts off seeds nothing, so its sessions fall to the lazy
+/// path exactly as a timed-out batch does.
+pub(crate) fn session_witness_primed_within(
+    records: &[&crate::claims::ClaimRecord],
+    deadline: Option<std::time::Instant>,
+) -> (
+    impl Fn(&crate::claims::ClaimRecord) -> crate::claims::SessionLiveness,
+    std::rc::Rc<std::cell::RefCell<Option<&'static str>>>,
+) {
+    let records = records.to_vec();
     if records.is_empty() {
         // Nothing to classify: the lazy witness costs nothing, and skipping
         // the registry read keeps an empty claims dir at its measured 0s.
@@ -886,7 +936,7 @@ pub(crate) fn session_witness_primed_for<'a>(
             .collect()
     };
     let memo = std::cell::RefCell::new(std::collections::HashMap::new());
-    let (map, _) = crate::truth_probe::family1_truth_probe_many_measured(&wire);
+    let (map, _) = crate::truth_probe::family1_truth_probe_many_measured_within(&wire, deadline);
     {
         let registry_known = index.borrow().as_ref().is_some_and(|r| r.known);
         for (session, probe) in &map {
