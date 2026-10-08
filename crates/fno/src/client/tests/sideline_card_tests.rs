@@ -602,8 +602,8 @@ fn a_foreign_cwd_shows_inline_in_parens_and_never_adds_a_row() {
     v.sideline_width = 80;
     let frame_text = crate::vt::frame_text(&v.compose());
     assert!(
-        frame_text.contains("w1 (elsewhere)"),
-        "the cwd rides inline after the slug: {frame_text}"
+        frame_text.contains("w1 \u{b7} lead-a (elsewhere)"),
+        "the cwd rides inline after the slug and lead: {frame_text}"
     );
     // A squad-less row whose cwd base repeats its own node id prints no
     // parenthetical (the user's noise case); one from an arbitrary directory
