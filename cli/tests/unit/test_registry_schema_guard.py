@@ -49,7 +49,7 @@ def _row(name: str = "worker-1") -> dict:
 
 
 def _doc(path: Path) -> dict:
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     return read_registry_document(path)[0]
 

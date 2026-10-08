@@ -2032,7 +2032,7 @@ def _live_joiner_names(node_id: str) -> list[str]:
     session non-terminally, or its transcript moved inside the idle window.
     Join spawns are claude-only, so the claude probes cover every row here.
     """
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     try:
         reg = read_registry_document()[0]

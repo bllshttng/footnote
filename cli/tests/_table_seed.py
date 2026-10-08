@@ -13,7 +13,7 @@ from typing import Any, Optional
 def seed_registry(rows: list[dict[str, Any]], path: Optional[Path] = None, **document: Any) -> None:
     """Replace the registry document with ``rows`` (plus any top-level keys)."""
     from fno import paths
-    from fno.agents.registry_door import commit_registry_document, read_registry_document
+    from fno.registry_door import commit_registry_document, read_registry_document
 
     target = Path(path) if path is not None else Path(paths.agents_registry_path())
     target.parent.mkdir(parents=True, exist_ok=True)

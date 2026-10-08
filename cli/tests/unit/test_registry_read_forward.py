@@ -294,7 +294,7 @@ def test_write_still_works_at_the_current_schema(tmp_path: Path) -> None:
 
     reg.write_registry(reg.load_registry(path), path)
 
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     assert read_registry_document(path)[0]["schema_version"] == reg.SCHEMA_VERSION
 

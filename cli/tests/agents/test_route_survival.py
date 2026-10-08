@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.registry_door import read_registry_document
+from fno.registry_door import read_registry_document
 
 ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",

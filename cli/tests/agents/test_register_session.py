@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.registry_door import read_registry_document
+from fno.registry_door import read_registry_document
 
 
 def _events(tmp_path: Path) -> list[dict]:
@@ -1284,7 +1284,7 @@ def test_heal_mux_ref_idempotent_noop_writes_nothing(tmp_path, monkeypatch):
     from fno.agents.registry import _registry_path
 
     registry_path = _registry_path(None)
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     before = read_registry_document(registry_path)
     emitted: list = []

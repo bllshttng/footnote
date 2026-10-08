@@ -1201,7 +1201,7 @@ def _read_raw_registry(target: Path) -> Optional[dict]:
     Read once by ``write_registry`` and shared by its schema, row-loss, and
     existing-name checks.
     """
-    from fno.agents.registry_door import RegistryDoorError, read_registry_document
+    from fno.registry_door import RegistryDoorError, read_registry_document
 
     try:
         return read_registry_document(target)[0]
@@ -1343,7 +1343,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     The table revision read here guards the write: a writer that landed
     between the read and the commit makes the door refuse.
     """
-    from fno.agents.registry_door import (
+    from fno.registry_door import (
         RegistryDoorError,
         commit_registry_document,
         read_registry_document,
@@ -1493,7 +1493,7 @@ def repair_registry_schema(
     """
     target = _registry_path(path)
     with _hold_registry_lock(target, timeout=lock_timeout):
-        from fno.agents.registry_door import (
+        from fno.registry_door import (
             RegistryDoorError,
             commit_registry_document,
             read_registry_document,
@@ -1700,7 +1700,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     alien harness never bricks the shared read, and dispatch capability is
     gated at the spawn/ask seam.
     """
-    from fno.agents.registry_door import RegistryDoorError, read_registry_document
+    from fno.registry_door import RegistryDoorError, read_registry_document
 
     target = _registry_path(path)
     try:
@@ -2606,7 +2606,7 @@ def registry_rows_by_cwd(
 
     override = os.environ.get("WORKTREE_STATUS_REGISTRY")
     target = Path(override) if override else (path or agents_registry_path())
-    from fno.agents.registry_door import RegistryDoorError, read_registry_document
+    from fno.registry_door import RegistryDoorError, read_registry_document
 
     try:
         data = read_registry_document(target)[0]

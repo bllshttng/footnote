@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents.registry_door import read_registry_document
+from fno.registry_door import read_registry_document
 from fno.harness_identity import (
     AMBIENT_IDENTITY_ENV,
     HARNESS_SESSION_MARKERS,

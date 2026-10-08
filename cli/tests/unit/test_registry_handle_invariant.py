@@ -100,7 +100,7 @@ def test_write_registry_refuses_a_new_handleless_row(tmp_path: Path) -> None:
     # content, and so this is a genuinely NEW-row refusal, not an empty file.
     seed = reg.AgentEntry(name="seed", cwd="/x", log_path="/x/seed.log", harness="claude")
     reg.write_registry([seed], path=path)
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     before = read_registry_document(path)
 

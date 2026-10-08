@@ -1270,7 +1270,7 @@ def live_thread_row_for_cwd(
     if not cwd:
         return None
     try:
-        from fno.agents.registry_door import read_registry_document
+        from fno.registry_door import read_registry_document
 
         raw = read_registry_document(registry_path)[0]
         rows = raw.get("agents") if isinstance(raw, dict) else None

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.registry_door import read_registry_document
+from fno.registry_door import read_registry_document
 
 
 def _replace_path_on_first_flock(monkeypatch, module, lock_path: Path):
@@ -340,7 +340,7 @@ def test_ac2_err_atomic_write_on_exception(tmp_path: Path, monkeypatch) -> None:
     original_content = read_registry_document(registry_path)[0]
 
     # Now simulate a write that dies inside the table door.
-    import fno.agents.registry_door as door_module
+    import fno.registry_door as door_module
 
     def _exploding_commit(*args, **kwargs):
         raise RuntimeError("simulated kill -9 mid-write")
@@ -366,7 +366,7 @@ def test_write_registry_failure_surfaces_and_keeps_the_table(tmp_path: Path, mon
     """An ``OSError`` inside the write door propagates and leaves no partial rows."""
     use_tmpdir(monkeypatch, tmp_path)
 
-    import fno.agents.registry_door as door_module
+    import fno.registry_door as door_module
     from fno.agents.registry import AgentEntry, write_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"

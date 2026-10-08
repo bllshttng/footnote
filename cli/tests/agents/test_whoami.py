@@ -259,7 +259,7 @@ class TestWhoamiCLI:
         monkeypatch.setenv("FNO_AGENT_SESSION", "s-cli")
         from fno import paths
 
-        from fno.agents.registry_door import read_registry_document
+        from fno.registry_door import read_registry_document
 
         def _hash() -> str:
             return str(read_registry_document(paths.agents_registry_path()))

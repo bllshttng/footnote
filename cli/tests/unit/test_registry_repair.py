@@ -42,7 +42,7 @@ def _row(name: str, **extra) -> dict:
 
 
 def _document(path: Path) -> dict:
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     return read_registry_document(path)[0]
 

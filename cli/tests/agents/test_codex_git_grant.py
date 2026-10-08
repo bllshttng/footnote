@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fno.agents.harnesses import codex
 from fno.agents.registry import AgentEntry, load_registry, write_registry
-from fno.agents.registry_door import read_registry_document
+from fno.registry_door import read_registry_document
 
 
 def _git(cwd: Path, *args: str) -> str:

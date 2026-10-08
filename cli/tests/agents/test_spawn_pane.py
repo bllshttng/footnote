@@ -1475,7 +1475,7 @@ def test_node_spawn_persists_projects_and_supplies_watchdog_identity(
         provenance={"FNO_NODE": "x-cafe", "FNO_SLUG": "node-projection"},
     )
 
-    from fno.agents.registry_door import read_registry_document
+    from fno.registry_door import read_registry_document
 
     persisted = read_registry_document()[0]
     persisted_row = persisted["agents"][0]

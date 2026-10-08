@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.registry_door import read_registry_document
+from fno.registry_door import read_registry_document
 
 BIRTH = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
 REMINT = "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e"

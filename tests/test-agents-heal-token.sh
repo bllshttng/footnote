@@ -82,12 +82,12 @@ fail() { echo "FAIL: $1"; exit 1; }
 # fence, so every read and reset goes through the registry-commit door.
 reg_rows() {
   "$VENV_PY" -c 'import json, sys; from pathlib import Path
-from fno.agents.registry_door import read_registry_rows
+from fno.registry_door import read_registry_rows
 print(json.dumps(read_registry_rows(Path(sys.argv[1]))))' "${1:-$REGISTRY}"
 }
 reg_clear() {
   "$VENV_PY" -c 'import sys; from pathlib import Path
-from fno.agents.registry_door import commit_registry_document, read_registry_document
+from fno.registry_door import commit_registry_document, read_registry_document
 path = Path(sys.argv[1])
 document, revision = read_registry_document(path)
 commit_registry_document(path, {"schema_version": document["schema_version"], "agents": [], "replace": True}, revision)' "${1:-$REGISTRY}" \

@@ -1659,7 +1659,7 @@ def _owned_registry_effort(harness: str, session_id: str) -> "str | None":
     if not harness or not session_id:
         return None
     try:
-        from fno.agents.registry_door import RegistryDoorError, read_registry_document
+        from fno.registry_door import RegistryDoorError, read_registry_document
 
         raw = read_registry_document()[0]
     except (OSError, TypeError, ValueError, RegistryDoorError):
