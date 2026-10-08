@@ -758,7 +758,7 @@ impl View {
                     cells[r * cols].c = CARD_EDGE_BAR;
                     cells[r * cols].fg = crate::theme::dim_fg(&self.theme);
                 }
-                self.paint_card_identity(cells, r, cols, text_w, drow);
+                self.paint_card_identity(cells, r, cols, text_w, drow, highlit);
                 if let DisplayRow::CardMetrics(a) = drow {
                     self.paint_card_activity(cells, r, cols, text_w, a, card_indent + depth * 2);
                 }
@@ -1217,6 +1217,7 @@ impl View {
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint_card_identity(
         &self,
         cells: &mut [Cell],
@@ -1224,6 +1225,7 @@ impl View {
         cols: usize,
         text_w: usize,
         drow: &DisplayRow<'_>,
+        highlit: bool,
     ) {
         let DisplayRow::Agent(agent) = drow else {
             return;
@@ -1316,9 +1318,19 @@ impl View {
                     .join(" ");
                 let w = crate::chrome::str_cols(&pairs);
                 let start = text_w.saturating_sub(w);
+                // The strip yields to the surface that owns the line: the
+                // chosen fill's or the band's own fg there, dim only at
+                // rest (the composed contrast test pins 3:1 on both).
+                let rollup_fg = if on_chosen_fill {
+                    fill_fg
+                } else if highlit {
+                    crate::theme::band_style(&self.theme).0
+                } else {
+                    crate::theme::dim_fg(&self.theme)
+                };
                 for (cell, ch) in line[start..].iter_mut().zip(pairs.chars()) {
                     cell.c = ch;
-                    cell.fg = crate::theme::dim_fg(&self.theme);
+                    cell.fg = rollup_fg;
                     cell.flags = 0;
                 }
             }
