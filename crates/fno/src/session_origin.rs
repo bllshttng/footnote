@@ -181,6 +181,31 @@ fn prune_beside(dir: &Path, keep: &str) {
     }
 }
 
+/// Write a record that arrived from elsewhere beside a local transcript.
+/// No prune: pruning stays the writing machine's job, on its own writes.
+pub fn write_record_beside(transcript: &Path, origin: &SessionOrigin) -> std::io::Result<bool> {
+    let Some(path) = record_path(transcript, &origin.session_id) else {
+        return Ok(false);
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let bytes = serde_json::to_vec_pretty(origin)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            file.write_all(&bytes)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Read the record beside a transcript. Any error is None: a missing,
 /// unreadable or foreign-shaped record means "not recorded", never a failure.
 pub fn read_beside(transcript: &Path, session_id: &str) -> Option<SessionOrigin> {

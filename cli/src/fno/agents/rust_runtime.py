@@ -204,6 +204,10 @@ RUST_CLIENT_VERBS = frozenset(
         # (never lazy-starts). Dispatched directly in client.rs before
         # build_request (no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
+        # `transcript`: move a session bundle over a pairing code or a file.
+        # Client-side only (no daemon RPC); dispatches directly like `report`.
+        # The user's 2026-10-07 in-session build order is the Python grant.
+        "transcript",
         "report",
         # Agent-state wait + event subscription (mux roadmap wave 2).
         # Both dispatch DIRECTLY in client.rs before build_request (no daemon

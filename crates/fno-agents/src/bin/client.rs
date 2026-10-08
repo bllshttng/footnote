@@ -34,6 +34,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "canonical-check",
     "ask",
     "attach",
+    "transcript",
     "authorized-merge",
     "bash-census",
     "board",
@@ -1094,6 +1095,11 @@ async fn run(args: Vec<String>) -> i32 {
         .await;
     }
     // `wait`: poll registry.json directly for a state (no daemon RPC).
+    // `transcript`: move a session bundle over a pairing code or a file.
+    // Client-side only: no daemon RPC, no registry write.
+    if verb == "transcript" {
+        return fno_agents::transcript_transfer::run_transcript(&args[1..]).await;
+    }
     if verb == "wait" {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
