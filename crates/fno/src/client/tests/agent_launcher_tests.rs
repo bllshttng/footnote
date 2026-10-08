@@ -3040,8 +3040,8 @@ fn composer_keys_refusals_help_and_flag_parsing_contract() {
     let mut esc = LauncherEsc::default();
     assert_eq!(
         esc.fold(b"\x1b\x7f"),
-        vec![super::agent_launcher::LKey::KillLeft],
-        "ESC+DEL is one key, never Esc then Backspace"
+        vec![super::agent_launcher::LKey::KillWord],
+        "ESC+DEL is one key (Option+Backspace, the word kill), never Esc then Backspace"
     );
     let mut esc = LauncherEsc::default();
     assert_eq!(
