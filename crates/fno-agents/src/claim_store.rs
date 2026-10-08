@@ -66,7 +66,7 @@ pub(crate) fn open_directory(dir: &Path) -> Result<Connection, String> {
         .map_err(|e| format!("{}: {e}", path.display()))?;
     connection.execute_batch("CREATE TABLE IF NOT EXISTS claim_history (id INTEGER PRIMARY KEY, retired_at INTEGER NOT NULL, record TEXT NOT NULL);
         CREATE TRIGGER IF NOT EXISTS claims_archive_delete BEFORE DELETE ON claims BEGIN
-            INSERT INTO claim_history(retired_at, record) VALUES (CAST((julianday('now')-2440587.5)*86400000 AS INTEGER), json_object('key',old.key,'holder',old.holder,'schema_version',old.schema_version,'acquired_at',old.acquired_at,'expires_at',old.expires_at,'pid',old.pid,'pid_unavailable',json(CASE WHEN old.pid_unavailable THEN 'true' ELSE 'false' END),'host',old.host,'machine_id',old.machine_id,'reason',old.reason,'harness',old.harness,'session_id',old.session_id,'pid_provenance',old.pid_provenance,'metadata',json(old.metadata)));
+            INSERT INTO claim_history(retired_at, record) VALUES (CAST((julianday('now')-2440587.5)*86400000 AS INTEGER), json_object('key',old.key,'holder',old.holder,'schema_version',old.schema_version,'acquired_at',old.acquired_at,'expires_at',old.expires_at,'pid',old.pid,'pid_unavailable',json(CASE WHEN old.pid_unavailable THEN 'true' ELSE 'false' END),'host',old.host,'machine_id',old.machine_id,'reason',old.reason,'harness',old.harness,'session_id',old.session_id,'pid_provenance',old.pid_provenance,'metadata',CASE WHEN json_valid(old.metadata) THEN json(old.metadata) ELSE old.metadata END));
         END;").map_err(|e| e.to_string())?;
     import_lockfiles(&mut connection, dir)?;
     Ok(connection)
