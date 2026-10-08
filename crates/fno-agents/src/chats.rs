@@ -2231,11 +2231,10 @@ mod tests {
         // show --json layers the reply identity over the stored row: the
         // registry-resolved name and short_id, the session id, and the fmail
         // id. The row's fields stay verbatim underneath.
-        std::fs::write(
+        crate::registry_store::seed_raw(
             home_pin.join("registry.json"),
-            r#"{"agents":[{"name":"rowan","session_id":"sess-a","harness":"claude","short_id":"rowan-short"}]}"#,
-        )
-        .unwrap();
+            r#"{"schema_version":1,"agents":[{"name":"rowan","cwd":"/x","session_id":"sess-a","harness_session_id":"sess-a","harness":"claude","short_id":"rowan-short"}]}"#,
+        );
         let jq = |caller: &str| ShowQuery {
             thread: false,
             json: true,
