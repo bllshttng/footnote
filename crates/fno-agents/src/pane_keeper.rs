@@ -1088,20 +1088,15 @@ mod tests {
 
     /// The `[54;3H` bug: a cut whose ESC went out with the dropped prefix
     /// used to leave the sequence tail as the replay's opening text. The
-    /// drop now extends through the sequence.
+    /// drop now extends through the split sequence; a complete sequence
+    /// before the cut replays intact.
     #[test]
-    fn ring_cut_inside_an_escape_sequence_extends_to_the_boundary() {
+    fn ring_cut_at_an_escape_sequence_replays_from_the_boundary() {
         let mut ring = Ring::new(8);
         ring.push(b"\x1b[54;3");
         ring.push(b"Hwold");
         assert_eq!(ring.snapshot(), b"wold");
         assert_eq!(ring.dropped, 7, "3 prefix + 3 split + the final H, counted");
-    }
-
-    /// A cut that lands BEFORE a complete sequence trims only the split
-    /// one; the next sequence replays intact.
-    #[test]
-    fn ring_cut_before_a_complete_sequence_keeps_it() {
         let mut ring = Ring::new(8);
         ring.push(b"\x1b[2J\x1b[Hok");
         ring.push(b"XY");
