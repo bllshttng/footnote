@@ -30,10 +30,12 @@ pub(super) fn codex_thread_on_done(
         let name = name.clone();
         let turn_id = receipt.turn_id.clone();
         let status = receipt.status.clone();
+        let error = receipt.error.clone();
+        let failed = status == "failed" || error.is_some();
         let registry_path = registry_path.clone();
         tokio::spawn(async move {
             let bump_name = name.clone();
-            let _ = update_registry_offloaded(registry_path, move |registry| {
+            let session_id = update_registry_offloaded(registry_path, move |registry| {
                 if let Some(entry) = registry.find_mut(&bump_name) {
                     // The completion of an INTERRUPTED turn must not
                     // resurrect a row the stop path just settled Exited:
@@ -44,18 +46,38 @@ pub(super) fn codex_thread_on_done(
                         entry.status = crate::AgentStatus::Live;
                         entry.last_message_at = Some(now_rfc3339_like());
                     }
+                    return entry.harness_session_id.clone();
                 }
+                None
             })
-            .await;
-            let _ = emitter.emit(
-                "agent_ask_done",
-                &json!({
-                    "name": name,
-                    "backend": "codex-thread",
-                    "turn_id": turn_id,
-                    "turn_status": status,
-                }),
-            );
+            .await
+            .ok()
+            .flatten();
+            if !failed && status == "completed" {
+                if let Some(session_id) = session_id.as_deref() {
+                    crate::mail_hold::conversation_turn_end(session_id);
+                }
+            }
+            let mut payload = json!({
+                "name": name,
+                "backend": "codex-thread",
+                "turn_id": turn_id,
+                "turn_status": status,
+            });
+            if let Some(session_id) = session_id {
+                payload["session_id"] = json!(session_id);
+            }
+            if let Some(error) = error {
+                payload["error"] = error;
+            }
+            let event = if failed {
+                emitter.emit("codex_turn_error", &payload)
+            } else {
+                emitter.emit("agent_ask_done", &payload)
+            };
+            if let Err(error) = event {
+                eprintln!("codex-thread: completion event write failed: {error}");
+            }
         });
     })
 }

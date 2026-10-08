@@ -27,6 +27,37 @@ fn rebind_runtime_ready() -> bool {
 }
 
 impl super::Core {
+    pub(super) fn handle_workspace_restore(
+        &mut self,
+        dry_run: bool,
+        harness: Option<String>,
+        member_session: Option<String>,
+        reply: ControlReply,
+    ) {
+        if !self.restored {
+            let _ = reply.send(ServerMsg::Err {
+                code: crate::proto::err_code::RESTORE_NOT_RUN,
+                msg: "startup restore has not run in this session yet: attach once, then re-run"
+                    .into(),
+            });
+            return;
+        }
+        self.workspace_restore_start(dry_run, harness, member_session, reply);
+    }
+
+    fn targeted_restore_candidates(
+        &self,
+        harness: Option<&str>,
+        session: Option<&str>,
+    ) -> Vec<(String, crate::squad_store::StoredMember)> {
+        self.restore_candidates(harness)
+            .into_iter()
+            .filter(|(_, member)| {
+                session.is_none_or(|sid| member.harness_session_id.as_deref() == Some(sid))
+            })
+            .collect()
+    }
+
     /// `fno mux workspace restore`, phase 1: split the run. A dry
     /// run never resolves plans (it reports classifications and spawns
     /// nothing), and a run with no claude members needs none, so both apply
@@ -38,6 +69,7 @@ impl super::Core {
         &mut self,
         dry_run: bool,
         harness: Option<String>,
+        member_session: Option<String>,
         reply: ControlReply,
     ) {
         // The off-loop registry reader ticks independently and may never have
@@ -48,20 +80,24 @@ impl super::Core {
             self.agents = rows;
         }
         if dry_run {
-            self.workspace_restore_apply(true, harness, HashMap::new(), reply);
+            self.workspace_restore_apply(true, harness, member_session, HashMap::new(), reply);
             return;
         }
         let claude_names: Vec<String> = self
-            .restore_candidates(harness.as_deref())
+            .targeted_restore_candidates(harness.as_deref(), member_session.as_deref())
             .into_iter()
             .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
             .map(|(name, _)| name)
             .collect();
-        let portal_names = portal_reach::portals_needing_claude_plan(self);
+        let portal_names = if member_session.is_none() {
+            portal_reach::portals_needing_claude_plan(self)
+        } else {
+            Vec::new()
+        };
         // Every member re-seats a row that already held a seat, so no spawn
         // gate is asked: with no claude plan to resolve, the apply runs now.
         if claude_names.is_empty() && portal_names.is_empty() {
-            self.workspace_restore_apply(false, harness, HashMap::new(), reply);
+            self.workspace_restore_apply(false, harness, member_session, HashMap::new(), reply);
             return;
         }
         let core_tx = self.self_tx.clone();
@@ -71,6 +107,7 @@ impl super::Core {
                 .send(CoreMsg::WorkspaceRestoreApply {
                     dry_run,
                     harness,
+                    member_session,
                     plans,
                     reply,
                 })
@@ -88,11 +125,13 @@ impl super::Core {
         &mut self,
         dry_run: bool,
         harness: Option<String>,
+        member_session: Option<String>,
         mut plans: HashMap<String, Result<ReentryVerdict, String>>,
         reply: ControlReply,
     ) {
         use self::portal_reach::RESTORE_CLIENT;
-        let candidates = self.restore_candidates(harness.as_deref());
+        let candidates =
+            self.targeted_restore_candidates(harness.as_deref(), member_session.as_deref());
         // One rebind job per resumed member whose registry row
         // carried a native session id: the pane is running, and the row it
         // left behind names the DEAD pane, so mail, pane send, and
@@ -279,7 +318,15 @@ impl super::Core {
             }
             rows.push(row);
         }
-        rows.extend(portal_reach::portal_restore_rows(self, dry_run, &mut plans));
+        if member_session.is_none() {
+            rows.extend(portal_reach::portal_restore_rows(self, dry_run, &mut plans));
+        } else if rows.is_empty() {
+            rows.push(restore_route_gate::refused_row(
+                member_session.unwrap(),
+                harness,
+                "exact session is not a restorable workspace member".into(),
+            ));
+        }
         let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
         if resumed > 0 {
             self.push_layout(true);

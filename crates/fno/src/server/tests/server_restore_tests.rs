@@ -1287,6 +1287,7 @@ fn run_workspace_restore(core: &mut Core, dry_run: bool) -> Vec<RestoreRow> {
     core.handle(CoreMsg::WorkspaceRestoreApply {
         dry_run,
         harness: None,
+        member_session: None,
         plans: HashMap::new(),
         reply: tx,
     });
@@ -1416,6 +1417,25 @@ fn workspace_restore_member_rows() {
         .collect();
     assert_eq!(still_one, vec![resumed_pane], "the rerun spawned nothing");
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    core.handle(CoreMsg::WorkspaceRestoreApply {
+        dry_run: false,
+        harness: None,
+        member_session: Some("different-session".into()),
+        plans: HashMap::new(),
+        reply: tx,
+    });
+    let ServerMsg::WorkspaceRestored { rows } = rx.blocking_recv().unwrap() else {
+        panic!("restore receipt")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "refused");
+    assert_eq!(
+        core.panes.len(),
+        2,
+        "an unmatched exact session touches no other seat"
+    );
+
     core.reap_pane(resumed_pane);
     core.reap_pane(shell);
     let _ = std::fs::remove_dir_all(&cwd);
@@ -1428,6 +1448,7 @@ fn workspace_restore_member_rows() {
     core.handle(CoreMsg::WorkspaceRestore {
         dry_run: false,
         harness: None,
+        member_session: None,
         reply: tx,
     });
     match rx.blocking_recv().expect("a reply") {
@@ -1447,6 +1468,7 @@ fn workspace_restore_member_rows() {
     core.handle(CoreMsg::WorkspaceRestore {
         dry_run: true,
         harness: None,
+        member_session: None,
         reply: tx,
     });
     assert!(
@@ -1798,6 +1820,7 @@ fn workspace_restore_portal_rows() {
         dry_run: false,
         harness: None,
         plans,
+        member_session: None,
         reply: tx,
     });
     let rows = match rx.blocking_recv().expect("a reply") {
