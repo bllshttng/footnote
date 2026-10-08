@@ -2349,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn renew_refuses_expired_lease_even_when_the_old_process_is_alive() {
+    fn renew_extends_an_expired_claim_the_status_verdict_calls_live() {
         // AC1-HP: a session past its TTL whose pid is verifiably alive
         // extends its own claim, on the same verdict `claim status` prints.
         let td = TempDir::new().unwrap();
@@ -2372,7 +2372,7 @@ mod tests {
             "fixture must read LIVE past expiry or AC1-HP proves nothing"
         );
         std::thread::sleep(Duration::from_millis(2));
-        let _t0 = now_ms();
+        let t0 = now_ms();
         assert_eq!(
             renew(
                 "node:x-expired-live",
@@ -2380,11 +2380,13 @@ mod tests {
                 120_000,
                 Some(td.path())
             ),
-            Ok(false)
+            Ok(true)
         );
-        assert_eq!(
-            read_claim(&td, "node:x-expired-live").expires_at,
-            rec.expires_at
+        let exp = read_claim(&td, "node:x-expired-live").expires_at.unwrap();
+        assert!(
+            (exp - (t0 + 120_000)).abs() < 1_000,
+            "deadline must be ~now+ttl, got {exp} vs {}",
+            t0 + 120_000
         );
     }
 
