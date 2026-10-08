@@ -693,10 +693,6 @@ def reap_dead_claims(
     )
     probe_reasons = getattr(abandonment_probe, "reasons", {})
     ts = now_ms()
-    # A pid shared across holders stays shared for this sweep once one member
-    # is archived; otherwise the survivor's fresh read turns exclusive and the
-    # apply pass drains only the first member.
-    archived_shared_pids: set[tuple[str, int]] = set()
 
     def _judge(claim: Claim, verdict: dict[str, Any]) -> tuple[bool, str]:
         dead, bucket = sweep_verdict(
@@ -733,9 +729,12 @@ def reap_dead_claims(
                     dirs = summary["unclassified_dirs"]
                     dirs[str(directory)] = dirs.get(str(directory), 0) + 1
                     continue
-                pid_key = (fresh.machine_id or fresh.host, fresh.pid) if fresh.pid is not None else None
+                # The keyed re-read sees one row, so it cannot see the pid's
+                # other holders and reads a shared pid as exclusive. The
+                # sweep's shared verdict holds while the row's pid is the same.
                 if (
-                    pid_key in archived_shared_pids
+                    fresh.pid is not None
+                    and fresh.pid == claim.pid
                     and verdict.get("basis") == "pid-shared"
                     and fresh_verdict.get("basis") == "live"
                 ):
@@ -756,8 +755,6 @@ def reap_dead_claims(
                     summary["contended"] += 1
                     continue
                 summary["reaped"] += 1
-                if pid_key is not None and verdict.get("basis") == "pid-shared":
-                    archived_shared_pids.add(pid_key)
                 if optout_sink is not None and key.startswith("config-optout:"):
                     optout_sink.append(fresh)
                 emit_claim_reaped(
