@@ -38,6 +38,9 @@ HOSTED_DELIVERY = "hosted"
 #: what happened and no more, and names the pane a reader can go read.
 TYPED_DELIVERY = "typed"
 
+#: Audit-only: outage-era traffic backfilled with full provenance, never re-delivered.
+CROSS_SESSION_DELIVERY = "cross-session"
+
 # Size-triggered rotation now lives in the Rust bus-append door
 # (fno-agents announce::append_line), which reads the same
 # FNO_BUS_MAX_BYTES / FNO_BUS_RETAIN envs. A malformed override degrades
@@ -410,7 +413,8 @@ def is_deliverable(env: Envelope) -> bool:
     """
     if getattr(env, "kind", None) in CONTROL_KINDS:
         return False
-    return getattr(env, "delivery", None) not in (HOSTED_DELIVERY, TYPED_DELIVERY)
+    delivery = getattr(env, "delivery", None)
+    return delivery not in (HOSTED_DELIVERY, TYPED_DELIVERY, CROSS_SESSION_DELIVERY)
 
 
 def record_hosted_delivery(

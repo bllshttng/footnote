@@ -2610,6 +2610,53 @@ event_types:
         duration_ms:
           type: integer
 
+  - name: codex_turn_error
+    description: "A Codex app-server turn failed. Its unfinished work remains working while the actor schedules a continuation."
+    sources: [daemon]
+    data:
+      required: [name, backend, turn_id, turn_status]
+      properties:
+        name: { type: string }
+        backend: { type: string }
+        turn_id: { type: string }
+        turn_status: { type: string, enum: [failed] }
+        session_id: { type: string }
+        error: { type: object }
+
+  - name: quiet_worker_nudge
+    description: "A quiet unfinished worker received a nudge. Its transcript marker confirms read on a later sweep."
+    sources: [daemon]
+    data:
+      required: [session_id, node, stage, marker, delivery]
+      properties:
+        session_id: { type: string }
+        node: { type: string }
+        stage: { type: integer, enum: [1, 2] }
+        marker: { type: string }
+        delivery: { type: string, enum: [handed, queued, failed, read] }
+        exit: { type: integer }
+        receipt: { type: string }
+        error: { type: string }
+
+  - name: quiet_worker_recovery
+    description: "An unfinished worker recovery attempt was accepted or refused."
+    sources: [daemon]
+    data:
+      required: [session_id, node, reason]
+      properties:
+        session_id: { type: string }
+        node: { type: string }
+        reason: { type: string }
+        delivery: { type: string, enum: [read] }
+
+  - name: quiet_worker_error
+    description: "The daemon could not inspect or escalate one quiet unfinished worker."
+    sources: [daemon]
+    data:
+      required: [name, reason]
+      properties:
+        name: { type: string }
+        reason: { type: string }
   - name: agent_followup_started
     description: "An fno-agents followup ask started against a live registry entry."
     sources: [daemon, agents]
@@ -7783,8 +7830,8 @@ event_types:
     consumers: [operator]
 
   - name: lead_goal_resumed
-    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
-    sources: [loop]
+    description: "An admitted Codex lead wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch. The wake-mode loop emits it on its dispatch-side resume, and the daemon's check-in beat arm emits it with reason beat."
+    sources: [loop, daemon]
     data:
       required: [session_id, scope, resumed, successor, provider_receipt]
       properties:

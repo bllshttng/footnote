@@ -442,6 +442,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_receipt::run_mail_receipt(&args[1..]);
     }
 
+    // The historical-mail row contract's hidden binary-direct door: the
+    // archive id, the receiver-side block parser, and the provenance
+    // validation live in Rust once; Python keeps the transcript scan and the
+    // bus write. Same `matches!` treatment so the parity guard never sees it.
+    if matches!(verb, "mail-backfill") {
+        return fno_agents::mail_backfill::run_mail_backfill(&args[1..]);
+    }
+
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct

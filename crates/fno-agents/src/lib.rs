@@ -257,6 +257,7 @@ pub mod machine_load;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
+pub mod mail_backfill;
 pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_header;
@@ -1544,6 +1545,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "merge_reaper_stopped",
     "agent_inconsistent",
     "agent_ask_done",
+    "codex_turn_error",
+    "quiet_worker_nudge",
+    "quiet_worker_recovery",
+    "quiet_worker_error",
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",
@@ -1704,6 +1709,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The lead-wake arm's receipt: one row per daemon wake episode, the
     // dedupe memory the arm folds before it wakes again (lead_wake.rs).
     "lead_wake",
+    // The beat's cron act receipt: the wake resumed a parked codex lead's
+    // resting goal, so the beat is a work beat (lead_wake.rs). The same kind
+    // the wake-mode loop emits for its dispatch-side resume.
+    "lead_goal_resumed",
     // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
