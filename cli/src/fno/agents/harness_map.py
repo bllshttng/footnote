@@ -692,18 +692,12 @@ def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
     return None
 
 
-#: The /target verb's own non-node words (sizes, modes, controls): the gate
-#: judges only a word that could name a node.
-_TARGET_SEED_CONTROL = frozenset(
-    "S M L small medium large agent fork bg batched clean adversarial"
-    " beastmode beast combo auto-merge resume cancel".split())
+_TARGET_SEED_CONTROL = ("S M L small medium large agent fork bg batched clean adversarial"
+                        " beastmode beast combo auto-merge resume cancel").split()
 
 
 def resolve_seed_node(message: str) -> tuple[Optional[str], Optional[str]]:
-    """Resolve a /fno:target seed word via the backlog id resolver: exact id, slug, bare hex
-    (configured prefix), title fuzzy; control words pass; a miss refuses nearest; unreadable
-    graph fails open (absence cannot be proven).
-    """
+    """Resolve a /fno:target seed word via the backlog id resolver, or fail open."""
     first = message.strip().splitlines()[0].split()
     if len(first) < 2 or first[1].startswith(("-", "/", "$")) or first[1] in _TARGET_SEED_CONTROL:
         return None, None
@@ -715,11 +709,11 @@ def resolve_seed_node(message: str) -> tuple[Optional[str], Optional[str]]:
         entries = [e for e in load_graph() if not e.get("archived_at")]
     except Exception:  # noqa: BLE001 - an unreadable graph cannot prove a miss
         return None, None
-    match = resolve_node(first[1], entries)
-    match = match if match.kind == "exact" and match.id else resolve_id(first[1], entries)
-    if match.id and match.kind in ("exact", "fuzzy") and len(match.candidates) <= 1:
-        return match.id, None
-    near = list(match.candidates) or search_entries(first[1], entries)
+    m = resolve_node(first[1], entries)
+    m = m if m.kind == "exact" and m.id else resolve_id(first[1], entries)
+    if m.id and m.kind in ("exact", "fuzzy") and len(m.candidates) <= 1:
+        return m.id, None
+    near = list(m.candidates) or search_entries(first[1], entries)
     nearest = "; ".join(f"{e.get('id')} ({e.get('title', '')})" for e in near[:5]) or "none"
     return None, ("refused: the /target word %r names no backlog node; the worker would carry a"
                   " prose node and its PR lands on no card. Nearest nodes: %s. Spawn with a node"
