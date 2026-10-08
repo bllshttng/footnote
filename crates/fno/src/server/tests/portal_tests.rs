@@ -3549,7 +3549,7 @@ fn non_seat_attach_viewer_death_replays_the_attach() {
     let fresh = leaves
         .iter()
         .copied()
-        .find(|&&p| p != _p1)
+        .find(|&p| p != _p1)
         .expect("fresh leaf");
     assert!(
         core.panes.contains_key(&fresh),
