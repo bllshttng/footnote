@@ -302,8 +302,13 @@ fn record_bounce(caller: &str, deferred: bool, state_root: &Path) {
     if !deferred {
         let sidecar = state_root.join(BOUNCE_SIDECAR);
         let _ = std::fs::create_dir_all(&sidecar.parent().unwrap_or(state_root));
+        // The sidecar ts stays an epoch float: cli._bounce_sender floats it
+        // to age the receipt against its 15s window.
         let envelope = serde_json::json!({
-            "ts": now_micros_z(),
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
             "caller": caller,
             "pid": libc::getpid(),
             "ppid": libc::getppid(),
