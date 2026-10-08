@@ -405,13 +405,7 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let launch_agents_dir = std::env::var_os("FNO_TEST_PR_WATCH_LAUNCH_AGENTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| Path::new(&home).join("Library").join("LaunchAgents"))
-                .unwrap_or_else(|| PathBuf::from("Library").join("LaunchAgents"))
-        });
+    let launch_agents_dir = launch_agents_dir();
     let inp = gather(&cwd, &launch_agents_dir);
     let marks = tick_watermarks(&inp.events);
     let leg = leg_facts(&inp);
@@ -473,6 +467,18 @@ pub(crate) fn gather(cwd: &Path, launch_agents_dir: &Path) -> Inputs {
         watcher_state: park_paths.state.clone(),
         cwd: cwd.to_path_buf(),
     }
+}
+
+/// The LaunchAgents dir every pr-watch verb writes and reads: the test pin
+/// moves it, production keeps it under HOME.
+pub(crate) fn launch_agents_dir() -> PathBuf {
+    std::env::var_os("FNO_TEST_PR_WATCH_LAUNCH_AGENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| Path::new(&home).join("Library").join("LaunchAgents"))
+                .unwrap_or_else(|| PathBuf::from("Library").join("LaunchAgents"))
+        })
 }
 
 /// True when the watcher's label appears in `launchctl list` output. The

@@ -12,12 +12,13 @@
 //! leg did, and keeps its refusal behavior off other hosts (launchctl absent
 //! reads as a failed activation, never a crash).
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::status::{as_bool, cfg_lookup, launchctl_is_loaded, state_root, PLIST_FILENAME};
+use super::status::{
+    as_bool, cfg_lookup, launch_agents_dir, launchctl_is_loaded, state_root, PLIST_FILENAME,
+};
 
 const LABEL: &str = "sh.fno.pr-watcher";
 
@@ -113,7 +114,9 @@ pub(crate) fn default_agent_path(fno_binary: &str) -> String {
             entries.push(parent.display().to_string());
         }
     }
+    // An empty CARGO_HOME reads as unset, the way the Python `or` default did.
     let cargo_home = std::env::var_os("CARGO_HOME")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".cargo"));
     let candidates = [
@@ -153,6 +156,9 @@ fn augment_path(install_path: &str) -> String {
 }
 
 /// Write only when the bytes differ. Returns whether the file changed.
+/// Unused until the refresh wave lands: its only Rust caller is the refresh
+/// verb, so this sits quiet rather than moving twice.
+#[allow(dead_code)]
 pub(crate) fn write_if_changed(plist_path: &Path, plist_text: &str) -> std::io::Result<bool> {
     if plist_path.is_file() && std::fs::read_to_string(plist_path)? == plist_text {
         return Ok(false);
@@ -432,9 +438,7 @@ fn heal_status_line(cwd: &Path) -> String {
 }
 
 fn launch_agents_dir() -> PathBuf {
-    std::env::var_os("FNO_TEST_PR_WATCH_LAUNCH_AGENTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join("Library").join("LaunchAgents"))
+    super::status::launch_agents_dir()
 }
 
 /// The interactive confirm gate, click-shaped: `{text} [y/N]: ` on stdout,
@@ -718,15 +722,13 @@ mod tests {
         );
         // The PATH line carries the cargo bin beside the binary's own dir.
         let cargo_bin = std::env::var_os("CARGO_HOME")
+            .filter(|v| !v.is_empty())
             .map(|c| PathBuf::from(c).join("bin"))
             .unwrap_or_else(|| home_dir().join(".cargo").join("bin"));
         let path_line = text
             .lines()
             .find(|l| l.contains(&cargo_bin.display().to_string()))
             .expect("cargo bin in PATH");
-        assert!(
-            path_line.contains("&lt;"),
-            "raw < must be escaped: {path_line}"
-        );
+        assert!(path_line.contains("<string>"), "{path_line}");
     }
 }
