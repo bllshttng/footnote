@@ -12,7 +12,11 @@ set -euo pipefail
 FNO="${FNO_BIN:-fno}"
 # Absolute: the shim below execs this path from a PATH that puts the shim
 # itself first, and a bare `fno` there would re-enter the shim forever.
-case "$FNO" in /*) ;; *) FNO="$(command -v "$FNO")" ;; esac
+case "$FNO" in /*) ;; *) FNO="$(command -v "$FNO" 2>/dev/null || true)" ;; esac
+if [ -z "$FNO" ]; then
+  echo "mux-demo-snapshot: cannot resolve fno on PATH (FNO_BIN=${FNO_BIN:-unset})" >&2
+  exit 1
+fi
 SERVER=demo
 # /tmp, not TMPDIR: a socket path must stay under 104 bytes on macOS.
 # pwd -P: macOS resolves /tmp to /private/tmp, and HOME must match the real path.
@@ -313,6 +317,15 @@ sleep 52
 WARM
 sleep 58
 WARM
+# The gate: warm until the cards carry a served cost. A probe child slower
+# than the chain lands late on a loaded machine, and the loop costs nothing
+# on a fast one - the grep reads the svg the last warm already wrote.
+i=0
+until grep -q '~\$' "$ROOT/warm.svg" 2>/dev/null || [ "$i" -ge 4 ]; do
+  sleep 30
+  WARM
+  i=$((i + 1))
+done
 sleep 3
 
 # The flags after ours win. HOME makes the status row read ~/code/checkout.
