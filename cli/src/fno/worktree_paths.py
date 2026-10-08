@@ -1,19 +1,10 @@
-"""Canonical worktree path resolution: ~/.fno/worktrees/{proj}-{slug}/.
+"""Worktree base, project id, and worktree policy resolution.
 
-Single source of truth for where worktrees live. Replaces the previous
-``.claude/worktrees/`` and ``~/conductor/workspaces/`` locations that
-were hardcoded in multiple files.
-
-The path shape is flat with a project prefix so a single
-``~/.fno/worktrees/`` directory holds every worktree across every
-project the user works in. ``project_id`` is the stable short identifier
-declared in ``.fno/settings.yaml`` under ``project.id`` (or
-derived from ``git remote get-url origin`` basename when absent).
-
-Both ``project_id`` and ``name`` are validated against
-``^[A-Za-z0-9][A-Za-z0-9._-]*$`` so path components can never escape
-the worktree root (defense-in-depth against the path-traversal class
-of bug previously flagged on PR #225).
+``project_id`` is the stable short identifier declared in
+``.fno/settings.yaml`` under ``project.id`` (or derived from
+``git remote get-url origin`` basename when absent). It is validated
+against ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` so it can never escape a path
+root (defense-in-depth against the path-traversal class of bug).
 """
 from __future__ import annotations
 
@@ -133,39 +124,6 @@ def resolve_project_id(repo_root: Path | None = None) -> str:
         pid = repo_root.name
 
     return _validate_component(pid, kind="project_id")
-
-
-def worktree_path(
-    name: str,
-    *,
-    project_id: str | None = None,
-    repo_root: Path | None = None,
-) -> Path:
-    """Return the canonical worktree path for ``name``.
-
-    Shape: ``~/.fno/worktrees/{project_id}-{name}/``.
-
-    ``project_id`` is resolved from settings/git when omitted. ``name``
-    is validated to be a safe path component.
-    """
-    _validate_component(name, kind="name")
-    if project_id is None:
-        project_id = resolve_project_id(repo_root)
-    else:
-        project_id = _validate_component(project_id, kind="project_id")
-    return worktree_base() / f"{project_id}-{name}"
-
-
-def legacy_worktree_path(name: str, repo_root: Path | None = None) -> Path:
-    """Return the OLD ``.claude/worktrees/{name}/`` path.
-
-    Kept so AC7 (back-compat) can detect a worktree that lives at the
-    old location and reuse its branch. Not used for new worktrees.
-    """
-    _validate_component(name, kind="name")
-    if repo_root is None:
-        repo_root = Path.cwd()
-    return repo_root / ".claude" / "worktrees" / name
 
 
 # ---------------------------------------------------------------------------

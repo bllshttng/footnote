@@ -16,6 +16,10 @@ pub const LOAD_PER_CORE_BAND: f64 = 10.0;
 /// admission for 30 minutes. Named for the notify-signals file pattern.
 pub const MACHINE_BRAKE_NAME: &str = "machine-brake.json";
 pub const MACHINE_BRAKE_HOLD_SECS: u64 = 1800;
+/// The sccache server's last seen pid and restart timestamps, one row per
+/// tick: a pid change is one restart. The footprint verb reads it.
+pub const SCCACHE_WATCH_NAME: &str = "sccache-watch.json";
+const SCCACHE_RESTART_CAP: usize = 64;
 pub const RUNAWAY_LOAD_PER_CORE: f64 = 4.0;
 pub const RUNAWAY_LOAD_HOLD_SECS: u64 = 600;
 pub const HOT_ESCALATION_SECS: u64 = 1800;
@@ -148,6 +152,8 @@ pub fn decide(
         .load_15m
         .zip(sample.cores)
         .map_or_else(|| "unknown".into(), |(load, cores)| num(load / cores));
+    let busy_cores = busy_cores_text(sample);
+    let groups = top_groups_text(sample);
     let reason = if sample.busy_fraction.is_none() {
         "Machine unclear: CPU use is not readable (host CPU ticks unavailable)".to_string()
     } else {
@@ -157,7 +163,7 @@ pub fn decide(
             _ => "unclear",
         };
         format!(
-            "Machine {word}: CPU {busy} busy across {cores} cores (fine is under {:.0}%), about {per_core} jobs per core waiting (fine is under {}); {} of {} processes running",
+            "Machine {word}: {busy_cores} of {cores} cores busy (CPU {busy}, fine is under {:.0}%), about {per_core} jobs per core waiting (fine is under {}); top groups {groups}; {} of {} processes running",
             busy_band * 100.0,
             num(load_band),
             sample.runnable.map_or_else(|| "unknown".into(), |v| v.to_string()),
@@ -165,6 +171,40 @@ pub fn decide(
         )
     };
     (verdict.into(), reason)
+}
+
+/// The busy-core count a person reads: `12`, or `unknown` when the host ticks
+/// or the core count cannot answer. `busy_fraction * cores`, rounded: the
+/// notice itself distinguishes "cores actually busy" from "jobs per core
+/// waiting" (2026-10-03 investigation).
+fn busy_cores_text(sample: &MachineSample) -> String {
+    sample.busy_fraction.zip(sample.cores).map_or_else(
+        || "unknown".to_string(),
+        |(busy, cores)| format!("{:.0}", (busy * cores).round()),
+    )
+}
+
+/// The busiest process-name groups, `rustc x4, python3 x15`, from the census
+/// the sample already carries (sorted by count, so the first rows lead).
+fn top_groups_text(sample: &MachineSample) -> String {
+    let rows: Vec<String> = sample
+        .top_names
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let name = row.get("name").and_then(|v| v.as_str())?;
+            let count = row.get("count").and_then(|v| v.as_u64())?;
+            Some(format!("{} x{count}", name))
+        })
+        .take(3)
+        .collect();
+    if rows.is_empty() {
+        "unmeasured".to_string()
+    } else {
+        rows.join(", ")
+    }
 }
 
 pub fn tick_machine_watch(
@@ -242,21 +282,24 @@ pub fn tick_machine_watch_with_thresholds(
             verdict = "runaway".into();
             forced_escalation = true;
             reason = format!(
-                "Machine overloaded: about {} jobs per core waiting (fine is under {}) and CPU {} busy across {} cores (brake needs over {:.0}%) for {}",
+                "Machine overloaded: {} of {} cores busy (CPU {}, brake needs over {:.0}%), about {} jobs per core waiting (fine is under {}) for {}",
+                busy_cores_text(sample),
+                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
+                busy_text(sample),
+                busy_band * 100.0,
                 num(sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0)),
                 num(thresholds.load_per_core),
-                busy_text(sample),
-                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
-                busy_band * 100.0,
                 span(elapsed),
             );
         } else {
             verdict = "hot".into();
             reason = format!(
-                "Machine busy: about {} jobs per core waiting (fine is under {}) and CPU {} busy for {}; tests pause at {}",
+                "Machine busy: {} of {} cores busy (CPU {}), about {} jobs per core waiting (fine is under {}) for {}; tests pause at {}",
+                busy_cores_text(sample),
+                sample.cores.map_or_else(|| "unknown".into(), |v| format!("{v:.0}")),
+                busy_text(sample),
                 num(sample.load_1m.unwrap_or_default() / sample.cores.unwrap_or(1.0)),
                 num(thresholds.load_per_core),
-                busy_text(sample),
                 span(elapsed),
                 span(thresholds.load_hold),
             );
@@ -482,6 +525,82 @@ fn write_brake_file(
     let path = brake_path();
     std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default())
         .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn sccache_watch_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_SCCACHE_WATCH").filter(|v| !v.is_empty()) {
+        return PathBuf::from(v);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("."));
+    crate::state_layout::place(&PathBuf::from(home).join(".fno"), SCCACHE_WATCH_NAME)
+}
+
+fn read_sccache_watch() -> serde_json::Value {
+    std::fs::read_to_string(sccache_watch_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({"last_pid": null, "restarts": []}))
+}
+
+fn sccache_now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// One tick of the restart counter: a different nonzero pid than last seen
+/// appends one restart; absence records nothing, so a dead server between
+/// ticks costs one entry when it returns, not one per idle probe. Best-effort
+/// both ways: an unreadable or unwritable file degrades the reading, never
+/// the tick.
+pub fn observe_sccache_pid(pid: Option<u32>) {
+    #[cfg(test)]
+    if std::env::var_os("FNO_SCCACHE_WATCH").is_none() {
+        return;
+    }
+    let mut state = read_sccache_watch();
+    if let Some(new) = pid {
+        let last = state.get("last_pid").and_then(serde_json::Value::as_u64);
+        if last.is_some_and(|last| last != new as u64) {
+            if let Some(prints) = state.get_mut("restarts").and_then(|v| v.as_array_mut()) {
+                prints.push(serde_json::json!(sccache_now_epoch()));
+                while prints.len() > SCCACHE_RESTART_CAP {
+                    prints.remove(0);
+                }
+            }
+        }
+    }
+    // Absence never overwrites last_pid: the common death passes through an
+    // absent tick before the new server appears, and that reappearance must
+    // count against the pid the server died with.
+    if let Some(new) = pid {
+        state["last_pid"] = serde_json::json!(new);
+    }
+    let _ = std::fs::write(
+        sccache_watch_path(),
+        serde_json::to_string(&state).unwrap_or_default(),
+    );
+}
+
+/// Restarts within the trailing hour: the footprint verb's sccache line.
+pub fn sccache_restarts_1h() -> usize {
+    #[cfg(test)]
+    if std::env::var_os("FNO_SCCACHE_WATCH").is_none() {
+        return 0;
+    }
+    let now = sccache_now_epoch();
+    read_sccache_watch()
+        .get("restarts")
+        .and_then(serde_json::Value::as_array)
+        .map(|prints| {
+            prints
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .filter(|ts| now.saturating_sub(*ts) <= 3600)
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn notice_body(reason: &str, sample: &MachineSample) -> String {
@@ -711,6 +830,13 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         ) {
             tracing::warn!(%error, "machine process snapshot failed");
         }
+        // One long-lived sccache server per machine: a server that died under
+        // load is revived within a tick, and the pid change feeds the restart
+        // counter the footprint verb reads. The sample's own table answers the
+        // probe, so the tick spends no extra process walk.
+        let sccache_pid = crate::cargo_build_dirs::sccache_row_pid(&sample.procs);
+        crate::cargo_build_dirs::ensure_sccache_server_unless(sccache_pid.is_some());
+        observe_sccache_pid(sccache_pid);
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
@@ -907,6 +1033,14 @@ mod tests {
         let (verdict, reason) = decide(&sample(Some(0.95), Some(363.0)), 0.9, 10.0, None);
         assert_eq!(verdict, "hot");
         assert!(
+            reason.contains("11 of 12 cores busy"),
+            "the reason names the busy cores: {reason}"
+        );
+        assert!(
+            reason.contains("top groups unmeasured"),
+            "a sample with no census says so instead of inventing groups: {reason}"
+        );
+        assert!(
             reason.contains("about 30.2 jobs per core waiting (fine is under 10)"),
             "{reason}"
         );
@@ -1065,11 +1199,12 @@ mod tests {
                 assert_eq!(outcome.verdict, "runaway");
             }
         }
-        // The page a person reads: plain words, both numbers, the scale built in.
+        // The page a person reads: plain words, busy cores first, both
+        // numbers, the scale built in.
         assert_eq!(last.0, RUNAWAY_TITLE);
         assert!(
             last.1.starts_with(
-                "Machine overloaded: about 8 jobs per core waiting (fine is under 4) and CPU 95.0% busy across 12 cores (brake needs over 90%) for 10 minutes"
+                "Machine overloaded: 11 of 12 cores busy (CPU 95.0%, brake needs over 90%), about 8 jobs per core waiting (fine is under 4) for 10 minutes"
             ),
             "{}",
             last.1
@@ -1234,5 +1369,52 @@ mod tests {
         assert_eq!(outcome.acted, 0, "second notice is throttled");
         assert_eq!(notify_calls, 1);
         assert_eq!(brake_calls, 2);
+    }
+
+    #[test]
+    fn sccache_restarts_count_a_reappearance_with_a_new_pid() {
+        let path = std::env::temp_dir().join(format!(
+            "fno-sccache-watch-test-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("FNO_SCCACHE_WATCH", &path);
+        // First sighting is not a restart; absence must not wipe the pid the
+        // server died with, or the reappearance a tick later would go uncounted.
+        for pid in [None, Some(100), Some(100), None, Some(200), None, Some(300)] {
+            observe_sccache_pid(pid);
+        }
+        assert_eq!(sccache_restarts_1h(), 2);
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["last_pid"], 300);
+        // The never-stop idle default rides fill_sccache_env so daemon-spawned
+        // builds and the wrapper agree; an operator's shorter override survives.
+        // Skipped where sccache is absent: the fill gates on the binary.
+        if crate::cargo_build_dirs::sccache_bin().is_some() {
+            let saved_idle = std::env::var_os("SCCACHE_IDLE_TIMEOUT");
+            let saved_dir = std::env::var_os("SCCACHE_DIR");
+            std::env::remove_var("SCCACHE_IDLE_TIMEOUT");
+            std::env::remove_var("SCCACHE_DIR");
+            crate::cargo_build_dirs::fill_sccache_env(std::path::Path::new("/any/worktree"));
+            assert_eq!(std::env::var("SCCACHE_IDLE_TIMEOUT").unwrap(), "0");
+            std::env::set_var("SCCACHE_IDLE_TIMEOUT", "3");
+            crate::cargo_build_dirs::fill_sccache_env(std::path::Path::new("/any/worktree"));
+            assert_eq!(std::env::var("SCCACHE_IDLE_TIMEOUT").unwrap(), "3");
+            match saved_dir {
+                Some(value) => std::env::set_var("SCCACHE_DIR", value),
+                None => std::env::remove_var("SCCACHE_DIR"),
+            }
+            match saved_idle {
+                Some(value) => std::env::set_var("SCCACHE_IDLE_TIMEOUT", value),
+                None => std::env::remove_var("SCCACHE_IDLE_TIMEOUT"),
+            }
+        }
+        std::env::remove_var("FNO_SCCACHE_WATCH");
+        let _ = std::fs::remove_file(&path);
     }
 }

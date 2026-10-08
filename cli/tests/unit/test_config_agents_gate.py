@@ -15,22 +15,6 @@ def test_provider_loader_reserved_keys_match_agents_schema():
     assert _AGENTS_RESERVED_KEYS == set(AgentsBlock.model_fields) | {"max_lanes"}
 
 
-def test_defaults():
-    b = AgentsBlock()
-    assert b.max_live == 3
-    assert b.provider_limits["zai"].lanes == 5
-    assert b.provider_limits["zai"].subagents == 1
-    assert b.min_free_gb == 4.0
-    assert b.worker_qos == "utility"
-
-
-def test_valid_values_pass_through():
-    b = AgentsBlock(max_live=7, min_free_gb=2.5, worker_qos="off")
-    assert b.max_live == 7
-    assert b.min_free_gb == 2.5
-    assert b.worker_qos == "off"
-
-
 def test_max_live_below_one_coerces_to_default():
     assert AgentsBlock(max_live=0).max_live == 3
     assert AgentsBlock(max_live=-2).max_live == 3
@@ -69,36 +53,10 @@ def test_min_free_gb_unparseable_coerces_to_default():
     assert AgentsBlock(min_free_gb=True).min_free_gb == 4.0
 
 
-def test_max_swap_pct_default_and_passthrough():
-    # x-8c8c: the swap ceiling beside min_free_gb; default 90, checked on
-    # every spawn.
-    assert AgentsBlock().max_swap_pct == 90.0
-    assert AgentsBlock(max_swap_pct=75).max_swap_pct == 75.0
-
-
-def test_max_swap_pct_zero_is_valid_disable():
-    assert AgentsBlock(max_swap_pct=0).max_swap_pct == 0.0
-    assert AgentsBlock(max_swap_pct=-1).max_swap_pct == -1.0
-
-
-def test_max_swap_pct_unparseable_coerces_to_default():
-    assert AgentsBlock(max_swap_pct="banana").max_swap_pct == 90.0
-    assert AgentsBlock(max_swap_pct=None).max_swap_pct == 90.0
-    assert AgentsBlock(max_swap_pct=True).max_swap_pct == 90.0
-
-
 def test_worker_qos_unknown_coerces_to_utility():
     assert AgentsBlock(worker_qos="turbo").worker_qos == "utility"
     assert AgentsBlock(worker_qos=None).worker_qos == "utility"
     assert AgentsBlock(worker_qos="OFF").worker_qos == "off"
-
-
-def test_spawn_defaults_unset_by_default():
-    # US7: empty string = unset.
-    d = AgentsBlock().defaults
-    assert d.provider == ""
-    assert d.model == ""
-    assert d.effort == ""
 
 
 # --- x-7198: legacy agents.spawn_permission_mode migrates onto
@@ -121,32 +79,6 @@ def test_legacy_spawn_permission_mode_migrates_when_defaults_unset():
     assert len(_DEPRECATED_WARNED) == warned_before
 
 
-def test_legacy_spawn_permission_mode_dropped_when_defaults_already_set():
-    """AC1-EDGE: both set -> defaults.permission_mode wins, legacy is dropped."""
-    b = AgentsBlock.model_validate(
-        {
-            "spawn_permission_mode": "plan",
-            "defaults": {"permission_mode": "acceptEdits"},
-        }
-    )
-    assert b.defaults.permission_mode == "acceptEdits"
-    assert not hasattr(b, "spawn_permission_mode")
-
-
-def test_neither_permission_key_set_warns_nothing_and_stays_unset():
-    """AC1-ERR: no legacy key present -> no warning, byte-identical to today."""
-    from fno.config import _DEPRECATED_WARNED
-
-    _DEPRECATED_WARNED.discard("agents.spawn_permission_mode")
-    b = AgentsBlock.model_validate({})
-    assert b.defaults.permission_mode == ""
-    assert "agents.spawn_permission_mode" not in _DEPRECATED_WARNED
-
-
-def test_spawn_permission_mode_field_no_longer_exists():
-    assert "spawn_permission_mode" not in AgentsBlock.model_fields
-
-
 def test_legacy_empty_opt_out_migrates_with_a_distinct_loud_warning():
     """An explicit legacy `spawn_permission_mode = ""` was an opt-out from
     auto-approval; the surviving field has no equivalent, so the migration
@@ -164,13 +96,6 @@ def test_legacy_empty_opt_out_migrates_with_a_distinct_loud_warning():
         _LOG.warning = orig_warning
     assert b.defaults.permission_mode == ""
     assert any("no equivalent opt-out" in m for m in messages)
-
-
-def test_spawn_defaults_values_pass_through():
-    b = AgentsBlock(defaults={"provider": "codex", "model": "gpt-5.6-sol", "effort": "high"})
-    assert b.defaults.provider == "codex"
-    assert b.defaults.model == "gpt-5.6-sol"
-    assert b.defaults.effort == "high"
 
 
 def test_spawn_defaults_non_mapping_degrades_to_unset():

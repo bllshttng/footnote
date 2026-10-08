@@ -73,16 +73,16 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Inspect every path that can start a session without an operator asking.",
         {"hidden": True},
     ),
-    "king": (
-        "fno.king.cli:king_app",
-        "The king's board and its session manifest.",
+    "lead": (
+        "fno.lead.cli:lead_app",
+        "The lead's board and its session manifest.",
         {"hidden": True},
     ),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
     "inbox": (
         "fno.inbox.cli:inbox_app",
-        "What is waiting on a human: approvals, notify, outstanding, king board, decisions, law.",
+        "What is waiting on a human: approvals, notify, outstanding, lead board, decisions, law.",
         {"hidden": True},
     ),
     # Moved to `inbox` (VERB_MOVES). The old top-level registration stays for

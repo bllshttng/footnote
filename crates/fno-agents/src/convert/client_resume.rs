@@ -18,7 +18,7 @@
 pub enum IdVerdict {
     /// Same id. The conversion completes silently.
     Kept,
-    /// A new id the caller authorized on an uncrowned row. The old id is
+    /// A new id the caller authorized on an unpromoted row. The old id is
     /// recorded as the related id and the receipt says so out loud.
     AcceptedNew { old: String, new: String },
     /// Stop the new session and put the row back.
@@ -181,7 +181,7 @@ pub fn to_claude_thread(
 /// Team liveness is the ROW's liveness, so the level alone answers it: an
 /// exited row carries no live team whatever it records.
 pub fn row_is_teamed(entry: &crate::state::RegistryEntry) -> bool {
-    entry.crown_level.is_some_and(|level| level > 0)
+    entry.role_level.is_some_and(|level| level > 0)
 }
 
 #[cfg(test)]
@@ -276,10 +276,10 @@ mod tests {
     #[test]
     fn only_a_recorded_team_level_reads_as_teamed() {
         let mut entry = crate::state::RegistryEntry::default();
-        assert!(!row_is_teamed(&entry), "an uncrowned row holds no team");
-        entry.crown_level = Some(0);
+        assert!(!row_is_teamed(&entry), "an unpromoted row holds no team");
+        entry.role_level = Some(0);
         assert!(!row_is_teamed(&entry), "level zero is not a team");
-        entry.crown_level = Some(1);
+        entry.role_level = Some(1);
         assert!(row_is_teamed(&entry));
     }
 

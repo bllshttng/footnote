@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
-import time
 from typing import Optional
 
 # The exit a NOT LANDED receipt leaves `mail send` with : a last-line
@@ -21,6 +19,33 @@ from typing import Optional
 # usage (2), lock (11), durable-address (12) and unknown-agent (16) refusals:
 # the send itself succeeded and is recoverable, the LANDING is what is missing.
 NOT_LANDED_EXIT = 14
+
+
+def _render(argv: list[str]) -> str:
+    """One mail-receipt read through the native door (the style-check
+    pattern: Python keeps transports, the assembly lives in Rust). The
+    receipt vocabulary is single-source, so a missing binary refuses rather
+    than falling back to a second renderer."""
+    from fno.rust_binary import VerbUnavailable, resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise VerbUnavailable("fno-agents binary not found; run `fno doctor update`")
+    proc = subprocess.run(
+        [str(binary), "mail-receipt", *argv],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise VerbUnavailable(
+            (proc.stderr or "fno-agents mail-receipt failed").strip()[:200]
+        )
+    return proc.stdout.rstrip("\n")
+
+
+def _flag(name: str, value: Optional[str]) -> list[str]:
+    return [f"--{name}", value] if value is not None else []
 
 
 def _live_miss_age_suffix(recipient: str) -> str:
@@ -80,13 +105,7 @@ def durable_window_clause(owner: Optional[str]) -> str:
     from fno.inbox.store import owner_ttl_hours
 
     hours = owner_ttl_hours(owner or "")
-    if hours <= 0:
-        return ""
-    if hours < 1:
-        window = f"~{round(hours * 60)}m"
-    else:
-        window = f"~{round(hours)}h"
-    return f" - typically drains within {window} - an empty unread before then is not a failure"
+    return _render(["window", "--ttl-hours", repr(hours)])
 
 
 def durable_leg_story(
@@ -102,16 +121,35 @@ def durable_leg_story(
     (a ``waited-<n>s`` token in the reason) and the transcript-age suffix, so
     the sender can tell a busy peer from a silent one. Words only: no raw
     token reaches this line."""
-    if not _is_live_lane_failure(reason):
-        return None
-    story = "live leg unconfirmed"
-    for token in (reason or "").split(";"):
-        if token.startswith("waited-"):
-            story += f" after {token[len('waited-'):]}"
-            break
-    if recipient is not None:
-        story += _live_miss_age_suffix(recipient)
-    return story + "; durable leg holds"
+    suffix = _live_miss_age_suffix(recipient) if recipient is not None else None
+    story = _render(
+        ["story", *(_flag("reason", reason)), *(_flag("suffix", suffix)), *(_flag("age-of", recipient))]
+    )
+    return story or None
+
+
+def json_receipt(
+    msg_id: str,
+    *,
+    to: str,
+    status: str,
+    subject: Optional[str] = None,
+) -> str:
+    """The default send receipt: one JSON line, SendMessage-shaped.
+
+    Four keys, always: ``msg_id`` (the reply handle), ``subject`` (the
+    sender's ``--subject``, null when none), ``to``, and ``status`` carrying
+    the delivery verdict in the receipt vocabulary every reader already
+    greps (``delivered (hosted)``, ``queued (durable)``, ``typed``)."""
+    return _render(
+        [
+            "json",
+            "--msg-id", msg_id,
+            "--to", to,
+            "--status", status,
+            *(_flag("subject", subject)),
+        ]
+    )
 
 
 def demotion_receipt(
@@ -122,19 +160,26 @@ def demotion_receipt(
     target: Optional[str] = None,
     project: Optional[str] = None,
     age_target: Optional[str] = None,
+    subject: Optional[str] = None,
 ) -> str:
-    """The stdout line for a durable demotion (refined by x-aaaa)."""
-    token = durable_leg_story(reason, age_target if age_target is not None else target)
-    if token is None:
-        token = reason or "live-miss"
-        if token == "live-miss" or token.startswith("transcript-"):
-            age_of = age_target if age_target is not None else target
-            if age_of is not None:
-                token += _live_miss_age_suffix(age_of)
-    where = f" for {target}" if target else ""
-    if project:
-        where += f" [project {project}]"
-    return f"{msg_id} queued (durable){where} [{token}]" + durable_window_clause(owner)
+    """The stdout receipt for a durable demotion (refined by x-aaaa)."""
+    from fno.inbox.store import owner_ttl_hours
+
+    age_of = age_target if age_target is not None else target
+    suffix = _live_miss_age_suffix(age_of) if age_of is not None else None
+    return _render(
+        [
+            "demotion",
+            "--msg-id", msg_id,
+            *(_flag("reason", reason)),
+            "--ttl-hours", repr(owner_ttl_hours(owner or "")),
+            *(_flag("target", target)),
+            *(_flag("project", project)),
+            *(_flag("age-of", age_of)),
+            *(_flag("suffix", suffix)),
+            *(_flag("subject", subject)),
+        ]
+    )
 
 
 def not_landed_receipt(
@@ -154,28 +199,16 @@ def not_landed_receipt(
     thread with no pane cannot be injected by fno at all - the session's own
     surface has to receive it - and the verify names that.
     """
-    lines = [
-        f"{msg_id} NOT LANDED - not claimed on the bus, not in the recipient "
-        "transcript"
-    ]
-    if pane is not None:
-        lines += [
-            f"  read the frame:         fno mux pane read {pane}",
-            f"  envelope in composer?   fno mux pane send {pane} --raw --submit   # presses Enter",
-            f"  then verify:            fno agents peek {target} --grep {msg_id}",
+    return _render(
+        [
+            "not-landed",
+            "--msg-id", msg_id,
+            *(_flag("pane", str(pane) if pane is not None else None)),
+            "--target", target,
+            *(_flag("harness", harness)),
+            *(_flag("session-id", session_id)),
         ]
-    elif harness == "codex" and session_id:
-        lines += [
-            "  fno cannot inject a codex thread with no pane; the session's own",
-            "  surface (the user's Codex window) must receive it. The durable copy",
-            "  drains on the recipient's next `fno agents mail unread` poll.",
-            f"  verify later:           fno agents peek {target} --grep {msg_id}",
-        ]
-    else:
-        lines += [
-            f"  verify:                 fno agents peek {target} --grep {msg_id}",
-        ]
-    return "\n".join(lines)
+    )
 
 
 def report_landing(
@@ -250,7 +283,7 @@ def _live_pane_for(target: str, session_id: Optional[str]) -> Optional[int]:
     return None
 
 
-def print_project_demotion(result, to_project: str) -> None:
+def print_project_demotion(result, to_project: str, subject: Optional[str] = None) -> None:
     """Stdout receipt(s) for a --to-project send that wrote durable.
 
     A resolved live peer demoted to durable is addressed to that PEER (same
@@ -264,29 +297,39 @@ def print_project_demotion(result, to_project: str) -> None:
             from fno.mail import hold as _hold
 
             _note = _hold.bounce_reason(result.recipient)
-            print(
-                f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}] "
-                f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
-                + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
-                + durable_window_clause(result.durable_owner)
-            )
+            print(json_receipt(
+                result.msg_id,
+                to=result.recipient,
+                status=(
+                    f"queued (durable) [project {to_project}] "
+                    f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
+                )
+                + durable_window_clause(result.durable_owner),
+                subject=subject,
+            ))
+            if _note:
+                print(f"`fno agents mail withdraw {result.msg_id}` retracts it.")
         else:
             _warn_deferred(result.recipient, reason=result.reason)
             print(demotion_receipt(
                 result.msg_id,
                 reason=result.reason, owner=result.durable_owner,
                 target=result.recipient, project=to_project,
+                subject=subject,
             ))
         return
     from fno.inbox.store import DurableOwner
 
     _warn_deferred(to_project, project=True)
-    print(
-        f"{result.msg_id} queued (durable) for project {to_project} "
-        f"[param-forced: --to-project]"
-        + durable_window_clause(DurableOwner.INBOX_DRAIN.value)
-    )
+    print(json_receipt(
+        result.msg_id,
+        to=to_project,
+        status=(
+            "queued (durable) [param-forced: --to-project]"
+            + durable_window_clause(DurableOwner.INBOX_DRAIN.value)
+        ),
+        subject=subject,
+    ))
 
 
 def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:
@@ -320,61 +363,29 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
 
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     from fno.agents.dispatch import LOCK_TIMEOUT_REASON
+    from fno.mail.deferred_liveness import deferred_liveness_head
 
     if project:
-        msg = (
-            f"mail: project inbox {target} has no live drain; queued durably as "
-            "recovery only - a session must drain the project inbox to read this, "
-            "and may never do so\n"
-            "  this is NOT delivery. Address a live session instead: "
-            "`fno agents top` to find one, then `fno agents mail send <short-id>`"
-        )
+        arm = "project"
     elif reason == LOCK_TIMEOUT_REASON:
-        msg = (
-            f"mail: live delivery to {target} was not attempted (another verb "
-            f"held {target}'s agent lock past the wait); queued durably. That "
-            "holder is any verb on this agent - a send, an ask, a spawn, a "
-            "stop, an rm - so the token proves nothing about the recipient in "
-            "either direction. Do not resurrect it on this evidence, and do "
-            "not read it as healthy either: check it.\n"
-            "  a busy peer may not drain soon, so the rungs that stay open,\n"
-            "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
-            "  copy still lands at the recipient's next drain:\n"
-            f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
-            "    fno agents mail withdraw <id>      # retract the queued copy FIRST\n"
-            f"    fno agents mail send {target} '<message>'  # then retry live\n"
-            "  a withdraw that refuses because the recipient already claimed\n"
-            "  the message is telling you it LANDED. Stop there: re-sending on\n"
-            "  top of that is the double delivery this ladder exists to avoid."
-        )
+        arm = "lock"
     elif _is_live_lane_failure(reason):
-        msg = (
-            f"mail: live delivery to {target} not confirmed ({reason}); queued "
-            "durably as recovery only - the recipient was live and reachable, so "
-            "the message may still land past the confirm window or sit until the "
-            "recipient drains its inbox\n"
-            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
-            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            # The rung that was missing. Every option above tries to reach the
-            # recipient; when none of them can, the sender was left holding a
-            # message that nagged every turn and could not be taken back.
-            "    fno agents mail withdraw <id>      # none of the above? retract it"
-        )
+        arm = "live"
     else:
-        from fno.mail.deferred_liveness import deferred_liveness_head
-        msg = deferred_liveness_head(target) + (
-            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
-            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            # The rung that was missing. Every option above tries to reach the
-            # recipient; when none of them can, the sender was left holding a
-            # message that nagged every turn and could not be taken back.
-            "    fno agents mail withdraw <id>      # none of the above? retract it"
-        )
-    print(msg, file=sys.stderr)
+        arm = "plain"
+    head = deferred_liveness_head(target) if arm == "plain" else None
+    print(
+        _render(
+            [
+                "warn-deferred",
+                "--target", target,
+                "--arm", arm,
+                *(_flag("reason", reason)),
+                *(_flag("head", head)),
+            ]
+        ),
+        file=sys.stderr,
+    )
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
@@ -393,12 +404,9 @@ def _recipient_is_attended(recipient: str) -> bool:
     an unresolved recipient escalates nothing, so the send still succeeds.
     """
     try:
-        from fno.agents.registry import load_registry, resolve_agent_in
-
-        entry = resolve_agent_in(load_registry(), recipient).entry
-    except Exception:  # noqa: BLE001 - a registry read failure never breaks the send
+        return _render(["attended", "--recipient", recipient]) == "true"
+    except Exception:  # noqa: BLE001 - a door failure escalates nothing
         return False
-    return getattr(entry, "origin", None) == "operator"
 
 
 def _escalate_to_human(
@@ -437,33 +445,23 @@ def _escalate_to_human(
     from fno.paths import state_dir
 
     pair = hashlib.sha256(f"{sender}\x00{recipient}".encode()).hexdigest()[:16]
-    marker_dir = state_dir() / "mail-escalations"
-    marker = marker_dir / pair
+    # The debounce marker state machine lives behind the mail-receipt verb
+    # (file budget): O_CREAT|O_EXCL claims the window atomically - exactly
+    # one concurrent sender wins a fresh escalation, the rest see the marker
+    # and debounce; a stale marker refreshes so the next window runs from now.
     try:
-        marker_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    # Atomically claim the debounce window via O_CREAT|O_EXCL: exactly one
-    # concurrent sender wins a fresh escalation, the rest see the marker and
-    # debounce. A check-then-touch here would let a concurrent burst from one
-    # pair all notify at once, defeating the debounce during the exact spike it
-    # exists to damp.
-    try:
-        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.close(fd)
-    except FileExistsError:
-        try:
-            last = marker.stat().st_mtime
-        except OSError:
-            last = 0.0
-        if time.time() - last < _ESCALATION_DEBOUNCE_S:
-            return "debounced"
-        try:
-            os.utime(marker, None)  # stale window: refresh so the next runs from now
-        except OSError:
-            pass
-    except OSError:
-        pass  # a missing marker just re-notifies; it never suppresses the durable write
+        verdict = _render(
+            [
+                "debounce",
+                "--marker-dir", str(state_dir() / "mail-escalations"),
+                "--pair", pair,
+                "--window-secs", str(_ESCALATION_DEBOUNCE_S),
+            ]
+        )
+    except Exception:  # noqa: BLE001 - a marker failure just re-notifies
+        verdict = "claim"
+    if verdict == "debounced":
+        return "debounced"
     # Debounce gate passed: this is a real escalation. Emit the overlay event
     # BEFORE the notifier verdict - the overlay is an independent surface that
     # must render even on a headless host where the notifier is unavailable (the

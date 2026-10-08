@@ -51,13 +51,13 @@ pub(super) async fn spawn_codex_thread_lane(
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
     let node = req.params.get("node").and_then(Value::as_str);
-    // The crown rides the request so the row is crowned AT MINT: the seed
-    // turn below enqueues inside this lane, and a crown settled by the
+    // The role rides the request so the row is promoted AT MINT: the seed
+    // turn below enqueues inside this lane, and a role settled by the
     // Python caller only after the receipt lets the actor run its first
-    // turn uncrowned. Both halves or neither; the territory and
+    // turn unpromoted. Both halves or neither; the territory and
     // succession policy stays at the Python seam.
-    let crown = match crown_from_params(&req.params) {
-        Ok(crown) => crown,
+    let role = match role_from_params(&req.params) {
+        Ok(role) => role,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
     // Hop 2 of the state-root grant. Read the roots from the REQUEST,
@@ -103,10 +103,11 @@ pub(super) async fn spawn_codex_thread_lane(
                 .collect()
         })
         .unwrap_or_default();
-    let carry = match crate::codex_thread::parse_harness_args(&harness_args) {
+    let mut carry = match crate::codex_thread::parse_harness_args(&harness_args) {
         Ok(carry) => carry,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
+    worker_retry_config(&mut carry.config);
     let mut state_dirs = state_dirs;
     for dir in carry.add_dirs {
         if !state_dirs.iter().any(|existing| existing == &dir) {
@@ -127,6 +128,54 @@ pub(super) async fn spawn_codex_thread_lane(
     // as a fallback would be the exact outcome this resolves away. The ensure
     // shells out (git + the worktree ensure), so it runs on the blocking
     // pool, off the async executor every hosted thread shares.
+    if role.is_some()
+        || matches!(
+            seed.split_whitespace().next(),
+            Some("$fno:lead" | "/fno:lead")
+        )
+    {
+        let home = ctx.home.clone();
+        let blocker = tokio::task::spawn_blocking(move || {
+            crate::graph_store::read_rows_where(
+                &crate::gc_sweep::graph_path(&home),
+                &crate::backlog::RowQuery {
+                    fields: Some(
+                        ["id", "slug", "status", "merge_status"]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .map(|rows| codex_lead_recovery_blocker(&rows).map(str::to_string))
+            .map_err(|e| e.to_string())
+        })
+        .await;
+        match blocker {
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(blocker))) => {
+                return thread_spawn_refusal(
+                    ctx,
+                    req,
+                    name,
+                    provider,
+                    &format!(
+                        "Codex lead spawn refused while fleet recovery is unfinished: {blocker}"
+                    ),
+                )
+            }
+            error => {
+                return thread_spawn_refusal(
+                    ctx,
+                    req,
+                    name,
+                    provider,
+                    &format!("Codex lead spawn refused: recovery gate unreadable ({error:?})"),
+                )
+            }
+        }
+    }
     let cwd = match resolve_target_cwd(cwd, node, &seed).await {
         Ok(cwd) => cwd,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
@@ -161,8 +210,8 @@ pub(super) async fn spawn_codex_thread_lane(
         &harness_args,
         &req.params,
         provenance,
-        crown.as_ref().map(|(level, _)| *level),
-        crown.as_ref().map(|(_, scope)| scope.as_str()),
+        role.as_ref().map(|(level, _)| *level),
+        role.as_ref().map(|(_, scope)| scope.as_str()),
     );
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
@@ -180,23 +229,23 @@ pub(super) async fn spawn_codex_thread_lane(
         }) {
             return false;
         }
-        // One-live-crown guard at mint, the same invariant the Python
+        // One-live-role guard at mint, the same invariant the Python
         // settle keeps in its write lock: a scope a non-terminal row
-        // already reigns is not ours to crown. Succession - the sitting
-        // king being this spawn's own caller - is the settle's write, so
-        // the mint declines to uncrowned rather than ever landing a
-        // second live crown over the scope.
-        if entry.crown_level.is_some() {
-            if let Some(scope) = entry.crown_scope.as_deref() {
+        // already terms is not ours to role. Succession - the sitting
+        // lead being this spawn's own caller - is the settle's write, so
+        // the mint declines to unpromoted rather than ever landing a
+        // second live role over the scope.
+        if entry.role_level.is_some() {
+            if let Some(scope) = entry.role_scope.as_deref() {
                 let held = registry.entries.iter().any(|existing| {
-                    existing.crown_level.is_some()
-                        && existing.crown_scope.as_deref() == Some(scope)
+                    existing.role_level.is_some()
+                        && existing.role_scope.as_deref() == Some(scope)
                         && is_non_terminal(existing.status)
                 });
                 if held {
-                    entry.crown_level = None;
-                    entry.crown_scope = None;
-                    entry.crown_grantor = None;
+                    entry.role_level = None;
+                    entry.role_scope = None;
+                    entry.role_grantor = None;
                 }
             }
         }
@@ -301,14 +350,47 @@ pub(super) async fn spawn_codex_thread_lane(
     )
 }
 
-/// The crown a spawn request carries: `Some((level, scope))` or None, both
+pub(super) fn worker_retry_config(config: &mut serde_json::Map<String, Value>) {
+    for (key, value) in [
+        ("model_providers.openai.stream_max_retries", 20),
+        ("model_providers.openai.stream_idle_timeout_ms", 600_000),
+    ] {
+        let field = key.rsplit('.').next().expect("provider field");
+        if config.get(key).is_some()
+            || config
+                .get("model_providers.openai")
+                .and_then(|provider| provider.get(field))
+                .is_some()
+            || config
+                .get("model_providers")
+                .and_then(|providers| providers.get("openai"))
+                .and_then(|provider| provider.get(field))
+                .is_some()
+        {
+            continue;
+        }
+        config.entry(key.to_string()).or_insert(json!(value));
+    }
+}
+
+fn codex_lead_recovery_blocker(rows: &[Value]) -> Option<&str> {
+    rows.iter()
+        .find(|row| {
+            row.get("slug").and_then(Value::as_str) == Some("codex-turn-that-ends-error-is")
+                && row.get("status").and_then(Value::as_str) != Some("done")
+                && row.get("merge_status").and_then(Value::as_str) != Some("merged")
+        })
+        .and_then(|row| row.get("id").and_then(Value::as_str))
+}
+
+/// The role a spawn request carries: `Some((level, scope))` or None, both
 /// halves required. This door bounds the TYPE the registry row stores (a
 /// u32 level 0..=2, a nonblank scope); the territory, succession and
 /// canonical-scope policy is the Python seam's pre-launch gate.
-fn crown_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
-    let level = params.get("crown_level");
+fn role_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
+    let level = params.get("role_level");
     let scope = params
-        .get("crown_scope")
+        .get("role_scope")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -318,14 +400,14 @@ fn crown_from_params(params: &Value) -> Result<Option<(u32, String)>, String> {
             let level = level
                 .as_u64()
                 .filter(|l| *l <= 2)
-                .ok_or_else(|| "crown_level must be an integer 0..=2".to_string())?;
+                .ok_or_else(|| "role_level must be an integer 0..=2".to_string())?;
             Ok(Some((level as u32, scope.to_string())))
         }
         (Some(_), None) => {
-            Err("a crown needs both crown_level and crown_scope; got a level with no scope".into())
+            Err("a role needs both role_level and role_scope; got a level with no scope".into())
         }
         (None, Some(_)) => {
-            Err("a crown needs both crown_level and crown_scope; got a scope with no level".into())
+            Err("a role needs both role_level and role_scope; got a scope with no level".into())
         }
     }
 }
@@ -371,4 +453,27 @@ async fn resolve_target_cwd(cwd: &Path, node: Option<&str>, seed: &str) -> Resul
         ));
     }
     Ok(ensured)
+}
+
+#[cfg(test)]
+mod recovery_guard_tests {
+    use super::*;
+
+    #[test]
+    fn lead_recovery_guard_names_the_unfinished_binding_and_releases_on_done() {
+        let mut rows = vec![
+            json!({"id": "recovery-node", "slug": "codex-turn-that-ends-error-is", "status": "in_progress"}),
+        ];
+        assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
+        rows[0]["status"] = json!("done");
+        assert_eq!(codex_lead_recovery_blocker(&rows), None);
+        rows[0]["status"] = json!("in_progress");
+        rows[0]["deferred_kind"] = json!("operator_request");
+        assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
+        rows[0]["status"] = json!("deferred");
+        assert_eq!(codex_lead_recovery_blocker(&rows), Some("recovery-node"));
+        rows[0]["merge_status"] = json!("merged");
+        assert_eq!(codex_lead_recovery_blocker(&rows), None);
+        assert_eq!(codex_lead_recovery_blocker(&[]), None);
+    }
 }

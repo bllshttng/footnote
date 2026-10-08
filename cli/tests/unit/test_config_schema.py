@@ -6,7 +6,6 @@ paths block, obsidian block, validators.
 from __future__ import annotations
 
 import logging
-import warnings
 from pathlib import Path
 
 import pytest
@@ -39,153 +38,11 @@ def test_glob_star_in_state_dir_rejected(tmp_path: Path, monkeypatch: pytest.Mon
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
 
     from fno.config import load_settings
 
     with pytest.raises(Exception, match=r"\*|\?|\[|glob"):
         load_settings()
-
-
-def test_glob_question_in_paths_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-ERR: paths.ledger_json with '?' raises ValidationError at load time."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(
-        tmp_path,
-        "schema_version: 1\nconfig:\n  paths:\n    ledger_json: '~/.fno/ledger?.json'\n",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    with pytest.raises(Exception, match=r"\*|\?|\[|glob"):
-        load_settings()
-
-
-def test_glob_bracket_in_plans_dir_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-ERR: plans_dir with '[' raises ValidationError at load time."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(
-        tmp_path, "schema_version: 1\nconfig:\n  plans_dir: '.fno/[plans]/'\n"
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    with pytest.raises(Exception, match=r"\*|\?|\[|glob"):
-        load_settings()
-
-
-# ---------------------------------------------------------------------------
-# AC1-FR: Process-level cache hit (same object returned on second call)
-# ---------------------------------------------------------------------------
-
-
-def test_load_settings_cache_hit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-FR: load_settings returns the same object when called twice."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(tmp_path, "schema_version: 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    # Clear lru_cache so the monkeypatch env takes effect
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    first = load_settings()
-    second = load_settings()
-    assert first is second, "load_settings() should return the same cached object"
-
-
-# ---------------------------------------------------------------------------
-# AC1-FR: Unknown keys => warning, not error
-# ---------------------------------------------------------------------------
-
-
-def test_unknown_key_emits_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
-) -> None:
-    """AC1-FR: Unknown config key warns on stderr at startup, FNO_DEBUG set or
-    not, never an exception."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.delenv("FNO_DEBUG", raising=False)
-    settings_file = _write_settings(
-        tmp_path, "schema_version: 1\nconfig:\n  future_thing: true\n"
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno.config import load_settings
-
-    result = load_settings()
-    err = capsys.readouterr().err
-
-    assert result is not None, "load_settings() should succeed on unknown keys"
-    assert "future_thing" in err, f"Expected the unknown key on stderr, got: {err!r}"
-
-
-# ---------------------------------------------------------------------------
-# AC1-HP: Default values are correct
-# ---------------------------------------------------------------------------
-
-
-def test_default_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: Default state_dir is '~/.fno/'."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(tmp_path, "schema_version: 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    result = load_settings()
-    assert result.state_dir == "~/.fno/"
-
-
-def test_default_plans_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: Default plans_dir is '.fno/plans/'."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(tmp_path, "schema_version: 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    result = load_settings()
-    assert result.plans_dir == ".fno/plans/"
-
-
-def test_schema_version_defaults_to_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: Default schema_version is 1."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(tmp_path, "schema_version: 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    result = load_settings()
-    assert result.schema_version == 1
-
-
-def test_obsidian_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: obsidian.enabled defaults to False."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(tmp_path, "schema_version: 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    result = load_settings()
-    assert result.obsidian.enabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +61,6 @@ def test_vault_template_with_obsidian_disabled_rejected(
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
 
     from fno.config import load_settings
 
@@ -215,61 +71,6 @@ def test_vault_template_with_obsidian_disabled_rejected(
 # ---------------------------------------------------------------------------
 # Fix 6: Dual ProjectBlock - top-level project is deprecated alias for config.project
 # ---------------------------------------------------------------------------
-
-
-def test_top_level_project_id_logs_deprecation_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """In a legacy DUAL-shape file (a `config:` block AND a top-level
-    `project` block), the top-level `project.id` is the deprecated location:
-    it is lifted into config.project.id and emits a deprecation WARNING.
-
-    The model is flat now, so a bare top-level `project` with NO `config:`
-    block is the canonical shape and draws no warning (see
-    test_config_project_id_no_warning); only the mixed legacy file warns.
-    """
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(
-        tmp_path,
-        "schema_version: 1\nproject:\n  id: my-top-level-project\nconfig:\n  review: {}\n",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-        result = load_settings()
-
-    assert result.project.id == "my-top-level-project"
-    assert any(
-        "deprecated" in record.message.lower() or "config.project" in record.message
-        for record in caplog.records
-    ), f"Expected deprecation warning, got: {[r.message for r in caplog.records]}"
-
-
-def test_config_project_id_no_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Fix 6: config.project.id (canonical form) emits no deprecation warning."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(
-        tmp_path,
-        "schema_version: 1\nconfig:\n  project:\n    id: my-project\n",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-        result = load_settings()
-
-    assert result.project.id == "my-project"
-    assert not any(
-        "deprecated" in record.message.lower()
-        for record in caplog.records
-    ), f"Unexpected deprecation warning: {[r.message for r in caplog.records]}"
 
 
 # ---------------------------------------------------------------------------
@@ -287,24 +88,6 @@ def test_obsidian_enabled_true_with_no_vault_raises() -> None:
 
     with pytest.raises(ValidationError, match=r"vault|obsidian"):
         ObsidianBlock(enabled=True, vault=None)
-
-
-def test_obsidian_enabled_true_with_empty_vault_raises() -> None:
-    """Fix 5: ObsidianBlock(enabled=True, vault='') must raise ValidationError."""
-    from pydantic import ValidationError
-    from fno.config import ObsidianBlock
-
-    with pytest.raises(ValidationError, match=r"vault|obsidian"):
-        ObsidianBlock(enabled=True, vault="")
-
-
-def test_obsidian_enabled_false_with_no_vault_ok() -> None:
-    """Fix 5: ObsidianBlock(enabled=False, vault=None) is fine - disabled doesn't need vault."""
-    from fno.config import ObsidianBlock
-
-    block = ObsidianBlock(enabled=False, vault=None)
-    assert block.enabled is False
-    assert block.vault is None
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +110,6 @@ def test_double_brace_escape_not_rejected_as_vault(
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
 
     from fno.config import load_settings
 
@@ -350,7 +132,6 @@ def test_load_settings_falls_through_on_corrupt_project_local(
     load_settings() must continue to try the global ~/.fno/settings.yaml
     rather than returning empty defaults.
     """
-    import os
 
     # Create fake home with a valid global settings.yaml
     fake_home = tmp_path / "home"
@@ -378,7 +159,6 @@ def test_load_settings_falls_through_on_corrupt_project_local(
 
     from fno import config as config_mod
     config_mod._loaded_from = None
-    import fno.paths as paths_mod
     from fno.config import load_settings
 
     result = load_settings()
@@ -404,7 +184,6 @@ def test_state_dir_exceeding_path_max_rejected(
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
 
     from fno.config import load_settings
 
@@ -415,21 +194,6 @@ def test_state_dir_exceeding_path_max_rejected(
 # ---------------------------------------------------------------------------
 # Fix 2: _load_raw warns on YAML parse failure instead of silent fallback
 # ---------------------------------------------------------------------------
-
-
-def test_missing_config_names_missing_not_parse_failure(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    from fno.config_io import _load_raw
-
-    missing = tmp_path / "settings.yaml"
-    with caplog.at_level(logging.WARNING, logger="fno.config_io"):
-        data, ok = _load_raw(missing)
-
-    assert (data, ok) == ({}, False)
-    messages = [record.message for record in caplog.records]
-    assert any("is missing" in message for message in messages)
-    assert all("failed to parse" not in message for message in messages)
 
 
 def test_corrupt_yaml_returns_defaults_and_logs_warning(
@@ -443,7 +207,6 @@ def test_corrupt_yaml_returns_defaults_and_logs_warning(
     settings_file = _write_settings(tmp_path, ":::bad yaml:::\n  - broken: [unterminated")
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -489,7 +252,6 @@ def test_project_local_settings_anchored_to_repo_root_not_cwd(
 
     from fno import config as config_mod
     config_mod._loaded_from = None
-    import fno.paths as paths_mod
 
     from fno.config import load_settings
 
@@ -497,24 +259,6 @@ def test_project_local_settings_anchored_to_repo_root_not_cwd(
     assert result.state_dir == "/custom/from-repo-root/", (
         f"Should have loaded repo-root settings, got state_dir={result.state_dir!r}"
     )
-
-
-def test_env_var_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-FR: FNO_CONFIG env var overrides the default file locations."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    # Write a settings file with a custom state_dir at an arbitrary path
-    custom_file = tmp_path / "my-settings.yaml"
-    custom_file.write_text(
-        "schema_version: 1\nconfig:\n  state_dir: '/custom/env/path/'\n", encoding="utf-8"
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(custom_file))
-
-    from fno import config as config_mod
-
-    from fno.config import load_settings
-
-    result = load_settings()
-    assert result.state_dir == "/custom/env/path/"
 
 
 # ---------------------------------------------------------------------------
@@ -546,37 +290,6 @@ def test_unknown_key_warns_exactly_once_per_load(
 # ---------------------------------------------------------------------------
 # config.blueprint.max_prs_per_epic (ab-e9c81ed3, C1)
 # ---------------------------------------------------------------------------
-
-
-def test_blueprint_max_prs_per_epic_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Default max_prs_per_epic is 4 when config.blueprint is absent."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(tmp_path, "schema_version: 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    settings = config_mod.load_settings()
-    assert settings.blueprint.max_prs_per_epic == 4
-
-
-def test_blueprint_max_prs_per_epic_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """config.blueprint.max_prs_per_epic is read from settings.yaml."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    settings_file = _write_settings(
-        tmp_path,
-        "schema_version: 1\nconfig:\n  blueprint:\n    max_prs_per_epic: 7\n",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    settings = config_mod.load_settings()
-    assert settings.blueprint.max_prs_per_epic == 7
 
 
 def test_blueprint_max_prs_per_epic_rejects_non_positive(

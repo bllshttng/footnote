@@ -287,11 +287,11 @@ def test_same_second_inbound_resets_once_without_erasing_a_later_reservation(
 
 def test_control_lane_keys_colliding_codex_siblings_separately():
     budget.reserve_control(
-        sender="king", recipient="01a0370b", words=55, msg_id="ctl-a",
+        sender="lead", recipient="01a0370b", words=55, msg_id="ctl-a",
         recipient_key="aaaa1111-2222-3333-4444-555566667777",
     )
     second = budget.reserve_control(
-        sender="king", recipient="01a0370b", words=55, msg_id="ctl-b",
+        sender="lead", recipient="01a0370b", words=55, msg_id="ctl-b",
         recipient_key="bbbb1111-2222-3333-4444-555566667777",
     )
     assert second.running_before == 0, "distinct full-id keys charge separate control windows"

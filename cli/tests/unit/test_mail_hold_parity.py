@@ -96,13 +96,18 @@ SITES = (
 
 
 def _expire():
-    hold_mod._write(
-        hold_mod.Hold(
-            handle=HANDLE,
-            until=datetime.now(timezone.utc) - timedelta(seconds=1),
-            window_s=300,
-        )
-    )
+    """Seed a lapsed clock directly: the transport cannot write this state."""
+    fields = {
+        "until": (datetime.now(timezone.utc) - timedelta(seconds=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "window_s": 300,
+        "clock_kind": "idle",
+        "ceiling": None,
+    }
+    path = hold_mod.hold_path(HANDLE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(fields) + "\n", encoding="utf-8")
 
 
 @pytest.mark.parametrize("label,probe", SITES, ids=[s[0] for s in SITES])

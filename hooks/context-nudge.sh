@@ -22,7 +22,7 @@
 #
 # A TEAMED lead additionally gets the ORPHAN check (b): did it spawn workers
 # that are still live with no resolution recorded? A lead that spawns workers
-# cannot be a pure pass: abdicating now leaves them nobody to mail at review.
+# cannot be a pure pass: stepping_down now leaves them nobody to mail at review.
 # Check (b) is team-only; only check (a) generalizes.
 #
 # Both BLOCK (the only Stop output documented to reach the model on Claude and
@@ -125,12 +125,12 @@ NUDGE_BUDGET="$(hook_budget_secs)"
 
 # ── 2. Both triggers from config (general 50, lead 40). ───────────────────────
 GENERAL_TRIGGER="50"
-KING_TRIGGER="40"
+LEAD_TRIGGER="40"
 if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
     # ONE boot for the whole block. Each `fno config get` pays ~1.7s of
     # interpreter startup, so a read per scalar costs a boot per scalar; a Stop
     # hook that wants two numbers from one block asks for the block.
-    # stdout is `{"enabled":...,"used_pct_trigger":50,"king_used_pct_trigger":40}`;
+    # stdout is `{"enabled":...,"used_pct_trigger":50,"lead_used_pct_trigger":40}`;
     # provenance goes to stderr. sed, not jq: jq is optional in this hook.
     _blk=$(with_timeout "$NUDGE_BUDGET" fno config get target.handoff 2>/dev/null || true)
     _t=$(printf '%s' "$_blk" | sed -n 's/.*"used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
@@ -138,7 +138,7 @@ if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 50
         *) GENERAL_TRIGGER="$_t" ;;
     esac
-    _t=$(printf '%s' "$_blk" | sed -n 's/.*"king_used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    _t=$(printf '%s' "$_blk" | sed -n 's/.*"lead_used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 40
         *) LEAD_TRIGGER="$_t" ;;
@@ -208,7 +208,7 @@ fi
 # `fno agents registry-json` is a daemon-free file read (load_registry), NOT
 # `fno agents list` (which is Rust-routed and lazy-starts the daemon for
 # live-status enrichment - a Stop hook must never stall on a daemon start).
-# Emits structured crown_level/crown_scope/spawned_by_session per row.
+# Emits structured role_level/role_scope/spawned_by_session per row.
 #
 # BEST-EFFORT: a missing/unreadable registry or a session with no row is treated
 # as non-teamed. The context check still fires at the general trigger on REAL
@@ -231,8 +231,8 @@ if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
         MY_ROW=$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SESSION_ID" \
             '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)
         if [[ -n "$MY_ROW" ]]; then
-            TEAM_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)
-            TEAM_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)
+            TEAM_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.role_level // empty' 2>/dev/null)
+            TEAM_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.role_scope // empty' 2>/dev/null)
         fi
         # Active children this session spawned. Computed ONLY when teamed: the
         # orphan check below is team-only, so scanning the registry for children
@@ -273,7 +273,7 @@ if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
+                    and ((.role_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and .liveness == "alive"
                     # a door-stamped row names its owner (mission,
@@ -290,7 +290,7 @@ if [[ "$NUDGE_BUDGET" -gt 0 ]] && command -v fno >/dev/null 2>&1; then
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
+                    and ((.role_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and (.liveness != "alive" and .liveness != "dead")
                     # a door-stamped row names its owner (mission,
@@ -480,16 +480,16 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     fi
     if [[ "$IS_LEAD" -eq 1 ]]; then
         emit_event "lead_context_nudge" \
-            "{\"used_pct\":${USED_PCT},\"trigger\":${LEAD_TRIGGER},\"crown_level\":${TEAM_LEVEL},\"crown_scope\":\"${TEAM_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
+            "{\"used_pct\":${USED_PCT},\"trigger\":${LEAD_TRIGGER},\"role_level\":${TEAM_LEVEL},\"role_scope\":\"${TEAM_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
         # Roll up the lead's neighbourhood from the same registry read (no second
         # source). Workers are counted by the orphan check below; peers and the
         # lead above derive the same way, so the nudge states the roll-up instead
         # of asking the lead to reconstruct it. Superset is approximate (my scope
         # starts with theirs); it degrades to silence, never to a wrong claim.
         PEER_LEADS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$TEAM_SCOPE" \
-            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s)] | length' 2>/dev/null || printf '%s' 0)
+            '[.agents[] | select((.role_level // 0) > 0 and (.role_scope // "") != $s)] | length' 2>/dev/null || printf '%s' 0)
         LEAD_ABOVE=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$TEAM_SCOPE" \
-            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s and ($s | startswith(.crown_scope // "")))] | length' 2>/dev/null || printf '%s' 0)
+            '[.agents[] | select((.role_level // 0) > 0 and (.role_scope // "") != $s and ($s | startswith(.role_scope // "")))] | length' 2>/dev/null || printf '%s' 0)
         _rollup=""
         [[ "$PEER_LEADS" =~ ^[0-9]+$ && "$PEER_LEADS" -gt 0 ]] && _rollup=" ${PEER_LEADS} peer lead(s) also in flight."
         [[ "$LEAD_ABOVE" =~ ^[0-9]+$ && "$LEAD_ABOVE" -gt 0 ]] && _rollup="${_rollup} A lead above holds your scope."
@@ -532,7 +532,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
             _compact_action="PREPARE TO COMPACT AND KEEP RULING; do not compact until the action band"
         fi
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the team over ${TEAM_SCOPE}. A team is maintained across a compact - your team, session id, mail handle, and claims all come out the other side - so the move here is to ${_compact_action}. ${_compact_ask} The PreCompact hook writes your team, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_lead_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${TEAM_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the team in the same atomic write that vacates yours - 'fno agents spawn -k \"${TEAM_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the team over ${TEAM_SCOPE}. A team is maintained across a compact - your team, session id, mail handle, and claims all come out the other side - so the move here is to ${_compact_action}. ${_compact_ask} The PreCompact hook writes your team, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_lead_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${TEAM_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your successor over your own scope, which transfers the team in the same atomic write that vacates yours - 'fno agents spawn -k \"${TEAM_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
@@ -579,13 +579,13 @@ if [[ "$IS_LEAD" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
     # below: a broken reader never silently clears a guard.
     RESOLVED=0
     if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
-        KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout "$NUDGE_BUDGET" fno agents king \
+        LEAD_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout "$NUDGE_BUDGET" fno agents lead \
             manifest-path --harness-session-id "$SESSION_ID" 2>/dev/null || true)
-        if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
-            LEAD_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
+        if [[ -n "$LEAD_MANIFEST" && -f "$LEAD_MANIFEST" ]]; then
+            LEAD_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$LEAD_MANIFEST" | head -1 | tr -d '[:space:]')
             # Stored manifests carry either spelling this release; both mean
             # the holder declared the team and the orphan nag is answered.
-            [[ "$LEAD_SHAPE" == "org" || "$LEAD_SHAPE" == "court" ]] && RESOLVED=1
+            [[ "$LEAD_SHAPE" == "org" || "$LEAD_SHAPE" == "team" ]] && RESOLVED=1
         fi
     fi
     # Resolution 3: a carveout carrying THIS scope (structured field, not free
@@ -615,8 +615,8 @@ if [[ "$IS_LEAD" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
     if [[ "$RESOLVED" -eq 0 ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "lead_orphan_block" \
-            "{\"crown_level\":${TEAM_LEVEL},\"crown_scope\":\"${TEAM_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"unlinked_unknown_workers\":\"${UNLINKED_UNKNOWN}\",\"unlinked_unknown_count\":${UNLINKED_UNKNOWN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the team over ${TEAM_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this team's obligations. ${UNLINKED_UNKNOWN_COUNT} unlinked worker row(s) also have unresolved liveness (${UNLINKED_UNKNOWN:-none}); same reason, they count on their own. A lead that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents org shape court'; (2) hand the team to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${TEAM_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${TEAM_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
+            "{\"role_level\":${TEAM_LEVEL},\"role_scope\":\"${TEAM_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"unlinked_unknown_workers\":\"${UNLINKED_UNKNOWN}\",\"unlinked_unknown_count\":${UNLINKED_UNKNOWN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
+        ORPHAN_REASON="You hold the team over ${TEAM_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this team's obligations. ${UNLINKED_UNKNOWN_COUNT} unlinked worker row(s) also have unresolved liveness (${UNLINKED_UNKNOWN:-none}); same reason, they count on their own. A lead that spawns workers cannot be a pure pass: stepping_down now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as team through the wave with 'fno agents org shape team'; (2) hand the team to a successor by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${TEAM_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${TEAM_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else

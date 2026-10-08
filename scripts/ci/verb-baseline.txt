@@ -92,15 +92,15 @@ inbox outstanding reindex
 inbox user ack
 inbox user list
 inbox user status
-king board
-king cancel
-king done
-king drain
-king escalate
-king init
-king manifest-path
-king shape
-king term
+lead board
+lead cancel
+lead done
+lead drain
+lead escalate
+lead init
+lead manifest-path
+lead shape
+lead term
 lint
 loops
 loops resume-all

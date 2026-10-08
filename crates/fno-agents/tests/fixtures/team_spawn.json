@@ -1,0 +1,520 @@
+{
+  "source_sha": "8038e229946c9fc7e03f6694ec2d6f480bd1d4bb",
+  "cases": [
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "seed",
+        "message": "ship\nkeep trailing bytes \n",
+        "level": 2,
+        "scope": "epic-a",
+        "revive": false,
+        "harness": "claude"
+      },
+      "answer": {
+        "message": "/fno:lead epic-a\nship\nkeep trailing bytes \n",
+        "typed": true
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "seed",
+        "message": "brief",
+        "level": null,
+        "scope": null,
+        "revive": false,
+        "harness": "claude"
+      },
+      "answer": {
+        "message": "brief",
+        "typed": false
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "seed",
+        "message": "brief",
+        "level": 2,
+        "scope": "epic-a",
+        "revive": true,
+        "harness": "claude"
+      },
+      "answer": {
+        "message": "brief",
+        "typed": false
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "seed",
+        "message": "",
+        "level": 0,
+        "scope": "alpha,beta",
+        "revive": false,
+        "harness": "claude"
+      },
+      "answer": {
+        "message": "/fno:lead alpha,beta\n",
+        "typed": true
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": null,
+        "scope": null,
+        "level_repr": "None",
+        "scope_repr": "None",
+        "level_is_int": false,
+        "scope_is_str": false,
+        "projects": []
+      },
+      "answer": {
+        "refusal": null
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": null,
+        "scope": "epic-a",
+        "level_repr": "None",
+        "scope_repr": "'epic-a'",
+        "level_is_int": false,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "a role needs both level and scope; got level=None scope='epic-a'"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "2",
+        "scope": null,
+        "level_repr": "2",
+        "scope_repr": "None",
+        "level_is_int": true,
+        "scope_is_str": false,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "a role needs both level and scope; got level=2 scope=None"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "-1",
+        "scope": "epic-a",
+        "level_repr": "-1",
+        "scope_repr": "'epic-a'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got -1"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "3",
+        "scope": "epic-a",
+        "level_repr": "3",
+        "scope_repr": "'epic-a'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got 3"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "scope": "epic-a",
+        "level_repr": "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "scope_repr": "'epic-a'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role level must be 0..2 (0 several projects, 1 one project, 2 one epic); got 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "True",
+        "scope": "epic-a",
+        "level_repr": "True",
+        "scope_repr": "'epic-a'",
+        "level_is_int": false,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role level must be an int 0..2; got True"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "1",
+        "scope": "epic-a",
+        "level_repr": "'1'",
+        "scope_repr": "'epic-a'",
+        "level_is_int": false,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role level must be an int 0..2; got '1'"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "1.5",
+        "scope": "epic-a",
+        "level_repr": "1.5",
+        "scope_repr": "'epic-a'",
+        "level_is_int": false,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role level must be an int 0..2; got 1.5"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "2",
+        "scope": "",
+        "level_repr": "2",
+        "scope_repr": "''",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role scope must be a nonblank id; got ''"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "2",
+        "scope": "{'bad': 1}",
+        "level_repr": "2",
+        "scope_repr": "{'bad': 1}",
+        "level_is_int": true,
+        "scope_is_str": false,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "role scope must be a nonblank id; got {'bad': 1}"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "0",
+        "scope": "beta,alpha",
+        "level_repr": "0",
+        "scope_repr": "'beta,alpha'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": [
+          "alpha",
+          "beta"
+        ]
+      },
+      "answer": {
+        "refusal": "role scope must be canonical (sorted, deduped, no blank members); got 'beta,alpha', want 'alpha,beta'"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "1",
+        "scope": "alpha,beta",
+        "level_repr": "1",
+        "scope_repr": "'alpha,beta'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": [
+          "alpha",
+          "beta"
+        ]
+      },
+      "answer": {
+        "refusal": "a scope naming 2 members is level 0 (a portfolio of projects) or 2 (a set of epics), not 1"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "0",
+        "scope": "alpha,beta",
+        "level_repr": "0",
+        "scope_repr": "'alpha,beta'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": [
+          "alpha",
+          "beta"
+        ]
+      },
+      "answer": {
+        "refusal": null
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "0",
+        "scope": "epic-a,epic-b",
+        "level_repr": "0",
+        "scope_repr": "'epic-a,epic-b'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": "level 0 is a portfolio of PROJECTS, but no member of 'epic-a,epic-b' resolves to a configured project"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "2",
+        "scope": "alpha,beta",
+        "level_repr": "2",
+        "scope_repr": "'alpha,beta'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": [
+          "alpha",
+          "beta"
+        ]
+      },
+      "answer": {
+        "refusal": "level 2 is a SET OF EPICS, but alpha, beta resolve(s) to a configured project"
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "2",
+        "scope": "epic-a,epic-b",
+        "level_repr": "2",
+        "scope_repr": "'epic-a,epic-b'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": null
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "validate",
+        "level": "2",
+        "scope": "epic-a",
+        "level_repr": "2",
+        "scope_repr": "'epic-a'",
+        "level_is_int": true,
+        "scope_is_str": true,
+        "projects": []
+      },
+      "answer": {
+        "refusal": null
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "journal",
+        "outcome": "granted",
+        "vacated": [],
+        "name": "successor",
+        "level": 2,
+        "scope": "epic-a",
+        "grantor": "human"
+      },
+      "answer": {
+        "events": [
+          {
+            "kind": "agent_promoted",
+            "data": {
+              "name": "successor",
+              "level": 2,
+              "scope": "epic-a",
+              "grantor": "human",
+              "vacated_scope": null,
+              "vacated_level": null,
+              "stranded_subordinates": []
+            }
+          }
+        ],
+        "arm_missions": true
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "journal",
+        "outcome": "succeeded",
+        "vacated": [
+          [
+            {
+              "name": "predecessor",
+              "role_level": 2,
+              "role_scope": "epic-a",
+              "harness_session_id": "predecessor-session",
+              "role_grantor": "human"
+            },
+            "succession"
+          ],
+          [
+            {
+              "name": "child",
+              "role_level": null,
+              "role_scope": null,
+              "harness_session_id": "predecessor-session",
+              "role_grantor": "human"
+            },
+            "reowned"
+          ]
+        ],
+        "name": "successor",
+        "level": 2,
+        "scope": "epic-a",
+        "grantor": "human"
+      },
+      "answer": {
+        "events": [
+          {
+            "kind": "agent_role_vacated",
+            "data": {
+              "scope": "epic-a",
+              "level": 2,
+              "holder": "predecessor",
+              "holder_session": "predecessor-session",
+              "grantor": "human",
+              "cause": "succession",
+              "successor": "successor"
+            }
+          },
+          {
+            "kind": "agent_team_reowned",
+            "data": {
+              "scope": "epic-a",
+              "successor": "successor",
+              "child": "child"
+            }
+          },
+          {
+            "kind": "agent_promoted",
+            "data": {
+              "name": "successor",
+              "level": 2,
+              "scope": "epic-a",
+              "grantor": "human",
+              "vacated_scope": null,
+              "vacated_level": null,
+              "stranded_subordinates": []
+            }
+          }
+        ],
+        "arm_missions": true
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "journal",
+        "outcome": "declined",
+        "vacated": [
+          [
+            {
+              "name": "predecessor",
+              "role_level": 2,
+              "role_scope": "epic-a",
+              "harness_session_id": "predecessor-session",
+              "role_grantor": "human"
+            },
+            "holder_terminal"
+          ]
+        ],
+        "name": "successor",
+        "level": 2,
+        "scope": "epic-a",
+        "grantor": "human"
+      },
+      "answer": {
+        "events": [
+          {
+            "kind": "agent_role_vacated",
+            "data": {
+              "scope": "epic-a",
+              "level": 2,
+              "holder": "predecessor",
+              "holder_session": "predecessor-session",
+              "grantor": "human",
+              "cause": "holder_terminal",
+              "successor": null
+            }
+          }
+        ],
+        "arm_missions": false
+      }
+    },
+    {
+      "payload": {
+        "kind": "spawn-team",
+        "op": "journal",
+        "outcome": "declined",
+        "vacated": [],
+        "name": "successor",
+        "level": 2,
+        "scope": "epic-a",
+        "grantor": "human"
+      },
+      "answer": {
+        "events": [],
+        "arm_missions": false
+      }
+    }
+  ]
+}

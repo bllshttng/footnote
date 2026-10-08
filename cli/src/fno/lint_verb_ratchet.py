@@ -76,8 +76,7 @@ COLLAPSE_MAP_ROW_HELP = (
     "  refs                  how many times the corpus outside cli/src names this "
     "leaf, swept by `python3 scripts/diagnostics/verb-callers.py`\n"
     "  reason-if-not-T1      required on every non-T1 row, left empty on T1\n"
-    "Then bump the row count pinned in cli/tests/unit/test_verb_collapse_map.py, "
-    "and regenerate scripts/ci/verb-baseline.txt last."
+    "Then regenerate scripts/ci/verb-baseline.txt last."
 )
 COLLAPSE_FLAGS_ROW_HELP = (
     "One line per hidden option on an argument-dispatched action, e.g.\n"

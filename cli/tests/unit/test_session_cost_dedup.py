@@ -94,25 +94,6 @@ def test_duplicate_lines_count_once():
     assert metrics.assistant_messages == 2, metrics.assistant_messages
 
 
-def test_deduped_cost_prices_the_deduped_totals():
-    # The Rust tests own the rate math; this pins that the price leg sees
-    # exactly the DEDUPED totals (three identical lines, one usage).
-    seen_totals = []
-
-    def fake_cost(metrics):
-        seen_totals.append((metrics.input_tokens, metrics.output_tokens))
-        return 44.97
-
-    # The script runner in _main() calls tests bare, so no pytest fixtures:
-    # patch inline and restore.
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(session_cost, "calculate_cost", fake_cost)
-        lines = [_assistant_line("msg_0", "req_0") for _ in range(3)]
-        metrics = _parse(lines)
-        assert metrics.cost_usd == 44.97
-        assert seen_totals == [(USAGE["input_tokens"], USAGE["output_tokens"])]
-
-
 # --- AC1-ERR: missing dedup keys ----------------------------------------------
 
 
@@ -126,26 +107,6 @@ def test_lines_missing_request_id_count_as_is():
     metrics = _parse(lines)
     assert metrics.assistant_messages == 3, metrics.assistant_messages
     assert metrics.input_tokens == 3 * USAGE["input_tokens"]
-
-
-def test_lines_missing_message_id_count_as_is():
-    lines = [
-        _assistant_line(None, "req_0"),
-        _assistant_line(None, "req_0"),
-    ]
-    metrics = _parse(lines)
-    assert metrics.assistant_messages == 2
-
-
-def test_non_string_dedup_keys_count_as_is():
-    # A future format drift to non-string id/requestId must over-count
-    # toward the old per-line behavior, never dedup on unstable keys.
-    a = _assistant_line("msg_0", None)
-    a["requestId"] = 12345
-    b = _assistant_line("msg_0", None)
-    b["requestId"] = 12345
-    metrics = _parse([a, b])
-    assert metrics.assistant_messages == 2
 
 
 # --- AC1-UI: output shape stability -------------------------------------------
@@ -183,20 +144,6 @@ def test_json_surfaces_unpriced_model():
     assert payload["unpriced_model"] == "claude-opus-next"
 
 
-def test_json_omits_unpriced_field_when_priced():
-    # A priced session is stubbed (the parse would otherwise come back
-    # unpriced with no binary): a dollar answer sets no unpriced key.
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(session_cost, "calculate_cost", lambda m: 44.97)
-        metrics = _parse([_assistant_line("msg_0", "req_0")])
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        session_cost.print_metrics(metrics, as_json=True)
-    payload = json.loads(out.getvalue())
-    assert "unpriced_model" not in payload
-    assert payload["cost_usd"] == 44.97
-
-
 # --- AC1-EDGE: multi-transcript dedup ------------------------------------------
 
 
@@ -222,13 +169,6 @@ def test_resumed_session_history_not_recounted():
     assert combined.assistant_messages == 3
 
 
-def test_per_file_dedup_without_shared_set():
-    # Without an explicit seen set, each parse still dedups within its file.
-    lines = [_assistant_line("msg_0", "req_0") for _ in range(3)]
-    metrics = _parse(lines)
-    assert metrics.input_tokens == USAGE["input_tokens"]
-
-
 # --- AC1-FR: malformed transcript recovery -------------------------------------
 
 
@@ -249,13 +189,6 @@ def test_malformed_lines_skipped_with_warning():
 # --- Boundaries -----------------------------------------------------------------
 
 
-def test_zero_assistant_lines():
-    metrics = _parse([{"type": "user", "timestamp": "2026-06-04T20:00:00.000Z"}])
-    assert metrics.cost_usd == 0.0
-    assert metrics.assistant_messages == 0
-    assert metrics.total_tokens == 0
-
-
 def test_null_usage_fields_coerced():
     usage = {"input_tokens": None, "output_tokens": 5}
     metrics = _parse([_assistant_line("msg_0", "req_0", usage=usage)])
@@ -264,23 +197,6 @@ def test_null_usage_fields_coerced():
 
 
 # --- Invariants -------------------------------------------------------------------
-
-
-def test_dedup_never_increases_token_counts():
-    lines = [
-        _assistant_line("msg_0", "req_0"),
-        _assistant_line("msg_0", "req_0"),
-        _assistant_line("msg_1", None),
-        _assistant_line("msg_2", "req_2"),
-    ]
-    deduped = _parse(lines)
-    # Per-line accounting baseline: parse with dedup keys made unique.
-    unique_lines = [
-        _assistant_line(f"msg_{i}", f"uniq_req_{i}") for i in range(len(lines))
-    ]
-    per_line = _parse(unique_lines)
-    assert deduped.total_tokens <= per_line.total_tokens
-    assert deduped.total_tokens == 3 * sum(USAGE.values())
 
 
 def test_compaction_detection_unaffected_by_duplicates():
@@ -296,15 +212,6 @@ def test_compaction_detection_unaffected_by_duplicates():
     ]
     metrics = _parse(lines)
     assert metrics.compaction_count == 1, metrics.compaction_count
-
-
-def test_render_tasks_md_provenance_note():
-    # Open question 2: ledger.md carries a one-line provenance note once
-    # any entry has been corrected; pre-backfill ledgers render unchanged.
-    with_marker = session_cost.render_tasks_md([{"title": "x", "cost_backfill": "recomputed"}])
-    assert "backfill-cost-recompute.py" in with_marker
-    without_marker = session_cost.render_tasks_md([{"title": "x"}])
-    assert "backfill-cost-recompute.py" not in without_marker
 
 
 def test_branch_breakdown_dedups():

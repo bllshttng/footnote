@@ -682,7 +682,7 @@ async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
 /// with no state dirs and overwrote the row with the narrowed result, which
 /// is the loss `codex_thread_resumed_without_state_grant` used to announce.
 #[tokio::test(flavor = "current_thread")]
-async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
+async fn ensure_codex_thread_handle_freezes_the_promoting_resolution() {
     // CODEX_HOME is process-global: hold the same guard every other fake
     // user holds, or a parallel test's driver reads THIS test's fake.
     let _guard = crate::path_test_guard();
@@ -736,8 +736,8 @@ async fn ensure_codex_thread_handle_freezes_the_crowning_resolution() {
         .find("t-resume")
         .cloned()
         .unwrap();
-    // The crowning resolution is FROZEN: the fake resolves readOnly, and the
-    // seeded workspaceWrite must survive it - a mid-reign refresh would mask
+    // The promoting resolution is FROZEN: the fake resolves readOnly, and the
+    // seeded workspaceWrite must survive it - a mid-term refresh would mask
     // the drift a narrowed resolution caused.
     assert_eq!(after.resolved_sandbox.as_deref(), Some("workspaceWrite"));
     // AC3-EDGE: the recorded grant survives the write-back.
@@ -1877,7 +1877,7 @@ fn gate_inside_leg_onto_row_teamed_done_is_quiet_but_lands() {
     let mut registry = state::Registry::default();
     let mut row = thread_entry("t-lead", AgentStatus::Live, None);
     row.codex_session_id = Some("sid-lead".into());
-    row.crown_level = Some(2);
+    row.role_level = Some(2);
     registry.entries.push(row);
 
     let rep = |seq, st, reason: Option<&str>| state::InsideLegReport {
@@ -1990,12 +1990,12 @@ async fn poll_thread_row(
 /// land in the `thread/start` config map with TOML-typed values, `--add-dir`
 /// rides the state-root grant onto every turn, the spawn-request effort rides
 /// `turn/start`, and the row stores the raw tokens for startup recovery
-/// (AC2-HP, AC3-HP). The same door carries the crown (x-c5db): the request's
-/// crown half-pair lands on the row AT MINT - grantor read off the request's
+/// (AC2-HP, AC3-HP). The same door carries the role (x-c5db): the request's
+/// role half-pair lands on the row AT MINT - grantor read off the request's
 /// parent edge, never caller-supplied - so the seed turn enqueued below can
-/// never submit to an uncrowned row. A scope a non-terminal row already
-/// reigns mints UNCROWNED (succession is the Python settle's write, never a
-/// second live crown), and a lone half refuses with no row written.
+/// never submit to an unpromoted row. A scope a non-terminal row already
+/// terms mints UNPROMOTED (succession is the Python settle's write, never a
+/// second live role), and a lone half refuses with no row written.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
     let behavior = crate::codex_fake_daemon::Behavior::quick();
@@ -2015,8 +2015,8 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
                 "cwd": worktree.to_string_lossy(),
                 "message": "seed turn",
                 "effort": "high",
-                "crown_level": 2,
-                "crown_scope": "x-aaaa",
+                "role_level": 2,
+                "role_scope": "x-aaaa",
                 "spawned_by_session": "parent-session-uuid",
                 "harness_args": [
                     "-c", "sandbox_workspace_write.network_access=true",
@@ -2089,87 +2089,91 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
             ),
             "the row stores the fenced tokens verbatim"
         );
-        let crowned = registry.find("t").unwrap();
-        assert_eq!(crowned.crown_level, Some(2), "crowned at mint: {crowned:?}");
-        assert_eq!(crowned.crown_scope.as_deref(), Some("x-aaaa"));
+        let promoted = registry.find("t").unwrap();
         assert_eq!(
-            crowned.crown_grantor.as_deref(),
+            promoted.role_level,
+            Some(2),
+            "promoted at mint: {promoted:?}"
+        );
+        assert_eq!(promoted.role_scope.as_deref(), Some("x-aaaa"));
+        assert_eq!(
+            promoted.role_grantor.as_deref(),
             Some("parent-session-uuid")
         );
         ctx.codex_threads.lock().await.remove("t");
         std::fs::remove_dir_all(home.root()).ok();
 
         // A held scope (fresh home: the fake mints one thread id per
-        // process, and the heir must not collide with the phase-1 row):
-        // the mint declines to uncrowned, and the sitting king keeps its
-        // crown.
-        let held = tmp_home("codex-crown-held");
+        // process, and the successor must not collide with the phase-1 row):
+        // the mint declines to unpromoted, and the sitting lead keeps its
+        // role.
+        let held = tmp_home("codex-role-held");
         let held_ctx = test_ctx(held.clone(), PathBuf::from("/nonexistent"));
         let held_wt = held.root().join("worktree");
         std::fs::create_dir_all(&held_wt).unwrap();
-        let mut king = thread_entry("sitting-king", AgentStatus::Live, None);
-        king.crown_level = Some(1);
-        king.crown_scope = Some("x-aaaa".into());
+        let mut lead = thread_entry("sitting-lead", AgentStatus::Live, None);
+        lead.role_level = Some(1);
+        lead.role_scope = Some("x-aaaa".into());
         let inserted = update_registry_offloaded(held.registry_json(), move |registry| {
-            registry.entries.push(king);
+            registry.entries.push(lead);
             true
         })
         .await;
         assert!(inserted.is_ok(), "fixture row: {inserted:?}");
-        let heir_req = json!({
-            "name": "heir",
+        let successor_req = json!({
+            "name": "successor",
             "provider": "codex",
             "substrate": "thread",
             "cwd": held_wt.to_string_lossy(),
             "message": "seed turn",
-            "crown_level": 2,
-            "crown_scope": "x-aaaa",
+            "role_level": 2,
+            "role_scope": "x-aaaa",
         });
-        let resp = handle_spawn(&held_ctx, &Request::new(1, "agent.spawn", heir_req)).await;
+        let resp = handle_spawn(&held_ctx, &Request::new(1, "agent.spawn", successor_req)).await;
         assert!(resp.result().is_some(), "spawn failed: {resp:?}");
         let registry = load_registry_offloaded(held.registry_json())
             .await
             .expect("registry");
-        let heir = registry.find("heir").expect("the heir row");
+        let successor = registry.find("successor").expect("the successor row");
         assert_eq!(
-            heir.crown_level, None,
-            "an occupied scope mints uncrowned: {heir:?}"
+            successor.role_level, None,
+            "an occupied scope mints unpromoted: {successor:?}"
         );
-        assert_eq!(heir.crown_scope, None);
-        assert_eq!(heir.crown_grantor, None);
+        assert_eq!(successor.role_scope, None);
+        assert_eq!(successor.role_grantor, None);
         assert_eq!(
-            registry.find("sitting-king").unwrap().crown_level,
+            registry.find("sitting-lead").unwrap().role_level,
             Some(1),
-            "the sitting king keeps its crown"
+            "the sitting lead keeps its role"
         );
-        ctx.codex_threads.lock().await.remove("heir");
+        ctx.codex_threads.lock().await.remove("successor");
         std::fs::remove_dir_all(held.root()).ok();
 
         // A lone half, or an out-of-ladder level, refuses: no thread, no
-        // row. A scopeless level stamps a crown that rules nothing and a
+        // row. A scopeless level stamps a role that rules nothing and a
         // levelless scope can never deserialize, so the door fails closed.
-        let refusals = tmp_home("codex-crown-lone-half");
+        let refusals = tmp_home("codex-role-lone-half");
         let ref_ctx = test_ctx(refusals.clone(), PathBuf::from("/nonexistent"));
         let ref_wt = refusals.root().join("worktree");
         std::fs::create_dir_all(&ref_wt).unwrap();
-        for half in ["crown_level", "crown_scope"] {
+        for half in ["role_level", "role_scope"] {
             let mut params = json!({
                 "name": "t2",
                 "provider": "codex",
                 "substrate": "thread",
                 "cwd": ref_wt.to_string_lossy(),
                 "message": "seed turn",
-                "crown_level": 2,
-                "crown_scope": "x-bbbb",
+                "role_level": 2,
+                "role_scope": "x-bbbb",
             });
             params.as_object_mut().unwrap().remove(half);
             let resp = handle_spawn(&ref_ctx, &Request::new(1, "agent.spawn", params)).await;
             let refused = match &resp.payload {
                 crate::protocol::ResponsePayload::Err(error) => error.message.clone(),
-                _ => panic!("a lone crown half must refuse: {half} -> {resp:?}"),
+                _ => panic!("a lone role half must refuse: {half} -> {resp:?}"),
             };
             assert!(
-                refused.contains("both crown_level and crown_scope"),
+                refused.contains("both role_level and role_scope"),
                 "the refusal names the missing half {half}: {refused}"
             );
         }
@@ -2186,8 +2190,8 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
     .await;
 }
 
-/// AC2-EDGE: with no fenced tokens, the frames are today's frames - no
-/// `config` key anywhere, and the row stays slim.
+/// With no fenced tokens, worker resilience defaults reach the frame while
+/// the registry stores no synthetic harness arguments.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
     let behavior = crate::codex_fake_daemon::Behavior::quick();
@@ -2205,9 +2209,13 @@ async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
             .find(|f| f["method"] == "thread/start")
             .and_then(|f| f.get("params").cloned())
             .expect("a thread/start frame");
-        assert!(
-            start.get("config").is_none(),
-            "no fenced tokens, no config key - today's frame: {start}"
+        assert_eq!(
+            start["config"],
+            json!({
+                "model_providers.openai.stream_max_retries": 20,
+                "model_providers.openai.stream_idle_timeout_ms": 600_000
+            }),
+            "unfenced workers receive only the resilience defaults: {start}"
         );
 
         let registry = load_registry_offloaded(home.registry_json())

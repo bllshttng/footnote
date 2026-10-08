@@ -15,10 +15,12 @@ The destructive edge: `resume`, as the startup policy or the on-demand verb, rel
 ## The verb
 
 ```bash
-fno mux workspace restore [--dry-run] [--harness <harness>] [--json]
+fno mux workspace restore [--dry-run] [--harness <harness>] [--member-session <full-session-id>] [--json]
 ```
 
 The verb enumerates every live, non-tombstoned worker member in the workspace store. It joins each to its registry row and resumes it: the pane runs the harness's own resume argv with the member's full session id. `--dry-run` classifies every member and spawns nothing. `--harness` narrows the run to one harness. `--json` prints one row per member with its outcome, so a script can branch without parsing prose.
+
+`--member-session` restores only the member with that exact native session ID and skips unrelated portals. An absent match returns a refusal. The CLI refuses servers below protocol 109 before sending this filter. Servers below protocol 109 ignore it and can restore every member.
 
 Every member that cannot come back is named, with the reason. The reasons include: no registry row, no session id, a harness the table gives no resume form, an ambiguous name, and a failed spawn. A seat already live in this session names the pane. Silence is never an outcome. A run that resumes two and refuses one prints all three.
 
@@ -79,7 +81,7 @@ A revival re-seats a row that already held a seat, so it never asks the spawn ga
 
 ## After a reboot, without a tap
 
-The first `fno-agents` daemon start of a boot revives the fleet on its own (`crates/fno-agents/src/boot_revival.rs`). It plans before the startup sweep rewrites a status. If a worker was live at the boot, it counts: a live-ish status, or an exit stamped after the boot began. If `claude agents --json --all` lists its job as stopped or failed and its node is still open, it revives. Kings go first, then the rest in parallel, each through `claude respawn <job id>`. One receipt row per worker, revived, skipped with its reason, or failed with its error, lands in `~/.fno/agents/boot-revival.json`. That file's boot stamp makes the pass run once per boot. If the listing cannot be read, the pass stamps nothing and runs again on the next daemon start. A row the pass never reached still revives on one tap. A tap refuses while the listing cannot be read, because a bg resume of a live session starts a copy.
+The first `fno-agents` daemon start of a boot revives the fleet on its own (`crates/fno-agents/src/boot_revival.rs`). It plans before the startup sweep rewrites a status. If a worker was live at the boot, it counts: a live-ish status, or an exit stamped after the boot began. If `claude agents --json --all` lists its job as stopped or failed and its node is still open, it revives. Leads go first, then the rest in parallel, each through `claude respawn <job id>`. One receipt row per worker, revived, skipped with its reason, or failed with its error, lands in `~/.fno/agents/boot-revival.json`. That file's boot stamp makes the pass run once per boot. If the listing cannot be read, the pass stamps nothing and runs again on the next daemon start. A row the pass never reached still revives on one tap. A tap refuses while the listing cannot be read, because a bg resume of a live session starts a copy.
 
 ## Files
 

@@ -1,6 +1,6 @@
 # Buddy: a companion beside your status line
 
-Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. It is a Claude Code mod in its own plugin, `buddy`, in the footnote marketplace. You do not need fno to use it. `/buddy` and `/bbb` (bring back buddy) are the same command.
+Buddy is a small terminal companion. It stands at the right end of your status line, moves a little, and says one line after each turn. It is a Claude Code mod, claude-mod-buddy, in its own plugin, `buddy`, in the footnote marketplace. You do not need fno to use it. `/buddy` and `/bbb` (bring back buddy) are the same command.
 
 It needs Claude Code 2.1.287 or later. That is the first version that loads mods.
 
@@ -13,28 +13,40 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## Start
 
 1. Install the plugin: `/plugin install buddy@footnote`. The buddy hatches at the next session start.
-2. Type `/buddy` to see its card.
+2. Type `/buddy` to see its card. The first time, you watch it hatch from an egg. Press any key to close the card.
 3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
 4. If you want the buddy in a side pane, type `/buddy pane`.
 
 ## What you see
 
 - **The sprite.** The buddy is one of 18 species. It has a rarity, eyes, and sometimes a hat. Five stats set its voice: debugging, patience, chaos, wisdom, and snark.
-- **A quick line.** When a turn of 5 seconds or more ends, the buddy says a short line. Its highest stat picks the line.
-- **A model line.** A moment later, one model call reads the last exchange and answers in the voice of the buddy. This call runs at most once each 10 seconds, and only while the buddy is on screen.
-- **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. These lines use no model call.
+- **Idle talk.** When nothing happens for 2 minutes, the buddy says something of its own. It is one model call, in its personality, about what the session is doing. The buddy has no canned lines.
+- **Reactions.** After a turn, one model call reads the last exchange and answers in the voice of the buddy. Ordinary turns wait 30 seconds between reactions, as the original did. A turn that says the buddy's name, fails tests, hits an error, or lands a diff over 80 lines gets a reaction at once. Petting and hatching get one too. The last three lines go along, so the buddy does not repeat itself.
+- **Observations.** Every observation the buddy makes goes to `~/.fno/state/buddy/observations.jsonl`, one JSON row each with the time, the name, the reason, and the line. Read it with `tail ~/.fno/state/buddy/observations.jsonl`.
+- **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. It says the news in its own voice with one model call. If that call fails, it says the plain fact.
 - **The fno CLI is optional.** Fleet news and fleet counts need the `fno` CLI. Without it, the buddy still talks about your own session.
 - **Fleet counts.** Beside its name, the buddy shows live workers, questions that wait for you, and your open PRs. One read every 5 minutes serves every session.
+
+## Only where you can see it
+
+Each live session has its own buddy, and all of them share one soul. If no person can see the answer, a buddy makes no model call. Hidden sessions stay quiet.
+
+- **In an fno mux pane,** the mux writes the panes on screen to `~/.fno/mux/<session>.visible.json`. A buddy whose pane is not in that list makes no model call. Its sessions on another tab or in the sideline cost nothing.
+- **Anywhere else,** the buddy counts as seen for 10 minutes after you type in that session's prompt box.
+- **One voice for the machine.** Idle talk and fleet news happen once. After the 2-minute gap, the first seen session says the idle line. The first seen session to read a fleet event tells it. Two panes side by side do not say the same news twice.
+- **Reactions** stay with each session, because each one is about that session's own turn.
 
 ## Where it stands
 
 The buddy has three places. It uses the first place that is available.
 
-1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left, unchanged. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words wrap to its left, up to 30 columns wide, on the rows beside the art. Below 100 columns it shows a one-line face, as the original did. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
+1. **Beside your status line.** This is the default after you type `/buddy statusline`. Your own status line stays on the left. The buddy stands at the right edge with the same sprite as the original: 4 or 5 rows of art (the top row holds the hat), then a row for its name. Its words show to its left in a thought bubble: a rounded outline that starts 30 columns wide and grows up to 60 columns for a long line, with a trail of dots toward the buddy. While the bubble shows, it can cover the ends of your rows; they come back when it fades. If your rows are too wide to share even without a bubble, the buddy cuts the ends of the rows beside it. Below 60 columns it shows a one-line face. The mode line of Claude Code shows under the last row, so a buddy taller than your status line adds rows.
 2. **A narrow pane on the right.** Type `/buddy pane` to put the buddy here. The sprite stands at the bottom, and its words are above it. Claude Code shows this pane only in the fullscreen layout, at 110 columns or more. If you never typed `/buddy statusline`, the buddy opens this pane by itself at 144 columns or more.
 3. **One line above the prompt.** If the first two places are not available, the buddy shows a one-line face above the prompt.
 
-The length of your status line does not move the buddy. The buddy always aligns to the right edge of the terminal. If a row of your status line is too wide to share, the buddy moves down one row. If 6 rows cannot hold the buddy, it changes to the one-line face.
+In the Claude Desktop app, the buddy stands right above the text input, at the right edge: the full sprite, its name below, and its thought bubble to its left. If that band has too few rows, it shows the one-line face. Desktop has no status line, so `/buddy statusline` changes nothing there, even when it is on in your terminal. The card and its hatch work in both apps.
+
+The length of your status line does not move the buddy. The buddy always aligns to the right edge of the terminal. If a row of your status line is too wide to share, the buddy first moves down a row. If no row count up to 6 fits, it keeps the full sprite and cuts your rows. If your status line already uses all 6 rows, it changes to the one-line face.
 
 ### Your status line, and how to undo it
 
@@ -46,7 +58,7 @@ If you run `/statusline` again later, the buddy tells you at the next session st
 
 ## The reroll game
 
-`/buddy roll` hatches a new buddy in place of the old one. Each roll costs one reroll. You cannot undo a roll.
+`/buddy roll` hatches a new buddy in place of the old one. Each roll costs one reroll. You cannot undo a roll. All your live sessions share one buddy, so each session shows the new buddy within 2 seconds.
 
 You get rerolls in two ways:
 

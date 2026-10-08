@@ -240,7 +240,7 @@ pub(crate) fn codex_resume_route(
         {
             // The not-loaded arm is the reboot gap: the daemon boot (or the
             // wake's own inject) resumes the thread from its rollout, a
-            // crowned row's turn re-asserts the recorded full-access policy,
+            // promoted row's turn re-asserts the recorded full-access policy,
             // and the viewport keeps the row on the mux - the terminal-exec
             // fallback would strand the thread outside the daemon with the
             // rollout's narrowed sandbox.
@@ -1194,13 +1194,44 @@ where
         .map(Path::new);
     let snapshot = read_roster(config_dir);
     if !snapshot.is_known() {
-        return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        return live_claude_missing_row(
+            name,
+            short_id,
+            session_uuid,
+            cwd,
+            "the claude roster could not be read",
+        );
     }
     let Some(row) = snapshot.find(short_id) else {
-        return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        // A full, warning-free roster that lacks the row is affirmative death
+        // no process answered: the live-wake route got here on a stale fno
+        // truth view. Run the relaunch the refusal used to print;
+        // a partial listing keeps the refusal, since absence there proves
+        // nothing.
+        if snapshot.warning_text().is_empty() {
+            let wake = if message_already_queued {
+                None
+            } else {
+                message
+            };
+            return relaunch_exited_claude(home, name, row_name, short_id, session_uuid, cwd, wake);
+        }
+        return live_claude_missing_row(
+            name,
+            short_id,
+            session_uuid,
+            cwd,
+            "the claude roster listing was partial, so a missing row proves nothing",
+        );
     };
     let Some(state) = row.state.as_deref().filter(|state| !state.is_empty()) else {
-        return live_claude_missing_row(name, short_id, session_uuid, cwd);
+        return live_claude_missing_row(
+            name,
+            short_id,
+            session_uuid,
+            cwd,
+            "the roster row reports no state",
+        );
     };
     let state_lower = state.to_ascii_lowercase();
     if matches!(state_lower.as_str(), "working" | "busy") {
@@ -1319,14 +1350,213 @@ fn display_roster_state(state: &str) -> String {
         .unwrap_or_default()
 }
 
-fn live_claude_missing_row(name: &str, short_id: &str, session_id: &str, cwd: &str) -> i32 {
+/// The transcript id a relaunch continues: the recorded uuid when shaped,
+/// else the newest transcript file whose name starts with the short id.
+/// `None` means no transcript exists to seed from.
+fn exited_relaunch_transcript(
+    claude_home: &ClaudeHome,
+    short_id: &str,
+    session_uuid: &str,
+) -> Option<String> {
+    if is_uuid_shaped(session_uuid) {
+        return Some(session_uuid.to_string());
+    }
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for projects in claude_home.project_dirs() {
+        let Ok(per_project) = std::fs::read_dir(&projects) else {
+            continue;
+        };
+        for slug in per_project.flatten() {
+            let Ok(per_slug) = std::fs::read_dir(slug.path()) else {
+                continue;
+            };
+            for f in per_slug.flatten() {
+                let name = f.file_name();
+                let lossy = name.to_string_lossy();
+                let Some(stem) = lossy.strip_suffix(".jsonl") else {
+                    continue;
+                };
+                if !stem.starts_with(short_id) {
+                    continue;
+                }
+                let modified = f
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().map_or(true, |(t, _)| modified > *t) {
+                    best = Some((modified, stem.to_string()));
+                }
+            }
+        }
+    }
+    best.map(|(_, uuid)| uuid)
+}
+
+fn transcript_exists(claude_home: &ClaudeHome, uuid: &str) -> bool {
+    claude_home.project_dirs().iter().any(|projects| {
+        std::fs::read_dir(projects)
+            .map(|per_project| {
+                per_project
+                    .flatten()
+                    .any(|slug| slug.path().join(format!("{uuid}.jsonl")).is_file())
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// The newest `custom-title` the user set on this transcript (what claude
+/// shows as the session name), or `None` when it has none.
+fn transcript_custom_title(claude_home: &ClaudeHome, uuid: &str) -> Option<String> {
+    use std::io::BufRead;
+    let file = claude_home.project_dirs().iter().find_map(|projects| {
+        std::fs::read_dir(projects)
+            .ok()?
+            .flatten()
+            .find_map(|slug| {
+                let path = slug.path().join(format!("{uuid}.jsonl"));
+                path.is_file().then_some(path)
+            })
+    })?;
+    let reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
+    let mut title = None;
+    for line in reader.lines().map_while(Result::ok) {
+        if !line.contains("\"custom-title\"") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record["type"] == "custom-title" {
+            if let Some(text) = record["customTitle"].as_str().filter(|t| !t.is_empty()) {
+                title = Some(text.to_string());
+            }
+        }
+    }
+    title
+}
+
+/// The row name a relaunch gives the session. A row that carries a real name
+/// keeps it. An adopted row is named by its short id, which says nothing, so
+/// it takes the name the user gave the conversation in the harness.
+fn relaunch_name(claude_home: &ClaudeHome, row_name: &str, short_id: &str, uuid: &str) -> String {
+    if row_name != short_id && row_name != uuid {
+        return row_name.to_string();
+    }
+    transcript_custom_title(claude_home, uuid)
+        .filter(|title| {
+            title
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+        .unwrap_or_else(|| row_name.to_string())
+}
+
+/// The exited-row relaunch: a full, warning-free roster that lacks
+/// the row is affirmative death no process answered, and the recovery the old
+/// refusal printed is one command. Run it as a child and let the spawn
+/// receipt answer; refuse only when no transcript exists to seed from. A
+/// wake message seeds the fork as its opening prompt.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relaunch_exited_claude(
+    home: &AgentsHome,
+    name: &str,
+    row_name: &str,
+    short_id: &str,
+    session_uuid: &str,
+    cwd: &str,
+    message: Option<&str>,
+) -> i32 {
+    relaunch_exited_claude_with(
+        home,
+        name,
+        row_name,
+        short_id,
+        session_uuid,
+        cwd,
+        message,
+        &ClaudeHome::from_env(),
+    )
+}
+
+/// The seam: the transcript home injected so tests run on a literal tree.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relaunch_exited_claude_with(
+    home: &AgentsHome,
+    name: &str,
+    row_name: &str,
+    short_id: &str,
+    session_uuid: &str,
+    cwd: &str,
+    message: Option<&str>,
+    claude_home: &ClaudeHome,
+) -> i32 {
+    let uuid = match exited_relaunch_transcript(claude_home, short_id, session_uuid) {
+        Some(uuid) if transcript_exists(claude_home, &uuid) => uuid,
+        _ => {
+            return live_claude_missing_row(
+                name,
+                short_id,
+                session_uuid,
+                cwd,
+                "no transcript exists to relaunch from",
+            );
+        }
+    };
+    let spawn_name = relaunch_name(claude_home, row_name, short_id, &uuid);
+    // A down-route launch refuses when another holder took the node or PR:
+    // the same gate the dead arm runs before its relaunch.
+    if let Some(code) = crate::resume_gate::gate_and_reserve(home, row_name, &uuid) {
+        return code;
+    }
+    eprintln!(
+        "fno agents resume: no process answered for {name} ({short}); relaunching \
+         the transcript on a thread",
+        short = short_id
+    );
+    let mut command = std::process::Command::new(crate::scrape::fno_bin());
+    command.args([
+        "agents",
+        "spawn",
+        "--name",
+        &spawn_name,
+        "--resume",
+        &uuid,
+        "--cwd",
+        cwd,
+        "--substrate",
+        "thread",
+        "-H",
+        "claude",
+    ]);
+    if let Some(message) = message {
+        command.arg(message);
+    }
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("fno agents resume: relaunch failed to run fno: {e}");
+            1
+        }
+    }
+}
+
+/// Exit 16: no live process answered and fno could not relaunch the session
+/// itself. The line names the cause in words and the hand-run relaunch; the
+/// code is documented in `resume --help`.
+fn live_claude_missing_row(
+    name: &str,
+    short_id: &str,
+    session_id: &str,
+    cwd: &str,
+    cause: &str,
+) -> i32 {
     let cwd_arg = if cwd.is_empty() {
         String::new()
     } else {
         format!(" --cwd {cwd}")
     };
     eprintln!(
-        "fno agents resume: {name} ({short_id}) is not listed in the claude roster.\nNo process answered for {short_id}. A wake cannot reach a session that has exited.\nRelaunch the conversation instead: fno agents spawn --name {name} --resume {session_id}{cwd_arg}"
+        "fno agents resume: {name} ({short_id}) has no live process, and fno could not relaunch it by itself: {cause}.\nRelaunch it by hand: fno agents spawn --name {name} -H claude --resume {session_id}{cwd_arg}"
     );
     16
 }
@@ -2216,12 +2446,12 @@ mod tests {
 
     /// The wake route answers whenever the daemon can reach the thread: the
     /// loaded arm (the original gate), the not-loaded arm once the daemon is
-    /// ensured (the reboot gap, where the crowned row's turn re-asserts the
+    /// ensured (the reboot gap, where the promoted row's turn re-asserts the
     /// recorded full-access policy), and the launch-failure arm rebinds the
     /// row to the thread lane. The terminal-exec fallback would strand the
     /// thread outside the daemon under the rollout's narrowed sandbox.
     #[test]
-    fn a_crowned_resume_wakes_over_the_daemon_whether_loaded_or_not() {
+    fn a_promoted_resume_wakes_over_the_daemon_whether_loaded_or_not() {
         let _guard = crate::path_test_guard();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -2281,7 +2511,7 @@ mod tests {
         std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
 
         // Arm B: the reboot gap - the pane is dead and the thread is NOT
-        // loaded, but the ensure arm answers. A crowned row's wake carries
+        // loaded, but the ensure arm answers. A promoted row's wake carries
         // the recorded dangerFullAccess policy, and the row keeps its mux.
         let home = tmp_home("wake-reboot");
         push_codex_pane_row(&home, "w1", "sess-1");
@@ -2335,7 +2565,7 @@ mod tests {
         assert_eq!(
             turn["sandboxPolicy"],
             serde_json::json!({"type": "dangerFullAccess"}),
-            "a crowned row's wake re-asserts the crowned policy"
+            "a promoted row's wake re-asserts the promoted policy"
         );
         {
             let launched = io.launched.lock().unwrap();
@@ -3149,5 +3379,126 @@ mod tests {
         );
         assert_eq!(result, 7);
         assert_eq!(calls.into_inner(), vec!["guard", "relaunch"]);
+    }
+
+    #[test]
+    fn an_absent_full_roster_row_relaunches_the_transcript() {
+        // The node's shape: the fno truth view says live, the claude roster
+        // answers without the row. The relaunch the refusal used to print must
+        // RUN: spawn --resume <uuid> --cwd <cwd> --substrate thread, the wake
+        // message seeded when one was typed, its exit code returned.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path().join("clhome"));
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let slug = crate::claude_ask::claude_cwd_slug(std::path::Path::new("/tmp/wt"));
+        let transcript = claude_home.project_dirs()[0]
+            .join(&slug)
+            .join(format!("{uuid}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "{}").unwrap();
+
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let launch_log = temp.path().join("launch.log");
+        crate::write_exec_stub(
+            &bin,
+            "fno-stub",
+            &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", launch_log.display()),
+        );
+        let old_bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_BIN", bin.join("fno-stub"));
+
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        let code = relaunch_exited_claude_with(
+            &home,
+            "w1",
+            "w1",
+            "0a1b2c3d",
+            uuid,
+            "/tmp/wt",
+            Some("continue the work"),
+            &claude_home,
+        );
+        match &old_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert_eq!(code, 0, "the stub exits 0 and its code is the receipt");
+        let launch = std::fs::read_to_string(&launch_log).unwrap();
+        assert!(
+            launch.contains("agents spawn --name w1 --resume 0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"),
+            "{launch}"
+        );
+        assert!(launch.contains("--cwd /tmp/wt"), "{launch}");
+        assert!(launch.contains("--substrate thread -H claude"), "{launch}");
+        assert!(launch.contains("continue the work"), "{launch}");
+
+        // An adopted row is named by its short id; the relaunch takes the
+        // newest title the user set in the harness instead.
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"custom-title\",\"customTitle\":\"old-name\"}\n{\"type\":\"custom-title\",\"customTitle\":\"mods-think\"}\n",
+        )
+        .unwrap();
+        std::fs::write(&launch_log, "").unwrap();
+        std::env::set_var("FNO_BIN", bin.join("fno-stub"));
+        let code = relaunch_exited_claude_with(
+            &home,
+            "0a1b2c3d",
+            "0a1b2c3d",
+            "0a1b2c3d",
+            uuid,
+            "/tmp/wt",
+            None,
+            &claude_home,
+        );
+        match &old_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert_eq!(code, 0);
+        let launch = std::fs::read_to_string(&launch_log).unwrap();
+        assert!(
+            launch.contains("agents spawn --name mods-think --resume"),
+            "{launch}"
+        );
+
+        // No transcript anywhere: the refusal stands, the child never runs.
+        std::fs::remove_file(&transcript).unwrap();
+        std::fs::write(&launch_log, "").unwrap();
+        let code = relaunch_exited_claude_with(
+            &home,
+            "w1",
+            "w1",
+            "0a1b2c3d",
+            uuid,
+            "/tmp/wt",
+            None,
+            &claude_home,
+        );
+        assert_eq!(code, 16, "no transcript keeps the refusal");
+        assert!(
+            std::fs::read_to_string(&launch_log).unwrap().is_empty(),
+            "no transcript must not launch"
+        );
+    }
+
+    #[test]
+    fn a_short_id_resolves_to_the_newest_transcript_for_the_relaunch() {
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let projects = claude_home.project_dirs()[0].join("slug");
+        std::fs::create_dir_all(&projects).unwrap();
+        let older = projects.join("0a1b2c3d-1111-6071-8293-a4b5c6d7e8f9.jsonl");
+        let newer = projects.join("0a1b2c3d-2222-6071-8293-a4b5c6d7e8f9.jsonl");
+        std::fs::write(&older, "{}").unwrap();
+        std::fs::write(&newer, "{}").unwrap();
+        let resolved = exited_relaunch_transcript(&claude_home, "0a1b2c3d", "").unwrap();
+        assert_eq!(resolved, "0a1b2c3d-2222-6071-8293-a4b5c6d7e8f9");
+        assert!(
+            exited_relaunch_transcript(&claude_home, "ffffffff", "").is_none(),
+            "no matching transcript resolves to None"
+        );
     }
 }

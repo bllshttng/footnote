@@ -520,6 +520,9 @@ impl ApiIo for RealIo {
     }
 
     fn append_row(&mut self, row: &Value) -> Result<(), String> {
+        // ponytail: no lock, one write(2) per row on an O_APPEND file, so a row
+        // cannot tear at byte grain; share fno-agents day.rs's mkdir mutex if a
+        // reader ever needs cross-writer ordering.
         use std::io::Write;
         let path = journal_path();
         if let Some(parent) = path.parent() {
@@ -530,7 +533,8 @@ impl ApiIo for RealIo {
             .append(true)
             .open(&path)
             .map_err(|e| e.to_string())?;
-        writeln!(f, "{row}").map_err(|e| e.to_string())
+        f.write_all(format!("{row}\n").as_bytes())
+            .map_err(|e| e.to_string())
     }
 
     fn clear(&mut self, id: &str, answer_text: &str) -> Result<(), String> {

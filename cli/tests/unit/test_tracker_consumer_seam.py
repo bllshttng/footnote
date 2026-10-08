@@ -5,7 +5,7 @@ seam-owned fields stops touching the graph file. Each test here gives the
 tracker side and the sidecar side DIFFERENT sentinel values than the graph
 file carries, so a pass is positive evidence the reader went through the
 seam - an assertion that ``read_graph`` text disappeared is not evidence
-(plan Risk 3 / the king's census requirement).
+(plan Risk 3 / the lead's census requirement).
 """
 from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
@@ -131,7 +131,7 @@ def test_metadata_class_guards_external(external_store, contradictory_graph):
     caller keeps its missing-data path - never a stale graph row."""
     from fno.tracker import metadata
 
-    from fno.agents.crown import _graph_entry
+    from fno.agents.role import _graph_entry
     from fno.relay.router import _default_node_resolver
 
     def _active_missions():
@@ -158,7 +158,7 @@ def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     from fno.tracker import metadata
 
-    from fno.agents.crown import _graph_entry
+    from fno.agents.role import _graph_entry
     from fno.relay.router import _default_node_resolver
 
     rows = metadata.read_entries("active_backlog")

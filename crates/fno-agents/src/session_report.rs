@@ -171,8 +171,8 @@ pub(crate) fn handle_session_report(
 
     let mut outcome = Outcome::Unknown;
     let mut row_name: Option<String> = None;
-    // Set when this report is the heir's first self-identification: the
-    // primary id filled on a crowned row. The manifest arm runs after the
+    // Set when this report is the successor's first self-identification: the
+    // primary id filled on a promoted row. The manifest arm runs after the
     // registry write commits.
     let mut manifest_arm: Option<(String, String, Option<String>)> = None;
     if let Err(e) = state::update_registry(&home.registry_json(), |r| {
@@ -191,7 +191,7 @@ pub(crate) fn handle_session_report(
                 } else {
                     r.entries[i].claude_session_uuid = Some(session_id.clone());
                 }
-                crowned_first_fill(&r.entries[i], &mut manifest_arm);
+                promoted_first_fill(&r.entries[i], &mut manifest_arm);
                 i
             }
             Find::Named(i) => {
@@ -200,7 +200,7 @@ pub(crate) fn handle_session_report(
                 let related = entry.related_session_id.as_deref().unwrap_or("");
                 if primary.is_empty() {
                     r.entries[i].harness_session_id = Some(session_id.clone());
-                    crowned_first_fill(&r.entries[i], &mut manifest_arm);
+                    promoted_first_fill(&r.entries[i], &mut manifest_arm);
                 } else if related == session_id.as_str() {
                     // already held additively; the field stamps below still land
                 } else if related.is_empty() {
@@ -245,12 +245,12 @@ pub(crate) fn handle_session_report(
         );
     }
 
-    // The heir's first report is the manifest arm point (Python's
-    // `_arm_crown_after_identification`): spawn-time succession has no heir
-    // id at settle, so the transfer leaves the manifest naming the abdicating
-    // session and the heir holds with no levers until this rewrite names it.
+    // The successor's first report is the manifest arm point (Python's
+    // `_arm_role_after_identification`): spawn-time succession has no successor
+    // id at settle, so the transfer leaves the manifest naming the stepping_down
+    // session and the successor holds with no levers until this rewrite names it.
     if let Some((scope, cwd, row_harness)) = manifest_arm {
-        arm_crown_manifest(
+        arm_role_manifest(
             &scope,
             &cwd,
             row_harness.as_deref(),
@@ -305,14 +305,14 @@ pub(crate) fn handle_session_report(
     }
 }
 
-/// The crowned-row read that decides the arm: a crown stamp plus a scope on
+/// The promoted-row read that decides the arm: a role stamp plus a scope on
 /// the row the report just identified, with the row's own harness so the
 /// rebind never leaves the manifest naming the arming path's harness.
-fn crowned_first_fill(entry: &RegistryEntry, out: &mut Option<(String, String, Option<String>)>) {
-    if entry.crown_level.is_none() {
+fn promoted_first_fill(entry: &RegistryEntry, out: &mut Option<(String, String, Option<String>)>) {
+    if entry.role_level.is_none() {
         return;
     }
-    if let Some(scope) = entry.crown_scope.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(scope) = entry.role_scope.as_deref().filter(|s| !s.is_empty()) {
         let harness = entry.harness.clone().filter(|h| !h.trim().is_empty());
         *out = Some((scope.to_string(), entry.cwd.clone(), harness));
     }
@@ -320,11 +320,11 @@ fn crowned_first_fill(entry: &RegistryEntry, out: &mut Option<(String, String, O
 
 /// Rebind one scope's lead manifest to the session that just identified
 /// itself, fail-soft like the Python arm: a failed write emits
-/// `crown_manifest_arm_failed` and never fails the report. A scope with no
+/// `role_manifest_arm_failed` and never fails the report. A scope with no
 /// manifest yet is a fresh grant, not a stale succession; that arm stays
 /// Python's. `row_harness` rides when the row carries one, so a manifest
 /// naming the predecessor's harness never outlives the succession.
-fn arm_crown_manifest(
+fn arm_role_manifest(
     scope: &str,
     cwd: &str,
     row_harness: Option<&str>,
@@ -334,7 +334,7 @@ fn arm_crown_manifest(
 ) {
     let fail = |error: String| {
         let _ = emitter.emit(
-            "crown_manifest_arm_failed",
+            "role_manifest_arm_failed",
             &json!({
                 "name": row_name,
                 "scope": scope,
@@ -397,6 +397,9 @@ fn build_session_report_params(rest: &[String]) -> Result<Value, String> {
             }
             "--wait-row" => {
                 params.insert("wait_row".into(), Value::Bool(true));
+            }
+            "--origin-only" => {
+                params.insert("origin_only".into(), Value::Bool(true));
             }
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -544,6 +547,51 @@ async fn drain_spool(home: &AgentsHome) {
     }
 }
 
+/// Write the origin record beside this session's transcript (see
+/// `crate::session_origin`). Best effort: an error never fails the hook. A
+/// source of `resume` writes nothing: the record names the machine a session
+/// BEGAN on, and a resume is not that machine's claim to make.
+fn record_origin(params: &Value) {
+    let payload = params.get("payload");
+    let source = payload
+        .and_then(|p| p.get("source"))
+        .or_else(|| params.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if source == "resume" {
+        return;
+    }
+    let harness = params
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let sid = payload
+        .and_then(|p| p.get("session_id"))
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if sid.is_empty() {
+        return;
+    }
+    let transcript = payload
+        .and_then(|p| p.get("transcript_path"))
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            if harness == "codex" {
+                crate::codex_store::codex_rollout_path(None, sid)
+            } else {
+                None
+            }
+        });
+    let Some(transcript) = transcript else {
+        return;
+    };
+    let _ = crate::session_origin::write_if_absent(
+        &crate::session_origin::SessionOrigin::for_this_machine(harness, sid, &transcript),
+    );
+}
+
 /// The `report` verb's dispatcher. `--kind session` selects the SessionStart
 /// transport; every other invocation is the inside-leg report, unchanged. The
 /// SessionStart form rides the EXISTING action because the client action list
@@ -593,6 +641,12 @@ pub async fn run_session_report(rest: &[String], home: &AgentsHome) -> i32 {
     let mut params = params;
     if let Some(payload) = read_stdin_payload() {
         params["payload"] = payload;
+    }
+    record_origin(&params);
+    // --origin-only writes the record and sends nothing: the daemon learns
+    // nothing new, and a hand-started session spools no frame for it.
+    if params.get("origin_only").and_then(Value::as_bool) == Some(true) {
+        return 0;
     }
     let req = Request::new(1, "agent.session_report", params);
     // FIFO: spooled frames go first, so a replayed startup report can never
@@ -682,28 +736,86 @@ mod tests {
         assert_eq!(response_json(&resp)["error"]["code"], "invalid_params");
     }
 
+    /// Backdate a file so the prune's 24-hour floor reads it as stale.
+    fn backdate(path: &std::path::Path, age: std::time::Duration) {
+        let past = std::time::SystemTime::now() - age;
+        let secs = past
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as libc::time_t;
+        let times = [
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+        ];
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid C string from an owned path; the call only sets times.
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+        }
+    }
+
     #[test]
     fn payload_session_id_wins_and_stamps_transcript_and_source() {
         let (_d, home) = temp_home("stamp");
         seed_registry(&home, claude_row());
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("w1.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        // An orphan this machine wrote over a day ago, its transcript gone:
+        // the next write in this folder prunes exactly it (AC2-PRUNE).
+        let orphan_sid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let orphan = dir.path().join(format!("{orphan_sid}.fno.json"));
+        std::fs::write(
+            &orphan,
+            serde_json::to_vec(&crate::session_origin::SessionOrigin {
+                machine: crate::session_origin::this_machine(),
+                host: "elsewhere".into(),
+                harness: "claude".into(),
+                session_id: orphan_sid.into(),
+                transcript_path: "/gone/w1.jsonl".into(),
+                recorded_at: "2026-09-01T00:00:00Z".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        backdate(&orphan, std::time::Duration::from_secs(2 * 24 * 3600));
+        let path_str = transcript.to_string_lossy().to_string();
         let params = json!({
             "harness": "claude",
             "session_id": "env-fallback",
             "payload": {
                 "session_id": "3228ccad-c078-4f2e-9a51-6d1f0a2b3c4d",
-                "transcript_path": "/t/w1.jsonl",
+                "transcript_path": path_str,
                 "source": "startup"
             }
         });
-        let resp = handle_session_report(&home, &emitter(&home), &req(params));
+        let resp = handle_session_report(&home, &emitter(&home), &req(params.clone()));
         assert_eq!(response_json(&resp)["result"]["stored"], true);
         let row = &read_rows(&home)[0];
         assert_eq!(
             row.harness_session_id.as_deref(),
             Some("3228ccad-c078-4f2e-9a51-6d1f0a2b3c4d")
         );
-        assert_eq!(row.transcript_path.as_deref(), Some("/t/w1.jsonl"));
+        assert_eq!(row.transcript_path.as_deref(), Some(path_str.as_str()));
         assert_eq!(row.start_source.as_deref(), Some("startup"));
+        // The startup report wrote the origin record beside the transcript;
+        // a second write is a no-op (first machine wins); the prune removed
+        // only the stale orphan (AC1-HP, AC2-PRUNE).
+        let record = dir
+            .path()
+            .join("3228ccad-c078-4f2e-9a51-6d1f0a2b3c4d.fno.json");
+        record_origin(&params);
+        assert!(record.exists());
+        assert!(!orphan.exists(), "stale orphan pruned");
+        let first = std::fs::read(&record).unwrap();
+        record_origin(&params);
+        assert_eq!(std::fs::read(&record).unwrap(), first, "first machine wins");
     }
 
     #[test]
@@ -756,12 +868,15 @@ mod tests {
                 "harness_session_id": "0197aaaa-1234-7abc-9def-0123456789ab"
             }),
         );
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("rollout.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
         let params = report_params(
             "codex",
             "0197bbbb-1234-7abc-9def-0123456789ab",
-            json!({"agent_self": "w1", "payload": {"source": "resume"}}),
+            json!({"agent_self": "w1", "payload": {"source": "resume", "transcript_path": transcript.to_string_lossy()}}),
         );
-        let resp = handle_session_report(&home, &emitter(&home), &req(params));
+        let resp = handle_session_report(&home, &emitter(&home), &req(params.clone()));
         assert_eq!(response_json(&resp)["result"]["related_filled"], true);
         let row = &read_rows(&home)[0];
         assert_eq!(
@@ -773,6 +888,13 @@ mod tests {
             Some("0197bbbb-1234-7abc-9def-0123456789ab")
         );
         assert_eq!(row.start_source.as_deref(), Some("resume"));
+        // A resume writes no origin record: the record names the machine the
+        // session BEGAN on, and the resuming machine is not it (AC2-ERR).
+        record_origin(&params);
+        assert!(!dir
+            .path()
+            .join("0197bbbb-1234-7abc-9def-0123456789ab.fno.json")
+            .exists());
     }
 
     #[test]
@@ -817,15 +939,15 @@ mod tests {
         assert!(read_rows(&home).is_empty());
     }
 
-    /// A `spawn --crown --succeed` transfer leaves the manifest
-    /// naming the abdicating session, and the heir's levers (shape, term)
-    /// read that manifest, so the heir holds with no levers. The heir's
+    /// A `spawn --promote --succeed` transfer leaves the manifest
+    /// naming the stepping_down session, and the successor's levers (shape, term)
+    /// read that manifest, so the successor holds with no levers. The successor's
     /// first session report is the arm point: the fill rebinds the manifest
-    /// to the heir, including the harness when the row carries one (a claude
-    /// predecessor's `harness: claude` must not outlive a codex heir). A
+    /// to the successor, including the harness when the row carries one (a claude
+    /// predecessor's `harness: claude` must not outlive a codex successor). A
     /// later resume (related-slot fill) rewrites nothing.
     #[test]
-    fn a_crowned_heirs_first_report_binds_the_manifest_to_its_session() {
+    fn a_promoted_successors_first_report_binds_the_manifest_to_its_session() {
         let lock = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -842,32 +964,32 @@ mod tests {
         // A .git child makes space_dir resolve the repo itself, so the
         // manifest lands at a deterministic path whatever the ambient env.
         std::fs::create_dir_all(cwd.join(".git")).unwrap();
-        let heir = "01a10f07-d704-75a0-a460-7913efe8971b";
+        let successor = "01a10f07-d704-75a0-a460-7913efe8971b";
         let predecessor = "99473043-aaaa-4bbb-8ccc-ddddeeeeeeee";
         seed_registry(
             &home,
             json!({
                 "name": "lead-wren", "cwd": cwd.display().to_string(),
                 "status": "spawning", "created_at": "2026-10-05T20:06:00Z",
-                "harness": "codex", "crown_level": 2,
-                "crown_scope": "x-aaaa", "crown_grantor": "vellum"
+                "harness": "codex", "role_level": 2,
+                "role_scope": "x-aaaa", "role_grantor": "vellum"
             }),
         );
-        let kings = crate::paths::space_dir(&cwd).join("kings");
-        std::fs::create_dir_all(&kings).unwrap();
-        let manifest = kings.join("x-aaaa.md");
+        let leads = crate::paths::space_dir(&cwd).join("leads");
+        std::fs::create_dir_all(&leads).unwrap();
+        let manifest = leads.join("x-aaaa.md");
         std::fs::write(
             &manifest,
             format!(
                 "---\nfno_id: 21fa9486-2bd8-426f-b7e8-8c376b60bf72\ncreated_at: 2026-10-05T20:31:14Z\n\
-                 term: span:96h\nscope: x-aaaa\nshape: court\nharness: claude\n\
-                 harness_session_id: {predecessor}\ncrown_level: 2\ncrown_scope: x-aaaa\n\
-                 crown_grantor: vellum\n---\n"
+                 term: span:96h\nscope: x-aaaa\nshape: team\nharness: claude\n\
+                 harness_session_id: {predecessor}\nrole_level: 2\nrole_scope: x-aaaa\n\
+                 role_grantor: vellum\n---\n"
             ),
         )
         .unwrap();
 
-        let params = report_params("codex", heir, json!({"agent_self": "lead-wren"}));
+        let params = report_params("codex", successor, json!({"agent_self": "lead-wren"}));
         let resp = handle_session_report(&home, &emitter(&home), &req(params));
         assert_eq!(
             response_json(&resp)["result"]["stored"],
@@ -877,7 +999,7 @@ mod tests {
         );
         let bound = std::fs::read_to_string(&manifest).unwrap();
         assert!(
-            bound.contains(&format!("harness_session_id: {heir}")),
+            bound.contains(&format!("harness_session_id: {successor}")),
             "{bound}"
         );
         // The harness rides with the id: the row's own harness wins, and the
@@ -886,8 +1008,8 @@ mod tests {
         assert!(!bound.contains("harness: claude"), "{bound}");
         // Everything but the holder identity survives the rewrite.
         assert!(bound.contains("term: span:96h"), "{bound}");
-        assert!(bound.contains("shape: court"), "{bound}");
-        assert!(bound.contains("crown_grantor: vellum"), "{bound}");
+        assert!(bound.contains("shape: team"), "{bound}");
+        assert!(bound.contains("role_grantor: vellum"), "{bound}");
         assert_eq!(read_rows(&home)[0].status, AgentStatus::Live);
 
         // A resume fills the related slot and never rewrites the manifest.
@@ -897,7 +1019,7 @@ mod tests {
         assert_eq!(response_json(&resp)["result"]["related_filled"], true);
         let bound = std::fs::read_to_string(&manifest).unwrap();
         assert!(
-            bound.contains(&format!("harness_session_id: {heir}")),
+            bound.contains(&format!("harness_session_id: {successor}")),
             "{bound}"
         );
         match saved_spaces {

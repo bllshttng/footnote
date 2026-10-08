@@ -73,15 +73,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // keys are `skip_serializing` so they never round-trip. A pre-v10 reader must reject
 // a v10 store rather than mis-read a harness-only row. Accepted set widens to 1..=10.
 //
-// v11 (US9) adds the crown fields (`crown_level`/`crown_scope`/`crown_grantor`),
+// v11 (US9) adds the role fields (`role_level`/`role_scope`/`role_grantor`),
 // mirrored here as additive-optional passthrough so the daemon preserves a
-// spawn-stamped crown across a read-modify-write (a Python-only field would be
+// spawn-stamped role across a read-modify-write (a Python-only field would be
 // dropped when the daemon re-serializes the row). Python's asdict emits them on
 // every written row, so a pre-v11 reader must reject a v11 store rather than
 // TypeError on the unknown keys. Accepted set widens to 1..=11.
 //
 // v12 adds `route_settings_path` - the route-settings file a routed
-// worker was launched with - mirrored here for the same reason as the crown
+// worker was launched with - mirrored here for the same reason as the role
 // fields: a Python-only field is dropped when the daemon re-serializes the row,
 // which would leave the relaunch guard reading None on every row the daemon has
 // touched. Python's asdict emits the key on every written row, so a pre-v12
@@ -187,7 +187,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 //
 // v28 adds `adopted_by_session` - the session that VOUCHED for an
 // adopted row, split out so `spawned_by_session` keeps one meaning and
-// crowning cannot re-attribute a row's cost.
+// promoting cannot re-attribute a row's cost.
 //
 // v29 adds `resolved_sandbox` / `granted_writable_roots` - what a codex thread
 // row's sandbox RESOLVED to server-side and the roots it carries, beside the
@@ -1119,20 +1119,20 @@ pub struct RegistryEntry {
     /// `screen_state: Optional[dict]` (X3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_state: Option<ScreenStateReport>,
-    /// Crown fields (US9, v11): who holds an orchestrator crown and at what
+    /// Role fields (US9, v11): who holds an orchestrator role and at what
     /// altitude. The Python spawn path is the sole writer (grantor-stamped,
     /// never self-declared); the daemon only custodies them so a spawn-stamped
-    /// crown round-trips losslessly across a read-modify-write - the same X3
+    /// role round-trips losslessly across a read-modify-write - the same X3
     /// passthrough treatment as `inside_leg`/`screen_state`. Skip-when-`None`
-    /// keeps a Rust-authored uncrowned row slim; Python's `asdict` always emits
-    /// the keys, so a crowned Python row round-trips fine. Crown liveness ==
+    /// keeps a Rust-authored unpromoted row slim; Python's `asdict` always emits
+    /// the keys, so a promoted Python row round-trips fine. Role liveness ==
     /// this row's liveness (no separate lifecycle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_level: Option<u32>,
+    pub role_level: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_scope: Option<String>,
+    pub role_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crown_grantor: Option<String>,
+    pub role_grantor: Option<String>,
     /// Route-settings path (v12): the `route-settings/<sha16>.json`
     /// this worker was launched with, or `None` when it was never routed. The
     /// Python spawn seams are the sole writers and the Python relaunch paths
@@ -1140,7 +1140,7 @@ pub struct RegistryEntry {
     /// survives a read-modify-write - without this mirror the daemon's next GC
     /// or screen-state write would drop it and the relaunch guard would read
     /// `None` on every row it had touched. Same X3 passthrough treatment as
-    /// `crown_*`. A path, never route contents: that file is 0600 and carries a
+    /// `role_*`. A path, never route contents: that file is 0600 and carries a
     /// live `ANTHROPIC_AUTH_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_settings_path: Option<String>,
@@ -1243,8 +1243,8 @@ pub struct RegistryEntry {
     ///
     /// FROZEN at its first real value: the resume write-back stamps the
     /// column only while it holds `None`/`unknown`, so the name never moves
-    /// after the crowning resolution. It is the baseline the lead check-in's
-    /// drift judge reads, and a mid-reign refresh would mask the drift a
+    /// after the promoting resolution. It is the baseline the lead check-in's
+    /// drift judge reads, and a mid-term refresh would mask the drift a
     /// narrowed resolution caused.
     ///
     /// Distinct from `sandbox_posture`, which records what the spawn REQUESTED
@@ -1639,9 +1639,9 @@ impl RegistryEntry {
         branch.harness_session_id = Some(successor_session_id.to_string());
         branch.predecessor_session_ids.clear();
         branch.forked_from_session_id = Some(predecessor_session_id.to_string());
-        branch.crown_level = None;
-        branch.crown_scope = None;
-        branch.crown_grantor = None;
+        branch.role_level = None;
+        branch.role_scope = None;
+        branch.role_grantor = None;
         branch.short_id.clear();
         branch.session_id = None;
         branch.claude_session_uuid = None;
@@ -2082,7 +2082,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
         }
         Err(typed_err) => {
             // One row carrying an undecodable OPTIONAL enrichment block must
-            // not zero the decode: a crown succession reown once forked an
+            // not zero the decode: a role succession reown once forked an
             // owner-only spawn_provenance (no `origin`) onto a
             // provenance-less adopted row, and that row failed the WHOLE
             // typed file (raw_rows=28, decoded_rows=0). Heal rows whose only
@@ -2165,7 +2165,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
 
 /// Heal rows whose ONLY typed-decode failure is the optional
 /// `spawn_provenance` block: strip the block, keep the row, name the drop.
-/// A crown succession reown once forked an owner-only block (no `origin`)
+/// A role succession reown once forked an owner-only block (no `origin`)
 /// onto a provenance-less adopted row, and that one optional block failed
 /// the WHOLE typed file (raw_rows=28, decoded_rows=0), every Rust registry
 /// read with it. Returns None when no row is repairable or the healed file
@@ -2180,8 +2180,12 @@ fn repaired_spawn_provenance_registry(
     if candidate.entries.len() != raw_rows {
         return None;
     }
-    for note in &notes {
-        eprintln!("fno agents: registry {note}");
+    // The heal is in memory until the next registry write, so this note
+    // would repeat on every load: a non-fatal note, said only on FNO_VERBOSE=1.
+    if std::env::var_os("FNO_VERBOSE").is_some_and(|v| v == "1") {
+        for note in &notes {
+            eprintln!("fno agents: registry {note}");
+        }
     }
     Some(candidate)
 }
@@ -2491,7 +2495,7 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
 /// the session uuid (the register path once wrote it that way): the
 /// transport key is the uuid's own leading 8-hex segment, and a full uuid
 /// refuses `claude attach`. Rewrites ONLY `short_id` - name, aliases and
-/// crown fields are untouched - under the registry lock, skips the write
+/// role fields are untouched - under the registry lock, skips the write
 /// entirely when nothing matches, and never touches a short id that is an
 /// independent transport key (not a copy of the row's own session id).
 pub fn heal_full_uuid_short_ids(path: &Path) -> Result<usize, StateError> {
@@ -2856,9 +2860,9 @@ pub fn rename_agent(
 /// only by rows that satisfy `may_displace`, the label and alias move off
 /// those rows inside this SAME transaction instead of refusing. The predicate
 /// receives the row and the transaction's own entries, so its verdict reads
-/// the state under the lock, not a pre-transaction snapshot. The crown
+/// the state under the lock, not a pre-transaction snapshot. The role
 /// check-in takes a carried label back from a predecessor row that holds no
-/// live crown; every other caller keeps the plain refusal.
+/// live role; every other caller keeps the plain refusal.
 pub fn rename_agent_displacing(
     path: &Path,
     token: &str,

@@ -46,10 +46,23 @@ if [[ $have_jq -eq 1 && -s "$cache" ]]; then
         else
             printf 'No open questions from this session.\n'
         fi
-        printf '%s open across the fleet.\n' "${total:-0}"
+        # Role audience: the fleet total is lead/user context. A worker
+        # sees only its own questions and the rule line.
+        if [[ "${FNO_SESSION_ROLE:-}" != "worker" ]]; then
+            printf '%s open across the fleet.\n' "${total:-0}"
+        fi
         printf 'Never open an interactive question (AskUserQuestion) from a background or thread session: nobody can see it and the worker idles. File it (fno inbox outstanding ask) and keep working, park with a lease, or mail your lead.\n'
         exit 0
     fi
+fi
+
+# Role audience, fallback leg: a worker session gets no fleet fold at all.
+# The cache branch above already printed its own questions or nothing, and
+# the fold below is the fleet-wide list the worker's role omits.
+if [[ "${FNO_SESSION_ROLE:-}" == "worker" ]]; then
+    printf '## Outstanding for you\n\nNo open questions from this session.\n'
+    printf 'Never open an interactive question (AskUserQuestion) from a background or thread session: nobody can see it and the worker idles. File it (fno inbox outstanding ask) and keep working, park with a lease, or mail your lead.\n'
+    exit 0
 fi
 
 # Fallback: the full fold. A non-zero exit is NOT silence: collapsing a failed

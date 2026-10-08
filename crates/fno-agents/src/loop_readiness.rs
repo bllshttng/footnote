@@ -305,7 +305,7 @@ fn stop_leg_from_events(events: &str, harness: &str, session: &str) -> Readiness
     let complete = data.get("measurement_complete").and_then(Value::as_bool) == Some(true);
     // A slow startup producer times out and lands in measurement_errors: the
     // snapshot is then a MEASURED partial, not an unobserved hook. Blocking
-    // team admission on it starved a fresh heir for its whole session life.
+    // team admission on it starved a fresh successor for its whole session life.
     let errors: Vec<&str> = data
         .get("measurement_errors")
         .and_then(Value::as_array)
@@ -313,7 +313,7 @@ fn stop_leg_from_events(events: &str, harness: &str, session: &str) -> Readiness
         .unwrap_or_default();
     // A slow startup producer times out and lands in measurement_errors: the
     // snapshot is then a MEASURED partial, not an unobserved hook. Blocking
-    // team admission on it starved a fresh heir for its whole session life.
+    // team admission on it starved a fresh successor for its whole session life.
     // The producer's structured `measurement_timeouts` count is the contract;
     // the substring fallback reads journals written before the field existed.
     let all_timeouts = !errors.is_empty()

@@ -87,7 +87,7 @@ fn stand_down_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)overstay|stand(ing)?[ -]down|step(ping)?[ -]down|abdicat|(end|stop) (the|your|this) lead|compact\w* (\w+ ){0,3}(degraded|diminish)",
+            r"(?i)overstay|stand(ing)?[ -]down|step(ping)?[ -]down|step_down|(end|stop) (the|your|this) lead|compact\w* (\w+ ){0,3}(degraded|diminish)",
         )
         .expect("valid pattern")
     })

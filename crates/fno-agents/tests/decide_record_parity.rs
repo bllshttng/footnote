@@ -34,7 +34,7 @@ const CASES: &[(&str, &[&str])] = &[
         ],
     ),
     ("missing_args", &[]),
-    ("bad_authority", &["x-n1", "do it", "--authority", "king"]),
+    ("bad_authority", &["x-n1", "do it", "--authority", "lead"]),
     (
         "bad_graduation",
         &["x-n1", "do it", "--graduation", "banana"],

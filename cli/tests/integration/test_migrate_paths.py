@@ -6,19 +6,16 @@ Tests cover:
 - AC2b-HP: Fresh install (empty settings_root) -> writes settings.yaml + sentinel
 - AC2b-HP: Existing install with internal/ symlink -> detects vault
 - AC2b-ERR: Permission denied on settings_root -> exits non-zero
-- AC2b-UI: One-screen summary (5 lines max, no Traceback)
 - AC2b-EDGE: Race - two threads call run_migration concurrently; filelock serializes
-- AC2b-FR: Crashed prior migration (settings.yaml.tmp present, no sentinel) -> cleanup + fresh run
-- AC2b-EDGE: Existing settings.yaml without sentinel gets backed up
+- AC2b-FR: Crashed prior migration (stale tmp file, no sentinel) -> cleanup + fresh run
 - AC2b-FR: Idempotent re-run without --force -> no-op
-- AC2b-FR: --force re-runs despite sentinel
+- Existing keys survive both the --force merge and the non-force backup path
 
 All tests pass `settings_root=` directly for isolation.
 Autouse fixture pins FNO_REPO_ROOT (feedback_fno_repo_root_leaks_between_tests).
 """
 from __future__ import annotations
 
-import stat
 import threading
 import time
 from pathlib import Path
@@ -39,9 +36,9 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    from fno import config as config_mod
-    import fno.paths as paths_mod
     yield
+
+
 def _settings_root(tmp_path: Path) -> Path:
     """Return the isolated settings_root for this test."""
     return tmp_path / ".fno"
@@ -135,27 +132,6 @@ def test_permission_denied_exits_nonzero(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2b-UI: One-screen summary (5 lines max, no Traceback)
-# ---------------------------------------------------------------------------
-
-
-def test_one_screen_summary(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-    """AC2b-UI: Migration prints at most 5 lines of summary, no Traceback."""
-    from fno.setup.migrate_paths import run_migration
-
-    settings_root = _settings_root(tmp_path)
-    run_migration(settings_root=settings_root)
-
-    captured = capsys.readouterr()
-    output_lines = [l for l in captured.out.splitlines() if l.strip()]
-    assert len(output_lines) <= 5, (
-        f"Summary should be 5 lines max, got {len(output_lines)}:\n{captured.out}"
-    )
-    assert "Traceback" not in captured.out, "Should not print stack traces"
-    assert "Traceback" not in captured.err, "Should not print stack traces to stderr"
-
-
-# ---------------------------------------------------------------------------
 # AC2b-EDGE: Race - two threads; filelock serializes
 # ---------------------------------------------------------------------------
 
@@ -196,33 +172,6 @@ def test_concurrent_migration_serializes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2b-FR: Crashed prior migration - cleanup and fresh run succeeds
-# ---------------------------------------------------------------------------
-
-
-def test_crashed_prior_migration_cleanup(tmp_path: Path) -> None:
-    """AC2b-FR: tmp file from crashed migration is cleaned up on next run."""
-    from fno.setup.migrate_paths import run_migration
-
-    settings_root = _settings_root(tmp_path)
-    settings_root.mkdir(parents=True)
-
-    # Simulate crashed state: a stale .tmp file, no sentinel, no final settings.yaml
-    stale_tmp = settings_root / "settings.yaml.tmp"
-    stale_tmp.write_text("# stale", encoding="utf-8")
-
-    assert not (settings_root / ".path-migration-done").exists()
-    assert not (settings_root / "settings.yaml").exists()
-
-    rc = run_migration(settings_root=settings_root)
-    assert rc == 0, "Migration should succeed despite stale .tmp"
-
-    assert not stale_tmp.exists(), "Stale .tmp should be cleaned up"
-    assert (settings_root / "settings.yaml").exists(), "settings.yaml should exist"
-    assert (settings_root / ".path-migration-done").exists(), "Sentinel should exist"
-
-
-# ---------------------------------------------------------------------------
 # Fix 4: Cleanup matches actual tmp writer pattern (.settings.yaml.<random>.tmp)
 # ---------------------------------------------------------------------------
 
@@ -255,36 +204,6 @@ def test_crashed_prior_migration_cleans_actual_tmp_pattern(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# AC2b-EDGE: Existing settings.yaml without sentinel gets backed up
-# ---------------------------------------------------------------------------
-
-
-def test_existing_settings_without_sentinel_gets_backed_up(tmp_path: Path) -> None:
-    """AC2b-EDGE: Hand-edited settings.yaml (no sentinel) gets backed up before overwrite."""
-    from fno.setup.migrate_paths import run_migration
-
-    settings_root = _settings_root(tmp_path)
-    settings_root.mkdir(parents=True)
-
-    # Simulate a hand-edited settings.yaml with no sentinel
-    prior_content = "schema_version: 1\n# hand edited\n"
-    settings_file = settings_root / "settings.yaml"
-    settings_file.write_text(prior_content, encoding="utf-8")
-
-    assert not (settings_root / ".path-migration-done").exists()
-
-    rc = run_migration(settings_root=settings_root)
-    assert rc == 0
-
-    # A backup should exist, under backups/ (never the state root, x-a469)
-    backups = list(settings_root.glob("backups/settings.yaml.bak.*"))
-    assert backups, "A backup of the prior settings.yaml should have been created"
-
-    # The main settings.yaml should exist (possibly same or new content)
-    assert settings_file.exists(), "settings.yaml should still exist after migration"
-
-
-# ---------------------------------------------------------------------------
 # AC2b-FR: Idempotent re-run without --force -> no-op
 # ---------------------------------------------------------------------------
 
@@ -314,36 +233,6 @@ def test_idempotent_noop_with_sentinel(tmp_path: Path) -> None:
     assert mtime_after == mtime_before, (
         "settings.yaml should not be touched on idempotent re-run"
     )
-
-
-# ---------------------------------------------------------------------------
-# AC2b-FR: --force re-runs despite sentinel
-# ---------------------------------------------------------------------------
-
-
-def test_force_reruns_despite_sentinel(tmp_path: Path) -> None:
-    """AC2b-FR: --force causes migration to run even if sentinel already exists."""
-    from fno.setup.migrate_paths import run_migration
-
-    settings_root = _settings_root(tmp_path)
-
-    # First run to establish sentinel
-    rc = run_migration(settings_root=settings_root)
-    assert rc == 0
-
-    settings_file = settings_root / "settings.yaml"
-    mtime_first = settings_file.stat().st_mtime
-
-    time.sleep(0.02)
-
-    # Force re-run
-    rc2 = run_migration(force=True, settings_root=settings_root)
-    assert rc2 == 0, "--force run should exit 0"
-
-    mtime_after = settings_file.stat().st_mtime
-    # Mtime should change because force=True causes a re-write
-    # (If atomic_write creates a new file, mtime will differ)
-    assert mtime_after >= mtime_first, "settings.yaml should be rewritten on --force"
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ pub mod pipe_guard;
 pub mod pretooluse_bash;
 pub mod prompt;
 pub mod refusal_streak;
+pub mod send_message_guard;
 pub mod session_state;
 pub mod stop;
 pub mod subagent_worktree_guard;
@@ -33,21 +34,20 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("bin-install-guard") => bin_install_guard::run(&args[1..]),
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("effect-guard") => crate::effect_gate::run_hook(&args[1..]),
-        // Both spellings for one release: a repo hook and an installed
-        // binary update at different times.
-        Some("lead-guard") | Some("king-guard") => lead_guard::run(&args[1..]),
+        Some("lead-guard") => lead_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("pretooluse-bash") => pretooluse_bash::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
         Some("posttooluse-bash") => refusal_streak::run(&args[1..]),
         Some("rules") => crate::event_rules::run_hook(&args[1..]),
+        Some("send-message-guard") => send_message_guard::run(&args[1..]),
         Some("session-state") => session_state::run(&args[1..]),
         Some("test-run-guard") => test_run_guard::run(&args[1..]),
         Some("stop") => stop::run(&args[1..]),
         Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, king-guard, pipe-guard, posttooluse-bash, pretooluse-bash, prompt, rules, session-state, subagent-worktree-guard, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, pipe-guard, posttooluse-bash, pretooluse-bash, prompt, rules, send-message-guard, session-state, subagent-worktree-guard, test-run-guard or stop"
             );
             2
         }

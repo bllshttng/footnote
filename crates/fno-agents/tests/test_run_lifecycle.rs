@@ -1030,6 +1030,38 @@ fn a_second_cargo_waits_until_the_building_cargo_exits() {
         waiter.try_wait().unwrap().is_none(),
         "the agent waiter must still hold after the user walk-through"
     );
+    // Cargo asks once per crate; the beside line is said once per cargo.
+    let again = build_admit(&root, cargo_user.id(), &tree_a)
+        .env_remove("FNO_AGENT_SELF")
+        .output()
+        .expect("run the user-origin build-admit again");
+    assert!(again.status.success());
+    assert!(
+        !String::from_utf8_lossy(&again.stderr).contains("cargo admission"),
+        "the second crate of the same cargo stays quiet: {:?}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    // `fno update`'s install build takes the user lane even from an agent
+    // session: it never queues behind the agent holder.
+    let mut cargo_install = Command::new("sleep").arg("60").spawn().unwrap();
+    let start = Instant::now();
+    let out = build_admit(&root, cargo_install.id(), &tree_b)
+        .env("FNO_INSTALL_BUILD", "1")
+        .output()
+        .expect("run the install build-admit");
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the install build must not queue, took {:?}",
+        start.elapsed()
+    );
+    let _ = cargo_install.kill();
+    let _ = cargo_install.wait();
 
     let _ = cargo_a.kill();
     let _ = cargo_a.wait();
@@ -1265,10 +1297,11 @@ fn run_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path)
     cmd
 }
 
-/// AC1-HP: two cargos hold both run slots; a third waits, names both
-/// holders and the count, and takes the freed slot within 2s.
+/// AC1-HP, the 2026-10-06 try-lock contract: two cargos hold both run
+/// slots; a third agent cargo refuses at once with the move-on answer. A
+/// free slot admits, and the user's cargo never waits.
 #[test]
-fn a_third_cargo_run_waits_until_a_slot_frees() {
+fn a_third_agent_cargo_refuses_when_every_slot_is_busy() {
     let root = std::fs::canonicalize(tmp_claims_root("run-pool")).unwrap();
     let (tree_1, tree_2, tree_3) = (root.join("w1"), root.join("w2"), root.join("w3"));
     for tree in [&tree_1, &tree_2, &tree_3] {
@@ -1283,18 +1316,33 @@ fn a_third_cargo_run_waits_until_a_slot_frees() {
     let second = run_admit(&root, holder_2.id(), &tree_2).status().unwrap();
     assert!(second.success(), "slot 1 must be taken at once");
 
-    let mut waiter = run_admit(&root, std::process::id(), &tree_3)
+    let start = Instant::now();
+    let refused = run_admit(&root, std::process::id(), &tree_3)
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        refused.status.code(),
+        Some(86),
+        "the third agent cargo must refuse, not queue: {refused:?}"
+    );
     assert!(
-        waiter.try_wait().unwrap().is_none(),
-        "the third cargo must wait while both slots are held"
+        start.elapsed() < Duration::from_secs(5),
+        "the refusal must answer at once, took {:?}",
+        start.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("commit, push, CI runs it"),
+        "the refusal must carry the move-on answer: {stderr}"
+    );
+    assert!(
+        stderr.contains("FNO_TEST_FULL"),
+        "the refusal must name the sanctioned queue lane: {stderr}"
     );
 
-    // The user lane never queues on the slots: with both held and an agent
-    // waiter parked, a user-origin run-admit walks through at once.
+    // The user lane never queues on the slots: with both held, a
+    // user-origin run-admit walks through at once.
     let start = Instant::now();
     let user = run_admit(&root, std::process::id(), &tree_3)
         .env_remove("FNO_AGENT_SELF")
@@ -1309,43 +1357,17 @@ fn a_third_cargo_run_waits_until_a_slot_frees() {
         "the user-origin cargo must not queue on the slots, took {:?}",
         start.elapsed()
     );
-    assert!(
-        waiter.try_wait().unwrap().is_none(),
-        "the agent waiter must still hold after the user walk-through"
-    );
 
+    // A free slot admits at once: release one, the next agent ask runs.
     let _ = holder_1.kill();
     let _ = holder_1.wait();
-    let released = Instant::now();
-    let status = waiter.wait().unwrap();
-    assert!(
-        status.success(),
-        "the waiter must be admitted, got {status}"
-    );
-    assert!(
-        released.elapsed() < Duration::from_secs(2),
-        "admission must follow the freed slot within 2s, took {:?}",
-        released.elapsed()
-    );
-    let mut stderr = String::new();
-    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
-    assert!(
-        stderr.contains("cargo admission: holding")
-            && stderr.contains("2 of 2 cargo run slots held by"),
-        "stderr must name the pool count: {stderr}"
-    );
-    assert!(
-        stderr.contains("queue depth 1")
-            && stderr.contains("push now: CI is the gate (law d-50986bf8)"),
-        "stderr must tell a queued worker to push: {stderr}"
-    );
-    assert!(
-        stderr.contains(&format!("cargo:{}:{}", tree_1.display(), holder_1.id()))
-            && stderr.contains(&format!("cargo:{}:{}", tree_2.display(), holder_2.id())),
-        "stderr must name both holders: {stderr}"
-    );
+    let mut next = Command::new("sleep").arg("60").spawn().unwrap();
+    let admitted = run_admit(&root, next.id(), &tree_3).status().unwrap();
+    assert!(admitted.success(), "a free slot must admit: {admitted}");
     let _ = holder_2.kill();
     let _ = holder_2.wait();
+    let _ = next.kill();
+    let _ = next.wait();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1384,8 +1406,9 @@ fn a_process_under_a_slot_holder_is_admitted_without_a_second_slot() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC4-HP: with every slot held, a waiting build-admit leaves build:cargo
-/// without a holder; it takes the slot first, then the build claim.
+/// AC4-HP: with every slot held, a queued build-admit (the whole-suite lane;
+/// a plain agent ask refuses under the try-lock) leaves build:cargo without
+/// a holder; it takes the slot first, then the build claim.
 #[test]
 fn build_admit_takes_a_run_slot_before_build_cargo() {
     let root = std::fs::canonicalize(tmp_claims_root("run-order")).unwrap();
@@ -1408,6 +1431,7 @@ fn build_admit_takes_a_run_slot_before_build_cargo() {
     let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
     let mut waiter = build_admit(&root, cargo_b.id(), &tree_b)
         .env("FNO_CONFIG", root.join("config.toml"))
+        .env("FNO_TEST_FULL", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1440,8 +1464,9 @@ fn build_admit_takes_a_run_slot_before_build_cargo() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC8-HP: a cargo waiting on a run slot writes the same stop-hook marker
-/// as a build waiter; the stop hook's read names a holder.
+/// AC8-HP: a cargo queued on a run slot lane writes the same stop-hook
+/// marker as a build waiter; the stop hook's read names a holder. The plain
+/// agent ask refuses now, so the waiter rides the whole-suite lane.
 #[test]
 fn a_run_slot_waiter_writes_the_stop_hook_marker() {
     let root = std::fs::canonicalize(tmp_claims_root("run-marker")).unwrap();
@@ -1461,6 +1486,7 @@ fn a_run_slot_waiter_writes_the_stop_hook_marker() {
         .success());
 
     let mut waiter = run_admit(&root, std::process::id(), &tree_w)
+        .env("FNO_TEST_FULL", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1547,8 +1573,10 @@ fn a_priority_checkout_jumps_the_run_slot_queue() {
     assert!(run_admit(&root, h1.id(), &w1).status().unwrap().success());
     assert!(run_admit(&root, h2.id(), &w2).status().unwrap().success());
 
-    // Q from w3 queues first, before the lane exists.
+    // Q from w3 queues first, in the whole-suite lane (the plain agent ask
+    // refuses under the try-lock; the lane ask is what waits).
     let mut q = run_admit(&root, std::process::id(), &w3)
+        .env("FNO_TEST_FULL", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1611,7 +1639,7 @@ fn a_priority_checkout_jumps_the_run_slot_queue() {
 }
 
 /// AC19-EDGE: a live lane reserves nothing. With the lane held for w4 but no
-/// waiter from w4, a normal waiter is admitted as soon as a slot frees.
+/// waiter from w4, a whole-lane waiter is admitted as soon as a slot frees.
 #[test]
 fn an_idle_priority_lane_reserves_nothing() {
     let root = std::fs::canonicalize(tmp_claims_root("prio-idle")).unwrap();
@@ -1633,6 +1661,7 @@ fn an_idle_priority_lane_reserves_nothing() {
 
     set_priority(&root, &w4, 600_000);
     let mut q = run_admit(&root, std::process::id(), &w3)
+        .env("FNO_TEST_FULL", "1")
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();

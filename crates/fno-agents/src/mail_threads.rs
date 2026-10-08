@@ -24,7 +24,7 @@ fn is_hold_sender(sender: &str) -> bool {
 }
 
 /// The registry's rows, tolerant: a missing or malformed file reads as none.
-fn registry_rows() -> Vec<Value> {
+pub(crate) fn registry_rows() -> Vec<Value> {
     let text = std::fs::read_to_string(AgentsHome::from_env().registry_json()).unwrap_or_default();
     serde_json::from_str::<Value>(&text)
         .ok()
@@ -34,7 +34,7 @@ fn registry_rows() -> Vec<Value> {
 
 /// The registry row that IS this address: session id first, then name and
 /// aliases (law d-e952ed19: a name is a label, the session id is the key).
-fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
+pub(crate) fn registry_lookup<'a>(rows: &'a [Value], key: &str) -> Option<&'a Value> {
     if key.is_empty() {
         return None;
     }
@@ -234,6 +234,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                 "to_key": to_key,
                 "to": to,
                 "summary": crate::mail_header::summary_of(&body),
+                "subject": v.get("subject").and_then(Value::as_str),
                 "body": body,
                 "expires": expires_at(&v),
                 "in_reply_to": v.get("in_reply_to").and_then(Value::as_str),
@@ -264,10 +265,10 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
                         system.entry(to_key.clone()).or_default().push(row.clone());
                     } else {
                         let receiver_scope = reg_to
-                            .and_then(|r| r.get("crown_scope"))
+                            .and_then(|r| r.get("role_scope"))
                             .and_then(Value::as_str);
                         let sender_scope = reg_from
-                            .and_then(|r| r.get("crown_scope"))
+                            .and_then(|r| r.get("role_scope"))
                             .and_then(Value::as_str);
                         let ts = v.get("ts").and_then(Value::as_str).unwrap_or("");
                         if let Some(scope) = sender_scope.filter(|_| !system_row) {
@@ -309,7 +310,7 @@ pub(crate) fn project_at(chats: &Path, registry: &[Value], now: u64) -> Value {
     for (key, p) in participants.iter_mut() {
         let reg = registry_lookup(registry, key);
         let held = reg
-            .and_then(|r| r.get("crown_scope"))
+            .and_then(|r| r.get("role_scope"))
             .and_then(Value::as_str)
             .filter(|_| {
                 reg.and_then(|r| r.get("liveness")).and_then(Value::as_str) != Some("alive")
@@ -407,8 +408,8 @@ fn participant_row(key: &str, reg: Option<&Value>, extra: Option<&str>) -> Value
             r.get("liveness").and_then(Value::as_str) == Some("alive")
                 || r.get("status").and_then(Value::as_str) == Some("live")
         }),
-        "crown_scope": reg.and_then(|r| r.get("crown_scope")).and_then(Value::as_str),
-        "crown_level": reg.and_then(|r| r.get("crown_level")).and_then(Value::as_u64),
+        "role_scope": reg.and_then(|r| r.get("role_scope")).and_then(Value::as_str),
+        "role_level": reg.and_then(|r| r.get("role_level")).and_then(Value::as_u64),
         "created_at": reg.and_then(|r| r.get("created_at")).and_then(Value::as_str),
         "exited_at": reg.and_then(|r| r.get("exited_at")).and_then(Value::as_str),
         "system": crate::system_sender::is_system_sender(key),
@@ -475,7 +476,7 @@ fn best_scope(votes: &BTreeMap<String, (usize, String)>) -> Option<String> {
 /// The hidden `fno-agents mail-threads` verb: `--format json` (the only
 /// form) prints the projection; `details --session <id>` prints that
 /// session's token counters and ledger cost. Hidden from help, like
-/// `court-fold` (ruling d-aef0ed7b).
+/// `team-fold` (ruling d-aef0ed7b).
 pub fn run_mail_threads(args: &[String]) -> i32 {
     let Some(sub) = args.first() else {
         return run_mail_threads(&["--format".into(), "json".to_string()]);
@@ -776,11 +777,11 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let now = crate::state::rfc3339_like_to_secs("2026-10-02T12:00:00Z").unwrap();
         // The registry: a lead, its live worker, an exited worker, and the
-        // crowned successor over the same scope (AC2-HP).
+        // promoted successor over the same scope (AC2-HP).
         let registry = vec![
             json!({"name": "vellum", "fno_id": "s-vellum", "harness_session_id": "s-vellum",
                    "harness": "claude", "liveness": "alive", "status": "live",
-                   "crown_level": 1, "crown_scope": "fno"}),
+                   "role_level": 1, "role_scope": "fno"}),
             json!({"name": "candor", "fno_id": "s-candor", "harness_session_id": "s-candor",
                    "harness": "codex", "liveness": "alive", "status": "live"}),
             json!({"name": "quill", "fno_id": "s-quill", "harness_session_id": "s-quill",
@@ -797,13 +798,14 @@ mod tests {
             &chats,
             "chat-aaaaaaaaaaaaaaaa",
             &[
-                msg(
-                    "fmail-111111111111",
-                    "2026-10-01T09:00:00Z",
-                    "s-candor",
-                    "vellum",
-                    "Ship the auth fix. It blocks the release.",
-                ),
+                json!({
+                    "type": "message", "kind": "send", "v": 1,
+                    "id": "fmail-111111111111", "ts": "2026-10-01T09:00:00Z",
+                    "thread": "fmail-111111111111",
+                    "from": "s-candor", "to": "vellum",
+                    "subject": "release blocker",
+                    "body": "Ship the auth fix. It blocks the release.",
+                }),
                 json!({
                     "type": "message", "kind": "send", "v": 1,
                     "id": "fmail-222222222222", "ts": "2026-10-01T09:05:00Z", "thread": "fmail-111111111111",
@@ -892,7 +894,7 @@ mod tests {
             )],
         );
         // An unresolvable leaked fixture reads as Archive, not live-list. It
-        // mails candor, whose registry row holds no crown scope, so no
+        // mails candor, whose registry row holds no role scope, so no
         // scope vote ever names it and the unresolved bucket takes it.
         write_chat(
             &chats,
@@ -924,7 +926,7 @@ mod tests {
             &[msg(
                 "fmail-444444444444",
                 "2026-10-01T09:10:00Z",
-                "king-settle",
+                "lead-settle",
                 "candor",
                 "Settle point reached.",
             )],
@@ -1005,6 +1007,20 @@ mod tests {
         assert_eq!(body_of("fmail-b1b1b1b1b1b1"), "Ship it.");
         assert_eq!(body_of("fmail-b2b2b2b2b2b2"), "Ship it. Then merge.");
         assert_eq!(body_of("fmail-b3b3b3b3b3b3"), "see <fno_mail> docs");
+        // The sender's --subject rides the projected row; a row without one
+        // reads null.
+        let subject_of = |id: &str| -> Option<String> {
+            threads
+                .iter()
+                .flat_map(|t| t.get("rows").and_then(Value::as_array).unwrap())
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
+                .and_then(|r| r.get("subject").and_then(Value::as_str).map(str::to_string))
+        };
+        assert_eq!(
+            subject_of("fmail-111111111111").as_deref(),
+            Some("release blocker")
+        );
+        assert_eq!(subject_of("fmail-b2b2b2b2b2b2"), None);
         // AC4-HP: the registry never named s-lone; its from name shows and
         // the id stays the key.
         let lone = participants
@@ -1040,7 +1056,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].get("from").and_then(Value::as_str),
-            Some("fno/king-settle")
+            Some("fno/lead-settle")
         );
         // Channels and announcements (AC4-HP, R12).
         let channels = projection

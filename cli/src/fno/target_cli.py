@@ -1038,7 +1038,7 @@ def review_invocation_cmd(
     level). The refusal surfaces a held worker reads (the stop gate's coverage
     reason, the merge guard, the CI status) embed this output; prose cannot
     carry it because ``check-review-invocation-single-source.sh`` bans any
-    concrete level outside the builder. A worker or king can also run this
+    concrete level outside the builder. A worker or lead can also run this
     verb directly.
 
     Read-only; writes no state. Always exits 0 - a render failure prints the

@@ -111,6 +111,21 @@ fn transcript_fixture() -> (tempfile::TempDir, TranscriptFacts) {
             .join("\n"),
     )
     .unwrap();
+    // The origin record a startup on mac-a left beside the transcript, as it
+    // would arrive here through the user's own file move (AC3-HP).
+    fs::write(
+        dir.path().join(format!("{SID}.fno.json")),
+        json!({
+            "machine": "aaaaaaaaaaaaaaaa",
+            "host": "mac-a",
+            "harness": "claude",
+            "session_id": SID,
+            "transcript_path": path.to_string_lossy(),
+            "recorded_at": "2026-09-23T06:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
     (dir, scan(&path).unwrap())
 }
 
@@ -149,6 +164,14 @@ fn agents_history_card_joins_transcript_stages_and_events() {
     assert!(card.contains("effort xhigh merge grant approved (operator)"));
     assert!(card.contains("stage:      ship 2026-09-23T13:00:00Z -> open"));
     assert!(card.contains("permission: bypassPermissions -> auto (transcript)"));
+    assert!(card.contains(&format!(
+        "transcript: {} (this machine)",
+        transcript.path.as_deref().unwrap().display()
+    )));
+    assert!(card.contains(&format!(
+        "origin:     mac-a (another machine, id aaaaaaaaaaaaaaaa), claude session {SID}, transcript {}",
+        transcript.path.as_deref().unwrap().display()
+    )));
     assert!(card.contains("event:      2026-09-23T00:48:20Z spawn worker"));
     assert!(card.contains("event:      2026-09-23T13:41:05Z adopt"));
     assert!(card.contains("event:      2026-09-23T13:41:09Z resume"));
@@ -162,6 +185,10 @@ fn agents_history_unknown_provider_never_prints_a_plain_resume() {
     assert!(lines.contains("provider:   unknown (the registry row records no provider)"));
     assert!(lines.contains("resume:     unknown (the provider is not recorded, so a plain resume could run the account default)"));
     assert!(!lines.contains("claude --resume"));
+    assert!(lines.contains(
+        "transcript: not found on this machine (claude projects and codex sessions searched)"
+    ));
+    assert!(lines.contains("origin:     not recorded"));
 }
 
 #[test]

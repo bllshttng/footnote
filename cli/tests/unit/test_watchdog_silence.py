@@ -66,10 +66,10 @@ def test_silence_verdict_node_done_is_never_silenced():
     assert v.verdict != SILENCE
 
 
-def test_silence_verdict_scope_excludes_crown_operator_and_outside_root(
+def test_silence_verdict_scope_excludes_role_operator_and_outside_root(
     monkeypatch, tmp_path,
 ):
-    """AC1-EDGE (scope half) + AC3-EDGE: a crowned row, an operator-origin
+    """AC1-EDGE (scope half) + AC3-EDGE: a promoted row, an operator-origin
     row, and a row whose project_root is outside every root never reach the
     silence table - a claude session from another project is absent."""
     from fno.agents import registry as registry_mod
@@ -81,27 +81,27 @@ def test_silence_verdict_scope_excludes_crown_operator_and_outside_root(
         AgentEntry(
             name="ok-row", harness="claude", harness_session_id="sid-ok",
             cwd=in_root, log_path="", status="live", origin="spawn",
-            crown_level=None, node="x-1", project_root=in_root,
+            role_level=None, node="x-1", project_root=in_root,
         ),
         AgentEntry(
-            name="crowned-row", harness="claude", harness_session_id="sid-crown",
+            name="promoted-row", harness="claude", harness_session_id="sid-role",
             cwd=in_root, log_path="", status="live", origin="spawn",
-            crown_level=1, node="x-2", project_root=in_root,
+            role_level=1, node="x-2", project_root=in_root,
         ),
         AgentEntry(
             name="operator-row", harness="claude", harness_session_id="sid-op",
             cwd=in_root, log_path="", status="live", origin="operator",
-            crown_level=None, node="x-3", project_root=in_root,
+            role_level=None, node="x-3", project_root=in_root,
         ),
         AgentEntry(
             name="outside-row", harness="claude", harness_session_id="sid-out",
             cwd=outside, log_path="", status="live", origin="spawn",
-            crown_level=None, node="x-4", project_root=outside,
+            role_level=None, node="x-4", project_root=outside,
         ),
         AgentEntry(
             name="daemon-row", harness="codex", harness_session_id="sid-codex",
             cwd=in_root, log_path="", status="live", origin="spawn",
-            crown_level=None, node="x-5", project_root=in_root,
+            role_level=None, node="x-5", project_root=in_root,
         ),
     ]
     monkeypatch.setattr(registry_mod, "load_registry", lambda: rows)
@@ -109,6 +109,7 @@ def test_silence_verdict_scope_excludes_crown_operator_and_outside_root(
     got, _warnings = watchdog.silence_rows([tmp_path])
 
     assert [r.name for r in got] == ["ok-row"]
+
 
 
 

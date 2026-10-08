@@ -29,7 +29,7 @@ class FakeRun:
         self,
         *,
         default: str = "main",
-        base: str = "feature/bg-crown",
+        base: str = "feature/bg-role",
         merged_pr: str = "",
         merged_head: str = LANDED,
         base_tip: str = LANDED,
@@ -149,28 +149,22 @@ def patch_run(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kwargs,verdict,fragment",
-    [
-        ({"pr_head": ""}, "unknown", "head sha"),
-        ({"contained": True}, "ok", "contains"),
-        ({"contained": False}, "stale", "merge origin/main into the branch"),
-        ({"fetch_fails": True}, "unknown", "could not refresh"),
-    ],
+    "kwargs",
+    [{"contained": True}, {"contained": False}, {"fetch_fails": True}],
 )
-def test_default_base_lineage_table(patch_run, kwargs, verdict, fragment):
-    """A base that IS the default branch: ancestry decides, probes stay humble.
+def test_default_base_passes_whether_or_not_the_head_has_the_tip(patch_run, kwargs):
+    """A base that IS the default branch never fails on how far behind the head is.
 
-    The stale row asserts the remedy, not just the fault: a refusal that
-    closes the door without pointing at the key invites improvisation.
+    A catch-up demand made busy-main PRs chase the tip forever, and every
+    catch-up push cancelled their CI. A real conflict is GitHub's refusal.
     """
     patch_run(FakeRun(base="main", **kwargs))
-    got, why = _base_lineage.lineage_verdict(805, "/repo")
-    assert got == verdict
-    assert fragment in why
+    got, _ = _base_lineage.lineage_verdict(805, "/repo")
+    assert got == "ok"
 
 
 def test_merged_pr_on_unmoved_base_refuses(patch_run):
-    """The specimen: PR #789 merged feature/bg-crown, whose tip had not moved."""
+    """The specimen: PR #789 merged feature/bg-role, whose tip had not moved."""
     patch_run(FakeRun(merged_pr="789", merged_head=LANDED, base_tip=LANDED, contained=True))
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"

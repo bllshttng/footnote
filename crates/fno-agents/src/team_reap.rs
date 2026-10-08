@@ -122,26 +122,26 @@ pub(crate) fn team_outlived_window(
 /// registry could not be read - a failed read never vacates.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct TeamReap {
-    pub vacated: Vec<VacatedCrown>,
-    pub kept: Vec<KeptCrown>,
+    pub vacated: Vec<VacatedRole>,
+    pub kept: Vec<KeptRole>,
     pub unread: Option<String>,
     /// Team-name records dropped (or would-drop, dry run) by the sweep's
     /// prune of `team_names.json`: scopes with no live team or a mismatched
     /// holder session.
     #[serde(default)]
     pub names_pruned: Vec<String>,
-    /// Successions reverted (or would-revert, dry run): an heir that died
+    /// Successions reverted (or would-revert, dry run): a successor that died
     /// unbound past the window, its team restored to the predecessor.
     #[serde(default)]
     pub successions_reverted: Vec<crate::team_names::RevertedSuccession>,
-    /// Pending successions the sweep kept, with the reason (a live heir).
+    /// Pending successions the sweep kept, with the reason (a live successor).
     #[serde(default)]
     pub successions_kept: Vec<String>,
 }
 
 /// A team this sweep vacated (or would vacate, under a dry run).
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct VacatedCrown {
+pub struct VacatedRole {
     pub scope: String,
     pub level: Option<u32>,
     pub manifest_path: String,
@@ -158,7 +158,7 @@ pub struct VacatedCrown {
 
 /// A team this sweep kept, with the reason nothing was written.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct KeptCrown {
+pub struct KeptRole {
     pub scope: String,
     pub reason: String,
 }
@@ -193,22 +193,22 @@ pub fn sweep(
     let superseded = crate::lead_state::superseded_manifests(&manifests);
     let mut roster_read: Option<ClaudeAgentsSnapshot> = None;
     let mut out = TeamReap::default();
-    let mut dead: Vec<VacatedCrown> = Vec::new();
+    let mut dead: Vec<VacatedRole> = Vec::new();
     for (path, content) in &manifests {
-        let Some(scope) = crate::claude_adopt::manifest_field(content, "crown_scope") else {
+        let Some(scope) = crate::claude_adopt::manifest_field(content, "role_scope") else {
             continue;
         };
         if superseded.contains(path) {
             continue;
         }
-        // A live row holding the territory (a split team, a succession heir)
+        // A live row holding the territory (a split team, a succession successor)
         // is never a candidate, whatever the manifest names.
         let key = crate::lead_state::territory_key(&scope);
         if held_keys.contains(&key) {
             continue;
         }
         let mut keep = |reason: String| {
-            out.kept.push(KeptCrown {
+            out.kept.push(KeptRole {
                 scope: scope.clone(),
                 reason,
             })
@@ -255,10 +255,10 @@ pub fn sweep(
                 continue;
             }
         }
-        let level = crate::claude_adopt::manifest_field(content, "crown_level")
-            .and_then(|v| v.parse().ok());
+        let level =
+            crate::claude_adopt::manifest_field(content, "role_level").and_then(|v| v.parse().ok());
         let inheritor = inheritor_for(level, &scope, &live, cwd);
-        dead.push(VacatedCrown {
+        dead.push(VacatedRole {
             scope,
             level,
             manifest_path: path.display().to_string(),
@@ -279,8 +279,8 @@ pub fn sweep(
                 &v.inheritor,
                 events,
             ) {
-                Ok(cleared_rows) => out.vacated.push(VacatedCrown { cleared_rows, ..v }),
-                Err(reason) => out.kept.push(KeptCrown {
+                Ok(cleared_rows) => out.vacated.push(VacatedRole { cleared_rows, ..v }),
+                Err(reason) => out.kept.push(KeptRole {
                     scope: v.scope.clone(),
                     reason,
                 }),
@@ -315,7 +315,7 @@ pub(crate) fn vacate(
 ) -> Result<Vec<String>, String> {
     let key = crate::lead_state::territory_key(scope);
     let claims = |e: &crate::state::RegistryEntry| {
-        e.crown_scope
+        e.role_scope
             .as_deref()
             .map(|s| crate::lead_state::territory_key(s) == key)
             .unwrap_or(false)
@@ -336,9 +336,9 @@ pub(crate) fn vacate(
             .iter_mut()
             .filter(|e| crate::lead_state::is_terminal(e) && claims(e))
         {
-            row.crown_level = None;
-            row.crown_scope = None;
-            row.crown_grantor = None;
+            row.role_level = None;
+            row.role_scope = None;
+            row.role_grantor = None;
             cleared.push(row.name.clone());
         }
     });
@@ -368,8 +368,8 @@ pub(crate) fn vacate(
                 ));
             }
         }
-        let grantor = crate::claude_adopt::manifest_field(&content, "crown_grantor");
-        let level = crate::claude_adopt::manifest_field(&content, "crown_level")
+        let grantor = crate::claude_adopt::manifest_field(&content, "role_grantor");
+        let level = crate::claude_adopt::manifest_field(&content, "role_level")
             .and_then(|v| v.parse::<u32>().ok());
         fs::remove_file(manifest_path)
             .map_err(|e| format!("cannot remove {}: {e}", manifest_path.display()))?;
@@ -467,7 +467,7 @@ pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool
         Utc::now(),
     );
     // The succession revert runs BEFORE the prune: a pending record whose
-    // heir died unbound restores its predecessor's session, so the prune's
+    // successor died unbound restores its predecessor's session, so the prune's
     // own live-team rule judges the reverted state, not the pre-revert
     // limbo.
     let window_s = 3 * crate::lead_verdict_inputs::checkin_interval_secs(cwd);
@@ -484,7 +484,7 @@ pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool
                     let _ = events.emit(
                         "team_succession_reverted",
                         &serde_json::json!({
-                            "scope": r.scope, "heir_name": r.heir_name,
+                            "scope": r.scope, "successor_name": r.successor_name,
                             "predecessor_name": r.predecessor_name,
                             "predecessor_session": r.predecessor_session,
                             "evidence": r.evidence,
@@ -557,14 +557,14 @@ mod tests {
     ) -> PathBuf {
         let path = root
             .join("space-a")
-            .join("kings")
+            .join("leads")
             .join(format!("{scope}.md"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = format!(
             "---\nfno_id: 20260919T000000Z-kg1-deadbeef\nscope: {scope}\nshape: pass\n\
              harness: {harness}\nharness_session_id: {session}\nowner_pid: 1\n\
-             created_at: {created_at}\ncrown_scope: {scope}\ncrown_level: 2\n\
-             crown_grantor: operator\n---\n"
+             created_at: {created_at}\nrole_scope: {scope}\nrole_level: 2\n\
+             role_grantor: operator\n---\n"
         );
         fs::write(&path, body).unwrap();
         path
@@ -580,8 +580,8 @@ mod tests {
             "name": name, "cwd": "/tmp", "status": status,
             "created_at": "2026-09-01T00:00:00Z",
             "harness": "claude", "harness_session_id": format!("{name}-session"),
-            "crown_level": level, "crown_scope": scope,
-            "crown_grantor": scope.map(|_| "operator"),
+            "role_level": level, "role_scope": scope,
+            "role_grantor": scope.map(|_| "operator"),
         })
     }
 
@@ -693,9 +693,9 @@ mod tests {
         let rows: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
         let stale = &rows["agents"][0];
-        assert!(stale["crown_scope"].is_null(), "{stale}");
-        assert!(stale["crown_level"].is_null(), "{stale}");
-        assert!(stale["crown_grantor"].is_null(), "{stale}");
+        assert!(stale["role_scope"].is_null(), "{stale}");
+        assert!(stale["role_level"].is_null(), "{stale}");
+        assert!(stale["role_grantor"].is_null(), "{stale}");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -735,7 +735,7 @@ mod tests {
         // The terminal row keeps its team fields: nothing was vacated.
         let rows: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
-        assert_eq!(rows["agents"][0]["crown_scope"], "zed");
+        assert_eq!(rows["agents"][0]["role_scope"], "zed");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -937,7 +937,7 @@ mod tests {
         assert!(read_events(&dir).is_empty());
         let rows: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
-        assert!(rows["agents"][0]["crown_scope"].is_null(), "{rows}");
+        assert!(rows["agents"][0]["role_scope"].is_null(), "{rows}");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -967,7 +967,9 @@ mod tests {
 
     #[test]
     fn the_inheritor_names_the_presiding_l1_or_operator() {
-        let _env_lock = crate::claims::test_env_lock();
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("inheritor");
         // One epic list mapping to one project, so the presiding level-1
         // team resolves through the seeded FNO_HOME store. set_var is
@@ -1062,7 +1064,7 @@ mod tests {
         // The terminal row keeps its team fields: only the apply clears them.
         let rows: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
-        assert_eq!(rows["agents"][0]["crown_scope"], "zed");
+        assert_eq!(rows["agents"][0]["role_scope"], "zed");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1099,7 +1101,7 @@ mod tests {
     /// AC: the production sweep wires the revert in BEFORE the prune, fills
     /// the report fields, and journals one receipt per reverted succession.
     #[test]
-    fn production_sweep_reverts_an_unbound_heir_and_journals_the_receipt() {
+    fn production_sweep_reverts_an_unbound_successor_and_journals_the_receipt() {
         use serde_json::json;
         let old_home = std::env::var("FNO_AGENTS_HOME").ok();
         let seeded = tempfile::TempDir::new().unwrap();
@@ -1120,7 +1122,7 @@ mod tests {
         .unwrap();
         let dir = tmp("sweep-revert");
         pin_window(&dir, None);
-        // The predecessor row survives (exited, resumable); the heir's row
+        // The predecessor row survives (exited, resumable); the successor's row
         // was removed by the bind-window reaper. Store carries a pending
         // succession well past the 12h window (3 * 4h checkin interval).
         let registry = registry_file(
@@ -1136,11 +1138,11 @@ mod tests {
             serde_json::to_string(&json!({
                 "version": 1,
                 "teams": {"x-sweep": {
-                    "name": "Folio", "regnal": 2,
+                    "name": "Folio", "generation": 2,
                     "holder_session": null,
                     "nodes": [], "updated_at": "2026-09-28T00:00:00Z",
                     "pending_succession": {
-                        "heir_name": "jolly-finch", "predecessor_name": "lead-old",
+                        "successor_name": "jolly-finch", "predecessor_name": "lead-old",
                         "predecessor_session": "sess-old", "ts": "2026-08-01T00:00:00Z"
                     }
                 }}

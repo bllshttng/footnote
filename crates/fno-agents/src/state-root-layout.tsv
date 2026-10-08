@@ -50,7 +50,7 @@ approvals.db	db/approvals.db	sqlite	daemon
 # pages/ - regenerated renders.
 graph.md	pages/graph.md	page	daemon
 graph.html	pages/graph.html	page	daemon
-reign.html	pages/lead.html	page	daemon
+term.html	pages/lead.html	page	daemon
 rundown.html	pages/rundown.html	page	daemon
 fleet.html	pages/fleet.html	page	daemon
 # logs/ - append-only logs; launchd fds keep writing the renamed inode.
@@ -76,6 +76,7 @@ plugin-root	install/plugin-root	marker	daemon
 notify-signals.json	state/notify-signals.json	overwrite	daemon
 git-protection.json	state/git-protection.json	overwrite	daemon
 machine-brake.json	state/machine-brake.json	overwrite	daemon
+sccache-watch.json	state/sccache-watch.json	overwrite	daemon
 .worktree-stranded-cache.json	state/.worktree-stranded-cache.json	overwrite	daemon
 .worktree-stranded-refresh-stamp	state/.worktree-stranded-refresh-stamp	overwrite	daemon
 # mux/ - the mux server owns these; it moves them at its own start.

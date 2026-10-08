@@ -12,6 +12,9 @@ command -v jq >/dev/null 2>&1 || exit 0
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/lib/hook-budget.sh
 source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
+# Overload skip: past the threshold the preamble alone can pass the harness
+# cap; the stage read is stateless and re-runs next turn.
+hook_overloaded && exit 0
 # shellcheck source=lib/write-targets.sh
 source "$HOOK_DIR/lib/write-targets.sh" 2>/dev/null || true
 input="$(cat 2>/dev/null || true)"

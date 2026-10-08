@@ -591,6 +591,7 @@ def list_prs_rest(
                         "url": row["html_url"],
                         "mergedAt": row.get("merged_at"),
                         "body": row.get("body") or "",
+                        "isCrossRepository": ((row["head"].get("repo") or {}).get("full_name") != ((row.get("base") or {}).get("repo") or {}).get("full_name")),
                     }
                 )
             rows.append(summary)

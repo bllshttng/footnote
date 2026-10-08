@@ -93,21 +93,7 @@ pub fn is_gate_event(kind: &str) -> bool {
 /// append-only history), so queries expand a kind to its old spelling and
 /// readers canonicalize the row type through [`event_type_alias`]. This
 /// table never shrinks.
-pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[
-    ("agent_crown_vacated", "agent_team_vacated"),
-    ("crown_succession_reverted", "team_succession_reverted"),
-    ("king_action", "lead_action"),
-    ("king_context_nudge", "lead_context_nudge"),
-    ("king_drain_reserve", "lead_drain_reserve"),
-    ("king_goal_resumed", "lead_goal_resumed"),
-    ("king_loop_check", "lead_loop_check"),
-    ("king_orphan_block", "lead_orphan_block"),
-    ("king_term", "lead_term"),
-    ("king_wake", "lead_wake"),
-    ("reign_armed", "lead_armed"),
-    ("reign_checkin", "lead_checkin"),
-    ("reign_dispatch_exception", "lead_dispatch_exception"),
-];
+pub const EVENT_TYPE_ALIASES: &[(&str, &str)] = &[("agent_role_vacated", "agent_team_vacated")];
 
 /// The canonical (new) spelling of an event kind: an old stored spelling
 /// maps to its replacement, anything else is itself.
@@ -346,6 +332,52 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 /// schema ensured (v2 created, or v1 migrated) before the connection is
 /// handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
+    if store.exists() {
+        let check = crate::store_conn::open_read(store).and_then(|conn| {
+            let result: String = conn
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .map_err(|e| format!("{}: integrity check failed: {e}", store.display()))?;
+            if result == "ok" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: database disk image is malformed: integrity check failed: {result}",
+                    store.display()
+                ))
+            }
+        });
+        if let Err(error) = check {
+            let parent = store.parent().unwrap_or_else(|| Path::new("."));
+            let root = if parent.file_name().is_some_and(|name| name == "db") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            let attention = root.join("questions.jsonl");
+            let mut identity = Sha256::new();
+            identity.update(store.as_os_str().as_encoded_bytes());
+            if let Ok(meta) = store.metadata() {
+                identity.update(meta.dev().to_le_bytes());
+                identity.update(meta.ino().to_le_bytes());
+            }
+            let id = format!("q-store-{:x}", identity.finalize());
+            let row = serde_json::json!({"ts": chrono::Utc::now().to_rfc3339(), "type": "operator_question", "source": "rust", "data": {"question_id": id, "question": error, "ask": "Recover an offline copy of the event store; pause writers before any separately approved installation.", "asker": "event-store", "node": "none", "context": {"blocked_because": error, "unknowns": "The original corruption interleaving and live installation safety have not been verified."}, "subject": "event-store-integrity", "blocks": []}});
+            use std::io::Write;
+            let notice = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&attention)
+                .and_then(|mut file| writeln!(file, "{row}"));
+            return Err(match notice {
+                Ok(()) => format!("{error}; write refused; attention: {}", attention.display()),
+                Err(e) => format!(
+                    "{error}; write refused; attention {} failed: {e}",
+                    attention.display()
+                ),
+            });
+        }
+    }
     let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;
     observation::ensure_observation_tables(&conn)
@@ -354,6 +386,10 @@ fn open_store(store: &Path) -> Result<Connection, String> {
 }
 
 /// Read-only handle for history readers; a failure names the store path.
+pub(crate) fn upgrade_role_store(store: &Path) -> Result<(), String> {
+    open_store(store).map(|_| ())
+}
+
 pub fn open_read(store: &Path) -> Result<Connection, String> {
     let conn = crate::store_conn::open_read(store)?;
     refuse_newer_schema(&conn, store)?;
@@ -415,6 +451,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
         migrate_caused_by(conn)?;
+        crate::role_migration::upgrade_event_store(conn)?;
         return stamp_coverage_epoch(conn, store);
     }
     let has_events: bool = conn
@@ -462,6 +499,7 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
     tx.commit()
         .map_err(|e| format!("{}: migration: {e}", store.display()))?;
     migrate_caused_by(conn)?;
+    crate::role_migration::upgrade_event_store(conn)?;
     stamp_coverage_epoch(conn, store)
 }
 
@@ -700,13 +738,6 @@ fn import_file(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FileTally::default()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // Offsets are BYTE offsets into the raw file, never into a lossy string:
-    // a conversion that resizes bytes would desync the stored cursor.
-    let head_hash: Vec<u8> = {
-        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
-        Sha256::digest(first).to_vec()
-    };
     let (dev, ino, len) = (meta.dev() as i64, meta.ino() as i64, meta.len());
     let resume: Option<(Vec<u8>, i64)> = tx
         .query_row(
@@ -716,6 +747,28 @@ fn import_file(
         )
         .optional()
         .map_err(|e| sql_error(&e))?;
+    // A frozen journal is read on every import. When the cursor already sits
+    // at EOF under the same head line, a bounded head read proves there is
+    // nothing new; only the cursor's age is refreshed so prune keeps it.
+    if let Some((head, offset)) = &resume {
+        if u64::try_from(*offset).is_ok_and(|o| o == len)
+            && read_head_hash(path).as_ref() == Some(head)
+        {
+            tx.execute(
+                "UPDATE ingest_cursor SET updated_ms = ?3 WHERE dev = ?1 AND ino = ?2",
+                params![dev, ino, now_ms],
+            )
+            .map_err(|e| sql_error(&e))?;
+            return Ok(FileTally::default());
+        }
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Offsets are BYTE offsets into the raw file, never into a lossy string:
+    // a conversion that resizes bytes would desync the stored cursor.
+    let head_hash: Vec<u8> = {
+        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
+        Sha256::digest(first).to_vec()
+    };
     // Resume only when the head line still hashes equal AND the file has not
     // shrunk under the cursor; anything else re-reads from zero and lets
     // row_hash dedupe the overlap.
@@ -877,7 +930,7 @@ fn is_valid_event_scope(event_type: &str, _data: &serde_json::Value, scope: &str
         return is_canonical_team_scope(scope);
     }
     // A stop_decision with no team scope remains an auditable event: the
-    // correlated session row is what lead admission reads, and a fresh heir
+    // correlated session row is what lead admission reads, and a fresh successor
     // journals exactly there - before init writes the manifest that would
     // carry its scope.
     event_type == "stop_decision"
@@ -1046,12 +1099,86 @@ pub fn append_envelope(
     let row_hash = Sha256::digest(line.as_bytes()).to_vec();
     let class = retention_class(&ty);
 
+    // Python's door client already retries the same policy
+    // (store_client.py:213): the store's 5s busy wait expires under
+    // fork-heavy contention, and one expired wait must not lose the row.
+    // The event id is the sha256 of the line, so a retried append reads
+    // back as an idempotent hit, never a duplicate.
+    let mut last_error = String::new();
+    for attempt in 0..APPEND_ATTEMPTS {
+        match commit_envelope(&store, line, &event_id, &row_hash, &ty, class, obj, ts_ms) {
+            Ok(receipt) => return Ok(receipt),
+            Err(error) => {
+                let settled = !lock_busy(&error) || attempt + 1 == APPEND_ATTEMPTS;
+                last_error = error;
+                if settled {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250 * (attempt as u64 + 1)));
+            }
+        }
+    }
+    report_lost_row(&store, &ty, &last_error);
+    Err(last_error)
+}
+
+/// How many commit attempts [`append_envelope`] makes before the row is
+/// reported lost. Python's store_client carries the same bound.
+const APPEND_ATTEMPTS: usize = 3;
+
+/// The diagnostic SQLite answers when the busy wait expired. Python's
+/// store_client matches the same string at store_client.py:232.
+fn lock_busy(error: &str) -> bool {
+    error.contains("database is locked")
+}
+
+/// The dead-letter line a finally-lost row leaves behind: every commit
+/// attempt failed, the row exists nowhere, and a plain file append is the
+/// only trace that does not contend with the store that refused the write.
+/// Best-effort by design: a failed sidecar write eprintlns, and the
+/// original error still returns to the caller.
+fn report_lost_row(store: &Path, type_name: &str, error: &str) {
+    use std::io::Write;
+    let sidecar = PathBuf::from(format!("{}.lost.jsonl", store.display()));
+    let row = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": type_name,
+        "store": store.display().to_string(),
+        "error": error,
+    });
+    let write = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&sidecar)
+        .and_then(|mut file| writeln!(file, "{row}"));
+    if let Err(e) = write {
+        eprintln!(
+            "event store: lost {type_name:?} row and could not record it in {}: {e}",
+            sidecar.display()
+        );
+    }
+}
+
+/// One commit attempt: the exact body `append_envelope` ran before the
+/// retry loop existed, from the directory create through the positive
+/// readback. Deterministic ids make any attempt after a half-landed
+/// predecessor an idempotent hit.
+fn commit_envelope(
+    store: &Path,
+    line: &str,
+    event_id: &str,
+    row_hash: &[u8],
+    ty: &str,
+    class: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    ts_ms: i64,
+) -> Result<AppendReceipt, String> {
     // The commit creates the directory it needs; the caller-side guards
     // (Python's hermetic fence, the shell's opt-in parent guard) already ran.
     if let Some(parent) = store.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", store.display()))?;
     }
-    let mut conn = open_store(&store)?;
+    let mut conn = open_store(store)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("{}: {e}", store.display()))?;
@@ -1070,8 +1197,8 @@ pub fn append_envelope(
         tx.commit()
             .map_err(|e| format!("{}: {e}", store.display()))?;
         return Ok(AppendReceipt {
-            store,
-            event_id: event_id.clone(),
+            store: store.to_path_buf(),
+            event_id: event_id.to_string(),
             seq,
             retention_class: class.to_string(),
             inserted: false,
@@ -1110,8 +1237,8 @@ pub fn append_envelope(
             tx.commit()
                 .map_err(|e| format!("{}: {e}", store.display()))?;
             return Ok(AppendReceipt {
-                store,
-                event_id,
+                store: store.to_path_buf(),
+                event_id: event_id.to_string(),
                 seq: 0,
                 retention_class: class.to_string(),
                 inserted: false,
@@ -1165,8 +1292,8 @@ pub fn append_envelope(
     tx.commit()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     Ok(AppendReceipt {
-        store,
-        event_id,
+        store: store.to_path_buf(),
+        event_id: event_id.to_string(),
         seq,
         retention_class: class.to_string(),
         inserted: inserted > 0,
@@ -1209,6 +1336,10 @@ pub struct EventQuery {
     /// asked for by name; a gate never satisfies itself on one.
     pub include_rejected: bool,
     pub limit: Option<u32>,
+    /// Commit-order window `after_seq < seq <= until_seq`: an incremental
+    /// reader keeps `after_seq` as its cursor and reads only newer rows.
+    pub after_seq: Option<i64>,
+    pub until_seq: Option<i64>,
 }
 
 impl EventQuery {
@@ -1251,6 +1382,12 @@ impl EventQuery {
         if let Some(v) = self.until_ms {
             push("ts_ms <= ?".into(), Box::new(v));
         }
+        if let Some(v) = self.after_seq {
+            push("seq > ?".into(), Box::new(v));
+        }
+        if let Some(v) = self.until_seq {
+            push("seq <= ?".into(), Box::new(v));
+        }
         if let Some(v) = self.scope.clone() {
             push("(scope = ? OR scope IS NULL)".into(), Box::new(v));
         }
@@ -1282,7 +1419,7 @@ impl EventQuery {
         };
         let limit_sql = self
             .limit
-            .map(|n| format!(" LIMIT {n}"))
+            .map(|n| format!(" ORDER BY seq LIMIT {n}"))
             .unwrap_or_default();
         let history = if recovery {
             "EXISTS(SELECT 1 FROM recovery_history h WHERE h.event_id = events.event_id)"
@@ -1294,7 +1431,28 @@ impl EventQuery {
         } else {
             "NULL"
         };
-        (format!("SELECT seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch} FROM events{where_sql} ORDER BY seq{limit_sql}"), args)
+        let columns = format!("seq, event_id, ts_ms, type, source, scope, retention_class, reject_reason, line, {history}, {batch}");
+        // An indexed filter reads rows out of commit order. The filter then
+        // picks seqs in a subquery, so the sort holds integers only. Sorting
+        // the selected rows sorted every `line` in a temp B-tree, which
+        // spilled gigabytes to disk on each daemon tick. With no indexed
+        // filter, a plain scan is already in seq order.
+        let indexed = !self.types.is_empty()
+            || self.scope.is_some()
+            || self.session_id.is_some()
+            || self.node_id.is_some()
+            || self.pr_number.is_some()
+            || self.head_sha.is_some();
+        let sql = if indexed {
+            format!("SELECT {columns} FROM events WHERE seq IN (SELECT seq FROM events{where_sql}{limit_sql}) ORDER BY seq")
+        } else {
+            let limit = self
+                .limit
+                .map(|n| format!(" LIMIT {n}"))
+                .unwrap_or_default();
+            format!("SELECT {columns} FROM events{where_sql} ORDER BY seq{limit}")
+        };
+        (sql, args)
     }
 }
 
@@ -1323,6 +1481,14 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// The newest committed seq, or 0 for an empty store: the high-water mark an
+/// incremental reader bounds one pass by and stores as its next cursor.
+pub fn max_seq(journal: &Path) -> Result<i64, String> {
+    let conn = open_read(&store_path(journal))?;
+    conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))
         .map_err(|e| e.to_string())
 }
 

@@ -30,6 +30,13 @@ admit() {
         repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
         rc=0
         fno-agents test-run ${mode}-admit --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
+        if [[ "$rc" -eq 86 ]]; then
+            # Slot-busy is policy, not breakage: the door printed the answer
+            # ("commit, push, CI runs it"). Stop the compile or run here;
+            # failing open would build unadmitted under the very saturation
+            # the gate exists to cap.
+            exit 86
+        fi
         if [[ "$rc" -ge 128 ]]; then
             # A signal stopped the wait: cargo is stopping, so compile or
             # run nothing.
@@ -165,6 +172,10 @@ esac
 
 if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}"
+    # 0 stops the server exiting on idle mid-build, which fell compiles back
+    # to local rustc under fleet load. The daemon sets the same default; this
+    # keeps an operator's shorter override working.
+    export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
     # The fleet cache lives under the build-dir base so one reclaim lane owns
     # the whole tree. The rc export and fill_sccache_env set it first; this
     # default only covers shells that predate them.

@@ -176,6 +176,18 @@ fno agents logs worker-codex --follow
 | 13 | codex / gemini attach refused |
 | 14 | claude not on PATH |
 
+## Continue a session on another computer
+
+A session's state is its transcript plus the repo state it describes. To pick a session up on another machine, move the transcript and resume there.
+
+Stop the session on the first machine first. Two writers on one transcript diverge, and fno does not police that. Push the branch.
+
+Copy the transcript folder by whatever moves files for you: any sync tool, AirDrop, scp. fno assumes none of them and sends nothing off the machine. `fno agents history <session-id>` prints the exact path on its `transcript:` line. Claude keys the transcript folder on the cwd, so `$HOME` and the repo path must match on both machines.
+
+On the second machine, check out the branch, then run `fno agents adopt <session-id>` and `fno agents resume <name>`, or `claude --resume <id>` directly. `fno agents history <session-id>` now prints the `transcript:` and `origin:` lines: the full path, and the machine, host, harness and session id the session began with, recorded beside the transcript in `<session-id>.fno.json`.
+
+A different harness is a handoff doc plus `/fno:agent handoff <doc> <provider>`, never transcript conversion. The doc's frontmatter carries the same `origin:` block, so a later reader can find the full transcript.
+
 ## When to use what
 
 | Scenario | Verb |

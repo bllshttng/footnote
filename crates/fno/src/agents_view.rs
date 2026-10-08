@@ -138,16 +138,16 @@ pub struct RegistryAgent {
     /// The spawn-stamped team altitude (0 VP / 1 Director / 2 IC), mesh-owned;
     /// `None` = an un-teamed leaf. Read-only here - the sideline orders and
     /// indents by it, the mux never writes it.
-    pub crown_level: Option<u32>,
+    pub role_level: Option<u32>,
     /// The project/epic/node id the team rules over, for the inline team badge.
-    pub crown_scope: Option<String>,
+    pub role_scope: Option<String>,
     /// (v94) The role's people title read from team_names.json; None when
     /// the store has none.
-    pub crown_title: Option<String>,
+    pub role_title: Option<String>,
     /// The session id this row was spawned by - the lineage join key,
     /// matched against other rows' `harness_session_id`. `None` = no recorded
     /// parent (a root, as far as the renderer can know). Distinct from
-    /// `crown_level`, a fixed authority rank: lineage is who spawned whom.
+    /// `role_level`, a fixed authority rank: lineage is who spawned whom.
     pub spawned_by_session: Option<String>,
     /// The served CHILD/PEER word for this row's spawn edge, read from the
     /// registry row. `None` (a pre-v32 row) renders flat like a peer.
@@ -1409,7 +1409,7 @@ fn encode_claim_key(key: &str) -> String {
 /// an unreadable hostname fails toward "not live".
 ///
 /// NOT an identity: see `is_same_machine` below. This is only the legacy arm.
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if rc != 0 {
@@ -1470,7 +1470,7 @@ fn platform_machine_id() -> String {
 /// `claims.rs::machine_id`). `gethostname(2)` moves under a roaming laptop,
 /// which read as cross-host and dropped a live claim to stale, and stale is
 /// stealable. Never substitutes the hostname: a present value is authoritative.
-fn machine_id() -> String {
+pub(crate) fn machine_id() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CACHE.get_or_init(platform_machine_id).clone()
 }
@@ -2029,12 +2029,12 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         .max();
         // (US9 team) Mesh-owned role metadata, additive: absent -> un-teamed.
         // Parsed tolerantly like every other field; the FILE is the contract.
-        let crown_level = row
-            .get("crown_level")
+        let role_level = row
+            .get("role_level")
             .and_then(|v| v.as_u64())
             .map(|n| n as u32);
-        let crown_scope = row
-            .get("crown_scope")
+        let role_scope = row
+            .get("role_scope")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -2043,7 +2043,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         // the sideline falls back to the scope.
         let team_titles =
             crate::org_titles::titles(&registry_path().with_file_name("team_names.json"));
-        let crown_title = crown_scope
+        let role_title = role_scope
             .as_ref()
             .and_then(|scope| team_titles.get(scope.trim()).cloned());
         // Succession re-homes the org: the CURRENT owner edge (the row's
@@ -2242,9 +2242,9 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             claude_session_uuid,
             log_path,
             updated_at,
-            crown_level,
-            crown_scope,
-            crown_title,
+            role_level,
+            role_scope,
+            role_title,
             spawned_by_session,
             lineage_kind,
             spawned_by_name: None,
@@ -2511,9 +2511,9 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             log_path: None,
             updated_at: None,
             // A roster worker carries no team (team is an fno-registry fact).
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
+            role_level: None,
+            role_scope: None,
+            role_title: None,
             spawned_by_session: None,
             lineage_kind: None,
             spawned_by_name: None,
@@ -2581,9 +2581,9 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             claude_session_uuid: Some(id.to_string()),
             log_path: None,
             updated_at: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
+            role_level: None,
+            role_scope: None,
+            role_title: None,
             spawned_by_session: r.harness_session_id.clone(),
             // A parked fork belongs to its own worker: a CHILD of it.
             lineage_kind: Some("child".into()),
@@ -2904,19 +2904,22 @@ mod tests {
     #[test]
     fn derive_rows_reads_the_owner_edge_over_the_birth_edge() {
         // Succession re-homes the org. The FILE keeps the birth
-        // edge (the abdicated lead) as history; the sideline joins the
-        // CURRENT owner, so the lead label names the heir.
-        let raw = reg(r#"{"name":"kestrel-heir","cwd":"/w","status":"live",
-                 "harness_session_id":"01a0ee3f-heir"},
+        // edge (the stepped_down lead) as history; the sideline joins the
+        // CURRENT owner, so the lead label names the successor.
+        let raw = reg(r#"{"name":"kestrel-successor","cwd":"/w","status":"live",
+                 "harness_session_id":"01a0ee3f-successor"},
                {"name":"xfcb4-w5","cwd":"/w","status":"live",
                  "spawned_by_session":"bf388b2e-lead",
                  "spawn_provenance":{"origin":{"kind":"session"},
                    "owner":{"kind":"session","harness":"codex",
-                            "session_id":"01a0ee3f-heir","cwd":"/w"}}}"#);
+                            "session_id":"01a0ee3f-successor","cwd":"/w"}}}"#);
         let rows = merge_rows(derive_rows(&raw, NOW).unwrap(), &[]);
         let kid = rows.iter().find(|r| r.name == "xfcb4-w5").unwrap();
-        assert_eq!(kid.spawned_by_session.as_deref(), Some("01a0ee3f-heir"));
-        assert_eq!(kid.spawned_by_name.as_deref(), Some("kestrel-heir"));
+        assert_eq!(
+            kid.spawned_by_session.as_deref(),
+            Some("01a0ee3f-successor")
+        );
+        assert_eq!(kid.spawned_by_name.as_deref(), Some("kestrel-successor"));
     }
 
     #[test]
@@ -3697,20 +3700,20 @@ unheard_of_field = true
         // RegistryAgent; an un-teamed row carries None (additive, absence-safe).
         let raw = reg(
             r#"{"name":"dir","cwd":"/w","status":"live","provider":"claude",
-                "crown_level":1,"crown_scope":"epic-x"},
+                "role_level":1,"role_scope":"epic-x"},
                {"name":"leaf","cwd":"/w","status":"live","provider":"claude"},
                {"name":"partial","cwd":"/w","status":"live","provider":"claude",
-                "crown_level":0,"crown_scope":""}"#,
+                "role_level":0,"role_scope":""}"#,
         );
         let rows = derive_rows(&raw, NOW).unwrap();
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
-        assert_eq!(get("dir").crown_level, Some(1));
-        assert_eq!(get("dir").crown_scope.as_deref(), Some("epic-x"));
-        assert_eq!(get("leaf").crown_level, None, "un-teamed => None");
-        assert_eq!(get("leaf").crown_scope, None);
+        assert_eq!(get("dir").role_level, Some(1));
+        assert_eq!(get("dir").role_scope.as_deref(), Some("epic-x"));
+        assert_eq!(get("leaf").role_level, None, "un-teamed => None");
+        assert_eq!(get("leaf").role_scope, None);
         // An empty scope string degrades to None (the badge then shows `?`).
-        assert_eq!(get("partial").crown_level, Some(0));
-        assert_eq!(get("partial").crown_scope, None, "empty scope => None");
+        assert_eq!(get("partial").role_level, Some(0));
+        assert_eq!(get("partial").role_scope, None, "empty scope => None");
     }
 
     #[test]
@@ -4372,9 +4375,9 @@ config_dir = "~/.claude-alt"
             claude_session_uuid: None,
             log_path: None,
             updated_at: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_title: None,
+            role_level: None,
+            role_scope: None,
+            role_title: None,
             liveness: if exited {
                 Liveness::Dead
             } else {

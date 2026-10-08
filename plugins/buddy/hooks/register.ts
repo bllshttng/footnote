@@ -1,24 +1,32 @@
 import type { EngineInterface, On } from 'claude-code'
 
-import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, embody, hatch, restore } from './companion'
-import { IDLE_SEQUENCE, PET_HEARTS, renderFace, renderSprite } from './sprites'
-import { type FeedRow, cleanPersonality, cleanReaction, narrate, personalityPrompt, quickLine, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
+import { type Companion, type Soul, RARITY_COLORS, RARITY_STARS, RARITY_THEME, STAT_NAMES, type StatName, embody, hatch, restore } from './companion'
+import { HATCH_FRAMES, HATCH_FRAME_MS, HATCH_MIN_ROUNDS, HATCH_WOBBLE, IDLE_SEQUENCE, PET_HEARTS, RAINBOW, renderFace, renderSprite } from './sprites'
+import { type FeedRow, addressedBy, cleanPersonality, cleanReaction, idlePrompt, lastPrompt, loudReason, type Reason, turnOutput, newsFact, newsPrompt, personalityPrompt, reactionPrompt, summarizeTurn, systemPrompt } from './voice'
 
 const TICK_MS = 500
 const BUBBLE_MS = 30_000
 // After this long with nothing said, the buddy says a canned line (no model call).
-const IDLE_TALK_MS = 45_000
+// Quiet this long, the buddy says something of its own: one model call, like a reaction.
+const IDLE_TALK_MS = 120_000
 const PET_MS = 2_500
-const MIN_TURN_MS = 5_000
-const REACT_GAP_MS = 10_000
+// The original's gap between ordinary turn reactions.
+const REACT_GAP_MS = 30_000
 const FEED_MS = 120_000
 const FEED_WINDOW_S = 600
 const FLEET_MS = 300_000
 // A buddy that drew within this window has someone looking at it.
 const SEEN_MS = 5_000
+// The status line runs in every live session, hidden mux panes too, so a draw does not mean a
+// person is there. In an fno mux pane the mux names the panes on screen; elsewhere a key typed
+// in this session's prompt box within this window stands in for that.
+const TYPED_MS = 600_000
 // The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
 const FRAME_REFRESH_MS = 10_000
 const PANE_ID = 'buddy'
+// The /buddy card opens here, focused, so any key closes it like the original.
+const CARD_ID = 'buddy-card'
+let cardSnap: Shown | undefined
 const PANE_COLUMNS = 24
 const WRAPPER = 'statusline.py'
 // bbb: bring back buddy.
@@ -27,13 +35,29 @@ const COMMANDS = ['buddy', 'bbb']
 let buddy: Companion | null = null
 let muted = false
 let tick = 0
-let turns = 0
 let bubble: { text: string; at: number } | null = null
 let pettedAt = -Infinity
 let drawnAt = -Infinity
+let typedAt = -Infinity
+// The mux's on-screen file and this session's pane in it; '' outside an fno mux pane.
+let muxVisible = ''
+let muxPane = 0
+// Null when there is no mux answer to read.
+let onScreen: boolean | null = null
 let paneDrawnAt = -Infinity
 let paneAsked = false
 let reactedAt = -Infinity
+let recent: string[] = []
+// The /buddy output row draws as the card; a fresh soul's first card plays the hatch first.
+const CARD_MARK = '\u2063'
+const HATCH_MARK = '\u2064'
+type Shown = { c: Companion; last: string; r: Rerolls; hatchAt?: number; crackAt?: number }
+const shown = new Map<string, Shown>()
+let pending: Shown | undefined
+let hatchUntil = -Infinity
+// False while a fresh soul waits for its model-written personality; the hatch holds on the wobble until then.
+let personalityDone = true
+let lastSaid = ''
 let feedSince = 0
 let feedOff = false
 let fleet = ''
@@ -74,7 +98,47 @@ async function load($: EngineInterface, now: number): Promise<void> {
   await $.store.set('soul', soul)
   buddy = embody(soul)
   say(welcome ?? `hi. i'm ${buddy.name}.`, now)
-  if (fresh) void givePersonality($)
+  if (fresh) {
+    personalityDone = false
+    void givePersonality($)
+  }
+}
+
+// The soul is shared by every session on the machine. A roll or a new personality in one
+// session rewrites it; the others take it here, so all sessions show the same buddy.
+async function syncSoul($: EngineInterface): Promise<void> {
+  const saved = (await $.store.get('soul')) as Soul | undefined
+  if (!buddy || !saved?.seed) return
+  if (saved.seed === buddy.seed && saved.name === buddy.name && saved.personality === buddy.personality) return
+  if (saved.seed !== buddy.seed) {
+    recent = []
+    lastSaid = ''
+    // Drop the old buddy's line but keep its time, so the swap does not start an idle call.
+    if (bubble) bubble = { text: '', at: bubble.at }
+  }
+  buddy = embody(saved)
+}
+
+// A model call is spent only where a person can see the answer.
+function attended(now: number): boolean {
+  return onScreen ?? now - typedAt < TYPED_MS
+}
+
+async function readOnScreen($: EngineInterface): Promise<void> {
+  if (!muxVisible) return
+  try {
+    onScreen = (JSON.parse(await $.fs.read(muxVisible)).panes ?? []).includes(muxPane)
+  } catch {
+    // An older mux writes no file: fall back to typing.
+    onScreen = null
+  }
+}
+
+// Idle talk is one line for the whole machine: the first attended session past the gap says it.
+async function claimIdle($: EngineInterface, now: number): Promise<boolean> {
+  if (now - (Number(await $.store.get('idleAt')) || -Infinity) < IDLE_TALK_MS) return false
+  await $.store.set('idleAt', now)
+  return true
 }
 
 // An fno release from before the move still loads its own copy of the buddy, which stamps fno's
@@ -126,7 +190,7 @@ async function givePersonality($: EngineInterface): Promise<void> {
   const c = buddy
   if (!c) return
   try {
-    const reply = await $.model.complete({ model: 'haiku', prompt: personalityPrompt(c, c.seed), maxTokens: 120, timeoutMs: 20_000 })
+    const reply = await $.model.complete({ model: 'haiku', prompt: personalityPrompt(c, c.seed), maxTokens: 200, timeoutMs: 20_000 })
     const personality = reply.isAnswered ? cleanPersonality(reply.text) : null
     if (!personality || buddy?.seed !== c.seed) return
     const soul: Soul = { seed: c.seed, name: c.name, personality, hatchedAt: c.hatchedAt, ...(c.species ? { species: c.species } : {}) }
@@ -134,6 +198,8 @@ async function givePersonality($: EngineInterface): Promise<void> {
     buddy = embody(soul)
   } catch {
     // The placeholder personality stays; the buddy still talks.
+  } finally {
+    if (buddy?.seed === c.seed) personalityDone = true
   }
 }
 
@@ -177,6 +243,106 @@ async function rerolls($: EngineInterface, now: number, shippedAt: number[] = []
   const r = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now), shippedAt)
   await $.store.set('rerolls', r)
   return r
+}
+
+// The original card: rarity and species on top, the sprite, the name, the quoted personality,
+// the stat bars, and the last thing it said.
+function cardTree(ui: any, c: Companion, said: string, r: Rerolls): any {
+  const { Box, Text } = ui
+  const color = RARITY_THEME[c.rarity]
+  const stat = (s: StatName) => {
+    const v = c.stats[s]
+    const n = Math.round(v / 10)
+    return Box({ flexDirection: 'row', children: [Box({ width: 11, children: [Text({ children: [s] })] }), Text({ children: ['█'.repeat(n) + '░'.repeat(10 - n) + ' '] }), Text({ dimColor: true, children: [String(v).padStart(3)] })] })
+  }
+  return Box({
+    flexDirection: 'column',
+    borderStyle: 'round',
+    borderColor: color,
+    paddingX: 2,
+    paddingY: 1,
+    width: 40,
+    flexShrink: 0,
+    children: [
+      Box({ justifyContent: 'space-between', children: [Text({ bold: true, color, children: [`${RARITY_STARS[c.rarity]} ${c.rarity.toUpperCase()}`] }), Text({ color, children: [c.species.toUpperCase()] })] }),
+      ...(c.shiny ? [Text({ color: 'warning', bold: true, children: ['✨ SHINY ✨'] })] : []),
+      Box({ flexDirection: 'column', marginY: 1, children: drawArt(ui, c, renderSprite(c, 0)) }),
+      Text({ bold: true, children: [c.name] }),
+      Box({ marginY: 1, children: [Text({ dimColor: true, italic: true, children: [`"${c.personality}"`] })] }),
+      Box({ flexDirection: 'column', children: STAT_NAMES.map(stat) }),
+      ...(said
+        ? [Box({ flexDirection: 'column', marginTop: 1, children: [Text({ dimColor: true, children: ['last said'] }), Box({ borderStyle: 'round', borderColor: 'inactive', paddingX: 1, children: [Text({ dimColor: true, italic: true, children: [said] })] })] })]
+        : []),
+      Box({ marginTop: 1, children: [Text({ dimColor: true, children: [`rerolls ${r.bank}/${REROLL_BANK}`] })] }),
+    ],
+  })
+}
+
+// The hatch while it plays, then the card; in the focused pane, with the original's footer and a key to close.
+function showTree(ui: any, snap: Shown, now: number, close: any): any {
+  if (snap.hatchAt === undefined) return close ? ui.Box({ flexDirection: 'column', children: [cardTree(ui, snap.c, snap.last, snap.r), ui.Box({ marginTop: 1, children: [close] })] }) : cardTree(ui, snap.c, snap.last, snap.r)
+  const tick = Math.floor((now - snap.hatchAt) / HATCH_FRAME_MS)
+  // The soul is ready once the model wrote its personality, or after 8 s without one.
+  const ready = (buddy?.seed === snap.c.seed && personalityDone) || now - snap.hatchAt > 8_000
+  if (snap.crackAt === undefined && ready && tick >= HATCH_MIN_ROUNDS * HATCH_WOBBLE) snap.crackAt = tick
+  const frame = snap.crackAt === undefined ? tick % HATCH_WOBBLE : Math.min(HATCH_WOBBLE + tick - snap.crackAt, HATCH_FRAMES.length)
+  if (frame >= HATCH_FRAMES.length) {
+    const c = buddy?.seed === snap.c.seed ? buddy : snap.c
+    const said = lastSaid || snap.last
+    const { Box, Text } = ui
+    return Box({
+      flexDirection: 'column',
+      children: [
+        cardTree(ui, c, said, snap.r),
+        Box({
+          flexDirection: 'column',
+          marginTop: 1,
+          children: [
+            Text({ dimColor: true, children: [`${c.name} is here · it'll chime in as you code`] }),
+            Text({ dimColor: true, children: ['each line is one small model call on your plan'] }),
+            Text({ dimColor: true, children: ['say its name to get its take · /buddy pet · /buddy off'] }),
+            ...(close ? [Box({ marginTop: 1, children: [close] })] : []),
+          ],
+        }),
+      ],
+    })
+  }
+  const f = HATCH_FRAMES[frame]!
+  const { Box, Text } = ui
+  return Box({
+    flexDirection: 'column',
+    alignItems: 'center',
+    borderStyle: 'round',
+    borderColor: RAINBOW[tick % RAINBOW.length],
+    paddingY: 1,
+    children: [
+      ...f.lines.map(l => Text({ children: [' '.repeat(1 + f.offset) + l + ' '.repeat(1 - f.offset)] })),
+      Box({
+        flexDirection: 'column',
+        alignItems: 'center',
+        marginTop: 1,
+        children: [
+          Text({ dimColor: true, children: ['hatching a coding buddy…'] }),
+          Text({ dimColor: true, children: ["it'll watch you work and occasionally have opinions"] }),
+        ],
+      }),
+    ],
+  })
+}
+
+// What a fresh buddy sees first, as the original read it: the package name and the last commits.
+async function projectContext($: EngineInterface): Promise<string> {
+  const root = await $.session.root().catch(() => '')
+  const parts: string[] = []
+  try {
+    const pkg = JSON.parse(await $.fs.read(`${root}/package.json`))
+    if (pkg.name) parts.push(`project: ${pkg.name}${pkg.description ? ' - ' + pkg.description : ''}`)
+  } catch {
+    // No package.json.
+  }
+  const log = await $.process.run(['git', '-C', root || '.', 'log', '--oneline', '-n', '3'], { timeoutMs: 5_000 }).catch(() => null)
+  if (log?.exitCode === 0 && log.stdout.trim()) parts.push(`recent commits:\n${log.stdout.trim()}`)
+  return parts.join('\n') || '(fresh project, nothing to see yet)'
 }
 
 function rerollLine(r: Rerolls): string {
@@ -282,20 +448,52 @@ async function statuslineOff($: EngineInterface): Promise<{ ok: boolean; text: s
   return { ok: true, text }
 }
 
-async function react($: EngineInterface): Promise<void> {
-  if (!buddy) return
-  const summary = summarizeTurn(await $.session.messages())
-  if (!summary.trim()) return
+// The original observer: one model call per reaction. Loud turns, a mention of the name, a pet,
+// and a hatch skip the quiet gap; an ordinary turn waits it out. The last three lines ride along
+// so the buddy does not repeat itself.
+async function react($: EngineInterface, why: Reason | 'idle' = 'turn', context?: string): Promise<void> {
+  const c = buddy
+  if (!c) return
+  const messages = await $.session.messages()
+  const summary = context ?? summarizeTurn(messages)
+  if (why === 'turn' && !summary.trim()) return
   const reply = await $.model.complete({
     model: 'haiku',
-    system: systemPrompt(buddy),
-    prompt: reactionPrompt(summary),
-    maxTokens: 80,
+    system: systemPrompt(c),
+    prompt: why === 'idle' ? idlePrompt(summary) : reactionPrompt(summary, why, recent),
+    maxTokens: 160,
     timeoutMs: 20_000,
   })
   const line = reply.isAnswered ? cleanReaction(reply.text) : ''
-  if (line) say(line, await $.clock.now())
+  if (!line || buddy?.seed !== c.seed) return
+  recent = [...recent, line].slice(-3)
+  lastSaid = line
+  const now = await $.clock.now()
+  say(line, now)
   $.ui.invalidate('ui.render')
+  await remember($, c, why, line, now)
+}
+
+// Every observation the buddy makes, one JSON row each, so you can read them back. The mods API
+// has no append, so each write rewrites the file; the cap keeps that cheap.
+// ponytail: two sessions writing at once can drop a row; an append call would fix it if the API gains one.
+const OBSERVATIONS_KEPT = 1000
+async function remember($: EngineInterface, c: Companion, why: string, line: string, now: number): Promise<void> {
+  const path = `${buddyDir()}/observations.jsonl`
+  let old: string[] = []
+  try {
+    old = (await $.fs.read(path)).split('\n').filter(Boolean)
+  } catch {}
+  // Two writes that cross can leave a torn row; drop it here so it does not stay in the file.
+  old = old.filter(row => {
+    try {
+      return JSON.parse(row) && true
+    } catch {
+      return false
+    }
+  })
+  const rows = [...old, JSON.stringify({ at: new Date(now).toISOString(), name: c.name, why, line })].slice(-OBSERVATIONS_KEPT)
+  await $.fs.write(path, rows.join('\n') + '\n').catch(() => {})
 }
 
 // One feed read serves every session on the machine: a read costs about 4 s of
@@ -330,17 +528,30 @@ async function readFeed($: EngineInterface, now: number): Promise<void> {
   if (!rows) return
   const before = refill((await $.store.get('rerolls')) as Rerolls | undefined, today(now)).bank
   const after = await rerolls($, now, rows.filter(row => row.kind === 'node_shipped').map(row => Date.parse(row.ts)).filter(Number.isFinite))
+  // Every session counts ships, so none is missed; an attended one tells them, once for the machine.
+  if (!attended(now)) return
+  let since = Math.max(feedSince, Number(await $.store.get('newsSince')) || 0)
   let line: string | null = null
   for (const row of rows) {
     const at = Math.floor(Date.parse(row.ts) / 1000)
-    if (!(at >= feedSince)) continue
-    feedSince = Math.max(feedSince, at + 1)
-    line = narrate(row) ?? line
+    if (!(at >= since)) continue
+    since = Math.max(since, at + 1)
+    line = newsFact(row) ?? line
   }
-  if (after.bank > before) line = `${line ? line + ' ' : ''}+1 reroll (${after.bank}/${REROLL_BANK}).`
+  feedSince = since
+  await $.store.set('newsSince', since)
+  const earned = after.bank > before ? `+1 reroll (${after.bank}/${REROLL_BANK})` : ''
+  if (line && buddy) {
+    const c = buddy
+    const reply = await $.model.complete({ model: 'haiku', system: systemPrompt(c), prompt: newsPrompt(line), maxTokens: 160, timeoutMs: 20_000 }).catch(() => null)
+    // Unvoiced, the fact still gets through: a question waiting on the user must not vanish.
+    line = (reply?.isAnswered && cleanReaction(reply.text)) || line
+  }
+  line = [line, earned].filter(Boolean).join(' ')
   if (line) {
     say(line, now)
     $.ui.invalidate('ui.render')
+    if (buddy) await remember($, buddy, 'news', line, now)
   }
 }
 
@@ -381,7 +592,7 @@ async function readFleet($: EngineInterface, now: number): Promise<void> {
 }
 
 function talking(now: number): string | null {
-  return bubble && now - bubble.at < BUBBLE_MS ? bubble.text : null
+  return bubble?.text && now - bubble.at < BUBBLE_MS ? bubble.text : null
 }
 
 function sprite(c: Companion, now: number): string[] {
@@ -420,6 +631,21 @@ async function writeFrame($: EngineInterface, now: number): Promise<void> {
   await $.fs.write(`${buddyDir()}/frames/${sessionId}.json`, `{"at":${now},${frame.slice(1)}`)
 }
 
+const BUBBLE_COLUMNS = 34
+
+// Desktop sets text in a proportional font, which collapses the spaces in a sprite. There the
+// sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes a fixed color.
+let desktop = false
+const SVG_COLORS: Record<string, string> = { common: '#8a8a8a', uncommon: '#4caf50', rare: '#3fa7d6', epic: '#b36ae2', legendary: '#e0a526' }
+const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+function drawArt(ui: any, c: Companion, lines: string[]): any[] {
+  if (!desktop) return lines.map(line => ui.Text({ color: RARITY_THEME[c.rarity], children: [line] }))
+  const w = Math.ceil(Math.max(...lines.map(l => l.length)) * 8.4) + 2
+  const h = lines.length * 17
+  const rows = lines.map((l, i) => `<text x="0" y="${i * 17 + 13}" xml:space="preserve">${esc(l)}</text>`).join('')
+  return [ui.Svg({ alt: `${c.name} the ${c.species}`, width: w, height: h, source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" font-family="ui-monospace,Menlo,monospace" font-size="14" fill="${SVG_COLORS[c.rarity]}">${rows}</svg>` })]
+}
+
 export function register(on: On) {
   on('session.start', async ($, e, next) => {
     const now = await $.clock.now()
@@ -432,6 +658,10 @@ export function register(on: On) {
     // A buddy that is off runs nothing at start: no process, no settings read.
     if (!muted) {
       stateDir = await resolveStateDir($)
+      // The fno mux sets both in each pane it hosts, and writes <mux dir>/<session>.visible.json.
+      const mux = await $.env.get('FNO_SESSION')
+      muxPane = Number(await $.env.get('FNO_PANE')) || 0
+      if (mux && muxPane && stateDir) muxVisible = `${(await $.env.get('FNO_MUX_DIR')) || `${stateDir}/mux`}/${mux}.visible.json`
       const settings = await readSettings($)
       wrapped = isOurs(settings?.statusLine)
       if (wrapped && stateDir) await installWrapper($).catch(() => {})
@@ -445,11 +675,14 @@ export function register(on: On) {
       tick += 1
       if (!buddy || muted) return
       const at = await $.clock.now()
-      if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS) {
-        turns += 1
-        say(quickLine(buddy, turns), at)
-      }
       if (tick % 4 === 0) {
+        await readOnScreen($)
+        if (at - drawnAt < SEEN_MS && at - (bubble?.at ?? -Infinity) > IDLE_TALK_MS && attended(at) && (await claimIdle($, at))) {
+          // Stamp first so a slow call is not asked twice; the line shows when it arrives.
+          bubble = { text: '', at }
+          react($, 'idle').catch(() => {})
+        }
+        await syncSoul($).catch(() => {})
         const was = wrapped
         wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
         if (wrapped && !was) await $.ui.close({ id: PANE_ID }).catch(() => {})
@@ -459,6 +692,9 @@ export function register(on: On) {
         drawnAt = at
         await writeFrame($, at).catch(() => {})
       } else if (at - drawnAt < SEEN_MS) $.ui.invalidate('ui.render')
+    })
+    $.clock.every(HATCH_FRAME_MS, async () => {
+      if ((await $.clock.now()) < hatchUntil) $.ui.invalidate('ui.render')
     })
     $.clock.every(FEED_MS, async () => readFeed($, await $.clock.now()))
     $.clock.every(FLEET_MS / 5, async () => readFleet($, await $.clock.now()))
@@ -512,38 +748,102 @@ export function register(on: On) {
       const r = await rerolls($, now)
       if (r.bank < 1) return { text: `${buddy!.name} stays. ${rerollLine(r)}.` }
       await $.store.set('rerolls', { ...r, bank: r.bank - 1 })
-      const soul = hatch(newSeed(), now)
+      let soul = hatch(newSeed(), now)
+      for (let i = 0; i < 20 && soul.name === buddy!.name; i++) soul = hatch(newSeed(), now)
       await $.store.set('soul', soul)
       buddy = embody(soul)
-      say(`hi. i'm ${buddy.name}.`, now)
+      recent = []
+      lastSaid = ''
+      personalityDone = false
       void givePersonality($)
     }
     if (arg === 'pet') {
       pettedAt = now
-      say('♥', now)
+      reactedAt = now
+      react($, 'pet', '(you were just petted)').catch(() => {})
     }
-    $.ui.invalidate('ui.render')
-    return { text: card(buddy!, await rerolls($, now)) }
+    const r = await rerolls($, now)
+    const fresh = (await $.store.get('hatchSeen')) !== buddy!.seed
+    if (fresh) {
+      await $.store.set('hatchSeen', buddy!.seed)
+      hatchUntil = now + 20_000
+      // Like the original, the hello comes once the soul is written, so it speaks as itself.
+      void (async () => {
+        for (let i = 0; i < 16 && !personalityDone; i++) await $.clock.sleep(500)
+        await react($, 'hatch', await projectContext($))
+      })().catch(() => {})
+    }
+    const snap: Shown = { c: buddy!, last: lastSaid, r, ...(fresh ? { hatchAt: now } : {}) }
+    try {
+      cardSnap = snap
+      await $.ui.open({ id: CARD_ID, title: buddy!.name, focus: true, closeOnEscape: true })
+      $.ui.invalidate('ui.render')
+      return { text: `${buddy!.name} the ${buddy!.species} · ${RARITY_STARS[buddy!.rarity]} ${buddy!.rarity}` }
+    } catch {
+      // No pane here (a narrow terminal, another app): the card draws in the output row instead.
+      cardSnap = undefined
+      pending = snap
+      $.ui.invalidate('ui.render')
+      return { text: (fresh ? HATCH_MARK : CARD_MARK) + card(buddy!, r) }
+    }
+  })
+
+  on('prompt.edit', async ($, e, next) => {
+    typedAt = await $.clock.now()
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (buddy && !muted && !e.agentId && !e.isAborted && e.durationMs >= MIN_TURN_MS) {
+    if (buddy && !muted && !e.agentId && !e.isAborted) {
       const now = await $.clock.now()
-      turns += 1
-      say(quickLine(buddy, turns), now)
-      $.ui.invalidate('ui.render')
-      if (now - reactedAt >= REACT_GAP_MS && now - drawnAt < SEEN_MS) {
-        reactedAt = now
-        // Not awaited: the next prompt must not wait on the buddy's model call.
-        react($).catch(() => {})
+      if (now - drawnAt < SEEN_MS && attended(now)) {
+        const messages = await $.session.messages()
+        const why: Reason = addressedBy(lastPrompt(messages), buddy.name) ? 'addressed' : loudReason(turnOutput(messages)) ?? 'turn'
+        if (why !== 'turn' || now - reactedAt >= REACT_GAP_MS) {
+          reactedAt = now
+          // Not awaited: the next prompt must not wait on the buddy's model call.
+          react($, why).catch(() => {})
+        }
       }
     }
     return next(e)
   })
 
+  // The /buddy row: the card the original drew, or the hatch that leads into it.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
+    const text = String(e.props.text ?? '')
+    if (!text.startsWith(CARD_MARK) && !text.startsWith(HATCH_MARK)) return next(e)
+    let snap = shown.get(e.requestId)
+    if (!snap) {
+      if (!pending) return next(e)
+      snap = pending
+      pending = undefined
+      shown.set(e.requestId, snap)
+    }
+    return showTree($.ui.resolve(e), snap, await $.clock.now(), false)
+  })
+
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
+    if (e.requestId !== CARD_ID || !cardSnap) return next(e)
+    const ui = $.ui.resolve(e)
+    const shut = () => {
+      cardSnap = undefined
+      void $.ui.close({ id: CARD_ID }).catch(() => {})
+    }
+    // An empty field holds the focus: any typed key or Enter closes the card, and Esc does too.
+    // Desktop draws an Input as a text box, so there the card closes with a button or Esc.
+    const close = e.surface === 'desktop'
+      ? ui.Button({ key: 'close', label: 'close', onPress: shut })
+      : ui.Input({ key: 'close', placeholder: 'press any key', value: '', submitLabel: 'close', autoFocus: true, onInput: shut, onSubmit: shut })
+    return showTree(ui, cardSnap, await $.clock.now(), close)
+  })
+
   // The fallback when the status line is not wrapped: a narrow dock on the right,
   // the buddy standing at the bottom and its words above it.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    desktop = e.surface === 'desktop'
     if (e.requestId !== PANE_ID || !buddy || muted) return next(e)
     // One buddy on screen: a pane left open (a resumed session, a late open) closes once the status line has it.
     if (wrapped) {
@@ -560,9 +860,9 @@ export function register(on: On) {
       justifyContent: 'flex-end',
       height: e.props.scroll?.bodyRows ?? 12,
       children: [
-        ...(words ? [Text({ wrap: 'wrap', children: [words] }), Text({ children: [' '] })] : []),
+        ...(words ? [Box({ borderStyle: 'round', children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: ['  ◦ ·'] })] : []),
         ...(fleet ? [Text({ dimColor: true, wrap: 'wrap', children: [fleet] }), Text({ children: [' '] })] : []),
-        ...sprite(buddy, now).map(line => Text({ color, children: [line] })),
+        ...drawArt({ Text, Svg: $.ui.resolve(e).Svg }, buddy, sprite(buddy, now)),
         Button({ key: 'pet', label: buddy.name, hotkey: 'p', plain: true, dimColor: true, onPress: async () => {
           pettedAt = await $.clock.now()
           $.ui.invalidate('ui.render')
@@ -573,7 +873,9 @@ export function register(on: On) {
 
   // The band only holds a one-line face, and only where neither the status line nor the dock has the buddy.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!buddy || muted || wrapped || e.props.hasSurvey) return next(e)
+    desktop = e.surface === 'desktop'
+    // Desktop draws no status line but shares its settings, so a wrapped status line hides nothing there.
+    if (!buddy || muted || (wrapped && e.surface !== 'desktop') || e.props.hasSurvey) return next(e)
     const now = await $.clock.now()
     if (now - paneDrawnAt < SEEN_MS) return next(e)
     if (!paneAsked && e.viewport?.isFullscreen === true) {
@@ -583,6 +885,22 @@ export function register(on: On) {
     drawnAt = now
     const { Box, Text } = $.ui.resolve(e)
     const words = talking(now)
+    const art = sprite(buddy, now)
+    // Desktop has room above the input: the full buddy stands at the right edge, its bubble to its left.
+    if (e.surface === 'desktop' && (e.props.maxRows ?? 0) > art.length) {
+      const color = RARITY_THEME[buddy.rarity]
+      const ours = Box({
+        flexDirection: 'row',
+        justifyContent: 'flex-end',
+        alignItems: 'flex-end',
+        children: [
+          ...(words ? [Box({ borderStyle: 'round', width: BUBBLE_COLUMNS, children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: [' ◦ · '] })] : []),
+          Box({ flexDirection: 'column', alignItems: 'center', children: [...drawArt({ Text, Svg: $.ui.resolve(e).Svg }, buddy, art), Text({ bold: true, children: [buddy.name] })] }),
+        ],
+      })
+      const theirs = await next(e)
+      return theirs ? Box({ flexDirection: 'column', children: [ours, theirs] }) : ours
+    }
     const face = (now - pettedAt < PET_MS ? '♥ ' : '') + renderFace(buddy)
     const ours = Text({ children: [Text({ color: RARITY_THEME[buddy.rarity], children: [`${face} ${buddy.name}`] }), ...(words ? [`: ${words}`] : [])] })
     const theirs = await next(e)

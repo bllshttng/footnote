@@ -167,15 +167,15 @@ function makeHandler(io, dir) {
         if (sid && (await resolveManifest(dir, io))) {
           try {
             const out = await io.run([process.env.FNO_BIN || "fno", "whoami"], dir)
-            const crown = (String(out).match(/^crown:.*$/m) || [])[0]
-            if (crown) {
+            const role = (String(out).match(/^role:.*$/m) || [])[0]
+            if (role) {
               await io.sendSynthetic(
                 sid,
-                `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/lead/references/cli-commands.md.`,
+                `${role}\nYou hold this role. Before you reach for any CLI verb, Read skills/lead/references/cli-commands.md.`,
               )
             }
           } catch (e) {
-            console.error(`[footnote] crown inject failed: ${e}`)
+            console.error(`[footnote] role inject failed: ${e}`)
           }
         }
         return
@@ -214,7 +214,7 @@ function makeHandler(io, dir) {
       let items = []
       // Resolved per fire: manifests appear and disappear as targets start
       // and finish. When nothing resolves, the gate still runs against the
-      // legacy candidate path so a crowned session reaches its own evidence
+      // legacy candidate path so a promoted session reaches its own evidence
       // path and an unbound session gets its refusal (AC2-*).
       const manifestPath = await resolveManifest(dir, io)
       const stateArg = manifestPath || join(dir, ".fno", "target-state.md")
@@ -678,7 +678,7 @@ async function server({ directory, worktree, client, $ }) {
   const contextQueue = new Map()
   // Post-compact re-inject: after the bus fires session.compacted, run the
   // two carriers the claude PostCompact lane runs, with the compact payload
-  // king-postcompact-reinject.sh reads, and queue their context so the next
+  // lead-postcompact-reinject.sh reads, and queue their context so the next
   // system transform carries it. Fail-open: a missing script or a failed
   // run queues nothing, never a failed session.
   const runPostCompactReinject = async (sid) => {
@@ -690,7 +690,7 @@ async function server({ directory, worktree, client, $ }) {
       session_id: sid,
     }
     for (const script of [
-      "hooks/king-postcompact-reinject.sh",
+      "hooks/lead-postcompact-reinject.sh",
       "hooks/target-postcompact-reinject.sh",
     ]) {
       try {

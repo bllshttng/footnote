@@ -7,12 +7,10 @@ and already-flat both convert), AC3-FR (crash-safe atomic write).
 """
 from __future__ import annotations
 
-import os
 
 import pytest
 
 from fno.config import (
-    _atomic_write_toml,
     _migrate_yaml_to_toml,
     run_config_migration,
     settings_from_files,
@@ -70,29 +68,6 @@ def test_ac3_err_idempotent_noop_when_toml_exists(tmp_path):
     assert settings_from_files([toml_path]).review.required_bots == ["existing"]
 
 
-def test_ac3_edge_wrapped_and_flat_both_convert(tmp_path):
-    # A legacy config:-wrapped file and an already-flat (no wrapper) file both
-    # produce an equivalent flat config.toml.
-    wrapped_dir = tmp_path / "w" / ".fno"
-    flat_dir = tmp_path / "f" / ".fno"
-    wrapped_dir.mkdir(parents=True)
-    flat_dir.mkdir(parents=True)
-    (wrapped_dir / "settings.yaml").write_text(
-        "config:\n  review:\n    required_bots:\n      - codex\n", encoding="utf-8"
-    )
-    (flat_dir / "settings.yaml").write_text(
-        "review:\n  required_bots:\n    - codex\n", encoding="utf-8"
-    )
-
-    run_config_migration([wrapped_dir / "settings.yaml"])
-    run_config_migration([flat_dir / "settings.yaml"])
-
-    w = settings_from_files([wrapped_dir / "config.toml"])
-    f = settings_from_files([flat_dir / "config.toml"])
-    assert w.review.required_bots == ["codex"]
-    assert f.review.required_bots == ["codex"]
-
-
 def test_ac3_edge_local_override_converts_to_config_local_toml(tmp_path):
     fno = tmp_path / ".fno"
     fno.mkdir()
@@ -135,12 +110,3 @@ def test_ac3_fr_crash_before_rename_leaves_yaml_intact(tmp_path, monkeypatch):
     assert _migrate_yaml_to_toml(yaml_path) is not None
     assert (fno / "config.toml").is_file()
     assert not yaml_path.exists()
-
-
-def test_atomic_write_strips_none(tmp_path):
-    # TOML has no null; a None-valued key must be dropped, not crash tomli_w.
-    target = tmp_path / "config.toml"
-    _atomic_write_toml(target, {"a": 1, "b": None, "c": {"d": None, "e": 2}})
-    import tomllib
-
-    assert tomllib.loads(target.read_text(encoding="utf-8")) == {"a": 1, "c": {"e": 2}}

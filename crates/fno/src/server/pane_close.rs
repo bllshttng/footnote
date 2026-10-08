@@ -102,28 +102,24 @@ impl Core {
             bound.and_then(|a| a.harness_session_id.as_deref()),
             bound.and_then(|a| a.harness.as_deref()),
         );
-        if crate::pane_send_audit::append_agents_event(
+        crate::pane_send_audit::queue_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            eprintln!("fno mux: pane_closed emit failed");
-        }
+            event,
+            None,
+        );
     }
 
     /// Emit [`server_stopped_row`] at the serve exit. Best-effort like
-    /// [`Self::emit_pane_closed`].
+    /// [`Self::emit_pane_closed`]. The last row of the process, so it waits
+    /// for the journal writer to drain before the server exits.
     pub(super) fn emit_server_stopped(&self, cause: &str) {
         let event = server_stopped_row(&self.session_name, cause, self.panes.len());
-        if crate::pane_send_audit::append_agents_event(
+        crate::pane_send_audit::queue_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            eprintln!("fno mux: server_stopped emit failed");
-        }
+            event,
+            None,
+        );
+        crate::pane_send_audit::flush_agents_journal(std::time::Duration::from_secs(2));
     }
 
     /// Close one pane whose child exited on its own: the death path. A live

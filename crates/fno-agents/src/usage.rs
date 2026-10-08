@@ -29,7 +29,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // because this line is what `restart --help` prints.
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
-    "rename <name> --name <new-label>   -- renames the registry label and, for a teamed session, its team name (regnal restarts at 1); old label stays an alias; harness session is untouched",
+    "rename <name> --name <new-label>   -- renames the registry label and, for a teamed session, its team name (generation restarts at 1); old label stays an alias; harness session is untouched",
     "rename --from-journal [--apply]    -- plan registry label rebuilds from the agents journal; --apply renames",
     "stop <name> [--force] [--cross-project]   --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
@@ -45,7 +45,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // converts a live pane into a persistent thread under the same session
     // id. The three flags that belong to it are spelled out here because
     // this line is what `resume --help` prints.
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and team; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a teamed row). Both need --substrate thread",
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and team; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a teamed row). Both need --substrate thread. A claude session that has exited relaunches itself on a thread under its original name. Exit codes: 0 done; 13 refused (stderr names why); 16 no live process and fno could not relaunch it (stderr names the cause and the hand-run relaunch)",
     "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",

@@ -95,8 +95,8 @@ impl SuccessionFixture {
 
     fn lead(&self, name: &str, session: &str, scope: &str) -> serde_json::Value {
         let mut row = self.row(name);
-        row["crown_level"] = serde_json::json!(1);
-        row["crown_scope"] = serde_json::json!(scope);
+        row["role_level"] = serde_json::json!(1);
+        row["role_scope"] = serde_json::json!(scope);
         row["harness_session_id"] = serde_json::json!(session);
         row
     }
@@ -252,7 +252,7 @@ fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
         fixture.worker("worker", "session-a"),
     ]);
     let no_caller = fixture
-        .spawn("heir-no-caller", None, Some("x-epic"))
+        .spawn("successor-no-caller", None, Some("x-epic"))
         .expect_err("a succession without caller identity cannot replace a row");
     assert_eq!(
         no_caller.receipt.as_ref().unwrap()["succession"],
@@ -261,8 +261,8 @@ fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
 
     let mut dead = fixture.row("dead-lead");
     dead["pid"] = serde_json::json!(4_194_321_u32);
-    dead["crown_level"] = serde_json::json!(1);
-    dead["crown_scope"] = serde_json::json!("x-epic");
+    dead["role_level"] = serde_json::json!(1);
+    dead["role_scope"] = serde_json::json!("x-epic");
     dead["harness_session_id"] = serde_json::json!("session-dead");
     fixture.write_entries(vec![
         dead,
@@ -270,7 +270,11 @@ fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
         fixture.worker("other-worker", "session-other"),
     ]);
     let not_live = fixture
-        .spawn("heir-dead-caller", Some("session-dead"), Some("x-epic"))
+        .spawn(
+            "successor-dead-caller",
+            Some("session-dead"),
+            Some("x-epic"),
+        )
         .expect_err("a dead caller row cannot release a slot");
     assert_eq!(
         not_live.receipt.as_ref().unwrap()["succession"],
@@ -281,16 +285,16 @@ fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
 #[test]
 fn succession_cannot_take_a_second_slot_at_cap_plus_one() {
     let fixture = SuccessionFixture::new(2);
-    let mut heir = fixture.row("pending-heir");
-    heir["harness_session_id"] = serde_json::json!("session-heir");
+    let mut successor = fixture.row("pending-successor");
+    successor["harness_session_id"] = serde_json::json!("session-successor");
     fixture.write_entries(vec![
         fixture.lead("lead", "session-lead", "x-epic"),
         fixture.worker("worker", "session-lead"),
-        heir,
+        successor,
     ]);
 
     let refusal = fixture
-        .spawn("second-heir", Some("session-lead"), Some("x-epic"))
+        .spawn("second-successor", Some("session-lead"), Some("x-epic"))
         .expect_err("cap plus one cannot replace another slot");
     assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
     assert_eq!(refusal.receipt.as_ref().unwrap()["count"], 3);
@@ -308,7 +312,7 @@ fn succession_refuses_the_old_lead_after_transfer() {
     ]);
 
     let refusal = fixture
-        .spawn("late-heir", Some("session-old"), Some("x-epic"))
+        .spawn("late-successor", Some("session-old"), Some("x-epic"))
         .expect_err("only the holder who will be vacated may succeed");
     assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
     assert_eq!(
@@ -327,7 +331,7 @@ fn succession_refuses_ambiguous_caller_session() {
     .unwrap();
 
     assert_eq!(
-        spawn_gate_lanes::succession_replaces(&rows, Some("session-shared"), "x-epic"),
+        spawn_gate_lanes::succession_replaces(&rows, Some("session-shared"), "x-epic", "successor"),
         Err("caller_ambiguous")
     );
 }

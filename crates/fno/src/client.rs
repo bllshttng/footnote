@@ -36,11 +36,12 @@ use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
 mod open_chooser;
+mod open_link;
 mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
 mod wire_version;
-use open_chooser::{open_for_session, resolve_sender};
+use open_chooser::open_for_session;
 use row_menu::execute_row_menu_action;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
@@ -1632,6 +1633,8 @@ enum MenuAction {
     /// active tab, `None` opens a standalone new-portal seat. Chooser-only:
     /// built by `open_chooser::build_open_chooser`, never the row menu.
     PortalAt(Option<Dir>),
+    /// Release the row's mail hold; built only on a row wearing a hold mark.
+    ReleaseHold,
 }
 
 impl MenuAction {
@@ -1679,20 +1682,6 @@ impl MenuAction {
 enum MoveSrc {
     Tab(TabId),
     Pane(u64),
-}
-
-/// An entry whose action has an IN-MENU accelerator: the hint is the
-/// live glyph from the menu scope (`keys::menu_key_for`), never a prefix chord
-/// - the open menu does not run prefix chords, so advertising one describes an
-/// input path the reader is not on. An unscoped id resolves to nothing, which
-/// is the honest hint (LD9 / AC8).
-fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
-    PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: crate::keys::menu_key_for(id).unwrap_or_default(),
-        enabled: true,
-    }
 }
 
 /// (US4/US5) The sideline MENU popup and the minimal settings modal share
@@ -2332,7 +2321,7 @@ impl View {
                 (
                     a.name.as_str(),
                     yard_eye(a, need),
-                    a.crown_level.unwrap_or(0),
+                    a.role_level.unwrap_or(0),
                 )
             })
             .collect()
@@ -6600,8 +6589,12 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool, activity: Option<ShellActiv
             // agent is the defect this branch ships to delete.
             Some(ShellActivity::Running) => PaneState::Working,
             Some(ShellActivity::Idle) => PaneState::Idle,
-            Some(ShellActivity::Empty) => PaneState::Empty,
-            Some(ShellActivity::Unmeasured) | None => PaneState::Unmeasured,
+            // The user's 2026-10-06 ruling: a user's shell tab is live. The
+            // `empty` and unmeasured marks are dropped - a quiet shell reads
+            // `Idle` like any live row, superseding the marked-absence
+            // ruling (a shell tab is not a mystery to measure).
+            Some(ShellActivity::Empty) => PaneState::Idle,
+            Some(ShellActivity::Unmeasured) | None => PaneState::Idle,
         },
     }
 }
@@ -8023,28 +8016,16 @@ async fn attach_and_run(
                     });
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
-                    // External URL opens run off-loop; a cold browser must not stall rendering.
-                    if let Some(id) = crate::link::message_id_from_uri(&url) {
-                        messages_view::open_message(&mut view, id.to_string());
+                    // External opens run off-loop; a cold browser must not stall
+                    // rendering. The router names the opener for each pseudo
+                    // scheme; the message leg finishes here on the UI loop.
+                    if let Some(routed) =
+                        crate::client::open_link::start(&url, link_tx.clone(), sender_tx.clone())
+                    {
+                        messages_view::open_message(&mut view, routed.id);
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
                         }
-                    } else if crate::link::is_sender_uri(&url) {
-                        // Resolve the sender session, then open its chooser row.
-                        let tx = sender_tx.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let id = url
-                                .trim_start_matches(crate::link::SENDER_SCHEME)
-                                .to_string();
-                            let resolved = resolve_sender(&id);
-                            let _ = tx.send((id, resolved));
-                        });
-                    } else {
-                        let tx = link_tx.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let outcome = crate::link::open_url(&url);
-                            let _ = tx.send((url, outcome));
-                        });
                     }
                 }
                 Ok(ServerMsg::LinkHover {
@@ -9095,7 +9076,7 @@ async fn dispatch_event(
         }
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
-        Event::OpenCourt => view.org.toggle(),
+        Event::OpenTeam => view.org.toggle(),
         Event::ToggleBell => bell::toggle(view),
         Event::OpenMessages => messages_view::open_from_chord(view),
         Event::TogglePanel => {

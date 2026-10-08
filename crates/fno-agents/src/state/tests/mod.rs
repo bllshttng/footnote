@@ -93,9 +93,9 @@ fn sample_entry(name: &str) -> RegistryEntry {
         exited_at: None,
         mux: None,
         screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
+        role_level: None,
+        role_scope: None,
+        role_grantor: None,
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
@@ -499,9 +499,9 @@ fn succession_preserves_thread_id_and_branch_keeps_two_rows() {
     predecessor.session_id = Some("session-a".into());
     predecessor.codex_session_id = Some("session-a".into());
     predecessor.log_path = Some("/tmp/session-a.log".into());
-    predecessor.crown_level = Some(2);
-    predecessor.crown_scope = Some("scope-a".into());
-    predecessor.crown_grantor = Some("human".into());
+    predecessor.role_level = Some(2);
+    predecessor.role_scope = Some("scope-a".into());
+    predecessor.role_grantor = Some("human".into());
     predecessor.mux = Some(MuxRef {
         session: "main".into(),
         pane_id: 4,
@@ -519,9 +519,9 @@ fn succession_preserves_thread_id_and_branch_keeps_two_rows() {
     assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-b"));
     // The branch carries no id of its own; the registry write mints it one.
     assert_eq!(branch.fno_id, None);
-    assert!(branch.crown_level.is_none());
-    assert!(branch.crown_scope.is_none());
-    assert!(branch.crown_grantor.is_none());
+    assert!(branch.role_level.is_none());
+    assert!(branch.role_scope.is_none());
+    assert!(branch.role_grantor.is_none());
     assert!(branch.short_id.is_empty());
     assert!(branch.session_id.is_none());
     assert!(branch.codex_session_id.is_none());
@@ -2816,9 +2816,9 @@ fn registry_schema_fields() {
             ttl_ms: None,
             answerable: None,
         }),
-        crown_level: Some(1),
-        crown_scope: Some("value".into()),
-        crown_grantor: Some("value".into()),
+        role_level: Some(1),
+        role_scope: Some("value".into()),
+        role_grantor: Some("value".into()),
         route_settings_path: Some("value".into()),
         fno_id: Some("value".into()),
         delivery_policy: Some("value".into()),
@@ -2890,8 +2890,8 @@ fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
     warden.harness_session_id = Some(uuid.into());
     warden.short_id = uuid.into();
     warden.aliases = vec!["footnote-49a80492".into()];
-    warden.crown_level = Some(1);
-    warden.crown_scope = Some("fleet".into());
+    warden.role_level = Some(1);
+    warden.role_scope = Some("fleet".into());
     let mut spawned = sample_entry("spawned");
     spawned.harness = Some("claude".into());
     spawned.harness_session_id = Some("abcd1234-1111-2222-3333-444444444444".into());
@@ -2937,8 +2937,8 @@ fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
     );
     assert_eq!(warden.name, "warden", "the name survives");
     assert_eq!(warden.aliases, vec!["footnote-49a80492"]);
-    assert_eq!(warden.crown_level, Some(1), "the team fields survive");
-    assert_eq!(warden.crown_scope.as_deref(), Some("fleet"));
+    assert_eq!(warden.role_level, Some(1), "the team fields survive");
+    assert_eq!(warden.role_scope.as_deref(), Some("fleet"));
     assert_eq!(by_name("spawned").short_id, "abcd1234");
     assert_eq!(
         by_name("independent").short_id,

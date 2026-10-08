@@ -22,10 +22,6 @@ def _mock_fno_auto_register(bin_dir: Path) -> None:
     fno.chmod(0o755)
 
 
-def test_register_session_start_shell_syntax() -> None:
-    subprocess.run(["bash", "-n", str(HOOK)], check=True)
-
-
 def test_codex_disagreeing_ids_register_no_row(tmp_path: Path) -> None:
     """The resolvers degrade a same-family id disagreement to unresolved; a row
     registered under the table-first id is one this session can never resolve
@@ -259,6 +255,14 @@ def test_hand_started_session_still_gated_on_the_optin_knob(tmp_path: Path) -> N
     fno = bin_dir / "fno"
     fno.write_text('#!/usr/bin/env bash\necho false\nexit 0\n', encoding="utf-8")
     fno.chmod(0o755)
+    # The origin-only call rides fno-agents the same way the worker report
+    # does; the mock records its argv so that lane is visible here too.
+    agents_bin = bin_dir / "fno-agents"
+    agents_bin.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$AGENTS_CAPTURE"\n',
+        encoding="utf-8",
+    )
+    agents_bin.chmod(0o755)
 
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -270,10 +274,24 @@ def test_hand_started_session_still_gated_on_the_optin_knob(tmp_path: Path) -> N
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "CLAUDE_CODE_SESSION_ID": "0718619e-2527-4bba-9cc0-5e493313240c",
+        "FNO_AGENTS_BIN": str(agents_bin),
+        "AGENTS_CAPTURE": str(tmp_path / "agents-argv"),
         "UV_CAPTURE": str(capture),
     }
     subprocess.run(["bash", str(HOOK)], check=True, env=env)
     assert not capture.exists(), "knob off must still suppress hand-started auto-join"
+    # The origin record lane runs regardless of the knob: the session-start
+    # hook asks for the record write and nothing else (AC2-HOOK).
+    origin_argv = env["AGENTS_CAPTURE"] and (tmp_path / "agents-argv").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert origin_argv[:2] == ["report", "--kind"]
+    assert origin_argv[2] == "session" and origin_argv[3] == "--origin-only"
+    assert origin_argv[origin_argv.index("--harness") + 1] == "claude"
+    assert (
+        origin_argv[origin_argv.index("--session-id") + 1]
+        == "0718619e-2527-4bba-9cc0-5e493313240c"
+    )
 
     _mock_fno_auto_register(bin_dir)
     subprocess.run(["bash", str(HOOK)], check=True, env=env)

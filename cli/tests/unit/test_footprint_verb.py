@@ -820,7 +820,7 @@ def test_live_root_pids_routes_a_claude_row_with_an_empty_short_id(
         harness="claude",
         short_id="",
         harness_session_id="2529b52b-2477-4c1e-9d3a-1a2b3c4d5e6f",
-        name="king-119e-reap-branch-2529b52b",
+        name="lead-119e-reap-branch-2529b52b",
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
     monkeypatch.setattr(
@@ -979,13 +979,13 @@ def test_live_root_pids_gaps_one_dead_socket_row_and_keeps_the_live_one(
     from fno import doctor_footprint
     from types import SimpleNamespace
 
-    king = SimpleNamespace(
+    lead = SimpleNamespace(
         status="live",
         pid=None,
         pid_start_time=None,
         harness="claude",
         short_id="810d8070",
-        name="king-4d9b-opus-g5",
+        name="lead-4d9b-opus-g5",
     )
     peer = SimpleNamespace(
         status="live",
@@ -995,7 +995,7 @@ def test_live_root_pids_gaps_one_dead_socket_row_and_keeps_the_live_one(
         short_id="aaaaaaaa",
         name="live-peer",
     )
-    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [king, peer])
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [lead, peer])
     monkeypatch.setattr(
         "fno.agents.session_procs.bg_socket_pid_map",
         lambda **_kwargs: {"810d8070": 38786, "aaaaaaaa": 98176},
@@ -1007,7 +1007,7 @@ def test_live_root_pids_gaps_one_dead_socket_row_and_keeps_the_live_one(
     roots, error = doctor_footprint._live_root_pids()
     assert roots == {98176}
     assert isinstance(error, doctor_footprint.AttributionGap)
-    assert "king-4d9b-opus-g5" in error.text
+    assert "lead-4d9b-opus-g5" in error.text
     assert "38786" in error.text
     assert "live-peer" not in error.text
 
@@ -1954,7 +1954,7 @@ def test_cause_reading_keeps_the_reading_over_a_dead_socket_pid(monkeypatch) -> 
                 "pid_start_time": None,
                 "harness": "claude",
                 "short_id": "810d8070",
-                "name": "king-4d9b-opus-g5",
+                "name": "lead-4d9b-opus-g5",
             }
         ],
         [],
@@ -1967,7 +1967,7 @@ def test_cause_reading_keeps_the_reading_over_a_dead_socket_pid(monkeypatch) -> 
     assert error is None
     assert reading is not None
     assert reading.attribution_gap is not None
-    assert "king-4d9b-opus-g5" in reading.attribution_gap
+    assert "lead-4d9b-opus-g5" in reading.attribution_gap
     assert "worker root liveness unavailable" not in reading.attribution_gap
     admission = _cpu_axis((reading, None))
     assert admission.verdict == "admit"
@@ -2866,3 +2866,29 @@ def test_parse_reads_the_linux_state_header():
 
 
 # ---------------------------------------------------------------------------
+
+
+def test_sccache_reading_rides_the_process_table_fetch(monkeypatch) -> None:
+    """The process-table fetch also stashes the daemon's sccache answer (pid
+    and trailing-hour restarts); a payload without the fields degrades to
+    (None, None) instead of failing the verb."""
+    def door(verb, args=(), **kwargs):
+        return (
+            None,
+            {"ps": "  1  0 10:00 0.0 1024 /bin/x", "unreadable": 0,
+             "sccache_server_pid": 4242, "sccache_restarts_1h": 3},
+        )
+
+    monkeypatch.setattr(doctor_footprint, "call_binary_json", door)
+    table, error = doctor_footprint._read_ps(timeout=5.0)
+    assert error is None and table
+    assert doctor_footprint._LAST_SCCACHE == (4242, 3)
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "call_binary_json",
+        lambda *args, **kwargs: (None, {"ps": "  1  0 10:00 0.0 1024 /bin/x", "unreadable": 0}),
+    )
+    table, error = doctor_footprint._read_ps(timeout=5.0)
+    assert error is None
+    assert doctor_footprint._LAST_SCCACHE == (None, None)

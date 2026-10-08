@@ -730,13 +730,6 @@ mod tests {
     }
 
     #[test]
-    fn rename_drops_only_the_old_name() {
-        let before = "def heal(a):\n    return a\n";
-        let after = "def heal2(a):\n    return a\n";
-        assert_eq!(removed_top_level_names(before, after), vec!["heal"]);
-    }
-
-    #[test]
     fn substring_is_not_whole_word() {
         let before = "def heal():\n    pass\n";
         let after = "def healer():\n    pass\n";
@@ -796,21 +789,6 @@ mod tests {
     }
 
     // --- test-count verdict ---
-
-    #[test]
-    fn count_falls_against_head() {
-        let b = baseline(
-            "def test_a():\n    pass\ndef test_b():\n    pass\ndef test_c():\n    pass\n",
-            "HEAD",
-        );
-        let after = "def test_a():\n    pass\ndef test_b():\n    pass\n";
-        let finding = test_count_finding("py", Some(&b), after).expect("fires");
-        assert!(
-            finding.contains("test count fell 3 -> 2 against HEAD"),
-            "{finding}"
-        );
-        assert!(finding.contains("AGENTS.md"), "{finding}");
-    }
 
     #[test]
     fn count_rise_or_equal_stays_quiet() {

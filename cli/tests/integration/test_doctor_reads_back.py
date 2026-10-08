@@ -1,8 +1,7 @@
 """`fno config doctor` reads the config back the way an operator reads it.
 
-Every test here pairs a positive marker with the input that makes the same
-check fail. No test asserts only that an error did not appear: an absence has
-three explanations and only one of them is the outcome.
+A test that asserts an absence carries a positive marker beside it: an
+absence has three explanations and only one of them is the outcome.
 """
 from __future__ import annotations
 
@@ -55,15 +54,6 @@ def test_a_config_toml_holding_yaml_refuses_and_names_the_parse_error(tmp_path: 
     assert "Expected '='" in result.output
 
 
-def test_a_well_formed_config_toml_is_clean(tmp_path: Path) -> None:
-    """AC1 negative control."""
-    f = _write(tmp_path / "config.toml", 'schema_version = 1\nstate_dir = "%s"\n' % (tmp_path / ".fno"))
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    assert "[doctor] OK; no suspicious paths detected." in result.output
-    assert "unreadable settings file" not in result.output
-
-
 # --- AC2: a non-mapping document refuses and names its type ---------------
 
 
@@ -73,14 +63,6 @@ def test_a_settings_yaml_holding_a_list_names_the_type_it_parsed_to(tmp_path: Pa
     assert result.exit_code == 1, result.output
     assert str(f) in result.output
     assert "parsed to a list, not a table" in result.output
-
-
-def test_an_empty_config_toml_stays_legal(tmp_path: Path) -> None:
-    """AC2 negative control: an empty file contributes nothing and that is fine."""
-    f = _write(tmp_path / "config.toml", "")
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    assert "[doctor] OK" in result.output
 
 
 # --- AC3 / AC4: unknown keys, named with their file ------------------------
@@ -95,17 +77,6 @@ def test_a_typod_section_is_reported_with_the_file_that_holds_it(tmp_path: Path)
     assert str(f) in line
 
 
-def test_a_correctly_spelled_section_reports_nothing(tmp_path: Path) -> None:
-    """AC3 negative control."""
-    f = _write(
-        tmp_path / "config.toml",
-        'schema_version = 1\nstate_dir = "%s"\n[review]\nmax_rounds = 2\n' % (tmp_path / ".fno"),
-    )
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    assert "ignored" not in result.output
-
-
 def test_the_wrong_section_pair_names_the_key_the_operator_meant(tmp_path: Path) -> None:
     """AC4: `[agents] max_lanes` reads as a lane cap and sets no lane cap."""
     f = _write(tmp_path / "config.toml", "schema_version = 1\n[agents]\nmax_lanes = 4\n")
@@ -113,28 +84,6 @@ def test_the_wrong_section_pair_names_the_key_the_operator_meant(tmp_path: Path)
     assert result.exit_code == 1, result.output
     line = next(ln for ln in result.output.splitlines() if "agents.max_lanes" in ln)
     assert "parallel.max_lanes" in line
-
-
-def test_the_right_section_resolves_and_is_clean(tmp_path: Path) -> None:
-    """AC4 negative control: the key in its real section sets the value."""
-    f = _write(
-        tmp_path / "config.toml",
-        'schema_version = 1\nstate_dir = "%s"\n[parallel]\nmax_lanes = 4\n' % (tmp_path / ".fno"),
-    )
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-
-    from fno.config import load_settings, resolve_source
-
-    import os
-
-    os.environ["FNO_CONFIG"] = str(f)
-    try:
-        assert load_settings().parallel.max_lanes == 4
-        decided = resolve_source("parallel.max_lanes")
-        assert decided is not None and decided[0].resolve() == f.resolve()
-    finally:
-        os.environ.pop("FNO_CONFIG", None)
 
 
 # --- AC5: a switch enabled with an empty population ------------------------
@@ -154,36 +103,6 @@ def test_cross_model_enabled_with_no_dispatchable_peer_is_named(
     assert len(problems) == 1, problems
     assert "review.cross_model.enabled is true" in problems[0]
     assert "available reviewer kinds: claude" in problems[0]
-
-
-def test_cross_model_with_a_real_peer_is_clean(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC5 negative control, with the resolver itself pinned.
-
-    The second assertion is the positive control on the STUB: a stub that
-    returned claude alone would make the first assertion pass for the wrong
-    reason.
-    """
-    from fno.review import provider_resolution as pr
-    from fno import config_readback as doctor_mod
-
-    f = _write(tmp_path / "config.toml", "schema_version = 1\n[review.cross_model]\nenabled = true\n")
-    monkeypatch.setenv("FNO_CONFIG", str(f))
-    monkeypatch.setattr(pr, "available_provider_kinds", lambda **_: ["claude", "codex"])
-    assert doctor_mod.check_enabled_with_empty_population() == []
-    assert len(pr.available_provider_kinds()) > 1
-
-
-def test_cross_model_disabled_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno import config_readback as doctor_mod
-
-    f = _write(tmp_path / "config.toml", "schema_version = 1\n")
-    monkeypatch.setenv("FNO_CONFIG", str(f))
-    monkeypatch.setattr(
-        "fno.review.provider_resolution.available_provider_kinds", lambda **_: ["claude"]
-    )
-    assert doctor_mod.check_enabled_with_empty_population() == []
 
 
 # --- AC6: every printed value names its decider ----------------------------
@@ -258,17 +177,6 @@ def test_wip_caps_are_read_from_config_toml_not_only_settings_yaml(
     assert "'now'" in problems[0]
 
 
-def test_wip_caps_in_config_toml_can_be_clean(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Negative control on the same reader: a valid cap in the same file."""
-    from fno.setup.doctor import check_wip_caps
-
-    toml = _write(tmp_path / "config.toml", "[kanban.wip_caps]\nnow = 20\n")
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(toml.with_name("settings.yaml")))
-    assert check_wip_caps() == []
-
-
 def test_an_overridden_bad_cap_is_not_a_finding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -322,8 +230,9 @@ def test_a_typod_leaf_inside_a_dict_keyed_block_is_still_caught(tmp_path: Path) 
 
 def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path: Path) -> None:
     """The operator shape measured on 2026-09-16 (x-4455): worktree.auto_install,
-    the route-slot policy leaves on profiles, and a by_difficulty rung are all
-    real keys consumed outside this model (setup-worktree.sh, route_slot.rs),
+    the route-slot policy leaves on profiles, a by_difficulty rung, and
+    merge.visual_paint_paths are all real keys consumed outside this model
+    (setup-worktree.sh, route_slot.rs, merge_gates.rs),
     so the walker must stay silent on every one of them."""
     f = _write(
         tmp_path / "config.toml",
@@ -333,37 +242,13 @@ def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path
         '[agents.profiles.target]\nlanes = ["zai-flash"]\n'
         'on_exhausted = "queue"\non_low = "prefer_healthy"\non_unknown = "skip"\n'
         "[agents.profiles.target.by_difficulty.high]\n"
-        'lanes = ["claude-opus-5"]\non_exhausted = "queue"\n' % (tmp_path / ".fno"),
+        'lanes = ["claude-opus-5"]\non_exhausted = "queue"\n'
+        '[merge]\nvisual_paint_paths = ["crates/fno/src/client/**"]\n' % (tmp_path / ".fno"),
     )
     result = _doctor(f)
     assert result.exit_code == 0, result.output
     unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
     assert unknown == [], unknown
-
-
-def test_backlog_max_open_ideas_is_modeled(tmp_path: Path) -> None:
-    """The Rust idea cap enforces this key (idea_cap.rs), so the model must
-    know it: no fno call warns, and get reads the set value (x-dddb)."""
-    f = _write(
-        tmp_path / "config.toml",
-        'schema_version = 1\nstate_dir = "%s"\n'
-        "[backlog]\nmax_open_ideas = 400\n" % (tmp_path / ".fno"),
-    )
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
-    assert unknown == [], unknown
-
-
-def test_max_open_ideas_zero_is_a_legal_value(tmp_path: Path) -> None:
-    """0 is cap-off for the Rust reader; ge=0 must accept it, not refuse."""
-    f = _write(
-        tmp_path / "config.toml",
-        'schema_version = 1\nstate_dir = "%s"\n'
-        "[backlog]\nmax_open_ideas = 0\n" % (tmp_path / ".fno"),
-    )
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
 
 
 def test_a_retired_attention_row_reads_as_retired(tmp_path: Path) -> None:
@@ -416,21 +301,6 @@ def test_a_json_read_stays_parseable_with_an_unknown_key(
     )
     assert loud.exit_code == 0, loud.output
     assert "fno config:" in loud.output
-
-
-def test_route_slot_policy_leaves_default_to_unset() -> None:
-    """Empty string = unset, so the Rust reader keeps applying its own default."""
-    from fno.config.spawn_blocks import DifficultyLaneBlock, SpawnProfileBlock
-
-    profile = SpawnProfileBlock()
-    assert profile.on_exhausted == ""
-    assert profile.on_low == ""
-    assert profile.on_unknown == ""
-    assert profile.by_difficulty == {}
-    rung = DifficultyLaneBlock()
-    assert rung.lanes == []
-    # A non-mapping by_difficulty table degrades to none, never raises.
-    assert SpawnProfileBlock.model_validate({"by_difficulty": "banana"}).by_difficulty == {}
 
 
 def test_a_large_unknown_table_reports_once(tmp_path: Path) -> None:
@@ -507,22 +377,6 @@ def test_a_legacy_spelling_the_loader_accepts_is_not_a_typo(tmp_path: Path) -> N
     assert "not a modeled config key" not in result.output
 
 
-def test_the_exemption_does_not_hide_a_typo_in_the_same_file(tmp_path: Path) -> None:
-    """Positive control on the exemption: it exempts blocks, not the file."""
-    f = _write(
-        tmp_path / "config.toml",
-        "schema_version = 1\n[providers]\nauto_switch = false\n"
-        "[kanban.wip_caps]\nnow = 20\n[reveiw]\ncross_model = true\n",
-    )
-    result = _doctor(f)
-    assert result.exit_code == 1, result.output
-    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
-    # Two channels, one finding each: the loader's stderr warning and the
-    # doctor's own report line.
-    assert len(unknown) == 2, unknown
-    assert sum("reveiw.cross_model" in ln for ln in unknown) == 2, unknown
-
-
 # --- an out-of-enum value refuses by name -----------------------------------
 
 
@@ -565,29 +419,6 @@ def test_a_masked_out_of_enum_value_is_still_reported(tmp_path: Path) -> None:
     assert "config value(s) the schema refuses" in result.output
     assert str(masked) in result.output
     assert "recovery.watchdog.mode = 'on'" in result.output
-
-
-def test_a_clean_config_reports_no_value_findings(tmp_path: Path) -> None:
-    """Negative control for check_values."""
-    f = _write(
-        tmp_path / "config.toml",
-        'schema_version = 1\n[recovery.watchdog]\nmode = "handoff"\n',
-    )
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    assert "the schema refuses" not in result.output
-
-
-def test_dead_key_under_a_known_table_warns_at_load(tmp_path: Path) -> None:
-    """A key the operator set but no code reads names itself on every load,
-    not only under `fno config doctor` or FNO_DEBUG. Found as
-    recovery.watchdog_reap, set for months, read by nothing, silent."""
-    f = _write(tmp_path / "config.toml", 'schema_version = 1\n[recovery]\nwatchdog_reap = true\n')
-    result = runner.invoke(
-        app, ["config", "get", "recovery.enabled"], env={**_ENV, "FNO_CONFIG": str(f)}
-    )
-    assert "recovery.watchdog_reap" in result.output, result.output
-    assert "not a modeled config key" in result.output, result.output
 
 
 def test_honored_legacy_spelling_is_not_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

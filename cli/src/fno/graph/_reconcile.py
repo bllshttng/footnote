@@ -1685,7 +1685,7 @@ def classify_open_pr_bindings(
     ``body`` field never reads the trailer; the ``untracked`` detail names
     that absence instead of reading it as an empty body.
 
-    Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
+    Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the lead
     board all read the same verdicts.
     """
     from fno.pr.closure import branch_node_ids, parse_closure_answer
@@ -1717,6 +1717,8 @@ def classify_open_pr_bindings(
         number = row.get("number")
         head = str(row.get("headRefName") or "")
         if not isinstance(number, int) or not head:
+            continue
+        if row.get("isCrossRepository"):
             continue
         body_supplied = "body" in row
         # ONE pr-closure-parse spawn per body answers both fields.

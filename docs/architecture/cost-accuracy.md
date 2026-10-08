@@ -120,31 +120,42 @@ Ground truth at ship time: the fixed parser reproduced the reference tool's $31.
    catalog prices is priced on the next refresh. A model it does not stays
    unpriced - never add a hand tier.
 
-## Exact cost: the local OTel ingest
+## Reported request cost and local OTel ingest
 
-When `[telemetry] claude_otel` is on (the default), the fno-agents daemon binds an OTLP/http-json receiver on 127.0.0.1 and publishes its port at `~/.fno/agents/otel/port`. Supervisor birth injects `CLAUDE_CODE_ENABLE_TELEMETRY=1`, points the OTLP logs exporter at the receiver, and sets `OTEL_LOG_TOOL_DETAILS=1` so real skill and plugin names survive. Claude Code then reports one `api_request` record per API call with `cost_usd_micros`, `session.id` and skill or plugin attribution. The receiver keeps the named columns in `~/.fno/agents/otel/otel.db` and drops the rest. Tool details carry command text. Nothing leaves the machine.
+With `[telemetry] claude_otel = true` (the default), the daemon serves OTLP/http-json logs on localhost. Its `~/.fno/agents/otel/port` record survives shutdown, and the next daemon uses the same port. A first start uses port 4318. A bind conflict or invalid port record reports an error and does not choose a different endpoint. Supervisor birth injects telemetry only after a receiver has published the port record. With no record, the port may belong to another collector, so the supervisor injects nothing. Daemon restarts keep the exporter destination stable. Explicit operator telemetry settings take precedence.
 
-The off switch: `[telemetry] claude_otel = false` in config.toml means no listener binds and no `OTEL_*` env reaches any supervisor birth. A supervisor that is already running keeps its env until restart, and an operator-set `OTEL_EXPORTER_OTLP_ENDPOINT` always wins over fno's injection.
+The database retains every log event in `otel_events`, including unknown future event names. `api_requests` supplies typed cost and token columns. Both tables are defined in one canonical SQL file. The generated [schema reference](../reference/otel-schema.md) lists every table and column. A batch commits raw retention and typed projection together. Failed storage returns HTTP 503 so the exporter can retry. Invalid payloads return HTTP 400.
 
-### Cost source order
+Content is redacted before storage. `OTEL_LOG_TOOL_DETAILS=1` provides real skill/plugin attribution but also exports command text and tool arguments. The receiver masks those values and keeps safe tool/skill/MCP names. If a sender enables content export, the receiver still masks prompt/response text, API bodies, hook definitions and managed settings content. fno does not set `OTEL_LOG_USER_PROMPTS` or `OTEL_LOG_TOOL_CONTENT`. Metrics and traces remain off. Nothing is forwarded outside this machine.
 
-When OTel rows exist for a session, the burn arm (`crates/fno-agents/src/burn_watch.rs` `session_cost_exact`) reads their exact sum. It falls back to the transcript-parsed `ledger.json` estimate (`loopcheck::session_cost_from_ledger`) otherwise. The `finalize` handoff cost line stays on the ledger until OTel coverage is proven on the fleet.
-
-### Readouts
-
-Per-skill spend, exact:
-
-```sql
-SELECT skill_name, SUM(cost_usd_micros)/1e6 AS usd
-FROM api_requests GROUP BY 1 ORDER BY usd DESC;
-```
-
-Per-worker spend: sum by session, then join `session_id` to a worker via `harness_session_id` in `~/.fno/agents/registry.json`:
+### Health and coverage
 
 ```bash
-sqlite3 ~/.fno/agents/otel/otel.db \
-  "SELECT session_id, SUM(cost_usd_micros)/1e6 FROM api_requests GROUP BY 1"
+fno doctor cost status
+fno doctor cost status --json
 ```
 
-A record is deduped on its `request_id` (`rid:` key). A record without a `request_id` dedupes on session, sequence and timestamp. A record with `cost_usd` but no micros converts at 1e6. A record with neither is still stored for its token counts. It contributes zero to the cost sum.
+Doctor and lead check-in use one telemetry reader. It reports API rows in the last hour, live Claude workers, uncovered sessions and unknown liveness. Missing data and unreadable data are distinct. A stale worker measurement cannot prove coverage. A default doctor invocation prints the same advisory on stderr, preserving its existing JSON stdout. The standalone cost status exits 1 for degraded coverage and 2 for a read failure.
 
+A supervisor already running without telemetry keeps its old environment. Complete its hosted sessions before restarting it through the normal managed Claude lifecycle. Start the updated receiver, then let fno birth the supervisor and verify recent rows with the status command. Do not interrupt live workers to turn telemetry on. On the first upgrade from the old receiver, its shutdown can remove the old port record. The updated receiver then publishes the stable endpoint before the supervisor is restarted.
+
+The off switch is `[telemetry] claude_otel = false`. It prevents a new listener and telemetry injection on supervisor birth. Existing supervisors keep their environment until restart.
+
+### CSV export
+
+```bash
+fno doctor cost export --csv > request-costs.csv
+fno doctor cost export --csv --output request-costs.csv
+```
+
+Export groups by UTC day, session, model and skill. It includes request counts, unpriced request counts, reported USD cost and token totals. When the group has no priced requests, cost stays blank. A partial cost sum is accompanied by its unpriced count. An absent database produces a header and an explicit empty-data diagnostic. An incompatible or unreadable database fails before output. CSV text is escaped.
+
+These costs are provider-reported estimates, not billing statements. When priced telemetry is available, burn watch uses its per-session sum. Otherwise, it reads the transcript ledger. The finalize handoff retains its existing ledger source.
+
+To inspect events that have no typed cost projection:
+
+```sql
+SELECT event_name, COUNT(*) FROM otel_events GROUP BY event_name;
+SELECT session_id, prompt_id, attributes, resource
+FROM otel_events WHERE event_name = 'skill_activated';
+```

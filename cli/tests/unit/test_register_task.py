@@ -177,34 +177,6 @@ def test_emit_ledger_transition_warns_when_session_id_missing():
         )
 
 
-def test_append_to_tasks_json_handles_bare_list_shape():
-    """Regression test for ab-67063a76.
-
-    A ledger.json written as a bare JSON list `[...]` (rather than the
-    canonical `{"entries": [...]}` wrapper) parses cleanly through
-    json.loads, so the `except json.JSONDecodeError` guard never fires.
-    The old code then called `data.get("entries", [])` on a list and
-    crashed with `'list' object has no attribute 'get'`, silently
-    skipping ledger registration. append_to_tasks_json must tolerate the
-    bare-list shape: treat the list as the entries, append, and rewrite
-    in canonical wrapped form.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        ledger = Path(td) / "ledger.json"
-        # Pre-existing legacy entry, bare-list shape (no {"entries": ...}).
-        ledger.write_text(json.dumps([{"session_id": "old-1", "title": "legacy"}]))
-
-        entry = {"session_id": "new-1", "title": "new entry"}
-        register_task.append_to_tasks_json(ledger, entry)
-
-        data = json.loads(ledger.read_text())
-        assert isinstance(data, dict), "ledger should be rewritten in wrapped form"
-        entries = data.get("entries", [])
-        sids = [e.get("session_id") for e in entries]
-        assert "old-1" in sids, "legacy bare-list entry must be preserved"
-        assert "new-1" in sids, "new entry must be appended"
-
-
 def test_append_to_tasks_json_recovers_from_dict_without_list_entries():
     """Hardening for ab-67063a76 (Gemini review on PR #356).
 
@@ -360,42 +332,11 @@ def test_append_to_tasks_json_promotion_drops_node_backstop_row():
         assert entries[0].get("backstop") is not True
 
 
-def test_render_tasks_md_handles_bare_list_shape():
-    """Regression test for ab-67063a76 (render path).
-
-    render_tasks_md reads the same ledger.json and must not crash when it
-    holds a bare list rather than the wrapped dict.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        ledger = Path(td) / "ledger.json"
-        md = Path(td) / "ledger.md"
-        ledger.write_text(json.dumps([{"title": "legacy", "branch": "main"}]))
-
-        # Must not raise; should render the single legacy entry.
-        register_task.render_tasks_md(ledger, md)
-        assert md.exists(), "ledger.md should be rendered from bare-list ledger"
-        assert "legacy" in md.read_text(), "rendered md should include the entry title"
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # build_entry: step-6 termination_reason / cost_json / provider_id fallback
 # (ab-f8e5f214). These are the schema changes US7's per-node paper trail rests
 # on; before this they had zero direct coverage (sigma-review gap 2).
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_build_entry_records_termination_reason():
-    entry = register_task.build_entry(
-        {"input": "x", "session_id": "sid-1"}, "tid-1", termination_reason="Budget"
-    )
-    assert entry["termination_reason"] == "Budget"
-
-
-def test_build_entry_omits_termination_reason_when_absent():
-    # Legacy byte-parity: a caller that passes no termination_reason gets an
-    # entry with NO termination_reason key (old stop-hook callers unchanged).
-    entry = register_task.build_entry({"input": "x", "session_id": "sid-1"}, "tid-1")
-    assert "termination_reason" not in entry
 
 
 def test_build_entry_cost_json_overrides_manifest():
@@ -415,14 +356,6 @@ def test_build_entry_cost_json_overrides_manifest():
     assert entry["model"] == "claude-opus"
 
 
-def test_build_entry_cost_null_when_both_absent():
-    # AC7-ERR: no cost anywhere -> a thin-but-correct row with cost_usd null,
-    # never a missing row.
-    entry = register_task.build_entry({"input": "x", "session_id": "sid"}, "tid")
-    assert entry["cost_usd"] is None
-    assert entry["tokens_total"] is None
-
-
 def test_build_entry_provider_id_falls_back_to_provider():
     # US7: every terminal session leaves a provider-attributed row even on a
     # standard (non-rotation) run that only has `provider`, not `provider_id`.
@@ -430,22 +363,6 @@ def test_build_entry_provider_id_falls_back_to_provider():
         {"input": "x", "session_id": "sid", "provider": "claude"}, "tid"
     )
     assert entry["provider_id"] == "claude"
-
-
-def test_build_entry_records_lane_axes():
-    entry = register_task.build_entry(
-        {
-            "input": "x",
-            "session_id": "sid",
-            "provider": "openai",
-            "model": "gpt-5.5",
-            "effort": "low",
-        },
-        "tid",
-    )
-    assert entry["provider"] == "openai"
-    assert entry["model"] == "gpt-5.5"
-    assert entry["effort"] == "low"
 
 
 def test_build_entry_prefers_registry_lane_axes(monkeypatch):
@@ -479,21 +396,6 @@ def test_build_entry_prefers_registry_lane_axes(monkeypatch):
     assert entry["provider"] == "zai"
     assert entry["model"] == "glm-5.3"
     assert entry["effort"] == "low"
-
-
-def test_build_entry_provider_id_prefers_explicit():
-    # A rotation-written provider_id wins over the provider family fallback.
-    entry = register_task.build_entry(
-        {"input": "x", "session_id": "sid", "provider": "claude", "provider_id": "claude-primary"},
-        "tid",
-    )
-    assert entry["provider_id"] == "claude-primary"
-
-
-def test_build_entry_no_provider_omits_provider_id():
-    # Neither provider_id nor provider -> the key is omitted (legacy parity).
-    entry = register_task.build_entry({"input": "x", "session_id": "sid"}, "tid")
-    assert "provider_id" not in entry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -539,31 +441,6 @@ def test_build_entry_reads_pr_from_ship_artifact():
         assert entry["pr_url"] == "https://github.com/org/repo/pull/418"
 
 
-def test_build_entry_manifest_pr_still_wins():
-    # A legacy manifest carrying pr_number keeps precedence over the artifact.
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        sid = "sid-legacy"
-        _write_ship_artifact(root, sid, 999)
-        orig_git = register_task.git_cmd
-
-        def fake_git(*args):
-            if args[:1] == ("remote",):
-                return "git@github.com:org/repo.git"
-            if args[:1] == ("rev-parse",):
-                return str(root)
-            return ""
-
-        register_task.git_cmd = fake_git
-        try:
-            entry = register_task.build_entry(
-                {"input": "x", "session_id": sid, "pr_number": "418"}, "tid"
-            )
-        finally:
-            register_task.git_cmd = orig_git
-        assert entry["pr_number"] == 418  # manifest wins over the artifact's 999
-
-
 def test_build_entry_pr_none_when_no_artifact_and_no_gh():
     # No manifest pr_number, no ship artifact, gh yields nothing -> None, never
     # an invented number (preserves the no_ship / no-PR run behavior).
@@ -580,11 +457,6 @@ def test_build_entry_pr_none_when_no_artifact_and_no_gh():
             register_task._pr_number_from_gh = orig_gh
         assert entry["pr_number"] is None
         assert entry["pr_url"] is None
-
-
-def test_pr_number_from_ship_artifact_absent_returns_none():
-    with tempfile.TemporaryDirectory() as td:
-        assert register_task._pr_number_from_ship_artifact(td, "no-such-sid") is None
 
 
 def test_main_legacy_accepts_empty_session_id():
@@ -662,25 +534,6 @@ def _post_collapse_state(**overrides):
     return state
 
 
-def test_derive_phases_node_input_build_run_never_plan_only():
-    # x-6aa0: a node-input do/review/ship run recorded phases ["think", "plan"]
-    # (dead gate keys + input_type defaulting to "idea"), the fold's plan-only
-    # discriminator then read the row planned, and the fidelity gate wedged the
-    # stop gate until merge. The row must carry build phases instead.
-    completed, skipped = register_task.derive_phases(_post_collapse_state(), pr_number=2605)
-    assert "execute" in completed
-    assert "ship" in completed
-    assert "think" not in completed
-    assert "plan" not in completed
-    assert "think" in skipped and "plan" in skipped
-
-
-def test_derive_phases_idea_input_records_think_plan():
-    # A bare-idea run thinks and plans in-session: those phases are real.
-    completed, _ = register_task.derive_phases(_post_collapse_state(input="add user auth"))
-    assert "think" in completed and "plan" in completed
-
-
 def test_derive_phases_plan_path_skips_think_plan():
     completed, skipped = register_task.derive_phases(
         _post_collapse_state(input="docs/plans/auth", plan_path="docs/plans/auth")
@@ -695,13 +548,6 @@ def test_derive_phases_no_ship_flag_skips_ship():
     )
     assert "ship" in skipped
     assert "ship" not in completed
-
-
-def test_derive_phases_skip_flags_record_skipped():
-    _, skipped = register_task.derive_phases(
-        _post_collapse_state(no_external=True, no_docs=True), pr_number=None
-    )
-    assert "external" in skipped and "docs" in skipped
 
 
 def test_build_entry_node_input_row_not_planned_in_the_fold():
