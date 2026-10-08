@@ -420,8 +420,8 @@ fn codex_resume_reuses_registry_reasoning_effort() {
     fno_agents::registry_store::seed_raw(
         &registry_path,
         body.replace(
-            "\"status\":\"live\"",
-            "\"effort\":\"low\",\"status\":\"live\"",
+            "\"status\": \"live\"",
+            "\"effort\": \"low\", \"status\": \"live\"",
         ),
     );
 

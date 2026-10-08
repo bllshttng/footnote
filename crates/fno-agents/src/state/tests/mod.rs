@@ -2062,14 +2062,14 @@ fn update_registry_respects_writer_floor_and_preserves_unknown_fields() {
         REGISTRY_SCHEMA_VERSION
     );
     crate::registry_store::seed_raw(&path, &incomplete);
+    // The table mints an fno_id per row on seed; the refusal must leave the
+    // stored document exactly as seeded.
+    let seeded = crate::registry_store::read_raw(&path);
     assert!(matches!(
         update_registry(&path, |_| ()),
         Err(StateError::WriterTooOld { .. })
     ));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&crate::registry_store::read_raw(&path)).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&incomplete).unwrap()
-    );
+    assert_eq!(crate::registry_store::read_raw(&path), seeded);
     std::fs::remove_dir_all(&dir).ok();
 }
 

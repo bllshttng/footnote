@@ -4052,10 +4052,6 @@ fn an_unreadable_staging_graph_holds_the_row_in_both_modes_without_effects() {
 
     let (dir, home) = staged_graph_home();
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    // The corrupt graph: the staging re-read returns None on it; the legacy
-    // db twin makes the ladder read this root spelling.
-    std::fs::write(dir.path().join("graph.db"), b"SQLite format 3\0").unwrap();
-    std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
     crate::state::update_registry(&home.registry_json(), |r| {
         let mut e = state::RegistryEntry::default();
         e.name = "corruptw".into();
@@ -4066,6 +4062,15 @@ fn an_unreadable_staging_graph_holds_the_row_in_both_modes_without_effects() {
         e.created_at = "2026-09-01T00:00:00Z".into();
         r.entries.push(e);
     })
+    .unwrap();
+    // The registry shares graph.db, so the graph turns unreadable by losing
+    // its version, not by corrupt bytes.
+    stage_graph(dir.path(), json!([]));
+    rusqlite::Connection::open(crate::backlog::database_path(
+        &dir.path().join("graph.json"),
+    ))
+    .unwrap()
+    .execute("DELETE FROM graph_meta WHERE key = 'version'", [])
     .unwrap();
     let store = home.root().join("store");
     std::fs::create_dir_all(&store).unwrap();
@@ -4898,10 +4903,8 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
     .unwrap();
     // A PID-liveness claim naming s-done: the holder pid is this test
     // process, so classification reads Live through the same claims
-    // `list` the production sweep calls. The lockfile lives at
-    // `<root>/.fno/claims/`, the layout `list` scans.
+    // `list` the production sweep calls, in the table `list` scans.
     let claims_root = dir.path().join(".fno").join("claims");
-    std::fs::create_dir_all(&claims_root).unwrap();
     let rec = crate::claims::ClaimRecord {
         schema_version: crate::claims::SCHEMA_VERSION,
         key: "node:x-dddd".into(),
@@ -4918,11 +4921,7 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
         machine_id: None,
         metadata: Default::default(),
     };
-    std::fs::write(
-        claims_root.join("node:x-dddd.lock"),
-        serde_yaml_ng::to_string(&rec).unwrap(),
-    )
-    .unwrap();
+    crate::claim_store::seed_at_path(&claims_root.join("node%3Ax-dddd.lock"), &rec);
 
     let graph = graph_read(&[("s-done", "N1", "done")], &[]);
     let summary = gc_sweep::run(

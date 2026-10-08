@@ -2200,7 +2200,7 @@ mod tests {
         // session id.
         crate::registry_store::seed_raw(
             home_pin.join("registry.json"),
-            r#"{"agents":[{"name":"rowan","session_id":"sess-b-uuid","harness":"claude"}]}"#,
+            r#"{"schema_version":1,"agents":[{"name":"rowan","cwd":"/x","session_id":"sess-b-uuid","harness":"claude"}]}"#,
         );
         let named = bus_line("fmail-777777777777", "sess-a", "rowan", "send");
         let Recorded::Message {
