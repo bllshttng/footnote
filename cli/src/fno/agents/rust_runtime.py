@@ -389,6 +389,9 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # the Rust client, so it must never auto-route to the daemon (it would 404 /
     # be shadowed for installed users). Python owns it.
     "spawn-guard",
+    # The bundle transfer: the Python shim execs the native fno binary's
+    # `agents transcript` role (the history pattern, not a client action).
+    "transcript",
     #: the canonical agent-name bridge, the shell twin of the Python
     # dispatchers' direct `fno.agents.naming` import. Pure Python and purely
     # computational (no daemon state); there is NO `name` on the Rust client, so

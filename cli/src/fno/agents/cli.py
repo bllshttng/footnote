@@ -4767,12 +4767,14 @@ def cmd_attach(
 from fno.agents.trace_cli import cmd_trace as _cmd_trace  # noqa: E402
 from fno.agents.resume_cli import cmd_resume as _cmd_resume  # noqa: E402
 from fno.agents.history import history_command  # noqa: E402
+from fno.agents.transcript import transcript_command  # noqa: E402
 
 agents_app.command("trace", hidden=True)(_cmd_trace)
 agents_app.command("resume")(_cmd_resume)
 # Advertised: the one verb over live rows, reap receipts and the
 # ledger. `fno whoami ledger` stays as its hidden alias.
 agents_app.command("history")(history_command)
+agents_app.command("transcript", hidden=True)(transcript_command)
 
 
 # Gate verb (Task 2.3): per-provider injection verification gate management

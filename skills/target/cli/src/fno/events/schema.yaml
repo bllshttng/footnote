@@ -8105,28 +8105,29 @@ event_types:
   - name: done_ahead_of_main
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: lead_spawned_successor
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: lead_wake_refused
+
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: lead_wake
     description: "One lead-wake arm episode: the daemon woke a lead past its check-in beat and told the rung-up leads. The arm folds the newest row per scope as its dedupe memory (lead_wake.rs)."
     sources: [daemon]
     data:
       required: [scope, level, idle_secs, beat_secs, acted]
+  - name: worker_wake
+    description: "The daemon nudged an ended Codex worker turn on an open node. The session and last activity timestamp identify one quiet episode."
+    sources: [daemon]
+    data: {required: [session_id, node, last_activity_ms, via]}
   - name: mcp_channel_demoted_to_socket
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]
-    data:
-      required: []
+    data: {required: []}
   - name: mcp_channel_envelope_drift
     description: "Legacy agents-family telemetry kind, envelope-mapped by the shared emitter."
     sources: [daemon, agents]

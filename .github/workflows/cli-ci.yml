@@ -658,8 +658,9 @@ jobs:
     # Widest of 14 passing runs sampled 2026-09-24: 6.9m. The release build
     # of fno-agents outgrew the 10m cap on cold runners once the crate grew
     # the native decisions listing, and the job died inside cargo before any
-    # budget ran.
-    timeout-minutes: 15
+    # budget ran. Outgrew the 15m cap the same way twice on 2026-10-08 under
+    # fleet load; died inside cargo both times.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -683,12 +684,17 @@ jobs:
           sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
           sudo apt-get update && sudo apt-get install -y strace
       - name: Build release binary
-        # The copy onto PATH installs the build for the freshness step below:
-        # `fno doctor harness-matrix` execs the *installed* binary by design
-        # (resolve_installed_binary), and the freshness verdict is only honest
-        # when that binary was built from this checkout.
+        # Build ONCE through the test target: `cargo test --no-run` compiles
+        # the fno-agents lib, bin, and the hook_latency harness in one pass,
+        # so the latency step below pays a cache hit instead of a second
+        # full compile of the crate (x-ed99: the double build outgrew the
+        # 15m cap on cold runners). The copy onto PATH installs the build
+        # for the freshness step below: `fno doctor harness-matrix` execs
+        # the *installed* binary by design (resolve_installed_binary), and
+        # the freshness verdict is only honest when that binary was built
+        # from this checkout.
         run: |
-          cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+          cargo test --release --manifest-path crates/fno-agents/Cargo.toml --no-run --test hook_latency
           # Runner-only: replayed locally this overwrites the deployed binary
           # in place and macOS SIGKILLs every launch. Pin a local build with
           # FNO_AGENTS_FRONT instead.

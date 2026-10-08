@@ -20,6 +20,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## What you see
 
 - **The sprite.** The buddy is one of 18 species. It has a rarity, eyes, and sometimes a hat. Five stats set its voice: debugging, patience, chaos, wisdom, and snark.
+- **Rarity colors.** In the dark theme, common is gray, uncommon green, rare blue, epic purple, and legendary gold. The card, the status line, and the Desktop sprite all draw the color of your Claude Code theme. A custom theme draws the dark theme's colors in the status line.
 - **Idle talk.** When nothing happens for 2 minutes, the buddy says something of its own. It is one model call, in its personality, about what the session is doing. The buddy has no canned lines.
 - **Reactions.** After a turn, one model call reads the last exchange and answers in the voice of the buddy. Ordinary turns wait 30 seconds between reactions, as the original did. A turn that says the buddy's name, fails tests, hits an error, or lands a diff over 80 lines gets a reaction at once. Petting and hatching get one too. The last three lines go along, so the buddy does not repeat itself.
 - **Observations.** Every observation the buddy makes goes to `~/.fno/state/buddy/observations.jsonl`, one JSON row each with the time, the name, the reason, and the line. Read it with `tail ~/.fno/state/buddy/observations.jsonl`.

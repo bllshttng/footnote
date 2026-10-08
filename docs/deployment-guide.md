@@ -89,7 +89,7 @@ When installation needs more time, set `AGY_PLUGIN_INSTALL_TIMEOUT_S=120`.
 
 ## Setup Wizard
 
-After installation, run the interactive setup wizard:
+After installation, run the one run-once setup (interactive, or `--yes` for a no-prompt pass):
 
 ```
 /fno:setup

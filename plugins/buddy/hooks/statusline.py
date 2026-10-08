@@ -25,7 +25,20 @@ STALE_S = 30
 INNER_MAX_AGE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
 LEAD = "⠀"
-COLORS = {"gray": 90, "green": 32, "cyan": 36, "magenta": 35, "yellow": 33}
+# The ANSI names Claude Code's -ansi themes use for the rarity colors.
+# The bare names are what a mod from before the theme table still writes.
+ANSI_NAMES = {"blackBright": 90, "white": 37, "green": 32, "greenBright": 92, "blue": 34, "blueBright": 94, "magenta": 35, "magentaBright": 95, "yellow": 33, "yellowBright": 93, "gray": 90, "cyan": 36}
+
+
+def sgr(color):
+    """The escape for a frame color: rgb(r,g,b) as 24-bit, ansi:<name> in the terminal's own palette, else dim gray."""
+    color = color or ""
+    if color.startswith("rgb(") and color.endswith(")"):
+        parts = [p.strip() for p in color[4:-1].split(",")]
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            return "\x1b[38;2;" + ";".join(parts) + "m"
+    name = color[5:] if color.startswith("ansi:") else color
+    return f"\x1b[{ANSI_NAMES.get(name, 90)}m"
 
 
 def width(s):
@@ -174,7 +187,7 @@ def layout(left, frame, cols):
         return left
     if cols + 4 < NARROW:
         return face_row(left, frame, cols)
-    color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
+    color = sgr(frame.get("color"))
     art = [r.rstrip() for r in frame.get("sprite", [])]
     while art and not art[0].strip():
         art.pop(0)
@@ -220,7 +233,7 @@ def layout(left, frame, cols):
 
 def face_row(left, frame, cols):
     """The one-line face on the lowest row that has room."""
-    color = f"\x1b[{COLORS.get(frame.get('color'), 90)}m"
+    color = sgr(frame.get("color"))
     face = f"{frame.get('face', '')} {frame.get('name', '')}"
     if frame.get("speech"):
         face += f": {frame['speech']}"
