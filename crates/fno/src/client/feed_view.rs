@@ -285,7 +285,10 @@ pub(crate) fn feed_panel_rows(
     // session (tail 8), lead, summary. The narrowest panel keeps time, kind,
     // node and summary; a wider one adds lead, harness, area, session back
     // in that drop order (AC11).
-    let mut used = 16usize + 17usize + 9usize; // marker+time (date+time), kind, node
+    // Date plus time needs a 15-column cell; below 48 columns the panel
+    // keeps the compact HH:MM so kind, node and a summary sliver survive.
+    let show_date = w >= 48;
+    let mut used = (if show_date { 16usize } else { 10usize }) + 17usize + 9usize;
     let fits = |needed: usize, used: &mut usize| {
         if *used + needed <= w {
             *used += needed;
@@ -348,7 +351,11 @@ pub(crate) fn feed_panel_rows(
                 let mut row = Vec::new();
                 cell(
                     &mut row,
-                    format!(" {marker} {:<11} ", short_ts(&item.ts)),
+                    format!(
+                        " {marker} {:<width$} ",
+                        short_ts(&item.ts, show_date),
+                        width = if show_date { 11 } else { 5 },
+                    ),
                     selected,
                     selected,
                 );
@@ -585,10 +592,11 @@ pub(crate) fn widest_title(items: &[FeedItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// Compact local time in the operator's zone: today reads `HH:MM`,
-/// anything older carries its date (`MM-DD HH:MM`), so a scrolling feed
-/// never presents last week as this morning. An unparseable ts shows raw.
-pub(crate) fn short_ts_in<Tz: chrono::TimeZone>(ts: &str, tz: &Tz) -> String
+/// Compact local time in the operator's zone. With `with_date`, anything
+/// older than today carries its date (`MM-DD HH:MM`) so a scrolling feed
+/// never presents last week as this morning; without it, every row reads
+/// `HH:MM` (the narrow panel's budget). An unparseable ts shows raw.
+pub(crate) fn short_ts_in<Tz: chrono::TimeZone>(ts: &str, tz: &Tz, with_date: bool) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -596,18 +604,18 @@ where
         Ok(t) => {
             let local = tz.from_utc_datetime(&t.naive_utc());
             let today = chrono::Utc::now().with_timezone(tz).date_naive();
-            if local.date_naive() == today {
-                local.format("%H:%M").to_string()
-            } else {
-                local.format("%m-%d %H:%M").to_string()
+            let older = local.date_naive() != today;
+            match (with_date, older) {
+                (true, true) => local.format("%m-%d %H:%M").to_string(),
+                _ => local.format("%H:%M").to_string(),
             }
         }
         Err(_) => ts.to_string(),
     }
 }
 
-fn short_ts(ts: &str) -> String {
-    short_ts_in(ts, &chrono::Local)
+fn short_ts(ts: &str, with_date: bool) -> String {
+    short_ts_in(ts, &chrono::Local, with_date)
 }
 
 /// The feed panel's width until the operator drags its border once; persisted

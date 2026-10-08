@@ -38,6 +38,7 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         parent: None,
         url: None,
         lead: None,
+        lead_current: false,
         area: String::new(),
         cursor: String::new(),
     }
@@ -66,6 +67,7 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
         parent: None,
         url: None,
         lead: None,
+        lead_current: false,
         area: String::new(),
         cursor: String::new(),
     }
@@ -1084,21 +1086,26 @@ fn detail_field_rows() {
     assert_eq!(owner, "epic x-29a8 the epic");
 
     let tz = chrono::FixedOffset::east_opt(-7 * 3600).unwrap();
-    // An older row carries its date; a today row reads time only.
+    // An older row carries its date when the panel is wide enough; a
+    // today row and a narrow panel read time only.
     assert_eq!(
-        feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz),
+        feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz, true),
         "09-28 09:48"
+    );
+    assert_eq!(
+        feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz, false),
+        "09:48"
     );
     let now = chrono::Utc::now()
         .with_timezone(&tz)
         .format("%H:%M")
         .to_string();
     assert_eq!(
-        feed_view::short_ts_in(&chrono::Utc::now().to_rfc3339(), &tz),
+        feed_view::short_ts_in(&chrono::Utc::now().to_rfc3339(), &tz, true),
         now
     );
     assert_eq!(
-        feed_view::short_ts_in("not-a-time", &tz),
+        feed_view::short_ts_in("not-a-time", &tz, true),
         "not-a-time",
         "unparseable stamps show raw"
     );

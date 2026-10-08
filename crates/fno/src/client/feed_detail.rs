@@ -32,7 +32,7 @@ pub(crate) enum Destination<'a> {
     /// session - and the view says so rather than implying provenance.
     NameOnly(&'a AgentRow),
     /// A session id with no live row of any kind.
-    SessionOnly(&'a str),
+    SessionOnly,
     None,
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn destination<'a>(rows: &'a [AgentRow], item: &'a FeedItem) -> Desti
         return Destination::NameOnly(row);
     }
     match item.session_id.as_deref() {
-        Some(sid) => Destination::SessionOnly(sid),
+        Some(_) => Destination::SessionOnly,
         None => Destination::None,
     }
 }
@@ -264,7 +264,7 @@ pub(crate) fn build(
             Destination::Exact(a) => (!a.name.is_empty()).then(|| a.name.clone()),
             _ => None,
         };
-        let open = crate::backlog_model::open_session(agents, sid, item.cwd.as_deref());
+        let open = crate::backlog_model::open_session(agents, sid);
         match open_row(open, sid) {
             LinkRow::Action(action, value) => {
                 let label = match name {
@@ -301,7 +301,7 @@ pub(crate) fn build(
             actions.push(FeedAction::Session(session_hit(a, active_squad)));
             values.push(seat_v);
         }
-        Destination::SessionOnly(_) => info(
+        Destination::SessionOnly => info(
             "pane",
             Some("not in the live roster".to_string()),
             &mut rows,
@@ -346,12 +346,9 @@ pub(crate) fn build(
             .filter(|r| !r.is_empty())
     });
     let parent = parent.or_else(|| item.parent.clone());
-    let parent_row = parent_sid.as_deref().map(|sid| {
-        open_row(
-            crate::backlog_model::open_session(agents, sid, item.cwd.as_deref()),
-            sid,
-        )
-    });
+    let parent_row = parent_sid
+        .as_deref()
+        .map(|sid| open_row(crate::backlog_model::open_session(agents, sid), sid));
     match (parent, parent_row) {
         (Some(text), Some(LinkRow::Action(action, value))) => {
             rows.push(PopupRow::Entry {
@@ -407,9 +404,19 @@ pub(crate) fn build(
         .as_deref()
         .and_then(owner_holder)
         .and_then(|holder| {
+            // A team holder's name is fleet-managed (a rename displaces
+            // the label), so a live ROLE row bearing the name is the
+            // current holder; a plain worker reusing a lead's old name
+            // does not answer.
             let live: Vec<&AgentRow> = agents
                 .iter()
-                .filter(|a| a.name == holder && !a.exited)
+                .filter(|a| {
+                    a.name == holder
+                        && !a.exited
+                        && a.role_scope
+                            .as_deref()
+                            .is_some_and(|s| !s.trim().is_empty())
+                })
                 .collect();
             match live.as_slice() {
                 [a] => Some(FeedAction::Session(session_hit(a, active_squad))),
@@ -431,19 +438,20 @@ pub(crate) fn build(
         (None, _) => {}
     }
     // now-led-by: the node's CURRENT coverage, the other of the two names.
-    // Enter opens the covering lead's session. The narrowest LIVE team
-    // naming the node comes from the shared lead_of resolver - an exited
-    // row with the scope does not answer for it.
-    if let Some(node) = item.node.as_deref() {
-        let live: Vec<AgentRow> = agents.iter().filter(|a| !a.exited).cloned().collect();
-        let cover = crate::backlog_model::lead_of(&live, node, None, None).and_then(|(name, _)| {
-            agents.iter().find(|a| {
-                a.name == name
-                    && !a.exited
-                    && a.role_scope
-                        .as_deref()
-                        .is_some_and(|s| s.split(',').any(|seg| seg.trim() == node))
-            })
+    // Enter opens the covering lead's session. The projection stamps
+    // lead_current when the lead column resolved the LIVE team name -
+    // inherited coverage included - and a fallback name is the event-time
+    // holder, which lights no current row.
+    if item.lead_current {
+        let cover = item.lead.as_deref().and_then(|name| {
+            let live: Vec<&AgentRow> = agents
+                .iter()
+                .filter(|a| a.name == name && !a.exited)
+                .collect();
+            match live.as_slice() {
+                [a] => Some(*a),
+                _ => None,
+            }
         });
         if let Some(a) = cover {
             let title = a.role_title.clone().or_else(|| {

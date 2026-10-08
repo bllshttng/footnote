@@ -1303,7 +1303,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
                 // A session the registry lacks: adopt is the reach that
                 // heals the row from the harness stores.
                 SessionAction::Dim(_) if joined.is_none() => {
-                    sid.map(|sid| session_command("adopt", sid, node_cwd.as_deref()))
+                    sid.map(|sid| session_command("adopt", sid, None))
                 }
                 SessionAction::Dim(_) => None,
             };
@@ -1707,10 +1707,10 @@ fn session_command(verb: &str, sid: &str, cwd: Option<&str>) -> String {
     cmd
 }
 
-/// Resolve the open-session gesture for `sid` against the roster. `cwd`
-/// pins the shell lines' working directory when the caller knows one (the
-/// node's project dir), the same pin [`SessionView`] carries.
-pub(crate) fn open_session(agents: &[AgentRow], sid: &str, cwd: Option<&str>) -> OpenSession {
+/// Resolve the open-session gesture for `sid` against the roster. The
+/// shell lines carry no cwd pin: a resume relaunches in the row's recorded
+/// directory and an adopt heals the row in place.
+pub(crate) fn open_session(agents: &[AgentRow], sid: &str) -> OpenSession {
     let joined = agents
         .iter()
         .find(|a| a.harness_session_id.as_deref() == Some(sid));
@@ -1721,8 +1721,12 @@ pub(crate) fn open_session(agents: &[AgentRow], sid: &str, cwd: Option<&str>) ->
             // the attach id when the harness gave one, the session id
             // otherwise (Follow/Locate rows carry no attach id).
             None => OpenSession::Cmds(vec![crate::proto::Command::AttachAgent {
+                // The portal resolver answers an attach id or the registry
+                // NAME, never a session id: the same fallback agent_hit
+                // makes for Follow/Locate rows.
                 id: joined
                     .and_then(|a| a.attach_id.clone())
+                    .or_else(|| joined.map(|a| a.name.clone()))
                     .unwrap_or_else(|| sid.to_string()),
                 placement: crate::proto::PanePlacement {
                     portal: Some(0),
@@ -1738,8 +1742,9 @@ pub(crate) fn open_session(agents: &[AgentRow], sid: &str, cwd: Option<&str>) ->
         }]),
         // A session the registry lacks: adopt is the reach that heals the
         // row from the harness stores - the SessionView command's own rule.
+        // No cwd pin: adopt heals the row in place (the resume relaunches).
         SessionAction::Dim(_) if joined.is_none() => {
-            OpenSession::Shell(session_command("adopt", sid, cwd))
+            OpenSession::Shell(session_command("adopt", sid, None))
         }
         SessionAction::Dim(why) => OpenSession::Dim(why),
     }

@@ -97,6 +97,10 @@ pub struct FeedRow {
     /// The search answers `l:` through it, else through `owner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead: Option<String>,
+    /// True when `lead` is the LIVE team name resolved at render time;
+    /// omitted (false) when it is the event-time holder's fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_current: bool,
     /// The row's position in the total order, as a six-string JSON array
     /// (`[ts, kind, node, session_id, ref, title]`, absent fields as "").
     /// The `--before` / `--after` flags take one back. Always serialized:
@@ -1156,12 +1160,19 @@ fn assign_owners(
             let rank = crate::team_names::title(*level as u32, &scope, theme.as_deref());
             let canon = crate::territory::canonical_scope(&scope);
             // Both names: the owner string keeps the lead AT EVENT TIME, the
-            // lead column resolves to the team's CURRENT name.
-            r.owner = match lead_display(None, holder) {
+            // lead column resolves to the team's CURRENT name, and the flag
+            // tells the two apart on the wire.
+            r.owner = match lead_display(holder) {
                 Some(name) => Some(format!("{rank} ({name})")),
                 None => Some(rank),
             };
-            r.lead = lead_display(lead_names.get(canon.as_str()), holder);
+            r.lead = match lead_names.get(canon.as_str()).filter(|n| !n.is_empty()) {
+                Some(name) => {
+                    r.lead_current = true;
+                    Some((*name).clone())
+                }
+                None => lead_display(holder),
+            };
         } else if r.node.is_none() {
             // A node-less row whose parent session IS a held role holder's
             // session rolls up to that holder: the question a lead's own
@@ -1174,11 +1185,17 @@ fn assign_owners(
                         .cloned();
                     let rank = crate::team_names::title(*level as u32, scope, theme.as_deref());
                     let canon = crate::territory::canonical_scope(scope);
-                    r.owner = match lead_display(None, holder) {
+                    r.owner = match lead_display(holder) {
                         Some(n) => Some(format!("{rank} ({n})")),
                         None => Some(rank),
                     };
-                    r.lead = lead_display(lead_names.get(canon.as_str()), holder);
+                    r.lead = match lead_names.get(canon.as_str()).filter(|n| !n.is_empty()) {
+                        Some(n) => {
+                            r.lead_current = true;
+                            Some((*n).clone())
+                        }
+                        None => lead_display(holder),
+                    };
                 }
             }
         } else if let Some(p) = parent {
@@ -1197,17 +1214,11 @@ fn scope_holds(scope: &str, node: &str) -> bool {
     scope.split(',').any(|seg| seg.trim() == node)
 }
 
-/// The lead name a feed row prints: `current`, the covering scope's live
-/// store name (always person-shaped; `name_team` validates it), when given,
-/// else the event-time holder when it is one. A dispatch slug carries
-/// digits (`king-4d9b-op`) and never prints - the row keeps its rank rollup
-/// without a placeholder name. `None` for `current` reads the event-time
-/// spelling alone (the owner string's contract).
-fn lead_display(current: Option<&String>, stored: &str) -> Option<String> {
-    if let Some(name) = current {
-        // A record mid-write can carry an empty name; nothing prints.
-        return (!name.is_empty()).then(|| name.clone());
-    }
+/// The event-time name a feed row prints: the holder when person-shaped.
+/// A dispatch slug carries digits in it and never prints - the row keeps
+/// its rank rollup without a placeholder name. The live store name rides
+/// beside this one and always passes (name_team validates it).
+fn lead_display(stored: &str) -> Option<String> {
     (!stored.bytes().any(|b| b.is_ascii_digit())).then(|| stored.to_string())
 }
 
@@ -3001,7 +3012,7 @@ mod tests {
         ];
         let events = vec![
             granted("2026-10-07T09:00:00Z", "finch", "x-live"),
-            granted("2026-10-07T09:00:00Z", "king-4d9b-op", "x-old"),
+            granted("2026-10-07T09:00:00Z", "w-9x4d2-g", "x-old"),
             granted("2026-10-07T09:00:00Z", "candor", "x-gone"),
         ];
         let lead_names = std::collections::BTreeMap::from([("x-live".to_string(), "Quill".into())]);
@@ -3014,8 +3025,10 @@ mod tests {
             &Default::default(),
         );
         // The renamed team's lead column prints the CURRENT name while the
-        // owner string keeps the lead at event time: both names on the row.
+        // owner string keeps the lead at event time: both names on the row,
+        // and the flag tells the two apart on the wire.
         assert_eq!(rows[0].lead.as_deref(), Some("Quill"));
+        assert!(rows[0].lead_current);
         assert_eq!(rows[0].owner.as_deref(), Some("Lead of x-live (finch)"));
         // A slug holder with no live team prints no name: rank only, lead
         // absent - the placeholder never renders.
@@ -3024,6 +3037,7 @@ mod tests {
         // A person-shaped stored holder is the fallback when no live team
         // covers the node.
         assert_eq!(rows[2].lead.as_deref(), Some("candor"));
+        assert!(!rows[2].lead_current, "a fallback name is not the live one");
         assert_eq!(rows[2].owner.as_deref(), Some("Lead of x-gone (candor)"));
     }
 }
