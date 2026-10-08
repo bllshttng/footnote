@@ -166,6 +166,22 @@ CONTEXT="${CONTEXT}
 Progress is not in the manifest. Run \`fno whoami\` then \`fno whoami status\`
 for live phase + completion state (git HEAD, PR/CI, review)."
 
+# The read-verb lesson rides the post-compact brief: a compaction boundary
+# newer than the taught one re-teaches it once, and the door prints nothing
+# when the session is current. Best-effort - a stale or absent binary
+# teaches nothing and never blocks the brief.
+if [[ -r "$SOURCE_ROOT/hooks/lib/agents-bin.sh" ]]; then
+    # shellcheck source=../hooks/lib/agents-bin.sh
+    source "$SOURCE_ROOT/hooks/lib/agents-bin.sh"
+    TEACH_BIN="$(fno_agents_bin "$SOURCE_ROOT")"
+    if [[ -n "$TEACH_BIN" && -x "$TEACH_BIN" && -n "$CALLER_SESSION_ID" ]]; then
+        TEACH="$("$TEACH_BIN" mail-teach --session "$CALLER_SESSION_ID" --mark 2>/dev/null || true)"
+        [[ -n "$TEACH" ]] && CONTEXT="${CONTEXT}
+
+$TEACH"
+    fi
+fi
+
 postcompact_emit "$CARRIER" "$CONTEXT"
 
 exit 0

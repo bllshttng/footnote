@@ -165,6 +165,96 @@ pub fn sccache_row_pid(rows: &[crate::census::ProcRow]) -> Option<u32> {
         .map(|row| row.pid)
 }
 
+/// A client this old, still waiting on a server that has no compile running,
+/// is stuck: a live compile always shows as a child of the server, so a server
+/// answering `--show-stats` with clients parked and no child ran nothing for
+/// them. Measured 2026-10-08: clients sat at 0 percent CPU for 5h30m.
+pub const SCCACHE_WEDGE_CLIENT_SECS: u64 = 600;
+
+/// What the watchdog found: the wedged server and how many clients wait on it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SccacheWedge {
+    pub server_pid: u32,
+    pub stuck_clients: usize,
+    pub oldest_client_secs: u64,
+}
+
+fn is_sccache_client(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    first.rsplit('/').next() == Some("sccache")
+        && words.next().is_some_and(|arg| !arg.starts_with("--"))
+}
+
+/// A live server with clients parked past `min_client_secs` and no child of
+/// its own. Process-table only, so the tick spends no extra process walk and
+/// never asks a wedged server a question it cannot answer.
+pub fn sccache_wedge(
+    rows: &[crate::census::ProcRow],
+    min_client_secs: u64,
+) -> Option<SccacheWedge> {
+    let server_pid = sccache_row_pid(rows)?;
+    if rows.iter().any(|row| row.ppid == server_pid) {
+        return None;
+    }
+    // A client older than the server asked an earlier server: after a restart
+    // the stragglers must not read as stuck on the new one.
+    let server_age = rows.iter().find(|row| row.pid == server_pid)?.elapsed_s;
+    let stuck: Vec<u64> = rows
+        .iter()
+        .filter(|row| {
+            is_sccache_client(&row.command)
+                && row.elapsed_s >= min_client_secs
+                && row.elapsed_s < server_age
+        })
+        .map(|row| row.elapsed_s)
+        .collect();
+    let oldest_client_secs = stuck.iter().copied().max()?;
+    Some(SccacheWedge {
+        server_pid,
+        stuck_clients: stuck.len(),
+        oldest_client_secs,
+    })
+}
+
+/// Stop the wedged server and start a fresh one. `--stop-server` answers
+/// through the server, so it gets ten seconds and then the pid gets SIGKILL.
+/// Runs off the tick on its own thread: the wait must not hold the arm.
+pub fn restart_wedged_sccache(server_pid: u32) {
+    let Some(bin) = sccache_bin() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let stopped = std::process::Command::new(&bin)
+            .arg("--stop-server")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+            .and_then(|mut child| {
+                for _ in 0..100 {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return Some(status.success()),
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        Err(_) => break,
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            });
+        if stopped != Some(true) {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &server_pid.to_string()])
+                .status();
+        }
+        ensure_sccache_server_unless(false);
+    });
+}
+
 fn expand_home(path: &Path) -> PathBuf {
     if let Ok(rest) = path.strip_prefix("~") {
         if let Some(home) = home() {
@@ -1821,6 +1911,41 @@ mod tests {
         assert_eq!(sccache_row_pid(&rows), Some(20));
         let clients = vec![row(10, "sccache /usr/bin/rustc --crate-name a")];
         assert_eq!(sccache_row_pid(&clients), None);
+    }
+
+    #[test]
+    fn sccache_wedge_needs_old_clients_and_a_server_with_no_compile() {
+        let row = |pid: u32, ppid: u32, age: u64, command: &str| crate::census::ProcRow {
+            pid,
+            ppid,
+            state: 'S',
+            elapsed_s: age,
+            cpu_pct: 0.0,
+            rss_kb: 100,
+            command: command.into(),
+        };
+        let server = row(20, 1, 9000, "/opt/homebrew/bin/sccache");
+        let old = row(10, 5, 7000, "sccache /usr/bin/rustc --crate-name a");
+        let fresh = row(11, 5, 30, "sccache /usr/bin/rustc --crate-name b");
+        let wedged = vec![server.clone(), old.clone(), fresh.clone()];
+        assert_eq!(
+            sccache_wedge(&wedged, SCCACHE_WEDGE_CLIENT_SECS),
+            Some(SccacheWedge {
+                server_pid: 20,
+                stuck_clients: 1,
+                oldest_client_secs: 7000,
+            })
+        );
+        let compiling = vec![
+            server.clone(),
+            old.clone(),
+            row(30, 20, 7000, "rustc --crate-name a"),
+        ];
+        assert_eq!(sccache_wedge(&compiling, SCCACHE_WEDGE_CLIENT_SECS), None);
+        let restarted = vec![row(21, 1, 60, "/opt/homebrew/bin/sccache"), old.clone()];
+        assert_eq!(sccache_wedge(&restarted, SCCACHE_WEDGE_CLIENT_SECS), None);
+        let young = vec![server, fresh];
+        assert_eq!(sccache_wedge(&young, SCCACHE_WEDGE_CLIENT_SECS), None);
     }
     fn seven_h() -> u64 {
         7 * 3600

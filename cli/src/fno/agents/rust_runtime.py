@@ -312,6 +312,10 @@ RUST_CLIENT_VERBS = frozenset(
         # PreCompact stamp writer/reader: the hook invokes the
         # binary directly (`fno-agents compaction mark`). Parity-synced.
         "compaction",
+        # The fmail read-verb lesson state: the hook carriers invoke
+        # the binary directly (`fno-agents mail-teach --self --mark`).
+        # Parity-synced.
+        "mail-teach",
         # Read leaves over the packaged capability table and the merge-posture
         # family table: the successors to the retired
         # dispatch capabilities/family query leaves (d-496680aa). Direct dispatch
@@ -567,6 +571,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "target-family": "Merge-posture family test: --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
     "permission-tokens": "The permission-posture owner: payload {provider, mode, substrate} in, the {mappable, tokens} answer out; invoked by the spawn seam via fno.rust_binary.verb_call, not `fno agents` routing.",
     "sandbox-probe": "The codex sandbox verdict owner: payload {cwd, mode} in, the {verdict, blocked, note} envelope out; invoked by fno.agents.sandbox_probe, not `fno agents` routing.",
+    "mail-teach": "The fmail read-verb lesson state: (--session <id> | --self) [--transcript <path>] [--mark] prints the teaching line when the lesson is due and stamps it taught; the hook carriers invoke the binary directly.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises. Every other

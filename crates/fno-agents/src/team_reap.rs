@@ -1098,16 +1098,12 @@ mod tests {
     #[test]
     fn production_sweep_reverts_an_unbound_successor_and_journals_the_receipt() {
         use serde_json::json;
-        // The env mutation rides the same lock the settle tests hold: a
-        // parallel FNO_AGENTS_HOME re-point mid-sweep otherwise lets another
-        // test's fleet announce land in this test's journal (a second
-        // team_succession_announced row, failing the exactly-one assert).
-        let _env_lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let old_home = std::env::var("FNO_AGENTS_HOME").ok();
         let seeded = tempfile::TempDir::new().unwrap();
-        std::env::set_var("FNO_AGENTS_HOME", seeded.path());
+        // The shared test-env lock, like every sibling that repoints the
+        // home: unlocked, a parallel succession test resolving from_env
+        // mid-body wrote its announce rows into this journal and the
+        // announce count read three instead of one.
+        let _home = crate::AgentsHomeEnvGuard::set(seeded.path());
         // The rollback announce needs one live recipient in the home registry.
         std::fs::write(
             seeded.path().join("registry.json"),
@@ -1185,10 +1181,6 @@ mod tests {
         assert_eq!(announces.len(), 1, "{:?}", events);
         assert_eq!(announces[0]["data"]["scope"], "x-sweep");
         let _ = registry;
-        match old_home {
-            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
-            None => std::env::remove_var("FNO_AGENTS_HOME"),
-        }
         fs::remove_dir_all(&dir).ok();
     }
 }
