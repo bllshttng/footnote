@@ -1374,7 +1374,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sort table columns",
         ),
         b(
-            b'G',
+            b'W',
             "cycle-agent-group",
             CycleAgentGroup,
             Global,
