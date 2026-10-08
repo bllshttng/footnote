@@ -529,9 +529,6 @@ fn write_pair(
 #[cfg(test)]
 mod engine_tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("fno-mbft-{tag}-{}", std::process::id()))
@@ -608,13 +605,19 @@ mod engine_tests {
 
     #[test]
     fn run_writes_once_then_idempotent_rerun() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The shared test-env lock: the fence-clean home is process env, and
+        // every other env-pinning test in the crate takes the same lock.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = temp_root("run");
         let home = temp_root("home");
         let bus_dir = root.join("bus");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
         write_transcripts(&root);
+        let saved_bus = std::env::var_os("FNO_BUS_DIR");
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
         std::env::set_var("FNO_BUS_DIR", &bus_dir);
         std::env::set_var("FNO_AGENTS_HOME", home.join("agents"));
         let args: Vec<String> = [
@@ -664,5 +667,13 @@ mod engine_tests {
         assert_eq!(count, 1);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
+        match saved_bus {
+            Some(v) => std::env::set_var("FNO_BUS_DIR", v),
+            None => std::env::remove_var("FNO_BUS_DIR"),
+        }
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
     }
 }
