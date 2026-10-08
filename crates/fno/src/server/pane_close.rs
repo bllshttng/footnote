@@ -377,38 +377,31 @@ impl Core {
     /// liveness is the argv witness, never the pid.
     pub(super) fn reattach_seat_argv(&self, pid: u64) -> Option<(String, Vec<String>, String)> {
         let row = crate::thread_viewer::row_for_pane(&self.portals, pid, &self.agents)?;
-        if row.harness.as_deref() != Some("claude") {
-            return None;
-        }
         let id = row.attach_id.clone()?;
-        let uuid = row
-            .claude_session_uuid
-            .as_deref()
-            .filter(|u| !u.is_empty())?;
-        let live = crate::argv_witness::live_process_argvs()
-            .iter()
-            .any(|a| a.contains(uuid));
-        live.then(|| {
-            let (acct, cd) = self.attach_account_ctx(&id);
-            (
-                id.clone(),
-                attach_argv(&id, acct.as_deref(), cd.as_deref()),
-                row.name.clone(),
-            )
-        })
+        self.attach_replay_argv(&id, row)
     }
 
     /// [`Self::reattach_seat_argv`] for a NON-seat attach viewer: the row
     /// resolves through the attached map - the pane's own attach id - never
-    /// a portal. Same claude + live-argv-witness gate: a uuid no live
-    /// process argv names is a genuinely ended session and reads `None`, so
-    /// the plain close stands.
+    /// a portal.
     fn reattach_view_argv(&self, pid: u64) -> Option<(String, Vec<String>, String)> {
         let id = self.attached.iter().find(|(_, &p)| p == pid)?.0.clone();
         let row = self
             .agents
             .iter()
             .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))?;
+        self.attach_replay_argv(&id, row)
+    }
+
+    /// The replay plan both death paths share: the claude gate, the session
+    /// uuid, and the live-argv witness. A uuid no live process argv names is
+    /// a genuinely ended session and reads `None`, so the plain close
+    /// stands.
+    fn attach_replay_argv(
+        &self,
+        id: &str,
+        row: &crate::agents_view::RegistryAgent,
+    ) -> Option<(String, Vec<String>, String)> {
         if row.harness.as_deref() != Some("claude") {
             return None;
         }
@@ -420,10 +413,10 @@ impl Core {
             .iter()
             .any(|a| a.contains(uuid));
         live.then(|| {
-            let (acct, cd) = self.attach_account_ctx(&id);
+            let (acct, cd) = self.attach_account_ctx(id);
             (
-                id.clone(),
-                attach_argv(&id, acct.as_deref(), cd.as_deref()),
+                id.to_string(),
+                attach_argv(id, acct.as_deref(), cd.as_deref()),
                 row.name.clone(),
             )
         })
