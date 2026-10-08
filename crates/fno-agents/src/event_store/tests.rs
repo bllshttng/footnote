@@ -47,6 +47,14 @@ fn count_type(store: &Path, event_type: &str) -> i64 {
         .unwrap()
 }
 
+/// An ephemeral row that must survive import sits one hour old: import
+/// prunes on a fresh store, so any fixed ts crosses the retention floor
+/// and the row vanishes.
+fn fresh_ts() -> String {
+    (chrono::Utc::now() - chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 #[test]
 fn a_cause_stores_reads_back_and_migrates_in_place() {
     let dir = tempfile::tempdir().unwrap();
