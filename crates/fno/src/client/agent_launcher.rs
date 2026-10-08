@@ -1563,17 +1563,7 @@ fn kill_to_line_start(draft: &mut LaunchDraft) {
 fn kill_to_word_start(draft: &mut LaunchDraft) {
     let cur = draft.cursor_chars;
     let before: Vec<char> = draft.message.chars().take(cur).collect();
-    let ws = before
-        .iter()
-        .rev()
-        .take_while(|c| c.is_whitespace())
-        .count();
-    let word = before[..before.len() - ws]
-        .iter()
-        .rev()
-        .take_while(|c| is_word_char(**c))
-        .count();
-    let drop = ws + word;
+    let drop = word_run(&before, true);
     if drop == 0 {
         return;
     }
@@ -1612,31 +1602,41 @@ fn move_right(draft: &mut LaunchDraft) {
     draft.cursor_chars = (draft.cursor_chars + 1).min(total);
 }
 
-/// Word motion is flat (a `\n` counts as whitespace, so it crosses rows)
-/// while the kills stay row-local: a motion undoes with one keystroke, a
-/// kill that ate a newline does not.
+/// One word step's width over `chars`: the whitespace run, then the word
+/// run behind or after it. `rev` counts from the back (a leftward step),
+/// otherwise from the front. Word motion is flat (a `\n` counts as
+/// whitespace, so it crosses rows) while the kills stay row-local: a
+/// motion undoes with one keystroke, a kill that ate a newline does not.
+/// The settings input fields share it (one editing grammar).
+pub(crate) fn word_run(chars: &[char], rev: bool) -> usize {
+    let ws = if rev {
+        chars.iter().rev().take_while(|c| c.is_whitespace()).count()
+    } else {
+        chars.iter().take_while(|c| c.is_whitespace()).count()
+    };
+    let rest = if rev {
+        &chars[..chars.len() - ws]
+    } else {
+        &chars[ws..]
+    };
+    let word = if rev {
+        rest.iter().rev().take_while(|c| is_word_char(**c)).count()
+    } else {
+        rest.iter().take_while(|c| is_word_char(**c)).count()
+    };
+    ws + word
+}
+
 fn move_word_left(draft: &mut LaunchDraft) {
     let cur = draft.cursor_chars;
     let before: Vec<char> = draft.message.chars().take(cur).collect();
-    let ws = before
-        .iter()
-        .rev()
-        .take_while(|c| c.is_whitespace())
-        .count();
-    let word = before[..before.len() - ws]
-        .iter()
-        .rev()
-        .take_while(|c| is_word_char(**c))
-        .count();
-    draft.cursor_chars = cur - ws - word;
+    draft.cursor_chars = cur - word_run(&before, true);
 }
 
 fn move_word_right(draft: &mut LaunchDraft) {
     let cur = draft.cursor_chars;
     let after: Vec<char> = draft.message.chars().skip(cur).collect();
-    let ws = after.iter().take_while(|c| c.is_whitespace()).count();
-    let word = after[ws..].iter().take_while(|c| is_word_char(**c)).count();
-    draft.cursor_chars = cur + ws + word;
+    draft.cursor_chars = cur + word_run(&after, false);
 }
 
 fn move_line_start(draft: &mut LaunchDraft) {

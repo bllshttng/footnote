@@ -69,17 +69,7 @@ impl InputField {
                 // too: one byte grammar, one editing grammar.
                 LKey::KillWord => {
                     let before: Vec<char> = self.text.chars().take(self.cursor).collect();
-                    let ws = before
-                        .iter()
-                        .rev()
-                        .take_while(|c| c.is_whitespace())
-                        .count();
-                    let word = before[..before.len() - ws]
-                        .iter()
-                        .rev()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .count();
-                    let drop = ws + word;
+                    let drop = super::agent_launcher::word_run(&before, true);
                     let at = self.byte_at(self.cursor - drop);
                     self.text.replace_range(at..self.byte_at(self.cursor), "");
                     self.cursor -= drop;
@@ -88,33 +78,14 @@ impl InputField {
                 LKey::End => self.cursor = self.text.chars().count(),
                 LKey::WordLeft | LKey::WordRight => {
                     let cur = self.cursor;
-                    let (taken, rev) = if matches!(key, LKey::WordLeft) {
-                        (self.text.chars().take(cur).collect::<Vec<_>>(), true)
+                    let rev = matches!(key, LKey::WordLeft);
+                    let taken: Vec<char> = if rev {
+                        self.text.chars().take(cur).collect()
                     } else {
-                        (self.text.chars().skip(cur).collect::<Vec<_>>(), false)
+                        self.text.chars().skip(cur).collect()
                     };
-                    let ws = if rev {
-                        taken.iter().rev().take_while(|c| c.is_whitespace()).count()
-                    } else {
-                        taken.iter().take_while(|c| c.is_whitespace()).count()
-                    };
-                    let word = if rev {
-                        taken[..taken.len() - ws]
-                            .iter()
-                            .rev()
-                            .take_while(|c| c.is_alphanumeric() || **c == '_')
-                            .count()
-                    } else {
-                        taken[ws..]
-                            .iter()
-                            .take_while(|c| c.is_alphanumeric() || **c == '_')
-                            .count()
-                    };
-                    self.cursor = if rev {
-                        cur - ws - word
-                    } else {
-                        cur + ws + word
-                    };
+                    let step = super::agent_launcher::word_run(&taken, rev);
+                    self.cursor = if rev { cur - step } else { cur + step };
                 }
                 LKey::Left => self.cursor = self.cursor.saturating_sub(1),
                 LKey::Right => self.cursor = (self.cursor + 1).min(self.text.chars().count()),
