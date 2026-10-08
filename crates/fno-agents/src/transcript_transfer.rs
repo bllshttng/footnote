@@ -145,7 +145,12 @@ fn current_branch() -> String {
 }
 
 fn relay_hints() -> Vec<transit::RelayHint> {
-    vec![transit::RelayHint::new(RELAY_HOST, RELAY_PORT)]
+    let tcp = [transit::DirectHint::new(RELAY_HOST, RELAY_PORT)];
+    vec![transit::RelayHint::new(
+        Some(RELAY_HOST.into()),
+        tcp,
+        std::iter::empty(),
+    )]
 }
 
 fn print_code(code: &Code) {
@@ -163,8 +168,9 @@ fn locate(sid: &str) -> Result<(PathBuf, &'static str, PathBuf), String> {
     if let Some(path) = claude_transcript_paths::resolve_transcript(&claude_root, sid) {
         let rel = path
             .strip_prefix(&claude_root)
-            .map_err(|_| format!("{} sits outside the claude store", path.display()))?;
-        return Ok((path, "claude", rel.to_path_buf()));
+            .map_err(|_| format!("{} sits outside the claude store", path.display()))?
+            .to_path_buf();
+        return Ok((path, "claude", rel));
     }
     if let Some(path) = codex_store::codex_rollout_path(None, sid) {
         let root = codex_store::codex_home()
@@ -172,8 +178,9 @@ fn locate(sid: &str) -> Result<(PathBuf, &'static str, PathBuf), String> {
             .ok_or("the codex home is unreadable")?;
         let rel = path
             .strip_prefix(&root)
-            .map_err(|_| format!("{} sits outside the codex store", path.display()))?;
-        return Ok((path, "codex", rel.to_path_buf()));
+            .map_err(|_| format!("{} sits outside the codex store", path.display()))?
+            .to_path_buf();
+        return Ok((path, "codex", rel));
     }
     Err(format!(
         "no transcript for {sid} (claude projects and codex sessions searched)"
@@ -268,12 +275,12 @@ async fn run_send(rest: &[String]) -> i32 {
         let mailbox = MailboxConnection::create(transfer::APP_CONFIG, 2)
             .await
             .map_err(|e| e.to_string())?;
-        let code = mailbox.code.clone();
+        let code = mailbox.code().clone();
         print_code(&code);
         let wh = Wormhole::connect(mailbox)
             .await
             .map_err(|e| e.to_string())?;
-        let mut cursor = std::io::Cursor::new(envelope);
+        let mut cursor = futures_util::io::Cursor::new(envelope);
         transfer::send_file(
             wh,
             relay_hints(),
