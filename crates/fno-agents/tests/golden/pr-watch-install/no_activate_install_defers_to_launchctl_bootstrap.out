@@ -1,0 +1,64 @@
+--- Rendered plist ---
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Global PR-state watcher LaunchAgent.  ONE agent polls ~/.fno/graph.json
+  for open-PR backlog nodes and fires /fno:ship pr check or /fno:ship pr merged.
+  RunAtLoad is false: review the rendered plist and run
+    launchctl load <CASE>/home/Library/LaunchAgents/sh.fno.pr-watcher.plist
+  yourself (human gate).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>sh.fno.pr-watcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string><CASE>/stub/fno-py</string>
+    <string>do</string>
+    <string>pr</string>
+    <string>watch</string>
+    <string>tick</string>
+  </array>
+
+  <!-- launchd launches with a minimal PATH.  Capture install-time PATH so
+       gh / claude / uv are resolvable without a login shell. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string><CASE>/stub:<CASE>/cargo/bin:<CASE>/home/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string><CASE>/home</string>
+  </dict>
+
+  <!-- Poll every N seconds.  Default 600 (10 min). -->
+  <key>StartInterval</key>
+  <integer>0</integer>
+
+  <!-- Do NOT fire on agent load; wait for the first StartInterval. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Standard</string>
+
+  <!-- Belt-and-suspenders: set cwd to $HOME so any code that constructs a
+       relative path at least lands somewhere writable rather than in /.
+       The primary fix is that _emit_event now anchors to state_dir()
+       explicitly, but WorkingDirectory is a cheap additional safety net. -->
+  <key>WorkingDirectory</key>
+  <string><CASE>/home</string>
+
+  <key>StandardOutPath</key>
+  <string><CASE>/home/.fno/logs/pr-watcher.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string><CASE>/home/.fno/logs/pr-watcher.err.log</string>
+</dict>
+</plist>
+
+Write plist to <CASE>/home/Library/LaunchAgents/sh.fno.pr-watcher.plist? [y/N]: Written: <CASE>/home/Library/LaunchAgents/sh.fno.pr-watcher.plist
+To activate: launchctl bootstrap gui/$(id -u) <CASE>/home/Library/LaunchAgents/sh.fno.pr-watcher.plist
+The canonical pr-watch daemon now owns merge detection; no per-repo watcher install is needed.
+Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)

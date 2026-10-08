@@ -1551,27 +1551,34 @@ def install(
     """Render and install the global PR-state watcher LaunchAgent, then load it.
 
     Prints the full plist before writing.  Requires explicit confirmation
-    before writing to ~/Library/LaunchAgents/, then runs ``launchctl load`` so
-    enabled means running.  Pass ``--no-activate`` to write only.
+    before writing to ~/Library/LaunchAgents/, then bootout/bootstrap/kickstart
+    bounces the agent so enabled means running.  Pass ``--no-activate`` to
+    write only.
     """
-    from fno.pr_watch import _install as m
+    import subprocess
 
-    settings = load_settings()
-    cfg = settings.pr_watch
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
 
-    _interval = interval if interval > 0 else cfg.interval_seconds
-
-    m.install(
-        launch_agents_dir=_LAUNCH_AGENTS_DIR,
-        fno_binary=_resolve_fno_binary(),
-        interval=_interval,
-        dry_run=dry_run,
-        activate=not no_activate,
-    )
-    # A fresh install sees the healer's arm state beside the watcher's.
-    from fno.pr_watch._install import heal_status_line
-
-    typer.echo(heal_status_line())
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno do pr watch install: the fno-agents binary was not found. "
+            "It ships in the `pip install fno` wheel and with the plugin; "
+            "reinstall fno or run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    argv = [str(binary), "pr-watch", "install", "--fno-binary", _resolve_fno_binary()]
+    if dry_run:
+        argv.append("--dry-run")
+    if interval > 0:
+        argv += ["--interval", str(interval)]
+    if no_activate:
+        argv.append("--no-activate")
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 @cli.command()
@@ -1682,15 +1689,31 @@ def ensure_watcher_activated() -> str:
 
     The config-set hook path: it must never prompt (the interactive install
     confirm would wedge a headless `fno config set`).  Returns the outcome
-    string from ``_install.ensure_activated``.
+    string from the ``fno-agents pr-watch install --ensure`` verb.
     """
-    from fno.pr_watch import _install as m
+    import subprocess
 
-    return m.ensure_activated(
-        launch_agents_dir=_LAUNCH_AGENTS_DIR,
-        fno_binary=_resolve_fno_binary(),
-        interval=load_settings().pr_watch.interval_seconds,
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        # No binary, no activation leg. The caller's warning names the remedy
+        # and the config write stays enabled for doctor to flag.
+        return "load-failed"
+    proc = subprocess.run(
+        [
+            str(binary), "pr-watch", "install", "--ensure",
+            "--fno-binary", _resolve_fno_binary(),
+            "--interval", str(load_settings().pr_watch.interval_seconds),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
+    word = proc.stdout.strip()
+    known = {"already-running", "activated", "write-failed", "load-failed"}
+    return word if word in known else "load-failed"
 
 
 def deactivate_watcher() -> str:
