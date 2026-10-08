@@ -240,17 +240,26 @@ fn hit_rows() {
     let row = joined_row("worker-01", Some("x-9223"), Some(7));
     let item = feed_item(Some("x-9223"), Some("s-ghost"));
     let (_, actions, _) = feed_detail::build(&[row], 0, &item);
-    let expected = agent_hit(&joined_row("worker-01", Some("x-9223"), Some(7)), 0);
-    let joined = actions.iter().find_map(|a| match a {
+    // The session id has no roster row: the link takes the shared
+    // open-session action's adopt door. The pane row is the seat of the
+    // node's current worker: FocusPane(7).
+    let seat = actions.iter().find_map(|a| match a {
         feed_detail::FeedAction::Session(hit) => Some(hit.clone()),
         _ => None,
     });
-    assert_eq!(actions.len(), 3, "node, session-id and pane are actions");
-    // ChromeHit carries no Debug/PartialEq; the two shapes that matter here.
-    match (joined, expected) {
+    let expected = agent_hit(&joined_row("worker-01", Some("x-9223"), Some(7)), 0);
+    match (seat, expected) {
         (Some(ChromeHit::Cmds(a)), ChromeHit::Cmds(b)) => assert_eq!(a, b),
-        _ => panic!("both hits must be Cmds"),
+        _ => panic!("the seat hit must be Cmds"),
     }
+    assert!(
+        actions.iter().any(
+            |a| matches!(a, feed_detail::FeedAction::Resume { line, name: None }
+            if line == "fno agents adopt s-ghost --cross-project")
+        ),
+        "the ghost session's link takes the adopt door: {actions:?}"
+    );
+    assert_eq!(actions.len(), 3, "node, session-id and pane are actions");
 
     let item = feed_item(Some("x-nope"), None);
     let (_, actions, _) = feed_detail::build(&[], 0, &item);
@@ -377,18 +386,20 @@ fn click_rows() {
         matches!(&hit, ChromeHit::OpenFeedDetail(item) if item.session_id.as_deref() == Some("s-3")),
         "the click names the event the top row painted"
     );
-    // And THAT modal's session row offers the resume command the session id
-    // answers: the feed id is a session handle, never an attach jobId, so
-    // the row copies `fno agents resume <sid>` instead of a doomed attach.
+    // And THAT modal's session row offers the adopt command the session id
+    // answers: the feed id is a session handle the registry lacks, so the
+    // shared open-session action spells the adopt line, and `y` copies it.
     v.feed_detail = Some(feed_detail::modal(&v, feed_item(Some("x-c"), Some("s-3"))));
     let m = v.feed_detail.as_ref().unwrap();
     assert!(m.actions.iter().any(
         |a| matches!(a, feed_detail::FeedAction::Resume { line, name: None }
-            if line == "fno agents resume s-3")
+            if line == "fno agents adopt s-3 --cross-project")
     ));
     assert!(
-        m.values.iter().any(|v| v == "fno agents resume s-3"),
-        "y copies the resume command: {:?}",
+        m.values
+            .iter()
+            .any(|v| v == "fno agents adopt s-3 --cross-project"),
+        "y copies the adopt command: {:?}",
         m.values
     );
     // Header and footer rows are chrome, not rows: they never deep-link.
@@ -1073,7 +1084,19 @@ fn detail_field_rows() {
     assert_eq!(owner, "epic x-29a8 the epic");
 
     let tz = chrono::FixedOffset::east_opt(-7 * 3600).unwrap();
-    assert_eq!(feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz), "09:48");
+    // An older row carries its date; a today row reads time only.
+    assert_eq!(
+        feed_view::short_ts_in("2026-09-28T16:48:49Z", &tz),
+        "09-28 09:48"
+    );
+    let now = chrono::Utc::now()
+        .with_timezone(&tz)
+        .format("%H:%M")
+        .to_string();
+    assert_eq!(
+        feed_view::short_ts_in(&chrono::Utc::now().to_rfc3339(), &tz),
+        now
+    );
     assert_eq!(
         feed_view::short_ts_in("not-a-time", &tz),
         "not-a-time",

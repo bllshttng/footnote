@@ -285,7 +285,7 @@ pub(crate) fn feed_panel_rows(
     // session (tail 8), lead, summary. The narrowest panel keeps time, kind,
     // node and summary; a wider one adds lead, harness, area, session back
     // in that drop order (AC11).
-    let mut used = 10usize + 17usize + 9usize; // marker+time, kind, node
+    let mut used = 16usize + 17usize + 9usize; // marker+time (date+time), kind, node
     let fits = |needed: usize, used: &mut usize| {
         if *used + needed <= w {
             *used += needed;
@@ -348,7 +348,7 @@ pub(crate) fn feed_panel_rows(
                 let mut row = Vec::new();
                 cell(
                     &mut row,
-                    format!(" {marker} {:<5} ", short_ts(&item.ts)),
+                    format!(" {marker} {:<11} ", short_ts(&item.ts)),
                     selected,
                     selected,
                 );
@@ -385,11 +385,9 @@ pub(crate) fn feed_panel_rows(
                     cell(&mut row, format!("{:<8} ", sid), false, false);
                 }
                 if show_lead {
-                    let lead = item
-                        .lead
-                        .as_deref()
-                        .or(item.owner.as_deref())
-                        .unwrap_or("-");
+                    // The lead column names a lead or nothing: the epic
+                    // rollup lives in the owner grouping, never here.
+                    let lead = item.lead.as_deref().unwrap_or("-");
                     let lead: String = lead.chars().take(12).collect();
                     cell(&mut row, format!("{:<12} ", lead), false, false);
                 }
@@ -587,16 +585,23 @@ pub(crate) fn widest_title(items: &[FeedItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// `HH:MM` in the operator's zone; an unparseable ts shows raw.
+/// Compact local time in the operator's zone: today reads `HH:MM`,
+/// anything older carries its date (`MM-DD HH:MM`), so a scrolling feed
+/// never presents last week as this morning. An unparseable ts shows raw.
 pub(crate) fn short_ts_in<Tz: chrono::TimeZone>(ts: &str, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
     match chrono::DateTime::parse_from_rfc3339(ts) {
-        Ok(t) => tz
-            .from_utc_datetime(&t.naive_utc())
-            .format("%H:%M")
-            .to_string(),
+        Ok(t) => {
+            let local = tz.from_utc_datetime(&t.naive_utc());
+            let today = chrono::Utc::now().with_timezone(tz).date_naive();
+            if local.date_naive() == today {
+                local.format("%H:%M").to_string()
+            } else {
+                local.format("%m-%d %H:%M").to_string()
+            }
+        }
         Err(_) => ts.to_string(),
     }
 }

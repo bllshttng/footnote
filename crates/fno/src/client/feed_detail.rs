@@ -90,18 +90,61 @@ fn seat(a: &AgentRow) -> String {
 /// current (the report's dead `lead (...)`). The holder is the parenthesized
 /// name the owner assignment writes; a line without one passes through.
 fn live_owner(owner: &str, agents: &[AgentRow]) -> String {
-    let Some(open) = owner.rfind('(') else {
+    let Some(holder) = owner_holder(owner) else {
         return owner.to_string();
     };
-    if !owner.ends_with(')') || open + 1 >= owner.len() - 1 {
-        return owner.to_string();
-    }
-    let holder = &owner[open + 1..owner.len() - 1];
     let live = agents.iter().any(|a| a.name == holder && !a.exited);
     if live {
         owner.to_string()
     } else {
         format!("{owner} · gone")
+    }
+}
+
+/// The parenthesized holder an owner string carries, when it has one.
+fn owner_holder(owner: &str) -> Option<&str> {
+    let open = owner.rfind('(')?;
+    if !owner.ends_with(')') || open + 1 >= owner.len() - 1 {
+        return None;
+    }
+    Some(&owner[open + 1..owner.len() - 1])
+}
+
+/// The hit for a session link on the modal: a live row's own agent_hit
+/// (focus the pane, else the portal door); an exited row goes through the
+/// row-menu resume path - `RespawnAgent`, the door whose per-harness plan
+/// runs the claude cascade (adopt, then resume, then respawn) and plain
+/// resume for every other harness.
+fn session_hit(a: &AgentRow, active_squad: u64) -> ChromeHit {
+    if a.exited {
+        return ChromeHit::Cmds(vec![Command::RespawnAgent {
+            name: a.name.clone(),
+        }]);
+    }
+    agent_hit(a, active_squad)
+}
+
+/// What a session-id link lands as on the modal: an action with its
+/// copyable value, or an inert row carrying the dim reason.
+enum LinkRow {
+    Action(FeedAction, String),
+    Inert(String),
+}
+
+/// Land one shared [`crate::backlog_model::OpenSession`] verdict on the
+/// modal: wire commands ride [`FeedAction::Session`], a shell line rides
+/// [`FeedAction::Resume`] and copies itself, a dim verdict renders its
+/// reason and offers nothing.
+fn open_row(open: crate::backlog_model::OpenSession, sid: &str) -> LinkRow {
+    match open {
+        crate::backlog_model::OpenSession::Cmds(cmds) => {
+            LinkRow::Action(FeedAction::Session(ChromeHit::Cmds(cmds)), sid.to_string())
+        }
+        crate::backlog_model::OpenSession::Shell(line) => {
+            let value = line.clone();
+            LinkRow::Action(FeedAction::Resume { line, name: None }, value)
+        }
+        crate::backlog_model::OpenSession::Dim(why) => LinkRow::Inert(why),
     }
 }
 
@@ -201,21 +244,47 @@ pub(crate) fn build(
         values.push(node.to_string());
     }
 
-    // session-id: the attach target, or plain text when no live reach exists.
-    match &dest {
-        Destination::Exact(a) | Destination::NameOnly(a) => {
-            if let Some(sid) = item.session_id.as_deref() {
+    // session-id: the shared open-session action (backlog_model::open_session),
+    // the step the board and the questions overlay wire next.
+    // Live or not: a live row focuses its seat (a portal when paneless), a
+    // registry row takes the row-menu resume door, a session the registry
+    // lacks takes the adopt line. The roster name rides beside the id when
+    // the join held; the copy keeps the raw id.
+    if let Some(sid) = item
+        .session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .filter(|_| !matches!(dest, Destination::Recovery(_) | Destination::None))
+    {
+        let name = match &dest {
+            Destination::Exact(a) | Destination::NameOnly(a) => {
+                (!a.name.is_empty()).then(|| a.name.clone())
+            }
+            _ => None,
+        };
+        let open = crate::backlog_model::open_session(agents, sid, item.cwd.as_deref());
+        match open_row(open, sid) {
+            LinkRow::Action(action, value) => {
+                let label = match name {
+                    Some(n) => format!("{n} ({sid})"),
+                    None => sid.to_string(),
+                };
                 rows.push(PopupRow::Entry {
                     glyph: "session-id".to_string(),
-                    label: sid.to_string(),
+                    label,
                     hint: String::new(),
                     enabled: true,
                 });
-                actions.push(FeedAction::Session(agent_hit(a, active_squad)));
-                values.push(sid.to_string());
+                actions.push(action);
+                values.push(value);
             }
-            // A name join reaches the node's CURRENT worker: the pane says
-            // so rather than implying this event's session sits there.
+            LinkRow::Inert(why) => info("session-id", Some(format!("{sid} · {why}")), &mut rows),
+        }
+    }
+    // The seat: a name join reaches the node's CURRENT worker, and the pane
+    // says so rather than implying this event's session sits there.
+    match &dest {
+        Destination::Exact(a) | Destination::NameOnly(a) => {
             let seat_v = if matches!(dest, Destination::NameOnly(_)) {
                 format!("{} · the node's current worker", seat(a))
             } else {
@@ -227,33 +296,14 @@ pub(crate) fn build(
                 hint: String::new(),
                 enabled: true,
             });
-            actions.push(FeedAction::Session(agent_hit(a, active_squad)));
+            actions.push(FeedAction::Session(session_hit(a, active_squad)));
             values.push(seat_v);
         }
-        Destination::SessionOnly(sid) => {
-            rows.push(PopupRow::Entry {
-                glyph: "session-id".to_string(),
-                label: (*sid).to_string(),
-                hint: String::new(),
-                enabled: true,
-            });
-            // The feed's session id is a session handle (an fno id or a
-            // harness uuid), never the 8-hex jobId the AttachAgent door
-            // resolves, so an attach here is a guaranteed refusal. The
-            // resume verb takes the full session id directly; Enter repeats
-            // the command and `y` copies it.
-            let cmd = format!("fno agents resume {sid}");
-            actions.push(FeedAction::Resume {
-                line: cmd.clone(),
-                name: None,
-            });
-            values.push(cmd);
-            info(
-                "pane",
-                Some("not in the live roster".to_string()),
-                &mut rows,
-            );
-        }
+        Destination::SessionOnly(_) => info(
+            "pane",
+            Some("not in the live roster".to_string()),
+            &mut rows,
+        ),
         Destination::Recovery(_) | Destination::None => {}
     }
 
@@ -270,7 +320,13 @@ pub(crate) fn build(
     }
 
     // parent: the exact row's named edge when one resolves, else the birth
-    // stamp the graph carried (a node_created row's creating session).
+    // stamp the graph carried (a node_created row's creating session). The
+    // same shared open-session action: Enter opens the parent session,
+    // live or not.
+    let parent_sid = exact_row(&dest)
+        .and_then(|a| a.spawned_by_session.clone())
+        .or_else(|| item.parent.clone())
+        .filter(|p| !p.is_empty());
     let parent = exact_row(&dest).and_then(|a| {
         a.spawned_by_session
             .as_deref()
@@ -287,9 +343,33 @@ pub(crate) fn build(
             .and_then(|a| a.lineage_reason.clone())
             .filter(|r| !r.is_empty())
     });
-    info("parent", parent.or_else(|| item.parent.clone()), &mut rows);
+    let parent = parent.or_else(|| item.parent.clone());
+    let parent_row = parent_sid.as_deref().map(|sid| {
+        open_row(
+            crate::backlog_model::open_session(agents, sid, item.cwd.as_deref()),
+            sid,
+        )
+    });
+    match (parent, parent_row) {
+        (Some(text), Some(LinkRow::Action(action, value))) => {
+            rows.push(PopupRow::Entry {
+                glyph: "parent".to_string(),
+                label: text,
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(action);
+            values.push(value);
+        }
+        (Some(text), Some(LinkRow::Inert(why))) => {
+            info("parent", Some(format!("{text} · {why}")), &mut rows)
+        }
+        (Some(text), None) => info("parent", Some(text), &mut rows),
+        (None, _) => {}
+    }
 
-    // lead: the exact row's team, else the row's own stamp.
+    // lead: the exact row's team, else the row's own stamp. The same session
+    // link: Enter opens the session that holds the role.
     let lead = exact_row(&dest).and_then(|a| match a.role_scope.as_deref() {
         Some(scope) => Some(
             a.role_title
@@ -300,14 +380,78 @@ pub(crate) fn build(
         ),
         None => a.role_title.clone(),
     });
-    info("lead", lead.or_else(|| item.role.clone()), &mut rows);
+    match (lead.or_else(|| item.role.clone()), exact_row(&dest)) {
+        (Some(text), Some(a)) => {
+            rows.push(PopupRow::Entry {
+                glyph: "lead".to_string(),
+                label: text.clone(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(FeedAction::Session(session_hit(a, active_squad)));
+            values.push(text);
+        }
+        (Some(text), None) => info("lead", Some(text), &mut rows),
+        (None, _) => {}
+    }
     info("reason", item.reason.clone(), &mut rows);
     info("role", item.role.clone(), &mut rows);
-    info(
-        "owner",
-        item.owner.as_deref().map(|o| live_owner(o, agents)),
-        &mut rows,
-    );
+    // owner: the lead AT EVENT TIME, focusable to its holder when the roster
+    // still holds that person (a live join reaches their seat).
+    let owner_text = item.owner.as_deref().map(|o| live_owner(o, agents));
+    let owner_action = item
+        .owner
+        .as_deref()
+        .and_then(owner_holder)
+        .and_then(|holder| {
+            agents
+                .iter()
+                .find(|a| a.name == holder && !a.exited)
+                .map(|a| FeedAction::Session(session_hit(a, active_squad)))
+        });
+    match (owner_text, owner_action) {
+        (Some(text), Some(action)) => {
+            rows.push(PopupRow::Entry {
+                glyph: "owner".to_string(),
+                label: text.clone(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(action);
+            values.push(text);
+        }
+        (Some(text), None) => info("owner", Some(text), &mut rows),
+        (None, _) => {}
+    }
+    // now-led-by: the node's CURRENT coverage, the other of the two names.
+    // Enter opens the covering lead's session.
+    if let Some(node) = item.node.as_deref() {
+        let cover = agents.iter().find(|a| {
+            !a.exited
+                && a.role_scope
+                    .as_deref()
+                    .is_some_and(|s| s.split(',').any(|seg| seg.trim() == node))
+        });
+        if let Some(a) = cover {
+            let title = a.role_title.clone().or_else(|| {
+                a.role_level
+                    .zip(a.role_scope.clone())
+                    .map(|(l, s)| format!("L{l} {s}"))
+            });
+            let label = match title {
+                Some(t) => format!("{} · {t}", a.name),
+                None => a.name.clone(),
+            };
+            rows.push(PopupRow::Entry {
+                glyph: "now-led-by".to_string(),
+                label: label.clone(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(FeedAction::Session(session_hit(a, active_squad)));
+            values.push(label);
+        }
+    }
     info("actor", item.actor.clone(), &mut rows);
     info("phase", item.phase.clone(), &mut rows);
 
