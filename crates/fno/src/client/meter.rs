@@ -101,10 +101,6 @@ pub(crate) fn capacity_state() -> Option<serde_json::value::Value> {
     }
     let root = match std::env::var_os("FNO_AGENTS_HOME") {
         Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".fno").join("agents"))?,
-    };
-        Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("agents"))?,
     };
     let mut key = crate::agents_view::machine_id();

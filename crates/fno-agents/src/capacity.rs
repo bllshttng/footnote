@@ -546,7 +546,6 @@ fn window_end(window: &str, zone: Option<&str>, now_epoch: i64) -> i64 {
                 .unwrap_or_else(Utc::now)
                 .with_timezone(&zone);
             let add_days = 7 - now.weekday().num_days_from_monday();
-            let add_days = 7 - now.weekday().num_days_from_monday();
             now.date_naive()
                 .and_hms_opt(0, 0, 0)
                 .and_then(|midnight| midnight.and_local_timezone(zone).single())
