@@ -99,11 +99,12 @@ pub fn parse_key(spec: &str) -> Option<u8> {
     }
 }
 
-/// How a byte prints in the which-key modal: `C-b` for a control byte, the
-/// character itself otherwise.
+/// How a byte prints in the which-key modal: `ctrl-b` for a control byte, the
+/// character itself otherwise. Lowercase: `C` does not read as ctrl and a
+/// capital `B` reads as the uppercase key.
 pub fn key_disp(b: u8) -> String {
     match b {
-        1..=26 => format!("C-{}", (b - 1 + b'a') as char),
+        1..=26 => format!("ctrl-{}", (b - 1 + b'a') as char),
         _ => (b as char).to_string(),
     }
 }
@@ -1667,8 +1668,9 @@ pub fn selector_hint() -> &'static str {
 /// and the prefix-prefix literal. Kept beside [`key_bindings`] so the modal's
 /// row set stays complete without polluting the executable table.
 ///
-/// The literal-prefix row is built from the LIVE prefix: a frozen `C-b C-b`
-/// would advertise a dead sequence the moment anyone set `config.mux.prefix`.
+/// The literal-prefix row is built from the LIVE prefix: a frozen `ctrl-b
+/// ctrl-b` would advertise a dead sequence the moment anyone set
+/// `config.mux.prefix`.
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
     let rows = vec![
@@ -2525,7 +2527,7 @@ mod tests {
     #[test]
     fn meta_rows_name_the_live_prefix() {
         // The literal-prefix row is built from `prefix()`, so it cannot keep
-        // advertising `C-b C-b` after the prefix moves. Asserted against the
+        // advertising `ctrl-b ctrl-b` after the prefix moves. Asserted against the
         // default here (`install` is process-global and one-shot, so a test must
         // not take it); the construction is what stops the drift.
         let rows = meta_rows();
@@ -2553,7 +2555,7 @@ mod tests {
         }
         let detach = rows.iter().find(|kb| kb.action == "detach").unwrap();
         assert_eq!(detach.key, 0x11);
-        assert_eq!(detach.disp, "C-q", "the key table prints the NEW key");
+        assert_eq!(detach.disp, "ctrl-q", "the key table prints the NEW key");
         assert_eq!(detach.event, Event::Detach);
 
         // The two no-default split actions live in the table as sentinel

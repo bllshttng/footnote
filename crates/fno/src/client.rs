@@ -1155,8 +1155,6 @@ pub(crate) struct View {
     /// The theme file importer, active only inside Settings > Theme.
     theme_import: theme_import_ui::ThemeImportUi,
     theme_import_gen: u64,
-    /// The Keybindings tab's open "press the new key" capture.
-    key_capture: Option<keys_settings::KeyCapture>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -1480,6 +1478,10 @@ struct KeysModal {
     /// The live `/` filter query. `None` = browsing; `Some` (possibly empty) =
     /// filtering, rows rebuilt per keystroke by [`keys_modal_with_filter`].
     filter: Option<String>,
+    /// The row index of the "[ edit keys in ... ]" button (`None` while
+    /// filtering, which drops it). Enter there opens the key config in
+    /// `$EDITOR` instead of dispatching a chord.
+    edit_row: Option<usize>,
 }
 
 /// (US2) The right-click / `m` row context menu over a sideline agent
@@ -1771,10 +1773,6 @@ pub(crate) enum AuxAction {
     SettingsBack,
     /// Open the macOS file picker for a theme file.
     ThemePick,
-    /// Open the "press the new key" capture for an action id, or "prefix".
-    KeyCapture(String),
-    /// Open the key config in `$EDITOR`, then reload the keymap.
-    EditKeysFile,
     /// Open the color picker for one `[sideline.colors]` axis key
     /// (existing or just typed). The axis names its table
     /// (`harness` / `route` / `model` / `row`).
@@ -2041,7 +2039,6 @@ impl View {
             lane: LaneColorsUi::default(),
             theme_import: theme_import_ui::ThemeImportUi::Idle,
             theme_import_gen: 0,
-            key_capture: None,
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -9494,6 +9491,25 @@ async fn row_menu_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
+            // The split cells answer shift+arrows, the same gesture the
+            // portal picker spells: the key runs the matching Split action
+            // through the SAME execute path Enter and a click use. A menu
+            // with no split cell (a live pane row's Move grid) swallows it -
+            // a modified arrow never dismisses the menu.
+            ModalKey::ShiftArrow(dir) => {
+                let hit = view.row_menu.as_ref().and_then(|m| {
+                    m.actions
+                        .iter()
+                        .position(|a| matches!(a, MenuAction::Split(d) if *d == dir))
+                });
+                if let Some(i) = hit {
+                    if let Some(m) = view.row_menu.as_mut() {
+                        m.popup.select(i);
+                        m.popup.follow_sel(view.term);
+                    }
+                    row_menu_execute_selected(view, sock_w).await?;
+                }
+            }
             ModalKey::PageUp => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
@@ -9649,7 +9665,6 @@ async fn execute_aux_action(
         AuxAction::OpenSettings => {
             view.lane.reset();
             theme_import_ui::reset(view);
-            view.key_capture = None;
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
@@ -9715,8 +9730,6 @@ async fn execute_aux_action(
         | AuxAction::ThemeImportCancel
         | AuxAction::ThemePick
         | AuxAction::SettingsBack
-        | AuxAction::KeyCapture(_)
-        | AuxAction::EditKeysFile
         | AuxAction::LaneColorEdit(..)
         | AuxAction::LaneColorAdd(_)
         | AuxAction::LaneColorCustom(..)
@@ -9877,7 +9890,6 @@ async fn aux_mouse(
                     if !view.aux_block_contains(rep.row, rep.col) {
                         view.lane.clear_entry();
                         theme_import_ui::reset(view);
-                        view.key_capture = None;
                         view.aux = None;
                     }
                 }

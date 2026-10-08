@@ -33,6 +33,16 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
     let mut rows: Vec<PopupRow> = Vec::new();
     let mut events: Vec<Option<Event>> = Vec::new();
     let mut any_row = false;
+    let mut edit_row: Option<usize> = None;
+    // The prefix line the settings table used to lead with: the whole
+    // table hangs off it, so it is the table's first row (US1).
+    rows.push(PopupRow::Entry {
+        glyph: crate::keys::prefix_display(),
+        label: "prefix".into(),
+        hint: String::new(),
+        enabled: true,
+    });
+    events.push(None);
     let bindings = key_bindings();
     for section in [
         KeySection::GlobalNoPrefix,
@@ -99,6 +109,15 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         events.push(None);
     }
     if filter.is_none() {
+        // The editor entry, carried from the settings table it replaced:
+        // a FullWidth row reads as the button it is, and the label names
+        // the editor that actually opens.
+        edit_row = Some(rows.len());
+        rows.push(PopupRow::FullWidth(format!(
+            "[ edit keys in {} ]",
+            keys_settings::editor_name()
+        )));
+        events.push(None);
         // The right-click config note. The mux side works whenever the
         // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
         // that never send them are named so the operator configures the terminal,
@@ -140,7 +159,7 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
     // viewport, so the table scrolls in a fixed window instead of growing one
     // row per binding.
     let mut popup = Popup::new(rows, Anchor::Center)
-        .title("Keybindings")
+        .title("keybindings")
         .width_cap(usize::MAX)
         .plain_body()
         .body_cap_pct(60)
@@ -154,6 +173,7 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
         popup,
         row_events: events,
         filter: filter.map(str::to_string),
+        edit_row,
     }
 }
 
@@ -263,6 +283,9 @@ pub(crate) async fn keys_modal_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
+            // The table has no split cells, so the folded Shift+arrow is
+            // inert here - swallowed, never leaked and never a dismissal.
+            ModalKey::ShiftArrow(_) => {}
             ModalKey::PageUp => {
                 let page = (view.term.0 as isize - 2).max(1);
                 if let Some(m) = view.keys_modal.as_mut() {
@@ -321,6 +344,18 @@ async fn keys_modal_execute_selected(
     scanner: &mut Scanner,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<DispatchFlow, String> {
+    // The edit button is the one row that is not a chord: it opens the key
+    // config in $EDITOR and returns to the table (which edit_keys_file
+    // rebuilds), the same stay-put the settings table's entry had.
+    let on_edit_row = view.keys_modal.as_ref().is_some_and(|m| {
+        m.popup
+            .selected()
+            .is_some_and(|(ri, _)| Some(ri) == m.edit_row)
+    });
+    if on_edit_row {
+        keys_settings::edit_keys_file(view).await;
+        return Ok(DispatchFlow::Continue);
+    }
     let ev = view.keys_modal.as_ref().and_then(|m| {
         m.popup
             .selected()

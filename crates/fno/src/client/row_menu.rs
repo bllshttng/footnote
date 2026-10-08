@@ -112,13 +112,17 @@ pub(super) fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(PopupRow::Rule, &[]);
         // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
         // IS the direction). Glyphs are half-block squares; a non-nerd-font
-        // terminal still shows the label beside them.
+        // terminal still shows the label beside them. One group label names
+        // the gesture the portal picker's footer spells ("shift+arrows/HJKL
+        // split"), and each cell carries its own key - the menu answers
+        // shift+arrows, so the cells advertise live keys, never dead ones.
+        add(PopupRow::Header("shift+arrows split".into()), &[]);
         add(
-            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
+            PopupRow::Grid(vec![cell("◧", "shift+←"), cell("◨", "shift+→")]),
             &[MenuAction::Split(Dir::Left), MenuAction::Split(Dir::Right)],
         );
         add(
-            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
+            PopupRow::Grid(vec![cell("⬒", "shift+↑"), cell("⬓", "shift+↓")]),
             &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
         );
         add(PopupRow::Rule, &[]);
