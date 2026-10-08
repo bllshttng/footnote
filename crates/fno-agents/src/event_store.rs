@@ -1006,108 +1006,142 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Once a day: `ephemeral` rows older than the schema's TTL floor and
-/// `telemetry` rows older than the telemetry horizon leave the store.
-/// `durable`, `gate`, rejected, and migration receipt rows never
-/// auto-expire; stale ingest cursors still fall off on the same cadence.
+/// Once a day: `ephemeral` rows older than the schema's TTL floor leave the
+/// store, and stale ingest cursors fall off. `telemetry` rows expire on their
+/// own gate ([`prune_telemetry_due`]). `durable`, `gate`, rejected, and
+/// migration receipt rows never auto-expire.
 fn prune(conn: &mut Connection, now_ms: i64) -> Result<(), String> {
-    let last_prune = |conn: &Connection| -> i64 {
-        conn.query_row(
-            "SELECT value FROM events_meta WHERE key = 'last_prune_ms'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-    };
-    if now_ms.saturating_sub(last_prune(&*conn)) < DAY_MS {
-        return Ok(());
+    if now_ms.saturating_sub(meta_ms(conn, "last_prune_ms")) >= DAY_MS {
+        let cutoff = now_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        // Re-read under the write lock: a concurrent sync that already claimed
+        // this pass wins, so two processes never prune at once.
+        if now_ms.saturating_sub(meta_ms(&tx, "last_prune_ms")) >= DAY_MS {
+            tx.execute(
+                "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM ingest_cursor WHERE updated_ms < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| e.to_string())?;
+            stamp_meta(&tx, "last_prune_ms", now_ms)?;
+            tx.commit().map_err(|e| e.to_string())?;
+        }
     }
-    let cutoff = now_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| e.to_string())?;
-    // Re-read under the write lock: a concurrent sync that already claimed
-    // this pass wins, so two processes never prune at once.
-    if now_ms.saturating_sub(last_prune(&*tx)) < DAY_MS {
-        return Ok(());
-    }
-    tx.execute(
-        "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?1",
-        params![cutoff],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM ingest_cursor WHERE updated_ms < ?1",
-        params![cutoff],
-    )
-    .map_err(|e| e.to_string())?;
-    stamp_last_prune(&tx, now_ms)?;
-    tx.commit().map_err(|e| e.to_string())?;
-    let telemetry_cutoff = now_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
-    if !prune_telemetry(conn, telemetry_cutoff, TELEMETRY_PRUNE_BUDGET)? {
-        // A backlog is left: the next sync returns in PRUNE_RETRY_MS, not a
-        // day, so a large first pass drains in short slices.
-        stamp_last_prune(conn, now_ms - DAY_MS + PRUNE_RETRY_MS)?;
-    }
+    // Best-effort: the ingest already committed, so a busy store here never
+    // fails the sync. A pass that errors keeps its backlog mark and retries.
+    let _ = prune_telemetry_due(conn, now_ms);
     Ok(())
 }
 
-fn stamp_last_prune(conn: &Connection, ms: i64) -> Result<(), String> {
+/// An integer `events_meta` value, 0 when absent or unreadable.
+fn meta_ms(conn: &Connection, key: &str) -> i64 {
+    conn.query_row(
+        "SELECT value FROM events_meta WHERE key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(0)
+}
+
+fn stamp_meta(conn: &Connection, key: &str, value: i64) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO events_meta (key, value) VALUES ('last_prune_ms', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = ?1",
-        params![ms.to_string()],
+        "INSERT INTO events_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![key, value.to_string()],
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
 }
 
+/// The true start of the last telemetry pass. Coverage reads its cutoff from
+/// here, so it never claims a range a pass already deleted from.
+const TELEMETRY_PRUNED_KEY: &str = "telemetry_pruned_ms";
+
+/// 1 while a telemetry pass has rows left (it spent its budget or failed).
+const TELEMETRY_BACKLOG_KEY: &str = "telemetry_backlog";
+
 /// Rows per telemetry delete. Each batch commits on its own and stays well
 /// inside the 5s busy wait an append rides, so the first pass over a large
 /// backlog never starves a live writer.
-const TELEMETRY_PRUNE_BATCH: usize = 1_000;
+const TELEMETRY_PRUNE_BATCH: i64 = 1_000;
 
 /// Wall-clock cap on one pass's telemetry deletes. The sync caller pays it,
 /// so a large backlog costs any one command a few seconds at most.
 const TELEMETRY_PRUNE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// How soon a pass that spent [`TELEMETRY_PRUNE_BUDGET`] runs again.
+/// How soon a pass that left a backlog runs again.
 const PRUNE_RETRY_MS: i64 = 5 * 60_000;
 
-/// Delete telemetry rows older than `cutoff_ms`, batch by batch, until none
-/// are left (`true`) or `budget` is spent (`false`). The match is by kind,
-/// not class: rows stored before their kind joined the class still read
-/// `durable`. Rejected rows stay.
+fn telemetry_due(conn: &Connection, now_ms: i64) -> bool {
+    let wait = if meta_ms(conn, TELEMETRY_BACKLOG_KEY) != 0 {
+        PRUNE_RETRY_MS
+    } else {
+        DAY_MS
+    };
+    now_ms.saturating_sub(meta_ms(conn, TELEMETRY_PRUNED_KEY)) >= wait
+}
+
+/// Run a telemetry pass when one is due: daily, or every
+/// [`PRUNE_RETRY_MS`] while a backlog is left. The pass is claimed under
+/// the write lock with the backlog mark already set, so a pass that dies
+/// midway is retried rather than forgotten for a day.
+fn prune_telemetry_due(conn: &mut Connection, now_ms: i64) -> Result<(), String> {
+    if !telemetry_due(conn, now_ms) {
+        return Ok(());
+    }
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    if !telemetry_due(&tx, now_ms) {
+        return Ok(());
+    }
+    stamp_meta(&tx, TELEMETRY_PRUNED_KEY, now_ms)?;
+    stamp_meta(&tx, TELEMETRY_BACKLOG_KEY, 1)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    let cutoff = now_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
+    if prune_telemetry(conn, cutoff, TELEMETRY_PRUNE_BUDGET)? {
+        stamp_meta(conn, TELEMETRY_BACKLOG_KEY, 0)?;
+    }
+    Ok(())
+}
+
+/// Delete telemetry rows older than `cutoff_ms`, oldest first within each
+/// kind, until none are left (`true`) or `budget` is spent (`false`). The
+/// match is by kind, not class: rows stored before their kind joined the
+/// class still read `durable`. Rejected rows stay.
 fn prune_telemetry(
     conn: &Connection,
     cutoff_ms: i64,
     budget: std::time::Duration,
 ) -> Result<bool, String> {
-    let kinds = vec!["?"; TELEMETRY_EVENT_TYPES.len()].join(", ");
-    let sql = format!(
-        "DELETE FROM events WHERE seq IN (SELECT seq FROM events \
-         WHERE type IN ({kinds}) AND ts_ms < ? AND reject_reason IS NULL \
-         LIMIT {TELEMETRY_PRUNE_BATCH})"
-    );
-    let mut args: Vec<&dyn rusqlite::ToSql> = TELEMETRY_EVENT_TYPES
-        .iter()
-        .map(|t| t as &dyn rusqlite::ToSql)
-        .collect();
-    args.push(&cutoff_ms);
     let started = std::time::Instant::now();
-    loop {
-        let deleted = conn
-            .execute(&sql, args.as_slice())
-            .map_err(|e| e.to_string())?;
-        if deleted < TELEMETRY_PRUNE_BATCH {
-            return Ok(true);
-        }
-        if started.elapsed() >= budget {
-            return Ok(false);
+    for kind in TELEMETRY_EVENT_TYPES {
+        loop {
+            if started.elapsed() >= budget {
+                return Ok(false);
+            }
+            let deleted = conn
+                .execute(
+                    "DELETE FROM events WHERE seq IN (SELECT seq FROM events \
+                     WHERE type = ?1 AND ts_ms < ?2 AND reject_reason IS NULL \
+                     ORDER BY ts_ms LIMIT ?3)",
+                    params![kind, cutoff_ms, TELEMETRY_PRUNE_BATCH],
+                )
+                .map_err(|e| e.to_string())?;
+            if (deleted as i64) < TELEMETRY_PRUNE_BATCH {
+                break;
+            }
         }
     }
+    Ok(true)
 }
 
 /// One acknowledged append: the positive readback the caller may trust.
@@ -1798,7 +1832,8 @@ pub fn coverage(journal: &Path, since_ms: Option<i64>, types: &[String]) -> Cove
     // back to the last prune's cutoff for its class. A mixed list takes the
     // later start.
     let ephemeral_cutoff = last_prune_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
-    let telemetry_cutoff = last_prune_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
+    let telemetry_cutoff =
+        meta_ms(&conn, TELEMETRY_PRUNED_KEY).saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
     let proven_start = types
         .iter()
         .map(|t| {

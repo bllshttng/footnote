@@ -413,7 +413,10 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
         )
         .unwrap();
     writable
-        .execute("DELETE FROM events_meta WHERE key = 'last_prune_ms'", [])
+        .execute(
+            "DELETE FROM events_meta WHERE key = 'telemetry_pruned_ms'",
+            [],
+        )
         .unwrap();
     drop(writable);
     sync(&live).unwrap();
@@ -423,6 +426,15 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
         "the legacy tick left"
     );
     assert_eq!(count_type(&store, "lead_checkin"), 1, "durable rows stay");
+    let backlog: String = open_read(&store)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM events_meta WHERE key = 'telemetry_backlog'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog, "0", "a finished pass clears its backlog mark");
     let class: String = open_read(&store)
         .unwrap()
         .query_row(
