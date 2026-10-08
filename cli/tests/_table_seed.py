@@ -104,3 +104,29 @@ def read_claim_row(key: str, root: Optional[Path] = None) -> dict[str, Any]:
             out["metadata"] = json.loads(out.get("metadata") or "{}")
             return out
     raise AssertionError(f"no claims row for {key} under {state}")
+
+
+def claim_history_rows(key: str, root: Optional[Path] = None) -> list[dict[str, Any]]:
+    """Return the archived records for ``key``, oldest first.
+
+    A reclaim or release retires the old row into ``claim_history``; this is
+    the table form of the old ``.expired/`` rename archive.
+    """
+    import json
+    import sqlite3
+
+    from fno.claims import native_claims_root
+    from fno.claims.io import claims_dir
+
+    state = claims_dir(root if root is not None else native_claims_root(key)).parent
+    rows: list[dict[str, Any]] = []
+    for db in state.rglob("graph.db"):
+        with sqlite3.connect(db) as connection:
+            try:
+                found = connection.execute(
+                    "SELECT record FROM claim_history ORDER BY id"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue
+        rows.extend(r for r in (json.loads(f[0]) for f in found) if r.get("key") == key)
+    return rows
