@@ -272,10 +272,9 @@ mod tests {
         // one sample renders one percent in both places (AC5).
         let overlay_pct = (state["memory"]["used_fraction"].as_f64().unwrap() * 100.0).round();
         assert_eq!(format!("{overlay_pct:.0}% full"), "64% full");
-    }
 
-    #[test]
-    fn no_capacity_state_renders_cap_unknown_and_no_memory_number() {
+        // No state at all: the cap reads unknown and no memory number
+        // renders, the never-a-zero contract (AC6).
         assert_eq!(capacity_segment(None), " · cap unknown");
         assert_eq!(memory_segment(None, false), "");
         let bare = json!({"ceiling": 23});
