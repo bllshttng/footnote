@@ -3496,3 +3496,113 @@ fn title_claim_rows() {
     );
     core.reap_pane(seat);
 }
+
+// A NON-seat attach viewer (the split right / open-here shape) whose
+// claude-attach child churned out gets the same replay a portal seat got:
+// the watched bg job came back under a new pid (a live argv still names the
+// session uuid), and closing the pane deletes a window the operator is
+// reading. The leaf is replaced in place: same tab, same attached mapping,
+// a fresh viewer pid.
+#[test]
+fn non_seat_attach_viewer_death_replays_the_attach() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let uuid = "53960000-1111-2222-3333-444455556666";
+    let _witness = crate::pty::ChildGuard::spawn(
+        &mut std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("sleep 25; : # {uuid}")),
+    );
+    let mut row = bg_row("worker-a", "/tmp/seen", Some("5396fee1"));
+    row.claude_session_uuid = Some(uuid.into());
+    core.agents = vec![row];
+    // The split shape: the shell leaf + the attach viewer leaf, focused.
+    let viewer = core
+        .spawn_pane_cmd(
+            &["/bin/cat".to_string(), "5396fee1".to_string()],
+            24,
+            40,
+            "/tmp/seen",
+        )
+        .expect("attach viewer pane");
+    core.attached.insert("5396fee1".to_string(), viewer);
+    let tab = &mut core.session.squad_mut(1).unwrap().tabs[0];
+    tab.root = Node::Branch {
+        axis: Axis::Vertical,
+        children: vec![(0.5, Node::Leaf(_p1)), (0.5, Node::Leaf(viewer))],
+    };
+    tab.focus = viewer;
+
+    let flow = core.close_viewer_died(viewer, "viewer exited");
+
+    assert!(
+        matches!(flow, Flow::Continue),
+        "the rescue never shuts the session down"
+    );
+    let tab = &core.session.squad(1).unwrap().tabs[0];
+    let leaves = tree::leaves(&tab.root);
+    assert_eq!(leaves.len(), 2, "both leaves survive");
+    assert!(
+        !leaves.contains(&viewer),
+        "the dead viewer pid is out of the tree"
+    );
+    let fresh = leaves
+        .iter()
+        .copied()
+        .find(|&&p| p != _p1)
+        .expect("fresh leaf");
+    assert!(
+        core.panes.contains_key(&fresh),
+        "the fresh pane is live: the attach replayed"
+    );
+    assert_eq!(core.panes[&fresh].name.as_deref(), Some("worker-a"));
+    assert_eq!(
+        core.attached.get("5396fee1"),
+        Some(&fresh),
+        "the attached mapping follows the replayed viewer"
+    );
+    assert!(
+        !core.panes.contains_key(&viewer),
+        "the dead viewer is reaped"
+    );
+    core.reap_pane(fresh);
+}
+
+// The witness is the gate, not the attachment: a uuid no live process argv
+// names is a genuinely ended session, and the plain close stands exactly as
+// before this rescue.
+#[test]
+fn non_seat_attach_viewer_without_witness_closes_as_before() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let mut row = bg_row("worker-b", "/tmp/seen", Some("5396fee2"));
+    row.claude_session_uuid = Some("ffff5396-1111-2222-3333-444455556666".into());
+    core.agents = vec![row];
+    let viewer = core
+        .spawn_pane_cmd(
+            &["/bin/cat".to_string(), "5396fee2".to_string()],
+            24,
+            40,
+            "/tmp/seen",
+        )
+        .expect("attach viewer pane");
+    core.attached.insert("5396fee2".to_string(), viewer);
+    let tab = &mut core.session.squad_mut(1).unwrap().tabs[0];
+    tab.root = Node::Branch {
+        axis: Axis::Vertical,
+        children: vec![(0.5, Node::Leaf(_p1)), (0.5, Node::Leaf(viewer))],
+    };
+    tab.focus = viewer;
+
+    let flow = core.close_viewer_died(viewer, "viewer exited");
+
+    assert!(matches!(flow, Flow::Continue), "the session survives");
+    let tab = &core.session.squad(1).unwrap().tabs[0];
+    let leaves = tree::leaves(&tab.root);
+    assert_eq!(leaves, vec![_p1], "the dead viewer's leaf is gone");
+    assert!(
+        !core.attached.contains_key("5396fee2"),
+        "the attached mapping is dropped with the pane"
+    );
+    assert!(!core.panes.contains_key(&viewer));
+}
