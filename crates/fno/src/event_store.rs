@@ -400,7 +400,13 @@ fn refuse_corrupt_store(store: &Path, error: &str) -> String {
 
 /// Read-only handle for history readers; a failure names the store path.
 pub(crate) fn upgrade_role_store(store: &Path) -> Result<(), String> {
-    open_store(store).map(|_| ())
+    open_store(store).map(|_| ()).map_err(|error| {
+        if corrupt_image(&error) {
+            refuse_corrupt_store(store, &error)
+        } else {
+            error
+        }
+    })
 }
 
 pub fn open_read(store: &Path) -> Result<Connection, String> {
@@ -1974,10 +1980,19 @@ pub struct GcReceipt {
 /// store is not created.
 pub fn gc_ephemeral(journal: &Path, cutoff_ms: i64, dry_run: bool) -> Result<GcReceipt, String> {
     let store = store_path(journal);
+    let result = gc_ephemeral_inner(&store, cutoff_ms, dry_run);
+    match result {
+        Ok(receipt) => Ok(receipt),
+        Err(error) if corrupt_image(&error) => Err(refuse_corrupt_store(&store, &error)),
+        Err(error) => Err(error),
+    }
+}
+
+fn gc_ephemeral_inner(store: &Path, cutoff_ms: i64, dry_run: bool) -> Result<GcReceipt, String> {
     if !store.exists() {
         return Ok(GcReceipt::default());
     }
-    let conn = open_store(&store)?;
+    let conn = open_store(store)?;
     let named = |e: rusqlite::Error| format!("{}: {e}", store.display());
     let (scanned, malformed) = conn
         .query_row(
