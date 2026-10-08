@@ -500,6 +500,24 @@ wire_harnesses() {
 	fi
 }
 
+# The one run-once setup (config + wiring), best effort: the CLI install
+# already succeeded, and the verb stops at its own done markers. FNO_YES or
+# a non-TTY stdin (curl | sh) takes the recommended defaults; the JSON
+# report prints so the run is never silent. FNO_NO_WIRE carries through:
+# the opt-out that skips plugin wiring skips the setup pass too, because
+# its harness-wiring step is the same work.
+run_setup_once() {
+	[ -n "${FNO_NO_WIRE:-}" ] && return 0
+	_mux="$(dirname "$FNO_REAL")/fno"
+	[ -x "$_mux" ] || _mux="$FNO_TOOL_BIN/fno"
+	[ -x "$_mux" ] || return 0
+	_yes=""
+	[ -n "${FNO_YES:-}" ] && _yes="--yes"
+	if _out=$("$_mux" config setup run --once $_yes --json 2>&1); then
+		printf '%s\n' "$_out"
+	fi
+}
+
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
 # make a later `fno`/`fno-py` call resolvable rather than a bare 127 (AC3-UI).
@@ -556,6 +574,14 @@ report_success() {
 
 # --- main ------------------------------------------------------------------
 main() {
+	# `--yes` (or FNO_YES=1): hand the run-once setup the same answer, so an
+	# agent install never prompts. `sh -s -- --yes` is the pipe form.
+	for _arg in "$@"; do
+		case "$_arg" in
+			--yes) FNO_YES=1 ;;
+		esac
+	done
+
 	# footnote is not supported on native Windows yet (the agent runtime uses
 	# POSIX flock + Unix-domain sockets; a named-pipe port is a separate spec).
 	# Catch MSYS/MinGW/Cygwin shells early with a clear message instead of a
@@ -608,6 +634,7 @@ main() {
 					if [ "$FNO_CHANNEL" = stable ] || plugin_version_matches "$FNO_VERIFIED_VERSION" "$FNO_DECLARED_VERSION"; then
 						say "fno is already installed and verified - nothing to do."
 						report_success
+						run_setup_once
 						return 0
 					fi
 					say "installed fno ${FNO_VERIFIED_VERSION:-<unreadable>} is not this tree's ${FNO_CHANNEL} ${FNO_DECLARED_VERSION}; replacing it."
@@ -664,6 +691,7 @@ Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	# never report success for a package that is not ours (AC5-ERR).
 	verify_ours_within || die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to report success for a foreign fno."
 	report_success
+	run_setup_once
 }
 
 main "$@"

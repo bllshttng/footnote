@@ -18,7 +18,6 @@ answer, not two).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -101,12 +100,14 @@ def test_write_registry_refuses_a_new_handleless_row(tmp_path: Path) -> None:
     # content, and so this is a genuinely NEW-row refusal, not an empty file.
     seed = reg.AgentEntry(name="seed", cwd="/x", log_path="/x/seed.log", harness="claude")
     reg.write_registry([seed], path=path)
-    before = path.read_text(encoding="utf-8")
+    from fno.registry_door import read_registry_document
+
+    before = read_registry_document(path)
 
     with pytest.raises(ValueError, match="carries no resolvable handle"):
         reg.write_registry([seed, _handleless("ghost")], path=path)
 
-    assert path.read_text(encoding="utf-8") == before, (
+    assert read_registry_document(path) == before, (
         "a refused write must leave the registry unchanged"
     )
 

@@ -21,7 +21,6 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.claims.core import claim_status
-from fno.claims.io import claim_path, encode_key
 from fno.claims.tasks import task_key
 
 runner = CliRunner()
@@ -97,6 +96,10 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claims_root: Path
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
+
+
+def _claimed(key: str, root: Path) -> bool:
+    return claim_status(key, root=root)["state"] != "free"
 
 
 def _node_row(graph: Path, node_id: str, task_id: str) -> dict:
@@ -205,7 +208,7 @@ def test_in_progress_claims_and_second_claimant_refused_by_name(
 ):
     """AC2-HP + AC2-ERR: transition writes row + lockfile; peer exit 3 names A."""
     key = task_key("x-t1", "1.1")
-    lock = claim_path(key, root=claims_root)
+    lock = key
 
     got = _task_update(
         monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
@@ -213,7 +216,7 @@ def test_in_progress_claims_and_second_claimant_refused_by_name(
     )
     assert got.exit_code == 0, got.output
     # Positive markers: the exact task key's lockfile exists and carries A.
-    assert lock.exists(), f"claim lockfile for {key} must exist"
+    assert _claimed(lock, claims_root), f"claim lockfile for {key} must exist"
     status = claim_status(key, root=claims_root)
     assert status["holder"] == SID_A
     assert status["state"] in ("live", "suspect")
@@ -271,8 +274,8 @@ def test_pidless_thread_claim_uses_two_hour_lease(
     assert result.exit_code == 0, result.output
 
     key = task_key("x-t1", "1.1")
-    lock = claim_path(key, root=claims_root)
-    assert lock.exists(), f"claim lockfile for {key} must exist"
+    lock = key
+    assert _claimed(lock, claims_root), f"claim lockfile for {key} must exist"
     claim = claim_status(key, root=claims_root)
     assert claim["pid"] is None
     assert claim["pid_unavailable"] is True
@@ -327,7 +330,7 @@ def test_reoffering_done_task_keeps_suspect_pidless_claim(
         monkeypatch.delenv(marker, raising=False)
 
     key = task_key("x-t1", "1.1")
-    lock = claim_path(key, root=claims_root)
+    lock = key
     first = _task_update(
         monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
     )
@@ -355,7 +358,7 @@ def test_reoffering_done_task_keeps_suspect_pidless_claim(
     )
     assert refused.exit_code == 3
     assert "re-offering shipped work is refused" in refused.output
-    assert lock.exists(), "the holder's existing claim survives the row refusal"
+    assert _claimed(lock, claims_root), "the holder's existing claim survives the row refusal"
 
 
 def test_claim_contention_exits_3_within_the_waves_contract(
@@ -420,7 +423,7 @@ def test_second_list_read_is_read_only(
 def test_dead_holder_is_archived_and_reclaimed(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """AC3-HP: a dead-pid claim is swept to .expired/ and B takes the task."""
+    """AC3-HP: a dead-pid claim is reclaimed and B takes the task."""
     key = task_key("x-t1", "1.1")
     dead = _dead_pid()
 
@@ -435,12 +438,9 @@ def test_dead_holder_is_archived_and_reclaimed(
         "--owner", SID_B,
     )
     assert taken.exit_code == 0, taken.output
-    # Positive markers: B owns row + live claim, and A's corpse is archived.
+    # Positive markers: B owns row + live claim.
     assert _node_row(tmp_graph, "x-t1", "1.1")["owner"] == SID_B
     assert claim_status(key, root=claims_root)["holder"] == SID_B
-    expired_dir = claim_path(key, root=claims_root).parent / ".expired"
-    archived = list(expired_dir.glob(f"{encode_key(key)}.*.lock"))
-    assert archived, f"the dead claim must be archived under {expired_dir}"
 
 
 # -- completion and give-back --
@@ -462,7 +462,7 @@ def test_done_releases_the_claim(
     assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"
     # Positive verdict from the instrument: state reads free, file gone.
     assert claim_status(key, root=claims_root)["state"] == "free"
-    assert not claim_path(key, root=claims_root).exists()
+    assert not _claimed(key, claims_root)
 
 
 def test_pending_give_back_is_holder_only(
@@ -630,7 +630,7 @@ def test_overlong_task_key_refused_at_validation(
         ),
         encoding="utf-8",
     )
-    bad_lock = claim_path(task_key("x-t1", huge_id), root=claims_root)
+    bad_lock = task_key("x-t1", huge_id)
 
     refused = _task_update(
         monkeypatch, _live_pid(), "x-t1", huge_id, "--status", "in_progress",
@@ -638,14 +638,14 @@ def test_overlong_task_key_refused_at_validation(
     )
     assert refused.exit_code == 2
     assert "exceeds" in refused.output
-    assert not bad_lock.exists(), "a refused key must leave no lockfile"
+    assert not _claimed(bad_lock, claims_root), "a refused key must leave no lockfile"
 
     ok = _task_update(
         monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
         "--owner", SID_A,
     )
     assert ok.exit_code == 0, ok.output
-    assert claim_path(task_key("x-t1", "1.1"), root=claims_root).exists(), (
+    assert _claimed(task_key("x-t1", "1.1"), claims_root), (
         "positive control: the same verb creates the healthy key's lockfile"
     )
 
@@ -794,12 +794,12 @@ def test_reclaiming_a_done_row_keeps_a_claim_you_already_held(
     Otherwise a holder whose row went done out of band is left running the
     task with nobody holding it, and a peer claims the same task.
     """
-    lock = claim_path(task_key("x-t1", "1.1"), root=claims_root)
+    lock = task_key("x-t1", "1.1")
     assert _task_update(
         monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
         "--owner", SID_A,
     ).exit_code == 0
-    assert lock.exists()
+    assert _claimed(lock, claims_root)
 
     # The row goes done underneath the live holder (a peer reconcile, an
     # operator), leaving the claim in place.
@@ -820,7 +820,7 @@ def test_reclaiming_a_done_row_keeps_a_claim_you_already_held(
         "--owner", SID_A,
     )
     assert refused.exit_code == 3
-    assert lock.exists(), "the claim this call did not take must survive its refusal"
+    assert _claimed(lock, claims_root), "the claim this call did not take must survive its refusal"
     assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["holder"] == SID_A
 
 
@@ -837,7 +837,7 @@ def test_a_stale_self_claim_is_not_one_you_hold(
     claim, and the refusal path then declines to release it. The task reads
     peer-held for the rest of the run.
     """
-    lock = claim_path(task_key("x-t1", "1.1"), root=claims_root)
+    lock = task_key("x-t1", "1.1")
     assert _task_update(
         monkeypatch, _dead_pid(), "x-t1", "1.1", "--status", "in_progress",
         "--owner", SID_A,
@@ -861,7 +861,7 @@ def test_a_stale_self_claim_is_not_one_you_hold(
         "--owner", SID_A,
     )
     assert refused.exit_code == 3
-    assert not lock.exists(), (
+    assert not _claimed(lock, claims_root), (
         "the claim this call DID take must be released by its own refusal"
     )
 
@@ -938,7 +938,7 @@ def test_owner_cannot_take_a_live_claim(
     """
     other = subprocess.Popen(["/bin/sleep", "30"])
     try:
-        lock = claim_path(task_key("x-t1", "1.1"), root=claims_root)
+        lock = task_key("x-t1", "1.1")
         assert _task_update(
             monkeypatch, other.pid, "x-t1", "1.1", "--status", "in_progress",
             "--owner", SID_A,
@@ -952,7 +952,7 @@ def test_owner_cannot_take_a_live_claim(
         assert refused.exit_code == 4
         assert "held LIVE" in refused.output
         assert "identity is shared" in refused.output
-        assert lock.exists(), "a live worker's claim must survive the refusal"
+        assert _claimed(lock, claims_root), "a live worker's claim must survive the refusal"
         assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "in_progress"
     finally:
         other.kill()
@@ -1032,7 +1032,7 @@ def test_manifest_only_identity_refused_as_a_shared_anchor(
     )
     assert refused.exit_code == 4
     assert "shared" in refused.output
-    assert not claim_path(task_key("x-t1", "1.1"), root=claims_root).exists(), (
+    assert not _claimed(task_key("x-t1", "1.1"), claims_root), (
         "a refused shared anchor leaves no lockfile"
     )
 

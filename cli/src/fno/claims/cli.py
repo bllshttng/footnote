@@ -1659,10 +1659,10 @@ def _owned_registry_effort(harness: str, session_id: str) -> "str | None":
     if not harness or not session_id:
         return None
     try:
-        from fno import paths
+        from fno.registry_door import RegistryDoorError, read_registry_document
 
-        raw = json.loads(paths.agents_registry_path().read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
+        raw = read_registry_document()[0]
+    except (OSError, TypeError, ValueError, RegistryDoorError):
         return None
     rows = raw.get("agents") if isinstance(raw, dict) else None
     if not isinstance(rows, list):

@@ -1145,15 +1145,14 @@ mod tests {
 
     fn write_registry(dir: &Path, rows: Value) -> PathBuf {
         let path = dir.join("registry.json");
-        fs::write(
+        crate::registry_store::seed_raw(
             &path,
             serde_json::json!({
                 "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
                 "agents": rows,
             })
             .to_string(),
-        )
-        .unwrap();
+        );
         path
     }
 

@@ -441,11 +441,12 @@ _LANES_READING: Optional[tuple[Optional[int], str]] = None
 def _lanes_threads() -> tuple[Optional[int], str]:
     """Test-thread cap from the `fno doctor lanes` reading, or None at default.
 
-    `lane_count` is how many MORE lanes fit: an idle box tops out at 64
-    (LANE_ANSWER_CAP) - full parallelism, not a lowered constant - and a
-    spawn-load ceiling breach forces 0, which clamps to 1 (serial). A refused
-    reading (a dark sensor is never headroom) or a failed one returns None so
-    the runner keeps its own default where sensors are dark (CI).
+    `lane_count` is how many MORE lanes fit, answered by the spawn-gate probe
+    itself (the learned effective cap minus the live slot count), so the suite
+    reads the same decider the gate refuses with. A spawn-load ceiling breach
+    forces 0, which clamps to 1 (serial). A refused reading (a dark sensor is
+    never headroom) or a failed one returns None so the runner keeps its own
+    default where sensors are dark (CI).
     """
     global _LANES_READING
     if _LANES_READING is not None:

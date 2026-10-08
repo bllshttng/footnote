@@ -40,12 +40,25 @@ const RARITY_FLOOR: Record<Rarity, number> = { common: 5, uncommon: 15, rare: 25
 export const RARITY_STARS: Record<Rarity, string> = {
   common: '★', uncommon: '★★', rare: '★★★', epic: '★★★★', legendary: '★★★★★',
 }
-export const RARITY_COLORS: Record<Rarity, string> = {
-  common: 'gray', uncommon: 'green', rare: 'cyan', epic: 'magenta', legendary: 'yellow',
-}
-// The original's theme keys: Claude Code draws them in the user's theme. The status line has only ANSI, so it keeps the names above.
+// The original's theme keys: Claude Code draws them in the user's theme.
 export const RARITY_THEME: Record<Rarity, string> = {
   common: 'inactive', uncommon: 'success', rare: 'permission', epic: 'autoAccept', legendary: 'warning',
+}
+
+// The status line and a Desktop SVG cannot name a theme key, so they take the value Claude Code
+// gives that key in each built-in theme (copied from Claude Code 2.1.294). A custom theme draws as dark.
+type ThemeKey = (typeof RARITY_THEME)[Rarity]
+const THEMES: Record<string, Record<ThemeKey, string>> = {
+  dark: { inactive: 'rgb(153,153,153)', success: 'rgb(78,186,101)', permission: 'rgb(177,185,249)', autoAccept: 'rgb(175,135,255)', warning: 'rgb(255,193,7)' },
+  light: { inactive: 'rgb(102,102,102)', success: 'rgb(44,122,57)', permission: 'rgb(87,105,247)', autoAccept: 'rgb(135,0,255)', warning: 'rgb(150,108,30)' },
+  'dark-daltonized': { inactive: 'rgb(153,153,153)', success: 'rgb(51,153,255)', permission: 'rgb(153,204,255)', autoAccept: 'rgb(175,135,255)', warning: 'rgb(255,204,0)' },
+  'light-daltonized': { inactive: 'rgb(102,102,102)', success: 'rgb(0,102,153)', permission: 'rgb(51,102,255)', autoAccept: 'rgb(135,0,255)', warning: 'rgb(255,153,0)' },
+  'dark-ansi': { inactive: 'ansi:white', success: 'ansi:greenBright', permission: 'ansi:blueBright', autoAccept: 'ansi:magentaBright', warning: 'ansi:yellowBright' },
+  'light-ansi': { inactive: 'ansi:blackBright', success: 'ansi:green', permission: 'ansi:blue', autoAccept: 'ansi:magenta', warning: 'ansi:yellow' },
+}
+
+export function rarityColor(theme: string, rarity: Rarity): string {
+  return (THEMES[theme] ?? THEMES.dark!)[RARITY_THEME[rarity]]!
 }
 
 function mulberry32(seed: number): () => number {

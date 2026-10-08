@@ -127,10 +127,89 @@ pub(crate) fn resolve_reseat_target(token: &str, reg_raw: &str) -> Result<Reseat
 /// pass through untouched, and a typed row can never drop a field a newer
 /// writer added. Answers how many rows were cleared; zero is success (an
 /// already-flipped row means a re-run after a half-completed move).
+/// One `fno-agents registry-commit` round trip: stdout JSON on exit 0, the
+/// exit code and stderr otherwise.
+fn registry_commit(payload: &serde_json::Value) -> Result<serde_json::Value, (i32, String)> {
+    use std::io::Write;
+    let mut command =
+        crate::process_admission::std_command(crate::digest_overlay::fno_agents_bin());
+    command
+        .arg("registry-commit")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::process_admission::std_spawn(&mut command)
+        .map_err(|e| (-1, format!("registry-commit spawn: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload.to_string().as_bytes())
+            .map_err(|e| (-1, format!("registry-commit stdin: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| (-1, format!("registry-commit wait: {e}")))?;
+    if !out.status.success() {
+        return Err((
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| (-1, format!("registry-commit reply: {e}")))
+}
+
+/// Clear `mux` on matching rows of an imported registry through the table's
+/// write door, re-reading on a revision conflict.
+fn clear_mux_refs_in_table(
+    registry: &std::path::Path,
+    matches: &dyn Fn(&serde_json::Value) -> bool,
+) -> Result<usize, String> {
+    let path = registry.to_string_lossy();
+    for _ in 0..5 {
+        let read = registry_commit(&serde_json::json!({"op": "read", "path": path}))
+            .map_err(|(_, e)| format!("read: {e}"))?;
+        let revision = read["revision"]
+            .as_i64()
+            .ok_or_else(|| "read: no revision".to_string())?;
+        let mut doc = read["document"].clone();
+        let schema_version = doc["schema_version"].clone();
+        let rows = doc
+            .get_mut("agents")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| "no agents array".to_string())?;
+        let mut cleared = 0;
+        for row in rows.iter_mut() {
+            if matches(row) {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("mux".to_string(), serde_json::Value::Null);
+                    cleared += 1;
+                }
+            }
+        }
+        if cleared == 0 {
+            return Ok(0);
+        }
+        let payload = serde_json::json!({
+            "path": path,
+            "schema_version": schema_version,
+            "agents": rows,
+            "revision": revision,
+        });
+        match registry_commit(&payload) {
+            Ok(_) => return Ok(cleared),
+            Err((3, e)) if e.contains("revision_conflict") => continue,
+            Err((_, e)) => return Err(format!("write: {e}")),
+        }
+    }
+    Err("write: the registry kept changing under the reseat".to_string())
+}
+
 pub(crate) fn clear_mux_refs(
     registry: &std::path::Path,
     matches: &dyn Fn(&serde_json::Value) -> bool,
 ) -> Result<usize, String> {
+    if registry.is_dir() {
+        return clear_mux_refs_in_table(registry, matches);
+    }
     let lock_path = registry
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -258,7 +337,7 @@ pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
                 return EXIT_USAGE;
             }
             let registry = crate::agents_view::registry_path();
-            let raw = match std::fs::read_to_string(&registry) {
+            let raw = match crate::registry_read::registry_text(&registry) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!(

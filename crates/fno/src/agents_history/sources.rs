@@ -63,7 +63,8 @@ fn registry_path(agents_home: &Path) -> PathBuf {
 }
 
 fn read_rows(path: &Path, key: &str) -> Rows {
-    let raw = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let raw = crate::registry_read::registry_text(path)
+        .map_err(|err| format!("{}: {err}", path.display()))?;
     let value: Value = serde_json::from_str(&raw)
         .map_err(|err| format!("{}: invalid JSON: {err}", path.display()))?;
     if let Some(rows) = value.as_array() {

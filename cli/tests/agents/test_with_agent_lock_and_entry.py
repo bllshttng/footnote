@@ -192,8 +192,12 @@ def test_registry_path_override_routes_both_lock_and_entry_reads(
     from fno import paths
     from fno.agents.registry import AgentEntry, update_registry
 
-    default_registry = tmp_path / "default-registry.jsonl"
-    override_registry = tmp_path / "override-registry.jsonl"
+    # The registry table lives in the graph store beside the path, so each
+    # registry needs its own directory to be a separate store.
+    default_registry = tmp_path / "default" / "registry.jsonl"
+    override_registry = tmp_path / "override" / "registry.jsonl"
+    default_registry.parent.mkdir()
+    override_registry.parent.mkdir()
 
     # Point the global default at default_registry; seed it with an
     # agent whose name we WILL look up via override. Pre-fix the

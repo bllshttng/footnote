@@ -99,7 +99,8 @@ fi
 # it was installed-without-effect too: Cargo decides incremental before this
 # script ever runs, so `.cargo/config.toml`'s [build] incremental = false
 # is what actually enables caching, not anything in this wrapper.
-if command -v sccache >/dev/null 2>&1; then
+# An uncached retry still passes build and run admission below.
+if [[ "${SCCACHE_DISABLE:-0}" != "1" ]] && command -v sccache >/dev/null 2>&1; then
     HAS_SCCACHE=1
 else
     HAS_SCCACHE=0
@@ -110,7 +111,7 @@ case " $* " in
         if [[ "$HAS_SCCACHE" -eq 1 ]]; then
             echo "cargo-rustc-wrapper: sccache (shared cache)" >&2
         else
-            echo "cargo-rustc-wrapper: bare rustc (sccache absent)" >&2
+            echo "cargo-rustc-wrapper: bare rustc (sccache absent or disabled)" >&2
         fi
         ;;
 esac

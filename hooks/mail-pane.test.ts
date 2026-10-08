@@ -191,12 +191,13 @@ test('delivered sender and message buttons resolve the canonical session and thr
   const messageLayout = orderedContent(messageTree)
   const heldSummaryAt = messageLayout.indexOf('2 held messages')
   const firstControlAt = messageLayout.indexOf(senderKey)
+  const firstSubjectAt = messageLayout.indexOf('hello from the worker')
   const firstBodyAt = messageLayout.indexOf('original mail body')
   const secondControlAt = messageLayout.indexOf(secondMessageKey)
   const secondBodyAt = messageLayout.indexOf('second mail body')
   if (
-    !(heldSummaryAt < firstControlAt && firstControlAt < firstBodyAt &&
-      firstBodyAt < secondControlAt && secondControlAt < secondBodyAt)
+    !(heldSummaryAt < firstControlAt && firstControlAt < firstSubjectAt &&
+      firstSubjectAt < firstBodyAt && firstBodyAt < secondControlAt && secondControlAt < secondBodyAt)
   ) {
     throw new Error('held-mail controls were not kept beside their message bodies')
   }
@@ -278,4 +279,43 @@ test('delivered sender and message buttons resolve the canonical session and thr
   const muxPane = await $.ui.mount(userMessage(`${HEADER}\noriginal mail body`, 'user-mux-pane'))
   expect(await muxPane.find({ key: senderKey })).toBeUndefined()
   await muxPane.unmount()
+})
+
+test('delivered header keeps the subject on the control row and drops the inline body', async ($, on) => {
+  const environment = new Map<string, string>([['FNO_PANE', '']])
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.version', () => ({ value: { version: '2.1.288', base: '2.1.288', builtAt: '' } }))
+  on('env.get', ($, e) => ({ value: environment.get(e.name) ?? '' }))
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'fno-agents' && e.argv[1] === 'mail-envelope') {
+      const texts = JSON.parse(e.init?.stdin ?? '[]') as string[]
+      return {
+        value: {
+          exitCode: 0,
+          stderr: '',
+          stdout: JSON.stringify(texts.map(text => text.includes(MESSAGE_ID)
+            ? { framing: 'header', msg_id: MESSAGE_ID, header_turns: [{ id: MESSAGE_ID, sender: 'maya' }] }
+            : { framing: 'bare', msg_id: null, header_turns: [] })),
+        },
+      }
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: 'unexpected command' } }
+  })
+  on('ui.render', ($, e) => ({ type: 'Text', props: {}, children: [String(e.props?.text ?? 'original message')] }))
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const message = await $.ui.mount(userMessage(
+    `\`@maya · ${MESSAGE_ID} · pane stalled on a watch\` ⏎ pane shows an hour of waiting`,
+  ))
+  if (!await message.find({ key: `mail-sender-${REQUEST_ID}-${MESSAGE_ID}` })) throw new Error('sender button missing')
+  if (!await message.find({ type: 'Text', text: /pane stalled on a watch/ })) throw new Error('subject left the header row')
+  if (await message.find({ type: 'Text', text: /pane shows an hour/ })) throw new Error('inline body rendered outside the pane')
+  await message.unmount()
+
+  const fenced = await $.ui.mount(userMessage(
+    `\`@maya · ${MESSAGE_ID} · run \`make\` now\` ⏎ rebuild finished`,
+  ))
+  if (!await fenced.find({ type: 'Text', text: /run `make` now/ })) throw new Error('subject with an inline backtick was truncated')
+  if (await fenced.find({ type: 'Text', text: /rebuild finished/ })) throw new Error('inline body rendered outside the pane')
+  await fenced.unmount()
 })

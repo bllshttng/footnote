@@ -123,6 +123,12 @@ if [ ! -x "$AGENTS_BIN" ]; then
   exit 1
 fi
 export PATH="$AGENTS_BIN_DIR:$PATH"
+export REGISTRY_SEED_BIN="$AGENTS_BIN"
+source "$REPO_ROOT/tests/helpers/registry-seed.sh"
+# Seed at this writer's schema. HOME is the sandbox, so this IS the shared
+# registry, and a source-built writer refuses to raise it from an older one.
+REG_V="$(PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno.agents.registry import SCHEMA_VERSION; print(SCHEMA_VERSION)')"
+export REG_V
 # Pin the optional-hook budget: this suite tests nudge LOGIC, and the runner's
 # load (four shards, one box) is a property of the shard, not of the code. A
 # busy-tier 1s bound fired twice on AC20's probe (2026-10-05, three runs) and
@@ -163,7 +169,7 @@ clear_carveouts() {
     'from fno.carveout.core import CARVEOUTS_NAME; from fno.paths import project_log; p = project_log(CARVEOUTS_NAME); p.parent.mkdir(parents=True, exist_ok=True); p.write_text("")'
 }
 
-# registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
+# registry.json on disk at state_dir/agents/registry.json: {"schema_version":<current>,"agents":[...]}.
 # liveness_measured_at is generated HERE, at call time: SERVED_LIVENESS_MAX_AGE_SECS
 # is 120, so a hardcoded stamp would age past the window and the suite would
 # turn red on a clock, not on a defect.
@@ -186,31 +192,31 @@ write_registry() {
   fi
   jq -n --argjson children "$children" --argjson peers "$peers" \
     --argjson cl "$role_level" --argjson cs "$role_scope" --argjson cg "$role_grantor" '{
-    schema_version: 13,
+    schema_version: ($ENV.REG_V|tonumber),
     agents: ( [{
       name:"lead-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"'"$LEAD_SID"'",
       harness_session_id:"'"$LEAD_SID"'",
       role_level:$cl, role_scope:$cs, role_grantor:$cg
     }] + $children + $peers )
-  }' > "$SBX/.fno/agents/registry.json"
+  }' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 # A registry with no row for THIS session: the hand-started REPL shape. The
 # context check does not consult the registry, so the nudge still fires; `--check`
 # answers not-injectable at resolve_agent.
 write_registry_without_self() {
-  jq -n '{schema_version: 13, agents: [{
+  jq -n '{schema_version: ($ENV.REG_V|tonumber), agents: [{
     name:"someone-else", harness:"claude", cwd:"/tmp", log_path:"/tmp/x",
     status:"live", short_id:"other", harness_session_id:"other-sid",
     role_level:null, role_scope:null, role_grantor:null
-  }]}' > "$SBX/.fno/agents/registry.json"
+  }]}' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 write_registry_with_unlinked_child() {
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  jq -n --arg ts "$ts" '{schema_version: 13, agents: [
+  jq -n --arg ts "$ts" '{schema_version: ($ENV.REG_V|tonumber), agents: [
     {
       name:"lead-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"lead-test-session-id",
@@ -229,7 +235,7 @@ write_registry_with_unlinked_child() {
       role_level:null, role_scope:null, origin:"operator",
       liveness:"alive", liveness_measured_at:$ts
     }
-  ]}' > "$SBX/.fno/agents/registry.json"
+  ]}' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 # A transcript with one assistant usage line: input_tokens sets the pct against
@@ -538,10 +544,10 @@ sleep 300 &                                            # foreign writer: cwd = F
 FPID=$!
 # status "busy" is deliberate: a dispatched worker mid-turn projects an active
 # status, not always "live", and the guard must see it anyway (review round 1).
-jq -n --argjson pid "$FPID" '{schema_version: 13, agents: [{
+jq -n --argjson pid "$FPID" '{schema_version: ($ENV.REG_V|tonumber), agents: [{
   name:"t-foreign-probe", harness:"codex", cwd:"/tmp", log_path:"/tmp/fp",
   status:"busy", short_id:"fp", harness_session_id:"foreign-probe-sid",
-  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' | registry_seed "$SBX/.fno/agents/registry.json"
 write_transcript "$SBX/low.jsonl" 300000
 run_hook "$(payload "$SBX/low.jsonl")"                 # stop 1: static=1
 assert_absent "AC26: stop 1 no block yet" "$OUT" '"decision":"block"'
@@ -575,10 +581,10 @@ assert_contains "AC26: control arm still advises the commit" "$OUT" 'commit it n
 # Self arm: a live pid-bearing row whose session id IS the hook's own (the pid
 # is this test shell, rooted in FLUSH_REPO by the cd above) -> self-excluded,
 # proved by the nudge appearing, not by a refusal failing to appear.
-jq -n --argjson pid "$$" '{schema_version: 13, agents: [{
+jq -n --argjson pid "$$" '{schema_version: ($ENV.REG_V|tonumber), agents: [{
   name:"t-self-probe", harness:"claude", cwd:"/tmp", log_path:"/tmp/sp",
   status:"live", short_id:"sp", harness_session_id:"'"$LEAD_SID"'",
-  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+  pid:$pid, role_level:null, role_scope:null, role_grantor:null }]}' | registry_seed "$SBX/.fno/agents/registry.json"
 rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null
 run_hook "$(payload "$SBX/low.jsonl")"
 run_hook "$(payload "$SBX/low.jsonl")"
@@ -860,14 +866,14 @@ clear_events
 
 write_registry_liveness() {  # write_registry_liveness '<jq children array>'
   jq -n --argjson children "$1" '{
-    schema_version: 13,
+    schema_version: ($ENV.REG_V|tonumber),
     agents: ( [{
       name:"lead-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"'"$LEAD_SID"'",
       harness_session_id:"'"$LEAD_SID"'",
       role_level:1, role_scope:"'"$SCOPE"'", role_grantor:"human"
     }] + $children )
-  }' > "$SBX/.fno/agents/registry.json"
+  }' | registry_seed "$SBX/.fno/agents/registry.json"
 }
 
 # --- Mixed: 2 alive + 2 dead, both fresh. Prints 2; neither dead name shows. -

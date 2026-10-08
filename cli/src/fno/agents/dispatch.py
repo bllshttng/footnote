@@ -6869,6 +6869,7 @@ def _deliver_live(
     sender_entry: "Optional[AgentEntry]" = None,
     reason_out: "Optional[list]" = None,
     family1_state: Optional[str] = None,
+    header_only: bool = False,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node).
@@ -6880,28 +6881,21 @@ def _deliver_live(
     generic live-miss. A side-channel, not a second return value, so callers
     and test mocks that read this as a plain bool are unaffected.
 
-    ``family1_state`` (node, change 2) is the caller's ALREADY-COMPUTED
-    :func:`_registered_family1_state` classification for ``entry`` -- passed in
-    rather than recomputed here, since ``dispatch_send`` already resolves it
-    before calling this function and a second call would re-read the recipient
-    transcript for no new information. ``"working"`` (mid-turn, per
-    :func:`_registered_family1_state`) scales the claude control.sock confirm
-    budget so a long tool call has room to yield before we give up.
+    ``family1_state`` is the caller's already-computed registered-state class
+    for ``entry``, passed in so the recipient transcript is not re-read;
+    ``"working"`` scales the claude confirm budget; ``header_only`` wraps the
+    turn as the header line alone (records and durable copies keep the body).
 
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
     self-recording (``grep <fno_mail>`` reconstructs a2a history). Every live
     transport below carries the same wrapped turn, ``agy`` mux entries included.
 
-    For claude peers: the ``control.sock`` inject via the ``fno-agents
-    mail-inject`` verb (G1) is the live primitive for adopted
-    ``claude --bg`` sessions, replacing the dead per-worker messaging socket; the
-    switchboard / MCP fast lanes still apply first for stream-json / MCP-routed
-    peers.
-
-    For codex/gemini peers: the daemon ``agent.deliver`` RPC, now carrying the
-    ``<fno_mail>`` envelope. Daemon-down or any failure demotes to durable with a
-    stderr notice; the durable envelope the caller writes is the recovery record.
+    For claude peers the ``control.sock`` inject via the ``fno-agents
+    mail-inject`` verb (G1) is the live primitive (the switchboard / MCP fast
+    lanes still apply first for stream-json / MCP-routed peers); for
+    codex/gemini peers the daemon ``agent.deliver`` RPC carries the envelope,
+    and its failure demotes to durable with a stderr notice.
     """
     wrapped = body
     if mail is not None:
@@ -6918,6 +6912,7 @@ def _deliver_live(
             origin=mail.origin,
             to_session=mail.to_session,
             subject=mail.subject,
+            header_only=header_only,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -7408,6 +7403,7 @@ def dispatch_send(
     registry_stamp_timeout_seconds: float = 1.0,
     origin: Optional[str] = None,
     subject: Optional[str] = None,
+    header_only: bool = False,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -7758,6 +7754,7 @@ def dispatch_send(
                         sender_entry=sender_entry,
                         reason_out=_live_reason,
                         family1_state=family1_state,
+                        header_only=header_only,
                     )
                     if _live_delivered:
                         delivery = "hosted"

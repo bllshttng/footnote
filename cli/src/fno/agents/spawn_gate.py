@@ -23,7 +23,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NoReturn, Optional, cast
-from urllib.parse import unquote
 
 from fno.agents.row_contradiction import project_row
 from fno.footprint import Admission
@@ -546,23 +545,18 @@ def _live_worker_slot_claims(
 ) -> int:
     """Live ``worker:<name>`` slot claims under the GLOBAL claims root."""
     try:
-        from fno.claims.core import claim_status
-    except Exception:
-        return 0
-    root = _gate_claims_root()
-    claims_dir = root / ".fno" / "claims"
-    if not claims_dir.is_dir():
+        from fno.claims.core import list_claims
+
+        rows = list_claims(prefix="worker:", include_stale=True, root=_gate_claims_root())
+    except Exception:  # noqa: BLE001 - an unreadable claims table counts nothing
         return 0
     n = 0
     counted_names = counted_names or set()
-    for f in claims_dir.glob("worker%3A*.lock"):
-        key = unquote(f.name[: -len(".lock")])
+    for row in rows:
+        key = str(row.get("key") or "")
         if key.removeprefix("worker:") in counted_names:
             continue
-        try:
-            state = claim_status(key, root=root).get("state")
-        except Exception:
-            continue
+        state = row.get("state")
         if state in ("live", "suspect"):
             n += 1
         elif state == "corrupted":

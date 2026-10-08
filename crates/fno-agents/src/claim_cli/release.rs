@@ -360,7 +360,12 @@ fn other_roots(key: &str, taken: &Path) -> Vec<(Option<PathBuf>, PathBuf)> {
         if seen.iter().any(|p| p == &file) {
             continue;
         }
-        if file.exists() {
+        // A table root holds the row behind the locator; a legacy root still
+        // holds the file itself. Never open a store that does not exist yet.
+        let in_table = crate::claim_store::database_path_from_directory(&dir)
+            .is_ok_and(|db| db.exists())
+            && matches!(crate::claim_store::read_at_path(&file), Ok(Some(_)));
+        if in_table || file.is_file() {
             seen.push(file.clone());
             out.push((raw, file));
         }

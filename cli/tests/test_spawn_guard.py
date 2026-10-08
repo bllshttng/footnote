@@ -25,13 +25,6 @@ from typer.testing import CliRunner
 
 from fno.agents.cli import agents_app
 from fno.claims.core import acquire_claim, claim_status
-from fno.claims.io import (
-    claim_path,
-    global_claims_root as _global_claims_root,
-    read_claim_file,
-    serialize_claim,
-)
-from fno.claims.types import now_ms
 
 runner = CliRunner()
 
@@ -109,14 +102,12 @@ def test_live_claim_already_running_no_reservation(claims_tmp):
 
 
 def test_corrupted_claim_verdict_no_reservation(claims_tmp):
-    # Write a garbage lock file at the node:<id> path so the probe classifies it
-    # corrupted (claim_status returns state=corrupted, never raises).
-    from fno.claims.core import claim_path
-    from fno.claims.io import global_claims_root
+    # An unreadable row at node:<id> classifies corrupted (claim_status
+    # returns state=corrupted, never raises).
+    from tests._table_seed import update_claim
 
-    path = claim_path("node:x-dddd", root=global_claims_root())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{ this is not valid claim yaml :::", encoding="utf-8")
+    acquire_claim("node:x-dddd", "h0")
+    update_claim("node:x-dddd", schema_version=999)
 
     res = _invoke("x-dddd", "--holder", "h", "--json")
     assert res.exit_code == 0  # corrupted is a clean verdict
@@ -396,6 +387,8 @@ def test_expired_dead_dispatch_reservation_reaped(claims_tmp):
     SUSPECT-arm behavior is asserted by
     test_suspect_claim_already_running_no_reservation above."""
     import psutil
+
+    from tests._table_seed import update_claim
     dead_pid = 999_999
     while psutil.pid_exists(dead_pid):
         dead_pid += 1
@@ -405,9 +398,7 @@ def test_expired_dead_dispatch_reservation_reaped(claims_tmp):
     acquire_claim(
         "dispatch:x-7777", "dispatch-node:orphan", pid=dead_pid, ttl_ms=60_000
     )
-    path = claim_path("dispatch:x-7777")
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    update_claim("dispatch:x-7777", expires_at=1)
     assert claim_status("dispatch:x-7777")["state"] == "stale"
 
     res = _invoke("x-7777", "--holder", "dispatch-node:fresh", "--json")
@@ -608,6 +599,9 @@ def test_a_stale_claim_with_a_worker_row_names_the_row_not_the_claim(
     followed it to a claim `fno agents claim status` read as UNCLAIMED."""
     import psutil
 
+    from fno.claims.io import global_claims_root as _global_claims_root
+    from tests._table_seed import update_claim
+
     dead_pid = 999_999
     while psutil.pid_exists(dead_pid):
         dead_pid += 1
@@ -615,9 +609,7 @@ def test_a_stale_claim_with_a_worker_row_names_the_row_not_the_claim(
         "node:x-6f98", "spawn-handover:bp-6f98-locked-decision",
         pid=dead_pid, ttl_ms=60_000,
     )
-    path = claim_path("node:x-6f98", root=_global_claims_root())
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    update_claim("node:x-6f98", expires_at=1)
     assert claim_status("node:x-6f98", root=_global_claims_root())["state"] == "stale"
 
     monkeypatch.setattr(
@@ -644,15 +636,15 @@ def test_the_contested_dispatch_warning_leads_with_the_worker_row(
     while the row was the occupant."""
     import psutil
 
+    from tests._table_seed import update_claim
+
     dead_pid = 999_999
     while psutil.pid_exists(dead_pid):
         dead_pid += 1
     acquire_claim(
         "node:x-6f99", "spawn-handover:bp-6f99-planner", pid=dead_pid, ttl_ms=60_000
     )
-    path = claim_path("node:x-6f99", root=_global_claims_root())
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    update_claim("node:x-6f99", expires_at=1)
     monkeypatch.setattr(
         "fno.graph.statuses.live_worked_node_ids",
         lambda **_kw: {"x-6f99": ["bp-6f99-planner"]},

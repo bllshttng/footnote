@@ -166,11 +166,15 @@ pub(super) async fn serve(
                 .await
                 .ok()
                 .flatten();
-                let raw = if stamp != cached {
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&path).ok())
-                        .await
-                        .ok()
-                        .flatten()
+                // A fence directory's stat never moves; its rows live in graph.db,
+                // so it is read every tick.
+                let raw = if stamp != cached || path.is_dir() {
+                    tokio::task::spawn_blocking(move || {
+                        crate::registry_read::registry_text(&path).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten()
                 } else {
                     None
                 };

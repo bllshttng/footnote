@@ -381,8 +381,14 @@ def test_claude_python_runtime_refuses_without_launching_legacy_wake(monkeypatch
         "fno.agents.harnesses.claude.claude_agents_json",
         lambda: ({"deadbeef": {"live_status": "Working"}}, []),
     )
-    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("spawned subprocess"))
-    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw: pytest.fail("spawned subprocess"))
+    real_run = subprocess.run
+
+    def _no_spawn(cmd, *a, **kw):
+        if "registry-commit" in [str(part) for part in cmd]:
+            return real_run(cmd, *a, **kw)  # the registry read door, not a wake
+        pytest.fail("spawned subprocess")
+
+    monkeypatch.setattr(subprocess, "run", _no_spawn)
 
     res = resume_logic(
         name="alpha",

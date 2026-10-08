@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from fno.claims.core import acquire_claim
-from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
@@ -50,9 +49,9 @@ def _worktree_list(entries):
 
 
 def _expire_claim(root: Path, key: str) -> None:
-    path = claim_path(key, root=root)
-    claim = read_claim_file(path)
-    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    from tests._table_seed import update_claim
+
+    update_claim(key, root=root, expires_at=now_ms() - 1)
 
 
 NO_WORKTREE = _fake_git({"worktree": _worktree_list([])})
@@ -499,17 +498,19 @@ def test_release_reports_whether_anything_was_there(tmp_path: Path):
     assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
 
 
-def test_release_clears_a_corrupted_lockfile(tmp_path: Path):
+def test_release_clears_a_corrupted_claim(tmp_path: Path):
     """A corrupted claim has no readable holder, so no release_claim call can
     name one. Leaving it is the worse outcome: every read classifies it
     CORRUPTED, which BLOCKS, forever."""
-    from fno.claims.io import claim_path
+    from fno.claims.core import claim_status
+    from tests._table_seed import update_claim
 
-    path = claim_path(_review_hold.review_hold_key("feature/x"), root=tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{ not a claim", encoding="utf-8")
+    key = _review_hold.review_hold_key("feature/x")
+    acquire_claim(key, "reviewer:sess-1", root=tmp_path)
+    update_claim(key, root=tmp_path, schema_version=999)
+    assert claim_status(key, root=tmp_path)["state"] == "corrupted"
     assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
-    assert not path.exists()
+    assert claim_status(key, root=tmp_path)["state"] == "free"
 
 
 def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
@@ -520,7 +521,6 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
     crashed reviewer would deny every bare `gh pr merge` in the repo until
     someone noticed."""
     from fno.claims.core import claim_status
-    from fno.claims.io import claim_path
 
     key = _review_hold.review_hold_key("feature/x")
     acquire_claim(key, "reviewer:sess-1", ttl_ms=60_000, pid=DEAD_PID, root=tmp_path)
@@ -531,7 +531,6 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
     )
     assert activity.blocked is False
     assert "expired" in capsys.readouterr().err
-    assert not claim_path(key, root=tmp_path).exists()
     assert claim_status(key, root=tmp_path)["state"] == "free"
 
 

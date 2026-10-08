@@ -109,6 +109,13 @@ fn fence_requested(input: &Value) -> bool {
         || input.get("fence").and_then(Value::as_bool) == Some(true)
 }
 
+/// A `header_only: true` payload delivers the header line alone: no body, no
+/// command. The receiver is taught the read verb once per session, not per
+/// mail, and the fmail- prefix is the cue; the bus copy keeps the full body.
+fn header_only_requested(input: &Value) -> bool {
+    input.get("header_only").and_then(Value::as_bool) == Some(true)
+}
+
 /// The fence for `body`: a backtick run one longer than the longest run the
 /// body holds, minimum three, so no body line can close it.
 fn fence_for(body: &str) -> String {
@@ -295,6 +302,11 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let body_text = wrapping.as_deref().unwrap_or("");
     let third = crate::mail_header::header_subject(subject, body_text);
     let header = crate::mail_header::render_header(form, sender, msg_id, &third);
+    // Header-only delivery: the turn is the header line alone, and the body
+    // waits on the bus.
+    if header_only_requested(input) {
+        return Ok(header);
+    }
     let delivered = crate::mail_header::delivered_body(subject, body_text);
     Ok(match wrapping {
         Some(_) if fence_requested(input) => {
@@ -505,6 +517,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(header, "`@quill \u{b7} msg-3 \u{b7} (empty)`");
+        // Header-only delivery: the turn is the header line alone; the body
+        // stays on the bus.
+        let header_only = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate. Details follow.",
+                "from":"folio-short", "id":"fmail-0123456789ab", "header_only":true
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            header_only,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`"
+        );
+        // Header-only ignores a fence request: there is nothing to fence.
+        let header_only_fenced = render_at(
+            &json!({
+                "mode":"wrap", "body":"Fix the gate.", "from":"folio-short",
+                "id":"fmail-0123456789ab", "header_only":true, "fence":true
+            }),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            header_only_fenced,
+            "`@folio \u{b7} fmail-0123456789ab \u{b7} Fix the gate.`"
+        );
+        // No body: tag mode renders the same header.
+        let header_only_tag = render_at(
+            &json!({"mode":"tag", "from":"folio-short", "id":"msg-6", "header_only":true}),
+            &path,
+        )
+        .unwrap();
+        assert_eq!(header_only_tag, "`@folio \u{b7} msg-6 \u{b7} (empty)`");
         // The pane lane's fenced delivery (payload `fence`, or FNO_MAIL_FENCE=1
         // on the pane-prepare child): the body rides a backtick run one longer
         // than any run it holds; the header line stays readable.
@@ -548,7 +594,9 @@ mod tests {
         assert_eq!(crate::mail_header::display_body(plain_code), plain_code);
         // A sender row RENAMED after the envelope was written still renders
         // its CURRENT name: the header resolves the stored session id.
-        let renamed_path = tmp.path().join("renamed-registry.json");
+        // Its own root: one graph.db holds one registry table.
+        let renamed_path = tmp.path().join("renamed").join("registry.json");
+        std::fs::create_dir_all(renamed_path.parent().unwrap()).unwrap();
         std::fs::write(
             &renamed_path,
             serde_json::json!({"schema_version": 11, "agents": [

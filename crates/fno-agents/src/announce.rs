@@ -1357,11 +1357,10 @@ mod tests {
     }
 
     fn write_registry(paths: &AnnouncePaths, rows: &[Value]) {
-        std::fs::write(
+        crate::registry_store::seed_raw(
             &paths.registry,
             serde_json::to_string(&json!({ "schema_version": 1, "agents": rows })).unwrap(),
-        )
-        .unwrap();
+        );
     }
 
     #[test]

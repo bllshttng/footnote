@@ -113,9 +113,10 @@ fn with_claims_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn slot_holder_reads_lockfiles_and_refuses_corrupted_claims() {
+fn slot_holder_reads_the_claim_table() {
     let temp = tempfile::TempDir::new().unwrap();
     with_claims_root(temp.path(), || {
+        std::env::set_var("FNO_AGENTS_HOME", temp.path());
         let key = slot_key("main");
         assert!(matches!(
             claims::acquire(
@@ -133,16 +134,7 @@ fn slot_holder_reads_lockfiles_and_refuses_corrupted_claims() {
             slot_holder_read(Path::new("/repo"), "main").unwrap(),
             Some(17)
         );
-        assert!(
-            !temp.path().join("graph.db").exists(),
-            "merge slots must use the claim lockfiles"
-        );
-
-        let corrupt = slot_key("broken");
-        let path = claims::claim_path(&corrupt, None).unwrap();
-        std::fs::write(path, "not: [valid yaml").unwrap();
-        let error = slot_holder_read(Path::new("/repo"), "broken").unwrap_err();
-        assert!(error.contains("corrupted"), "{error}");
+        std::env::remove_var("FNO_AGENTS_HOME");
     });
 }
 

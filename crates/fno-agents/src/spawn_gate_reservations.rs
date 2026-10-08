@@ -117,22 +117,17 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         let lock = claims_dir.join(format!(
             "{}.lock",
             claims::encode_key("worker:t-reserved-x-4444")
         ));
-        std::fs::write(
-            &lock,
-            format!(
+        crate::claim_store::seed_yaml_at_path(&lock, &format!(
                 "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n  reserved_reason: four parked PRs\n",
                 claims::SCHEMA_VERSION,
                 now + 600_000,
                 me,
                 claims::hostname()
-            ),
-        )
-        .unwrap();
+            ));
         (root, reg)
     }
 
@@ -220,6 +215,7 @@ mod tests {
         let _id = crate::spawn_gate_admission::AgentSelfFixture::set();
         let dir = std::env::temp_dir().join(format!("fno-gate-resv-adm-{}", std::process::id()));
         std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        std::env::set_var("FNO_AGENTS_HOME", dir.join("agents-home"));
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
         let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
@@ -248,6 +244,7 @@ mod tests {
             Ok(guard) => guard,
             Err(r) => {
                 std::env::remove_var("FNO_CLAIMS_ROOT");
+                std::env::remove_var("FNO_AGENTS_HOME");
                 match prior_payload {
                     Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
                     None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
@@ -271,6 +268,7 @@ mod tests {
         );
         drop(guard);
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var("FNO_AGENTS_HOME");
         match prior_payload {
             Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
@@ -292,7 +290,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-gate-resv-err-{}", std::process::id()));
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -303,16 +300,12 @@ mod tests {
             "{}.lock",
             claims::encode_key("worker:t-live-worker")
         ));
-        std::fs::write(
-            &lock,
-            format!(
+        crate::claim_store::seed_yaml_at_path(&lock, &format!(
                 "schema_version: {}\nkey: worker:t-live-worker\nholder: h\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n",
                 claims::SCHEMA_VERSION,
                 now + 600_000,
                 std::process::id()
-            ),
-        )
-        .unwrap();
+            ));
         release_redeemed_reservation("t-live-worker", Some(&root));
         let (state, _) = claims::status("worker:t-live-worker", Some(&root));
         assert!(

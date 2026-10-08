@@ -226,7 +226,7 @@ def test_doctor_reports_unbacked_file_residue(tmp_path, monkeypatch):
 
 
 def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monkeypatch):
-    from fno.claims.io import claim_path
+    from tests._table_seed import read_claim_row, update_claim
 
     config = tmp_path / "config.toml"
     config.write_text(
@@ -238,22 +238,13 @@ def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monke
     monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
     optout_lease.set_config_value("review.self_review_required", "false")
 
-    path = claim_path("config-optout:review.self_review_required")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    raw.update(
-        {
-            "schema_version": 2,
-            "pid": None,
-            "pid_unavailable": True,
-            "expires_at": 1,
-        }
-    )
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    key = "config-optout:review.self_review_required"
+    update_claim(key, pid=None, pid_unavailable=1, expires_at=1)
 
     monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
     optout_lease.set_config_value("review.self_review_required", "false")
 
-    replacement = yaml.safe_load(path.read_text(encoding="utf-8"))
+    replacement = read_claim_row(key)
     assert replacement["metadata"]["prior_present"] is True
     assert replacement["metadata"]["prior_value"] is True
 
@@ -274,17 +265,9 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
     optout_lease.set_config_value("review.self_review_required", "false", scope="global")
 
     key = "config-optout:review.self_review_required"
-    path = claim_path(key, root=global_claims_root())
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    raw.update(
-        {
-            "schema_version": 2,
-            "pid": None,
-            "pid_unavailable": True,
-            "expires_at": 1,
-        }
-    )
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    from tests._table_seed import read_claim_row, update_claim
+
+    update_claim(key, root=global_claims_root(), pid=None, pid_unavailable=1, expires_at=1)
 
     monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
     optout_lease.set_config_value(
@@ -294,15 +277,13 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
         repo_root=project_dir,
     )
 
-    taken_over = yaml.safe_load(path.read_text(encoding="utf-8"))
+    taken_over = read_claim_row(key, root=global_claims_root())
     assert (
         taken_over["metadata"]["config_path"]
         == str(project_dir / ".fno" / "config.toml")
     )
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    raw.update({"expires_at": 1})
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    update_claim(key, root=global_claims_root(), expires_at=1)
 
     optout_sink: list = []
     summary = reap_dead_claims(

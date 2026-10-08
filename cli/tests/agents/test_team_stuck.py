@@ -208,7 +208,11 @@ def test_a_fold_that_answered_nothing_says_so_rather_than_nothing(
     _prepare(monkeypatch, tmp_path, [_lead()], graph_entries=[])
     _accepted(monkeypatch)
 
-    def timeout(*a, **kw):
+    real_run = subprocess.run
+
+    def timeout(cmd, *a, **kw):
+        if "registry-commit" in [str(part) for part in cmd]:
+            return real_run(cmd, *a, **kw)
         raise subprocess.TimeoutExpired(
             cmd=["fno-agents", "org-fold", "--graph", "/g"], timeout=30
         )

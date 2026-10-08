@@ -78,7 +78,7 @@ impl Fixture {
     }
 
     fn registry_row(&self) -> Value {
-        let raw = fs::read_to_string(self.home.join("registry.json")).unwrap();
+        let raw = registry_text(&self.home.join("registry.json")).unwrap();
         let registry: Value = serde_json::from_str(&raw).unwrap();
         registry["entries"]
             .as_array()
@@ -413,4 +413,10 @@ fn the_packaged_contract_names_the_revivable_keeper_lanes() {
     assert!(carries("cursor-agent"));
     assert!(!carries("pi"));
     assert!(!carries("grok"));
+}
+
+fn registry_text(path: &std::path::Path) -> std::io::Result<String> {
+    fno_agents::registry_store::read(path)
+        .map(|doc| serde_json::to_string_pretty(&doc).unwrap())
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }

@@ -124,6 +124,39 @@ check_file_exists() {
   fi
 }
 
+# The node claim's state in a sandbox home's claim table ("free" when none).
+claim_state() {
+  FNO_CLAIMS_ROOT="$1" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c "
+from fno.claims.core import claim_status
+from pathlib import Path
+print(claim_status('node:${NODE_ID}', root=Path('$1')).get('state') or 'free')
+" 2>/dev/null || echo unreadable
+}
+
+check_claim_held() {
+  local desc="$1" state
+  state="$(claim_state "$2")"
+  if [ "$state" != "free" ] && [ "$state" != "unreadable" ]; then
+    echo "PASS: $desc"
+    pass=$((pass+1))
+  else
+    echo "FAIL: $desc (node claim is $state under $2)"
+    fail=$((fail+1))
+  fi
+}
+
+check_claim_free() {
+  local desc="$1" state
+  state="$(claim_state "$2")"
+  if [ "$state" = "free" ]; then
+    echo "PASS: $desc"
+    pass=$((pass+1))
+  else
+    echo "FAIL: $desc (node claim is $state under $2)"
+    fail=$((fail+1))
+  fi
+}
+
 check_file_absent() {
   local desc="$1" path="$2"
   if [ ! -e "$path" ]; then
@@ -602,8 +635,7 @@ check_log_order "AC1-HP: release receipt BEFORE delegated commit" \
   "$SBX/output-log" "prepare: archived manifest and released node:" "delegated $NODE_ID"
 
 # The prepare leg released the seeded node claim in-process (strict).
-check_file_absent "AC1-HP: node claim released in-process" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_free "AC1-HP: node claim released in-process" "$SBX/home"
 
 # Parent manifest archived and replaced by the child-bound target manifest.
 check_file_exists "AC1-HP: child target-state.md present" \
@@ -672,8 +704,7 @@ run_handoff "$SBX" "capability"
 check_exit "capability nonce mismatch parks" "10" "$handoff_rc"
 check_contains "capability nonce mismatch names probe stage" "capability_probe" "$output"
 check_file_exists "capability nonce mismatch keeps parent manifest" "$SBX/.fno/target-state.md"
-check_file_exists "capability nonce mismatch keeps parent claim" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "capability nonce mismatch keeps parent claim" "$SBX/home"
 
 # ---------------------------------------------------------------------------
 # Scenario 1c: transcript-observed model must match the configured model
@@ -690,8 +721,7 @@ run_handoff "$SBX" "capability"
 check_exit "observed model mismatch parks" "10" "$handoff_rc"
 check_contains "observed model mismatch names probe stage" "capability_probe" "$output"
 check_file_exists "observed model mismatch keeps parent manifest" "$SBX/.fno/target-state.md"
-check_file_exists "observed model mismatch keeps parent claim" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "observed model mismatch keeps parent claim" "$SBX/home"
 
 # ---------------------------------------------------------------------------
 # Scenario 1d: registration and prompt liveness do not replace readiness
@@ -708,8 +738,7 @@ run_handoff "$SBX" "capability"
 check_exit "readiness without positive marker parks" "10" "$handoff_rc"
 check_contains "readiness mismatch names capability stage" "capability_probe" "$output"
 check_file_exists "readiness mismatch keeps parent manifest" "$SBX/.fno/target-state.md"
-check_file_exists "readiness mismatch keeps parent claim" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "readiness mismatch keeps parent claim" "$SBX/home"
 
 # ---------------------------------------------------------------------------
 # Scenario 1e: delivered seed without child claim/manifest proof rolls back
@@ -775,8 +804,7 @@ check_exit "AC1-ERR: exits 10 (parked)" "10" "$handoff_rc"
 check_contains "AC1-ERR: output contains 'parked'" "parked" "$output"
 
 # Capability failure occurs before any parent ownership mutation.
-check_file_exists "AC1-ERR: spawn failure does not release parent claim" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "AC1-ERR: spawn failure does not release parent claim" "$SBX/home"
 
 # Manifest restored to .fno/
 check_file_exists "AC1-ERR: target-state.md restored to .fno/" \
@@ -853,8 +881,7 @@ check_contains "AC1-EDGE: output contains 'parked'" "parked" "$output"
 
 # Zero claim mutations: no claim acquire/release in log
 check_log_absent "AC1-EDGE: no claim acquire" "$CALL_LOG" "claim acquire"
-check_file_exists "AC1-EDGE: claim untouched" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "AC1-EDGE: claim untouched" "$SBX/home"
 
 # Manifest untouched
 check_file_exists "AC1-EDGE: target-state.md still in .fno/" \
@@ -875,8 +902,7 @@ run_handoff "$SBX" "blueprint-do"
 check_exit "double-handoff: exits 10 (parked)" "10" "$handoff_rc"
 check_contains "double-handoff: output contains 'parked'" "parked" "$output"
 check_log_absent "double-handoff: no claim acquire" "$CALL_LOG" "claim acquire"
-check_file_exists "double-handoff: claim untouched" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "double-handoff: claim untouched" "$SBX/home"
 
 # ---------------------------------------------------------------------------
 # Scenario 6: the explicit one-rung escalation is already spent
@@ -894,8 +920,7 @@ check_exit "gen-cap: exits 10 (parked)" "10" "$handoff_rc"
 check_contains "gen-cap: output contains 'parked'" "parked" "$output"
 check_contains "gen-cap: reason mentions chain-exhausted" "chain-exhausted" "$output"
 check_log_absent "gen-cap: no claim acquire" "$CALL_LOG" "claim acquire"
-check_file_exists "gen-cap: claim untouched" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "gen-cap: claim untouched" "$SBX/home"
 
 # ---------------------------------------------------------------------------
 # Context fixtures remain only as controls proving explicit escalation ignores
@@ -964,10 +989,10 @@ echo ""
 echo "=== Scenario 9: claim contended at prepare release ==="
 SBX="$(make_sandbox s9)"
 # Replace the correctly-held seed with a foreign holder's claim.
-rm -f "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
 FNO_CLAIMS_ROOT="$SBX/home" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c "
-from fno.claims.core import acquire_claim
+from fno.claims.core import acquire_claim, force_release_claim
 from pathlib import Path
+force_release_claim('node:${NODE_ID}', 'test reseed', root=Path('${SBX}/home'))
 acquire_claim('node:${NODE_ID}', holder='target-session:another-session',
               pid_unavailable=True, ttl_ms=3_600_000, root=Path('${SBX}/home'))
 " >/dev/null 2>&1
@@ -981,8 +1006,7 @@ check_contains "claim-contended: output reports prepare failure" "prepare failed
 # Custody restored: the live manifest is back and the foreign claim untouched.
 check_file_exists "claim-contended: parent manifest restored" \
   "$SBX/.fno/target-state.md"
-check_file_exists "claim-contended: foreign claim left intact" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_held "claim-contended: foreign claim left intact" "$SBX/home"
 
 # handoff_failed event emitted once, naming the live holder it found.
 set +e
@@ -1279,8 +1303,7 @@ printf '%s\n' "$CODEX_HOLDER" > "$SBX/scenario/expected-holder"
 run_handoff "$SBX" "blueprint-do"
 check_exit "codex-holder: exits 0" "0" "$handoff_rc"
 check_contains "codex-holder: delegates successfully" "delegated" "$output"
-check_file_absent "codex-holder: recorded-owner release confirmed (claim gone)" \
-  "$SBX/home/.fno/claims/node%3A${NODE_ID}.lock"
+check_claim_free "codex-holder: recorded-owner release confirmed (claim gone)" "$SBX/home"
 
 # ---------------------------------------------------------------------------
 # Scenario 6: x-3ad5 - the plan-status gate accepts the canonical in_review

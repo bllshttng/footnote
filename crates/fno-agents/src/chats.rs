@@ -165,10 +165,7 @@ fn recipient_key(to: &str) -> String {
         return to.to_string();
     }
     let home = crate::paths::AgentsHome::from_env();
-    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
-        return to.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = crate::registry_store::read(&home.registry_json()) else {
         return to.to_string();
     };
     for row in parsed
@@ -198,10 +195,7 @@ fn sender_key(from: &str, from_session: &str) -> String {
         return from.to_string();
     }
     let home = crate::paths::AgentsHome::from_env();
-    let Ok(text) = std::fs::read_to_string(home.registry_json()) else {
-        return from_session.to_string();
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+    let Ok(parsed) = crate::registry_store::read(&home.registry_json()) else {
         return from_session.to_string();
     };
     for row in parsed
@@ -1402,7 +1396,40 @@ pub(crate) fn show_at(
         ));
     }
     if q.json {
-        return Ok(msg.to_string());
+        // The machine view layers the sender identity the reply needs over the
+        // stored row: the registry-resolved name and short_id (a row renamed
+        // after the send still answers under its current name), the
+        // collision-safe session id, and the fmail id. No command strings: the
+        // receiver answers with its usual send verb. The stored row stays
+        // verbatim underneath.
+        let mut view = msg.clone();
+        let from_session = msg
+            .get("from_session")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let stored_from = msg.get("from").and_then(Value::as_str).unwrap_or("unknown");
+        let rows = crate::mail_threads::registry_rows();
+        let row = crate::mail_threads::registry_lookup(
+            &rows,
+            if from_session.is_empty() {
+                stored_from
+            } else {
+                from_session
+            },
+        );
+        let name = row
+            .and_then(|r| r.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(stored_from);
+        let short_id = row.and_then(|r| r.get("short_id")).and_then(Value::as_str);
+        let id = msg.get("id").and_then(Value::as_str).unwrap_or("");
+        if let Value::Object(map) = &mut view {
+            map.insert("name".into(), json!(name));
+            map.insert("short_id".into(), json!(short_id));
+            map.insert("session_id".into(), json!(from_session));
+            map.insert("fno_mail_id".into(), json!(id));
+        }
+        return Ok(view.to_string());
     }
     if !q.thread {
         return Ok(render_message(msg));
@@ -1878,7 +1905,7 @@ mod tests {
     fn bus_line(id: &str, from: &str, to: &str, kind: &str) -> Value {
         serde_json::json!({
             "v": 1, "id": id, "ts": "2026-10-01T19:00:00Z", "thread": id,
-            "from": from, "to": to, "kind": kind, "body": "hello",
+            "from": from, "from_session": from, "to": to, "kind": kind, "body": "hello",
         })
     }
 
@@ -2201,14 +2228,36 @@ mod tests {
         assert!(stranger
             .unwrap_err()
             .contains("not addressed to or from the caller"));
+        // show --json layers the reply identity over the stored row: the
+        // registry-resolved name and short_id, the session id, and the fmail
+        // id. The row's fields stay verbatim underneath.
+        crate::registry_store::seed_raw(
+            home_pin.join("registry.json"),
+            r#"{"schema_version":1,"agents":[{"name":"rowan","cwd":"/x","session_id":"sess-a","harness_session_id":"sess-a","harness":"claude","short_id":"rowan-short"}]}"#,
+        );
+        let jq = |caller: &str| ShowQuery {
+            thread: false,
+            json: true,
+            all: false,
+            limit: 50,
+            caller: Some(caller.to_string()),
+        };
+        let view: Value = serde_json::from_str(
+            &show_at(&chats, &db, "fmail-444444444444", &jq("sess-a")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(view["name"], "rowan", "a registry row names its sender");
+        assert_eq!(view["short_id"], "rowan-short");
+        assert_eq!(view["session_id"], "sess-a");
+        assert_eq!(view["fno_mail_id"], "fmail-444444444444");
+        assert_eq!(view["body"], "hello", "the stored row rides underneath");
         // A send addressed to a registry name records the resolved session
         // key as to_key, so the recipient reads their mail by their own
         // session id.
-        std::fs::write(
+        crate::registry_store::seed_raw(
             home_pin.join("registry.json"),
-            r#"{"agents":[{"name":"rowan","session_id":"sess-b-uuid","harness":"claude"}]}"#,
-        )
-        .unwrap();
+            r#"{"schema_version":1,"agents":[{"name":"rowan","cwd":"/x","harness_session_id":"sess-b-uuid","harness":"claude"}]}"#,
+        );
         let named = bus_line("fmail-777777777777", "sess-a", "rowan", "send");
         let Recorded::Message {
             chat_id: named_chat,

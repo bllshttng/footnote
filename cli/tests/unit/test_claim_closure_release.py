@@ -11,7 +11,6 @@ graph lock mirror that made the leak read as a stall.
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 
@@ -19,7 +18,6 @@ from pathlib import Path
 
 from fno.claims.cli import RosterReading, _node_settlement
 from fno.claims.core import reap_dead_claims, sweep_verdict
-from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.graph.store import commit_rows_via_store, read_graph_strict, release_node_claim_at_closure
 from tests.fixtures.graph_seed import seed_graph
@@ -38,19 +36,24 @@ def _dead_pid() -> int:
     return dead
 
 
-def _write_claim(key: str, *, holder: str, pid: int, expires_at_ms: int, root: Path) -> Path:
-    claim = Claim(
-        key=key,
-        holder=holder,
+def _write_claim(key: str, *, holder: str, pid: int, expires_at_ms: int, root: Path) -> None:
+    from fno.claims.core import acquire_claim
+    from tests._table_seed import update_claim
+
+    acquire_claim(key, holder, pid=os.getpid(), ttl_ms=3_600_000, root=root)
+    update_claim(
+        key,
+        root=root,
+        pid=pid,
         acquired_at=now_ms() - 7_200_000,
         expires_at=expires_at_ms,
-        pid=pid,
-        host=socket.gethostname(),
     )
-    path = claim_path(key, root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialize_claim(claim))
-    return path
+
+
+def _held(key: str, root: Path) -> bool:
+    from fno.claims.core import claim_status
+
+    return claim_status(key, root=root)["state"] != "free"
 
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
@@ -122,7 +125,7 @@ class TestClosureReleaseHook:
         commit_rows_via_store(graph, _close)
         assert read_graph_strict(graph)[0]["status"] == "done"
         assert read_graph_strict(graph)[0]["locked_by"] == HOLDER
-        assert claim_path("node:x-doen", root=global_root).exists()
+        assert _held("node:x-doen", global_root)
 
 
 
@@ -144,9 +147,7 @@ class TestClosureReleaseHook:
         assert out["locked_at"] is None
         # session_id on a done node is work/cost provenance, not a lock.
         assert out["session_id"] == HOLDER
-        assert not claim_path("node:x-doen", root=global_root).exists()
-        expired = list((claims_dir(global_root) / ".expired").glob("*.lock"))
-        assert expired, "the released claim must be archived, not vanished"
+        assert not _held("node:x-doen", global_root)
 
 
 
@@ -165,7 +166,7 @@ class TestClosureReleaseHook:
         out = read_graph_strict(graph)[0]
         assert out["status"] == "superseded"
         assert out["locked_by"] is None
-        assert not claim_path("node:x-doen", root=global_root).exists()
+        assert not _held("node:x-doen", global_root)
 
 
 
@@ -183,7 +184,7 @@ class TestClosureReleaseHook:
             return entries
 
         commit_rows_via_store(graph, _already_done)
-        assert not claim_path("node:x-doen", root=global_root).exists()
+        assert not _held("node:x-doen", global_root)
 
         # Replant (the pre-fix leak shape) and mutate again: kept.
         _write_claim(
@@ -201,7 +202,7 @@ class TestClosureReleaseHook:
             return entries
 
         commit_rows_via_store(graph, _retitle)
-        assert claim_path("node:x-doen", root=global_root).exists()
+        assert _held("node:x-doen", global_root)
 
     def test_a_broken_claims_store_never_fails_the_mutation(self, tmp_path, monkeypatch):
         graph, _ = self._graph_with_claimed_node(tmp_path, monkeypatch)
@@ -550,4 +551,4 @@ class TestReapClaimProjection:
         # file waits for the applied sweep.
         out = read_graph_strict(graph)[0]
         assert out["locked_by"] is None
-        assert claim_path("node:x-gone", root=claims_root).exists()
+        assert _held("node:x-gone", claims_root)

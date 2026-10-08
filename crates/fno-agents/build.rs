@@ -31,6 +31,7 @@ fn main() {
     sync_module_copy("role_migration");
     sync_module_copy("store_conn");
     sync_module_copy("otel_read");
+    sync_module_copy("registry_read");
     sync_merge_posture();
     sync_page_reload();
     sync_spawn_phase();

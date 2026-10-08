@@ -129,6 +129,7 @@ def wrap_fno_mail(
     harness: Optional[str] = None,
     held_release: bool = False,
     subject: Optional[str] = None,
+    header_only: bool = False,
 ) -> str:
     """Render a normal envelope or pass through a validated held-release turn.
 

@@ -625,7 +625,7 @@ pub(crate) fn slot_reading(
 /// the release verb for the first suspect one; all-live saturation names none.
 fn slot_refusal_line(
     slots: usize,
-    cap: usize,
+    learned: &crate::capacity::Effective,
     rows: usize,
     claims: &[SlotReservation],
     waiting: usize,
@@ -648,9 +648,10 @@ fn slot_refusal_line(
         None => String::new(),
     };
     format!(
-        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {n} headless \
+        "{slots} live worker slots >= {cap_clause} ({rows} registry rows, {n} headless \
          reservations{waiting_note}); every counted row: fno agents gate-status, field \
          slot_rows{remedy}; {tail}",
+        cap_clause = learned.clause(),
         n = claims.len()
     )
 }
@@ -1020,28 +1021,16 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
         None => return Vec::new(),
     };
     let dir = root.join(".fno/claims");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(), // no claims dir yet: nothing held.
+    let keys = match crate::claim_store::records_in(&dir, Some("worker:"), true) {
+        Ok(records) => records.into_iter().map(|r| r.key),
+        Err(_) => return Vec::new(), // no claims table yet: nothing held.
     };
-    let prefix = claims::encode_key("worker:");
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let fname = fname.to_string_lossy();
-        if !fname.starts_with(prefix.as_str()) {
-            continue;
-        }
-        // strip_suffix, not trim_end_matches: a worker name ending in ".lock"
-        // must lose exactly one suffix (gemini MEDIUM).
-        let key = match fname.strip_suffix(".lock").and_then(urldecode) {
-            Some(k) => k,
-            None => continue,
-        };
+    for key in keys {
         match claims::status(&key, Some(&root)) {
             (state @ (claims::ClaimState::Live | claims::ClaimState::Suspect), Some(rec)) => {
                 found.push(SlotReservation {
@@ -1072,25 +1061,6 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
         }
     }
     found
-}
-
-/// Minimal percent-decoder for claim filenames (inverse of
-/// `claims::encode_key`). `None` on malformed escapes.
-fn urldecode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// The gate's claims live under the GLOBAL root: the RAM budget is
@@ -1395,7 +1365,9 @@ fn decide_gate(
         maybe_emit_spawn_cap_escape();
         return Ok(GateGuard::default());
     }
-    let cap = agents_config::max_live(config_cwd) as usize;
+    let ceiling = agents_config::max_live(config_cwd) as usize;
+    let learned = crate::capacity::effective_from_env(ceiling);
+    let cap = learned.cap;
     let floor_gb = agents_config::min_free_gb(config_cwd);
     let swap_cap = agents_config::max_swap_pct(config_cwd);
     // AC7: the retired trigger (max_load_per_cpu) is not read here;
@@ -1871,9 +1843,9 @@ fn decide_gate(
                                     serde_json::json!("skipped (teamed succession)"),
                                 );
                             } else {
-                                check_lead_share(
+                                spawn_gate_lanes::check_lead_share(
                                     registry_path,
-                                    cap,
+                                    &learned,
                                     input.caller_session.as_deref(),
                                     &axes_read,
                                 )
@@ -1958,7 +1930,7 @@ fn decide_gate(
                             }
                             let line = slot_refusal_line(
                                 slots,
-                                cap,
+                                &learned,
                                 live.len(),
                                 &reservations,
                                 waiting.len(),
@@ -2002,7 +1974,7 @@ fn decide_gate(
                             }
                             let line = slot_refusal_line(
                                 slots,
-                                cap,
+                                &learned,
                                 live.len(),
                                 &reservations,
                                 waiting.len(),
@@ -2688,57 +2660,6 @@ pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
     }
 }
 
-fn check_lead_share(
-    registry_path: &Path,
-    cap: usize,
-    caller_session: Option<&str>,
-    _axes_read: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), Refusal> {
-    let Some(caller) = caller_session.filter(|c| !c.is_empty()) else {
-        return Ok(());
-    };
-    let reading = spawn_gate_lanes::share_reading(registry_path, cap, Some(caller));
-    let (Some(leads), Some(share), Some(held)) = (reading.leads, reading.share, reading.held)
-    else {
-        // An unreadable registry leaves every count unknown; nothing to
-        // enforce and no zero to fail open on.
-        return Ok(());
-    };
-    if held < share {
-        return Ok(());
-    }
-    let mut msg = format!(
-        "spawn-gate: lead {} holds {held} of max_live {cap} across {leads} leads (share {share}); \
-         refusing to spawn -- waiting cannot help while your own workers hold the share \
-         (--force to bypass)",
-        &caller[..caller.len().min(8)]
-    );
-    // The held names read before the unattributed bucket: they are the rows
-    // the caller can stop, where the bucket names nobody.
-    msg.push_str(&held_rows_suffix(reading.held_rows.as_ref()));
-    if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
-        let shown: Vec<String> = rows.iter().take(5).cloned().collect();
-        msg.push_str(&format!(
-            "; {} live row(s) name nobody and sit in the unattributed bucket ({}{})",
-            rows.len(),
-            shown.join(", "),
-            if rows.len() > 5 { "..." } else { "" }
-        ));
-    }
-    eprintln!("{msg}");
-    Err(Refusal::code(EXIT_LEAD_SHARE)
-        .ev("reason", serde_json::json!("lead_share"))
-        .ev("lead", serde_json::json!(caller))
-        .ev("held", serde_json::json!(held))
-        .ev("share", serde_json::json!(share))
-        .ev("max_live", serde_json::json!(cap))
-        .ev("leads", serde_json::json!(leads))
-        .ev(
-            "held_rows",
-            serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
-        ))
-}
-
 // ---------------------------------------------------------------------------
 // Layer 3: background QoS
 // ---------------------------------------------------------------------------
@@ -3198,10 +3119,6 @@ MemAvailable:    8000000 kB\n";
             Some(456)
         );
         assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
-
-        let key = "worker:my agent/x";
-        assert_eq!(urldecode(&claims::encode_key(key)).as_deref(), Some(key));
-        assert_eq!(urldecode("bad%zz"), None);
     }
 
     const ROOTS: [&str; 1] = ["/Users/x/.fno"];
@@ -3688,6 +3605,9 @@ Swapouts: 3444531.\n";
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
+        // Only an agent-origin caller reaches the mutex; a typed verb skips it.
+        let prior_agent_self = std::env::var_os("FNO_AGENT_SELF");
+        std::env::set_var("FNO_AGENT_SELF", "gate-sigdeath-test");
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
@@ -3697,7 +3617,7 @@ Swapouts: 3444531.\n";
         )
         .unwrap();
         let registry = dir.join("registry.json");
-        std::fs::write(&registry, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+        crate::registry_store::seed_raw(&registry, r#"{"schema_version":1,"entries":[]}"#);
 
         for sig in [libc::SIGTERM, libc::SIGKILL, libc::SIGPIPE] {
             let mut command = std::process::Command::new("sleep");
@@ -3774,6 +3694,10 @@ Swapouts: 3444531.\n";
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_agent_self {
+            Some(value) => std::env::set_var("FNO_AGENT_SELF", value),
+            None => std::env::remove_var("FNO_AGENT_SELF"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3889,12 +3813,23 @@ Swapouts: 3444531.\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An unknown effective cap, the shape every fallback clause test wants.
+    fn no_state() -> crate::capacity::Effective {
+        crate::capacity::Effective {
+            cap: 23,
+            ceiling: 23,
+            known: false,
+            reason: None,
+            since: None,
+        }
+    }
+
     /// AC5-TEXT: the shared refusal sentence names the probe field that lists
     /// every counted row, marks the operator-waiting share, and never again
     /// blames a population its own recommended reader cannot see.
     #[test]
     fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
-        let line = slot_refusal_line(3, 2, 3, &[], 1, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, &no_state(), 3, &[], 1, "refusing (--no-wait).");
         assert!(line.contains("fno agents gate-status"), "{line}");
         assert!(line.contains("slot_rows"), "{line}");
         assert!(
@@ -3904,7 +3839,7 @@ Swapouts: 3444531.\n";
         assert!(!line.contains("--status quiet"), "{line}");
         assert!(!line.contains("fno agents top"), "{line}");
 
-        let line = slot_refusal_line(3, 2, 3, &[], 0, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, &no_state(), 3, &[], 0, "refusing (--no-wait).");
         assert!(!line.contains("wait on an operator question"), "{line}");
     }
 
@@ -4237,9 +4172,21 @@ Swapouts: 3444531.\n";
         .unwrap();
         // One lead -> share = cap = 2; the caller holds both rows, so the
         // share refuses and the event must name w1 and w2.
-        let err = check_lead_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
-            .err()
-            .expect("the full share must refuse");
+        let cap_two = crate::capacity::Effective {
+            cap: 2,
+            ceiling: 2,
+            known: false,
+            reason: None,
+            since: None,
+        };
+        let err = spawn_gate_lanes::check_lead_share(
+            &reg,
+            &cap_two,
+            Some("session-aaaaaaaa"),
+            &serde_json::Map::new(),
+        )
+        .err()
+        .expect("the full share must refuse");
         assert_eq!(err.exit_code, EXIT_LEAD_SHARE);
         assert_eq!(err.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(
@@ -4279,8 +4226,9 @@ Swapouts: 3444531.\n";
         let claim_path = root
             .join(".fno/claims")
             .join(format!("{}.lock", claims::encode_key("worker:plain-codex")));
-        let raw = std::fs::read_to_string(claim_path).unwrap();
-        let record: claims::ClaimRecord = serde_yaml_ng::from_str(&raw).unwrap();
+        let record = crate::claim_store::read_at_path(&claim_path)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             record
                 .metadata
@@ -4796,7 +4744,9 @@ Swapouts: 3444531.\n";
             root.1
         );
         // One uncompilable live team refuses every node-bearing read.
-        let reg_bad = dir.join("registry-bad.json");
+        // A registry path's parent owns its table, so the bad one gets its own.
+        std::fs::create_dir_all(dir.join("bad")).unwrap();
+        let reg_bad = dir.join("bad/registry.json");
         std::fs::write(
             &reg_bad,
             format!(

@@ -63,7 +63,13 @@ run_validate() {
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 CLAIMS_HOME="$TMP/claims-home"
-mkdir -p "$CLAIMS_HOME/.fno/claims"
+mkdir -p "$CLAIMS_HOME"
+# Every fno call reads and writes state under $TMP, never the checkout's
+# space or the runner's home.
+export FNO_CLAIMS_ROOT="$CLAIMS_HOME"
+export FNO_AGENTS_HOME="$TMP/agents-home"
+export FNO_SPACES_DIR="$TMP/spaces"
+export FNO_STATE_DIR="$TMP/state"
 
 # Minimal git repo so resolve_repo_root + git rev-parse work inside $TMP.
 git init -q "$TMP"
@@ -197,11 +203,12 @@ else
 fi
 
 # ── S10: corrupted claim fails closed (not collapsed to free) ────────────────
-# A garbage lockfile cannot confirm ownership; validate must fail closed with
-# corrupted_claim rather than treat it as a free claim and grant ok.
-CLAIM_FILE="$CLAIMS_HOME/.fno/claims/node%3A${NODE}.lock"
-mkdir -p "$(dirname "$CLAIM_FILE")"
-printf 'not a valid claim lockfile' > "$CLAIM_FILE"
+# A claim row that cannot decode cannot confirm ownership; validate must fail
+# closed with corrupted_claim rather than treat it as a free claim and grant ok.
+FNO agents claim acquire "node:$NODE" --holder other-session >/dev/null 2>&1
+CLAIM_DB="$CLAIMS_HOME/.fno/db/graph.db"
+claim_sql() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(sys.argv[2], (sys.argv[3],)); c.commit()' "$CLAIM_DB" "$1" "node:$NODE"; }
+claim_sql "UPDATE claims SET metadata='{not json' WHERE key=?"
 run_validate
 REASON="$(printf '%s' "$VAL" | field reason)"
 if [[ "$VAL_RC" -ne 0 && "$REASON" == "corrupted_claim" ]]; then
@@ -209,7 +216,7 @@ if [[ "$VAL_RC" -ne 0 && "$REASON" == "corrupted_claim" ]]; then
 else
   fail "S10: expected corrupted_claim, got rc=$VAL_RC reason='$REASON'"
 fi
-rm -f "$CLAIM_FILE"
+claim_sql "DELETE FROM claims WHERE key=?"
 
 printf '[self-handoff] RESULTS: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP_COUNT"
 [[ "$FAIL" -eq 0 ]]

@@ -39,6 +39,18 @@ VERSION="$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$
 if [[ -n "$VERSION" ]]; then
   [[ "$(cat "$MARKER" 2>/dev/null)" == "$VERSION" ]] && exit 0
 fi
+
+# The one run-once setup attempt: when the CLI resolves, run the setup verb
+# once per install, backgrounded so the prompt never waits on it (the log
+# lands beside this hook's own markers). The verb reads no stdin on a
+# non-TTY, stops at its own done markers, and the attempted-marker here
+# caps the respawn even when the run ends needs-human. The verb owns the
+# state-root marker path, so this hook never hardcodes one.
+if [[ -n "$(fno_bin)" ]] && [[ ! -f "$DATA/setup.attempted" ]]; then
+  mkdir -p "$DATA" 2>/dev/null || true
+  : >"$DATA/setup.attempted" 2>/dev/null || true
+  "$(fno_bin)" config setup run --once --json >>"$DATA/setup.log" 2>&1 &
+fi
 [[ -n "$(fno_bin)" ]] && exit 0
 
 # The full hook prints the consent notice and starts nothing, so the capture

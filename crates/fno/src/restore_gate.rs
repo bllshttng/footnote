@@ -20,7 +20,7 @@ pub(crate) fn restore_registry_rows() -> Option<Vec<RegistryAgent>> {
     if let Some(rows) = RESTORE_REGISTRY_ROWS.with(|p| p.borrow().clone()) {
         return rows;
     }
-    std::fs::read_to_string(agents_view::registry_path())
+    crate::registry_read::registry_text(&crate::agents_view::registry_path())
         .ok()
         .and_then(|raw| agents_view::derive_rows(&raw, 0))
 }
@@ -56,7 +56,7 @@ pub(crate) fn stale_live_attach_ids_for_restore() -> std::collections::HashSet<S
     if let Some(set) = RESTORE_STALE_IDS.with(|p| p.borrow().clone()) {
         return set;
     }
-    std::fs::read_to_string(agents_view::registry_path())
+    crate::registry_read::registry_text(&crate::agents_view::registry_path())
         .ok()
         .map(|raw| crate::argv_witness::stale_live_attach_ids(&raw))
         .unwrap_or_default()
