@@ -179,7 +179,13 @@ impl Core {
         let rescue_view = !seat
             && cause == CloseCause::ViewerDied
             && self.attached.values().any(|&p| p == pid)
-            && self.panes.get(&pid).is_some_and(|e| e.cmd.is_some());
+            && self
+                .panes
+                .get(&pid)
+                // A transient command view rides `attached` too, but its
+                // machine-owned lifecycle cleans up by pane id; replaying it
+                // would strand that cleanup on a dead pid.
+                .is_some_and(|e| e.cmd.is_some() && !e.transient_view);
         if keep_seat {
             let (rows, cols) = self
                 .panes

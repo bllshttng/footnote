@@ -3606,3 +3606,50 @@ fn non_seat_attach_viewer_without_witness_closes_as_before() {
     );
     assert!(!core.panes.contains_key(&viewer));
 }
+
+// A transient command view rides `attached` too, but its machine-owned
+// lifecycle cleans up by pane id. The rescue must never replay it: the
+// replacement would strand that cleanup on a dead pid and leak a
+// persistent viewer where the view was machine-scoped.
+#[test]
+fn transient_attach_view_is_excluded_from_the_rescue() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let uuid = "53960000-1111-2222-3333-444455556666";
+    let _witness = crate::pty::ChildGuard::spawn(
+        &mut std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("sleep 25; : # {uuid}")),
+    );
+    let mut row = bg_row("worker-c", "/tmp/seen", Some("5396fee3"));
+    row.claude_session_uuid = Some(uuid.into());
+    core.agents = vec![row];
+    let viewer = core
+        .spawn_pane_cmd(
+            &["/bin/cat".to_string(), "5396fee3".to_string()],
+            24,
+            40,
+            "/tmp/seen",
+        )
+        .expect("transient attach pane");
+    core.attached.insert("5396fee3".to_string(), viewer);
+    core.panes.get_mut(&viewer).unwrap().transient_view = true;
+    let tab = &mut core.session.squad_mut(1).unwrap().tabs[0];
+    tab.root = Node::Branch {
+        axis: Axis::Vertical,
+        children: vec![(0.5, Node::Leaf(_p1)), (0.5, Node::Leaf(viewer))],
+    };
+    tab.focus = viewer;
+
+    let flow = core.close_viewer_died(viewer, "viewer exited");
+
+    assert!(matches!(flow, Flow::Continue), "the session survives");
+    let tab = &core.session.squad(1).unwrap().tabs[0];
+    let leaves = tree::leaves(&tab.root);
+    assert_eq!(leaves, vec![_p1], "the transient pane closed, not replayed");
+    assert!(
+        !core.attached.contains_key("5396fee3"),
+        "no replayed mapping leaked"
+    );
+    assert!(!core.panes.contains_key(&viewer));
+}
