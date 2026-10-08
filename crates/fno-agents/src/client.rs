@@ -436,6 +436,25 @@ pub fn fold_repeated_lines(text: &str) -> String {
         .join("\n")
 }
 
+/// The sandboxed lane's socket pin: `FNO_SUPERVISOR_SOCKET` names the mounted
+/// (or SSH-forwarded) supervisor socket. Set, the client talks to THAT socket
+/// and never lazy-starts a daemon of its own - a container that forked a
+/// daemon would hold state nobody else sees and answer nobody, which is the
+/// mute-worker harm the sandbox seam exists to prevent. Absent, the home's
+/// own path, unchanged.
+pub fn client_sock(home: &AgentsHome) -> PathBuf {
+    std::env::var_os("FNO_SUPERVISOR_SOCKET")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.supervisor_sock())
+}
+
+/// True when `FNO_SUPERVISOR_SOCKET` pins a socket: the client must never
+/// fork a daemon.
+fn sock_pinned() -> bool {
+    std::env::var_os("FNO_SUPERVISOR_SOCKET").is_some_and(|v| !v.is_empty())
+}
+
 /// Send one request to the daemon (lazy-starting it first) and return the
 /// response.
 pub async fn call(
@@ -443,8 +462,13 @@ pub async fn call(
     daemon_bin: &std::path::Path,
     req: &Request,
 ) -> Result<Response, ClientError> {
+    // A pinned lane reaches the host daemon through the mounted socket or it
+    // fails naming the pin; it never forks a competitor for the host daemon.
+    if sock_pinned() {
+        return call_if_running(home, req).await;
+    }
     ensure_daemon(home, daemon_bin).await?;
-    let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
+    let mut conn = UnixStream::connect(client_sock(home)).await?;
     write_request_bounded(&mut conn, req, WRITE_TIMEOUT).await?;
     read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
@@ -453,7 +477,7 @@ pub async fn call(
 /// `status` uses this so it reports a down daemon (exit 13) rather than booting
 /// one just to describe it as up (AC10-ERR).
 pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Response, ClientError> {
-    let mut conn = match UnixStream::connect(home.supervisor_sock()).await {
+    let mut conn = match UnixStream::connect(client_sock(home)).await {
         Ok(c) => c,
         // Only "nothing is listening" means the daemon is down. A permission
         // error or a non-socket at the path is a real fault that must surface

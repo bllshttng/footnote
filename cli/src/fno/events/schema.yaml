@@ -921,6 +921,21 @@ event_types:
           type: string
     consumers: [postmortem]
 
+  - name: transcript_record
+    retention: ephemeral
+    description: "One raw transcript line pushed over the daemon socket by a session's turn hook, for a session whose transcript file the host-side readers cannot read (a sandboxed worker). Stored through the judged event store; readers read stored records first and fall back to the file."
+    sources: [hook]
+    data:
+      required: [session_id, line]
+      properties:
+        session_id:
+          type: string
+          description: "The harness session id the record belongs to; projected to the store's session_id column, so readers query by session."
+        line:
+          type: string
+          description: "The raw transcript JSON line, byte-for-byte, exactly as the harness wrote it."
+    consumers: [operator]
+
   - name: polling_external_review
     description: "Emitted by /fno:ship pr check at every external-review check tick. Counted as the fifth thrash-fingerprint signal so polling iterations register as progress and the thrash detector does not force-cancel the loop while waiting for a slow external reviewer."
     sources: [target, subagent, hook]

@@ -1207,7 +1207,10 @@ pub fn state_root_grant_gate(
     substrate: &str,
     roots: &[String],
 ) -> Result<(), Refusal> {
-    state_root_grant_gate_decide(harness, substrate, roots).inspect_err(|r| {
+    let sock = crate::paths::AgentsHome::from_env_opt()
+        .as_ref()
+        .map(|h| h.supervisor_sock());
+    state_root_grant_gate_decide(harness, substrate, roots, sock.as_deref()).inspect_err(|r| {
         eprintln!("{}", verdict_line(r));
     })
 }
@@ -1216,6 +1219,7 @@ fn state_root_grant_gate_decide(
     harness: &str,
     substrate: &str,
     roots: &[String],
+    sock: Option<&Path>,
 ) -> Result<(), Refusal> {
     if roots.is_empty() {
         return Ok(());
@@ -1232,7 +1236,23 @@ fn state_root_grant_gate_decide(
             return Err(Refusal::code(EXIT_STATE_ROOT_UNGRANTED));
         }
     };
-    if contract.state_root_stance(harness, substrate).is_some() {
+    let stance = contract.state_root_stance(harness, substrate);
+    if let Err(reason) = crate::daemon::sandbox_host::socket_carrier_ok(stance, sock) {
+        // A `socket` carrier is verified, not taken on faith. A declaration
+        // whose socket answers nobody hides the exact mute-worker harm R3
+        // exists for: a worker that edits code and cannot claim, mail, spawn,
+        // or report that it cannot.
+        eprintln!(
+            "spawn-gate: refused: the {harness}/{substrate} lane declares carrier \
+             `socket`, but the supervisor socket does not answer ({reason})"
+        );
+        eprintln!(
+            "  start the daemon, or mount/forward it and point \
+             FNO_SUPERVISOR_SOCKET at the mounted path."
+        );
+        return Err(Refusal::code(EXIT_STATE_ROOT_UNGRANTED));
+    }
+    if stance.is_some() {
         return Ok(());
     }
     // R3: name the root. A refusal that says "denied" without saying WHICH
@@ -1249,7 +1269,8 @@ fn state_root_grant_gate_decide(
          mail, or spawn, and cannot report that either."
     );
     eprintln!(
-        "add {substrate} to [harness.{harness}.state_root_grant]: a carrier name, \
+        "add {substrate} to [harness.{harness}.state_root_grant]: a carrier name \
+         (`socket` when the lane rides the daemon socket), \
          \"unsandboxed\" when measured to need none, or \"unmeasured\"."
     );
     Err(Refusal::code(EXIT_STATE_ROOT_UNGRANTED))

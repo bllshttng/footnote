@@ -237,10 +237,17 @@ fn tail_window_lines(transcript: &Path) -> Result<(u64, Vec<String>), String> {
 }
 
 pub fn capped_tail(transcript: &Path) -> TailReading {
-    let (size, lines) = match tail_window_lines(transcript) {
-        Ok(v) => v,
-        Err(reason) => return (None, None, Some(reason)),
-    };
+    match tail_window_lines(transcript) {
+        Ok((size, lines)) => capped_tail_lines(&lines, size),
+        Err(reason) => (None, None, Some(reason)),
+    }
+}
+
+/// The claude-shaped verdict scan over transcript LINES, so the
+/// stored-records reader (`daemon/transcript_push.rs`) reuses the exact
+/// verdict logic instead of a forked copy. `size` is the window's byte size,
+/// which the window-miss unknowns still name.
+pub(crate) fn capped_tail_lines(lines: &[String], size: u64) -> TailReading {
     for line in lines.iter().rev() {
         if !line.contains("\"type\":\"assistant\"") {
             continue;
@@ -297,10 +304,17 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
 /// usage limit. ... try again at Sep 19th, 2026 9:34 AM.",
 /// "codex_error_info":"usage_limit_exceeded"}}}`.
 pub fn codex_capped_tail(rollout: &Path) -> TailReading {
-    let (size, lines) = match tail_window_lines(rollout) {
-        Ok(v) => v,
-        Err(reason) => return (None, None, Some(reason)),
-    };
+    match tail_window_lines(rollout) {
+        Ok((size, lines)) => codex_capped_tail_lines(&lines, size),
+        Err(reason) => (None, None, Some(reason)),
+    }
+}
+
+/// The codex-shaped verdict scan over transcript LINES, so the
+/// stored-records reader reuses the exact verdict logic instead of a forked
+/// copy. `size` is the window's byte size, which the window-miss unknowns
+/// still name.
+pub(crate) fn codex_capped_tail_lines(lines: &[String], size: u64) -> TailReading {
     for line in lines.iter().rev() {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -358,6 +372,70 @@ pub fn codex_capped_tail(rollout: &Path) -> TailReading {
         None,
         None,
         Some("no-assistant-entry-in-transcript".to_string()),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Stored-records tail: the sandboxed-session lane
+// ---------------------------------------------------------------------------
+
+/// The capped-tail verdict for one session, stored records FIRST: the
+/// transcripts journal's rows for `session_id` are scanned with the same
+/// verdict logic as the file, and a session the store holds nothing for
+/// falls back to the transcript file. Neither source answers, the verdict
+/// says so (`unknown`), never idle: a live sandboxed worker with an
+/// unreadable transcript must not read as parked.
+pub(crate) fn capped_tail_stored(
+    journal: &std::path::Path,
+    session_id: &str,
+    codex: bool,
+    fallback: Option<&std::path::Path>,
+) -> TailReading {
+    let scan = if codex {
+        codex_capped_tail_lines
+    } else {
+        capped_tail_lines
+    };
+    if let Some(lines) = crate::daemon::transcript_push::stored_lines(journal, session_id) {
+        let size = lines.iter().map(|l| l.len() as u64).sum();
+        let (ts, excerpt, unknown) = scan(&lines, size);
+        if unknown.is_none() {
+            return (ts, excerpt, None);
+        }
+        // Stored rows exist but the window missed: the file may hold the
+        // newer rows the hook has not pushed yet, so fall through.
+        stored_fallback(journal, session_id, codex, fallback, unknown)
+    } else {
+        stored_fallback(journal, session_id, codex, fallback, None)
+    }
+}
+
+/// The file fallback of the stored-first read, through the same shape scan:
+/// the harness dispatch rides `codex`. A missing or unreadable path reads
+/// the honest unknown: never idle, never parked.
+fn stored_fallback(
+    journal: &std::path::Path,
+    session_id: &str,
+    codex: bool,
+    fallback: Option<&std::path::Path>,
+    unknown: Option<String>,
+) -> TailReading {
+    if let Some(path) = fallback.filter(|p| p.is_file()) {
+        let (size, lines) = match tail_window_lines(path) {
+            Ok(v) => v,
+            Err(reason) => return (None, None, Some(reason)),
+        };
+        let scan = if codex {
+            codex_capped_tail_lines
+        } else {
+            capped_tail_lines
+        };
+        return scan(&lines, size);
+    }
+    (
+        None,
+        None,
+        unknown.or(Some("transcript-not-found".to_string())),
     )
 }
 
@@ -748,6 +826,8 @@ pub fn snapshot_with(
                 })
             });
         member.transcript = transcript.as_ref().map(|p| p.to_string_lossy().to_string());
+        let journal =
+            crate::paths::AgentsHome::at(scan.compaction_home.clone()).transcripts_journal();
         if let Some(t) = &transcript {
             let (ts, excerpt, unknown) = if harness == "codex" {
                 codex_capped_tail(t)
@@ -769,6 +849,19 @@ pub fn snapshot_with(
             );
             if cs.possibly_compacting() {
                 member.held = Some("compacting".to_string());
+            }
+        } else if let Some(sid) = session_id.as_deref() {
+            // The sandboxed lane: no host-visible transcript file, but the
+            // session's turn hook may be pushing stored records. Stored
+            // first; neither source answers `unknown`, never idle, so a live
+            // sandboxed worker is never parked or reaped as quiet.
+            let (ts, excerpt, unknown) =
+                capped_tail_stored(&journal, sid, harness == "codex", None);
+            member.newest_assistant = ts;
+            member.cap_unknown = unknown;
+            if let Some(excerpt) = excerpt {
+                member.capped = true;
+                member.excerpt = Some(excerpt);
             }
         } else if bridge_key.is_none() {
             member.cap_unknown = Some("transcript-not-found".to_string());
@@ -3635,5 +3728,49 @@ mod tests {
             1,
             "exactly one unknown verdict row: {j:?}"
         );
+    }
+
+    /// AC9: the sandboxed lane opens from STORED records with no file read -
+    /// the fallback path does not exist, and the verdict still lands. AC10:
+    /// no stored rows and no readable file answers the honest unknown,
+    /// never idle.
+    #[test]
+    fn stored_tail_reads_stored_first_and_answers_unknown_without_either() {
+        let td = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(td.path().to_path_buf());
+        let journal = home.transcripts_journal();
+        let capped_line = r#"{"type":"assistant","timestamp":"2026-10-08T01:00:00.000Z","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"API Error: Request rejected (429) - usage limit reached"}]}}"#;
+        let plain_line = r#"{"type":"user"}"#;
+        for line in [plain_line, capped_line] {
+            let envelope = json!({
+                "ts": "2026-10-08T01:00:00Z",
+                "type": "transcript_record",
+                "source": "hook",
+                "data": {"session_id": "sandbox-1", "line": line},
+            });
+            crate::event_store::append_envelope(&journal, &envelope.to_string(), None).unwrap();
+        }
+        let fallback = td.path().join("no-such-transcript.jsonl");
+        let (ts, excerpt, unknown) =
+            capped_tail_stored(&journal, "sandbox-1", false, Some(&fallback));
+        assert!(unknown.is_none(), "stored rows must answer: {unknown:?}");
+        assert!(ts.is_some(), "the stored assistant ts is the newest");
+        let excerpt = excerpt.expect("the 429 opens the lane");
+        assert!(excerpt.contains("429"), "{excerpt}");
+        // AC10: a session with no stored rows and no readable file.
+        let (_ts, _ex, unknown) =
+            capped_tail_stored(&journal, "never-stored", false, Some(&fallback));
+        assert_eq!(unknown.as_deref(), Some("transcript-not-found"));
+        // The file fallback still owns sessions the store holds nothing for
+        // when a file DOES resolve.
+        let file = td.path().join("plain.jsonl");
+        std::fs::write(
+            &file,
+            format!("{plain_line}\n{{\"type\":\"assistant\",\"timestamp\":\"2026-10-08T02:00:00.000Z\"}}\n"),
+        )
+        .unwrap();
+        let (ts, _ex, unknown) = capped_tail_stored(&journal, "never-stored", false, Some(&file));
+        assert!(unknown.is_none(), "{unknown:?}");
+        assert_eq!(ts.as_deref(), Some("2026-10-08T02:00:00.000Z"));
     }
 }

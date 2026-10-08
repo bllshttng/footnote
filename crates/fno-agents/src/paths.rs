@@ -346,6 +346,15 @@ impl AgentsHome {
         self.root.join("events.jsonl")
     }
 
+    /// The transcripts journal: one `transcript_record` envelope per raw
+    /// transcript line a session's turn hook pushed over the daemon socket
+    /// (the sandboxed-session lane; the file fallback stays for sessions
+    /// whose transcript file is readable). High-volume, so it stays out of
+    /// `events.jsonl` (the operator audit log).
+    pub fn transcripts_journal(&self) -> PathBuf {
+        self.root.join("transcripts.jsonl")
+    }
+
     /// Local OTel ingest tree: `port` (the receiver's bound port) and
     /// `otel.db` (one `api_requests` row per API request, harness-neutral).
     /// Owned by the daemon's otel_ingest arm.
