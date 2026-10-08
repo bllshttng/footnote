@@ -309,7 +309,9 @@ fn python_oracle(dir: &Path, case: &Case) -> Golden {
                 cmd.arg("--no-activate");
             }
         }
-        Mode::Ensure => cmd.args(["--mode", "ensure"]),
+        Mode::Ensure => {
+            cmd.args(["--mode", "ensure"]);
+        }
     }
     if case.interval > 0 {
         cmd.args(["--interval", &case.interval.to_string()]);
