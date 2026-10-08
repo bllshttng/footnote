@@ -344,9 +344,9 @@ fn import_sources(store: &Path, sources: &[&Path]) -> Result<SyncReceipt, String
 fn open_store(store: &Path) -> Result<Connection, String> {
     crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
     // No integrity sweep here. quick_check walks every page, so per-open it is
-    // O(store size), and this opener sits on the per-fire hook append path:
-    // a 673 MB store scanned 4-5 times per Bash call drove the load storm
-    // (x-2aa6). SQLite surfaces page damage as statement errors instead, and
+    // O(store size), and this opener sits on the per-fire hook append path: a
+    // 673 MB store scanned 4-5 times per Bash call drove the fleet load storm.
+    // SQLite surfaces page damage as statement errors instead, and
     // `refuse_corrupt_store` turns those into the same loud refusal.
     let mut conn = crate::store_conn::open_write(store)?;
     ensure_schema(&mut conn, store)?;

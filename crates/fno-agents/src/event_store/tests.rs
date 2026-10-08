@@ -500,8 +500,7 @@ fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
 fn corrupt_pages_refuse_writes_at_statement_time_and_file_attention() {
     let dir = tempfile::tempdir().unwrap();
     let damaged = dir.path().join("damaged.jsonl");
-    // Seed one stored row so both doors must traverse the events b-tree:
-    // the append inserts beside it and the import dedupes against it.
+    // Seed one stored row so the append must traverse the events b-tree.
     append(
         &damaged,
         &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "seed")],
@@ -530,24 +529,19 @@ fn corrupt_pages_refuse_writes_at_statement_time_and_file_attention() {
     drop(file);
     let line = checkin("2026-09-10T12:00:01Z", "x-aaaa", "damaged").to_string();
     let before = std::fs::read(&store).unwrap();
+    let error = append_envelope(&damaged, &line, None).unwrap_err();
+    assert!(
+        error.contains("database disk image is malformed") && error.contains("write refused"),
+        "{error}"
+    );
+    // The damaged page region itself must survive untouched (a lazy DDL
+    // commit may still checkpoint elsewhere in the file), and the file
+    // must never SHRINK.
+    let after = std::fs::read(&store).unwrap();
     let page_start = ((root - 1) * page_size) as usize;
     let page_end = page_start + page_size as usize;
-    for result in [
-        append_envelope(&damaged, &line, None).map(|_| ()),
-        import_all(&damaged).map(|_| ()),
-    ] {
-        let error = result.unwrap_err();
-        assert!(
-            error.contains("database disk image is malformed") && error.contains("write refused"),
-            "{error}"
-        );
-        // The damaged page region itself must survive untouched (a lazy DDL
-        // commit may still checkpoint elsewhere in the file), and the file
-        // must never SHRINK.
-        let after = std::fs::read(&store).unwrap();
-        assert_eq!(&after[page_start..page_end], &before[page_start..page_end]);
-        assert!(after.len() >= before.len());
-    }
+    assert_eq!(&after[page_start..page_end], &before[page_start..page_end]);
+    assert!(after.len() >= before.len());
     let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
     assert!(attention.contains("event-store-integrity"));
     let items = crate::attention::project(&attention, &[], "", 0);
@@ -556,12 +550,19 @@ fn corrupt_pages_refuse_writes_at_statement_time_and_file_attention() {
 }
 
 #[test]
-fn append_survives_damage_on_pages_it_never_touches() {
-    // No integrity sweep runs on the append path (that scan per guard row
-    // drove the fleet load storm). Damage the ingest_cursor page, which an
-    // append never reads: the append must still land.
+fn import_refuses_touching_damage_an_append_never_reads() {
+    // No integrity sweep runs on any open (that scan per guard row drove the
+    // fleet load storm): each door hits page damage only when a statement
+    // touches it. Damage the ingest_cursor page: the import reads the cursor
+    // and refuses, while the append never reads it and still lands.
     let dir = tempfile::tempdir().unwrap();
     let damaged = dir.path().join("damaged.jsonl");
+    // Seed the journal and store so the import opens the cursor with real
+    // work in front of it, then damage the cursor's page.
+    append(
+        &damaged,
+        &[checkin("2026-09-10T11:00:00Z", "x-aaaa", "seed")],
+    );
     sync(&damaged).unwrap();
     let store = store_path(&damaged);
     let conn = Connection::open(&store).unwrap();
@@ -586,7 +587,16 @@ fn append_survives_damage_on_pages_it_never_touches() {
     drop(file);
     let line = checkin("2026-09-10T12:00:00Z", "x-aaaa", "offpath").to_string();
     append_envelope(&damaged, &line, None).unwrap();
-    assert_eq!(count_events(&store), 1);
+    assert_eq!(count_events(&store), 2);
+    let error = import_all(&damaged).unwrap_err();
+    assert!(
+        error.contains("database disk image is malformed") && error.contains("write refused"),
+        "{error}"
+    );
+    let attention = std::fs::read_to_string(dir.path().join("questions.jsonl")).unwrap();
+    assert!(attention.contains("event-store-integrity"));
+    let items = crate::attention::project(&attention, &[], "", 0);
+    assert_eq!(items.len(), 1);
 }
 
 #[test]
