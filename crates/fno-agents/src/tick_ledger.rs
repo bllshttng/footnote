@@ -334,8 +334,9 @@ pub fn tick_data(
     data
 }
 
-/// Append one tick row through the loop journal (project journal + global
-/// mirror), the journal the daemon arms already use.
+/// Append one tick row through the loop journal the daemon arms already use.
+/// A daemon arm's journal pairs the agents journal with its global twin, and
+/// the readout folds both, so the row lands once (`append_readout_row`).
 pub fn emit_tick(
     journal: &Journal,
     arm: &str,
@@ -345,7 +346,7 @@ pub fn emit_tick(
     detail: Option<&str>,
     interval_s: u64,
 ) {
-    let _ = journal.append(
+    let _ = journal.append_readout_row(
         EVENT_TYPE,
         tick_data(arm, scheduler, acted, skip_reason, detail, interval_s),
     );
