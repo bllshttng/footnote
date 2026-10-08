@@ -1961,14 +1961,9 @@ fn write_handoff_doc(
             // A copied transcript arrives with the origin record beside it:
             // the record names the machine the session BEGAN on, and it
             // outranks this machine's identity.
-            let origin = crate::session_origin::SessionOrigin::read_beside(path, sid)
-                .unwrap_or_else(|| {
-                    crate::session_origin::SessionOrigin::for_this_machine(
-                        &member.harness,
-                        sid,
-                        path,
-                    )
-                });
+            let origin = crate::session_origin::read_beside(path, sid).unwrap_or_else(|| {
+                crate::session_origin::SessionOrigin::for_this_machine(&member.harness, sid, path)
+            });
             format!("---\n{}\n---\n\n", origin.frontmatter())
         }
         _ => String::new(),

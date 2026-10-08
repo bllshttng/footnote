@@ -283,9 +283,11 @@ pub(super) fn card(
     }
 
     lines.push(match transcript.and_then(|facts| facts.path.as_deref()) {
-        Some(path) => format!("transcript: {path} (this machine)"),
+        Some(path) => format!("transcript: {} (this machine)", path.display()),
         None => match registry.and_then(|row| str_at(row, "transcript_path")) {
-            Some(path) => format!("transcript: {path} (registry row; not found on this machine)"),
+            Some(path) => {
+                format!("transcript: {path} (registry row; not found on this machine)")
+            }
             None => "transcript: not found on this machine (claude projects and codex sessions searched)"
                 .into(),
         },
