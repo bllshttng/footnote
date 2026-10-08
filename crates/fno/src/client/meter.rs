@@ -170,10 +170,27 @@ fn capacity_segment(state: Option<&serde_json::Value>) -> String {
             let Some(provider) = account.get("provider").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let Some(windows) = account.get("windows").and_then(|v| v.as_array()) else {
+            if provider.is_empty() {
+                // A route-less record folds no tokens; printing a bare name
+                // with no reading would be a gauge of nothing.
                 continue;
-            };
-            let parts: Vec<String> = windows.iter().filter_map(window_part).collect();
+            }
+            let limit = account.get("limit_tokens").and_then(|v| v.as_u64());
+            let parts: Vec<String> = account
+                .get("windows")
+                .and_then(|v| v.as_array())
+                .map(|windows| {
+                    windows
+                        .iter()
+                        .filter_map(|window| window_part(window, limit))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(spend) = account.get("spend_usd").and_then(|v| v.as_f64()) {
+                // A metered account shows its month spend instead of windows.
+                line.push_str(&format!(" · {provider} ${spend:.2} this month"));
+                continue;
+            }
             if parts.is_empty() {
                 continue;
             }
@@ -184,21 +201,16 @@ fn capacity_segment(state: Option<&serde_json::Value>) -> String {
 }
 
 /// One window's readout: a percent against the account's own token limit
-/// when it sets one, raw tokens otherwise. `weekly` prints as `wk` (the
-/// gauge convention).
-fn window_part(window: &serde_json::Value) -> Option<String> {
+/// (which lives on the account, beside `windows`) when it sets one, raw
+/// tokens otherwise. `weekly` prints as `wk` (the gauge convention).
+fn window_part(window: &serde_json::Value, limit: Option<u64>) -> Option<String> {
     let name = window.get("window").and_then(|v| v.as_str())?;
     let label = match name {
         "weekly" => "wk",
         other => other,
     };
     let used = window.get("used_tokens").and_then(|v| v.as_u64())?;
-    match window
-        .get("limit_tokens")
-        .or_else(|| window.get("account_limit_tokens"))
-        .and_then(|v| v.as_u64())
-        .filter(|limit| *limit > 0)
-    {
+    match limit.filter(|limit| *limit > 0) {
         Some(limit) => Some(format!(
             "{label} {:.0}%",
             used as f64 / limit as f64 * 100.0
@@ -273,15 +285,19 @@ mod tests {
 
     #[test]
     fn the_capacity_line_names_workers_cap_reason_and_windows() {
+        // The account shape the writer emits: limit_tokens sits on the
+        // account, beside windows, never inside a window row.
         let state = json!({
             "ceiling": 23,
             "effective": 14,
             "reason": "CPU-bound",
             "workers_live": 15,
             "accounts": [
-                {"provider": "zai", "show": true, "windows": [
-                    {"window": "5h", "used_tokens": 40000, "limit_tokens": 64000},
+                {"provider": "zai", "show": true, "limit_tokens": 64000, "windows": [
+                    {"window": "5h", "used_tokens": 40000},
                     {"window": "weekly", "used_tokens": 1100000}]},
+                {"provider": "claude", "show": true, "billing": "metered",
+                 "spend_usd": 12.5, "windows": []},
                 {"provider": "hidden", "show": false, "windows": [
                     {"window": "5h", "used_tokens": 9}]},
             ],
@@ -296,6 +312,8 @@ mod tests {
         // contract: k-form tokens and a raw sub-k count.
         assert_eq!(human_tokens(40_000), "40k tok");
         assert_eq!(human_tokens(900), "900 tok");
+        // A metered account shows its month spend instead of windows.
+        assert!(line.contains("claude $12.50 this month"), "{line}");
         assert!(!line.contains("hidden"), "{line}");
     }
 }

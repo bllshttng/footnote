@@ -468,6 +468,18 @@ mod probe {
         let (slot_row_entries, slot_reservations) =
             spawn_gate::slot_reading(&registry_path, &mut warnings);
         let slots = slot_row_entries.len() + slot_reservations.len();
+        // The capacity fields ride EVERY verdict: saturation is when the
+        // probe is most useful, so the numbers are in place before any
+        // refusal returns, not only on the accepted tail.
+        out.insert("effective".into(), json!(cap));
+        out.insert("effective_ceiling".into(), json!(ceiling));
+        if !learned.known {
+            out.insert(
+                "effective_note".into(),
+                json!("effective cap unknown, using ceiling"),
+            );
+        }
+        out.insert("slots".into(), json!(slots));
         let mut slot_rows_json: Vec<Value> = slot_row_entries
             .iter()
             .map(|r| {
@@ -685,17 +697,6 @@ mod probe {
         out.insert("lanes".into(), lanes.clone());
         out.insert("live_workers".into(), json!(slots));
         out.insert("max_live".into(), json!(cap));
-        // The learned cap rides every accepted answer: `fno agents
-        // gate-status --json | jq .effective` is the live read.
-        out.insert("effective".into(), json!(cap));
-        out.insert("effective_ceiling".into(), json!(ceiling));
-        if !learned.known {
-            out.insert(
-                "effective_note".into(),
-                json!("effective cap unknown, using ceiling"),
-            );
-        }
-        out.insert("slots".into(), json!(slots));
         out.insert("share".into(), share_json(&reading));
         if let Some(payload_adm) = &cpu {
             out.insert("share_low".into(), json!(payload_adm.share_low));

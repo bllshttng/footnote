@@ -273,7 +273,7 @@ pub fn feed(
     }
     state.memory = memory_figure(sample);
     state.workers_live = sample.live_rows;
-    state.accounts = fold_accounts(cwd, home, ledger_rows(home), now_epoch);
+    state.accounts = fold_accounts(cwd, home, ledger_rows(cwd, home), now_epoch);
     state.updated_epoch = now_epoch;
     write_state(home, &state)?;
     Ok(state)
@@ -301,7 +301,11 @@ fn seed(sample: &MachineSample, ceiling: u32, now_epoch: i64) -> CapacityState {
 
 /// The verdict step: breach held long enough cuts 25% (floor 1), calm held
 /// long enough adds 1 (never over the ceiling), the middle band resets both
-/// streaks. `None` leaves the cap as it stands.
+/// streaks. The streak bookkeeping is ALWAYS updated in the returned state
+/// (a pre-threshold sample arms the clock; discarding it would restart the
+/// hold every tick and AIMD would never fire from natural ticks); the cap
+/// itself only moves on a threshold event. `None` when the sample carries no
+/// run queue, the one signal the loop reads.
 fn step(
     state: &CapacityState,
     sample: &MachineSample,
@@ -314,6 +318,7 @@ fn step(
         .filter(|(_, cores)| *cores > 0.0)
         .map(|(runnable, cores)| runnable as f64 / cores)?;
     let mut next = state.clone();
+    let per_core = per_core?;
     if per_core > t.cut_per_core {
         let over = state.over_since.unwrap_or(now_epoch);
         next.over_since = Some(over);
@@ -324,9 +329,8 @@ fn step(
             next.reason = Some("CPU-bound".into());
             next.since = Some(now_epoch);
             next.over_since = None;
-            return Some(next);
         }
-        return None;
+        return Some(next);
     }
     if per_core < t.raise_per_core {
         let calm = state.calm_since.unwrap_or(now_epoch);
@@ -337,13 +341,12 @@ fn step(
             next.reason = None;
             next.since = None;
             next.calm_since = None;
-            return Some(next);
         }
-        return None;
+        return Some(next);
     }
     next.over_since = None;
     next.calm_since = None;
-    None
+    Some(next)
 }
 
 fn memory_figure(sample: &MachineSample) -> Option<MemoryFigure> {
@@ -360,15 +363,19 @@ fn memory_figure(sample: &MachineSample) -> Option<MemoryFigure> {
     })
 }
 
-/// The global ledger next to the agents home (`~/.fno/ledger.json`), `[]`
-/// when missing or unreadable: the fold answers from whatever the ledger
-/// holds and never invents tokens.
-fn ledger_rows(home: &AgentsHome) -> Vec<Value> {
-    let path = home
-        .root()
-        .parent()
-        .map(|dir| dir.join("ledger.json"))
-        .unwrap_or_else(|| PathBuf::from("ledger.json"));
+/// The global ledger (`~/.fno/ledger.json` by default,
+/// `config.paths.ledger_json` when the install moves it), `[]` when missing
+/// or unreadable: the fold answers from whatever the ledger holds and never
+/// invents tokens.
+fn ledger_rows(cwd: &std::path::Path, home: &AgentsHome) -> Vec<Value> {
+    let configured = crate::agents_config::config_lookup(cwd, &["paths", "ledger_json"])
+        .and_then(|v| v.as_str().map(PathBuf::from));
+    let path = configured.unwrap_or_else(|| {
+        home.root()
+            .parent()
+            .map(|dir| dir.join("ledger.json"))
+            .unwrap_or_else(|| PathBuf::from("ledger.json"))
+    });
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -416,18 +423,22 @@ pub(crate) fn account_records(cwd: &std::path::Path) -> Vec<AccountRecord> {
             continue;
         };
         for rec in records {
-            let (Some(id), Some(route)) = (
-                rec.get("id").and_then(|v| v.as_str()),
-                rec.get("route").and_then(|v| v.as_str()),
-            ) else {
+            let Some(id) = rec.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
             if out.iter().any(|known| known.id == id) {
                 continue;
             }
-            let (provider, route_model) = match route.split_once('/') {
-                Some((p, m)) if !p.is_empty() => (p, m),
-                _ => continue,
+            // A record may name its route (provider/model) or skip it: an
+            // OAuth entry identifies its account without the model axis. A
+            // route-less record folds no tokens (no provider to match), but
+            // it stays in the state so the config is never silently dropped.
+            let (provider, route_model) = match rec.get("route").and_then(|v| v.as_str()) {
+                Some(route) => match route.split_once('/') {
+                    Some((p, m)) if !p.is_empty() => (p, m),
+                    _ => continue,
+                },
+                None => ("", ""),
             };
             let billing = rec
                 .get("billing")
@@ -577,17 +588,26 @@ fn window_len(window: &str) -> i64 {
 
 /// Ledger tokens whose provider matches, summed per window row. The ledger
 /// has no account axis; the model's route prefix is the provider.
-/// The ledger's model id against the record's route. Real ledger rows carry
-/// BARE model ids (`glm-5.3-flash[1m]`, `claude-opus-5-5`), so the match is
-/// the bare id against the route's model side, by prefix (`glm-5.3` matches
-/// `glm-5.3-flash[1m]`). A model that does carry the provider prefix
+/// The ledger row against the record. Rows that name their provider
+/// (`provider` / `provider_id`) match on it exactly - two accounts sharing a
+/// model prefix then never attribute each other's rows. Rows without a
+/// provider field fall to the model id: the BARE id (`glm-5.3-flash[1m]`,
+/// `claude-opus-5-5`) against the route's model side, by prefix (`glm-5.3`
+/// matches `glm-5.3-flash[1m]`); a model carrying the provider prefix
 /// (`zai/glm-5.3-flash`) strips it first.
 fn row_matches_record(row: &Value, rec: &AccountRecord) -> bool {
+    for key in ["provider", "provider_id"] {
+        if let Some(provider) = row.get(key).and_then(Value::as_str) {
+            if !provider.is_empty() {
+                return provider == rec.provider;
+            }
+        }
+    }
     let Some(model) = row.get("model").and_then(Value::as_str) else {
         return false;
     };
     let bare = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
-    rec.route_model.is_empty() || bare.starts_with(&rec.route_model)
+    !rec.route_model.is_empty() && bare.starts_with(&rec.route_model)
 }
 
 fn ledger_tokens(ledger: &[Value], rec: &AccountRecord, since_epoch: i64) -> u64 {
@@ -678,8 +698,23 @@ mod tests {
 
     #[test]
     fn sustained_breach_cuts_and_the_clause_names_both_numbers() {
-        let home = tmp_home("cut");
+        let cwd = std::env::temp_dir();
         let now = 1_800_000_000;
+        // Natural ticks: the FIRST overload sample arms the clock without
+        // cutting, the state file carries it, and the tick past the hold
+        // window fires the cut - no pre-seeded timestamps.
+        let natural = tmp_home("natural");
+        let mut hot = sample(Some(60), 12.0); // 5 per core, over the 4.0 band
+        hot.total_mem_gb = Some(96.0); // the seed budget reads 23 under this box
+        let armed = feed(&hot, &cwd, &natural, now).unwrap();
+        assert_eq!(armed.effective, 23, "the arming tick does not cut");
+        assert_eq!(armed.over_since, Some(now), "the breach clock is persisted");
+        let cut = feed(&hot, &cwd, &natural, now + 600).unwrap();
+        assert_eq!(cut.effective, 17, "a 25% cut of 23 floors to 17");
+        assert_eq!(cut.reason.as_deref(), Some("CPU-bound"));
+        let _ = std::fs::remove_dir_all(natural.root());
+
+        let home = tmp_home("cut");
         // Pre-learned cap at the ceiling, breach held the full hold window.
         let state = CapacityState {
             ceiling: 23,
@@ -696,8 +731,8 @@ mod tests {
         };
         write_state(&home, &state).unwrap();
         let cwd = std::env::temp_dir();
-        let sample = sample(Some(60), 12.0); // 5 per core, over the 4.0 band
-        let fed = feed(&sample, &cwd, &home, now).unwrap();
+        let hot = sample(Some(60), 12.0); // 5 per core, over the 4.0 band
+        let fed = feed(&hot, &cwd, &home, now).unwrap();
         assert_eq!(fed.effective, 17, "a 25% cut of 23 floors to 17");
         assert_eq!(fed.reason.as_deref(), Some("CPU-bound"));
         let learned = effective(&home, 23);
@@ -720,10 +755,9 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(bare.root());
         let _ = std::fs::remove_dir_all(home.root());
-    }
 
-    #[test]
-    fn calm_decay_adds_one_and_never_passes_the_ceiling() {
+        // The decay leg: calm held the full window adds one, a raised cap
+        // carries no cut reason, and the ceiling stops the walk.
         let home = tmp_home("decay");
         let now = 1_800_000_000;
         let state = CapacityState {
