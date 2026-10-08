@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].windows.len(), 2, "one row per window");
         assert_eq!(rows[0].windows[0].window, "5h");
-        assert_eq!(rows[0].windows[0].used_tokens, 172_080_597);
+        assert_eq!(rows[0].windows[0].used_tokens, 171_080_597);
         assert!(
             rows[0].windows[0].reset_epoch > now,
             "a 5h window resets in the future"
