@@ -499,36 +499,43 @@ impl Pane {
         let line = self.logical_line(point.line);
         if let Some((text, points)) = &line {
             if let Some(idx) = points.iter().position(|p| *p == point) {
-                if let Some((start, end, id)) = crate::link::find_mail_message(text) {
-                    if idx >= start && idx < end {
-                        return Some(LinkSpan {
-                            uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
-                            cells: self.visible_cells(&points[start..end]),
-                        });
+                // Hover fires this per mouse move, and each finder below
+                // allocates a char vector of the line: the two byte scans
+                // keep an ordinary line free of all four walks.
+                if text.contains("fmail-") {
+                    if let Some((start, end, id)) = crate::link::find_mail_message(text) {
+                        if idx >= start && idx < end {
+                            return Some(LinkSpan {
+                                uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
+                                cells: self.visible_cells(&points[start..end]),
+                            });
+                        }
+                    }
+                    if let Some((start, end, id)) = crate::link::find_mail_sender(text) {
+                        if idx >= start && idx < end {
+                            return Some(LinkSpan {
+                                uri: format!("{}{id}", crate::link::SENDER_SCHEME),
+                                cells: self.visible_cells(&points[start..end]),
+                            });
+                        }
+                    }
+                    if let Some((start, end, id)) = crate::link::find_fmail_token(text) {
+                        if idx >= start && idx < end {
+                            return Some(LinkSpan {
+                                uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
+                                cells: self.visible_cells(&points[start..end]),
+                            });
+                        }
                     }
                 }
-                if let Some((start, end, id)) = crate::link::find_mail_sender(text) {
-                    if idx >= start && idx < end {
-                        return Some(LinkSpan {
-                            uri: format!("{}{id}", crate::link::SENDER_SCHEME),
-                            cells: self.visible_cells(&points[start..end]),
-                        });
-                    }
-                }
-                if let Some((start, end, id)) = crate::link::find_fmail_token(text) {
-                    if idx >= start && idx < end {
-                        return Some(LinkSpan {
-                            uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
-                            cells: self.visible_cells(&points[start..end]),
-                        });
-                    }
-                }
-                if let Some((start, end, name)) = crate::link::find_handle_token(text) {
-                    if idx >= start && idx < end {
-                        return Some(LinkSpan {
-                            uri: format!("{}{name}", crate::link::HANDLE_SCHEME),
-                            cells: self.visible_cells(&points[start..end]),
-                        });
+                if text.contains('@') {
+                    if let Some((start, end, name)) = crate::link::find_handle_token(text) {
+                        if idx >= start && idx < end {
+                            return Some(LinkSpan {
+                                uri: format!("{}{name}", crate::link::HANDLE_SCHEME),
+                                cells: self.visible_cells(&points[start..end]),
+                            });
+                        }
                     }
                 }
             }

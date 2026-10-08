@@ -1627,11 +1627,9 @@ pub(crate) struct Core {
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
-    /// The one outstanding claimed click pair on a mouse-owning pane:
-    /// `(pane, row, col, client)` of a press whose cell carried an fno token
-    /// URI. Consumed by the matching release (which answers OpenLink),
-    /// dropped by any other event (a drag belongs to the app) and by the
-    /// pane's release, the `wheel_gate` pattern.
+    /// The one outstanding claimed fno-token click pair on a mouse-owning
+    /// pane, `(pane, row, col, client)`; see [`Core::claim_fno_token_click`].
+    /// Purged with the pane, the `wheel_gate` pattern.
     fno_token_claim: Option<(u64, u16, u16, u64)>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
     /// steering path; read by the scoreboard stats answer (v78).
@@ -9045,16 +9043,11 @@ impl Core {
         };
         match route_mouse(modes, event.kind) {
             MouseAction::Passthrough => {
-                // Rate-gate ONLY wheel ticks (brief Locked 2): a trackpad flood
-                // piles up in the app after the finger stops, so drop stale
-                // ticks beyond the budget before the PTY. Press/release/drag/move
-                // pass through byte-identical. Gate before the pane borrow (it
-                // needs &mut self.wheel_gate); the top-of-fn early return already
-                // proved the pane live, so no dead-pane state is ever inserted.
-                // An fno-token click pair (`@handle`, a bare `fmail-` id) is
-                // claimed before the PTY sees it: inside fno mux that click
-                // opens the session or the Messages thread, not the pane app's
-                // own gesture.
+                // Rate-gate ONLY wheel ticks (brief Locked 2): drop stale ticks
+                // beyond the budget before the PTY; everything else forwards
+                // byte-identical. The gate runs before the pane borrow; the
+                // top-of-fn return proved the pane live. An fno-token click
+                // pair is claimed first (the helper below owns the why).
                 if self.claim_fno_token_click(client_id, pane, &event) {
                     return;
                 }
@@ -9090,28 +9083,19 @@ impl Core {
                 self.broadcast_pane(pane);
             }
             MouseAction::SelectRelease => {
-                // Auto-copy on release with a real selection; the highlight stays
-                // held (Warp). A plain click (empty selection) clears any prior
-                // highlight, and opens the URL under it if there is one.
-                //
-                // No modifier: this arm is only reached in a pane that never
-                // negotiated mouse reporting, where a bare left click has no
-                // other meaning (click-to-focus is still unshipped, see this
-                // function's doc). Shift-click stays the native-terminal escape
-                // hatch - the client drops shifted events before they get here.
+                // Auto-copy a real selection on release (highlight stays held,
+                // Warp); a plain click clears the highlight and opens the URL
+                // under it. Reached only in panes that never negotiated mouse
+                // reporting; shift-click is the client-dropped escape hatch.
                 match self.panes.get(&pane).and_then(|e| e.vt.selection_text()) {
                     Some(text) => self.send_copy(client_id, text),
                     None => {
                         // Only a press and release on the SAME cell of the SAME
-                        // pane is a click. Without this, a drag begun in another
-                        // pane arrives here as a bare release (the client
-                        // re-hit-tests every report), and an ordinary cross-pane
-                        // selection would launch a browser (codex P2, PR 702).
-                        // TAKE, not read: a stored press authorizes exactly one
-                        // gesture. Left un-consumed it also authorizes any LATER
-                        // unmatched release at the same cell - and unmatched
-                        // releases do reach here, because a press swallowed as
-                        // chrome client-side never cancels it (codex, PR 702).
+                        // pane is a click: a cross-pane drag arrives as a bare
+                        // release and would launch a browser (codex P2, PR 702).
+                        // TAKE, not read: one stored press authorizes exactly one
+                        // gesture; an unmatched release reaches here uncanceled
+                        // (codex, PR 702).
                         let clicked = self
                             .clients
                             .iter_mut()

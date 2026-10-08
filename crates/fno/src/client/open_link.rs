@@ -63,22 +63,18 @@ pub struct Routed {
 }
 
 /// Start the off-loop leg for `url`'s route. Returns `Some` only for
-/// [`Route::Message`] and [`Route::Handle`], whose legs the caller finishes
-/// on the UI loop.
+/// [`Route::Message`] and [`Route::Handle`], whose legs [`finish`] lands on
+/// the UI loop.
 pub fn start(url: &str, link_tx: LinkTx, sender_tx: SenderTx) -> Option<Routed> {
-    match route(url) {
-        Route::Message(id) => Some(Routed {
-            kind: RoutedKind::Message(id),
-        }),
-        Route::Handle(name) => Some(Routed {
-            kind: RoutedKind::Handle(name),
-        }),
+    let kind = match route(url) {
+        Route::Message(id) => RoutedKind::Message(id),
+        Route::Handle(name) => RoutedKind::Handle(name),
         Route::Sender(id) => {
             tokio::task::spawn_blocking(move || {
                 let resolved = super::open_chooser::resolve_sender(&id);
                 let _ = sender_tx.send((id, resolved));
             });
-            None
+            return None;
         }
         r => {
             let url = url.to_string();
@@ -90,8 +86,18 @@ pub fn start(url: &str, link_tx: LinkTx, sender_tx: SenderTx) -> Option<Routed> 
                 };
                 let _ = link_tx.send((url, outcome));
             });
-            None
+            return None;
         }
+    };
+    Some(Routed { kind })
+}
+
+/// Land a routed UI-loop leg: open the message, or filter Messages to the
+/// clicked handle. The caller repaints.
+pub fn finish(routed: Routed, view: &mut super::View) {
+    match routed.kind {
+        RoutedKind::Message(id) => super::messages_view::open_message(view, id),
+        RoutedKind::Handle(name) => super::messages_view::open_handle(view, name),
     }
 }
 
