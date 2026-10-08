@@ -591,6 +591,9 @@ fn canonical_repo_root_cached(
     cache
         .entries
         .insert(cwd.to_path_buf(), (resolved.clone(), now));
+    // The marker's drop re-locks the cache; the publish guard must be gone
+    // first or the same thread blocks on a non-reentrant Mutex forever.
+    drop(cache);
     drop(marker);
     resolved
 }
