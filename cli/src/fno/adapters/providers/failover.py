@@ -12,7 +12,7 @@ per-phase state that bounds swap behavior. v0 ships:
   callers handle attended (BLOCKED all_providers_exhausted) vs
   unattended (sleep + restart) per Spec 1's locked decision #2.
 
-State persists at ``.fno/failover-state.json`` across calls
+State persists at ``~/.fno/state/failover-state.json`` across calls
 within the same phase. Phase boundaries are detected by the
 ``phase_id`` constructor arg (caller-provided, derived from
 target-state.md's ``session_id`` + ``current_phase``). When the stored
@@ -334,11 +334,15 @@ class FailoverController:
         self,
         *,
         settings_path: Path,
-        state_path: Path,
+        state_path: Path | None = None,
         phase_id: str,
         target_state_path: Path | None = None,
     ) -> None:
         self._settings_path = Path(settings_path)
+        if state_path is None:
+            from fno.paths import state_runtime_file
+
+            state_path = state_runtime_file("failover-state.json")
         self._state_path = Path(state_path)
         self._phase_id = phase_id
         self._target_state_path = target_state_path

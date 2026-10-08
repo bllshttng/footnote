@@ -858,6 +858,58 @@ def global_events_json() -> Path:
     return _guard_state_path(ledger_json().parent / "events.jsonl")
 
 
+def _state_subfile_at(root: Path, subfolder: str, name: str, legacy_name: str) -> Path:
+    """The move ladder against an explicit root: answer
+    ``<root>/<subfolder>/<name>``, renaming the legacy root spelling into it
+    on first resolve.
+
+    Split out so a caller on a must-not-raise path (the provider 429 lock)
+    can name the ``~/.fno`` fallback without loading settings.
+    """
+    new = root / subfolder / name
+    legacy = root / legacy_name
+    if legacy.exists() and not new.exists():
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            legacy.rename(new)
+        except OSError:
+            return _guard_state_path(legacy)
+    return _guard_state_path(new)
+
+
+def state_runtime_file(name: str, legacy_name: Optional[str] = None) -> Path:
+    """A rewritten runtime-state file under ``state/``, reading the legacy
+    root spelling while it exists.
+
+    The tidiness law (docs/state-root-inventory.md) moves every root file a
+    named subfolder can hold, and ``state/`` is the home for rewritten
+    runtime state: newer bytes win and a deleted file rebuilds on the next
+    write. The pr-watch, fleet-sweep, provider-runtime, failover,
+    health-throttle, recovery-nudge and watchdog-sweep writers lived at the
+    root; this is their one resolver, so the location follows
+    :func:`state_dir` and no caller hand-builds the path.
+
+    First resolve renames a legacy root file into ``state/`` (the
+    spaces-migration pattern: the mover is the resolver, so no second
+    mechanism can drift). The rename never clobbers: a ``state/`` file that
+    already exists wins (merge-capable readers like the provider runtime
+    fold the legacy remainder themselves), and a rename that cannot land
+    keeps the caller on the legacy path rather than splitting the state
+    across two spellings; the next resolve retries. ``legacy_name`` names a
+    root file whose spelling the move also changed (the dot-stamps drop
+    their dot under ``state/``).
+    """
+    return _state_subfile_at(state_dir(), "state", name, legacy_name or name)
+
+
+def logs_file(name: str) -> Path:
+    """A log file under ``logs/``, reading the legacy root spelling while it
+    exists. Same ladder as :func:`state_runtime_file`: the tidiness law
+    moves root logs under ``logs/``, and the resolver is the mover.
+    """
+    return _state_subfile_at(state_dir(), "logs", name, name)
+
+
 def decisions_jsonl() -> Path:
     """Return the machine-wide decision index beside the global ledger.
 
@@ -1118,15 +1170,20 @@ def runtime_state_json() -> Path:
     429-lock WRITE path, and a bad config must never turn a rate-limit into a
     crash that loses the lock. Tests pin an explicit file via the
     ``FNO_RUNTIME_STATE_PATH`` env override instead of a config key.
+
+    Resolves under ``state/`` per the state-root tidiness law through
+    :func:`state_runtime_file`; the Rust reader
+    (``fno-agents provider_cap::runtime_state_path``) mirrors the same
+    ladder, so the two languages answer one file.
     """
     try:
         settings = _settings()
         raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
         if os.path.isabs(raw):
-            return _guard_state_path(state_dir() / "provider-runtime-state.json")
+            return state_runtime_file("provider-runtime-state.json")
     except Exception:  # noqa: BLE001 - see docstring: never raise on config
         pass
-    return _guard_state_path(_resolve("~/.fno/") / "provider-runtime-state.json")
+    return _state_subfile_at(_resolve("~/.fno/"), "state", "provider-runtime-state.json", "provider-runtime-state.json")
 
 
 def observer_reports_dir(

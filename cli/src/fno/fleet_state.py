@@ -1,7 +1,7 @@
 """Fleet-sweep watermark: is the failover host alive, and where is each node
 in its fallback chain.
 
-One file, ``~/.fno/fleet-sweep-state.json``, written as the fleet leg's last
+One file, ``~/.fno/state/fleet-sweep-state.json``, written as the fleet leg's last
 act on every daemon tick. It exists because a status line is not evidence:
 ``fno do pr watch status`` reported the agent loaded while nothing had ticked for
 six hours and eighteen minutes against a 600s interval, and ``failover_swapped``
@@ -45,7 +45,7 @@ from typing import Any
 
 import filelock
 
-from fno.paths import state_dir
+from fno.paths import state_runtime_file
 
 log = logging.getLogger(__name__)
 
@@ -86,8 +86,8 @@ def _lock(path: Path | None = None):
 
 
 def fleet_state_path() -> Path:
-    """``~/.fno/fleet-sweep-state.json`` (or the configured state root)."""
-    return state_dir() / _FILENAME
+    """``~/.fno/state/fleet-sweep-state.json`` (or the configured state root)."""
+    return state_runtime_file(_FILENAME)
 
 
 def read_fleet_state(path: Path | None = None) -> dict[str, Any]:

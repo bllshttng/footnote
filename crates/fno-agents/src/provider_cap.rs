@@ -479,19 +479,52 @@ fn runtime_state_path_from(
 /// `state_dir` when its RAW value is absolute (a relative one falls back to
 /// `$HOME/.fno` in Python, never the cwd); else `$HOME/.fno`. Before
 /// this defaulted to `runtime-state.json`, a file nobody writes, so every
-/// reset read as unknown.
+/// reset read as unknown. The non-override answers run through
+/// [`migrate_runtime_state_to_state_dir`], the same move ladder Python's
+/// `paths.state_runtime_file` runs, so both languages answer one file.
 pub fn runtime_state_path(cwd: &Path) -> PathBuf {
+    // The env override names one explicit file: the ladder must never rename
+    // or relocate a caller-pinned path, so it is answered verbatim.
+    if let Some(v) = std::env::var_os("FNO_RUNTIME_STATE_PATH") {
+        return PathBuf::from(v);
+    }
     let raw = crate::agents_config::config_lookup(cwd, &["state_dir"])
         .and_then(|v| v.as_str().map(str::to_string));
     let dir = raw.map(|raw| match raw.strip_prefix("~/") {
         Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)),
         None => Some(PathBuf::from(&raw)),
     });
-    runtime_state_path_from(
-        std::env::var_os("FNO_RUNTIME_STATE_PATH").as_deref(),
+    let base = runtime_state_path_from(
+        None,
         dir.flatten().filter(|d| d.is_absolute()),
         std::env::var_os("HOME").as_deref(),
-    )
+    );
+    migrate_runtime_state_to_state_dir(&base)
+}
+
+/// The `state/` spelling of a state-root runtime file: rename the legacy
+/// root file into it when only the legacy one exists, answer the new path
+/// otherwise. Mirrors `paths.state_runtime_file` (rename never clobbers; a
+/// failed rename keeps the caller on the legacy path). A base that is not a
+/// bare state-root child (an override or odd shape) passes through unchanged.
+fn migrate_runtime_state_to_state_dir(base: &Path) -> PathBuf {
+    let Some(file_name) = base.file_name().map(|n| n.to_os_string()) else {
+        return base.to_path_buf();
+    };
+    let Some(root) = base.parent() else {
+        return base.to_path_buf();
+    };
+    let new = root.join("state").join(&file_name);
+    if new.exists() || !base.exists() {
+        return new;
+    }
+    match std::fs::create_dir_all(new.parent().unwrap_or(root))
+        .ok()
+        .and_then(|()| std::fs::rename(base, &new))
+    {
+        Ok(()) => new,
+        Err(_) => base.to_path_buf(),
+    }
 }
 
 fn account_reset_timezones(candidates: &[PathBuf]) -> BTreeMap<String, String> {

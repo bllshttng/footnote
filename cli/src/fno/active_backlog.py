@@ -15,19 +15,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-# The wake nudge sentinel filename under the state dir. The daemon watches this
-# file's mtime; a backlog mutation / advance dispatch touches it to wake the
-# drain loop sooner than the poll floor. The Rust watcher resolves the same file
-# under $HOME/.fno (the default state dir); a non-default state_dir only loses
-# the latency optimization, never correctness (the poll floor is the guarantee).
-NUDGE_SENTINEL_NAME = ".active-backlog-nudge"
+# The wake nudge sentinel filename under the state dir's ``state/`` folder. The
+# daemon watches this file's mtime; a backlog mutation / advance dispatch
+# touches it to wake the drain loop sooner than the poll floor. The Rust
+# watcher resolves the same file under $HOME/.fno/state (the default state
+# dir); a non-default state_dir only loses the latency optimization, never
+# correctness (the poll floor is the guarantee).
+NUDGE_SENTINEL_NAME = "active-backlog-nudge"
 
 
 def nudge_sentinel_path() -> Path:
     """Resolve the nudge sentinel path via the configured state dir."""
-    from fno.paths import state_dir
+    from fno.paths import state_runtime_file
 
-    return state_dir() / NUDGE_SENTINEL_NAME
+    return state_runtime_file(NUDGE_SENTINEL_NAME, legacy_name=".active-backlog-nudge")
 
 
 def touch_nudge() -> None:

@@ -25,16 +25,23 @@ pub(crate) const DEFAULT_PROVIDERS: [&str; 4] = ["claude", "codex", "gemini", "o
 pub(crate) const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The provider runtime-state payload: `$FNO_RUNTIME_STATE_PATH`, else the
-/// configured state root's `provider-runtime-state.json`. An unreadable file
-/// is an empty payload (unlocked), matching the Python reader's None arm.
+/// configured state root's `state/provider-runtime-state.json`, reading the
+/// legacy root spelling while it exists (the Python writer renames it on its
+/// first resolve). An unreadable file is an empty payload (unlocked),
+/// matching the Python reader's None arm.
 pub(crate) fn runtime_state_payload(config_cwd: &Path) -> Value {
     let path: PathBuf = match std::env::var_os("FNO_RUNTIME_STATE_PATH") {
         Some(override_) => PathBuf::from(override_),
         None => {
-            let mut path =
+            let root =
                 crate::agents_config::state_dir(config_cwd).unwrap_or_else(default_state_dir);
-            path.push("provider-runtime-state.json");
-            path
+            let new = root.join("state").join("provider-runtime-state.json");
+            let legacy = root.join("provider-runtime-state.json");
+            if !new.exists() && legacy.exists() {
+                legacy
+            } else {
+                new
+            }
         }
     };
     std::fs::read_to_string(path)

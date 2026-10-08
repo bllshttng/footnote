@@ -263,8 +263,9 @@ def test_ac3fr_uninstall_removes_plist_preserves_watermark(
     plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
     plist_path.write_text("<plist/>")
 
-    # Pre-seed a watermark store in the tmp HOME's .fno dir
-    state_file = tmp_home / ".fno" / "pr-watcher-state.json"
+    # Pre-seed a watermark store in the tmp HOME's .fno state dir
+    state_file = tmp_home / ".fno" / "state" / "pr-watcher-state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(json.dumps({"some/repo#1": {"parked": None}}))
 
     # Stub launchctl so we don't call the real one

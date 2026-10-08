@@ -61,6 +61,7 @@ groom.err.log	logs/groom.err.log	append	daemon
 corrections.log	logs/corrections.log	append	daemon
 corrections.log.wm	logs/corrections.log.wm	overwrite	daemon
 merge-gate-overrides.log	logs/merge-gate-overrides.log	append	daemon
+health-alerts.log	logs/health-alerts.log	append	daemon
 # history/ - append-only jsonl journals.
 health-history.jsonl	history/health-history.jsonl	append	daemon
 evals-history.jsonl	history/evals-history.jsonl	append	daemon
@@ -79,6 +80,30 @@ machine-brake.json	state/machine-brake.json	overwrite	daemon
 sccache-watch.json	state/sccache-watch.json	overwrite	daemon
 .worktree-stranded-cache.json	state/.worktree-stranded-cache.json	overwrite	daemon
 .worktree-stranded-refresh-stamp	state/.worktree-stranded-refresh-stamp	overwrite	daemon
+# The 2026-10-08 batch: the pr-watch, fleet-sweep, provider-runtime,
+# failover, health-throttle, recovery-nudge and watchdog-sweep writers, plus
+# the three dot-stamps (their dot drops under state/). Python resolves them
+# through paths.state_runtime_file (the rename-on-first-resolve ladder);
+# Rust readers resolve through place() on these rows - one table, both
+# languages, no third mechanism.
+pr-watcher-state.json	state/pr-watcher-state.json	overwrite	daemon
+pr-watcher-state.json.lock	state/pr-watcher-state.json.lock	lock	daemon
+pr-watcher-state.lock	state/pr-watcher-state.lock	lock	daemon
+pr-watcher-state-delivery.json	state/pr-watcher-state-delivery.json	overwrite	daemon
+pr-watcher-state-delivery.json.lock	state/pr-watcher-state-delivery.json.lock	lock	daemon
+fleet-sweep-state.json	state/fleet-sweep-state.json	overwrite	daemon
+fleet-sweep-state.json.lock	state/fleet-sweep-state.json.lock	lock	daemon
+pr-watch-bounce.json	state/pr-watch-bounce.json	overwrite	daemon
+provider-runtime-state.json	state/provider-runtime-state.json	overwrite	daemon
+provider-runtime-state.json.update.lock	state/provider-runtime-state.json.update.lock	lock	daemon
+failover-state.json	state/failover-state.json	overwrite	daemon
+failover-state.json.lock	state/failover-state.json.lock	lock	daemon
+health-throttle.json	state/health-throttle.json	overwrite	daemon
+recovery-nudges.json	state/recovery-nudges.json	overwrite	daemon
+watchdog-sweep.json	state/watchdog-sweep.json	overwrite	daemon
+.a2a-confirmed	state/a2a-confirmed	marker	daemon
+.active-backlog-nudge	state/active-backlog-nudge	marker	daemon
+.think-spawn-daily.json	state/think-spawn-daily.json	overwrite	daemon
 # mux/ - the mux server owns these; it moves them at its own start.
 mux-view.json	mux/mux-view.json	overwrite	mux
 mux-view.json.lock	mux/mux-view.json.lock	lock	mux
