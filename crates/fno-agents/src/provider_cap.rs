@@ -337,6 +337,11 @@ pub fn codex_capped_tail(rollout: &Path) -> TailReading {
             payload
                 .pointer("/error/message")
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    payload
+                        .pointer("/error/codex_error_info")
+                        .and_then(Value::as_str)
+                })
                 .map(|m| m.chars().take(200).collect::<String>())
         } else {
             None
@@ -2683,6 +2688,20 @@ mod tests {
                 .is_some_and(|e| e.starts_with("You've hit your usage limit")),
             "{:?}",
             lane.members[0].excerpt
+        );
+        write(&rollout, &serde_json::json!({
+            "timestamp":"2026-09-18T12:00:00Z", "type":"event_msg",
+            "payload":{"type":"task_complete", "error":{"codex_error_info":"usage_limit_exceeded"}}
+        }).to_string());
+        let code_only = snapshot_with(&scan, 1_000_000_001, &cfg(2)).unwrap();
+        assert!(
+            code_only
+                .lanes
+                .iter()
+                .find(|lane| lane.lane == "openai:default")
+                .unwrap()
+                .members[0]
+                .capped
         );
         let _ = std::fs::remove_dir_all(&root);
     }

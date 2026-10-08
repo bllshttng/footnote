@@ -37,6 +37,7 @@ pub(super) struct FleetArms {
     watch_expiry: crate::watch_expiry::Arm,
     codex_watch: crate::codex_watch::Arm,
     lead_wake: crate::lead_wake::Arm,
+    worker_wake: crate::worker_wake::Arm,
     notice_route: crate::notice_route::Arm,
     first_check: crate::first_check::Arm,
     // Retirement-sweep cadence: the throttle stamp beside the gate,
@@ -85,6 +86,7 @@ impl FleetArms {
             watch_expiry: crate::watch_expiry::Arm::default(),
             codex_watch: crate::codex_watch::Arm::default(),
             lead_wake: crate::lead_wake::Arm::new(opts.agents_config_cwd.clone()),
+            worker_wake: crate::worker_wake::Arm::default(),
             notice_route: crate::notice_route::Arm::new(opts.agents_config_cwd.clone()),
             first_check: crate::first_check::Arm::default(),
             last_gc_sweep: Instant::now(),
@@ -215,6 +217,7 @@ impl FleetArms {
         // gets the daemon's wake, and its rung-up lead is told. Writes
         // the lead_wake tick row the status table read UNOBSERVED before.
         crate::lead_wake::maybe_tick(&self.lead_wake, ctx.home.clone());
+        crate::worker_wake::maybe_tick(&self.worker_wake, ctx.home.clone());
         // The notice router: lead-scope reconcile warnings become one
         // deduped mail to the owning lead; the hourly fold turns repeated
         // failures and banners into one owned node.

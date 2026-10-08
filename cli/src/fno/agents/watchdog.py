@@ -1490,7 +1490,7 @@ def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
     except Exception as exc:  # noqa: BLE001 - an unreadable registry scopes nothing
         return [], [f"registry unreadable, silence sweep refused: {exc!r}"]
     for e in entries:
-        live = getattr(e, "status", None) in LIVE_STATUSES
+        live = getattr(e, "status", None) in LIVE_STATUSES and getattr(e, "harness", None) != "codex"
         spawn = getattr(e, "origin", None) == "spawn" and getattr(e, "role_level", None) is None
         node = getattr(e, "node", None)
         scope = str(getattr(e, "project_root", "") or getattr(e, "cwd", "") or "")
@@ -2624,5 +2624,3 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
             + (f": {tail[-1]}" if tail else ""),
         )
     return "applied", f"woke {v.name}; message confirmed in transcript"
-
-
