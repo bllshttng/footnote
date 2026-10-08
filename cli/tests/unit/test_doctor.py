@@ -949,25 +949,40 @@ def test_fix_refreshes_wedged_pr_watch_instead_of_healing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A wedged watermark is fresh, so the tick already runs: the cure is the
-    plist re-render (refresh_watcher), never the plain bounce."""
+    refresh verb, never the plain bounce."""
     _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
                   capture_present="present")
     _wedged_pr_watch(monkeypatch)
+    import subprocess
+
+    import fno.rust_binary as rb
     import fno.pr_watch._install as pw
-    refresh_calls: list = []
+    monkeypatch.setattr(rb, "resolve_binary", lambda: "/x/fno-agents")
+
+    spawn: list = []
+    real_run = subprocess.run
+
+    def _fake_run(argv, **kw):
+        if argv[:3] == ["/x/fno-agents", "pr-watch", "refresh"]:
+            spawn.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="pr-watch refresh: re-rendered and bounced x\n", stderr=""
+            )
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
 
     def _fail_heal(**kw):
         raise AssertionError("wedged must re-render the plist, not bounce it")
 
-    monkeypatch.setattr(
-        pw, "refresh_watcher",
-        lambda **kw: refresh_calls.append(kw) or ("re-rendered and bounced x", 0),
-    )
     monkeypatch.setattr(pw, "heal_watcher", _fail_heal)
 
     result = runner.invoke(app, ["doctor", "--fix"])
     assert result.exit_code == 0  # advisory: never flips the exit
-    assert len(refresh_calls) == 1
+    assert len(spawn) == 1
+    assert spawn[0][1:3] == ["pr-watch", "refresh"]
+    assert "--force-bounce" in spawn[0]
+    assert "doctor-fix" in spawn[0]
     assert "pr-watch refresh" in result.stderr
 
 

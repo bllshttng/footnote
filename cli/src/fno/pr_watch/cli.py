@@ -1575,7 +1575,18 @@ def install(
 
 
 @cli.command()
-def refresh() -> None:
+def refresh(
+    force_bounce: bool = typer.Option(
+        False,
+        "--force-bounce",
+        help="Bounce even when the rendered plist is unchanged (doctor --fix).",
+    ),
+    caller: str = typer.Option(
+        "refresh",
+        "--caller",
+        help="Name the bounce receipt's sender.",
+    ),
+) -> None:
     """Re-render the plist onto the current binary and bounce the watcher.
 
     Non-interactive, no confirm prompt: this is the tail of ``fno doctor update`` (so
@@ -1585,24 +1596,34 @@ def refresh() -> None:
     the update chain calls it best-effort and a refresh failure must not fail
     the update.
     """
-    from fno.pr_watch import _install as m
+    import subprocess
 
-    settings = load_settings()
-    if not settings.pr_watch.enabled:
-        typer.echo("pr-watch: disabled; nothing to refresh.")
-        return
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
 
-    msg, _rc = m.refresh_watcher(
-        launch_agents_dir=_LAUNCH_AGENTS_DIR,
-        fno_binary=_resolve_fno_binary(),
-        interval=settings.pr_watch.interval_seconds,
-        defer_when_ticking=True,
-        caller="refresh",
-    )
-    typer.echo(f"pr-watch refresh: {msg}")
-    from fno.pr_watch._install import heal_status_line
-
-    typer.echo(heal_status_line())
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno do pr watch refresh: the fno-agents binary was not found. "
+            "It ships in the `pip install fno` wheel and with the plugin; "
+            "reinstall fno or run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    argv = [
+        str(binary),
+        "pr-watch",
+        "refresh",
+        "--fno-binary",
+        _resolve_fno_binary(),
+        "--caller",
+        caller,
+    ]
+    if force_bounce:
+        argv.append("--force-bounce")
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 # Single-flight window for the SessionStart self-heal: long enough to cover the
