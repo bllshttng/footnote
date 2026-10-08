@@ -4006,6 +4006,9 @@ def cmd_send(
         return
 
     timeout_override = os.environ.pop("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", None)
+    # The mail verb's live leg is header only; the flag rides the same env
+    # channel the lock-timeout override does, and the finally below reaps it.
+    os.environ["_FNO_MAIL_HEADER_ONLY"] = "1"
     try:
         result = dispatch_send(
             name=name,
@@ -4016,7 +4019,6 @@ def cmd_send(
             from_name=stamp_from(from_name),
             origin=mail_origin,
             subject=subject,
-            footer=True,
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -4095,6 +4097,8 @@ def cmd_send(
         except UnavailableTokenError as unavailable:
             _unavailable_token_exit(name, unavailable)
         return
+    finally:
+        os.environ.pop("_FNO_MAIL_HEADER_ONLY", None)
 
     # AC3-UI: distinguish delivered vs queued on stdout. A durable demotion
     # carries the live lane's own reason (node), so a miss to a LIVE

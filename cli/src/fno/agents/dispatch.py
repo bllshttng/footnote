@@ -6869,7 +6869,6 @@ def _deliver_live(
     sender_entry: "Optional[AgentEntry]" = None,
     reason_out: "Optional[list]" = None,
     family1_state: Optional[str] = None,
-    footer: bool = False,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node).
@@ -6919,7 +6918,7 @@ def _deliver_live(
             origin=mail.origin,
             to_session=mail.to_session,
             subject=mail.subject,
-            footer=footer,
+            header_only=os.environ.pop("_FNO_MAIL_HEADER_ONLY", None) == "1",
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -7410,7 +7409,6 @@ def dispatch_send(
     registry_stamp_timeout_seconds: float = 1.0,
     origin: Optional[str] = None,
     subject: Optional[str] = None,
-    footer: bool = False,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -7761,7 +7759,6 @@ def dispatch_send(
                         sender_entry=sender_entry,
                         reason_out=_live_reason,
                         family1_state=family1_state,
-                        footer=footer,
                     )
                     if _live_delivered:
                         delivery = "hosted"
