@@ -1627,10 +1627,10 @@ pub(crate) struct Core {
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
-    /// The one outstanding claimed fno-token click pair on a mouse-owning
-    /// pane, `(pane, row, col, client)`; see [`Core::claim_fno_token_click`].
-    /// Purged with the pane, the `wheel_gate` pattern.
-    fno_token_claim: Option<(u64, u16, u16, u64)>,
+    /// Per-pane claimed fno-token click pair `(row, col, client)`; see
+    /// [`Core::claim_fno_token_click`]. Purged with the pane, `wheel_gate`'s
+    /// pattern.
+    fno_token_claims: HashMap<u64, (u16, u16, u64)>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
     /// steering path; read by the scoreboard stats answer (v78).
     touch_emit_failures: Arc<AtomicU64>,

@@ -62,9 +62,7 @@ impl Core {
         self.touch_last_emit.remove(&pid);
         self.wheel_gate.remove(&pid);
         // A claimed click pair on the dead pane can never see its release.
-        if matches!(self.fno_token_claim, Some((p, ..)) if p == pid) {
-            self.fno_token_claim = None;
-        }
+        self.fno_token_claims.remove(&pid);
         self.pane_stats.write().unwrap().remove(&pid);
         // Drop any attach mapping onto the dead pane so a re-attach
         // spawns fresh rather than focusing a corpse (the lazy `panes` check in

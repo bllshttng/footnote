@@ -45,10 +45,11 @@ impl Core {
     /// release on any other cell is swallowed with it (the app saw no press,
     /// so it gets no torn tail). A drag off a claimed press replays the
     /// press ahead of the drag, so an app-side text selection starting on a
-    /// token still begins whole. Every other event forwards (return `false`)
-    /// and drops a pending claim, so a second press can never leave a
-    /// half-owned pair behind. A release for which no claim is held forwards
-    /// untouched, so an app-owned click pair stays byte-identical.
+    /// token still begins whole. Claims are PER PANE, so one client's plain
+    /// events never consume another client's pending pair; every unclaimed
+    /// event forwards (return `false`) and drops only its own pane's claim.
+    /// A release for which no claim is held forwards untouched, so an
+    /// app-owned click pair stays byte-identical.
     pub(super) fn claim_fno_token_click(
         &mut self,
         client_id: u64,
@@ -63,12 +64,15 @@ impl Core {
         match event.kind {
             crate::proto::MouseKind::Press(crate::proto::MouseButton::Left) => {
                 let claimed = token_at(self, event.row, event.col).is_some();
-                self.fno_token_claim = claimed.then(|| (pane, event.row, event.col, client_id));
+                if claimed {
+                    self.fno_token_claims
+                        .insert(pane, (event.row, event.col, client_id));
+                }
                 claimed
             }
             crate::proto::MouseKind::Release(crate::proto::MouseButton::Left) => {
-                match self.fno_token_claim.take() {
-                    Some((p, row, col, c)) if p == pane && c == client_id => {
+                match self.fno_token_claims.remove(&pane) {
+                    Some((row, col, c)) if c == client_id => {
                         // The pair is ours wherever it ended: the app saw no
                         // press, so it gets no torn tail. Same cell is the
                         // click that opens; any other cell was a tiny drag.
@@ -80,7 +84,9 @@ impl Core {
                         true
                     }
                     other => {
-                        self.fno_token_claim = other;
+                        if let Some(claim) = other {
+                            self.fno_token_claims.insert(pane, claim);
+                        }
                         false
                     }
                 }
@@ -89,9 +95,12 @@ impl Core {
                 // A drag off a claimed press is an app-owned selection whose
                 // press the mux swallowed: replay the press ahead of this
                 // drag so the gesture starts whole, then hand the pair back.
-                let ours = matches!(self.fno_token_claim, Some((p, _, _, c)) if p == pane && c == client_id);
-                if ours {
-                    self.fno_token_claim = None;
+                if self
+                    .fno_token_claims
+                    .get(&pane)
+                    .is_some_and(|(_, _, c)| *c == client_id)
+                {
+                    self.fno_token_claims.remove(&pane);
                     let press = crate::proto::MouseEvent {
                         kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
                         ..*event
@@ -104,7 +113,9 @@ impl Core {
                 false
             }
             _ => {
-                self.fno_token_claim = None;
+                // A non-press event on the pane breaks its own pending pair
+                // (the pointer moved on); other panes' claims are untouched.
+                self.fno_token_claims.remove(&pane);
                 false
             }
         }

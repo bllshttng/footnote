@@ -444,11 +444,12 @@ pub fn find_mail_message(text: &str) -> Option<(usize, usize, String)> {
 /// range plus the full id. Where [`find_mail_message`] needs the delivered
 /// header around the id, this is the id wherever it prints - a transcript
 /// quote, a log line - because the token means what fno says. Word-bounded:
-/// a longer hex run and an `fmail-`-prefixed name never match.
-pub fn find_fmail_token(text: &str) -> Option<(usize, usize, String)> {
+/// a longer hex run and an `fmail-`-prefixed name never match. `skip` is the
+/// CHAR index to scan from, so a caller can walk a line's later occurrences.
+pub fn find_fmail_token(text: &str, skip: usize) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = text.chars().collect();
     let hex12 = |cs: &[char]| cs.len() == 12 && cs.iter().all(|c| c.is_ascii_hexdigit());
-    for i in 0..chars.len() {
+    for i in skip..chars.len() {
         if !chars[i..].starts_with(&['f', 'm', 'a', 'i', 'l', '-']) {
             continue;
         }
@@ -461,10 +462,11 @@ pub fn find_fmail_token(text: &str) -> Option<(usize, usize, String)> {
         if !hex12(chars.get(hex_start..id_end)?) {
             continue;
         }
-        // A hex digit right after the id means a longer token, not this id.
+        // Any word character right after the id means a longer token, not
+        // this id: `fmail-0123456789abg` names no mail this parse may pick.
         if chars
             .get(id_end)
-            .is_some_and(|c| c.is_ascii_hexdigit() || *c == '-')
+            .is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
         {
             continue;
         }
@@ -477,11 +479,12 @@ pub fn find_fmail_token(text: &str) -> Option<(usize, usize, String)> {
 /// The `@handle` token span in pane text, as a half-open CHAR range plus the
 /// bare handle (no `@`). The char before `@` must not continue a word, so an
 /// email address (`user@host`) never matches; a trailing `-` reads as
-/// punctuation, not the name.
-pub fn find_handle_token(text: &str) -> Option<(usize, usize, String)> {
+/// punctuation, not the name. `skip` is the CHAR index to scan from, so a
+/// caller can walk a line's later occurrences.
+pub fn find_handle_token(text: &str, skip: usize) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = text.chars().collect();
     let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
-    for i in 0..chars.len() {
+    for i in skip..chars.len() {
         if chars[i] != '@' {
             continue;
         }
@@ -811,7 +814,8 @@ mod tests {
     #[test]
     fn fno_token_spans_and_their_uris_stay_intercepted() {
         // The plain body-text form the delivered-header parsers reject.
-        let (start, end, id) = find_fmail_token("quote: fmail-0123456789ab done").expect("parses");
+        let (start, end, id) =
+            find_fmail_token("quote: fmail-0123456789ab done", 0).expect("parses");
         assert_eq!((start, end), (7, 25));
         assert_eq!(id, "fmail-0123456789ab");
         // Word bounds: a longer hex run and a prefixed token never match.
@@ -820,20 +824,40 @@ mod tests {
             "xfmail-0123456789ab",
             "fmail-0123456789ab-cd",
             "fmail-0123456789",
+            "fmail-0123456789abg",
         ] {
-            assert!(find_fmail_token(bad).is_none(), "{bad} resolves nothing");
+            assert!(find_fmail_token(bad, 0).is_none(), "{bad} resolves nothing");
         }
-        let (start, end, name) = find_handle_token("ping @nemo about it").expect("parses");
+        // A second occurrence on one line answers from the skip offset.
+        let line = "fmail-0123456789ab and fmail-fedcba987654";
+        let (start, end, id) = find_fmail_token(line, 0).expect("first");
+        assert_eq!((start, end), (0, 18));
+        let (start, end, id) = find_fmail_token(line, end).expect("second");
+        assert_eq!(id, "fmail-fedcba987654");
+        assert_eq!(
+            &line.chars().collect::<Vec<_>>()[start..end]
+                .iter()
+                .collect::<String>(),
+            id
+        );
+        let (start, end, name) = find_handle_token("ping @nemo about it", 0).expect("parses");
         assert_eq!((start, end), (5, 10));
         assert_eq!(name, "nemo");
         // A trailing dash reads as punctuation; the span stops before it.
         assert_eq!(
-            find_handle_token("cc @nemo- later"),
+            find_handle_token("cc @nemo- later", 0),
             Some((3, 8, "nemo".into()))
         );
+        let two = "@aa and @bb";
+        let (start, end, name) = find_handle_token(two, 0).expect("first");
+        assert_eq!(name, "aa");
+        assert_eq!(find_handle_token(two, end), Some((8, 11, "bb".into())));
         // The char before @ continues a word: emails and mid-word @s never match.
         for bad in ["user@example.com", "see bob@host", "@", "@-x"] {
-            assert!(find_handle_token(bad).is_none(), "{bad} resolves nothing");
+            assert!(
+                find_handle_token(bad, 0).is_none(),
+                "{bad} resolves nothing"
+            );
         }
         // The handle URI parses, and neither pseudo scheme is ever openable:
         // the platform opener can never receive either.

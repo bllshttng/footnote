@@ -72,8 +72,7 @@ fn attach_argv_rows() {
         attach_argv_for(Some("claude"), "job1", Some("readyrule"), Some(dir)),
         attach_argv("job1", Some("readyrule"), Some(dir))
     );
-    // A row with no harness recorded keeps the claude shape it had before
-    // a harness was passed at all.
+    // No harness recorded: keep the claude shape it had before.
     assert_eq!(
         attach_argv_for(None, "job1", None, None),
         attach_argv("job1", None, None)
@@ -8284,7 +8283,7 @@ pub(super) fn empty_core() -> Core {
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         wheel_gate: HashMap::new(),
-        fno_token_claim: None,
+        fno_token_claims: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
         client_count: watch::channel(0).0,

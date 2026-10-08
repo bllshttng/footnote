@@ -501,7 +501,10 @@ impl Pane {
             if let Some(idx) = points.iter().position(|p| *p == point) {
                 // Hover fires this per mouse move, and each finder below
                 // allocates a char vector of the line: the two byte scans
-                // keep an ordinary line free of all four walks.
+                // keep an ordinary line free of all four walks. Each token
+                // finder answers ONE occurrence; a line can carry several,
+                // so the walks below step over spans that sit left of the
+                // clicked cell.
                 if text.contains("fmail-") {
                     if let Some((start, end, id)) = crate::link::find_mail_message(text) {
                         if idx >= start && idx < end {
@@ -519,23 +522,34 @@ impl Pane {
                             });
                         }
                     }
-                    if let Some((start, end, id)) = crate::link::find_fmail_token(text) {
-                        if idx >= start && idx < end {
-                            return Some(LinkSpan {
-                                uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
-                                cells: self.visible_cells(&points[start..end]),
-                            });
+                    let mut skip = 0;
+                    while let Some((start, end, id)) = crate::link::find_fmail_token(text, skip) {
+                        if idx < end {
+                            if idx >= start {
+                                return Some(LinkSpan {
+                                    uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
+                                    cells: self.visible_cells(&points[start..end]),
+                                });
+                            }
+                            break;
                         }
+                        skip = end;
                     }
                 }
                 if text.contains('@') {
-                    if let Some((start, end, name)) = crate::link::find_handle_token(text) {
-                        if idx >= start && idx < end {
-                            return Some(LinkSpan {
-                                uri: format!("{}{name}", crate::link::HANDLE_SCHEME),
-                                cells: self.visible_cells(&points[start..end]),
-                            });
+                    let mut skip = 0;
+                    while let Some((start, end, name)) = crate::link::find_handle_token(text, skip)
+                    {
+                        if idx < end {
+                            if idx >= start {
+                                return Some(LinkSpan {
+                                    uri: format!("{}{name}", crate::link::HANDLE_SCHEME),
+                                    cells: self.visible_cells(&points[start..end]),
+                                });
+                            }
+                            break;
                         }
+                        skip = end;
                     }
                 }
             }
