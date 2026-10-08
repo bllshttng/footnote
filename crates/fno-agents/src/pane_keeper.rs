@@ -295,16 +295,18 @@ fn split_escape_tail(dropped: &[u8], kept: &[u8]) -> usize {
             kept.len()
         }
         b if (0x20..=0x2f).contains(&b) => {
-            // Intermediates then one final byte (`ESC ( B` shape).
+            // Intermediates then one final byte (`ESC ( B` shape). The final
+            // check runs before the increment so end() gets the final byte's
+            // own index.
             let mut p = 0;
             while let Some(b) = at(p) {
                 if b == 0x1b {
                     return 0;
                 }
-                p += 1;
                 if (0x30..=0x7e).contains(&b) {
                     return end(p);
                 }
+                p += 1;
             }
             kept.len()
         }
@@ -1114,6 +1116,8 @@ mod tests {
         assert_eq!(split_escape_tail(b"abc\x1b", b"7rest"), 1);
         assert_eq!(split_escape_tail(b"abc", b"kept"), 0);
         assert_eq!(split_escape_tail(b"\x1b]0;t\x1b", b"\\z"), 1);
+        // The intermediate form drops exactly through its final byte.
+        assert_eq!(split_escape_tail(b"abc\x1b(", b"Brest"), 1);
     }
 
     #[test]
