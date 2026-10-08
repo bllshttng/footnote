@@ -250,7 +250,7 @@ mod tests {
         );
         // the entry carries its in-menu key (`h`), drawn from the
         // live menu table so a rebind moves the glyph with the dispatch.
-        let held = focus_agent(3);
+        let mut held = focus_agent(3);
         held.dnd = true;
         let menu = build_row_menu(&held, test_anchor());
         let hint = menu
