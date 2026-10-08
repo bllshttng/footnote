@@ -3514,6 +3514,7 @@ fn non_seat_attach_viewer_death_replays_the_attach() {
             .arg(format!("sleep 25; : # {uuid}")),
     );
     let mut row = bg_row("worker-a", "/tmp/seen", Some("5396fee1"));
+    row.harness = Some("claude".into());
     row.claude_session_uuid = Some(uuid.into());
     core.agents = vec![row];
     // The split shape: the shell leaf + the attach viewer leaf, focused.
@@ -3576,6 +3577,7 @@ fn non_seat_attach_viewer_without_witness_closes_as_before() {
     set_attach_program(&["/bin/cat"]);
     let (mut core, _client_id, _p1, _rx) = thread_core();
     let mut row = bg_row("worker-b", "/tmp/seen", Some("5396fee2"));
+    row.harness = Some("claude".into());
     row.claude_session_uuid = Some("ffff5396-1111-2222-3333-444455556666".into());
     core.agents = vec![row];
     let viewer = core
@@ -3622,6 +3624,7 @@ fn transient_attach_view_is_excluded_from_the_rescue() {
             .arg(format!("sleep 25; : # {uuid}")),
     );
     let mut row = bg_row("worker-c", "/tmp/seen", Some("5396fee3"));
+    row.harness = Some("claude".into());
     row.claude_session_uuid = Some(uuid.into());
     core.agents = vec![row];
     let viewer = core
