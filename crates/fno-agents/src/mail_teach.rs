@@ -40,18 +40,28 @@ fn taught_boundary(path: &Path) -> Option<i64> {
 
 /// The transcript a session's boundary reads come from: the caller's
 /// explicit path, else the registry row the harness reported at SessionStart.
-/// An unreadable registry reads as no transcript, never as an error.
+/// `registry` hands in a registry the caller already loaded (the render
+/// path), so a due check costs no second locked load. An unreadable
+/// registry reads as no transcript, never as an error.
 fn resolve_transcript(
     home: &AgentsHome,
     session: &str,
     explicit: Option<&Path>,
+    registry: Option<&crate::state::Registry>,
 ) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return Some(path.to_path_buf());
     }
-    let registry = crate::state::try_load_registry(&home.root().join("registry.json"))
-        .ok()
-        .flatten()?;
+    let loaded;
+    let registry = match registry {
+        Some(rows) => rows,
+        None => {
+            loaded = crate::state::try_load_registry(&home.root().join("registry.json"))
+                .ok()
+                .flatten()?;
+            &loaded
+        }
+    };
     registry
         .entries
         .iter()
@@ -72,11 +82,12 @@ pub fn teach_if_due(
     home: &AgentsHome,
     session: &str,
     transcript: Option<&Path>,
+    registry: Option<&crate::state::Registry>,
     record: bool,
 ) -> bool {
     let path = teach_path(home, session);
     let taught = taught_boundary(&path);
-    let observed = resolve_transcript(home, session, transcript)
+    let observed = resolve_transcript(home, session, transcript, registry)
         .as_deref()
         .and_then(crate::compaction::newest_boundary_epoch);
     let due = match (taught, observed) {
@@ -172,7 +183,7 @@ pub fn run_mail_teach(args: &[String]) -> i32 {
         }
     };
     let home = AgentsHome::from_env();
-    if teach_if_due(&home, &session, transcript.as_deref(), record) {
+    if teach_if_due(&home, &session, transcript.as_deref(), None, record) {
         println!("{}", crate::chats::teach_line());
     }
     0
@@ -237,11 +248,11 @@ mod tests {
         let home = pin.home();
         let t1 = transcript_with_boundary(&pin.dir, 1_000);
         assert!(
-            teach_if_due(&home, "s1", None, false),
+            teach_if_due(&home, "s1", None, None, false),
             "never taught is due"
         );
         assert!(
-            teach_if_due(&home, "s1", Some(&t1), true),
+            teach_if_due(&home, "s1", Some(&t1), None, true),
             "record stamps the lesson"
         );
         assert_eq!(
@@ -250,25 +261,25 @@ mod tests {
             "the stamp holds the boundary the lesson rode"
         );
         assert!(
-            !teach_if_due(&home, "s1", Some(&t1), true),
+            !teach_if_due(&home, "s1", Some(&t1), None, true),
             "taught stays silent"
         );
         let t2 = transcript_with_boundary(&pin.dir, 2_000);
         assert!(
-            teach_if_due(&home, "s1", Some(&t2), true),
+            teach_if_due(&home, "s1", Some(&t2), None, true),
             "a newer boundary re-teaches"
         );
-        assert!(!teach_if_due(&home, "s1", Some(&t2), true), "and only once");
+        assert!(!teach_if_due(&home, "s1", Some(&t2), None, true), "and only once");
         // A harness whose transcript carries no known boundary shape (pi,
         // opencode) reads as "no boundary observed": the stamp silences it
         // forever after the first lesson. A missing transcript leaves the
         // never-taught case due.
         let plain = pin.dir.join("plain.jsonl");
         std::fs::write(&plain, "{\"type\":\"assistant\"}\n").unwrap();
-        assert!(teach_if_due(&home, "s2", Some(&plain), true));
-        assert!(!teach_if_due(&home, "s2", Some(&plain), true));
+        assert!(teach_if_due(&home, "s2", Some(&plain), None, true));
+        assert!(!teach_if_due(&home, "s2", Some(&plain), None, true));
         assert!(
-            teach_if_due(&home, "s3", None, false),
+            teach_if_due(&home, "s3", None, None, false),
             "a missing transcript leaves never-taught due"
         );
         // The lesson names the LIVE read verb: the const the dispatch arm
