@@ -10,6 +10,17 @@ import pytest
 from fno.agents import rust_runtime
 from fno.agents.spawn_defaults import seedless_thread_refusal
 
+
+@pytest.fixture(autouse=True)
+def _graphless_seed_resolver(monkeypatch):
+    """The seed-word gate fails open on an unreadable graph; pin that here so
+    the plumbing tests' fake node words never depend on the ambient store."""
+
+    def _unreadable(path=None, **_):
+        raise ValueError("graph store unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
+
 SEEDED_FORM = "fno agents spawn '/fno:target x-1' --name w --node x-1 --substrate thread"
 RESUME = "0a6e775f-1111-2222-3333-444444444444"
 

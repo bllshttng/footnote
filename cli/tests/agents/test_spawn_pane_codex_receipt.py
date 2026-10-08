@@ -13,6 +13,19 @@ from tests.agents.test_spawn_pane import (
     use_tmpdir,
 )
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _graphless_seed_resolver(monkeypatch):
+    """The seed-word gate fails open on an unreadable graph; pin that here so
+    the plumbing tests' fake node words never depend on the ambient store."""
+
+    def _unreadable(path=None, **_):
+        raise ValueError("graph store unreadable")
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
+
 
 def test_cmd_spawn_pane_refuses_unbound_codex_receipt(
     tmp_path, monkeypatch, loop_admission_ready
