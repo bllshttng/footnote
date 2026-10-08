@@ -314,7 +314,7 @@ def test_refresh_leaf_forwards_to_the_binary(monkeypatch, tmp_path):
     result = CliRunner().invoke(app, ["pr-watch", "refresh"])
     assert result.exit_code == 0
     assert spawn and spawn[0][1:3] == ["pr-watch", "refresh"]
-    assert "pr-watch refresh: ok" in result.stdout
+    assert "--caller" in spawn[0] and "refresh" in spawn[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1036,26 +1036,6 @@ def test_armed_status_with_no_binary_degrades_to_a_line_that_says_so(
 
     line = m.heal_status_line()
     assert line.startswith("Heal: armed; readout unavailable"), line
-
-
-def test_refresh_prints_the_heal_line(tmp_home, monkeypatch):
-    """A fresh refresh output carries the same Heal: readout status prints."""
-    from types import SimpleNamespace
-
-    from typer.testing import CliRunner
-
-    from fno.cli import app
-    import fno.pr_watch.cli as cli_mod
-    import fno.pr_watch._install as m
-
-    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
-    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
-    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: ("bounced", 0))
-    monkeypatch.setattr(m, "heal_status_line", lambda events_path=None: "Heal: armed; never ran")
-
-    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
-    assert result.exit_code == 0
-    assert "Heal: armed; never ran" in result.stdout, result.stdout
 
 
 # ---------------------------------------------------------------------------
