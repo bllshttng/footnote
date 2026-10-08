@@ -4576,10 +4576,8 @@ def doctor_command(
             from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher
 
             if pw.get("verdict") == "wedged":
-                # The refresh verb is the native cure; it self-gates on
-                # pr_watch.enabled and re-reads the interval from config.
+                # The refresh verb is the native cure; it self-gates on pr_watch.enabled.
                 import subprocess
-
                 from fno.rust_binary import resolve_binary
 
                 binary = resolve_binary()

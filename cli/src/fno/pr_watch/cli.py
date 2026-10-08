@@ -1581,11 +1581,7 @@ def refresh(
         "--force-bounce",
         help="Bounce even when the rendered plist is unchanged (doctor --fix).",
     ),
-    caller: str = typer.Option(
-        "refresh",
-        "--caller",
-        help="Name the bounce receipt's sender.",
-    ),
+    caller: str = typer.Option("refresh", "--caller", help="Name the bounce receipt's sender."),
 ) -> None:
     """Re-render the plist onto the current binary and bounce the watcher.
 
