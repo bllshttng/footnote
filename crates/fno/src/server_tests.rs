@@ -8284,6 +8284,7 @@ pub(super) fn empty_core() -> Core {
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         wheel_gate: HashMap::new(),
+        fno_token_claim: None,
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
         client_count: watch::channel(0).0,

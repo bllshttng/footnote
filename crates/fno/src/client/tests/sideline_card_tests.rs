@@ -559,11 +559,25 @@ fn hovering_the_card_rule_between_cards_bands_no_card() {
     let mut v = card_view(lead_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
-    let rows = v.painted_rows();
-    let rule_i = rows
-        .iter()
-        .position(|r| matches!(r, DisplayRow::CardRule))
-        .expect("a card rule exists between adjacent cards");
+    let (rule_i, card_lines) = {
+        let rows = v.painted_rows();
+        let rule_i = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::CardRule))
+            .expect("a card rule exists between adjacent cards");
+        let card_lines: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                matches!(
+                    r,
+                    DisplayRow::Agent(_) | DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        (rule_i, card_lines)
+    };
     v.hover_row = Some(rule_i);
     let frame = v.compose();
 
@@ -577,17 +591,6 @@ fn hovering_the_card_rule_between_cards_bands_no_card() {
             .zip(&plain_frame.cells[row * cols..row * cols + text_w])
             .any(|(a, b)| a.bg != b.bg)
     };
-    let card_lines: Vec<usize> = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| {
-            matches!(
-                r,
-                DisplayRow::Agent(_) | DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)
-            )
-        })
-        .map(|(i, _)| i)
-        .collect();
     assert!(
         !card_lines.is_empty(),
         "two adjacent cards paint six card lines"
