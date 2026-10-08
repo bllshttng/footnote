@@ -2548,6 +2548,15 @@ fn newest_snapshot(snapshots: &Path) -> Option<(std::time::Duration, u64)> {
 /// write: a missing snapshot is the status quo, and the 2026-09-27 overwrite
 /// showed what recovering from a month-old backup costs instead.
 pub(crate) fn snapshot_registry(path: &Path, document: &serde_json::Value) {
+    // A registry with no rows has nothing to recover. Snapshotting it would
+    // also set the size baseline the collapse check divides by.
+    let rows = document.get("agents").or_else(|| document.get("entries"));
+    if !rows
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|r| !r.is_empty())
+    {
+        return;
+    }
     let Ok(bytes) = serde_json::to_vec(document) else {
         return;
     };
