@@ -1183,6 +1183,12 @@ pub fn registry_path() -> PathBuf {
     base.join(".fno").join("agents").join("registry.json")
 }
 
+/// The registry document text at [`registry_path`], read through the table
+/// once the registry has been imported.
+pub fn registry_text() -> std::io::Result<String> {
+    crate::registry_read::registry_text(&registry_path())
+}
+
 /// Parse the fixed `YYYY-MM-DDThh:mm:ssZ` UTC stamp the registry writes back
 /// to epoch seconds (a focused copy of fno-agents' `rfc3339_like_to_secs` -
 /// Hinnant days-from-civil; the mux reads the FILE contract, not the crate).
