@@ -1563,7 +1563,7 @@ fn kill_to_line_start(draft: &mut LaunchDraft) {
 fn kill_to_word_start(draft: &mut LaunchDraft) {
     let cur = draft.cursor_chars;
     let before: Vec<char> = draft.message.chars().take(cur).collect();
-    let drop = word_run(&before, true);
+    let drop = word_kill_run(&before);
     if drop == 0 {
         return;
     }
@@ -1625,6 +1625,17 @@ pub(crate) fn word_run(chars: &[char], rev: bool) -> usize {
         rest.iter().take_while(|c| is_word_char(**c)).count()
     };
     ws + word
+}
+
+/// One backward word KILL's width: the word behind the cursor, then the
+/// whitespace run before it - the delimiter goes with the word (the
+/// desktop-editor kill; plain motion above keeps the readline landing
+/// instead, where the cursor parks after the separator).
+pub(crate) fn word_kill_run(chars: &[char]) -> usize {
+    let word = chars.iter().rev().take_while(|c| is_word_char(**c)).count();
+    let rest = &chars[..chars.len() - word];
+    let ws = rest.iter().rev().take_while(|c| c.is_whitespace()).count();
+    word + ws
 }
 
 fn move_word_left(draft: &mut LaunchDraft) {
@@ -4358,10 +4369,12 @@ impl Launcher {
             .take(cur_col)
             .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
             .sum();
-        let x = sl.message.x + PROMPT_GUTTER as u16 + disp_col as u16;
+        // `sl.message` is body-local; the sheet body blits at origin + 1,
+        // so the screen cell carries that offset.
+        let x = sl.origin.1 + 1 + sl.message.x + PROMPT_GUTTER as u16 + disp_col as u16;
         let in_sheet = cur_row >= sl.start_chunk && x < sl.message.x + sl.message.width;
         in_sheet.then(|| {
-            let y = sl.message.y + (cur_row - sl.start_chunk) as u16;
+            let y = sl.origin.0 + 1 + sl.message.y + (cur_row - sl.start_chunk) as u16;
             (y, x)
         })
     }

@@ -5019,11 +5019,13 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if {
-            let cell = agent_launcher::draw_overlay(self, &mut cells, rows, cols);
-            launcher_cursor = cell;
-            cell.is_some()
-        } {
+        } else if self.launcher.is_some() {
+            // The sheet paints whenever the launcher is open, even while a
+            // picker holds the keyboard (the returned cursor cell is then
+            // None): the chain stops here so a later overlay never draws
+            // over the composer, and the pane branch below never shows a
+            // pane's cursor behind it.
+            launcher_cursor = agent_launcher::draw_overlay(self, &mut cells, rows, cols);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the

@@ -69,7 +69,7 @@ impl InputField {
                 // too: one byte grammar, one editing grammar.
                 LKey::KillWord => {
                     let before: Vec<char> = self.text.chars().take(self.cursor).collect();
-                    let drop = super::agent_launcher::word_run(&before, true);
+                    let drop = super::agent_launcher::word_kill_run(&before);
                     let at = self.byte_at(self.cursor - drop);
                     self.text.replace_range(at..self.byte_at(self.cursor), "");
                     self.cursor -= drop;
