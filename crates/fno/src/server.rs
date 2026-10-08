@@ -95,6 +95,7 @@ mod squad_persistence;
 mod squad_sync;
 mod thread_workspace;
 mod truth_probe;
+mod visible_panes;
 mod workspace_restore;
 use self::session_guard::{ConnAlive, SocketGuard};
 
@@ -741,6 +742,7 @@ pub(crate) enum CoreMsg {
     WorkspaceRestore {
         dry_run: bool,
         harness: Option<String>,
+        member_session: Option<String>,
         reply: ControlReply,
     },
     /// The bulk apply half of a workspace restore: the plans are in
@@ -750,6 +752,7 @@ pub(crate) enum CoreMsg {
     WorkspaceRestoreApply {
         dry_run: bool,
         harness: Option<String>,
+        member_session: Option<String>,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
         reply: ControlReply,
     },
@@ -7713,7 +7716,7 @@ impl Core {
         self.place_adopted_leftovers(home_sid);
         if policy == crate::digest_overlay::MuxRestorePolicy::Resume {
             let (tx, _rx) = oneshot::channel::<ServerMsg>();
-            self.workspace_restore_start(false, None, tx);
+            self.workspace_restore_start(false, None, None, tx);
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU
@@ -8591,8 +8594,6 @@ impl Core {
                 c.id,
                 rects.len()
             ));
-            // An observer subscribes to all panes; a driving client to just
-            // its viewed tab's rects.
             let frame_ids: Vec<u64> = if c.passive {
                 all_pane_ids.clone()
             } else {
@@ -8637,6 +8638,7 @@ impl Core {
             ));
             self.push_layout(true);
         }
+        self.publish_visible_panes();
     }
 
     /// One client's `Layout`: the shared squad/tab catalog, with the
@@ -11778,32 +11780,20 @@ impl Core {
             CoreMsg::WorkspaceRestore {
                 dry_run,
                 harness,
+                member_session,
                 reply,
             } => {
-                // The persisted squads reach memory only on the first real
-                // attach (restore_squads). Answering before that would report
-                // "nothing to restore" for a store that was never read - the
-                // empty-success shape - so name the precondition instead.
-                if !self.restored {
-                    let _ = reply.send(ServerMsg::Err {
-                        code: crate::proto::err_code::RESTORE_NOT_RUN,
-                        msg: "startup restore has not run in this session yet: attach once \
-                              (its first real attach reads the persisted workspace), then \
-                              re-run"
-                            .into(),
-                    });
-                    return Flow::Continue;
-                }
-                self.workspace_restore_start(dry_run, harness, reply);
+                self.handle_workspace_restore(dry_run, harness, member_session, reply);
                 Flow::Continue
             }
             CoreMsg::WorkspaceRestoreApply {
                 dry_run,
                 harness,
+                member_session,
                 plans,
                 reply,
             } => {
-                self.workspace_restore_apply(dry_run, harness, plans, reply);
+                self.workspace_restore_apply(dry_run, harness, member_session, plans, reply);
                 Flow::Continue
             }
             CoreMsg::SquadReload { reply } => {
@@ -13105,11 +13095,16 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::WorkspaceRestore { dry_run, harness } => {
+        ControlVerb::WorkspaceRestore {
+            dry_run,
+            harness,
+            member_session,
+        } => {
             core_tx
                 .send(CoreMsg::WorkspaceRestore {
                     dry_run,
                     harness,
+                    member_session,
                     reply: reply_tx,
                 })
                 .await

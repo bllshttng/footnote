@@ -257,6 +257,7 @@ pub mod machine_load;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
+pub mod mail_backfill;
 pub mod mail_control_drain;
 pub mod mail_envelope;
 pub mod mail_header;
@@ -411,6 +412,7 @@ pub mod session_backfill;
 pub mod session_cost;
 pub mod session_join;
 pub mod session_names_fold;
+pub(crate) mod session_origin;
 pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
@@ -483,6 +485,7 @@ pub mod wake_name;
 pub mod watch_expiry;
 pub mod wave;
 pub mod worked_nodes;
+pub mod worker_wake;
 pub mod worktree_reapable;
 pub mod write_queue;
 pub mod zcode;
@@ -1545,6 +1548,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "merge_reaper_stopped",
     "agent_inconsistent",
     "agent_ask_done",
+    "codex_turn_error",
+    "quiet_worker_nudge",
+    "quiet_worker_recovery",
+    "quiet_worker_error",
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",
@@ -1705,6 +1712,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The lead-wake arm's receipt: one row per daemon wake episode, the
     // dedupe memory the arm folds before it wakes again (lead_wake.rs).
     "lead_wake",
+    "worker_wake",
+    // The beat's cron act receipt: the wake resumed a parked codex lead's
+    // resting goal, so the beat is a work beat (lead_wake.rs). The same kind
+    // the wake-mode loop emits for its dispatch-side resume.
+    "lead_goal_resumed",
     // A team's term declared or extended (`fno agents org term <spec>
     // [--reason]`), before or after a Stop-hook gate observed it reached.
     // The receipt a lead's tenure bound leaves; `fno doctor event audit`
@@ -2003,7 +2015,7 @@ pub(crate) fn tail_bytes(path: &std::path::Path, cap: u64) -> Vec<u8> {
         return Vec::new();
     }
     let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
+    if file.take(len - start).read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
     if start > 0 {

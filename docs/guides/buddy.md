@@ -20,12 +20,22 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## What you see
 
 - **The sprite.** The buddy is one of 18 species. It has a rarity, eyes, and sometimes a hat. Five stats set its voice: debugging, patience, chaos, wisdom, and snark.
+- **Rarity colors.** In the dark theme, common is gray, uncommon green, rare blue, epic purple, and legendary gold. The card, the status line, and the Desktop sprite all draw the color of your Claude Code theme. A custom theme draws the dark theme's colors in the status line.
 - **Idle talk.** When nothing happens for 2 minutes, the buddy says something of its own. It is one model call, in its personality, about what the session is doing. The buddy has no canned lines.
 - **Reactions.** After a turn, one model call reads the last exchange and answers in the voice of the buddy. Ordinary turns wait 30 seconds between reactions, as the original did. A turn that says the buddy's name, fails tests, hits an error, or lands a diff over 80 lines gets a reaction at once. Petting and hatching get one too. The last three lines go along, so the buddy does not repeat itself.
 - **Observations.** Every observation the buddy makes goes to `~/.fno/state/buddy/observations.jsonl`, one JSON row each with the time, the name, the reason, and the line. Read it with `tail ~/.fno/state/buddy/observations.jsonl`.
 - **Fleet news.** When `fno-agents` is on your PATH, the buddy reads the fleet activity feed every 2 minutes. It tells you when a node ships a PR, when a node finishes, and when a question waits for you. It says the news in its own voice with one model call. If that call fails, it says the plain fact.
 - **The fno CLI is optional.** Fleet news and fleet counts need the `fno` CLI. Without it, the buddy still talks about your own session.
 - **Fleet counts.** Beside its name, the buddy shows live workers, questions that wait for you, and your open PRs. One read every 5 minutes serves every session.
+
+## Only where you can see it
+
+Each live session has its own buddy, and all of them share one soul. If no person can see the answer, a buddy makes no model call. Hidden sessions stay quiet.
+
+- **In an fno mux pane,** the mux writes the panes on screen to `~/.fno/mux/<session>.visible.json`. A buddy whose pane is not in that list makes no model call. Its sessions on another tab or in the sideline cost nothing.
+- **Anywhere else,** the buddy counts as seen for 10 minutes after you type in that session's prompt box.
+- **One voice for the machine.** Idle talk and fleet news happen once. After the 2-minute gap, the first seen session says the idle line. The first seen session to read a fleet event tells it. Two panes side by side do not say the same news twice.
+- **Reactions** stay with each session, because each one is about that session's own turn.
 
 ## Where it stands
 

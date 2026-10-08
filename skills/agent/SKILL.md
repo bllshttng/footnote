@@ -527,6 +527,8 @@ through provider-supported logs or pane tools; a harness-level tool gate is a
 deferred follow-up. Say so honestly - do not imply the worker is sandboxed from
 outward actions.
 
+The handoff doc's frontmatter carries an `origin:` block naming the session it continues: machine, host, harness, session_id, transcript_path, recorded_at. `fno agents history <your session id>` prints those facts on its `origin:` and `transcript:` lines. When the doc lacks the block, add it before spawning, so a later reader can find the full transcript.
+
 ### Flow: NORMALIZE -> VALIDATE -> SPAWN -> REPORT (no confirm: free lane)
 
 1. **NORMALIZE.** Strip the leading `handoff` verb; pass the rest as the doc path.

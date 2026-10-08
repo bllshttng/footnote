@@ -1,4 +1,4 @@
-"""Tests for scripts/ci/check-autonomy-registry.sh (x-aaaf wave 3.3, AC6-CON).
+"""Tests for scripts/ci/check-autonomy-registry.sh.
 
 The negative control the plan requires: a fake unregistered spawner must turn
 CI red, naming it, and removing it must turn CI green again. Also asserts the
@@ -9,23 +9,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ci" / "check-autonomy-registry.sh"
 
-# Both tests scan the WHOLE cli/src tree while one of them mutates it (the
-# probe file). Under `-n auto` xdist can split them across workers, and the
-# baseline scan then sees the other test's transient probe and fails on
-# interleaving, not on a real spawner (observed on the dirty lane, gw0/gw1).
-# One group name pins them to a single worker, where file order serializes
-# them for free.
-pytestmark = pytest.mark.xdist_group("autonomy-registry")
-
-
-def _run() -> subprocess.CompletedProcess:
+def _run(root: Path = ROOT) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", str(SCRIPT)], cwd=ROOT, capture_output=True, text=True,
+        ["bash", str(SCRIPT)], cwd=root, capture_output=True, text=True,
     )
 
 
@@ -35,11 +24,20 @@ def test_current_repo_matches_the_baseline() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_negative_control_unregistered_spawner_fails_ci_then_clean_again() -> None:
+def test_negative_control_unregistered_spawner_fails_ci_then_clean_again(tmp_path: Path) -> None:
     """AC6-CON: a new spawn-shaped call site not in the baseline fails CI and
     names it; removing it restores a clean pass."""
-    probe = ROOT / "cli" / "src" / "fno" / "_ci_probe_fake_spawner.py"
-    assert not probe.exists(), "stale probe file from a prior failed run"
+    root = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    source = root / "cli" / "src" / "fno"
+    source.mkdir(parents=True)
+    (source / "known.py").write_text(
+        'def registered():\n    cmd = ["fno", "agents", "spawn"]\n', encoding="utf-8",
+    )
+    baseline = root / "scripts" / "ci" / "autonomy-registry-baseline.txt"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("cli/src/fno/known.py::registered fixture\n", encoding="utf-8")
+    probe = source / "_ci_probe_fake_spawner.py"
     probe.write_text(
         "def _fake_autonomous_spawner():\n"
         "    cmd = [\n"
@@ -52,7 +50,7 @@ def test_negative_control_unregistered_spawner_fails_ci_then_clean_again() -> No
         encoding="utf-8",
     )
     try:
-        result = _run()
+        result = _run(root)
         assert result.returncode == 1, result.stdout + result.stderr
         assert "_ci_probe_fake_spawner.py::_fake_autonomous_spawner" in (
             result.stdout + result.stderr
@@ -60,5 +58,5 @@ def test_negative_control_unregistered_spawner_fails_ci_then_clean_again() -> No
     finally:
         probe.unlink()
 
-    clean = _run()
+    clean = _run(root)
     assert clean.returncode == 0, clean.stdout + clean.stderr

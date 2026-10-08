@@ -23,9 +23,9 @@ The rest of this page fills in the details.
    ```
    This is the most common cold-start failure.
    If it is not, run `gh auth login`.
-4. Run the setup wizard and accept every default:
+4. Run the one run-once setup and accept every default:
    ```bash
-   fno config setup wizard
+   fno config setup run --yes
    ```
 5. Point the loop at a small task:
    ```
@@ -100,8 +100,9 @@ Configuration lives in `.fno/config.toml` (project-local) layered over `~/.fno/c
 **In the terminal, no agent (CLI-native):**
 
 ```bash
-fno config setup wizard            # asks the few real per-project decisions, writes them validated
-fno config setup wizard --advanced # also surfaces the advanced settings
+fno config setup run --yes         # takes every recommended default, never prompts, prints the JSON report
+fno config setup run --list --json # the step table (global, project, contributor layers)
+fno config setup plan --advanced   # the advanced config tier, as JSON
 ```
 
 Both walk the same schema-derived question plan and write through the validated config writer, so a typo or an out-of-range value is rejected, not silently stored.

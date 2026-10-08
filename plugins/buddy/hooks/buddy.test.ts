@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { embody, restore, rollBones } from './companion'
+import { embody, rarityColor, restore, rollBones } from './companion'
 import { fleetLine, refill } from './register'
 import { newsFact, summarizeTurn } from './voice'
 
@@ -31,7 +31,7 @@ function band(maxRows: number) {
 }
 
 // The stubs every test needs before session.start runs the mod's hook.
-function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), files = new Map<string, string>()) {
+function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), files = new Map<string, string>(), env: Record<string, string> = {}) {
   const clock = mock.clock(on)
   // Nothing after the buddy draws in the band.
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }))
@@ -42,7 +42,7 @@ function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), 
     saved.set(e.key, e.value)
     return { value: undefined }
   })
-  on('env.get', () => ({ value: '/home/u' }))
+  on('env.get', ($: any, e: any) => ({ value: env[e.name] ?? '/home/u' }))
   on('session.id', () => ({ value: 's1' }))
   on('fs.read', ($: any, e: any) => {
     if (e.path === '/home/u/.claude.json') return { value: config }
@@ -56,8 +56,12 @@ function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), 
   })
   on('ui.open', () => ({ value: undefined }))
   on('ui.close', () => ({ value: undefined }))
+  on('prompt.edit', ($: any, e: any) => ({ text: e.text, cursor: e.cursor }))
   return { clock, saved, files }
 }
+
+// A key the person typed in this session's prompt box.
+const typed = { origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'f' } as const
 
 test('a seed always rolls the same buddy', () => {
   expect(rollBones('seed-1')).toEqual(rollBones('seed-1'))
@@ -84,6 +88,7 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   const mine = { type: 'command', command: '~/bin/my-status', padding: 2 }
   const files = new Map([['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: mine })]])
   const { clock, saved } = boot(on, OLD_CONFIG, new Map(), files)
+  on('config.list', () => ({ value: [{ key: 'theme', value: 'light' }] }))
   on('process.run', ($: any, e: any) =>
     e.argv.join(' ') === 'fno config get state_dir'
       ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
@@ -99,6 +104,11 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
   await clock.advance(600)
   const frame = JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!)
   expect(frame).toMatchObject({ name: 'Quip', speech: 'Quip is back. did you miss me?' })
+  // The status line draws the color the card's theme key has in the person's theme.
+  const rarity = embody(restore(OLD_CONFIG, 0)!).rarity
+  expect(frame.color).toBe(rarityColor('light', rarity))
+  expect(rarityColor('dark', 'rare')).toBe('rgb(177,185,249)')
+  expect(rarityColor('custom:mine', 'rare')).toBe('rgb(177,185,249)')
 
   // A roll in another session rewrites the shared soul; this session draws the new buddy.
   saved.set('soul', { seed: 'other-seed', name: 'Zed', personality: 'a blob', hatchedAt: 1 })
@@ -118,7 +128,15 @@ test('a finished turn shows the model reaction, with no canned line first', asyn
   on('turn.complete', () => ({ text: '' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
-  const ui = await $.ui.mount(band(8))
+  // Nobody typed here, as in a hidden worker pane: the turn costs no model call.
+  let ui = await $.ui.mount(band(8))
+  await $.turn.complete({ turnId: 't0', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
+  await clock.advance(1)
+  await ui.unmount()
+  expect(await (await $.ui.mount(band(8))).find({ type: 'Text', text: /null check/ })).toBeUndefined()
+
+  await $.prompt.edit(typed)
+  ui = await $.ui.mount(band(8))
   await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
   await clock.advance(1)
   await ui.unmount()
@@ -127,12 +145,40 @@ test('a finished turn shows the model reaction, with no canned line first', asyn
   expect(await after.find({ type: 'Text', text: /Quip: That null check does zero work\.$/ })).toBeDefined()
 })
 
+test('in an fno mux pane the buddy reacts only while the mux shows that pane', async ($, on) => {
+  const files = new Map([['/mux/main.visible.json', '{"panes":[3]}']])
+  const { clock } = boot(on, OLD_CONFIG, new Map(), files, { FNO_SESSION: 'main', FNO_PANE: '7', FNO_MUX_DIR: '/mux' })
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'fix the parser', toolUses: [] }, { role: 'assistant', text: 'done', toolUses: [{ tool: 'Edit', input: {} }] }] }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'That null check does zero work.', usage: null } }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  // Pane 7 is in another tab: typing there does not count, the mux decides.
+  await $.prompt.edit(typed)
+  let ui = await $.ui.mount(band(8))
+  await clock.advance(2_000)
+  await $.turn.complete({ turnId: 't0', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
+  await clock.advance(1)
+  await ui.unmount()
+  expect(await (await $.ui.mount(band(8))).find({ type: 'Text', text: /null check/ })).toBeUndefined()
+
+  files.set('/mux/main.visible.json', '{"panes":[3,7]}')
+  ui = await $.ui.mount(band(8))
+  await clock.advance(2_000)
+  await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 9000, isAborted: false, usage: null })
+  await clock.advance(1)
+  await ui.unmount()
+  expect(await (await $.ui.mount(band(8))).find({ type: 'Text', text: /Quip: That null check does zero work\.$/ })).toBeDefined()
+})
+
 test('a shipped node in the fleet feed is told in the buddy voice', async ($, on) => {
   const { clock } = boot(on)
   on('model.complete', (_: any, e: any) => ({ value: /parser-fix shipped PR 42/.test(JSON.stringify(e)) ? { isAnswered: true, text: 'parser-fix shipped pr 42. took long enough.', usage: null } : { isAnswered: false, text: '', usage: null } }))
   const row = { ts: new Date(60_000).toISOString(), kind: 'node_shipped', node: 'parser-fix', ref: '42', title: 'PR 42' }
   on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify([row]), stderr: '' } }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // The session typed in last tells the news.
+  await $.prompt.edit(typed)
 
   await clock.advance(118_000)
   const ui = await $.ui.mount(band(8))

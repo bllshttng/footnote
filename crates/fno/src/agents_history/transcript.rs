@@ -4,13 +4,14 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 pub(super) struct TranscriptFacts {
     pub(super) runs: Vec<ModelRun>,
     pub(super) permissions: Vec<String>,
     pub(super) agent_name: Option<String>,
+    pub(super) path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -31,6 +32,7 @@ pub(super) fn find_many(sids: &[String]) -> HashMap<String, TranscriptFacts> {
 pub(super) fn scan(path: &Path) -> Result<TranscriptFacts, String> {
     let file = fs::File::open(path).map_err(|err| format!("{}: {err}", path.display()))?;
     let mut facts = TranscriptFacts::default();
+    facts.path = Some(path.to_path_buf());
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|err| format!("{}: {err}", path.display()))?;
         let Ok(record) = serde_json::from_str::<Value>(&line) else {

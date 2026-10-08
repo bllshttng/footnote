@@ -1415,7 +1415,7 @@ fn encode_claim_key(key: &str) -> String {
 /// an unreadable hostname fails toward "not live".
 ///
 /// NOT an identity: see `is_same_machine` below. This is only the legacy arm.
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if rc != 0 {
@@ -1476,7 +1476,7 @@ fn platform_machine_id() -> String {
 /// `claims.rs::machine_id`). `gethostname(2)` moves under a roaming laptop,
 /// which read as cross-host and dropped a live claim to stale, and stale is
 /// stealable. Never substitutes the hostname: a present value is authoritative.
-fn machine_id() -> String {
+pub(crate) fn machine_id() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CACHE.get_or_init(platform_machine_id).clone()
 }

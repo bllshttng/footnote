@@ -34,6 +34,7 @@ use serde_json::Value;
 
 use crate::paths::AgentsHome;
 use crate::watch_expiry::{self, Evidence, Watch};
+mod quiet;
 
 /// Poll cadence. One coalesced status read per ci watch per tick: the cache
 /// serves one live gh read per TTL across the whole fleet, so N watchers on
@@ -361,7 +362,7 @@ fn deliver_settle(watch: &SettleWatch, text: &str) -> Delivered {
 /// Production closures: the loaded-roster read, the coalesced status poll,
 /// and the per-harness settle delivery.
 pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
-    run_pass_with(
+    let settled = run_pass_with(
         home,
         &crate::codex_inject::loaded_thread_ids,
         &|cwd, pr| {
@@ -377,7 +378,11 @@ pub(crate) fn run_pass(home: &AgentsHome) -> Result<(), String> {
         },
         &deliver_settle,
         &crate::events::EventEmitter::new(crate::daemon::global_events_path(home), "daemon"),
-    )
+    );
+    if let Err(error) = quiet::run(home) {
+        eprintln!("quiet recovery: {error}");
+    }
+    settled
 }
 
 pub fn maybe_tick(arm: &Arm, home: AgentsHome) {

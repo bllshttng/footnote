@@ -103,6 +103,19 @@ if [[ -n "${FNO_AGENT_SELF:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Every session leaves a record of the machine it began on, beside its
+# transcript, whether or not it joins the roster. --origin-only writes that
+# one file and sends nothing to the daemon. A tty stdin (a manual run) reads
+# nothing instead of hanging.
+PAYLOAD=""
+[[ ! -t 0 ]] && PAYLOAD="$(cat)"
+if [[ -n "$BIN" ]]; then
+    ORIGIN_ARGS=(report --kind session --origin-only --harness "$HARNESS")
+    [[ -n "$SESSION_ID" ]] && ORIGIN_ARGS+=(--session-id "$SESSION_ID")
+    printf '%s' "$PAYLOAD" | with_timeout 2 "$BIN" "${ORIGIN_ARGS[@]}" >/dev/null 2>&1 || true
+fi
+
+# ---------------------------------------------------------------------------
 # Operator branch: a hand-started session joins the roster only when asked.
 # (config: agents.auto_register_sessions; /fno-me is the deliberate join.)
 if [[ "$(fno config get agents.auto_register_sessions 2>/dev/null || true)" != "true" ]]; then
@@ -116,12 +129,11 @@ cd "$REPO_ROOT" 2>/dev/null || true
 
 ARGS=(--harness "$HARNESS" --session-id "$SESSION_ID" --cwd "$REPO_ROOT")
 
-# Claude sends the SessionStart flavor (startup | resume | clear) as hook-input
-# JSON on stdin. Read it once, without hanging when stdin is absent (a manual
-# run, or a harness that sends nothing): the one-line python reads to EOF on a
-# pipe and errors into the empty default on a terminal.
-if [[ "$HARNESS" == "claude" && ! -t 0 ]]; then
-    SOURCE="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",""))' 2>/dev/null || true)"
+# Claude sends the SessionStart flavor (startup | resume | clear) in the
+# hook-input JSON, consumed above: read the flavor from the captured payload
+# instead of stdin, which the origin call already emptied.
+if [[ "$HARNESS" == "claude" && -n "$PAYLOAD" ]]; then
+    SOURCE="$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",""))' 2>/dev/null || true)"
     [[ -n "$SOURCE" ]] && ARGS+=(--source "$SOURCE")
 fi
 

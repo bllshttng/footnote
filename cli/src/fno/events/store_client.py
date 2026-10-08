@@ -199,7 +199,7 @@ def emit_envelope(
     events_path: Path,
     *,
     requested_id: Optional[str] = None,
-    timeout: float = 30,
+    timeout: float = 90,
 ) -> dict[str, Any]:
     """Commit one canonical ``{ts, type, source, data}`` envelope through the
     native store and return its receipt (``store``, ``event_id``, ``seq``,
@@ -212,7 +212,10 @@ def emit_envelope(
         cmd += ["--id", requested_id]
     # The store's 5s busy timeout can expire under fork-heavy contention
     # (concurrent emitters on a loaded runner); a short retry absorbs that
-    # tail instead of surfacing it as an unavailable store.
+    # tail instead of surfacing it as an unavailable store. The native side
+    # now runs its own 3-attempt loop with the same backoff, one pass worst
+    # case ~20s, so the ceiling must cover three full passes or a killed
+    # subprocess loses both the row and its dead-letter record.
     detail = ""
     for attempt in range(3):
         try:
