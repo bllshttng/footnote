@@ -96,7 +96,7 @@ impl Core {
                         kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
                         ..*event
                     };
-                    let bytes = sgr_mouse_bytes(&press);
+                    let bytes = super::sgr_mouse_bytes(&press);
                     if let Some(entry) = self.panes.get(&pane) {
                         let _ = entry.pty.write_input(&bytes);
                     }
