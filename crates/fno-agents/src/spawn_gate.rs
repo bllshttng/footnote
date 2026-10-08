@@ -625,7 +625,7 @@ pub(crate) fn slot_reading(
 /// the release verb for the first suspect one; all-live saturation names none.
 fn slot_refusal_line(
     slots: usize,
-    cap: usize,
+    learned: &crate::capacity::Effective,
     rows: usize,
     claims: &[SlotReservation],
     waiting: usize,
@@ -648,9 +648,10 @@ fn slot_refusal_line(
         None => String::new(),
     };
     format!(
-        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {n} headless \
+        "{slots} live worker slots >= {cap_clause} ({rows} registry rows, {n} headless \
          reservations{waiting_note}); every counted row: fno agents gate-status, field \
          slot_rows{remedy}; {tail}",
+        cap_clause = learned.clause(),
         n = claims.len()
     )
 }
@@ -1395,7 +1396,9 @@ fn decide_gate(
         maybe_emit_spawn_cap_escape();
         return Ok(GateGuard::default());
     }
-    let cap = agents_config::max_live(config_cwd) as usize;
+    let ceiling = agents_config::max_live(config_cwd) as usize;
+    let learned = crate::capacity::effective_from_env(ceiling);
+    let cap = learned.cap;
     let floor_gb = agents_config::min_free_gb(config_cwd);
     let swap_cap = agents_config::max_swap_pct(config_cwd);
     // AC7: the retired trigger (max_load_per_cpu) is not read here;
@@ -1958,7 +1961,7 @@ fn decide_gate(
                             }
                             let line = slot_refusal_line(
                                 slots,
-                                cap,
+                                &learned,
                                 live.len(),
                                 &reservations,
                                 waiting.len(),
@@ -2002,7 +2005,7 @@ fn decide_gate(
                             }
                             let line = slot_refusal_line(
                                 slots,
-                                cap,
+                                &learned,
                                 live.len(),
                                 &reservations,
                                 waiting.len(),
@@ -3892,9 +3895,20 @@ Swapouts: 3444531.\n";
     /// AC5-TEXT: the shared refusal sentence names the probe field that lists
     /// every counted row, marks the operator-waiting share, and never again
     /// blames a population its own recommended reader cannot see.
+    /// An unknown effective cap, the shape every fallback clause test wants.
+    fn no_state() -> crate::capacity::Effective {
+        crate::capacity::Effective {
+            cap: 23,
+            ceiling: 23,
+            known: false,
+            reason: None,
+            since: None,
+        }
+    }
+
     #[test]
     fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
-        let line = slot_refusal_line(3, 2, 3, &[], 1, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, &no_state(), 3, &[], 1, "refusing (--no-wait).");
         assert!(line.contains("fno agents gate-status"), "{line}");
         assert!(line.contains("slot_rows"), "{line}");
         assert!(
@@ -3904,7 +3918,7 @@ Swapouts: 3444531.\n";
         assert!(!line.contains("--status quiet"), "{line}");
         assert!(!line.contains("fno agents top"), "{line}");
 
-        let line = slot_refusal_line(3, 2, 3, &[], 0, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, &no_state(), 3, &[], 0, "refusing (--no-wait).");
         assert!(!line.contains("wait on an operator question"), "{line}");
     }
 

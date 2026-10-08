@@ -355,7 +355,9 @@ mod probe {
             .map(|a| a.iter().filter_map(Value::as_str).any(|s| s == "lanes"))
             .unwrap_or(false);
 
-        let cap = agents_config::max_live(&config_cwd) as usize;
+        let ceiling = agents_config::max_live(&config_cwd) as usize;
+        let learned = crate::capacity::effective(&home, ceiling);
+        let cap = learned.cap;
         let floor_gb = agents_config::min_free_gb(&config_cwd);
         let swap_cap = agents_config::max_swap_pct(&config_cwd);
 
@@ -494,7 +496,7 @@ mod probe {
             if slots >= cap {
                 return refuse_with(
                     "max_live",
-                    format!("{slots} live worker slots >= max_live {cap}"),
+                    format!("{slots} live worker slots >= {}", learned.clause()),
                     json!({"count": slots, "max_live": cap}),
                     &[fleet_row(slots, cap)],
                     out,
@@ -682,6 +684,16 @@ mod probe {
         out.insert("lanes".into(), lanes.clone());
         out.insert("live_workers".into(), json!(slots));
         out.insert("max_live".into(), json!(cap));
+        // The learned cap rides every accepted answer: `fno agents
+        // gate-status --json | jq .effective` is the live read.
+        out.insert("effective".into(), json!(cap));
+        out.insert("effective_ceiling".into(), json!(ceiling));
+        if !learned.known {
+            out.insert(
+                "effective_note".into(),
+                json!("effective cap unknown, using ceiling"),
+            );
+        }
         out.insert("slots".into(), json!(slots));
         out.insert("share".into(), share_json(&reading));
         if let Some(payload_adm) = &cpu {
