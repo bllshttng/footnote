@@ -64,7 +64,7 @@ fn pin_vendor_state(env: &CapacityEnv, registry: &str) -> LaneStatePins {
         "[agents.provider_limits.zai]\nlanes = 2\n",
     )
     .unwrap();
-    std::fs::write(pins.registry_path(), registry).unwrap();
+    crate::registry_store::seed_raw(&pins.registry_path(), registry);
     pins
 }
 

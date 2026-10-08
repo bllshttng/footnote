@@ -2032,7 +2032,7 @@ mod tests {
         // renders FAIL instead of a quiet ok.
         let (dir, home) = retirement_sweep_tmp_home("registry-unreadable");
         std::fs::create_dir_all(home.root()).unwrap();
-        std::fs::write(home.registry_json(), "{not json").unwrap();
+        crate::registry_store::seed_raw(&home.registry_json(), "{not json");
         let row = run_retire_pass_and_read_tick(
             &dir,
             &home,

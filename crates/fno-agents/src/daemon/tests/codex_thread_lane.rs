@@ -2343,10 +2343,9 @@ async fn codex_target_launch_cwd_thread_start(
 }
 
 fn codex_target_launch_cwd_registry_row(home: &AgentsHome, name: &str) -> serde_json::Value {
-    let Ok(raw) = std::fs::read_to_string(home.registry_json()) else {
+    let Ok(registry) = crate::registry_store::read(&home.registry_json()) else {
         return serde_json::Value::Null;
     };
-    let registry: serde_json::Value = serde_json::from_str(&raw).expect("registry json");
     registry["agents"]
         .as_array()
         .and_then(|entries| entries.iter().find(|entry| entry["name"] == name).cloned())

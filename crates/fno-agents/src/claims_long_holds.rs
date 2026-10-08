@@ -46,9 +46,11 @@ pub struct LongHoldRow {
 }
 
 fn sidecar_requests(cdir: &Path, key: &str) -> u64 {
-    std::fs::read_to_string(cdir.join(format!("{}.held-requests", encode_key(key))))
-        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
-        .unwrap_or(0)
+    std::fs::read_to_string(
+        crate::claims_root::auxiliary_dir(cdir).join(format!("{}.held-requests", encode_key(key))),
+    )
+    .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
+    .unwrap_or(0)
 }
 
 fn pid_observed(rec: &ClaimRecord) -> String {
@@ -68,9 +70,16 @@ fn pid_observed(rec: &ClaimRecord) -> String {
 /// Where the record's lockfile sits: the sidecar the gate wrote belongs to
 /// that directory, not to whichever dir is listed first.
 fn record_dir<'a>(dirs: &'a [PathBuf], rec: &ClaimRecord) -> Option<&'a Path> {
-    let name = format!("{}.lock", encode_key(&rec.key));
     dirs.iter()
-        .find(|dir| dir.join(&name).exists())
+        .find(|dir| {
+            crate::claim_store::records_in(dir, Some(&rec.key), true).is_ok_and(|rows| {
+                rows.iter().any(|row| {
+                    row.key == rec.key
+                        && row.holder == rec.holder
+                        && row.acquired_at == rec.acquired_at
+                })
+            })
+        })
         .map(PathBuf::as_path)
 }
 
@@ -262,12 +271,7 @@ mod tests {
     }
 
     fn write_rec(dir: &Path, rec: &ClaimRecord) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{}.lock", encode_key(&rec.key))),
-            serde_json::to_string(rec).unwrap(),
-        )
-        .unwrap();
+        crate::claim_store::seed_at_path(&dir.join(format!("{}.lock", encode_key(&rec.key))), rec);
     }
 
     #[test]
@@ -294,8 +298,10 @@ mod tests {
             &claims_dir,
             &flight_rec("node:z", "target-session:w", Some(dead_pid() as i32), 90),
         );
+        let auxiliary = crate::claims_root::auxiliary_dir(&claims_dir);
+        std::fs::create_dir_all(&auxiliary).unwrap();
         std::fs::write(
-            claims_dir.join(format!("{}.held-requests", encode_key("flight:abc"))),
+            auxiliary.join(format!("{}.held-requests", encode_key("flight:abc"))),
             "1 1\n2 2\n3 3\n\n",
         )
         .unwrap();
@@ -487,7 +493,7 @@ mod tests {
         let claims_dir = td.path().join("claims");
         write_rec(
             &claims_dir,
-            &flight_rec("flight:op", "single-flight:o", None, 13),
+            &flight_rec("flight:op", "single-flight:o", Some(dead_pid() as i32), 13),
         );
         let code = run_claim_long_holds(&[
             "--min-hold-s".into(),

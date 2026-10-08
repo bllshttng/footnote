@@ -328,14 +328,13 @@ def release_review_hold(
         state = status.get("state")
         if state == ClaimState.FREE.value:
             return False
-        # A corrupted lockfile has no readable holder, so no release_claim call
-        # can name one; unlink it directly. Leaving it is the worse outcome:
-        # every read classifies it CORRUPTED, which BLOCKS, forever.
+        # A corrupted claim has no readable holder, so no release_claim call
+        # can name one; force-drop it. Leaving it is the worse outcome: every
+        # read classifies it CORRUPTED, which BLOCKS, forever.
         if state == ClaimState.CORRUPTED.value:
-            from fno.claims.io import claim_path
+            from fno.claims.core import force_release_claim
 
-            claim_path(key, root=root).unlink(missing_ok=True)
-            return True
+            return force_release_claim(key, "corrupted review hold", root=root).archived
         return release_claim(key, holder or status.get("holder") or "", root=root) is not None
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"review-hold: could not release hold on {branch}: {exc}\n")

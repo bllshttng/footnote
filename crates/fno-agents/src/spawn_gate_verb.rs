@@ -355,7 +355,9 @@ mod probe {
             .map(|a| a.iter().filter_map(Value::as_str).any(|s| s == "lanes"))
             .unwrap_or(false);
 
-        let cap = agents_config::max_live(&config_cwd) as usize;
+        let ceiling = agents_config::max_live(&config_cwd) as usize;
+        let learned = crate::capacity::effective(&home, ceiling);
+        let cap = learned.cap;
         let floor_gb = agents_config::min_free_gb(&config_cwd);
         let swap_cap = agents_config::max_swap_pct(&config_cwd);
 
@@ -466,6 +468,18 @@ mod probe {
         let (slot_row_entries, slot_reservations) =
             spawn_gate::slot_reading(&registry_path, &mut warnings);
         let slots = slot_row_entries.len() + slot_reservations.len();
+        // The capacity fields ride EVERY verdict: saturation is when the
+        // probe is most useful, so the numbers are in place before any
+        // refusal returns, not only on the accepted tail.
+        out.insert("effective".into(), json!(cap));
+        out.insert("effective_ceiling".into(), json!(ceiling));
+        if !learned.known {
+            out.insert(
+                "effective_note".into(),
+                json!("effective cap unknown, using ceiling"),
+            );
+        }
+        out.insert("slots".into(), json!(slots));
         let mut slot_rows_json: Vec<Value> = slot_row_entries
             .iter()
             .map(|r| {
@@ -494,7 +508,7 @@ mod probe {
             if slots >= cap {
                 return refuse_with(
                     "max_live",
-                    format!("{slots} live worker slots >= max_live {cap}"),
+                    format!("{slots} live worker slots >= {}", learned.clause()),
                     json!({"count": slots, "max_live": cap}),
                     &[fleet_row(slots, cap)],
                     out,
@@ -615,7 +629,8 @@ mod probe {
         ) {
             if !caller.is_empty() && held >= share {
                 let mut message = format!(
-                    "this lead holds {held} of max_live {cap} across {leads} leads (share {share})"
+                    "this lead holds {held} of {} across {leads} leads (share {share})",
+                    learned.clause()
                 );
                 message.push_str(&crate::spawn_gate::held_rows_suffix(
                     reading.held_rows.as_ref(),
@@ -682,7 +697,6 @@ mod probe {
         out.insert("lanes".into(), lanes.clone());
         out.insert("live_workers".into(), json!(slots));
         out.insert("max_live".into(), json!(cap));
-        out.insert("slots".into(), json!(slots));
         out.insert("share".into(), share_json(&reading));
         if let Some(payload_adm) = &cpu {
             out.insert("share_low".into(), json!(payload_adm.share_low));
@@ -1656,7 +1670,7 @@ mod tests {
         assert_eq!(answer["reason"], "lead_share");
         assert_eq!(
             answer["message"],
-            "this lead holds 2 of max_live 2 across 1 leads (share 2); the rows charged to you are w1, w2"
+            "this lead holds 2 of max_live 2 (effective cap unknown, using ceiling) across 1 leads (share 2); the rows charged to you are w1, w2"
         );
         assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1886,7 +1900,7 @@ mod tests {
             "holder_pid": std::process::id(),
         }));
         let claims_dir = claims_root.join(".fno").join("claims");
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         let handed = gate_answer(&json!({
             "mode": "gate",
             "name": "revival-two",
@@ -1904,7 +1918,7 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "hold false leaves no claim behind: {:?}",
-            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+            leftovers.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
         );
         assert_eq!(handed["status"], "admitted", "{handed}");
         assert!(handed["gate_key"].is_string(), "{handed}");
@@ -1944,7 +1958,7 @@ mod tests {
         }));
 
         let claims_dir = dir.join("claims-root").join(".fno").join("claims");
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         std::env::remove_var(crate::paths::HOME_ENV);
         std::env::remove_var("FNO_CLAIMS_ROOT");
         match prior_config {
@@ -1966,7 +1980,7 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "refusals before the mint write nothing: {:?}",
-            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+            leftovers.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -2048,8 +2062,6 @@ mod tests {
         std::fs::create_dir_all(&agents_home).unwrap();
         std::env::set_var(crate::paths::HOME_ENV, &agents_home);
         let root = dir.join("claims-root");
-        let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -2137,7 +2149,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let argv: Vec<String> = [
             "t-reserved-x-4444",
@@ -2152,14 +2163,14 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let code = reserve_spawn_gate(&dir, &argv);
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code, 2);
         assert!(
             leftovers.is_empty(),
             "the ceiling refusal writes no claim: {:?}",
-            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+            leftovers.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -2174,7 +2185,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
-        std::fs::create_dir_all(&claims_dir).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -2193,16 +2203,12 @@ mod tests {
             "{}.lock",
             crate::claims::encode_key("worker:t-first-x-4444")
         ));
-        std::fs::write(
-            &first,
-            format!(
+        crate::claim_store::seed_yaml_at_path(&first, &format!(
                 "schema_version: {}\nkey: worker:t-first-x-4444\nholder: lead-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n  reserved_by: lead-1\n",
                 crate::claims::SCHEMA_VERSION,
                 now + 600_000,
                 std::process::id()
-            ),
-        )
-        .unwrap();
+            ));
         let argv: Vec<String> = [
             "t-second-x-4444",
             "--provider",
@@ -2214,7 +2220,7 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let code = reserve_spawn_gate(&dir, &argv);
-        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let leftovers = crate::claim_store::records_in(&claims_dir, None, true).unwrap();
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code, 2);

@@ -1165,7 +1165,8 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             .map(|rows| rows.iter().map(|r| r.holder.clone()).collect());
         let slots = crate::spawn_gate_lanes::share_reading(
             &crate::paths::AgentsHome::from_env().registry_json(),
-            crate::agents_config::max_live(&ctx.cwd) as usize,
+            crate::capacity::effective_from_env(crate::agents_config::max_live(&ctx.cwd) as usize)
+                .cap,
             session_id.as_deref(),
         )
         .share

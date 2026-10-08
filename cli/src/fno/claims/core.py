@@ -11,13 +11,12 @@ Seven operations on top of io + staleness:
     force_release_claim - administrative override, always succeeds.
     reap_dead_claims  - archive every provably-dead claim (GC).
 
-Every state-changing verb appends typed audit events; lockfile writes are authoritative.
+Rust owns claim persistence and audit receipts in graph.db. Python is a transport client.
 """
 
 from __future__ import annotations
 
 import os
-import socket
 from subprocess import PIPE as _SUBPROCESS_PIPE
 from subprocess import Popen as _SubprocessPopen
 from pathlib import Path
@@ -25,51 +24,14 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from urllib.parse import quote as _url_quote
 
-from .events import (
-    emit_claim_acquired,
-    emit_claim_force_overridden,
-    emit_claim_idempotent_reacquired,
-    emit_claim_reap_swept,
-    emit_claim_reaped,
-    emit_claim_refreshed,
-    emit_claim_rebound,
-    emit_claim_released,
-    emit_claim_stale_reclaimed,
-)
-from .hostid import is_same_machine, machine_id
-from .io import (
-    ClaimAlreadyHeld,
-    ClaimCorrupted,
-    ClaimGoneAway,
-    archive_claim,
-    atomic_create_exclusive,
-    claim_path,
-    claims_dir,
-    decode_key,
-    dedup_claims_roots,
-    global_claims_root,
-    read_claim_file,
-    serialize_claim,
-)
-from .self_identity import resolve_self_identity
-from ..mutex import acquire_dir_mutex, release_dir_mutex
+from .io import (ClaimAlreadyHeld, ClaimCorrupted, ClaimGoneAway, claim_path, encode_key, dedup_claims_roots, global_claims_root, read_claim_file)
 from .verdict import (
     ClaimSweepOmission,
     ClaimVerdictError,
     ClaimVerdictUnavailable,
     claim_verdicts,
 )
-from .types import (
-    MAX_ENCODED_FILENAME_BYTES,
-    MAX_KEY_LENGTH,
-    MAX_TTL_MS,
-    MIN_TTL_MS,
-    PID_UNAVAILABLE_SCHEMA_VERSION,
-    SCHEMA_VERSION,
-    Claim,
-    ClaimState,
-    now_ms,
-)
+from .types import (MAX_ENCODED_FILENAME_BYTES, MAX_KEY_LENGTH, MAX_TTL_MS, MIN_TTL_MS, Claim, ClaimState, now_ms)
 
 
 class ClaimHeldByOther(Exception):
@@ -216,471 +178,6 @@ def _validate_inputs(
         raise ClaimValidationError(f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]")
 
 
-def _resolve_pid_provenance(
-    pid: Optional[int], ttl_ms: Optional[int], harness: Optional[str]
-) -> str:
-    """Classify how a claim's pid was resolved: "session-prover" or "ambient".
-
-    The corroborated hybrid arm in the native classifier reads this field to
-    decide whether a live pid may keep an expired TTL claim LIVE, so the stamp
-    must be EARNED, never asserted. The one earning path is the process-tree
-    prover: the pid must be exactly ``resolve_session_pid``'s answer for THIS
-    process's own session. Everything else - a caller-supplied pid, a pid
-    resolved through an ambient harness marker (the specimen: a reattach that
-    landed on a chat app's app-server), or a defaulted transient subprocess
-    pid - stamps "ambient", and the TTL stays the lease it claims to be.
-
-    The walk proves WHICH process the pid is. It cannot prove that process
-    dies when the session does, and under a harness whose sessions share one
-    host process it does not: the walk lands on a multiplexer that outlives
-    every session it hosts, both sides of the equality below hold, and the
-    stamp is earned by a walk that proved the wrong thing. So ``harness``
-    gates the stamp - see ``pid_dies_with_session``.
-
-    ``harness`` is REQUIRED and is the harness the caller is about to WRITE on
-    the record, never one resolved here. Resolving it here would let the stamp
-    be earned against the walking process's own harness while the record stores
-    a different one, so a record could contradict itself about which harness
-    wrote it - the state the Rust ``make_claim`` hoists a single
-    ``resolve_harness()`` call to make impossible. It also spares a second full
-    ancestor walk: every caller has already resolved this value.
-
-    ``ttl_ms`` gates the walk: provenance is only ever consulted on a TTL
-    claim (PID-liveness claims never expire into the hybrid arm), so a
-    PID-liveness acquire skips the process walk entirely. Like the harness
-    resolution, callers invoke this OUTSIDE the recovery mutex - the walk has
-    no business on a critical section every other acquirer polls on.
-    """
-    if pid is None or ttl_ms is None:
-        return "ambient"
-    try:
-        from .session_pid import pid_dies_with_session, resolve_session_pid
-
-        if not pid_dies_with_session(harness):
-            return "ambient"
-        if resolve_session_pid(from_pid=os.getpid()) != pid:
-            return "ambient"
-        return "session-prover"
-    except Exception:  # noqa: BLE001 - an unprovable pid is ambient, never an error
-        return "ambient"
-
-
-def _make_claim(
-    key: str,
-    holder: str,
-    ttl_ms: Optional[int],
-    reason: Optional[str],
-    metadata: Optional[dict[str, Any]],
-    pid: Optional[int],
-    host: Optional[str],
-    harness: Optional[str] = None,
-    pid_provenance: Optional[str] = None,
-    pid_unavailable: bool = False,
-    *,
-    session_id: Optional[str] = None,
-) -> Claim:
-    acquired = now_ms()
-    return Claim(
-        schema_version=(PID_UNAVAILABLE_SCHEMA_VERSION if pid_unavailable else SCHEMA_VERSION),
-        key=key,
-        holder=holder,
-        acquired_at=acquired,
-        expires_at=(acquired + ttl_ms) if ttl_ms is not None else None,
-        pid=None if pid_unavailable else (pid if pid is not None else os.getpid()),
-        pid_unavailable=pid_unavailable,
-        host=host if host is not None else socket.gethostname(),
-        pid_provenance=pid_provenance,
-        # Liveness compares THIS, not host: a name that flips mid-session made a
-        # live holder read cross-host, then stale, then stealable. Additive, so a
-        # pre-change reader still reads host and behaves exactly as today. `or
-        # None` omits the field when no stable id exists rather than recording a
-        # hostname readers would trust as authoritative.
-        machine_id=machine_id() or None,
-        reason=reason,
-        # tag the claim with the acquiring harness so the dispatch guard
-        # can read a foreign owner off the claim. This is the PRODUCTION writer
-        # (`fno agents claim` forwards to this Python CLI), kept in lockstep with the
-        # Rust make_claim resolver via the shared harness_identity markers.
-        # An explicit `harness` wins over ambient resolution so callers can pin
-        # the owning harness deterministically.
-        #
-        # Resolution happens in the CALLER, before the recovery mutex, never
-        # here: the owned path walks the process tree, and this function runs
-        # inside the critical section every other acquirer waits on.
-        harness=harness,
-        session_id=session_id,
-        metadata=metadata or {},
-    )
-
-
-def _legacy_acquire_claim(
-    key: str,
-    holder: str,
-    *,
-    reason: Optional[str] = None,
-    ttl_ms: Optional[int] = None,
-    metadata: Optional[dict[str, Any]] = None,
-    pid: Optional[int] = None,
-    pid_unavailable: bool = False,
-    host: Optional[str] = None,
-    harness: Optional[str] = None,
-    pid_provenance: Optional[str] = None,
-    harness_session_id: Optional[str] = None,
-    root: Optional[Path] = None,
-    _attempt: int = 0,
-) -> Claim:
-    """Try to acquire a claim on ``key`` for ``holder``.
-
-    Resolution order when the path already exists:
-      1. Existing holder == requested holder => idempotent re-acquire:
-         rewrite the file with refreshed pid/host/acquired_at; emit
-         ``claim_idempotent_reacquired``.
-      2. Existing claim is stale (dead PID or TTL expired) => recovery:
-         archive to ``.expired/``, retry exclusive-create once. On
-         retry-EEXIST: re-read; whoever won, return result of step 1 or
-         raise ClaimHeldByOther.
-      3. Existing claim is live and held by another => raise
-         ClaimHeldByOther.
-
-    Inputs are validated up front (key length, ttl bounds, non-empty
-    holder). Validation failures raise ClaimValidationError before any
-    filesystem write so the lock dir is not polluted with half-bad files.
-
-    ``_attempt`` is internal bookkeeping only (never pass it): each
-    contention/race branch recurses through ``_retry()``, which counts
-    attempts and raises ``ClaimContended`` after the native retry budget
-    rather than recursing unbounded, mirroring the Rust claim loop.
-    """
-    _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
-    path = claim_path(key, root=root)
-    # Unconditional initial value (each branch below reassigns its own):
-    # gives _release_and_retry's `nonlocal` an unambiguous prior binding
-    # rather than relying on mypy tracing every conditional branch.
-    acquired_lock = False
-
-    def _retry() -> Claim:
-        if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
-            raise ClaimContended(
-                f"acquire_claim gave up after {_PY_LEGACY_RETRY_LIMIT} contention retries on {key!r}"
-            )
-        return _legacy_acquire_claim(
-            key,
-            holder,
-            reason=reason,
-            ttl_ms=ttl_ms,
-            metadata=metadata,
-            pid=pid,
-            pid_unavailable=pid_unavailable,
-            host=host,
-            harness=harness,
-            pid_provenance=pid_provenance,
-            harness_session_id=harness_session_id,
-            root=root,
-            _attempt=_attempt + 1,
-        )
-
-    def _release_and_retry() -> Claim:
-        nonlocal acquired_lock
-        if acquired_lock:
-            release_dir_mutex(recovery_lock, recovery_token)
-            acquired_lock = False
-        return _retry()
-
-    # Resolve the harness ONCE, outside every mutex below (: the owned
-    # path walks the process tree inside the critical section). ONE walk for
-    # both halves: session_id and harness tag share one identity answer.
-    identity = resolve_self_identity()
-    if harness is None:
-        harness = identity.harness
-    if harness_session_id is None:
-        harness_session_id = identity.session_id
-
-    # Provenance resolves ONCE, here, beside the harness and outside every
-    # mutex below, for the same reason: the earning path walks the
-    # process tree. An explicit stamp from a caller that already did its own
-    # proving is accepted verbatim; everything else earns the field against
-    # the prover or stays ambient - a writer that cannot reach the prover
-    # records the pid it has with "ambient" rather than lying.
-    if pid_provenance is None:
-        pid_provenance = _resolve_pid_provenance(pid, ttl_ms, harness)
-
-    new_claim = _make_claim(
-        key, holder, ttl_ms, reason, metadata, pid, host, harness,
-        pid_provenance, pid_unavailable, session_id=harness_session_id,
-    )
-    payload = serialize_claim(new_claim)
-
-    try:
-        atomic_create_exclusive(path, payload)
-        emit_claim_acquired(new_claim)
-        return new_claim
-    except ClaimAlreadyHeld:
-        pass
-
-    # Path exists; classify the existing holder.
-    try:
-        existing = read_claim_file(path)
-    except ClaimGoneAway:
-        # Disappeared between collision and read - someone else released
-        # while we were looking. Recurse once; if still racy, surface it.
-        return _retry()
-
-    if existing.holder == holder:
-        # Idempotent re-acquire: refresh pid/host/acquired_at. Take the same
-        # per-key recovery mutex reap_dead_claims() holds while it re-verifies
-        # and archives this exact file - without it, a respawned worker could
-        # rewrite the file as live in the gap between reap's re-verify and its
-        # archive_claim() call, and reap would archive the fresh write instead
-        # of the dead one it proved. Contention handling mirrors the
-        # stale-reclaim branch below (steal a corpse or wait briefly, then
-        # recurse) rather than a bare retry loop, which would spin straight
-        # into RecursionError against a genuinely live holder.
-        #
-        # This mkdir-path-build + acquired_lock/recovery_token + try/finally
-        # shape repeats at 6 sites in this file (here, the stale-reclaim
-        # branch below, compare_and_rebind, refresh_claim, force_release_claim,
-        # and reap_dead_claims). acquire_dir_mutex already collapsed the inner
-        # mkdir/steal/wait logic each site used to hand-roll; a further
-        # `with recovery_mutex(path) as token:` context manager could
-        # collapse this outer bookkeeping too, but each site's body differs
-        # enough (recurse vs. raise vs. continue on timeout) that it was
-        # judged a separate, larger refactor rather than folded into this
-        # PR's mutex-consolidation and reap-hardening scope.
-        recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
-        acquired_lock = False
-        recovery_token = ""
-        try:
-            token = acquire_dir_mutex(
-                recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
-            )
-            if token is None:
-                return _retry()
-            recovery_token = token
-            acquired_lock = True
-
-            # Re-verify under the mutex: a concurrent stale-reclaim or reap
-            # archive could have completed between our initial unlocked read
-            # (above) and acquiring this lock, installing a different holder
-            # (or nothing) at this path. Recurse rather than blindly
-            # overwrite whatever is there now - the recursion re-reads and
-            # re-dispatches to whichever branch the fresh state calls for.
-            try:
-                fresh_existing = read_claim_file(path)
-            except ClaimGoneAway:
-                return _release_and_retry()
-            if fresh_existing.holder != holder:
-                return _release_and_retry()
-
-            refreshed = _make_claim(
-                key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                pid_provenance, pid_unavailable, session_id=harness_session_id,
-            )
-            _atomic_replace(path, serialize_claim(refreshed))
-            emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
-            return refreshed
-        finally:
-            if acquired_lock:
-                release_dir_mutex(recovery_lock, recovery_token)
-
-    # Stale? Try recovery under a mkdir-based recovery mutex so the archive +
-    # recreate steps are serialized across concurrent workers. Without the
-    # mutex, two workers can both observe a stale file, both archive (one
-    # actually moves, one no-ops), and both successfully create the new lock
-    # in the gap between archive-and-create.
-    try:
-        existing_is_live = _existing_is_live(existing, root=root)
-    except ClaimGoneAway:
-        return _retry()
-    except ClaimSweepOmission:
-        # The sweep's directory snapshot straddled another racer's
-        # archive-and-recreate: the door refused to attest the key free,
-        # which says nothing about liveness. Re-read and re-dispatch like
-        # the other transient races on this path instead of leaking a
-        # verdict-instrument error out of acquire's return-or-ClaimHeldByOther
-        # contract (same disposition the create collision got).
-        return _retry()
-    if not existing_is_live:
-        recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
-        acquired_lock = False
-        recovery_token = ""
-        try:
-            # Another worker may be doing recovery -- or died holding the
-            # mutex. acquire_dir_mutex steals a corpse (age-based,
-            # rename-atomic) so a killed recoverer cannot brick this key
-            # forever, else polls briefly. Either outcome on timeout means
-            # recurse from the top: the recovering worker will either
-            # succeed (we then see live-other) or fail (we get another shot).
-            token = acquire_dir_mutex(
-                recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
-            )
-            if token is None:
-                return _retry()
-            recovery_token = token
-            acquired_lock = True
-
-            # Inside the recovery mutex: verify the existing claim is still
-            # what we read (a fast-moving releaser could have unlinked it).
-            try:
-                existing = read_claim_file(path)
-            except ClaimGoneAway:
-                # File vanished while we held the recovery lock - someone
-                # released cleanly. Try to create at the empty path; if a
-                # third worker races into create between our gone-away
-                # detection and this call, recurse rather than raising the
-                # low-level ClaimAlreadyHeld out of acquire_claim.
-                try:
-                    atomic_create_exclusive(path, payload)
-                except ClaimAlreadyHeld:
-                    return _release_and_retry()
-                emit_claim_acquired(new_claim)
-                return new_claim
-
-            if existing.holder == holder:
-                # Raced into the idempotent path while we were grabbing the lock.
-                refreshed = _make_claim(
-                    key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                    pid_provenance, pid_unavailable, session_id=harness_session_id,
-                )
-                _atomic_replace(path, serialize_claim(refreshed))
-                emit_claim_idempotent_reacquired(refreshed, previous=existing)
-                return refreshed
-
-            try:
-                existing_is_live = _existing_is_live(existing, root=root)
-            except ClaimGoneAway:
-                return _release_and_retry()
-            except ClaimSweepOmission:
-                # Same transient snapshot race as above, now under the
-                # recovery mutex: release and re-dispatch rather than leak.
-                return _release_and_retry()
-            if existing_is_live:
-                # Raced - now it's live. Fall through to ClaimHeldByOther.
-                raise ClaimHeldByOther(
-                    holder=existing.holder,
-                    pid=existing.pid,
-                    host=existing.host,
-                    key=key,
-                )
-
-            # Still stale; do the archive + recreate atomically (under the mutex).
-            archive_claim(path, ts_ms=now_ms())
-            try:
-                atomic_create_exclusive(path, payload)
-            except ClaimAlreadyHeld:
-                # A top-level creator won the empty path in the gap between our
-                # archive and this create (the top-level O_EXCL does not take the
-                # recovery mutex). Recurse to re-read and classify rather than
-                # letting the low-level ClaimAlreadyHeld escape acquire_claim's
-                # return-or-ClaimHeldByOther contract; the recursion sees the new
-                # live holder and raises ClaimHeldByOther.
-                return _release_and_retry()
-            emit_claim_stale_reclaimed(new_claim, previous=existing)
-            return new_claim
-        finally:
-            if acquired_lock:
-                release_dir_mutex(recovery_lock, recovery_token)
-
-    # Live and not us => block.
-    raise ClaimHeldByOther(
-        holder=existing.holder,
-        pid=existing.pid,
-        host=existing.host,
-        key=key,
-    )
-
-
-def _rebound_claim(
-    existing: Claim,
-    new_pid: Optional[int],
-    ttl_ms: Optional[int],
-    *,
-    new_holder: Optional[str] = None,
-    new_reason: Optional[str] = None,
-    new_harness: Optional[str] = None,
-    new_metadata: Optional[dict] = None,
-    new_pid_provenance: Optional[str] = None,
-    keep_acquired_at: bool = False,
-    new_pid_unavailable: bool = False,
-    new_session_id: Optional[str] = None,
-) -> Claim:
-    """A rebound claim: identity fields preserved, process anchor + lease fresh.
-
-    The native-resume rebind keeps ``key``/``holder``/``reason``/``metadata``/
-    ``harness`` (one target attempt retains one symbolic owner) and rewrites
-    only ``pid``/``host``/``machine_id``/``acquired_at``/``expires_at``. A
-    PID-liveness claim stays PID-liveness (``ttl_ms`` None and no prior
-    ``expires_at``); a TTL claim refreshes to ``now + prior_window`` so the
-    deadline never compounds across rebinds (the renew() lesson).
-
-    ``new_holder`` is the one exception to "identity preserved", and only the
-    dispatch handover passes it: the spawn side and the worker side of one
-    launch are genuinely different names for one piece of work. Its caller
-    proved the prior holder first; see :func:`compare_and_rebind`.
-
-    ``new_reason`` and ``new_harness`` travel with it. A handover changes WHO
-    owns the claim, so keeping the spawner's reason and harness tag would leave
-    the claim describing the wrong owner - and the init hook passes a PROVEN
-    harness precisely so a session that inherited a foreign marker does not
-    mislabel its claim. Both default to None, which preserves the existing
-    value, so every same-holder rebind is unchanged.
-
-    ``keep_acquired_at`` is for the renewal RE-ANCHOR, which repairs the process
-    anchor rather than acquiring anew. Two things depend on it. The do
-    provenance row keys ``started_at`` on ``acquired_at``, so moving it makes
-    the release stamp open a SECOND row instead of closing the one this claim
-    opened. And PID-reuse detection compares ``create_time(pid)`` against it, so
-    holding it still refuses an anchor whose session began AFTER the claim -
-    which is the cross-session takeover a re-anchor must never perform.
-    """
-    # TWO CLOCKS, and conflating them froze the lease. `acquired` is the record
-    # of when this claim began; the DEADLINE always runs from now. Deriving the
-    # deadline from a held `acquired` made a re-anchoring refresh extend the
-    # claim by zero, and on a short window it wrote a deadline in the PAST, so
-    # the heartbeat drove its own claim from suspect straight to stale.
-    now = now_ms()
-    acquired = existing.acquired_at if keep_acquired_at else now
-    if ttl_ms is not None:
-        expires_at: Optional[int] = now + ttl_ms
-    elif existing.expires_at is not None:
-        expires_at = now + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
-    else:
-        expires_at = None
-    # This is the ONE place that decides which harness a rebound record
-    # carries, so it is also where the stamp is held to it. A caller resolves
-    # its provenance before the mutex, against the harness it EXPECTS to write,
-    # and a non-handover rebind then keeps the prior record's harness instead -
-    # so the two can part company between there and here. Narrowing at the
-    # branch that picks the harness makes the record self-consistent by
-    # construction rather than by four callers each remembering.
-    from .session_pid import pid_dies_with_session
-
-    written_harness = new_harness if new_harness is not None else existing.harness
-    if not pid_dies_with_session(written_harness):
-        new_pid_provenance = "ambient"
-    return Claim(
-        schema_version=(PID_UNAVAILABLE_SCHEMA_VERSION if new_pid_unavailable else SCHEMA_VERSION),
-        key=existing.key,
-        holder=new_holder or existing.holder,
-        acquired_at=acquired,
-        expires_at=expires_at,
-        pid=None if new_pid_unavailable else new_pid,
-        pid_unavailable=new_pid_unavailable,
-        host=socket.gethostname(),
-        machine_id=machine_id() or None,
-        reason=new_reason if new_reason is not None else existing.reason,
-        harness=written_harness,
-        # The pid is being REWRITTEN here, so the prior record's provenance
-        # describes a process this claim no longer names. A rebound pid either
-        # earns its own stamp from the caller (the reanchor path's pid IS the
-        # prover's answer) or resets to ambient - never silently inherits.
-        pid_provenance=new_pid_provenance,
-        # Identity like the holder: preserve unless the caller (a handover)
-        # re-stamps it to the successor's session.
-        session_id=new_session_id if new_session_id is not None else existing.session_id,
-        metadata=new_metadata if new_metadata else existing.metadata,
-    )
-
-
 def compare_and_rebind(
     key: str,
     expected_holder: str,
@@ -698,288 +195,29 @@ def compare_and_rebind(
     harness_tag: Optional[str] = None,
     harness_session_id: Optional[str] = None,
 ) -> tuple[Claim, str]:
-    """Atomically rebind a same-holder LOCAL claim whose prior PID is dead.
-
-    The native-resume primitive. A resumed durable session proves it
-    owns a target claim by matching the symbolic holder AND showing the
-    recorded PID is dead on THIS machine, then takes a fresh PID + lease.
-    Distinct from ``acquire_claim``, which overwrites a same-holder claim even
-    when its PID is still live: two concurrent processes of one durable
-    conversation could then steal the claim back and forth.
-
-    Under the per-claim recovery mutex (the same one ``acquire_claim`` uses for
-    stale recovery), re-read and re-classify, then:
-
-    - prior PID still LIVE, == this pid  -> idempotent lease refresh;
-    - prior PID still LIVE, != this pid  -> ``RebindRefused`` (concurrent writer);
-    - SUSPECT/STALE but off-host          -> ``RebindRefused`` (death unproven);
-    - holder changed / claim gone / free / corrupt -> ``RebindRefused``;
-    - local same-holder, prior PID dead  -> atomically rebind to ``new_pid``.
-
-    Never creates a missing/free claim and never archives another holder (that
-    is the explicit ``fno do target start`` successor path). Emits ``claim_rebound``;
-    raises ``RebindRefused`` on any refusal.
-
-    ``new_holder`` moves the claim to a DIFFERENT holder on proof of the prior
-    one. The dispatch handover needs it: ``fno agents spawn --node``
-    takes the node claim before the worker exists, and the worker's own
-    ``fno do target init`` must then take it over rather than find it held and
-    abort. ``acquire_claim`` cannot do this - it raises ``ClaimHeldByOther`` for
-    a different holder on a live claim - and the same-holder rebind above cannot
-    either, because the two ends genuinely have different names.
-
-    Proof is what makes the move safe, and it is the SAME proof the same-holder
-    path already demands: the caller must name the exact prior holder, and this
-    re-reads under the mutex and refuses on any mismatch. The spawn-side holder
-    is worker-specific and reaches only that worker (exported into its
-    environment), so naming it is evidence of being the intended successor
-    rather than a bystander who guessed a key. A live prior PID that is not this
-    one still refuses as a concurrent writer, so the move never yanks a running
-    owner.
-
-    Omitting it preserves the holder, which is every pre-existing caller. A
-    handover also records the prior record's session id under
-    ``metadata['dispatched_by_session']`` so the session that dispatched the
-    work stays auditable after the successor's session replaces it.
-
-    Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
-    rebound), ``"idempotent"`` (a live same-PID lease refresh), or ``"handover"``
-    (a named prior holder was replaced by ``new_holder``).
-    """
-    _validate_inputs(key, expected_holder, ttl_ms)
-    path = claim_path(key, root=root)
-    npid = new_pid if new_pid is not None else os.getpid()
-    npid_unavailable = new_pid_unavailable or (new_pid is None and ttl_ms is not None)
-    # Resolved BEFORE the recovery mutex below, for the same reason as
-    # `acquire_claim`: the owned path walks the process tree, and everything
-    # after the lock runs while other callers poll on it.
-    # ONE walk for both halves (see acquire_claim).
-    identity = resolve_self_identity()
-    resolved_harness = new_harness if new_harness is not None else identity.harness
-    resolved_session_id = (
-        harness_session_id if harness_session_id is not None else identity.session_id
-    )
-    # Same placement, same reason: the rebind rewrites the pid, so its
-    # provenance is earned here against the prover or it resets to ambient.
-    resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
-    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
-    acquired_lock = False
-    recovery_token = ""
+    del emit, fno_id, harness_tag
+    import json
+    flags = ["--holder", new_holder or expected_holder, "--handover-from", expected_holder, "--bind-only"]
+    for flag,value in [("--reason",new_reason),("--harness",new_harness),("--session-id",harness_session_id),("--pid",new_pid),("--ttl-ms",ttl_ms)]:
+        if value is not None:
+            flags.extend((flag,str(value)))
+    if new_metadata is not None:
+        flags.extend(("--metadata",json.dumps(new_metadata)))
+    if new_pid_unavailable:
+        flags.append("--pid-unavailable")
+    flags.extend(_native_root_flags(root or _configured_claim_root()))
     try:
-        # A peer may be mid-recovery, or a recoverer died holding the mutex.
-        # acquire_dir_mutex steals a corpse so a killed peer cannot brick the
-        # rebind, else polls until timeout - a mutex that clears well inside
-        # the window (acquire_claim/reap's own archive-then-recreate is a
-        # few-ms critical section) now lets the rebind succeed instead of
-        # refusing on a steal-attempt-then-give-up basis. compare_and_rebind
-        # is a one-shot verb (unlike acquire_claim/refresh_claim it does not
-        # recurse), so a genuine timeout here still refuses rather than
-        # retrying from the top.
-        token = acquire_dir_mutex(
-            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
-        )
-        if token is None:
-            raise RebindRefused(
-                "claim recovery mutex busy; retry the resume bind",
-                state=None,
-            )
-        recovery_token = token
-        acquired_lock = True
-
-        # Inside the mutex: re-read + classify before any mutation.
+        payload = _native_claim("acquire",key,flags)
+    except ClaimVerdictError as exc:
+        # The refusal names its reason; the observed row is the status read.
         try:
-            existing = read_claim_file(path)
-        except ClaimGoneAway:
-            raise RebindRefused(
-                "claim vanished; this target no longer owns the node "
-                "(use `fno do target start` to reclaim)",
-                state="free",
-            )
-        except ClaimCorrupted:
-            raise RebindRefused(
-                "claim corrupted; cannot verify ownership (use `fno agents claim release --force`)",
-                state="corrupted",
-            )
-
-        if existing.holder != expected_holder:
-            raise RebindRefused(
-                f"holder mismatch: expected {expected_holder!r}, claim held by "
-                f"{existing.holder!r} (pid={existing.pid})",
-                state=_claim_state(existing, root=root).value,
-                holder=existing.holder,
-                pid=existing.pid,
-            )
-
-        state = _claim_state(existing, root=root)
-        # ONLY a launch-window holder may be replaced. Naming the prior holder
-        # is the proof, and for `spawn-handover:<worker>` that proof is real: it
-        # is minted per worker and travels only in that worker's environment.
-        # Every other holder is PUBLISHED by `fno agents claim status`, so without this
-        # anyone could read a holder off the store and hand the node to
-        # themselves - taking a running owner's claim, which `ClaimHeldByOther`
-        # had always refused.
-        #
-        # Computed ONCE and applied at all three rebind sites. Gating only the
-        # LIVE branch would leave the rename reachable through the idempotent
-        # and dead-owner paths, which is the same rule on one of three paths.
-        handover_allowed = bool(
-            new_holder
-            and new_holder != existing.holder
-            and existing.holder.startswith(HANDOVER_HOLDER_PREFIX)
-        )
-        if new_holder and new_holder != existing.holder and not handover_allowed:
-            # REFUSE, never fall through. Gating only the RENAME left this call
-            # dropping into the same-holder rebind below, which rewrote the
-            # victim's pid/host/expires_at and republished their claim as LIVE
-            # under THIS process. That is worse than the takeover the gate was
-            # added to stop: the claim then reads live to every dispatcher and
-            # `sweep_verdict` short-circuits on LIVE, so nothing can reap it.
-            raise RebindRefused(
-                f"holder {existing.holder!r} is not a launch-window holder; "
-                "only a spawn-side handover claim can be taken over",
-                state=state.value,
-                holder=existing.holder,
-                pid=existing.pid,
-            )
-        effective_new_holder = new_holder if handover_allowed else None
-        # The reason and the harness tag describe the OWNER, so they travel with
-        # the rename or not at all. Applying them to a refused handover let a
-        # caller rewrite another holder's fields while leaving the holder alone.
-        effective_new_reason = new_reason if handover_allowed else None
-        effective_new_metadata = None
-        if handover_allowed:
-            # The takeover rewrites session_id to the worker, which erases the
-            # only record of who dispatched the node. Carry the dispatcher's
-            # session in metadata so the audit survives; an explicit caller
-            # key wins.
-            merged = dict(existing.metadata or {})
-            merged.update(new_metadata or {})
-            if existing.session_id:
-                merged.setdefault("dispatched_by_session", existing.session_id)
-            effective_new_metadata = merged
-        # A handover with no PINNED harness resolves one from the ambient
-        # markers, exactly as `_make_claim` does on the ordinary acquire path.
-        # Preserving the spawner's tag instead left a claude worker under a
-        # codex lead reading as codex for the life of the claim, and that tag
-        # flows on into the do provenance row. The init hook omits --harness
-        # whenever its owned-identity probe fails, so this is not a rare path.
-        effective_new_harness = resolved_harness if handover_allowed else None
-        if state == ClaimState.LIVE and handover_allowed:
-            # A HANDOVER, and a live prior pid does not refuse it. The
-            # concurrent-writer rule below protects one symbolic owner from two
-            # of its own processes, which is a different situation: here the
-            # caller named a DIFFERENT prior holder exactly, and that holder
-            # exists only to be handed over.
-            #
-            # A live prior pid is in fact the NORMAL case on the blocking
-            # substrates. `fno agents spawn --substrate headless` (and `--once`)
-            # stays in dispatch_spawn for the worker's whole run, so the spawner
-            # is still alive when the worker reaches `fno do target init`. Refusing
-            # there left the worker unclaimed for the full lease, which is the
-            # free-read this whole change exists to close, reintroduced on the
-            # one substrate that blocks.
-            rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=effective_new_reason, new_harness=effective_new_harness,
-                new_metadata=effective_new_metadata,
-                new_pid_provenance=resolved_provenance,
-                new_pid_unavailable=npid_unavailable,
-                # A handover changes WHO owns the claim, so the successor's
-                # session id replaces the spawner's, exactly as the harness does.
-                new_session_id=resolved_session_id,
-            )
-            _atomic_replace(path, serialize_claim(rebound))
-            if emit:
-                emit_claim_rebound(
-                    rebound,
-                    previous_pid=existing.pid,
-                    previous_state=state.value,
-                    mode="handover",
-                    fno_id=fno_id,
-                    harness=harness_tag,
-                    harness_session_id=harness_session_id,
-                )
-            return rebound, "handover"
-        if state == ClaimState.LIVE:
-            if existing.pid == npid:
-                # Idempotent: already bound to this process; refresh lease only.
-                rebound = _rebound_claim(
-                    existing, npid, ttl_ms, new_holder=effective_new_holder,
-                    new_reason=effective_new_reason, new_harness=effective_new_harness,
-                    new_metadata=effective_new_metadata,
-                    new_pid_unavailable=npid_unavailable,
-                    new_pid_provenance=resolved_provenance,
-                    new_session_id=existing.session_id or resolved_session_id,
-                )
-                _atomic_replace(path, serialize_claim(rebound))
-                if emit:
-                    emit_claim_rebound(
-                        rebound,
-                        previous_pid=existing.pid,
-                        previous_state=state.value,
-                        mode="idempotent",
-                        fno_id=fno_id,
-                        harness=harness_tag,
-                        harness_session_id=harness_session_id,
-                    )
-                return rebound, "idempotent"
-            # A DIFFERENT live PID holds this same durable session: a concurrent
-            # writer of one conversation. Refuse rather than yank the claim.
-            raise RebindRefused(
-                f"concurrent writer: claim held by live pid {existing.pid}, "
-                f"this pid is {npid}; refusing to rebind a live owner",
-                state="live",
-                pid=existing.pid,
-            )
-
-        # SUSPECT or STALE. Rebind only when the dead owner is on THIS machine
-        # (death proven locally). Off-host/unverifiable -> refuse: Footnote
-        # cannot prove the owner is dead, so rebind would be a foreign takeover.
-        if not is_same_machine(existing.host, existing.machine_id):
-            raise RebindRefused(
-                "owner is off-host or machine identity is unverifiable; "
-                "death unproven, will not rebind a foreign claim",
-                state=state.value,
-                pid=existing.pid,
-            )
-
-        # Local same-holder, prior PID dead: the resume rebind.
-        rebound = _rebound_claim(
-            existing, npid, ttl_ms, new_holder=effective_new_holder,
-            new_reason=effective_new_reason, new_harness=effective_new_harness,
-            new_metadata=effective_new_metadata,
-            new_pid_provenance=resolved_provenance,
-            new_pid_unavailable=npid_unavailable,
-            # A rename reaching THIS branch is still a handover: the
-            # successor's session id replaces the spawner's, never preserves it.
-            new_session_id=(
-                resolved_session_id
-                if handover_allowed
-                else (existing.session_id or resolved_session_id)
-            ),
-        )
-        _atomic_replace(path, serialize_claim(rebound))
-        if emit:
-            emit_claim_rebound(
-                rebound,
-                previous_pid=existing.pid,
-                previous_state=state.value,
-                mode="handover" if handover_allowed else "rebound",
-                fno_id=fno_id,
-                harness=harness_tag,
-                harness_session_id=harness_session_id,
-            )
-        # A rename applied here is a HANDOVER, whatever the prior state was.
-        # This is in fact the dominant real case: on the pane substrate the
-        # spawner's pid is already dead when the worker reaches `target init`,
-        # so the claim reads SUSPECT and lands on this branch, not the LIVE one
-        # above. Reporting `rebound` made `acquire --handover-from` treat the
-        # successful takeover as a decline, fall through, and write the claim a
-        # second time - and labelled a holder change as a resume in the event.
-        return rebound, ("handover" if handover_allowed else "rebound")
-    finally:
-        if acquired_lock:
-            release_dir_mutex(recovery_lock, recovery_token)
+            seen = claim_status(key, root=root)
+        except Exception:  # noqa: BLE001 - the refusal stands without detail
+            seen = {}
+        raise RebindRefused(
+            str(exc), state=seen.get("state"), holder=seen.get("holder"), pid=seen.get("pid")
+        ) from exc
+    return _native_claim_model(payload), str(payload["mode"])
 
 
 #: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
@@ -1042,20 +280,13 @@ def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
 #: serializes against nobody.
 RECOVERY_LOCK_SUFFIX = ".recovery.d"
 
-_RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
-_RECOVERY_LOCK_MAX_WAIT_S = 5.0
 
-# Retained only by the legacy implementations while old imports drain.
-_PY_LEGACY_RETRY_LIMIT = 5
 
 
 def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, Any]:
     """Read one claim verdict from the native batch door."""
     verdict = claim_verdicts([claim.key], root=root).get(claim.key)
     if verdict is None:
-        path = claim_path(claim.key, root=root)
-        if not path.exists():
-            raise ClaimGoneAway(str(path))
         raise ClaimVerdictError(f"native verdict omitted readable claim {claim.key!r}")
     return verdict
 
@@ -1084,554 +315,12 @@ def _existing_is_live(existing: Claim, *, root: Optional[Path] = None) -> bool:
     return _claim_state(existing, root=root) in (ClaimState.LIVE, ClaimState.SUSPECT)
 
 
-def _atomic_replace(path: Path, content: str) -> None:
-    """Replace the file at path with content via write-temp + rename.
-
-    Used by idempotent re-acquire and refresh - both legitimately overwrite
-    an existing claim with new contents under the same holder. The temp
-    file goes in the same directory so the rename is atomic on POSIX.
-
-    Cleans up the tmp file on any failure between write and rename so a
-    partial replace cannot leave orphan tmp files in the claims directory.
-    """
-    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.rename(str(tmp), str(path))
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
-def _legacy_release_claim(
-    key: str,
-    holder: str,
-    *,
-    strict: bool = False,
-    root: Optional[Path] = None,
-) -> Optional["Claim"]:
-    """Release a claim we hold.
-
-    Behavior:
-      - No file present: silent success (the claim is already released).
-      - File present, our holder: unlink + emit ``claim_released``.
-      - File present, different holder: silent success unless ``strict``
-        (then raise HolderMismatch). Releases are idempotent in the common
-        case; strict mode is for explicit "this MUST be ours" callers.
-      - File present but corrupted: silent success (treat as released).
-      - The recovery-dir mutex cannot be acquired within the wait window:
-        ``None`` in non-strict mode (indistinguishable from the three cases
-        above - nothing was released, but WHY is not answerable from the
-        return value alone), ``ClaimContended`` in strict mode.
-
-    The duration_held_ms field in the audit event is best-effort: read from
-    acquired_at minus now. If the file disappears between read and unlink,
-    that race is benign (another caller released).
-
-    Returns the released ``Claim`` (carrying ``acquired_at``) on a real
-    release, or ``None`` when nothing was released (already gone, holder
-    mismatch, corrupted, mutex lost) - so a caller can stamp a window bounded
-    by the claim's own acquire time without re-reading the file. A caller
-    that must TELL those cases apart needs strict mode, not this return
-    value.
-    """
-    if not key or not holder:
-        raise ClaimValidationError("key and holder must be non-empty")
-
-    path = claim_path(key, root=root)
-    recovery_lock = path.with_name(path.name + ".recovery.d")
-    token = acquire_dir_mutex(
-        recovery_lock,
-        _RECOVERY_LOCK_MAX_WAIT_S,
-        poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S,
-    )
-    if token is None:
-        if strict:
-            raise ClaimContended(f"release_claim could not lock {key!r}")
-        return None
-    try:
-        if not path.exists():
-            return None
-        try:
-            existing = read_claim_file(path)
-        except ClaimGoneAway:
-            return None
-        except ClaimCorrupted:
-            if strict:
-                raise
-            return None
-
-        if existing.holder != holder:
-            if strict:
-                raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-            return None
-
-        duration_ms = max(0, now_ms() - existing.acquired_at)
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return None
-        emit_claim_released(existing, duration_ms=duration_ms)
-        return existing
-    finally:
-        release_dir_mutex(recovery_lock, token)
-
-
-def _registry_session_pid(session_id: str) -> Optional[int]:
-    """The live pid the fleet registry records for ``session_id``, or None.
-
-    The ``harness_session_id`` row binding is the identity proof, so no
-    create-time filter applies (it rejected every resumed session's anchor).
-    Reads the registry FILE directly (the L5 registry import is
-    boundary-refused) and degrades to None on anything unexpected.
-    """
-    sid = (session_id or "").strip()
-    if not sid:
-        return None
-    try:
-        import json
-
-        import psutil
-        from fno.paths import agents_registry_path
-
-        rows = json.loads(agents_registry_path().read_text(encoding="utf-8"))["agents"]
-    except Exception:  # noqa: BLE001 - liveness must degrade, never crash
-        return None
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("harness_session_id") or "").strip() != sid:
-            continue
-        pid = row.get("pid")
-        if isinstance(pid, int) and pid > 1:
-            try:
-                psutil.Process(pid)
-                return pid
-            except Exception:  # noqa: BLE001 - dead pid: next row
-                continue
-    return None
-
-
-def _reanchor_pid_for(
-    existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
-) -> Optional[int]:
-    """Return a safer live-session pid anchor for a renewed claim, if one exists."""
-    verdict = verdict or _claim_verdict(existing, root=root)
-    if existing.pid_unavailable or verdict.get("expired") is True:
-        return None
-    if verdict.get("bucket") == "offhost":
-        return None
-
-    # Repair ONLY a corpse: a recorded pid that is still the same live process
-    # needs no repair, and rewriting it would let any holder-string holder
-    # take over a running session's anchor. The pid FACT gates this, not the
-    # verdict, and it sits BEFORE the session-keyed branch so a row naming a
-    # different live process (a keeper pid) can never steal a healthy anchor.
-    if existing.pid is not None:
-        try:
-            import psutil
-
-            recorded_alive = (
-                psutil.Process(existing.pid).create_time() * 1000 <= existing.acquired_at
-            )
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            recorded_alive = False
-        if recorded_alive:
-            return None
-
-    # Session-keyed re-anchor, BEFORE the state gate: the registry row keyed
-    # by the session id is the identity proof, so its live pid anchors
-    # regardless of create time (the filter that rejected every resumed
-    # harness). Mirrors renew_locked's is_live(recorded pid) gate.
-    if existing.session_id:
-        registry_pid = _registry_session_pid(existing.session_id)
-        if registry_pid is not None:
-            return registry_pid
-
-    if verdict.get("state") not in (ClaimState.STALE.value, ClaimState.SUSPECT.value):
-        return None
-    from .session_pid import resolve_session_pid
-
-    anchor = resolve_session_pid(from_pid=os.getpid())
-    if anchor is None:
-        return None
-    # ONLY when the move actually repairs the claim. `acquired_at` is held now
-    # (the do row keys started_at on it), and `is_live` refuses a pid whose
-    # create_time is AFTER it. A RESUMED session's harness process started after
-    # the claim was filed, so anchoring to it would still classify SUSPECT while
-    # overwriting the original holder's pid for nothing. Leave the anchor alone
-    # there and let the TTL decide, which is what a claim with no better anchor
-    # has always done.
-    from .verdict import process_create_time_ms
-
-    created = process_create_time_ms(anchor)
-    if created is None or created > existing.acquired_at:
-        return None
-    return anchor
-
-
-def _legacy_refresh_claim(
-    key: str,
-    holder: str,
-    *,
-    ttl_ms: Optional[int] = None,
-    root: Optional[Path] = None,
-    _attempt: int = 0,
-) -> Optional[Claim]:
-    """Extend a TTL claim, or return None for PID-liveness claims."""
-    if not key or not holder:
-        raise ClaimValidationError("key and holder must be non-empty")
-    if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
-        raise ClaimValidationError(f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]")
-
-    path = claim_path(key, root=root)
-    if not path.exists():
-        raise ClaimGoneAway(str(path))
-
-    # Take the same per-key recovery mutex reap_dead_claims() holds while it
-    # re-verifies and archives a claim it proved dead - unconditionally, not
-    # just on contention, and read only once (under the lock). An unlocked
-    # pre-read followed by a second locked re-read would parse the same YAML
-    # file twice on every ordinary call; a single locked read costs one mkdir
-    # (cheap, uncontended) instead. Without the lock, _atomic_replace happily
-    # recreates `path` even if reap already archived it in the gap between a
-    # read and this write - silently resurrecting a claim GC just removed.
-    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
-    acquired_lock = False
-    recovery_token = ""
-    try:
-        token = acquire_dir_mutex(
-            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
-        )
-        if token is None:
-            if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
-                raise ClaimContended(
-                    f"refresh_claim gave up after {_PY_LEGACY_RETRY_LIMIT} "
-                    f"contention retries on {key!r}"
-                )
-            return _legacy_refresh_claim(
-                key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1
-            )
-        recovery_token = token
-        acquired_lock = True
-
-        existing = read_claim_file(path)
-        if existing.holder != holder:
-            raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-        if existing.expires_at is None:
-            return None
-        verdict = _claim_verdict(existing, root=root)
-        # STALE is the only refused verdict, matching Rust renew: an
-        # expired claim whose holder still reads live extends.
-        if verdict.get("state") == "stale":
-            raise ClaimValidationError(
-                f"claim {key!r} expired and its holder reads dead; refusing to resurrect it"
-            )
-
-        window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
-        anchor_pid = _reanchor_pid_for(existing, root=root, verdict=verdict)
-        if anchor_pid is not None:
-            refreshed = _rebound_claim(
-                existing,
-                anchor_pid,
-                window,
-                # The anchor IS resolve_session_pid's answer for this process
-                # (see _reanchor_pid_for), so the equality half of the stamp
-                # holds by construction. The harness half does not: under a
-                # shared-host harness that same answer is a multiplexer, so
-                # hardcoding the stamp here re-poisons on every refresh what
-                # acquire had just stopped writing. Re-derive it against the
-                # record's OWN harness, which a rebind-less refresh keeps.
-                new_pid_provenance=_resolve_pid_provenance(
-                    anchor_pid, window, existing.harness
-                ),
-                keep_acquired_at=True,
-            )
-        else:
-            # The pid is untouched, so its provenance stays truthful as written.
-            refreshed = existing.model_copy(update={"expires_at": now_ms() + window})
-
-        try:
-            _atomic_replace(path, serialize_claim(refreshed))
-        except FileNotFoundError as exc:
-            # File was unlinked between our read and the rename.
-            raise ClaimGoneAway(str(path)) from exc
-
-        emit_claim_refreshed(refreshed, previous=existing)
-        return refreshed
-    finally:
-        if acquired_lock:
-            release_dir_mutex(recovery_lock, recovery_token)
-
-
-def _legacy_claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
-    """Inspect a single key. Never raises; returns a structured dict.
-
-    Keys in the returned dict:
-        key:       echo of input
-        state:     one of free | live | suspect | stale | corrupted | unknown
-        basis:     why the state (only when state in {live, suspect, stale});
-                   e.g. stale/offhost vs stale/pid-reuse vs suspect/pid-shared;
-                   unknown/key-unrouted when a node-shaped key lost its prefix
-        holder:    string (only when state in {live, suspect, stale})
-        pid, host, acquired_at, expires_at, reason, metadata: when readable
-        error:     string (only when state == corrupted)
-
-    With no ``root``, the default store is read (the repo's space, or
-    ``$FNO_CLAIMS_ROOT``); root ROUTING is the native leg's job, and the
-    legacy leg survives only for explicit-root and python-runtime callers.
-    """
-    unrouted = _unrouted_key_verdict(key)
-    if unrouted is not None:
-        return unrouted
-    path = claim_path(key, root=root)
-    try:
-        claim = read_claim_file(path)
-    except ClaimGoneAway:
-        # Covers both "never existed" and "vanished before this read" - a
-        # separate path.exists() pre-check would be a redundant stat, since
-        # read_claim_file already turns a missing file into this same case.
-        return {"key": key, "state": ClaimState.FREE.value}
-    except ClaimCorrupted as exc:
-        return {
-            "key": key,
-            "state": ClaimState.CORRUPTED.value,
-            "error": str(exc),
-            "path": str(path),
-        }
-
-    try:
-        return _claim_verdict(claim, root=root)
-    except ClaimGoneAway:
-        return {"key": key, "state": ClaimState.FREE.value}
-    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
-        # The file itself read fine, so its identity fields are usable even
-        # though the native liveness verdict is unreachable. Dropping holder
-        # here made a visibility re-check read an instrument outage as a lost
-        # race: the dispatch gate saw a holderless row and refused with
-        # duplicate-claim / prior_holder=unknown.
-        return {
-            "key": key,
-            "state": ClaimState.CORRUPTED.value,
-            "error": str(exc),
-            "path": str(path),
-            "holder": claim.holder,
-            "pid": claim.pid,
-            "host": claim.host,
-        }
-
-
-def _list_claims_impl(
-    *,
-    prefix: Optional[str] = None,
-    include_stale: bool = False,
-    root: Optional[Path] = None,
-) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
-    """Shared directory walk for ``list_claims`` and ``list_claims_with_counts``.
-
-    Returns ``(rows, counts, states_by_key)``: ``rows`` is filtered per
-    ``include_stale`` exactly as before; ``counts`` is every state seen
-    while walking, regardless of what ``include_stale`` kept, so a caller
-    can report what it withheld; ``states_by_key`` maps every key seen to
-    its state (also independent of ``include_stale``) so a multi-root
-    caller can dedup its own cross-root totals by key instead of summing
-    ``counts`` blind to a key existing in more than one root.
-    """
-    cdir = claims_dir(root)
-    # "free" covers a claim released between iterdir() and the native batch
-    # below (ClaimGoneAway / a vanished path) - without a bucket for it, that
-    # entry silently drops out of `total` too, instead of being an accounted
-    # non-event.
-    counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0}
-    if not cdir.is_dir():
-        return [], {**counts, "total": 0}, {}
-
-    verdicts = claim_verdicts(prefix=prefix, root=root)
-    out: list[dict[str, Any]] = []
-    states_by_key: dict[str, str] = {}
-    for entry in sorted(cdir.iterdir()):
-        if entry.is_dir():
-            # Skip the .expired archive dir and any future subdirs.
-            continue
-        if not entry.name.endswith(".lock"):
-            continue
-
-        key = decode_key(entry.name)
-        if prefix is not None and not key.startswith(prefix):
-            continue
-
-        status = verdicts.get(key)
-        if status is None:
-            try:
-                read_claim_file(entry)
-            except ClaimCorrupted:
-                counts[ClaimState.CORRUPTED.value] += 1
-                states_by_key[key] = ClaimState.CORRUPTED.value
-            except ClaimGoneAway:
-                counts[ClaimState.FREE.value] += 1
-                states_by_key[key] = ClaimState.FREE.value
-            else:
-                counts[ClaimState.CORRUPTED.value] += 1
-                states_by_key[key] = ClaimState.CORRUPTED.value
-            continue
-        state = status.get("state")
-        if state in counts:
-            counts[state] += 1
-            states_by_key[key] = state
-        # SUSPECT is an active, TTL-protected claim - it must count
-        # alongside LIVE so the native lane accounting (the lane-count door) does not
-        # under-count a slot held by a respawned worker and over-dispatch.
-        if state in {ClaimState.LIVE.value, ClaimState.SUSPECT.value}:
-            out.append(status)
-        elif include_stale and state in {
-            ClaimState.STALE.value,
-            ClaimState.CORRUPTED.value,
-        }:
-            out.append(status)
-
-    return out, {**counts, "total": sum(counts.values())}, states_by_key
-
-
-def _legacy_list_claims(
-    *,
-    prefix: Optional[str] = None,
-    include_stale: bool = False,
-    root: Optional[Path] = None,
-) -> list[dict[str, Any]]:
-    """Enumerate claims under the claims directory.
-
-    Filters:
-        prefix:        only return claims whose key starts with this string.
-        include_stale: include stale + corrupted entries (default: live only).
-
-    Corrupted entries are returned with state="corrupted" and an "error"
-    key when ``include_stale=True``; they are skipped silently otherwise.
-    """
-    rows, _counts, _states = _list_claims_impl(
-        prefix=prefix, include_stale=include_stale, root=root
-    )
-    return rows
-
-
-def _legacy_list_claims_with_counts(
-    *,
-    prefix: Optional[str] = None,
-    include_stale: bool = False,
-    root: Optional[Path] = None,
-) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
-    """Like :func:`list_claims`, but also returns the filtered-state counts.
-
-    A store that is 99 percent stale must not render as an
-    empty store. ``counts`` carries ``live``/``suspect``/``stale``/
-    ``corrupted``/``total`` for every lockfile the walk saw, independent of
-    what ``include_stale`` kept in ``rows`` - this is what lets a caller
-    print what it filtered instead of the bare string ``no claims``. The
-    third element, ``states_by_key``, is the same information keyed by
-    claim key so a multi-root caller can dedup a key seen in more than one
-    root before summing.
-    """
-    return _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
-
-
 class ForceReleaseOutcome(NamedTuple):
     """What a force-release found at the path; archived=False means nothing was there."""
 
     path: Path
     archived: bool
     previous_holder: Optional[str]
-
-
-def _legacy_force_release_claim(
-    key: str,
-    reason: str,
-    *,
-    root: Optional[Path] = None,
-    holding_recovery_lock: bool = False,
-) -> ForceReleaseOutcome:
-    """Administratively drop a claim, regardless of holder.
-
-    ``reason`` is required (non-empty); the audit event records who ran the
-    override and why. Existing claims are archived to ``.expired/`` rather
-    than unlinked, so a forensic trail survives, and the outcome names the
-    path that was read and whether an archive happened. A missing claim file
-    is no longer reported as a release: the outcome carries
-    ``archived=False`` so a caller can tell "dropped" from "nothing there".
-
-    ``holding_recovery_lock`` is for the one caller that already holds this
-    key's recovery mutex and is calling from inside it. The mutex is a mkdir
-    lock and mkdir locks are not reentrant, so without this the nested acquire
-    below cannot ever succeed: it waits out the full timeout and then archives
-    UNLOCKED, which is the exact race the lock exists to close, bought at five
-    seconds per recovery.
-    """
-    if not key:
-        raise ClaimValidationError("key must be non-empty")
-    if not reason:
-        raise ClaimValidationError("reason must be non-empty for force-release")
-
-    path = claim_path(key, root=root)
-
-    # Take the same per-key recovery mutex acquire_claim/refresh_claim/
-    # reap_dead_claims all take. Without it, a concurrent idempotent
-    # re-acquire or refresh can read the still-present claim under ITS OWN
-    # lock and then write a fresh copy back via _atomic_replace's
-    # unconditional rename right after this call's archive_claim moves the
-    # file away - silently resurrecting the very claim this override just
-    # removed (the same class of race the other verbs close, just left open
-    # here). A contended mutex is a bounded wait like every other verb, never
-    # a refusal: on timeout, force-release proceeds without it rather than
-    # raising, preserving its "always succeeds" administrative-override
-    # contract - the exposure narrows from "always racy" to "racy only past
-    # a 5s timeout under sustained contention" instead of closing to zero.
-    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
-    acquired_lock = False
-    recovery_token = ""
-    try:
-        token = (
-            None
-            if holding_recovery_lock
-            else acquire_dir_mutex(
-                recovery_lock,
-                _RECOVERY_LOCK_MAX_WAIT_S,
-                poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S,
-            )
-        )
-        if token is not None:
-            recovery_token = token
-            acquired_lock = True
-
-        if not path.exists():
-            emit_claim_force_overridden(
-                key=key, reason=reason, previous_holder=None, previous_pid=None,
-            )
-            return ForceReleaseOutcome(path=path, archived=False, previous_holder=None)
-
-        previous: Optional[Claim] = None
-        try:
-            previous = read_claim_file(path)
-        except (ClaimCorrupted, ClaimGoneAway):
-            previous = None
-
-        archive_claim(path, ts_ms=now_ms())
-        emit_claim_force_overridden(
-            key=key,
-            reason=reason,
-            previous_holder=previous.holder if previous is not None else None,
-            previous_pid=previous.pid if previous is not None else None,
-        )
-        return ForceReleaseOutcome(
-            path=path,
-            archived=True,
-            previous_holder=previous.holder if previous is not None else None,
-        )
-    finally:
-        if acquired_lock:
-            release_dir_mutex(recovery_lock, recovery_token)
-
-
 
 
 def sweep_verdict(
@@ -1701,274 +390,6 @@ def _default_reap_roots() -> list[Path]:
     return _dedup_roots([global_claims_root(), None])
 
 
-def _legacy_reap_dead_claims(
-    *,
-    roots: Optional[list[Optional[Path]]] = None,
-    apply: bool = False,
-    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
-    node_settlement: Optional[Callable[..., Optional[bool]]] = None,
-    optout_sink: Optional[list[Claim]] = None,
-) -> dict[str, Any]:
-    """Archive claims proven dead; unknown or degraded evidence remains protected."""
-    use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
-    native_verdicts: dict[str, dict[str, Any]] = {}
-    for cdir in use_dirs:
-        # Verbatim: root=cdir.parent.parent re-resolved one level down, so
-        # space-root claims got no verdict.
-        native_verdicts.update(claim_verdicts(claims_dir_path=cdir))
-
-    ts = now_ms()
-    scanned = 0
-    reaped = 0
-    would_reap = 0
-    kept: dict[str, int] = {
-        "offhost": 0, "suspect": 0, "live": 0,
-        "suspect_alive": 0, "suspect_unprobed": 0,
-    }
-    # No verdict row in the walked dir is unclassified, never "unprobed".
-    kept_unclassified = 0
-    unclassified_dirs: dict[str, int] = {}
-    unprobed_by: dict[str, int] = {}
-
-    def _sweep_verdict(
-        claim: Claim, cdir: Path, native_verdict: Optional[dict[str, Any]] = None
-    ) -> tuple[bool, str]:
-        nonlocal kept_unclassified
-        native = native_verdict or native_verdicts.get(claim.key)
-        if native is None:
-            kept_unclassified += 1
-            unclassified_dirs[str(cdir)] = unclassified_dirs.get(str(cdir), 0) + 1
-            return False, "_unclassified"
-        dead, bucket = sweep_verdict(
-            claim,
-            abandonment_probe=abandonment_probe,
-            node_settlement=node_settlement,
-            native_verdict=native,
-        )
-        if not dead and bucket == "suspect_unprobed":
-            token = getattr(abandonment_probe, "reasons", {}).get(claim.key)
-            if token:
-                unprobed_by[token] = unprobed_by.get(token, 0) + 1
-        return dead, bucket
-
-    corrupted = 0
-    vanished = 0
-    # A provably-dead claim whose recovery mutex is held by a genuine live
-    # recovery (acquire_dir_mutex returned None on real contention, not a
-    # stealable corpse) - the file is still on disk and still dead, just
-    # left for the next sweep, so it must not be counted as vanished (which
-    # means "gone from the store").
-    contended = 0
-    reap_failed: list[tuple[str, str]] = []
-    # A shared PID remains shared for this sweep after one member is archived;
-    # otherwise the survivor's fresh native read would become exclusive and
-    # the apply pass would drain only the first member.
-    archived_shared_pids: set[tuple[str, int]] = set()
-
-    def _read_or_bucket(entry: Path) -> Optional[Claim]:
-        """Read one claim file for the sweep, or bucket why it can't be read.
-
-        Shared by the outer scan and the mutex re-verify below so the
-        corrupted/vanished handling exists once, not twice.
-        """
-        nonlocal corrupted, vanished
-        try:
-            return read_claim_file(entry)
-        except ClaimCorrupted:
-            # Cannot classify what cannot be parsed; a claim that cannot be
-            # read cannot be proven dead (AC6).
-            corrupted += 1
-            return None
-        except ClaimGoneAway:
-            # A concurrent release between listdir and read is a normal
-            # outcome, not a failure of this run.
-            vanished += 1
-            return None
-
-    # PID-exclusivity evidence for the sweep: which (machine, pid) pairs name
-    # more than one distinct holder. A prover-proven pid shared
-    # across distinct holders cannot corroborate an expired lease, so those
-    # claims read SUSPECT here and the secondary instruments settle them.
-    for cdir in use_dirs:
-        if not cdir.is_dir():
-            continue
-        root_label = str(cdir)
-        for entry in sorted(cdir.iterdir()):
-            if entry.is_dir():
-                # Skip .expired/ and any future subdir.
-                continue
-            if not entry.name.endswith(".lock"):
-                continue
-
-            scanned += 1
-            claim = _read_or_bucket(entry)
-            if claim is None:
-                continue
-
-            # Cheap, lock-free triage: decide whether this claim is even a
-            # reap candidate before paying for a mutex acquire. The mutex
-            # re-verify below does NOT reuse this result - it re-reads the
-            # file and asks the native door again for that fresh claim, because
-            # the claim may have been archived-and-recreated between this scan
-            # and the lock.
-            provably_dead, bucket = _sweep_verdict(claim, cdir)
-
-            if provably_dead:
-                if not apply:
-                    would_reap += 1
-                    continue
-
-                # Take the same per-key recovery mutex acquire_claim() uses for
-                # its own archive-then-recreate (core.py ~267-371) so this
-                # cannot archive a claim a concurrent legitimate acquirer just
-                # recreated at this path. timeout_s=0: try once, steal a
-                # corpse left by a crashed reap/acquire if the dir is stale,
-                # else give up immediately rather than wait - reap runs on a
-                # cadence and blocking here would stall the whole sweep; a
-                # live owner (no steal) means a real recovery is in flight,
-                # left for the next sweep.
-                recovery_lock = entry.with_name(entry.name + RECOVERY_LOCK_SUFFIX)
-                recovery_token = acquire_dir_mutex(recovery_lock, 0)
-                if recovery_token is None:
-                    # A live, in-age holder - genuine contention, not a
-                    # corpse (mutex.py's own contract). The file is still on
-                    # disk and still provably dead; "vanished" would wrongly
-                    # tell the operator it is gone from the store.
-                    contended += 1
-                    continue
-
-                try:
-                    # Re-read and re-verify under the mutex: the file may
-                    # have been archived-and-recreated by acquire_claim()
-                    # between our scan and this lock.
-                    fresh = _read_or_bucket(entry)
-                    if fresh is None:
-                        continue
-
-                    # The native key read deliberately has unknown PID
-                    # exclusivity: this is a TOCTOU re-read, not a reused batch
-                    # scan. The first batch read carried the full sibling set.
-                    fresh_native = claim_verdicts(prefix="", claims_dir_path=cdir).get(fresh.key)
-                    if fresh_native is None:
-                        kept_unclassified += 1
-                        unclassified_dirs[str(cdir)] = unclassified_dirs.get(str(cdir), 0) + 1
-                        continue
-                    identity = fresh.machine_id or fresh.host
-                    pid_key = (identity, fresh.pid) if fresh.pid is not None else None
-                    if (
-                        pid_key is not None
-                        and pid_key in archived_shared_pids
-                        and native_verdicts.get(fresh.key, {}).get("basis") == "pid-shared"
-                        and fresh_native.get("basis") == "live"
-                    ):
-                        fresh_native = {
-                            **fresh_native,
-                            "state": "suspect",
-                            "basis": "pid-shared",
-                            "bucket": "suspect",
-                            "provably_dead": False,
-                        }
-                    fresh_dead, fresh_bucket = _sweep_verdict(
-                        fresh,
-                        cdir,
-                        native_verdict=fresh_native,
-                    )
-                    if not fresh_dead:
-                        kept[fresh_bucket] += 1
-                        continue
-
-                    try:
-                        archive_path = archive_claim(entry, ts_ms=ts)
-                    except OSError as exc:
-                        # A permission error, full disk, or other rename
-                        # failure must not abort the whole sweep - every
-                        # other claim in this and later roots is still
-                        # reapable. Bucket this one and keep scanning,
-                        # matching the "move didn't happen" case below.
-                        reap_failed.append((str(entry), f"archive_claim raised: {exc}"))
-                        continue
-
-                    if archive_path != entry and archive_path.exists():
-                        # archive_path != entry proves archive_claim actually
-                        # computed a distinct .expired/ destination (the
-                        # idempotent-already-gone case returns entry itself
-                        # unchanged); combined with .exists() on that unique,
-                        # ts-suffixed path, that is durable proof THIS call's
-                        # rename succeeded - regardless of what entry.exists()
-                        # says afterward. A fresh, unrelated acquire_claim()
-                        # can legitimately recreate a live claim at the same
-                        # key the instant after this archive completes (its
-                        # top-level atomic_create_exclusive never consults
-                        # this recovery mutex once the path is empty), which
-                        # would make entry.exists() true again with no
-                        # bearing on whether the archive itself worked.
-                        reaped += 1
-                        initial = native_verdicts.get(fresh.key, {})
-                        if fresh.pid is not None and initial.get("basis") == "pid-shared":
-                            archived_shared_pids.add((fresh.machine_id or fresh.host, fresh.pid))
-                        if fresh.key.startswith("config-optout:") and optout_sink is not None:
-                            # The caller owns the opt-out restore: importing the
-                            # config layer here would tie claims (infra) to
-                            # config (policy) and mypy reads that edge as an
-                            # import cycle. Read-time revocation is the safety
-                            # guarantee either way; the restore is cleanup for
-                            # the human-facing file.
-                            optout_sink.append(fresh)
-                        emit_claim_reaped(
-                            fresh,
-                            root=root_label,
-                            age_ms=max(0, ts - fresh.acquired_at),
-                            basis=fresh_native.get("basis"),
-                        )
-                    elif not entry.exists():
-                        # archive_claim's idempotent short-circuit: the
-                        # source was already fully cleared (a concurrent
-                        # reap, or the holder's own delayed release) before
-                        # this call, so it returned the source path itself,
-                        # which does not exist either. The store no longer
-                        # holds it, which is the outcome we wanted; we just
-                        # cannot claim credit for the move.
-                        vanished += 1
-                    else:
-                        # The positive-marker rule: an exit without exception
-                        # is not evidence. The source is still there and no
-                        # archive was created, so the move did not happen
-                        # (AC5).
-                        reap_failed.append((str(entry), "archive_claim did not move the file"))
-                finally:
-                    release_dir_mutex(recovery_lock, recovery_token)
-                continue
-
-            if bucket == "_unclassified":
-                continue
-
-            # Not provably dead. Bucket the reason for the report.
-            kept[bucket] += 1
-
-    summary: dict[str, Any] = {
-        "scanned": scanned,
-        "reaped": reaped,
-        "would_reap": would_reap,
-        "kept_live": kept["live"],
-        "kept_suspect": kept["suspect"],
-        "kept_suspect_alive": kept["suspect_alive"],
-        "kept_suspect_unprobed": kept["suspect_unprobed"],
-        "kept_unclassified": kept_unclassified,
-        "unclassified_dirs": unclassified_dirs,
-        "kept_suspect_unprobed_by": unprobed_by,
-        "kept_offhost": kept["offhost"],
-        "corrupted": corrupted,
-        "vanished": vanished,
-        "contended": contended,
-        "reap_failed": reap_failed,
-        "apply": apply,
-        "roots": [str(d) for d in use_dirs],
-    }
-    if apply:
-        emit_claim_reap_swept(summary)
-    return summary
-
-
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
     """Resolve + dedup an explicit ``--root`` list, returning the claims dirs."""
     return [cdir for _, cdir in dedup_claims_roots(roots)]
@@ -2020,6 +441,10 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
             str(payload.get("host") or "unknown"),
             key,
         )
+    # A corrupted row is an answer, not a failure: status prints its verdict
+    # and exits 2 so shell callers notice.
+    if operation == "status" and isinstance(payload, dict) and payload.get("state") == "corrupted":
+        return payload
     if result.returncode != 0:
         detail = stderr.strip() or stdout.strip() or f"exit {result.returncode}"
         raise ClaimVerdictError(f"fno-agents claim {operation} failed: {detail}")
@@ -2038,41 +463,9 @@ def _native_claim_model(payload: dict[str, Any]) -> Claim:
     return Claim.model_validate(body)
 
 
-def _python_claim_runtime() -> bool:
-    return os.environ.get("FNO_AGENTS_RUNTIME", "").strip().lower() == "python"
-
-
 def _configured_claim_root() -> Optional[Path]:
     value = os.environ.get("FNO_CLAIMS_ROOT", "").strip()
     return Path(value) if value else None
-
-def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
-    # Only an explicit root or the python-runtime opt-in takes the legacy leg;
-    # root ROUTING (which store a key names) is decided by the native leg.
-    del key
-    return root is not None or _python_claim_runtime()
-
-
-def _legacy_sweep_roots_if_present() -> Optional[list[Optional[Path]]]:
-    roots: list[Optional[Path]] = [global_claims_root(), None, Path.cwd()]
-    try:
-        present = any(
-            any(path.is_file() and path.name.endswith(".lock") for path in directory.iterdir())
-            for _raw, directory in dedup_claims_roots(roots)
-        )
-    except OSError:
-        present = False
-    return roots if present else None
-
-
-_LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
-_LEGACY_RELEASE_CLAIM = _legacy_release_claim
-_LEGACY_REFRESH_CLAIM = _legacy_refresh_claim
-_LEGACY_CLAIM_STATUS = _legacy_claim_status
-_LEGACY_LIST_CLAIMS = _legacy_list_claims
-_LEGACY_LIST_CLAIMS_WITH_COUNTS = _legacy_list_claims_with_counts
-_LEGACY_FORCE_RELEASE_CLAIM = _legacy_force_release_claim
-_LEGACY_REAP_DEAD_CLAIMS = _legacy_reap_dead_claims
 
 
 def acquire_claim(
@@ -2091,9 +484,7 @@ def acquire_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
-    if _legacy_claim_call(key, root):
-        return _LEGACY_ACQUIRE_CLAIM(key, holder, reason=reason, ttl_ms=ttl_ms, metadata=metadata, pid=pid, pid_unavailable=pid_unavailable, host=host, harness=harness, pid_provenance=pid_provenance, harness_session_id=harness_session_id, root=root, _attempt=_attempt)  # noqa: E501
-    del host, harness, pid_provenance, harness_session_id, _attempt
+    del _attempt
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     native_root = root or _configured_claim_root()
     flags = ["--holder", holder]
@@ -2109,6 +500,9 @@ def acquire_claim(
         flags.extend(("--pid", str(pid if pid is not None else os.getpid())))
     if pid_unavailable:
         flags.append("--pid-unavailable")
+    for flag,value in [("--host",host),("--harness",harness),("--pid-provenance",pid_provenance),("--session-id",harness_session_id)]:
+        if value is not None:
+            flags.extend((flag,str(value)))
     flags.extend(_native_root_flags(native_root))
     return _native_claim_model(_native_claim("acquire", key, flags))
 
@@ -2120,13 +514,6 @@ def release_claim(
     strict: bool = False,
     root: Optional[Path] = None,
 ) -> Optional[Claim]:
-    if _legacy_claim_call(key, root):
-        return _LEGACY_RELEASE_CLAIM(
-            key,
-            holder,
-            strict=strict,
-            root=root,
-        )
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     native_root = root or _configured_claim_root()
@@ -2154,24 +541,23 @@ def refresh_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
-    if _legacy_claim_call(key, root):
-        return _LEGACY_REFRESH_CLAIM(
-            key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt
-        )
     del _attempt
-    if ttl_ms is not None and ttl_ms <= 0:
-        raise ClaimValidationError("ttl_ms must be positive")
+    _validate_inputs(key, holder, ttl_ms)
     native_root = root or _configured_claim_root()
     flags = _native_root_flags(native_root)
+    status = _native_claim("status", key, flags)
+    if status.get("holder") and status.get("holder") != holder:
+        raise HolderMismatch(holder, status["holder"], key)
+    state = status.get("state")
+    if state == "stale":
+        raise ClaimValidationError(
+            f"claim {key!r} expired and its holder reads dead; refusing to resurrect it"
+        )
     if ttl_ms is None:
-        status = _native_claim("status", key, flags)
-        state = status.get("state")
         if state == "free":
             raise ClaimGoneAway(str(claim_path(key, root=root)))
         if state == "corrupted":
             raise ClaimCorrupted(str(status.get("error") or key))
-        if state == "stale":
-            raise ClaimValidationError(f"claim {key!r} expired and cannot be refreshed")
         if status.get("expires_at") is None:
             return None
         ttl_ms = MIN_TTL_MS
@@ -2206,8 +592,6 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     unrouted = _unrouted_key_verdict(key)
     if unrouted is not None:
         return unrouted
-    if _legacy_claim_call(key, root):
-        return _LEGACY_CLAIM_STATUS(key, root=root)
     if not key:
         raise ClaimValidationError("key must be non-empty")
     return _native_claim("status", key, _native_root_flags(root or _configured_claim_root()))
@@ -2219,10 +603,6 @@ def list_claims(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
-    if root is not None or _python_claim_runtime():
-        return _LEGACY_LIST_CLAIMS(
-            prefix=prefix, include_stale=include_stale, root=root
-        )
     flags = _native_root_flags(root or _configured_claim_root())
     if prefix is not None:
         flags.extend(("--prefix", prefix))
@@ -2238,10 +618,6 @@ def list_claims_with_counts(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
-    if root is not None or _python_claim_runtime():
-        return _LEGACY_LIST_CLAIMS_WITH_COUNTS(
-            prefix=prefix, include_stale=include_stale, root=root
-        )
     rows = list_claims(prefix=prefix, include_stale=True, root=root)
     counts = {state: 0 for state in ("live", "suspect", "stale", "corrupted", "free")}
     states: dict[str, str] = {}
@@ -2262,14 +638,8 @@ def force_release_claim(
     *,
     root: Optional[Path] = None,
     holding_recovery_lock: bool = False,
+    expected_claim: Optional[Claim] = None,
 ) -> ForceReleaseOutcome:
-    if _legacy_claim_call(key, root):
-        return _LEGACY_FORCE_RELEASE_CLAIM(
-            key,
-            reason,
-            root=root,
-            holding_recovery_lock=holding_recovery_lock,
-        )
     if not key:
         raise ClaimValidationError("key must be non-empty")
     if not reason:
@@ -2277,6 +647,9 @@ def force_release_claim(
     flags = ["--reason", reason]
     if holding_recovery_lock:
         flags.append("--holding-recovery-lock")
+    if expected_claim is not None:
+        import json
+        flags.extend(("--expected-claim",json.dumps(expected_claim.model_dump())))
     payload = _native_claim(
         "force-release", key,
         [*_native_root_flags(root or _configured_claim_root()), *flags],
@@ -2296,26 +669,104 @@ def reap_dead_claims(
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
-    if roots is not None or _python_claim_runtime():
-        return _LEGACY_REAP_DEAD_CLAIMS(
-            roots=roots,
-            apply=apply,
-            abandonment_probe=abandonment_probe,
-            node_settlement=node_settlement,
-            optout_sink=optout_sink,
+    """Archive claims proven dead; unknown or degraded evidence stays protected.
+
+    The native verdict batch enumerates each claims table, so every scanned
+    key has a verdict. The apply pass re-reads the row and asks again before
+    retiring exactly the observed row, so a claim recreated since the scan is
+    never archived.
+    """
+    import json
+
+    from .events import emit_claim_reap_swept, emit_claim_reaped
+
+    directories = _default_reap_roots() if roots is None else _dedup_roots(roots)
+    summary: dict[str, Any] = dict.fromkeys(
+        ("scanned", "reaped", "would_reap", "kept_offhost", "kept_suspect", "kept_live",
+         "kept_suspect_alive", "kept_suspect_unprobed", "kept_unclassified", "corrupted",
+         "vanished", "contended"),
+        0,
+    )
+    summary.update(
+        roots=[str(d) for d in directories], reap_failed=[], unclassified_dirs={},
+        kept_suspect_unprobed_by={}, apply=apply,
+    )
+    probe_reasons = getattr(abandonment_probe, "reasons", {})
+    ts = now_ms()
+
+    def _judge(claim: Claim, verdict: dict[str, Any]) -> tuple[bool, str]:
+        dead, bucket = sweep_verdict(
+            claim, abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement, native_verdict=verdict,
         )
-    legacy_roots = _legacy_sweep_roots_if_present()
-    if legacy_roots is not None:
-        return _LEGACY_REAP_DEAD_CLAIMS(
-            roots=None,
-            apply=apply,
-            abandonment_probe=abandonment_probe,
-            node_settlement=node_settlement,
-            optout_sink=optout_sink,
-        )
-    del abandonment_probe, node_settlement, optout_sink
-    flags: list[str] = ["--apply"] if apply else []
-    native_root = _configured_claim_root()
-    if native_root is not None:
-        flags.extend(("--root", str(native_root)))
-    return _native_claim("reap", "", flags)
+        if not dead and bucket == "suspect_unprobed":
+            token = probe_reasons.get(claim.key) if isinstance(probe_reasons, dict) else None
+            if token:
+                counts = summary["kept_suspect_unprobed_by"]
+                counts[token] = counts.get(token, 0) + 1
+        return dead, bucket
+
+    for directory in directories:
+        verdicts = claim_verdicts(claims_dir_path=directory)
+        for key, verdict in verdicts.items():
+            if verdict.get("state") == "free":
+                continue
+            summary["scanned"] += 1
+            locator = directory / f"{encode_key(key)}.lock"
+            try:
+                claim = read_claim_file(locator)
+                dead, bucket = _judge(claim, verdict)
+                if not dead:
+                    summary["kept_" + bucket] = summary.get("kept_" + bucket, 0) + 1
+                    continue
+                if not apply:
+                    summary["would_reap"] += 1
+                    continue
+                fresh = read_claim_file(locator)
+                fresh_verdict = claim_verdicts([key], claims_dir_path=directory).get(key)
+                if fresh_verdict is None:
+                    summary["kept_unclassified"] += 1
+                    dirs = summary["unclassified_dirs"]
+                    dirs[str(directory)] = dirs.get(str(directory), 0) + 1
+                    continue
+                # The keyed re-read sees one row, so it cannot see the pid's
+                # other holders and reads a shared pid as exclusive. The
+                # sweep's shared verdict holds while the row's pid is the same.
+                if (
+                    fresh.pid is not None
+                    and fresh.pid == claim.pid
+                    and verdict.get("basis") == "pid-shared"
+                    and fresh_verdict.get("basis") == "live"
+                ):
+                    fresh_verdict = {
+                        **fresh_verdict, "state": "suspect", "basis": "pid-shared",
+                        "bucket": "suspect", "provably_dead": False,
+                    }
+                fresh_dead, fresh_bucket = _judge(fresh, fresh_verdict)
+                if not fresh_dead:
+                    summary["kept_" + fresh_bucket] = summary.get("kept_" + fresh_bucket, 0) + 1
+                    continue
+                result = _native_claim(
+                    "force-release", key,
+                    ["--claims-dir", str(directory), "--reason", "reap proven-dead claim",
+                     "--expected-claim", json.dumps(fresh.model_dump())],
+                )
+                if not result.get("archived"):
+                    summary["contended"] += 1
+                    continue
+                summary["reaped"] += 1
+                if optout_sink is not None and key.startswith("config-optout:"):
+                    optout_sink.append(fresh)
+                emit_claim_reaped(
+                    fresh, root=str(directory), age_ms=max(0, ts - fresh.acquired_at),
+                    basis=fresh_verdict.get("basis"),
+                )
+            except ClaimGoneAway:
+                summary["vanished"] += 1
+            except ClaimCorrupted:
+                summary["corrupted"] += 1
+            except Exception as exc:  # noqa: BLE001 - one bad row never aborts the sweep
+                summary["reap_failed"].append((str(locator), str(exc)))
+    if apply:
+        emit_claim_reap_swept(summary)
+    return summary

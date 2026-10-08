@@ -5,7 +5,6 @@ the skill brief's lever contract.
 """
 from __future__ import annotations
 
-import os
 import subprocess as _subprocess
 import time
 from datetime import date
@@ -116,7 +115,6 @@ def test_groom_enabled_defaults_true_matching_prior_ungated_behavior(
 ) -> None:
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
-    from fno import config as config_mod
 
     assert G.groom_enabled() is True
 
@@ -829,77 +827,44 @@ def test_default_groom_path_is_caller_independent(tmp_path, monkeypatch):
 # could not be read at all.
 
 
-def _write_marker(directory: Path, day: str, age_hours: float) -> Path:
-    from fno.claims.io import encode_key
+def _mark(day: str) -> None:
+    from fno.claims import acquire_claim
 
-    directory.mkdir(parents=True, exist_ok=True)
-    marker = directory / f"{encode_key(f'groom:{day}')}.lock"
-    marker.write_text("holder: test\n")
-    stamp = time.time() - age_hours * 3600.0
-    os.utime(marker, (stamp, stamp))
-    return marker
+    acquire_claim(f"groom:{day}", "groom:test", ttl_ms=G._GROOM_TTL_MS)
 
 
-def test_staleness_reads_a_live_marker(claims_root):
-    _write_marker(claims_root / ".fno" / "claims", "2026-07-19", 6.0)
+def test_staleness_reads_the_newest_marker_row(claims_root):
+    from fno.claims import acquire_claim
 
-    state, hours = G.groom_staleness()
+    _mark("2026-07-18")
+    _mark("2026-07-19")
+    acquire_claim("node:x-1c7b", "other")
+
+    state, hours = G.groom_staleness(now=time.time() + 6 * 3600)
     assert state == "ran"
     assert 5.9 < hours < 6.1
-
-
-def test_staleness_reads_a_marker_archived_to_expired(claims_root):
-    """A recovered marker moves to .expired/; the pass still ran."""
-    _write_marker(claims_root / ".fno" / "claims" / ".expired", "2026-07-18", 30.0)
-
-    state, hours = G.groom_staleness()
-    assert state == "ran", "an archived marker is still proof the pass ran"
-    assert 29.0 < hours < 31.0
-
-
-def test_staleness_takes_the_newest_across_both_dirs(claims_root):
-    claims = claims_root / ".fno" / "claims"
-    _write_marker(claims / ".expired", "2026-07-15", 96.0)
-    _write_marker(claims, "2026-07-19", 3.0)
-
-    state, hours = G.groom_staleness()
-    assert state == "ran"
-    assert hours < 4.0
-
-
-def test_staleness_ignores_unrelated_claim_keys(claims_root):
-    from fno.claims.io import encode_key
-
-    claims = claims_root / ".fno" / "claims"
-    claims.mkdir(parents=True)
-    (claims / f"{encode_key('node:x-1c7b')}.lock").write_text("holder: other\n")
-
-    assert G.groom_staleness() == ("never", None)
 
 
 def test_staleness_is_never_when_nothing_ever_ran(claims_root):
     assert G.groom_staleness() == ("never", None)
 
 
-def test_staleness_is_unknown_when_the_root_cannot_be_read(claims_root, monkeypatch):
+def test_staleness_is_unknown_when_the_table_cannot_be_read(claims_root, monkeypatch):
     """Distinct from "never": collapsing the two would fire on every session."""
-    claims = claims_root / ".fno" / "claims"
-    claims.mkdir(parents=True)
+    import fno.claims.core as core
 
-    def _boom(path):
-        raise PermissionError(13, "Permission denied")
+    def _boom(**_kwargs):
+        raise core.ClaimVerdictError("claims table unreadable")
 
-    monkeypatch.setattr(os, "listdir", _boom)
+    monkeypatch.setattr(core, "list_claims", _boom)
     assert G.groom_staleness() == ("unknown", None)
 
 
 def test_staleness_clamps_a_future_marker_to_zero(claims_root):
     """Clock skew must read as fresh, never as a negative age."""
-    _write_marker(claims_root / ".fno" / "claims", "2026-07-19", -5.0)
+    _mark("2026-07-19")
 
-    state, hours = G.groom_staleness()
-    assert state == "ran"
-    assert hours == 0.0
+    assert G.groom_staleness(now=time.time() - 5 * 3600) == ("ran", 0.0)
 
 
 @pytest.mark.parametrize(

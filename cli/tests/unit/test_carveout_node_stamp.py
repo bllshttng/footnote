@@ -34,12 +34,8 @@ def _acquire_node_claim(claims_root, node_id, holder, monkeypatch):
     from pathlib import Path
 
     from fno.claims.core import acquire_claim
-    from fno.claims.io import claims_dir
-
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
-    return acquire_claim(
-        f"node:{node_id}", holder, ttl_ms=60_000, root=claims_dir(Path(claims_root))
-    )
+    return acquire_claim(f"node:{node_id}", holder, ttl_ms=60_000, root=Path(claims_root))
 
 
 def test_add_carveout_stamps_the_held_node(tmp_path, monkeypatch):

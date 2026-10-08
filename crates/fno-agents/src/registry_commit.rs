@@ -1,10 +1,9 @@
 //! Atomic read-forward registry write door for Python registry callers.
 //!
-//! The caller holds the shared `locks/_registry.lock` flock across its read,
-//! mutation, and this door call. This leaf takes no lock so it cannot deadlock
-//! the cross-language transaction.
+//! Reads return a table revision. Writes compare it in an immediate transaction,
+//! preserving unknown fields and refusing a stale callback result.
 
-use crate::state::{write_json_atomic, REGISTRY_SCHEMA_VERSION};
+use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -40,6 +39,21 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+    if payload.get("op").and_then(Value::as_str) == Some("read") {
+        return match crate::registry_store::read_versioned(&path) {
+            Ok((document, revision)) => {
+                println!(
+                    "{}",
+                    json!({"status":"read","document":document,"revision":revision})
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("registry-commit read: {error}");
+                1
+            }
+        };
+    }
     let schema_version = match payload.get("schema_version").and_then(Value::as_u64) {
         Some(version) => version,
         None => {
@@ -54,34 +68,72 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let raw = match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("registry-commit: cannot parse {}: {error}", path.display());
-                return 1;
-            }
-        },
+    let expected = match payload.get("revision").and_then(Value::as_i64) {
+        Some(revision) => revision,
+        None => {
+            eprintln!("registry-commit: read the table revision before writing");
+            return 2;
+        }
+    };
+    let transaction = match crate::registry_store::begin(&path) {
+        Ok(transaction) => transaction,
         Err(error) => {
-            eprintln!("registry-commit: cannot read {}: {error}", path.display());
+            eprintln!("registry-commit: {error}");
             return 1;
         }
     };
-    match merge(raw, &payload, schema_version, agents) {
-        Ok(value) => match write_json_atomic(&path, &value) {
-            Ok(()) => {
-                println!("{{\"status\":\"written\"}}");
-                0
+    if transaction.revision != expected {
+        eprintln!(
+            "{}",
+            json!({"status":"refused","reason":"revision_conflict","message":"registry changed since read. Reload before applying the mutation again."})
+        );
+        return 3;
+    }
+    let before = transaction.document.clone();
+    // The schema repair verb drops newer-schema keys on purpose, so a merge
+    // that carries disk fields forward would undo it.
+    let replace = payload.get("replace").and_then(Value::as_bool) == Some(true);
+    let next = if replace {
+        Ok(json!({"schema_version": schema_version, "agents": agents}))
+    } else {
+        merge(before.clone(), &payload, schema_version, agents)
+    };
+    match next {
+        Ok(value) => {
+            // A replace is the schema repair: the stored document is AHEAD of
+            // this writer by definition, so judge the repaired document alone.
+            let baseline = if replace { &value } else { &before };
+            if let Err(error) =
+                crate::state::validate_registry_document_change(&path, baseline, &value)
+            {
+                eprintln!("registry-commit: {error}");
+                return 3;
             }
-            Err(error) => {
-                eprintln!("registry-commit: write failed: {error}");
-                1
+            match transaction.commit(value.clone()) {
+                Ok(()) => {
+                    if let (Ok(before), Ok(after)) = (
+                        serde_json::from_value::<crate::state::Registry>(before),
+                        serde_json::from_value::<crate::state::Registry>(value),
+                    ) {
+                        crate::state::account_for_removed_rows(
+                            &path,
+                            &before.entries,
+                            &after.entries,
+                        );
+                    }
+                    println!("{}", json!({"status":"written","revision":expected+1}));
+                    0
+                }
+                Err(error) => {
+                    eprintln!("registry-commit: write failed: {error}");
+                    1
+                }
             }
-        },
+        }
         Err((reason, message)) => {
             eprintln!(
                 "{}",
-                json!({"status": "refused", "reason": reason, "message": message})
+                json!({"status":"refused","reason":reason,"message":message})
             );
             3
         }
@@ -95,6 +147,13 @@ fn absolute_path(path: &str) -> std::io::Result<PathBuf> {
     }
     Ok(std::env::current_dir()?.join(path))
 }
+
+const RETIRED_ROW_KEYS: &[&str] = &[
+    "claude_short_id",
+    "claude_session_uuid",
+    "codex_session_id",
+    "gemini_session_id",
+];
 
 fn merge(
     mut disk: Value,
@@ -140,6 +199,10 @@ fn merge(
             consumed[index] = true;
             if let Some(disk_row) = disk_agents[index].as_object() {
                 for (key, value) in disk_row {
+                    // Retired keys are read-only backfill; the writer dropped them on purpose.
+                    if RETIRED_ROW_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
                     merged.entry(key.clone()).or_insert_with(|| value.clone());
                 }
             }
@@ -156,7 +219,11 @@ fn merge(
     let payload_object = payload.as_object().expect("validated payload object");
     let target = disk.as_object_mut().expect("root checked above");
     for (key, value) in payload_object {
-        if key != "path" && key != "agents" && key != "schema_version" {
+        // Request fields steer this verb; they are not registry data.
+        if !matches!(
+            key.as_str(),
+            "path" | "agents" | "schema_version" | "revision" | "replace" | "op"
+        ) {
             target.insert(key.clone(), value.clone());
         }
     }

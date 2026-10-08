@@ -64,11 +64,19 @@ graph_node_id_of() {  # $1 = state file
   grep '^graph_node_id:' "$1" | sed 's/^graph_node_id:[[:space:]]*//' | tr -d '\r'
 }
 
-# Node claims land in the GLOBAL root ($HOME/.fno/claims/), url-encoded as
-# node%3A<id>.lock -- not the project .fno/claims/. Match the id substring so
-# the encoding is not hard-coded. A hit means a phantom claim was acquired.
+# Node claims land in the GLOBAL root's claim table ($HOME/.fno graph.db), not
+# the project. Any state but "free" means a phantom claim was acquired. An
+# unreadable table fails the test: a read error must never pass as "free".
 node_claim_exists() {  # $1 = HOME dir, $2 = node id
-  ls "$1/.fno/claims/" 2>/dev/null | grep -qi "node.*${2}"
+  local state
+  state="$(FNO_CLAIMS_ROOT="$1" uv run --project "$REPO_ROOT/cli" python -c '
+import sys
+from pathlib import Path
+from fno.claims.core import claim_status
+print(claim_status("node:" + sys.argv[2], root=Path(sys.argv[1])).get("state") or "free")
+' "$1" "$2" 2>/dev/null)" || fail "claim status unreadable under $1"
+  [[ -n "$state" ]] || fail "claim status empty under $1"
+  [[ "$state" != "free" ]]
 }
 
 seed_graph() {

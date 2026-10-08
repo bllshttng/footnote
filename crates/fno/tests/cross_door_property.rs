@@ -49,6 +49,31 @@ const ALT_ACCOUNT: &str = "alt";
 /// Resolve the sibling fno-agents binary. The two crates share a repo but
 /// not a cargo target dir; the fno-agents test leg (preflight runs it
 /// first) builds it there.
+/// The registry document as text, read through the table door: after the
+/// import `registry.json` is a fence directory, not a file.
+fn registry_text(path: &Path) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new(fno_agents_bin())
+        .arg("registry-commit")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run registry-commit");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({"path": path, "op": "read"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "registry read failed");
+    String::from_utf8(output.stdout).unwrap()
+}
+
 fn fno_agents_bin() -> PathBuf {
     if let Ok(bin) = std::env::var("FNO_AGENTS_BIN") {
         if !bin.is_empty() && Path::new(&bin).exists() {
@@ -438,7 +463,7 @@ exit 2
     // it stages is what door 3's receipts (claude,U1) pair-leg reads.
     let d1 = fleet.run(&shim_dir, &bin, &["reap"]);
     println!("door 1 (reap): {d1}");
-    let registry = std::fs::read_to_string(fleet.agents_home().join("registry.json")).unwrap();
+    let registry = registry_text(&fleet.agents_home().join("registry.json"));
     assert!(
         !registry.contains(ROW1),
         "door 1: registry still holds the row"
@@ -573,7 +598,7 @@ impl Fleet {
     /// LIVE row survives every door in all three stores. A sweep that
     /// flips a live row to dead fails HERE, not on an operator's machine.
     fn assert_live_stays(&self, after: &str) {
-        let registry = std::fs::read_to_string(self.agents_home().join("registry.json")).unwrap();
+        let registry = registry_text(&self.agents_home().join("registry.json"));
         assert!(
             registry.contains(ROW4),
             "{after}: the sweep reaped the live row from the registry"
@@ -593,7 +618,7 @@ impl Fleet {
     /// The property, asserted after every door: the row is absent from all
     /// three stores.
     fn assert_property(&self, after: &str) {
-        let registry = std::fs::read_to_string(self.agents_home().join("registry.json")).unwrap();
+        let registry = registry_text(&self.agents_home().join("registry.json"));
         assert!(
             !registry.contains(ROW1),
             "{after}: registry still holds {ROW1}: {registry}"

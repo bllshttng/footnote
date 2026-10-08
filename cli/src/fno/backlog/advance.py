@@ -2032,10 +2032,10 @@ def _live_joiner_names(node_id: str) -> list[str]:
     session non-terminally, or its transcript moved inside the idle window.
     Join spawns are claude-only, so the claude probes cover every row here.
     """
-    from fno.paths import agents_registry_path
+    from fno.registry_door import read_registry_document
 
     try:
-        reg = json.loads(Path(agents_registry_path()).read_text())
+        reg = read_registry_document()[0]
     except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
         return []
     legacy_prefix = f"j-{node_id}-"

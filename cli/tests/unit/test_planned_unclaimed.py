@@ -110,22 +110,13 @@ def test_ac3_observer_miss_is_prepended_to_normal_selection():
     assert [row["id"] for row in merged] == ["x-p0-missed", "x-p2-normal"]
 
 
-def test_ac1_hp_claim_snapshot_walks_keys_without_subprocess(tmp_path, monkeypatch):
+def test_ac1_hp_claim_snapshot_lists_node_keys_only(tmp_path, monkeypatch):
     from fno.backlog.undispatched import read_claim_snapshot
-    from fno.claims import verdict as claims_verdict
+    from tests._table_seed import seed_claim
 
-    claims = tmp_path / ".fno" / "claims"
-    claims.mkdir(parents=True)
-    (claims / "node%3Ax-held.lock").write_text("holder: a\n")
-    (claims / "node%3Ax-other.lock").write_text("holder: b\n")
-    (claims / "other%3Akey.lock").write_text("holder: c\n")
-    (claims / ".expired").mkdir()
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-
-    def _boom(*_a, **_k):
-        raise AssertionError("read_claim_snapshot spawned the verdict sweep")
-
-    monkeypatch.setattr(claims_verdict, "run_subprocess", _boom)
+    for key, holder in (("node:x-held", "a"), ("node:x-other", "b"), ("other:key", "c")):
+        seed_claim(key, holder, root=tmp_path)
 
     rows = read_claim_snapshot()
 
@@ -137,11 +128,10 @@ def test_ac1_hp_keys_only_rows_classify_identically_to_verdict_rows(
     tmp_path, monkeypatch
 ):
     from fno.backlog.undispatched import classify_planned_unclaimed, read_claim_snapshot
+    from tests._table_seed import seed_claim
 
-    claims = tmp_path / ".fno" / "claims"
-    claims.mkdir(parents=True)
-    (claims / "node%3Ax-held.lock").write_text("holder: a\n")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    seed_claim("node:x-held", "a", root=tmp_path)
     entries = [_node("x-open"), _node("x-held")]
 
     from_keys = classify_planned_unclaimed(entries, read_claim_snapshot())

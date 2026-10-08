@@ -299,7 +299,7 @@ fn pane_send_registry_identity(
     session: &str,
     pane: u64,
 ) -> Option<(String, Option<String>, Option<String>)> {
-    let raw = std::fs::read_to_string(crate::agents_view::registry_path()).ok()?;
+    let raw = crate::registry_read::registry_text(&crate::agents_view::registry_path()).ok()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

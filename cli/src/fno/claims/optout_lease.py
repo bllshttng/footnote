@@ -28,7 +28,6 @@ from fno.claims import (
     native_claims_root,
     release_claim,
 )
-from fno.claims.io import claims_dir
 from fno.config.optouts import (
     MERGE_GATING_OPTOUT_DEFAULTS,
     MERGE_GATING_OPTOUTS,
@@ -107,19 +106,6 @@ def _claim_state(key: str) -> str:
     """Read the opt-out instrument, distinguishing unreadable from absent."""
     try:
         root = native_claims_root(f"config-optout:{key}")
-        directory = claims_dir(root)
-        try:
-            directory.stat()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return "unreadable"
-        else:
-            try:
-                with os.scandir(directory):
-                    pass
-            except OSError:
-                return "unreadable"
         return str(
             claim_status(f"config-optout:{key}", root=root).get(
                 "state", "unreadable"

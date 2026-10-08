@@ -458,7 +458,6 @@ def test_ask_followup_e2e_registry_seeded(provider, tmp_path: Path, monkeypatch)
     Follow-ups pass no `--harness` so the provider resolves from the row.
     The Python dispatch half of the old parity test died with the ported
     ask legs; the retained `_codex_create_path` still writes the row."""
-    import shutil
 
     install_fake, env_for = _PROVIDER_FAKES[provider]
     bin_dir = tmp_path / "bin"
@@ -497,9 +496,7 @@ def test_ask_followup_e2e_registry_seeded(provider, tmp_path: Path, monkeypatch)
 
     # Followup through the binary, from the same cwd so the registry-pinned
     # cwd is honored.
-    rs_home = tmp_path / "rs-home"
-    rs_home.mkdir()
-    shutil.copy(paths.agents_registry_path(), rs_home / "registry.json")
+    rs_home = paths.agents_registry_path().parent
     env = {
         **os.environ,
         "FNO_AGENTS_HOME": str(rs_home),

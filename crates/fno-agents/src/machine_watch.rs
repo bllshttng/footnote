@@ -983,6 +983,12 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             "machine_sample",
             sample.to_data(&outcome.verdict, busy_band, LOAD_PER_CORE_BAND),
         );
+        // The capacity loop reads the same sample the arm just took: one
+        // machine, one reader, the AIMD state the gate and the gauges share.
+        let now_epoch = chrono::Utc::now().timestamp();
+        if let Err(error) = crate::capacity::feed(&sample, &cwd, &home, now_epoch) {
+            tracing::warn!(%error, "capacity state write failed");
+        }
         crate::tick_ledger::emit_tick(
             &journal,
             "machine_watch",

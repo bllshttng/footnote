@@ -8,7 +8,6 @@ Python dispatch instead of exec-ing an installed binary.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 
 import pytest
@@ -260,10 +259,10 @@ class TestWhoamiCLI:
         monkeypatch.setenv("FNO_AGENT_SESSION", "s-cli")
         from fno import paths
 
-        reg_path = paths.agents_registry_path()
+        from fno.registry_door import read_registry_document
 
         def _hash() -> str:
-            return hashlib.md5(reg_path.read_bytes()).hexdigest()
+            return str(read_registry_document(paths.agents_registry_path()))
 
         before = _hash()
         for _ in range(3):

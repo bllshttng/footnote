@@ -1772,13 +1772,18 @@ mod tests {
         legacy_entry.status = crate::AgentStatus::Live;
         let mut registry = crate::state::Registry::default();
         registry.entries.push(legacy_entry.clone());
-        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let acquired = crate::claims::acquire(
             "node:x-legacy",
             "target-session:s-legacy",
             crate::claims::AcquireOpts {
                 pid: Some(std::process::id()),
-                identity: Some(("s-legacy".into(), "codex".into())),
+                // A claude pid dies with its session, so the live pid
+                // vouches for the claim with no session witness.
+                identity: Some(("s-legacy".into(), "claude".into())),
                 root: None,
                 events_dir: Some(temp.path().join("claim-events")),
                 ..Default::default()
@@ -1822,7 +1827,10 @@ mod tests {
         genuine_entry.harness_session_id = Some("s-genuine".into());
         genuine_entry.status = crate::AgentStatus::Live;
         registry.entries.push(genuine_entry);
-        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let acquired_genuine = crate::claims::acquire(
             "node:x-genuine",
             "target-session:s-genuine",
@@ -1894,7 +1902,10 @@ mod tests {
         fresh_entry.harness_session_id = Some("s-fresh".into());
         fresh_entry.status = crate::AgentStatus::Live;
         registry.entries.push(fresh_entry);
-        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let acquired_fresh = crate::claims::acquire(
             "node:x-fresh",
             "target-session:s-fresh",
@@ -1980,14 +1991,37 @@ mod tests {
             )
             .unwrap();
 
-        std::fs::remove_file(home.registry_json()).unwrap();
-        std::fs::create_dir(home.registry_json()).unwrap();
+        let store = rusqlite::Connection::open(
+            crate::registry_store::database_path(&home.registry_json()).unwrap(),
+        )
+        .unwrap();
+        let document: String = store
+            .query_row(
+                "SELECT value FROM registry_meta WHERE key='document'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        store
+            .execute(
+                "UPDATE registry_meta SET value='[' WHERE key='document'",
+                [],
+            )
+            .unwrap();
         let registry_error = crate::watch_expiry::run_pass(&home);
-        std::fs::remove_dir(home.registry_json()).unwrap();
+        store
+            .execute(
+                "UPDATE registry_meta SET value=?1 WHERE key='document'",
+                [document],
+            )
+            .unwrap();
 
         legacy_entry.harness_session_id = Some("s-legacy".into());
         registry.entries = vec![legacy_entry];
-        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let broken_claims_root = temp.path().join("claims-root-file");
         std::fs::write(&broken_claims_root, "unreadable claims root").unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &broken_claims_root);
@@ -2080,7 +2114,7 @@ mod tests {
         std::fs::create_dir_all(state_dir.join("locks")).unwrap();
         std::env::set_var("FNO_STATE_DIR", &state_dir);
         let claims_root = td.path().join("claims");
-        let waiters = claims_root.join(".fno/claims/build-waiters");
+        let waiters = claims_root.join(".fno/claim-aux/build-waiters");
         std::fs::create_dir_all(&waiters).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         let workdir = td.path().join("workdir");
@@ -2172,7 +2206,10 @@ mod tests {
         team.model = Some("glm-5.3-flash".into());
         let mut registry = crate::state::Registry::default();
         registry.entries.push(team);
-        std::fs::write(home.registry_json(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        crate::registry_store::seed_raw(
+            &home.registry_json(),
+            serde_json::to_vec(&registry).unwrap(),
+        );
         let mut calls: Vec<Vec<String>> = Vec::new();
         let mut runner_inner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             calls.push(argv.to_vec());

@@ -47,11 +47,6 @@ import typer
 MACMON_TIMEOUT_S = 5.0
 MEMORY_PRESSURE_TIMEOUT_S = 5.0
 
-#: The lane answer's sanity cap. Per-lane costs are small; without a cap a
-#: quiet machine advertises thousands of lanes, which is a number nobody can
-#: act on and nobody should read as a promise.
-LANE_ANSWER_CAP = 64
-
 #: Per-lane seed costs (cores, GB) used when no live roster row exists to
 #: measure from. Derived from the observed resident sizes on the specifying
 #: node: a keeper about 6.5 MB, fno-agents-daemon about 105 MB, the mux
@@ -431,26 +426,29 @@ def read_lanes(
 
     assert cpu_arm.value is not None and mem_arm.value is not None  # measured arms
     per_cpu, per_gb, row_count, cost_source = _fleet_cost(footprint, rows)
-    busy = cpu_arm.value["busy_fraction"]
-    capacity = cpu_arm.value["capacity_cores"]
-    free_cores = capacity * (1.0 - busy)
-    mem_value = mem_arm.value
-    available_gb = mem_value.get("available_gb")
-    if available_gb is None and mem_value.get("free_fraction") is not None:
-        # memory_pressure without a macmon total: the seed cost needs a GB
-        # figure, and a fraction alone cannot give one. Refusing here would
-        # contradict the arm's own "measured" state, so the seed GB total
-        # (16 GB) bounds the estimate and the output says so.
-        available_gb = round(mem_value["free_fraction"] * 16.0, 1)
-        cost_source = "seed 16 GB total x memory_pressure free fraction"
-    cpu_fits = free_cores / per_cpu
-    mem_fits = available_gb / per_gb
-    answer = int(max(0.0, min(cpu_fits, mem_fits, float(LANE_ANSWER_CAP))))
 
-    if load_arm.state == DARK or (
-        isinstance(load_arm.value, dict)
-        and load_arm.value.get("verdict") in ("hold", "undecidable", "refuse")
-    ):
+    # The lane answer IS the gate's own cap read (one decider, no second
+    # arithmetic): the probe carries the live slot count and the learned
+    # effective cap, and the CPU-share arithmetic it replaces (an answer of
+    # 15 more fit at 90% CPU) is deleted. Delegating to the Rust probe is
+    # the law (d-b6cc1a2a): Python deletes, the gate decides. When the probe
+    # cannot answer, a holding CPU axis still caps at 0 (a spawn-load breach
+    # runs the suite serial); only a silent probe AND an admitting axis
+    # refuses, because then nothing measured is holding anything back.
+    from fno.agents.spawn_gate import probe_capacity
+
+    probe = probe_capacity(only=["lanes"])
+    slots = probe.get("slots")
+    effective = probe.get("effective")
+    answer: Optional[int] = None
+    if isinstance(slots, int) and isinstance(effective, int):
+        answer = max(0, effective - int(slots))
+        cost_source += f"; probe {slots} live, effective cap {effective}"
+
+    hold_verdict = isinstance(load_arm.value, dict) and load_arm.value.get(
+        "verdict"
+    ) in ("hold", "undecidable", "refuse")
+    if load_arm.state == DARK or hold_verdict:
         # The CPU axis is not admitting, or never answered: a dark sensor is
         # never headroom, and neither is a hold, an undecidable band, or a
         # refusal (AC12).
@@ -461,6 +459,13 @@ def read_lanes(
             else str(load_arm.value.get("verdict"))
         )
         cost_source += f"; cpu admission {cap_why}, answer capped at 0"
+
+    if answer is None:
+        reading.refusal_reason = (
+            "the gate cannot answer the lane question: the spawn-gate probe "
+            f"carries no effective cap ({probe.get('reason') or 'gate unavailable'})"
+        )
+        return reading
 
     reading.lane_count = answer
     reading.per_lane_cpu_cores = round(per_cpu, 3)

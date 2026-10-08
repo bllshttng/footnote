@@ -1558,7 +1558,7 @@ pub fn workspace(
 /// predicate then treats every member as unknown-liveness and keeps everything.
 /// Absent files mean no agents system is running -> nothing is live.
 fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
-    let unreadable = |p: &Path| p.exists() && std::fs::read_to_string(p).is_err();
+    let unreadable = |p: &Path| p.exists() && crate::registry_read::registry_text(p).is_err();
     if unreadable(&crate::agents_view::registry_path())
         || unreadable(&crate::agents_view::roster_path())
     {
@@ -1573,7 +1573,7 @@ fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
 fn member_evidence() -> crate::squad_store::MemberEvidence {
     let registry_path = crate::agents_view::registry_path();
     let roster_path = crate::agents_view::roster_path();
-    let registry = std::fs::read_to_string(&registry_path);
+    let registry = crate::registry_read::registry_text(&registry_path);
     let roster = std::fs::read_to_string(&roster_path);
     let complete_empty = matches!(
         (&registry, &roster),
@@ -3170,7 +3170,7 @@ fn print_candidates(verb: &str, selector: &str, candidates: &[Candidate]) {
 /// every selector door; a read failure is EXIT_REGISTRY_UNAVAILABLE, never a
 /// silent "not found" (the rule `where` already shipped with).
 fn registry_rows_or(verb: &str) -> Result<(Vec<crate::agents_view::RegistryAgent>, u64), i32> {
-    let raw = match std::fs::read_to_string(crate::agents_view::registry_path()) {
+    let raw = match crate::registry_read::registry_text(&crate::agents_view::registry_path()) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("{verb}: no agent registry");

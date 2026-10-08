@@ -94,36 +94,21 @@ def groom_staleness(*, now: Optional[float] = None) -> GroomFreshness:
     """Hours since the last grooming pass, read from its own claim marker.
 
     The daily claim IS the run receipt, so there is no second source of truth to
-    drift from - and none to add. Live markers sit in the claims dir; recovered
-    ones are archived under ``.expired/`` with the same encoded key, so both are
-    scanned. Age comes from the file's mtime (an archive is a rename, which
-    preserves it), never from a shelled ``stat`` whose flags differ BSD vs GNU.
+    drift from - and none to add. Stale rows are read too: a marker past its TTL
+    still dates the last pass until a reap retires it.
     """
-    from fno.claims.core import native_claims_root
-    from fno.claims.io import EXPIRED_SUBDIR, claims_dir, encode_key
+    from fno.claims.core import list_claims, native_claims_root
 
-    prefix = encode_key(f"{_GROOM_KEY_PREFIX}:")
-    base = claims_dir(native_claims_root(f"{_GROOM_KEY_PREFIX}:probe"))
-
-    newest: Optional[float] = None
-    for directory in (base, base / EXPIRED_SUBDIR):
-        try:
-            names = os.listdir(directory)
-        except FileNotFoundError:
-            # A machine that never groomed has no claims dir at all; that is
-            # "never", not "unreadable".
-            continue
-        except OSError:
-            return ("unknown", None)
-        for name in names:
-            if not name.startswith(prefix):
-                continue
-            try:
-                mtime = (directory / name).stat().st_mtime
-            except OSError:
-                continue
-            if newest is None or mtime > newest:
-                newest = mtime
+    try:
+        rows = list_claims(
+            prefix=f"{_GROOM_KEY_PREFIX}:",
+            include_stale=True,
+            root=native_claims_root(f"{_GROOM_KEY_PREFIX}:probe"),
+        )
+    except Exception:  # noqa: BLE001 - an unreadable claims table is unknown, not never
+        return ("unknown", None)
+    stamps = [row["acquired_at"] for row in rows if isinstance(row.get("acquired_at"), int)]
+    newest: Optional[float] = max(stamps) / 1000.0 if stamps else None
 
     if newest is None:
         return ("never", None)

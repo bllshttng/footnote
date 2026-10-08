@@ -632,7 +632,6 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
     evidencing PR url, rather than calling graduate (a no-op) on its own
     (ab-bd9f476c)."""
     import os
-    import time
 
     from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
 
@@ -649,14 +648,10 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
     # live claim holder, not the graph row's retired mirror field: the row
     # carries a distinct stale id on purpose. FNO_CLAIMS_ROOT is a root; the
     # scan reads its .fno/claims directory.
-    now_ms = int(time.time() * 1000)
-    claims_dir = root / "claims" / ".fno" / "claims"
-    claims_dir.mkdir(parents=True)
-    (claims_dir / "node%3Aab-done0001.lock").write_text(
-        f'schema_version: 1\nkey: "node:ab-done0001"\nholder: "sess-9"\n'
-        f"acquired_at: {now_ms}\npid: {os.getpid()}\nhost: test-host\n"
-        f'expires_at: {now_ms + 900_000}\nreason: "done stamp fixture"\n'
-    )
+    from fno.claims.core import acquire_claim
+
+    acquire_claim("node:ab-done0001", "sess-9", ttl_ms=900_000, pid=os.getpid(),
+                  reason="done stamp fixture", root=root / "claims")
     stub = write_pr_stub(root, {900: "MERGED"})
     code, out, err = door(root, ["done", "ab-done0001"], path_prepend=str(stub))
     assert code == 0, out + err

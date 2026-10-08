@@ -111,28 +111,17 @@ def test_send_refuses_when_no_holder(runner, isolated, monkeypatch):
 
 def test_send_refuses_when_claim_stale(runner, isolated, monkeypatch):
     # A STALE claim (expired TTL) reads as non-live -> refuse, same path as free.
-    from fno.claims.core import claim_status
+    from fno.claims.core import acquire_claim, claim_status
+    from tests._table_seed import update_claim
 
-    # Acquire with the minimum TTL, then rewrite the lock file to back-date its
-    # expiry past the horizon so classify() reports STALE (not suspect/live).
-    from fno.claims.io import claim_path
-
-    acquire = __import__("fno.claims.core", fromlist=["acquire_claim"]).acquire_claim
-    acquire(
+    acquire_claim(
         key="node:stale-abcd",
         holder="target-session:dead0000-0000-0000-0000-000000000000",
         ttl_ms=60_000,
         reason="test",
         harness="claude",
     )
-    p = claim_path("node:stale-abcd")
-    text = p.read_text()
-    import re
-
-    # Push expires_at into the distant past.
-    text = re.sub(r"expires_at: \d+", "expires_at: 1000", text)
-    text = re.sub(r"acquired_at: \d+", "acquired_at: 1000", text)
-    p.write_text(text)
+    update_claim("node:stale-abcd", acquired_at=1000, expires_at=1000)
     assert claim_status("node:stale-abcd")["state"] == "stale"
 
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))

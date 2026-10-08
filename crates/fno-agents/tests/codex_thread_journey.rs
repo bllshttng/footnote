@@ -89,7 +89,7 @@ fn wait_for_file(path: &Path, budget: Duration) {
 }
 
 fn registry_row(home: &AgentsHome, name: &str) -> Value {
-    let raw = std::fs::read_to_string(home.registry_json()).expect("registry exists");
+    let raw = registry_text(&home.registry_json()).expect("registry exists");
     let registry: Value = serde_json::from_str(&raw).expect("registry JSON");
     registry["agents"]
         .as_array()
@@ -399,4 +399,10 @@ fn codex_thread_stop_mid_turn_interrupts() {
         std::thread::sleep(Duration::from_millis(200));
     }
     panic!("app-server child {pid} outlived a reported stop");
+}
+
+fn registry_text(path: &std::path::Path) -> std::io::Result<String> {
+    fno_agents::registry_store::read(path)
+        .map(|doc| serde_json::to_string_pretty(&doc).unwrap())
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }

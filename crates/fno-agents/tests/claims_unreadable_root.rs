@@ -118,7 +118,7 @@ fn claim_sweep_exits_nonzero_on_an_unreadable_dir() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("claims root"),
+        String::from_utf8_lossy(&out.stderr).contains(&dir.display().to_string()),
         "stderr names the fault: {:?}",
         String::from_utf8_lossy(&out.stderr)
     );

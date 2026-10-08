@@ -3424,7 +3424,7 @@ def _team_fake_writer(
     real_run = subprocess.run
 
     def fake_run(args, **kwargs):
-        if {"doctor", "event"} <= set(args) or "style-check" in args:
+        if {"doctor", "event"} <= set(args) or {"style-check", "registry-commit"} & set(args):
             # Event emission and the style gate ride the same subprocess seam;
             # let them reach the real binary so only true writer calls land
             # in `calls`.
