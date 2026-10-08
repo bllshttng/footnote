@@ -578,8 +578,12 @@ mod tests {
             team_beat_journals(&home, &registry_path, &stranger),
             vec![home.events_jsonl(), base.join("events.jsonl")]
         );
-        // A registry that cannot be read degrades to the shared pair.
-        let broken = base.join("registry-broken.json");
+        // A registry that cannot be read degrades to the shared pair. It gets
+        // its own folder: the store keys a registry by its folder, so a
+        // sibling of registry.json would read the table imported from it.
+        let broken_home = base.join("broken");
+        std::fs::create_dir_all(&broken_home).unwrap();
+        let broken = broken_home.join("registry.json");
         std::fs::write(&broken, "not json").unwrap();
         assert_eq!(
             team_beat_journals(&home, &broken, &head),
