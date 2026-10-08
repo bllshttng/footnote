@@ -914,11 +914,13 @@ def test_plain_send_delivers_read_line_on_a_hookless_harness(
     assert sent.exit_code == 0, sent.output
     assert len(injected) == 1
     # Without a subject the header's third field is the body's first sentence
-    # (AC10-HP); the turn is the header line alone.
+    # (AC10-HP). The turn is the header line plus the read-verb lesson: a
+    # never-taught recipient's first delivered header carries it once.
     lines = injected[0].splitlines()
-    assert len(lines) == 1, injected[0]
+    assert len(lines) == 2, injected[0]
     header = lines[0]
     assert header.startswith("`@web · fmail-")
+    assert "fno agents mail show <id>" in lines[1], injected[0]
     msg_id = header.split(" · ")[1]
 
     # The bus copy the id points at holds the full body.
