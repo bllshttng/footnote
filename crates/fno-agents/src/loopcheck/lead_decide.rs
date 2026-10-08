@@ -285,8 +285,60 @@ pub(super) fn lead_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         if undelivered == 0 {
             // The quiet exit names the reads it did not get (timeout-killed
             // truth batches included): the receipt is the record the next
-            // wake re-reads against, never a silent clean.
-            let quiet = format!("board clean; exiting NoWork{}", board.not_read_receipt());
+            // wake re-reads against, never a silent clean. The provider goal
+            // parks here too: an exit that leaves the goal active
+            // leaves the codex thread asking what to do next forever, which
+            // is the usage the parked beat exists to save.
+            let mut parked = false;
+            let provider_goal_error =
+                if should_pause_codex_goal(manifest.harness.as_deref(), drain_error.is_none())
+                    && !manifest.scope.trim().is_empty()
+                {
+                    match crate::lead_goal::pause_codex_lead_goal(&manifest, &parsed.cwd) {
+                        Ok(provider_receipt) => {
+                            parked = true;
+                            emit(
+                                "quiet-clean",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "scope": manifest.scope,
+                                    "provider_receipt": provider_receipt,
+                                }),
+                            );
+                            None
+                        }
+                        Err(error) => Some(error),
+                    }
+                } else {
+                    None
+                };
+            let quiet = match provider_goal_error.as_deref() {
+                // The refusal blocks, so its message never claims an exit.
+                Some(error) => format!(
+                    "board clean{}; Codex provider goal pause refused: {error}",
+                    board.not_read_receipt()
+                ),
+                None => {
+                    let mut quiet =
+                        format!("board clean; exiting NoWork{}", board.not_read_receipt());
+                    if parked {
+                        quiet = format!("{quiet}; Codex provider goal parked; the beat resumes it");
+                    }
+                    quiet
+                }
+            };
+            if let Some(error) = provider_goal_error.as_deref() {
+                let readings = vec![format!(
+                    "reading:provider-goal-pause:{}",
+                    manifest.scope.replace(',', "+")
+                )];
+                let body = provider_goal_pause_refusal_body(&session_id, error);
+                emit("lead_loop_check", body);
+                if let Some(b) = bounded(dry, &quiet) {
+                    return terminate(b.reason, &b.message, 0, b.fires, &readings);
+                }
+                return (0, lead_output("block", None, &quiet, 0, dry + 1));
+            }
             return terminate(TerminationReason::NoWork, &quiet, 0, dry, &[]);
         }
         // A readable quiet-undelivered fire is a park edge. Codex owns the

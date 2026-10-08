@@ -218,8 +218,67 @@ fn notify_operator(title: &str, body: &str) -> bool {
     crate::operator_notice::notify_operator_confirmed(title, body, Some("fno agents status"))
 }
 
+/// The beat's cron act: a codex lead the wake reached gets its
+/// resting goal resumed, so the beat is a work beat (check-in, then the
+/// board) and not one turn that sleeps again. A claude lead, a stale
+/// manifest, or an unreachable root is no signal, never an error; a provider
+/// refusal rides the note, and the beat still happened.
+fn resume_resting_goal(
+    home: &AgentsHome,
+    plan: &WakePlan,
+    lead_session: &str,
+    roots: &BTreeMap<String, String>,
+) -> Option<String> {
+    let root = roots.get(&plan.lead.holder).filter(|r| !r.is_empty())?;
+    let manifest_path = crate::paths::space_dir(Path::new(root))
+        .join("leads")
+        .join(format!("{}.md", plan.lead.scope));
+    let manifest = beat_resume_target(lead_session, &manifest_path)?;
+    match crate::lead_goal::resume(&manifest, Path::new(root)) {
+        Ok(receipt) => {
+            let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+            let payload = serde_json::json!({
+                "session_id": lead_session,
+                "scope": plan.lead.scope,
+                "resumed": true,
+                "successor": false,
+                "reason": "beat",
+                "provider_receipt": receipt,
+            });
+            if let Err(error) = emitter.emit("lead_goal_resumed", &payload) {
+                eprintln!("lead-wake: goal resume receipt emit failed: {error}");
+            }
+            Some("resumed its resting goal".to_string())
+        }
+        Err(error) => Some(format!("goal resume refused: {error}")),
+    }
+}
+
+/// The admission gate, no provider call: the piece a test can hold without
+/// touching the process env. The caller resolves the manifest path (one
+/// space_dir read per pass, not one per waking lead); the gate reads it and
+/// admits only a codex manifest naming this exact live session.
+fn beat_resume_target(
+    lead_session: &str,
+    manifest_path: &Path,
+) -> Option<crate::lead_termination::LeadManifest> {
+    let content = std::fs::read_to_string(manifest_path).ok()?;
+    let manifest = crate::lead_termination::parse_lead_manifest(&content)?;
+    if manifest.harness.as_deref() != Some("codex")
+        || manifest.harness_session_id.as_deref() != Some(lead_session)
+    {
+        return None;
+    }
+    Some(manifest)
+}
+
 /// One wake: deliver to the lead, tell the rungs, receipt the episode.
-fn act_on_plan(home: &AgentsHome, plan: WakePlan, beat_secs: i64) -> (u64, String) {
+fn act_on_plan(
+    home: &AgentsHome,
+    plan: WakePlan,
+    beat_secs: i64,
+    roots: &BTreeMap<String, String>,
+) -> (u64, String) {
     let told = plan.up.len() + plan.down.len();
     let mut acted = 0u64;
     let mut notes: Vec<String> = Vec::new();
@@ -229,6 +288,10 @@ fn act_on_plan(home: &AgentsHome, plan: WakePlan, beat_secs: i64) -> (u64, Strin
     {
         acted += 1;
         notes.push(format!("woke {}", plan.lead.holder));
+        if let Some(note) = resume_resting_goal(home, &plan, &lead_session, roots) {
+            notes.push(format!("{} {}", plan.lead.holder, note));
+            acted += 1;
+        }
     }
     let text = told_text(plan.lead, plan.idle_secs, beat_secs);
     for team in plan.up.iter().chain(plan.down.iter()) {
@@ -309,10 +372,29 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
             ),
         });
     }
+    // holder -> repo root (project_root, else cwd): where the lead manifest
+    // and the provider thread's cwd live, read once per pass, and only when
+    // a wake actually plans (the quiet pass never pays the registry parse).
+    let roots: BTreeMap<String, String> = crate::state::load_registry(&registry)
+        .map(|loaded| {
+            loaded
+                .entries
+                .into_iter()
+                .map(|e| {
+                    let root = if e.project_root.is_empty() {
+                        e.cwd
+                    } else {
+                        e.project_root
+                    };
+                    (e.name, root)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut acted = 0u64;
     let mut notes: Vec<String> = Vec::new();
     for plan in plans {
-        let (n, note) = act_on_plan(home, plan, beat_secs);
+        let (n, note) = act_on_plan(home, plan, beat_secs, &roots);
         acted += n;
         if !note.is_empty() {
             notes.push(note);
@@ -502,5 +584,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn write_beat_manifest(path: &Path, scope: &str, harness: &str, session: &str) {
+        // fno_id is non-empty: the manifest parser refuses a frontmatter
+        // block without one, so the fixture must carry a real-shaped id.
+        std::fs::write(
+            path,
+            format!(
+                "---\nfno_id: {scope}-fixture\nscope: {scope}\nharness: {harness}\nharness_session_id: {session}\n---\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    // The gate reads the manifest path its caller resolved, so the tests
+    // need no env pin: the space-dir resolution contract is paths.rs's, and
+    // an env pin here raced the suite's unlocked env mutators in CI.
+    #[test]
+    fn the_beat_resume_gate_admits_only_this_codex_sessions_manifest() {
+        let repo = tempfile::tempdir().unwrap();
+        let manifest_path = repo.path().join("x-aaa.md");
+        // No manifest, a claude manifest, or another session's manifest:
+        // all no signal.
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
+        write_beat_manifest(&manifest_path, "x-aaa", "claude", "s-l2a");
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
+        write_beat_manifest(&manifest_path, "x-aaa", "codex", "s-other");
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
+        // The woken codex session's own manifest: admitted.
+        write_beat_manifest(&manifest_path, "x-aaa", "codex", "s-l2a");
+        let manifest =
+            beat_resume_target("s-l2a", &manifest_path).expect("admits the woken codex lead");
+        assert_eq!(manifest.scope, "x-aaa");
+    }
+
+    #[test]
+    fn a_manifest_that_vanished_is_no_beat_resume_signal() {
+        let repo = tempfile::tempdir().unwrap();
+        let manifest_path = repo.path().join("never-written.md");
+        assert!(beat_resume_target("s-l2a", &manifest_path).is_none());
     }
 }
