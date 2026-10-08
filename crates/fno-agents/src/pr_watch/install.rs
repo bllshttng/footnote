@@ -22,10 +22,6 @@ use super::status::{
 
 const LABEL: &str = "sh.fno.pr-watcher";
 
-/// Per-repo watchers from the retired scripts/post-merge/ path. Their target
-/// script is deleted, so a loaded job would fail under launchd forever.
-const LEGACY_POSTMERGE_GLOB: &str = "com.fno.postmerge*.plist";
-
 /// The plist template, byte-for-byte the Python `_PLIST_TEMPLATE`.
 const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
