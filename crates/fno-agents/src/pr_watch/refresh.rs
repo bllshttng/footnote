@@ -191,6 +191,7 @@ fn write_if_changed(plist_path: &Path, plist_text: &str) -> std::io::Result<bool
 /// An unread answer never blocks a cure (fail-open, like the claim read it
 /// replaced).
 fn stdout_of(argv: &[&str], timeout_s: u64) -> String {
+    use std::os::unix::process::CommandExt as _;
     let Ok(mut child) = std::process::Command::new(argv[0])
         .args(&argv[1..])
         .stdin(std::process::Stdio::null())
@@ -285,8 +286,9 @@ fn tick_in_flight() -> Option<i32> {
 /// no sidecar: there is no kill to join) and emits `pr_watch_bounce` so
 /// deferrals are countable. Never panics; a receipt must not block a cure.
 fn record_bounce(caller: &str, deferred: bool, state_root: &Path) {
+    let (pid, ppid) = unsafe { (libc::getpid(), libc::getppid()) };
     let parent = stdout_of(
-        &["ps", "-o", "command=", "-p", &libc::getppid().to_string()],
+        &["ps", "-o", "command=", "-p", &ppid.to_string()],
         LAUNCHCTL_TIMEOUT_S,
     )
     .trim()
@@ -295,8 +297,8 @@ fn record_bounce(caller: &str, deferred: bool, state_root: &Path) {
     .collect::<String>();
     let data = serde_json::json!({
         "caller": caller,
-        "pid": libc::getpid(),
-        "ppid": libc::getppid(),
+        "pid": pid,
+        "ppid": ppid,
         "parent": parent,
         "deferred": deferred,
     });
@@ -311,8 +313,8 @@ fn record_bounce(caller: &str, deferred: bool, state_root: &Path) {
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0),
             "caller": caller,
-            "pid": libc::getpid(),
-            "ppid": libc::getppid(),
+            "pid": pid,
+            "ppid": ppid,
             "parent": parent,
             "deferred": deferred,
         });
@@ -354,6 +356,7 @@ fn now_micros_z() -> String {
 /// invocation order) stands in for the real tool, the way the load-state pin
 /// does for `launchctl list`.
 fn run_launchctl_timed(args: &[&str], timeout_s: u64) -> (i32, bool) {
+    use std::os::unix::process::CommandExt as _;
     if let Ok(script) = std::env::var("FNO_TEST_PR_WATCH_LAUNCHCTL") {
         let idx = LAUNCHCTL_CALL.fetch_add(1, Ordering::Relaxed);
         let parsed: Option<Vec<Vec<serde_json::Value>>> = serde_json::from_str(&script).ok();
