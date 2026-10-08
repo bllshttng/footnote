@@ -692,13 +692,20 @@ def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
     return None
 
 
+#: The /target verb's own non-node words (sizes, modes, controls): the gate
+#: judges only a word that could name a node.
+_TARGET_SEED_CONTROL = frozenset(
+    "S M L small medium large agent fork bg batched clean adversarial"
+    " beastmode beast combo auto-merge resume cancel".split())
+
+
 def resolve_seed_node(message: str) -> tuple[Optional[str], Optional[str]]:
     """Resolve a /fno:target seed word via the backlog id resolver: exact id, slug, bare hex
-    (configured prefix), title fuzzy. A proven miss refuses with the nearest matches; an
-    unreadable graph fails open (absence cannot be proven).
+    (configured prefix), title fuzzy; control words pass; a miss refuses nearest; unreadable
+    graph fails open (absence cannot be proven).
     """
     first = message.strip().splitlines()[0].split()
-    if len(first) < 2 or first[1].startswith(("-", "/", "$")) or first[1] in ("resume", "cancel"):
+    if len(first) < 2 or first[1].startswith(("-", "/", "$")) or first[1] in _TARGET_SEED_CONTROL:
         return None, None
     if parse_verb_token(first[0]) != ("target", True):
         return None, None
@@ -729,8 +736,7 @@ def verb_fired_marker(message: str) -> Optional[str]:
         return None
     if parse_verb_token(first[0]) != ("target", True):
         return None
-    first[1] = resolve_seed_node(message)[0] or first[1]
-    return f"fno agents claim status node:{first[1]}"
+    return f"fno agents claim status node:{resolve_seed_node(message)[0] or first[1]}"
 
 
 def render_seed(message: str, harness: str) -> str:
