@@ -1537,6 +1537,9 @@ pub(crate) async fn feed_keys(
                 let ceiling = feed_view::widest_title(&f.win.items).saturating_sub(1);
                 f.hpan = (f.hpan + 1).min(ceiling);
             }
+            // No split cells here: the folded Shift+arrow is inert, the
+            // same swallow the raw sequence got before it was folded.
+            ModalKey::ShiftArrow(_) => {}
             ModalKey::PageUp => {
                 let page = (view.term.0 as usize).saturating_sub(2).max(1);
                 f.sel = f.sel.saturating_sub(page);
