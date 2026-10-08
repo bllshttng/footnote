@@ -119,23 +119,64 @@ pub(crate) fn upgrade_registry_rows(rows: &mut [Value]) -> bool {
 }
 
 /// Rewrite the registry table once, so the stored rows carry current keys.
+/// Plain SQL, because the fno crate carries this file without the registry
+/// store.
 fn migrate_registry_table(root: &Path) -> Result<(), String> {
     for path in [
         root.join("registry.json"),
         root.join("agents").join("registry.json"),
     ] {
-        if !path.is_dir() {
+        let Some(database) = crate::registry_read::database_path(&path) else {
+            continue;
+        };
+        if !path.is_dir() || !database.exists() {
             continue;
         }
-        let write = crate::registry_store::begin(&path).map_err(|e| e.to_string())?;
-        let mut document = write.document.clone();
-        let changed = document
-            .get_mut("agents")
-            .and_then(Value::as_array_mut)
-            .is_some_and(|rows| upgrade_registry_rows(rows));
-        if changed {
-            write.commit(document).map_err(|e| e.to_string())?;
+        let mut conn = crate::store_conn::open_write(&database)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let table: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !table {
+            continue;
         }
+        let rows = {
+            let mut statement = tx
+                .prepare("SELECT identity, payload FROM registry")
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            let collected: Vec<(String, String)> =
+                rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+            collected
+        };
+        let mut changed = false;
+        for (identity, payload) in rows {
+            let mut row: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            if upgrade_registry_rows(std::slice::from_mut(&mut row)) {
+                tx.execute(
+                    "UPDATE registry SET payload=?1 WHERE identity=?2",
+                    rusqlite::params![row.to_string(), identity],
+                )
+                .map_err(|e| e.to_string())?;
+                changed = true;
+            }
+        }
+        if changed {
+            tx.execute(
+                "UPDATE registry_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -702,6 +743,13 @@ mod tests {
         let text: Value =
             serde_json::from_str(&crate::registry_read::registry_text(&path).unwrap()).unwrap();
         assert_eq!(text["agents"][0]["role_level"], 2);
+        migrate_registry_table(tmp.path()).unwrap();
+        let db = crate::registry_read::database_path(&path).unwrap();
+        let stored: String = rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row("SELECT payload FROM registry", [], |r| r.get(0))
+            .unwrap();
+        assert!(stored.contains("role_level") && !stored.contains("crown_level"));
     }
 
     #[test]
