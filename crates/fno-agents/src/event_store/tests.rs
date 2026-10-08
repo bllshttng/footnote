@@ -296,12 +296,15 @@ fn ephemeral_journal_is_refused_but_sibling_imports() {
         &[checkin("2026-09-10T08:00:00Z", "x-aaaa", "durable")],
     );
     let sibling = dir.path().join("events.jsonl.ephemeral");
+    // Half the retention window back, so the row sits inside it whatever
+    // day this runs: a hard-coded date hit its 672h expiry on 2026-10-08
+    // and the post-commit prune deleted the row this import just wrote.
+    let live_ts = (chrono::Utc::now() - chrono::Duration::hours(MINIMUM_EPHEMERAL_TTL_HOURS / 2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     append(
         &sibling,
-        &[
-            json!({"ts": "2026-09-10T08:00:00Z", "type": "mux_pane_counters",
-              "source": "mux", "data": {"panes": []}}),
-        ],
+        &[json!({"ts": live_ts, "type": "mux_pane_counters",
+              "source": "mux", "data": {"panes": []}})],
     );
     let err = sync(&sibling).unwrap_err();
     assert!(err.contains("ephemeral"), "err: {err}");
@@ -328,6 +331,15 @@ fn ephemeral_journal_is_refused_but_sibling_imports() {
 fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
+    // Ephemeral timestamps ride the retention window, not the calendar:
+    // one expired (twice the TTL back), one fresh (half the TTL back), so
+    // the pair holds whatever day this runs. Hard-coded dates detonated on
+    // 2026-10-08 when the 2026-09-10 row crossed its 672h expiry.
+    let fresh_ts = (chrono::Utc::now() - chrono::Duration::hours(MINIMUM_EPHEMERAL_TTL_HOURS / 2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expired_ts = (chrono::Utc::now()
+        - chrono::Duration::hours(MINIMUM_EPHEMERAL_TTL_HOURS * 2))
+    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     append(
         &live,
         &[
@@ -336,9 +348,9 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
             json!({"ts": "2026-05-01T08:00:00Z", "type": "review_attestation",
                    "source": "reviewer", "data": {"reviewer": "code-review",
                    "head_sha": "abc", "verdict": "pass"}}),
-            json!({"ts": "2026-05-01T08:00:00Z", "type": "mux_pane_counters",
+            json!({"ts": expired_ts, "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
-            json!({"ts": "2026-09-15T08:00:00Z", "type": "mux_pane_counters",
+            json!({"ts": fresh_ts, "type": "mux_pane_counters",
                    "source": "mux", "data": {"panes": []}}),
         ],
     );
@@ -356,7 +368,7 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
     assert_eq!(
         count_type(&store, "mux_pane_counters"),
         1,
-        "the fresh ephemeral row stays; the 2026-05-01 one is gone"
+        "the fresh ephemeral row stays; the expired one is gone"
     );
     // Force the daily prune again; the fresh ephemeral row survives.
     let writable = Connection::open(&store).unwrap();
