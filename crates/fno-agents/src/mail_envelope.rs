@@ -730,26 +730,30 @@ mod tests {
         // teach stamp lives beside the render's own registry, so no env pin
         // is involved and no sibling test can see this tmp world.
         let pin = tempfile::TempDir::new().unwrap();
-        let registry_body = |with_transcript: bool| {
-            let row = if with_transcript {
-                format!(
-                    "{{\"name\":\"quill\", \"short_id\":\"quill-short\", \"status\":\"busy\", \"harness\":\"pi\", \"cwd\":\"/repo\", \
-                     \"harness_session_id\":\"pi-session-1\", \"created_at\":\"2026-09-23T20:00:00Z\", \
-                     \"transcript_path\":\"{}/pi-transcript.jsonl\"}}",
-                    pin.path().display()
-                )
-            } else {
-                "{\"name\":\"quill\", \"short_id\":\"quill-short\", \"status\":\"busy\", \"harness\":\"pi\", \"cwd\":\"/repo\", \
-                  \"harness_session_id\":\"pi-session-1\", \"created_at\":\"2026-09-23T20:00:00Z\"}"
-                    .to_string()
-            };
+        // The first render imports registry.json into the store and retires
+        // the file into a fence directory, so the registry is written EXACTLY
+        // once, with transcript_path set from the start. The simulated
+        // compaction rewrites the TRANSCRIPT - a plain file the row already
+        // points at - from boundaryless to carrying a boundary.
+        let transcript = pin.path().join("pi-transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-08T15:00:00Z\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pin.path().join("registry.json"),
             format!(
                 "{{\"schema_version\":{}, \"agents\":[{{\"name\":\"folio\", \"short_id\":\"folio-short\", \"status\":\"live\", \"harness\":\"claude\", \"cwd\":\"/repo\", \
-                 \"harness_session_id\":\"7c9e6679-7423-40de-944b-e07fc1f90ae7\", \"created_at\":\"2026-09-23T20:00:00Z\"}}, {row}]}}",
-                crate::state::REGISTRY_SCHEMA_VERSION
-            )
-        };
-        std::fs::write(pin.path().join("registry.json"), registry_body(false)).unwrap();
+                 \"harness_session_id\":\"7c9e6679-7423-40de-944b-e07fc1f90ae7\", \"created_at\":\"2026-09-23T20:00:00Z\"}}, \
+                 {{\"name\":\"quill\", \"short_id\":\"quill-short\", \"status\":\"busy\", \"harness\":\"pi\", \"cwd\":\"/repo\", \
+                 \"harness_session_id\":\"pi-session-1\", \"created_at\":\"2026-09-23T20:00:00Z\", \
+                 \"transcript_path\":\"{}\"}}]}}",
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                transcript.display()
+            ),
+        )
+        .unwrap();
 
         let header_only = |id: &str| {
             render_at(
@@ -773,13 +777,13 @@ mod tests {
         assert_eq!(header_only("msg-2").unwrap().lines().count(), 1);
         let compacted_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         std::fs::write(
-            pin.path().join("pi-transcript.jsonl"),
+            &transcript,
             format!(
-                "{{\"type\":\"summary\",\"subtype\":\"compact_boundary\",\"timestamp\":\"{compacted_at}\"}}\n"
+                "{{\"type\":\"assistant\",\"timestamp\":\"2026-10-08T15:00:00Z\"}}\n\
+                 {{\"type\":\"summary\",\"subtype\":\"compact_boundary\",\"timestamp\":\"{compacted_at}\"}}\n"
             ),
         )
         .unwrap();
-        std::fs::write(pin.path().join("registry.json"), registry_body(true)).unwrap();
         two_lines(&header_only("msg-3").unwrap());
         assert_eq!(header_only("msg-4").unwrap().lines().count(), 1);
     }
