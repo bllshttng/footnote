@@ -543,7 +543,7 @@ mod tests {
         assert!(parse_envelope(b"NOTFNOS").is_err());
         assert!(parse_envelope(&envelope[..envelope.len() - 3]).is_err());
         let originless = build_envelope(&sample_meta("w.jsonl"), b"t", None).unwrap();
-        let (meta, transcript, origin) = parse_envelope(&originless).unwrap();
+        let (_meta, transcript, origin) = parse_envelope(&originless).unwrap();
         assert_eq!(transcript, b"t");
         assert!(origin.is_none());
     }
