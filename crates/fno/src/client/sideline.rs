@@ -1403,7 +1403,10 @@ impl View {
     /// The card-mode highlight pairing: a card's lower half inverts when
     /// the `Agent` row above it is selected or hovered, and an `Agent` row
     /// also inverts when its lower half is hovered. `base` is the ordinary
-    /// (non-inert) highlight for this row.
+    /// (non-inert) highlight for this row. A `CardRule` between two cards
+    /// names no card: only the metrics line reaches two rows up (its own
+    /// card's Agent line), never the detail line, whose second row up is
+    /// the rule above the card.
     pub(super) fn card_pair_highlit(
         &self,
         display: &[DisplayRow<'_>],
@@ -1416,8 +1419,9 @@ impl View {
                     || self.hover_row == Some(i)
                     || self.list_selector() == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
-                    || self.list_selector() == Some(i.saturating_sub(2))
-                    || self.hover_row == Some(i.saturating_sub(2))
+                    || matches!(row, DisplayRow::CardMetrics(..))
+                        && (self.list_selector() == Some(i.saturating_sub(2))
+                            || self.hover_row == Some(i.saturating_sub(2)))
                     // The detail line is the metrics line's upper half too:
                     // a hover or selection on the card's last line bands it.
                     // The metrics line never has a card row below.

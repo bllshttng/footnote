@@ -547,6 +547,58 @@ fn hovering_line_three_bands_the_whole_card() {
 }
 
 #[test]
+fn hovering_the_card_rule_between_cards_bands_no_card() {
+    // The dashed rule between adjacent cards names no card: a hover there
+    // must band neither card. It used to read as the card below's Agent
+    // line two rows up and band that card's detail line.
+    let mut plain = card_view(lead_and_worker());
+    plain.term = (30, 140);
+    plain.sideline_width = 80;
+    let plain_frame = plain.compose();
+
+    let mut v = card_view(lead_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let rows = v.painted_rows();
+    let rule_i = rows
+        .iter()
+        .position(|r| matches!(r, DisplayRow::CardRule))
+        .expect("a card rule exists between adjacent cards");
+    v.hover_row = Some(rule_i);
+    let frame = v.compose();
+
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let offset = v.sideline_offset();
+    let banded = |display_i: usize| {
+        let row = display_i - offset + 1; // the strip row owns row 0
+        frame.cells[row * cols..row * cols + text_w]
+            .iter()
+            .zip(&plain_frame.cells[row * cols..row * cols + text_w])
+            .any(|(a, b)| a.bg != b.bg)
+    };
+    let card_lines: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            matches!(
+                r,
+                DisplayRow::Agent(_) | DisplayRow::CardDetail(..) | DisplayRow::CardMetrics(..)
+            )
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !card_lines.is_empty(),
+        "two adjacent cards paint six card lines"
+    );
+    assert!(
+        card_lines.iter().all(|i| !banded(*i)),
+        "no card line bands from a hover on the rule"
+    );
+}
+
+#[test]
 fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     // Per-cell background, not text: every cell of both lines carries the
     // same band, the column gaps included. The pair is the theme's explicit
