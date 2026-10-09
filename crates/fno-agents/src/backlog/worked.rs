@@ -21,7 +21,6 @@ const ADVISORY: &str = "roster advisory: ";
 const UNMEASURABLE_ROW_PREFIX: &str = "unmeasurable-row: ";
 const REGISTRY_ONLY_MARK: &str = "falling back to registry-only view";
 const TRANSCRIPT_EVIDENCE_S: i64 = 20 * 60;
-const STALLED_AFTER_S: i64 = 2 * 3600;
 const TICK_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_PID: i64 = 0x7FFF_FFFF;
 
@@ -701,74 +700,6 @@ fn record_text(record: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The tail classifier (`classify_tail`)
-// ---------------------------------------------------------------------------
-
-fn watching_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"<watching[>\s]").unwrap())
-}
-
-fn promise_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"<promise[>\s]").unwrap())
-}
-
-fn help_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"<help[>\s]").unwrap())
-}
-
-fn api_error_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"^API Error\b").unwrap())
-}
-
-fn option_prompt_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"[\[(](?:[Yy]/[Nn]|\d+(?:/\d+)+)[\])]\s*$").unwrap())
-}
-
-/// Pure classifier over the LAST transcript turn. Content signals apply only
-/// when the last turn is the assistant's; a trailing user turn clears any
-/// stale assistant signal and mtime decides. A turn stops being news past
-/// `stalled_after_s`; `done` is an outcome and does not go stale.
-fn classify_tail(last_role: Option<&str>, last_text: &str, age_s: Option<f64>) -> String {
-    let text = last_text;
-    let stale = age_s.is_some_and(|a| a > STALLED_AFTER_S as f64);
-    if last_role == Some("assistant") {
-        if watching_re().is_match(text) {
-            return if stale {
-                "stalled".into()
-            } else {
-                "watching".into()
-            };
-        }
-        if promise_re().is_match(text) {
-            return "done".into();
-        }
-        if api_error_re().is_match(text.trim_start()) {
-            return "stalled".into();
-        }
-        let stripped = text.trim_end();
-        if stripped.ends_with('?')
-            || help_re().is_match(text)
-            || option_prompt_re().is_match(stripped)
-        {
-            return if stale {
-                "stalled".into()
-            } else {
-                "your-move".into()
-            };
-        }
-    }
-    if stale {
-        return "stalled".into();
-    }
-    "working".into()
-}
-
-// ---------------------------------------------------------------------------
 // Reachability
 // ---------------------------------------------------------------------------
 
@@ -885,7 +816,12 @@ fn worker_reachability(row: &FleetRow, listing: &[Hit]) -> Reach {
     {
         falsifier = Some(format!("finished-state:{}", row.state));
     }
-    let truth = classify_tail(facts.last_role.as_deref(), &facts.last_text, Some(age));
+    let truth = crate::session_truth::classify_tail(
+        facts.last_role.as_deref(),
+        &facts.last_text,
+        Some(age),
+        crate::session_truth::STALLED_AFTER_S,
+    );
     classify_reachability(Some(&truth), Some(age), falsifier)
 }
 

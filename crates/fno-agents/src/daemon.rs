@@ -1322,6 +1322,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         }
         Err(e) => return Err(e),
     };
+    crate::truth_probe::start_daemon_warm(&home);
     let sock_path = home.supervisor_sock();
     let bound_ino = std::fs::metadata(&sock_path).ok().map(|m| m.ino());
 
@@ -1958,14 +1959,13 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // The subscription verb: version-gated full document,
         // so a subscriber pays a stat per idle tick and a read per write.
         Some("watch") => run_blocking(ctx, req, handle_watch).await,
-        // status reads the in-memory drive table for the active-drives count, so
-        // it stays on the async runtime rather than the blocking pool.
+        // status reads the in-memory drive table, so it stays on the async runtime.
         Some("status") => handle_status(ctx, req).await,
+        Some("truth") => run_blocking(ctx, req, crate::truth_probe::truth_rpc).await,
         Some("reconcile") => run_blocking(ctx, req, handle_reconcile).await,
         // Label rename: the registry transaction under the flock, off-loop.
         Some("rename") => run_blocking(ctx, req, convert::handle_rename).await,
-        // Pane-to-thread conversion: the agent lock plus a registry flip.
-        Some("convert") => convert::handle_convert(ctx, req).await,
+        Some("convert") => convert::handle_convert(ctx, req).await, // agent lock + registry flip
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,
