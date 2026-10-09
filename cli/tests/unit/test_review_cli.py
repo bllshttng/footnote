@@ -33,11 +33,32 @@ def _finding(n: int, **overrides) -> dict:
 
 class TestBuildEmitRecord:
     def test_bare_array_yields_counts_and_primitives(self) -> None:
-        record = build_emit_record([_finding(1), _finding(2, category="typo")])
+        record = build_emit_record(
+            [
+                _finding(1, autofix_class="gated_auto", owner="author"),
+                _finding(2, category="typo", autofix_class="bogus"),
+            ]
+        )
         assert record["findings_blocking"] == 1
         assert record["findings_nonblocking"] == 1
         assert len(record["findings"]) == 2
         assert record["findings"][0]["finding_key"] == "f1.py:1:correctness"
+        # The class rides the attestation record; a value off the enum
+        # degrades to absent, so nothing off-contract is ever applied.
+        assert record["findings"][0]["autofix_class"] == "gated_auto"
+        assert record["findings"][0]["owner"] == "author"
+        assert record["findings"][1]["autofix_class"] is None
+
+    def test_declined_disposition_requires_a_citation(self) -> None:
+        cited = "unreachable: \"return None  # never\" is absent at this head"
+        record = build_emit_record(
+            {"findings": [], "dispositions": [{"finding_key": "x", "disposition": "declined", "reason": cited}]}
+        )
+        assert record["dispositions"][0]["reason"] == cited
+        with pytest.raises(RecordBuildError):
+            build_emit_record(
+                {"findings": [], "dispositions": [{"finding_key": "x", "disposition": "declined", "reason": "no quote here"}]}
+            )
 
     def test_object_payload_reads_findings_key(self) -> None:
         record = build_emit_record({"findings": [_finding(1)]})

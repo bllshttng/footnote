@@ -108,6 +108,18 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
                         "each disposition needs finding_key, a disposition in "
                         f"{list(_DISPOSITIONS)}, and a non-empty reason"
                     )
+                if disposition == "declined" and '"' not in reason:
+                    # A decline counts against the round cap like a fix, so
+                    # its reason must cite: a double-quoted span quoting the
+                    # proving line at the current head, plus the failure
+                    # scenario that does not hold. The gate checks the
+                    # citation exists; the prose quality stays the lane's
+                    # job (single-lane.md, Report and emit).
+                    raise RecordBuildError(
+                        "a declined disposition's reason must cite the finding: "
+                        'a double-quoted span quoting the proving line at the '
+                        "current head, plus the failure scenario that does not hold"
+                    )
                 dispositions.append(
                     {
                         "finding_key": key,

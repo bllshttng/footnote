@@ -114,13 +114,15 @@ class TestAC1Edge:
 
     def test_codex_shared_vocabulary_maps(self) -> None:
         records = normalize(
-            {"findings": [{"file": "a.py", "summary": "boom"}]},
+            {"findings": [{"file": "a.py", "summary": "boom", "autofix_class": "GATED_AUTO"}]},
             "codex_review_output",
         )
         assert len(records) == 1
         assert records[0].unmappable is False
         # file+summary map but failure_scenario is absent: still blocking.
         assert classify(records[0]) == "blocking"
+        # An unknown or padded class still normalizes onto the enum.
+        assert records[0].autofix_class == "gated_auto"
 
     def test_non_dict_array_element_is_unmappable_and_counted(self) -> None:
         records = normalize({"findings": ["oops", 42]}, "codex_review_output")
@@ -151,10 +153,13 @@ class TestNormalizers:
 
     def test_fenced_json_parses_every_fence(self) -> None:
         text = 'head\n\n```json\n[{"category": "nit", "file": "a.py", "line": 1, ' \
-               '"summary": "s", "failure_scenario": "f"}]\n```\n\ntail\n'
+               '"summary": "s", "failure_scenario": "f", "autofix_class": "gated_auto", ' \
+               '"owner": "author"}]\n```\n\ntail\n'
         records = normalize(text, "fenced_json")
         assert len(records) == 1
         assert classify(records[0]) == "nonblocking"
+        assert records[0].autofix_class == "gated_auto"
+        assert records[0].owner == "author"
 
     def test_fenced_json_no_fences_is_zero_records(self) -> None:
         assert normalize("no fences here", "fenced_json") == []

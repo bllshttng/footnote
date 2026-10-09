@@ -57,6 +57,16 @@ _FENCE_RE = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 #: category says.
 _CONFIRMED = "confirmed"
 
+#: The autofix class a finding carries (CE adoption): ``gated_auto`` may be
+#: applied mechanically by ``--fix``; ``manual`` names a fix the author
+#: applies; ``advisory`` records judgment with no fix intended. Only the
+#: exact lowercase value is machine-acted on: any other value (or none)
+#: reads as absent, and ``--fix`` applies nothing it cannot name.
+AUTOFIX_CLASSES: tuple[str, ...] = ("gated_auto", "manual", "advisory")
+
+#: The one class a fix pass may apply without the author in the loop.
+AUTO_APPLICABLE = "gated_auto"
+
 
 class FindingsNormalizeError(ValueError):
     """The payload is not a shape ``normalize`` can read at all.
@@ -77,6 +87,11 @@ class FindingRecord:
     line: Optional[Any] = None
     summary: Optional[str] = None
     failure_scenario: Optional[str] = None
+    #: Who the fix belongs to and whether a machine may apply it. A class
+    #: outside the enum reads as absent: fail-closed by construction, since
+    #: the only value any automation acts on is the exact ``gated_auto``.
+    autofix_class: Optional[str] = None
+    owner: Optional[str] = None
     #: The payload carried none of the recognizable field names, or was not
     #: an object at all. Unreadable is not harmless: it blocks.
     unmappable: bool = False
@@ -100,6 +115,9 @@ def _record(item: Any) -> FindingRecord:
     """
     if not isinstance(item, dict):
         return FindingRecord(unmappable=True)
+    autofix = _clean(item.get("autofix_class"))
+    if autofix is not None:
+        autofix = autofix.lower() if autofix.lower() in AUTOFIX_CLASSES else None
     record = FindingRecord(
         category=_clean(item.get("category")),
         verdict=_clean(item.get("verdict")),
@@ -107,6 +125,8 @@ def _record(item: Any) -> FindingRecord:
         line=item.get("line"),
         summary=_clean(item.get("summary")),
         failure_scenario=_clean(item.get("failure_scenario")),
+        autofix_class=autofix,
+        owner=_clean(item.get("owner")),
     )
     if all(
         record.__dict__[name] is None
@@ -308,6 +328,11 @@ class FindingPrimitive:
     #: fixing it means knowing what the finding says. The record already
     #: carried the text; only this primitive dropped it.
     summary: Optional[str] = None
+    #: The autofix class and owner ride the attestation ledger, so the next
+    #: round reads what may be applied mechanically, and a re-review tells a
+    #: finding disposed by a fix from one disposed by a decision.
+    autofix_class: Optional[str] = None
+    owner: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -317,6 +342,8 @@ class FindingPrimitive:
             "has_required_fields": self.has_required_fields,
             "finding_key": self.finding_key,
             "summary": self.summary,
+            "autofix_class": self.autofix_class,
+            "owner": self.owner,
         }
 
 
@@ -362,6 +389,8 @@ def summarize(
                 has_required_fields=_has_required_fields(record),
                 finding_key=finding_key(record),
                 summary=_bounded_summary(record.summary),
+                autofix_class=record.autofix_class,
+                owner=record.owner,
             )
         )
         if verdict == BLOCKING:
