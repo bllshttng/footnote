@@ -122,7 +122,10 @@ pub fn run(args: &[String]) -> i32 {
                         );
                     }
                     let revision = expected + i64::from(written);
-                    println!("{}", json!({"status":"written","revision":revision}));
+                    println!(
+                        "{}",
+                        json!({"status":"written","revision":revision,"changed":written})
+                    );
                     0
                 }
                 Err(error) => {

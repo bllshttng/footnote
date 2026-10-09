@@ -17,6 +17,13 @@ fn a_rust_registry_write_moves_the_revision_python_compares() {
     update_registry(&path, |_| {}).unwrap();
     let (_, unchanged) = crate::registry_store::read_versioned(&path).unwrap();
     assert_eq!(unchanged, after);
+    // The other write door stamps its own writer_rev; that alone is no change.
+    let write = crate::registry_store::begin(&path).unwrap();
+    let mut doc = write.document.clone();
+    doc["writer_rev"] = serde_json::json!("other/registry-commit");
+    assert!(!write.commit(doc).unwrap());
+    let (_, still) = crate::registry_store::read_versioned(&path).unwrap();
+    assert_eq!(still, after);
     std::fs::remove_dir_all(dir).ok();
 }
 
