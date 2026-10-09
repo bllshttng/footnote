@@ -102,7 +102,7 @@ fn max_hold_ms() -> i64 {
 }
 
 /// Every process under `root`, by its ppid chain.
-fn descendants(table: &[crate::census::ProcRow], root: u32) -> Vec<u32> {
+pub(crate) fn descendants(table: &[crate::census::ProcRow], root: u32) -> Vec<u32> {
     let parent: HashMap<u32, u32> = table.iter().map(|row| (row.pid, row.ppid)).collect();
     table
         .iter()
@@ -179,15 +179,7 @@ mod tests {
     use crate::claims::PidProbe;
 
     fn row(pid: u32, ppid: u32) -> crate::census::ProcRow {
-        crate::census::ProcRow {
-            pid,
-            ppid,
-            state: 'S',
-            elapsed_s: 0,
-            cpu_pct: 0.0,
-            rss_kb: 0,
-            command: String::new(),
-        }
+        crate::census::test_proc_row(pid, ppid, "")
     }
 
     #[test]
