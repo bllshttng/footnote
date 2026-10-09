@@ -19,19 +19,19 @@ if [[ $input =~ $session ]]; then
   # The frame's own text is in the key: bash 3.2 compares file times in whole seconds, which is too
   # coarse for frames that land twice a second. read -d '' stops at end of file and reports a
   # failure there, so its status is not the test.
-  frame= last= hits=0
+  frame= last= out= hits=0
   [[ -f $f.json ]] && IFS= read -r -d '' frame < "$f.json"
   key="$COLUMNS $rest $frame"
-  [[ -f $f.in ]] && IFS= read -r -d '' last < "$f.in"
+  # One file holds the key, a NUL, then the output. Python replaces the whole file, so a key never
+  # pairs with the output of another run or with a half-written one.
+  [[ -f $f.cache ]] && { IFS= read -r -d '' last; IFS= read -r -d '' out; } < "$f.cache"
   [[ -f $f.hits ]] && read -r hits < "$f.hits"
-  if [[ -f $f.out && $last == "$key" && $hits -lt $HITS ]]; then
-    printf '%s' $((hits + 1)) > "$f.hits"
-    IFS= read -r -d '' out < "$f.out"
+  if [[ -n $out && $last == "$key" && $hits -lt $HITS ]]; then
+    printf '%s' $((hits + 1)) > "$f.hits" 2>/dev/null
     printf '%s' "$out"
     exit 0
   fi
   printf '0' > "$f.hits" 2>/dev/null
-  # Each run names its own key file, so two runs at once cannot pair one's key with the other's output.
-  printf '%s' "$key" > "$f.in.$$" 2>/dev/null && export BUDDY_KEY_FILE="$f.in.$$"
+  export BUDDY_KEY="$key"
 fi
 printf '%s' "$input" | exec python3 "$dir/statusline.py"

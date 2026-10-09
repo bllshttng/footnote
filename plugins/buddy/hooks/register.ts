@@ -429,7 +429,7 @@ async function keepTicking($: EngineInterface, settings: Record<string, unknown>
   if (ours.refreshInterval === 1 && ours.command === wrapperCommand()) return
   const inner = (await readJson($, `${buddyDir()}/inner.json`)) ?? {}
   // An interval the user already gave their own line wins over the one on the wrapper.
-  if (inner.statusLine && inner.statusLine.refreshInterval === undefined && typeof ours.refreshInterval === 'number' && ours.refreshInterval !== 1) {
+  if (inner.statusLine && inner.statusLine.refreshInterval == null && typeof ours.refreshInterval === 'number' && ours.refreshInterval !== 1) {
     inner.statusLine.refreshInterval = ours.refreshInterval
     await $.fs.write(`${buddyDir()}/inner.json`, JSON.stringify(inner, null, 2) + '\n')
   }

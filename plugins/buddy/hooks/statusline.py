@@ -290,16 +290,20 @@ def main():
     out = "\n".join(layout(left, read_frame(session), cols))
     print(out)
     # statusline.sh prints this again, with no Python, until the input or the width changes or a new frame lands.
-    key = os.environ.get("BUDDY_KEY_FILE")
-    if session and key:
-        base = os.path.join(HOME, "frames", session)
+    key = os.environb.get(b"BUDDY_KEY")
+    if session and key is not None:
+        cache = os.path.join(HOME, "frames", f"{session}.cache")
+        tmp = f"{cache}.{os.getpid()}"
         try:
-            with open(base + ".out", "w", encoding="utf-8") as f:
-                f.write(out + "\n")
-            # The key goes in last, so a half-written output never matches.
-            os.replace(key, base + ".in")
+            # The key, a NUL, then the output, swapped in whole so a reader never sees half of it.
+            with open(tmp, "wb") as f:
+                f.write(key + b"\0" + (out + "\n").encode("utf-8"))
+            os.replace(tmp, cache)
         except OSError:
-            pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     main()
