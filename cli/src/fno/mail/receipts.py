@@ -57,13 +57,12 @@ def _live_miss_age_suffix(recipient: str) -> str:
     prints unknown, never 0s. Three lanes emit that receipt (the name lane,
     the job lane, the registered-agent lane), so the suffix lives here once.
     """
-    from fno.agents.session_truth import resolve_session_truth
-    from fno.agents.top import _fmt_age
+    from fno.agents.session_truth import fmt_age, resolve_session_truth
 
     age_s = resolve_session_truth(recipient).get("last_activity_age_s")
     if age_s is None:
         return ", transcript age unknown"
-    return f", transcript quiet {_fmt_age(age_s)}"
+    return f", transcript quiet {fmt_age(age_s)}"
 
 
 # Live-lane failures where the recipient WAS live and reachable but the inject
