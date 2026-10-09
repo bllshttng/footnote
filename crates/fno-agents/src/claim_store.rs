@@ -29,7 +29,7 @@ enum Db {
 impl Db {
     fn all(&self, sql: &str, args: &[SqlValue]) -> Result<Vec<Vec<SqlValue>>, String> {
         match self {
-            Db::Remote(remote) => Ok(remote.execute(sql, args)?.rows),
+            Db::Remote(remote) => Ok(on_primary(remote, sql, args)?.rows),
             Db::Local(connection) => {
                 let mut statement = connection.prepare(sql).map_err(|e| e.to_string())?;
                 let width = statement.column_count();
@@ -56,7 +56,7 @@ impl Db {
 
     fn execute(&self, sql: &str, args: &[SqlValue]) -> Result<u64, String> {
         match self {
-            Db::Remote(remote) => Ok(remote.execute(sql, args)?.affected),
+            Db::Remote(remote) => Ok(on_primary(remote, sql, args)?.affected),
             Db::Local(connection) => connection
                 .execute(sql, rusqlite::params_from_iter(args))
                 .map(|n| n as u64)
@@ -91,29 +91,33 @@ pub(crate) fn primary_for(dir: &Path) -> Result<Option<Remote>, String> {
     Ok((directory(None).ok().as_deref() == Some(dir)).then_some(remote))
 }
 
-/// The primary, with the claim tables created there once per process.
-fn ready_primary(dir: &Path) -> Result<Option<Remote>, String> {
-    static READY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    let Some(remote) = primary_for(dir)? else {
-        return Ok(None);
-    };
-    let mut ready = READY.lock().unwrap_or_else(|e| e.into_inner());
-    if !ready.iter().any(|url| url == remote.url()) {
-        // The primary never held lockfiles: its table is the authority from
-        // birth. The stamp also keeps an exported copy's rows when it opens
-        // as a local store, since the lockfile import clears an unstamped table.
-        remote.script(&format!(
-            "{DDL}\n{}\nINSERT OR IGNORE INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1'), ('table_authority_v1', '1');",
-            history_ddl()
-        ))?;
-        ready.push(remote.url().to_string());
+/// One statement on the primary. The claim tables are made on first use: a
+/// statement that meets no table runs the DDL and retries once, so a process
+/// pays no extra round trip on a primary that already has them.
+fn on_primary(
+    remote: &Remote,
+    sql: &str,
+    args: &[SqlValue],
+) -> Result<crate::store_remote::Reply, String> {
+    match remote.execute(sql, args) {
+        Err(error) if error.contains("no such table") => {
+            // The primary never held lockfiles: its table is the authority
+            // from birth. The stamp also keeps an exported copy's rows when it
+            // opens as a local store, since the lockfile import clears an
+            // unstamped table.
+            remote.script(&format!(
+                "{DDL}\n{}\nINSERT OR IGNORE INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1'), ('table_authority_v1', '1');",
+                history_ddl()
+            ))?;
+            remote.execute(sql, args)
+        }
+        reply => reply,
     }
-    Ok(Some(remote))
 }
 
 fn db_in(dir: &Path, key: &str) -> Result<Db, String> {
     if shared(key) {
-        if let Some(remote) = ready_primary(dir)? {
+        if let Some(remote) = primary_for(dir)? {
             return Ok(Db::Remote(remote));
         }
     }
@@ -609,7 +613,7 @@ fn rows_in(
             .iter()
             .any(|s| s.starts_with(p) || p.starts_with(s))
     });
-    let primary = if may_share { ready_primary(dir)? } else { None };
+    let primary = if may_share { primary_for(dir)? } else { None };
     let select = format!("SELECT {COLUMNS} FROM claims ORDER BY key");
     let mut records = Vec::new();
     if !store_absent(dir) {
@@ -976,8 +980,7 @@ pub(crate) fn extend_leases(
          RETURNING key",
         rows.join(",")
     );
-    Ok(remote
-        .execute(&sql, &args)?
+    Ok(on_primary(remote, &sql, &args)?
         .rows
         .iter()
         .filter_map(|row| row.first().and_then(SqlValue::text).map(str::to_string))
@@ -1290,7 +1293,7 @@ mod tests {
         };
         assert!(held("node:mine", "a") && held("build:cargo", "a"));
         assert!(!held("node:mine", "b"), "a live holder keeps its node");
-        let on_primary: Vec<String> = primary
+        let keys_on_primary: Vec<String> = primary
             .db
             .lock()
             .unwrap()
@@ -1300,7 +1303,7 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(on_primary, ["node:mine"]);
+        assert_eq!(keys_on_primary, ["node:mine"]);
         let keys: Vec<String> = records_in(&dir, None, true)
             .unwrap()
             .into_iter()
