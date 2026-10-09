@@ -227,9 +227,18 @@ pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
 }
 
 impl Write {
-    pub(crate) fn commit(self, document: Value) -> Result<(), StateError> {
-        crate::state::snapshot_registry(&self.path, &self.document);
+    /// Returns whether the write changed the stored document. A write that
+    /// stores what was already there rolls back: no revision bump, no
+    /// snapshot, no wake for watchers.
+    pub(crate) fn commit(self, document: Value) -> Result<bool, StateError> {
         save_document(&self.connection, &self.path, document)?;
+        if load_document(&self.connection, &self.path)? == self.document {
+            self.connection
+                .execute_batch("ROLLBACK")
+                .map_err(|e| failure(&self.path, e))?;
+            return Ok(false);
+        }
+        crate::state::snapshot_registry(&self.path, &self.document);
         self.connection
             .execute(
                 "UPDATE registry_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
@@ -238,7 +247,8 @@ impl Write {
             .map_err(|e| failure(&self.path, e))?;
         self.connection
             .execute_batch("COMMIT")
-            .map_err(|e| failure(&self.path, e))
+            .map_err(|e| failure(&self.path, e))?;
+        Ok(true)
     }
 }
 
