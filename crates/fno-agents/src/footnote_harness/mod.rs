@@ -323,6 +323,7 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
         }
     };
     let pid = child.id();
+    let prior = (entry.status, entry.pid);
     let _ = update_registry(&home.registry_json(), |reg| {
         let Some(e) = reg.find_mut(&row_name) else {
             return false;
@@ -332,7 +333,20 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
         true
     });
     let o = finish(child, &spec);
-    mark_row(home, &row_name, &record);
+    if o.exit_code == 2 {
+        // Refused before the session reopened (a live writer holds it, or
+        // the spec was refused): the row goes back to what it said, so a
+        // running session is never marked Exited by a second ask.
+        let _ = update_registry(&home.registry_json(), |reg| {
+            let Some(e) = reg.find_mut(&row_name) else {
+                return false;
+            };
+            (e.status, e.pid) = prior;
+            true
+        });
+    } else {
+        mark_row(home, &row_name, &record);
+    }
     print!("{}", o.stdout);
     eprint!("{}", o.stderr);
     Some(o.exit_code)
