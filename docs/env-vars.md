@@ -73,6 +73,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
 | `FNO_CARGO_FREE_BYTES` | rs | Overrides the free-space read the `cargo_build_dirs` cap lane defends against; test escape hatch. |
+| `FNO_CARGO_MAX_HOLD_SECS` | rs | The longest time in seconds that an agent cargo can hold an admission claim. After this time, the next cargo frees the claim and stops the holder. The default is 3600. A whole-suite run is exempt. |
 | `FNO_CARGO_TARGETS_BASE` | rs | Overrides the managed fno cargo build base the `cargo_build_dirs` lane sweeps and the tree-removal reclaim deletes under; test escape hatch. |
 | `FNO_CC_DAEMON_RV_ROOT` | py | unclear: cli/src/fno/agents/session_procs.py:40 |
 | `FNO_CHROME` | rs | The Chrome or Chromium binary `fno mux serve --snapshot --format png` runs. |
