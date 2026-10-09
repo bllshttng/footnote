@@ -213,7 +213,9 @@ impl Remote {
         let response = self
             .responses(vec![json!({"type": "batch", "batch": {"steps": batch}})])
             .map_err(|error| (None, error))?
-            .pop()
+            // The batch answers first; the pipeline's close answers last.
+            .into_iter()
+            .next()
             .unwrap_or_default();
         let result = response.get("result").cloned().unwrap_or_default();
         let errors = result.get("step_errors").and_then(Value::as_array);
