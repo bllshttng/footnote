@@ -43,14 +43,28 @@ fn the_census_dedups_the_roster_and_keeps_each_liveness_arm() {
     let mut dead = row("gone", AgentStatus::Busy);
     dead.pid = Some(400);
     let exited = row("done", AgentStatus::Exited);
-    let rows = vec![adopted, thread, pane, dead, exited];
+    // Its start time cannot be read: counted, but no evidence for a rewrite.
+    let mut unread = row("t-x-9abc-glm", AgentStatus::Spawning);
+    unread.pid = Some(500);
+    unread.pid_start_time = Some(1);
+    let rows = vec![adopted, thread, pane, dead, exited, unread];
 
-    let alive = |pid: u32, _: Option<u64>| matches!(pid, 100 | 300);
+    let state = |pid: u32, _: Option<u64>| match pid {
+        100 | 101 | 300 => Some(true),
+        500 => None,
+        _ => Some(false),
+    };
     let claim = |name: &str| name == "t-x-1234-sol";
-    let c = census(&roster, &rows, &alive, &claim, now_epoch_s());
+    let c = census(&roster, &rows, &state, &claim, chrono::Utc::now());
 
     let names: Vec<&str> = c.workers.iter().map(|w| w.name.as_str()).collect();
-    assert_eq!(names, ["aaaa1111", "t-x-1234-sol", "t-x-5678-glm"]);
+    assert_eq!(
+        names,
+        ["aaaa1111", "t-x-1234-sol", "t-x-5678-glm", "t-x-9abc-glm"]
+    );
+    assert_eq!(c.workers[3].stored_status, "spawning");
+    assert_eq!(c.workers[3].status_basis, None);
+    assert!(c.warnings[0].contains("t-x-9abc-glm"), "{:?}", c.warnings);
     let shown = &c.workers[0];
     assert_eq!(
         shown.session_pid,
@@ -62,7 +76,10 @@ fn the_census_dedups_the_roster_and_keeps_each_liveness_arm() {
     assert_eq!(c.workers[1].substrate, "worker");
     assert_eq!(c.workers[2].substrate, "pane");
     assert_eq!(c.workers[2].stored_status, "quiet");
-    assert_eq!(c.workers[2].status_basis, Some("stale-spawning-live-pid"));
+    assert_eq!(
+        c.workers[2].status_basis.as_deref(),
+        Some("stale-spawning-live-pid")
+    );
     assert!(c.live_registry_names.contains("sorrel"));
 }
 
@@ -78,8 +95,15 @@ fn a_worker_row_carries_the_handle_node_role_and_session_rss() {
     adopted.harness_session_id = Some(sid.into());
     adopted.role_level = Some(2);
     adopted.role_scope = Some("x-0e67".into());
+    adopted.node = Some("x-1111".into());
     let rows = vec![adopted];
-    let c = census(&roster, &rows, &|_, _| true, &|_| false, now_epoch_s());
+    let c = census(
+        &roster,
+        &rows,
+        &|_: u32, _: Option<u64>| Some(true),
+        &|_: &str| false,
+        chrono::Utc::now(),
+    );
     let mut sessions = Map::new();
     sessions.insert(
         sid.into(),
@@ -104,6 +128,17 @@ fn a_worker_row_carries_the_handle_node_role_and_session_rss() {
     assert_eq!(r["role"], "L2 x-0e67");
     assert_eq!(r["status"], "unknown");
     assert_eq!(r["progress"], "unknown");
+    // No claim and no graph row: the registry row's own node answers.
+    let bare = worker_rows(
+        &c,
+        &rows,
+        &HashMap::new(),
+        crate::truth_probe::BatchOutcome::Measured,
+        &Map::new(),
+        &rss,
+    );
+    assert_eq!(bare[0]["node"], "x-1111");
+    assert_eq!(bare[0]["node_basis"], "registry");
 }
 
 /// Newest first, deduped by agent id, the parent off the directory when the

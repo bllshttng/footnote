@@ -4,7 +4,7 @@
 //! live rows plus the claude daemon roster, deduped on the claude short id.
 //! Every slow read the Python view paid per row is one batched read here:
 //! transcript truth comes from the daemon's in-memory cursors
-//! ([`crate::truth_probe::family1_truth_probe_many_measured`]), the bg session
+//! ([`crate::truth_probe::family1_truth_probe_many_measured_within`]), the bg session
 //! pid from the roster's own `replPid` (never an lsof scan), and RSS from one
 //! process-table walk. The lead check-in reads [`payload`] in process.
 
@@ -12,19 +12,19 @@ use crate::state::RegistryEntry;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// The registry statuses that mean "this run holds a process", the census's
 /// `LIVE_STATUSES`. Every other status is terminal.
 const LIVE_STATUSES: &[&str] = &["spawning", "ready", "idle", "busy", "live", "restarting"];
 
-/// A stored `spawning` older than this, with live process evidence, is a
-/// token that stopped being a measurement (the list projection's rule).
-const STALE_SPAWNING_S: i64 = 600;
-
 /// Twelve-minute reconcile runs are measured (`FLIGHT_TTL_MS` in
 /// flight_gate.rs); a single-flight hold older than this shows here.
 const LONG_HOLD_S: i64 = 12 * 60;
+
+/// The truth batch's bound: a daemon answers from memory, so a read past
+/// this is the in-process fallback building cursors, and the beat moves on.
+const TRUTH_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Sidechain transcripts older than this are not scanned.
 const SUBAGENT_SCAN_WINDOW_S: u64 = 2 * 3600;
@@ -56,7 +56,7 @@ struct Worker {
     /// The process that IS the session; cost reads this one.
     session_pid: Option<u32>,
     stored_status: String,
-    status_basis: Option<&'static str>,
+    status_basis: Option<String>,
     session_id: Option<String>,
     spawned_by: Option<String>,
     /// Index into the registry rows this worker joins, when it joins one.
@@ -77,27 +77,51 @@ fn status_word(entry: &RegistryEntry) -> String {
         .unwrap_or_default()
 }
 
-fn now_epoch_s() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+/// One pid read: `Some(true)` the recorded incarnation is running,
+/// `Some(false)` it is gone, `None` the process exists but its start time
+/// cannot be read, which is no measurement of the incarnation.
+fn pid_state(pid: u32, recorded: Option<u64>) -> Option<bool> {
+    if !crate::daemon::pid_is_ours(pid, None) {
+        return Some(false);
+    }
+    match recorded {
+        None => Some(true),
+        Some(rec) => crate::daemon::process_start_time(pid).map(|now| now == rec),
+    }
 }
 
-fn older_than(created_at: &str, seconds: i64, now: i64) -> bool {
-    chrono::DateTime::parse_from_rfc3339(created_at)
-        .map(|t| now - t.timestamp() > seconds)
-        .unwrap_or(false)
+/// The list projection's contradiction rules over one census row: a stored
+/// `spawning` that live process evidence outlived reads `quiet`.
+fn contradiction(
+    stored: &str,
+    created_at: &str,
+    live: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, Option<String>) {
+    let mut row = Map::new();
+    row.insert("status".into(), json!(stored));
+    row.insert("created_at".into(), json!(created_at));
+    row.insert("pid_alive".into(), json!(live));
+    crate::daemon::list_rows::apply_row_contradiction(&mut row, None, now);
+    let status = row
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or(stored)
+        .to_string();
+    let basis = (status != stored)
+        .then(|| row.get("basis").and_then(Value::as_str).map(str::to_string))
+        .flatten();
+    (status, basis)
 }
 
-/// The display union. `pid_alive` and `claim_live` are injected so the
+/// The display union. `pid_state` and `claim_live` are injected so the
 /// liveness rules are testable without real processes or claim files.
 fn census(
     roster: &[crate::claude_roster::RosterWorker],
     rows: &[RegistryEntry],
-    pid_alive: &dyn Fn(u32, Option<u64>) -> bool,
+    pid_state: &dyn Fn(u32, Option<u64>) -> Option<bool>,
     claim_live: &dyn Fn(&str) -> bool,
-    now: i64,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Census {
     let mut out = Census::default();
     let mut counted: HashSet<String> = HashSet::new();
@@ -106,7 +130,7 @@ fn census(
         if w.session_id.is_empty() || !seen_sessions.insert(&w.session_id) {
             continue;
         }
-        let Some(pid) = w.pid.filter(|p| pid_alive(*p, None)) else {
+        let Some(pid) = w.pid.filter(|p| pid_state(*p, None) == Some(true)) else {
             continue;
         };
         let short = w.short_id().to_string();
@@ -118,8 +142,11 @@ fn census(
             substrate: "(foreign)".into(),
             pid: Some(pid),
             // The roster names the session's own process; the recorded pid
-            // is the PTY host that launched it.
-            session_pid: w.repl_pid.or(Some(pid)),
+            // is the PTY host that launched it. A stale replPid prices the host.
+            session_pid: w
+                .repl_pid
+                .filter(|r| pid_state(*r, None) == Some(true))
+                .or(Some(pid)),
             stored_status: "live".into(),
             status_basis: None,
             session_id: Some(w.session_id.clone()),
@@ -135,7 +162,14 @@ fn census(
             continue;
         }
         let harness = row.harness.clone().unwrap_or_default();
-        let pid_alive_now = row.pid.is_some_and(|p| pid_alive(p, row.pid_start_time));
+        let measured = row.pid.map(|p| pid_state(p, row.pid_start_time));
+        if measured == Some(None) {
+            out.warnings.push(format!(
+                "top: process incarnation unreadable for {}; counting the live registry row conservatively",
+                row.name
+            ));
+        }
+        let pid_alive_now = matches!(measured, Some(Some(true) | None));
         let bg_alive = row.pid.is_none()
             && harness == "claude"
             && !row.short_id.is_empty()
@@ -170,9 +204,14 @@ fn census(
         } else {
             "worker"
         };
-        let stale_spawning = stored == "spawning"
-            && (pid_alive_now || claim_alive)
-            && older_than(&row.created_at, STALE_SPAWNING_S, now);
+        // Only a measured incarnation is positive evidence: an unreadable
+        // start time keeps the stored token.
+        let (stored_status, status_basis) = contradiction(
+            &stored,
+            &row.created_at,
+            measured == Some(Some(true)) || claim_alive,
+            now,
+        );
         out.workers.push(Worker {
             source: "fno",
             name: row.name.clone(),
@@ -180,12 +219,8 @@ fn census(
             substrate: substrate.into(),
             pid: row.pid,
             session_pid: row.pid,
-            stored_status: if stale_spawning {
-                "quiet".into()
-            } else {
-                stored
-            },
-            status_basis: stale_spawning.then_some("stale-spawning-live-pid"),
+            stored_status,
+            status_basis,
             session_id: row.harness_session_id.clone(),
             spawned_by: row.spawned_by_session.clone(),
             entry: Some(index),
@@ -258,8 +293,13 @@ fn worker_rows(
                 "progress": progress,
                 "reach": opt_str(probe.and_then(|p| p.reachability.as_deref())),
                 "reach_basis": opt_str(probe.and_then(|p| p.basis.as_deref())),
-                "node": joined.and_then(|j| j.get("node")).cloned().unwrap_or(Value::Null),
-                "node_basis": joined.and_then(|j| j.get("basis")).cloned().unwrap_or(Value::Null),
+                // The session's claim or graph row first, the registry row's
+                // own node when neither names one.
+                "node": joined.and_then(|j| j.get("node")).cloned()
+                    .unwrap_or_else(|| opt_str(entry.and_then(|e| e.node.as_deref()))),
+                "node_basis": joined.and_then(|j| j.get("basis")).cloned().unwrap_or_else(|| {
+                    opt_str(entry.and_then(|e| e.node.as_ref()).map(|_| "registry"))
+                }),
                 "pr": joined.and_then(|j| j.get("pr")).cloned().unwrap_or(Value::Null),
                 "pr_basis": joined.and_then(|j| j.get("pr_basis")).cloned().unwrap_or(Value::Null),
                 "role": entry.and_then(role_label),
@@ -445,7 +485,7 @@ fn pane_counter_rows(path: &Path) -> Value {
     ));
     let rotated = PathBuf::from(format!("{}.1", sibling.display()));
     let mut samples: Vec<Value> = Vec::new();
-    for candidate in [path, &rotated, &sibling] {
+    for candidate in [path, rotated.as_path(), sibling.as_path()] {
         let tail = match read_tail(candidate, PANE_COUNTERS_TAIL_BYTES) {
             Ok(Some(tail)) => tail,
             Ok(None) => continue,
@@ -517,7 +557,7 @@ fn pane_counter_rows(path: &Path) -> Value {
     gone.extend(
         older_panes
             .keys()
-            .filter(|id| !newer_panes.contains_key(id)),
+            .filter(|id| !newer_panes.contains_key(*id)),
     );
     born.sort_unstable();
     gone.sort_unstable();
@@ -567,18 +607,18 @@ pub fn payload(include_subagents: bool, include_pane_stats: bool) -> Value {
     let home = crate::paths::AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut warnings: Vec<String> = Vec::new();
-    let roster = match crate::claude_roster::ClaudeRoster::load(
-        &crate::claude_roster::default_roster_path(),
-    ) {
-        Ok(r) => r.workers.into_values().collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            warnings.push(format!(
-                "top: claude roster unreadable ({e}); counting fno registry only"
-            ));
-            Vec::new()
-        }
-    };
+    let roster: Vec<crate::claude_roster::RosterWorker> =
+        match crate::claude_roster::ClaudeRoster::load(&crate::claude_roster::default_roster_path())
+        {
+            Ok(r) => r.workers.into_values().collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                warnings.push(format!(
+                    "top: claude roster unreadable ({e}); counting fno registry only"
+                ));
+                Vec::new()
+            }
+        };
     let rows = match crate::state::load_registry(&home.registry_json()) {
         Ok(r) => r.entries,
         Err(e) => {
@@ -595,13 +635,7 @@ pub fn payload(include_subagents: bool, include_pane_stats: bool) -> Value {
             crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
         )
     };
-    let mut c = census(
-        &roster,
-        &rows,
-        &crate::daemon::pid_is_ours,
-        &claim_live,
-        now_epoch_s(),
-    );
+    let mut c = census(&roster, &rows, &pid_state, &claim_live, chrono::Utc::now());
     warnings.append(&mut c.warnings);
 
     let handles: Vec<String> = c
@@ -609,7 +643,10 @@ pub fn payload(include_subagents: bool, include_pane_stats: bool) -> Value {
         .iter()
         .map(|w| truth_handle(w, w.entry.map(|i| &rows[i])))
         .collect();
-    let (truth, outcome) = crate::truth_probe::family1_truth_probe_many_measured(&handles);
+    let (truth, outcome) = crate::truth_probe::family1_truth_probe_many_measured_within(
+        &handles,
+        Some(std::time::Instant::now() + TRUTH_BUDGET),
+    );
     let sessions = crate::session_join::sessions_map();
     let roots: Vec<u32> = c
         .workers
@@ -661,8 +698,7 @@ pub fn payload(include_subagents: bool, include_pane_stats: bool) -> Value {
         });
     }
     if include_pane_stats {
-        out["pane_stats"] =
-            pane_counter_rows(&crate::decision_index::default_state_path("events.jsonl"));
+        out["pane_stats"] = pane_counter_rows(&crate::paths_cli::global_events_json(&cwd));
     }
     out["warnings"] = json!(warnings);
     out

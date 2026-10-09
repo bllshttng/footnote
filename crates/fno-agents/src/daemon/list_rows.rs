@@ -342,7 +342,7 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// test with Python; the caller supplies all fields before the row is written.
 /// `now` is injected so the fixture's fixed clock and production's wall clock
 /// assert the same rules.
-pub(super) fn apply_row_contradiction(
+pub(crate) fn apply_row_contradiction(
     row: &mut Map<String, Value>,
     exited_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
