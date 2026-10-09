@@ -227,19 +227,51 @@ pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
 }
 
 impl Write {
-    pub(crate) fn commit(self, document: Value) -> Result<(), StateError> {
+    /// Returns whether the write changed the stored document. A write that
+    /// stores what was already there rolls back: no revision bump and no wake
+    /// for watchers. It still snapshots what it read, so the collapse pin
+    /// fires on the first write after a collapse.
+    pub(crate) fn commit(self, document: Value) -> Result<bool, StateError> {
         crate::state::snapshot_registry(&self.path, &self.document);
-        save_document(&self.connection, &self.path, document)?;
+        // The stored form is the real test; the input compare only skips the
+        // rewrite when the caller already holds that form.
+        if !same_content(&document, &self.document) {
+            save_document(&self.connection, &self.path, document)?;
+            if !same_content(
+                &load_document(&self.connection, &self.path)?,
+                &self.document,
+            ) {
+                self.connection
+                    .execute(
+                        "UPDATE registry_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
+                        [],
+                    )
+                    .map_err(|e| failure(&self.path, e))?;
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(|e| failure(&self.path, e))?;
+                return Ok(true);
+            }
+        }
         self.connection
-            .execute(
-                "UPDATE registry_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
-                [],
-            )
+            .execute_batch("ROLLBACK")
             .map_err(|e| failure(&self.path, e))?;
-        self.connection
-            .execute_batch("COMMIT")
-            .map_err(|e| failure(&self.path, e))
+        Ok(false)
     }
+}
+
+/// Two registry documents hold the same content when they differ at most in
+/// `writer_rev`: the two write doors stamp different values, and a write that
+/// changes nothing else must not count as a change.
+fn same_content(a: &Value, b: &Value) -> bool {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if let Some(map) = v.as_object_mut() {
+            map.remove("writer_rev");
+        }
+        v
+    };
+    strip(a) == strip(b)
 }
 
 /// Replace the whole registry document behind `path`. Tests seed rows here.

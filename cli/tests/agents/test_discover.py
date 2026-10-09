@@ -19,6 +19,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -426,15 +427,9 @@ def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypa
         job_id="deadbeef",
         cwd="/Users/x/code/project",
     )
-    monkeypatch.setattr(discover, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(discover, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
-    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(lock_path, "w") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        started = time.monotonic()
-        sessions = discover.discover_live_sessions(
+    def scan():
+        return discover.discover_live_sessions(
             sessions_dir=sdir,
             projects_dir=tmp_path / "no-projects",
             codex_sessions_dir=tmp_path / "no-codex",
@@ -446,7 +441,51 @@ def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypa
             classify_truth=False,
         )
 
-    assert time.monotonic() - started < 0.5
+    # Contrast pass: with the lock free the same scan writes the map, so the
+    # contended pass can attribute its fallback to the lock timeout alone.
+    baseline = scan()
+    assert len(baseline) == 1
+    assert name_map.exists()
+    name_map.unlink()
+
+    monkeypatch.setattr(discover, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(discover, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
+    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # The contender consumes its timeout on a controlled clock: monotonic
+    # advances only when the lock loop sleeps, so a paused runner cannot
+    # inflate the contended pass. Wall time is never measured.
+    real_time = discover.time
+    now = 0.0
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(
+        discover,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: now,
+            sleep=fake_sleep,
+            time=lambda: real_time.time(),
+        ),
+    )
+
+    with open(lock_path, "w") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        sessions = scan()
+
+    # Gave up at the deadline on the controlled clock, one poll-sized sleep
+    # at a time, then fell back to the canonical handle without the write.
+    budget = discover._ALIAS_LOCK_TIMEOUT_SECONDS
+    poll = discover._ALIAS_LOCK_POLL_SECONDS
+    assert sleeps
+    assert all(d <= poll for d in sleeps)
+    assert now == pytest.approx(budget, abs=poll / 2)
     assert [session.handle for session in sessions] == ["aaaaaaaa"]
     assert not name_map.exists()
 

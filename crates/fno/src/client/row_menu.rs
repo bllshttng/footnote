@@ -896,39 +896,36 @@ pub(super) async fn execute_row_menu_action(
                 view.set_notice("row carries no session id to release".into());
                 return Ok(());
             };
-            let child = std::process::Command::new(crate::digest_overlay::fno_agents_bin())
-                .args(["mail-hold", "--session", &sid, "--release"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-            let mut child = match child {
-                Ok(child) => child,
-                Err(exc) => {
-                    view.set_notice(format!("release did not start: {exc}"));
-                    return Ok(());
-                }
-            };
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            let status = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(25));
+            // The verb wait is a subprocess round trip on a loaded machine.
+            // It runs on a task and the notice lands through the
+            // reply-notice channel, so the UI loop keeps draining keys while
+            // it runs; on timeout the child stays alive detached and the
+            // notice still tells the truth about the hold.
+            let notice_tx = view.reply_notice_tx.clone();
+            let name = a.name.clone();
+            tokio::spawn(async move {
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+                        .args(["mail-hold", "--session", &sid, "--release"])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status(),
+                )
+                .await;
+                let text = match outcome {
+                    Ok(Ok(s)) if s.success() => {
+                        format!("hold released for {name}; held mail is delivering")
                     }
-                    _ => break None,
+                    Ok(Ok(s)) => format!("release failed ({s}); is fno-agents current?"),
+                    Ok(Err(exc)) => format!("release did not start: {exc}"),
+                    Err(_) => "release is still running; the hold lifts when it lands".into(),
+                };
+                if let Some(tx) = notice_tx {
+                    let _ = tx.send(text);
                 }
-            };
-            match status {
-                Some(s) if s.success() => view.set_notice(format!(
-                    "hold released for {}; held mail is delivering",
-                    a.name
-                )),
-                Some(s) => view.set_notice(format!("release failed ({s}); is fno-agents current?")),
-                None => {
-                    view.set_notice("release is still running; the hold lifts when it lands".into())
-                }
-            }
+            });
         }
         MenuAction::Peek | MenuAction::Mail => {
             let idx = view

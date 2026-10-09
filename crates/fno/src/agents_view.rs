@@ -2210,6 +2210,58 @@ pub fn supervisor_sock_path() -> PathBuf {
     base.join(".fno").join("agents").join("supervisor.sock")
 }
 
+/// One daemon RPC round trip: connect, write one length-prefixed request
+/// frame, read one length-prefixed answer frame, decode the envelope. The
+/// framing (a 4-byte little-endian body length, then the body, no newline
+/// anywhere) is the daemon's wire contract
+/// (crates/fno-agents/src/protocol.rs), so it lives in exactly one place;
+/// [`watch_registry`] and [`agent_list_rpc`] bound their own round trips
+/// and read their own result shapes. The 16 MiB cap mirrors the daemon's
+/// MAX_FRAME_BYTES, so an oversize answer is refused, not read.
+async fn daemon_rpc(
+    sock: &std::path::Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "id": 1u64,
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|e| format!("encode: {e}"))?;
+    let mut conn = tokio::net::UnixStream::connect(sock)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&body);
+    conn.write_all(&frame)
+        .await
+        .map_err(|e| format!("write: {e}"))?;
+    let mut len_buf = [0u8; 4];
+    conn.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("read: {e}"))?;
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_BYTES {
+        return Err(format!("{method}: answer frame too large: {len}"));
+    }
+    let mut answer = vec![0u8; len as usize];
+    conn.read_exact(&mut answer)
+        .await
+        .map_err(|e| format!("read: {e}"))?;
+    let resp: serde_json::Value =
+        serde_json::from_slice(&answer).map_err(|e| format!("decode: {e}"))?;
+    if let Some(err) = resp.get("error") {
+        return Err(format!("{method} error: {err}"));
+    }
+    resp.get("result")
+        .cloned()
+        .ok_or_else(|| format!("{method}: answer carried neither result nor error"))
+}
+
 /// One `agent.watch` round trip against the daemon, if one
 /// answers. The registry's (mtime, len) stamp is the subscription version: it
 /// travels out as `since` and back beside the document, so the caller's
@@ -2227,8 +2279,6 @@ pub async fn watch_registry(
     since: Option<(std::time::SystemTime, u64)>,
     sock: &std::path::Path,
 ) -> Result<(Option<(std::time::SystemTime, u64)>, Option<String>), String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
     async fn round(
         since: Option<(std::time::SystemTime, u64)>,
         sock: &std::path::Path,
@@ -2243,33 +2293,8 @@ pub async fn watch_registry(
             }
             None => serde_json::Value::Null,
         };
-        let req = serde_json::json!({
-            "id": 1u64,
-            "method": "agent.watch",
-            "params": {"since": since_v},
-        });
-        let mut frame = req.to_string();
-        frame.push('\n');
-        let mut conn = tokio::net::UnixStream::connect(sock)
-            .await
-            .map_err(|e| format!("connect: {e}"))?;
-        conn.write_all(frame.as_bytes())
-            .await
-            .map_err(|e| format!("write: {e}"))?;
-        let mut reader = BufReader::new(conn);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read: {e}"))?;
-        let resp: serde_json::Value =
-            serde_json::from_str(line.trim()).map_err(|e| format!("decode: {e}"))?;
-        if let Some(err) = resp.get("error") {
-            return Err(format!("agent.watch error: {err}"));
-        }
-        let result = resp
-            .get("result")
-            .ok_or_else(|| "agent.watch: answer carried neither result nor error".to_string())?;
+        let result =
+            daemon_rpc(sock, "agent.watch", serde_json::json!({ "since": since_v })).await?;
         // Version -> stamp: the same (mtime, len) domain the file scan gates
         // with, so a served answer and a scanned answer are interchangeable
         // downstream without the reader knowing which one produced it.
@@ -2294,6 +2319,28 @@ pub async fn watch_registry(
     tokio::time::timeout(std::time::Duration::from_secs(2), round(since, sock))
         .await
         .map_err(|_| "agent.watch: round trip exceeded 2s".to_string())?
+}
+
+/// One `agent.list` round trip against the daemon, if one answers: the
+/// whole live fleet's rows, the same answer `fno agents list --json`
+/// prints after its Python cold start (the mux truth probe
+/// rides this instead of spawning the CLI, so no interpreter is ever a
+/// mux child). Params are empty exactly as the CLI's no-arg list sends
+/// them: no filter, every live row, the shape
+/// schemas/agents-list-row.json pins.
+///
+/// `Err(_)` - no daemon (refused/absent socket), transport fault, or the
+/// round-trip bound exceeded. The caller keeps the last good map.
+pub async fn agent_list_rpc(sock: &std::path::Path) -> Result<serde_json::Value, String> {
+    // Bound the WHOLE round trip: the daemon runs its per-list truth batch
+    // server-side, which can take tens of seconds on a big fleet, but a
+    // wedged daemon must release the probe latch, not hold it forever.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        daemon_rpc(sock, "agent.list", serde_json::json!({})),
+    )
+    .await
+    .map_err(|_| "agent.list: round trip exceeded 120s".to_string())?
 }
 
 /// Union the fno registry rows with claude's roster. Pure so the

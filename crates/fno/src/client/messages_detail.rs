@@ -10,8 +10,14 @@ use crate::popup::{Anchor, Popup, PopupRow};
 use serde_json::Value;
 
 /// The open modal: its popup carries the rows; keys fold in the caller.
+/// `key` is the participant the modal opened on: a token answer names its
+/// key, and only a modal still open on that row paints it. `tokens_pending`
+/// clears when an answer (or a miss) lands, so a duplicate is never painted
+/// twice.
 pub(crate) struct SessionDetail {
     pub(crate) popup: Popup,
+    pub(crate) key: String,
+    pub(crate) tokens_pending: bool,
 }
 
 /// Up/down move nothing yet (no entry rows); Esc or q closes (true).
@@ -19,8 +25,16 @@ pub(crate) fn detail_keys(_detail: &mut SessionDetail, bytes: &[u8]) -> bool {
     bytes == [27] || bytes == [b'q']
 }
 
+/// One bound over the `mail-threads details` subprocess: the modal opens
+/// without tokens, and they arrive (or miss) inside this budget, never
+/// later. The old path ran this subprocess inline on the UI thread with an
+/// unbounded wait - a loaded machine froze the client on the `d` press.
+const DETAILS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Open the modal on one participant key: projection row first, the
-/// roster beside it, tokens and cost from the details action.
+/// roster beside it, tokens and cost fetched OFF the UI loop - the modal
+/// opens now, and [`apply_tokens`] paints the token rows when the bounded
+/// subprocess answers.
 pub(crate) fn open(view: &mut View, key: String) {
     let proj_row = view
         .messages_board
@@ -39,10 +53,10 @@ pub(crate) fn open(view: &mut View, key: String) {
         .iter()
         .find(|a| a.harness_session_id.as_deref() == Some(key.as_str()) || a.name == key)
         .cloned();
-    let tokens = details_action(
-        &key,
-        roster.as_ref().and_then(|a| a.harness_session_id.clone()),
-    );
+    let sid = roster
+        .as_ref()
+        .and_then(|a| a.harness_session_id.clone())
+        .unwrap_or_else(|| key.clone());
     let mut rows: Vec<PopupRow> = Vec::new();
     rows.push(PopupRow::Header(format!("session {key}")));
     rows.push(PopupRow::Rule);
@@ -70,51 +84,121 @@ pub(crate) fn open(view: &mut View, key: String) {
         super::feed_detail::info_row("model", a.model.clone(), &mut rows);
         super::feed_detail::info_row("pr", a.pr.map(|n| n.to_string()), &mut rows);
     }
-    if let Some(t) = &tokens {
-        let get = |k: &str| {
-            t.get("tokens")
-                .and_then(|v| v.get(k))
-                .and_then(Value::as_u64)
-        };
-        super::feed_detail::info_row(
-            "fresh input",
-            get("input").map(|n| n.to_string()),
-            &mut rows,
-        );
-        super::feed_detail::info_row("output", get("output").map(|n| n.to_string()), &mut rows);
-        super::feed_detail::info_row(
-            "cache read",
-            get("cache_read").map(|n| n.to_string()),
-            &mut rows,
-        );
-        super::feed_detail::info_row(
-            "cache write",
-            get("cache_write").map(|n| n.to_string()),
-            &mut rows,
-        );
-        let cost = t.get("cost_usd").and_then(Value::as_f64);
-        super::feed_detail::info_row("api cost", cost.map(|c| format!("${c:.4}")), &mut rows);
-    }
     let popup = Popup::new(rows, Anchor::Center)
         .title("session details")
         .footer("esc close")
         .plain_body();
     if let Some(b) = view.messages_board.as_mut() {
-        b.detail = Some(SessionDetail { popup });
+        b.detail = Some(SessionDetail {
+            popup,
+            key: key.clone(),
+            tokens_pending: view.details_tx.is_some(),
+        });
+    }
+    if let Some(tx) = &view.details_tx {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let tokens = fetch_tokens(sid).await;
+            let _ = tx.send((key, tokens));
+        });
     }
 }
 
-/// The `mail-threads details` action over one session id: tokens and
-/// cost, or None when the binary, the registry row or the transcript is
-/// missing (a modal never blocks on a failed read).
-fn details_action(key: &str, sid: Option<String>) -> Option<Value> {
-    let sid = sid.unwrap_or_else(|| key.to_string());
-    let out = std::process::Command::new("fno-agents")
-        .args(["mail-threads", "details", "--session", &sid])
-        .output()
-        .ok()?;
+/// The `mail-threads details` action over one session id, bounded and off
+/// the UI thread: tokens and cost, or None when the binary, the registry
+/// row, the transcript or the budget is gone (a modal never blocks on a
+/// failed read, and now it never blocks at all).
+async fn fetch_tokens(sid: String) -> Option<Value> {
+    let out = tokio::time::timeout(
+        DETAILS_TIMEOUT,
+        tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+            .args(["mail-threads", "details", "--session", &sid])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     if !out.status.success() {
         return None;
     }
     serde_json::from_slice(&out.stdout).ok()
+}
+
+/// Paint one token answer onto the open modal: the rows the synchronous
+/// path used to build inline, appended after the provenance rows.
+pub(crate) fn apply_tokens(popup: &mut Popup, tokens: &Value) {
+    let get = |k: &str| {
+        tokens
+            .get("tokens")
+            .and_then(|v| v.get(k))
+            .and_then(Value::as_u64)
+    };
+    super::feed_detail::info_row(
+        "fresh input",
+        get("input").map(|n| n.to_string()),
+        &mut popup.rows,
+    );
+    super::feed_detail::info_row(
+        "output",
+        get("output").map(|n| n.to_string()),
+        &mut popup.rows,
+    );
+    super::feed_detail::info_row(
+        "cache read",
+        get("cache_read").map(|n| n.to_string()),
+        &mut popup.rows,
+    );
+    super::feed_detail::info_row(
+        "cache write",
+        get("cache_write").map(|n| n.to_string()),
+        &mut popup.rows,
+    );
+    let cost = tokens.get("cost_usd").and_then(Value::as_f64);
+    super::feed_detail::info_row(
+        "api cost",
+        cost.map(|c| format!("${c:.4}")),
+        &mut popup.rows,
+    );
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use crate::popup::Popup;
+
+    /// The token painter appends one row per field the answer holds; a
+    /// field no source holds prints nothing (the provenance card's rule).
+    #[test]
+    fn apply_tokens_appends_only_fields_the_answer_holds() {
+        let mut popup = Popup::new(vec![PopupRow::Rule], Anchor::Center).plain_body();
+        let tokens: Value = serde_json::json!({
+            "tokens": {"input": 10, "output": 2, "cache_read": 3, "cache_write": 4},
+            "cost_usd": 0.5
+        });
+        apply_tokens(&mut popup, &tokens);
+        assert_eq!(popup.rows.len(), 6);
+        let empty: Value = serde_json::json!({});
+        apply_tokens(&mut popup, &empty);
+        assert_eq!(popup.rows.len(), 6);
+    }
+}
+
+/// Land one fetched token answer: paints only a modal still open on the
+/// same key with its tokens still pending, so a stale answer never paints
+/// another session's numbers. True when the caller must repaint.
+pub(crate) fn apply_token_answer(view: &mut View, key: &str, tokens: Option<Value>) -> bool {
+    let Some(b) = view.messages_board.as_mut() else {
+        return false;
+    };
+    let Some(d) = b.detail.as_mut() else {
+        return false;
+    };
+    if d.key != key || !d.tokens_pending {
+        return false;
+    }
+    if let Some(tokens) = tokens {
+        apply_tokens(&mut d.popup, &tokens);
+    }
+    d.tokens_pending = false;
+    true
 }

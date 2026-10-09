@@ -258,7 +258,7 @@ pub(super) fn venv_shebang_offenders(bin: &Path, root: &Path) -> Vec<(String, St
 /// correctly scoped to one project and a board that could not resolve one and
 /// widened look nothing alike, and only this line says which you got.
 pub(super) fn board_scope_check() -> Check {
-    let (scope, why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+    let (scope, why) = crate::backlog_view::resolve_board_scope(crate::config_defaults::lookup_key);
     let refused = matches!(
         &scope,
         crate::backlog_view::BoardScope::Projects(s) if s.is_empty()

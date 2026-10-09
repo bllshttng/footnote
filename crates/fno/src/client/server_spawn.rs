@@ -21,13 +21,14 @@ pub(super) fn spawn_server(path: &Path) -> Result<(), String> {
     stamp_sandbox_owner(&mut cmd);
     // The pure-Rust server does not read config.toml. Resolve this once on the
     // client, which already pays for the bounded config lookup.
-    if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && super::shell_integration_off() {
+    if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
         cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
     }
     if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
         // The server must not shell out for config on its SIGTERM-critical
         // startup path; the client resolves the scope and passes it by env.
-        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+        let (scope, _why) =
+            crate::backlog_view::resolve_board_scope(crate::config_defaults::lookup_key);
         cmd.env(
             "FNO_BOARD_SCOPE",
             crate::backlog_view::board_scope_wire(&scope),
@@ -93,4 +94,42 @@ fn valid_owner_session(session: &str) -> bool {
         && session
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Whether the interactive path must disable OSC 133 injection. Fail-open
+/// through the native config read ([`crate::config_defaults::lookup_key`]):
+/// an absent file, an unreadable one, or a non-`off` value all leave
+/// injection on (the default). Runs synchronously inside `spawn_server`,
+/// *before* the client's spawn-connect wait loop exists - the native read is
+/// one bounded file parse, where the retired `fno config get` subprocess
+/// cold-started the Python shim and could freeze `fno` startup for seconds.
+fn shell_integration_off() -> bool {
+    crate::config_defaults::lookup_key("mux.shell_integration")
+        .as_deref()
+        .map(config_says_off)
+        .unwrap_or(false)
+}
+
+/// The one off-switch, matched exactly like the Rust pane-spawn side
+/// (`pty::integration_disabled`): only a trimmed `off` disables injection.
+pub(crate) fn config_says_off(stdout: &str) -> bool {
+    stdout.trim() == "off"
+}
+
+#[cfg(test)]
+mod spawn_config_tests {
+    use super::config_says_off;
+
+    /// The env bridge from config.toml to the interactive server's
+    /// latched env: must mirror `pty::integration_disabled` - exactly
+    /// `off`, never case-loose, never the default.
+    #[test]
+    fn config_says_off_matches_only_trimmed_off() {
+        assert!(config_says_off("off"));
+        assert!(config_says_off("off\n"));
+        assert!(config_says_off("  off  "));
+        assert!(!config_says_off("mux-panes\n"));
+        assert!(!config_says_off("OFF"));
+        assert!(!config_says_off(""));
+    }
 }

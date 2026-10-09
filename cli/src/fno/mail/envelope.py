@@ -74,10 +74,15 @@ def _render_in_rust(payload: dict) -> str:
             timeout=5,
         )
     except subprocess.TimeoutExpired:
-        # The renderer reads the registry under a shared flock; a sustained
-        # writer leaves the send blocked with no envelope to paste.
+        # Under WAL an imported registry's writer does not block this read, so
+        # the error names the machine load rather than guessing a lock.
+        try:
+            load = f"{os.getloadavg()[0]:.0f}"
+        except OSError:
+            load = "unknown"
         raise ForgedEnvelopeError(
-            "mail-envelope render timed out after 5s (registry lock contention?); "
+            f"mail-envelope render timed out after 5s (1-minute load average "
+            f"{load} on {os.cpu_count() or 'unknown'} cores); "
             "refusing to deliver a body without its attribution frame."
         ) from None
     if result.returncode:

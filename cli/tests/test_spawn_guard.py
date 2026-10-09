@@ -550,8 +550,10 @@ def test_a_worked_authority_outage_names_itself_not_a_running_worker(
     claims_tmp, monkeypatch: pytest.MonkeyPatch
 ):
     """When the worked overlay refuses, a FREE claim must not render as
-    `already-running reason=unproven-claim`: the block_reason token is the
-    honest reason (x-ae54 - peers refused as already-running while free)."""
+    `already-running`: the guard could not check, and that is not occupancy
+    (three free nodes were refused as already-running while their leads fell
+    back to a costlier lane). The verdict says unknown and the detail carries
+    the reader failure verbatim."""
     def _raise(**_kw):
         raise RuntimeError("roster timeout")
 
@@ -559,8 +561,9 @@ def test_a_worked_authority_outage_names_itself_not_a_running_worker(
     res = _invoke("x-9999", "--holder", "probe:1", "--no-reserve", "--json")
     assert res.exit_code == 0
     obj = json.loads(res.output)
-    assert obj["verdict"] == "already-running"
+    assert obj["verdict"] == "unknown"
     assert obj["reason"] == "worked-authority-unavailable"
+    assert "roster timeout" in obj["detail"]
 
 
 def test_a_worker_row_block_with_no_claim_names_the_row(

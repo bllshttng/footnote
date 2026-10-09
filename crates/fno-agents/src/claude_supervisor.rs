@@ -35,7 +35,7 @@ use crate::model_env_scrub::MODEL_ENV_KEYS;
 /// A new per-session stamp then defaults to the safe side, and a new
 /// machine-wide key that belongs here announces itself as a setting that did
 /// not take effect, which is the failure an operator can see and fix.
-const SUPERVISOR_WIDE_FNO_KEYS: [&str; 46] = [
+const SUPERVISOR_WIDE_FNO_KEYS: [&str; 48] = [
     "FNO_AGENTS_BIN",
     "FNO_AGENTS_DAEMON_BIN",
     "FNO_AGENTS_FRONT",
@@ -69,6 +69,8 @@ const SUPERVISOR_WIDE_FNO_KEYS: [&str; 46] = [
     "FNO_PR_BASE_LINEAGE_OK",
     "FNO_PR_STATUS_CACHE_DIR",
     "FNO_PY",
+    "FNO_RECLAIM_BACKUPS_AUDIT",
+    "FNO_RECLAIM_BACKUPS_DAYS",
     "FNO_RECLAIM_STATE_ROOT",
     "FNO_REGISTRY_ALLOW_ROW_LOSS",
     "FNO_ROUTE_SETTINGS_DIR",

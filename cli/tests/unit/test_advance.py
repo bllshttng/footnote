@@ -538,6 +538,40 @@ def test_worked_authority_failure_refuses_dispatch(monkeypatch):
     assert observation.blocks_dispatch is True
     assert observation.refusal_reason == "worked-authority-unavailable"
     assert observation.block_reason == "worked-authority-unavailable"
+    assert observation.worked_error == "roster timeout"
+
+
+def test_proven_occupancy_outranks_worked_error(monkeypatch):
+    """A live claim plus a roster outage must still read as occupancy: the
+    claim was proven held, so the refusal names the holder and the guard
+    renders already-running, never the unknown verdict an outage earns on a
+    free node (external review P2 on the unknown-verdict change)."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("ours", {"state": "live", "holder": "worker-a"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.blocks_dispatch is True
+    assert observation.block_reason == "held: claim live held by worker-a"
+    assert observation.refusal_reason == "held: claim live held by worker-a"
+    assert observation.worked_error == "roster timeout"
 
 
 def test_dead_dispatch_limit_outranks_worked_error(monkeypatch):
