@@ -698,7 +698,12 @@ fn probe_repo(cwd: &Path) -> RepoProbe {
     if !cwd.is_absolute() || !cwd.is_dir() {
         return RepoProbe::Unsure;
     }
-    let start_dev = device_of(cwd);
+    // Real path first: a symlinked cwd must climb its target's ancestors, not
+    // the link's, or a repo above the target reads as no repo at all.
+    let Ok(cwd) = std::fs::canonicalize(cwd) else {
+        return RepoProbe::Unsure;
+    };
+    let start_dev = device_of(&cwd);
     for dir in cwd.ancestors() {
         if device_of(dir) != start_dev {
             return RepoProbe::Unsure;
@@ -1582,10 +1587,15 @@ mod tests {
         );
         assert_eq!(
             canonical_root_of_probe(&main.join("deep")),
-            Some(Some(want))
+            Some(Some(want.clone()))
         );
+        // A symlinked cwd climbs its target's ancestors, not the link's.
+        let link = base.join("link");
+        std::os::unix::fs::symlink(main.join("deep"), &link).unwrap();
+        assert_eq!(canonical_root_of_probe(&link), Some(Some(want)));
+        let linked_real = std::fs::canonicalize(&linked).unwrap();
         assert!(
-            matches!(probe_repo(&linked.join("sub")), RepoProbe::Found(top, _) if top == linked),
+            matches!(probe_repo(&linked.join("sub")), RepoProbe::Found(top, _) if top == linked_real),
             "the walk stops at the linked worktree, not the main checkout"
         );
         std::fs::remove_dir_all(&base).ok();
