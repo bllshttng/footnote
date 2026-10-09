@@ -32,36 +32,33 @@ export PATH
 # the claim store confirms expires_at advanced past the pre-read deadline,
 # and a ledger gone stale while a session works means the hook itself stopped
 # firing - its own actionable signal.
-# Touches the claim lockfile only (via `fno agents claim refresh`) - never
-# the immutable manifest.
-# `refresh_claim` takes the same per-key recovery mutex as `reap`/`acquire`
-# (closes a resurrection race - see core.py), so on rare contention with a
-# concurrent reap sweep or acquire on the SAME key this call can wait up to
-# ~25s before returning (ACQUIRE_MAX_ATTEMPTS=5 retries x the mutex's own
-# 5s wait each, core.py) rather than failing fast. The stamp-file throttle
-# above keeps that window rare, but "rare" is not "never" - a PostToolUse
-# hook that can hang the tool call for 25s once in a while still breaks the
-# "NEVER blocks" contract this file promises, so the call itself is bounded
-# below with the shared `with_timeout` (scripts/lib/with-timeout.sh): a
-# refresh that would otherwise wait out the mutex instead times out and logs,
-# same non-fatal outcome as any other refresh failure.
+# Touches the claim lockfile only (via the native `fno-agents claim refresh`
+# leaf) - never the immutable manifest.
+# `claims::renew` (the native leaf's engine) takes the same per-key recovery
+# mutex as `reap`/`acquire` (closes a resurrection race), so on rare
+# contention with a concurrent reap sweep or acquire on the SAME key this
+# call can wait on that mutex rather than failing fast. The stamp-file
+# throttle above keeps that window rare, but "rare" is not "never" - a
+# PostToolUse hook that can hang the tool call for seconds once in a while
+# still breaks the "NEVER blocks" contract this file promises, so the call
+# itself is bounded below with the shared `with_timeout`
+# (scripts/lib/with-timeout.sh): a refresh that would otherwise wait out the
+# mutex instead times out and logs, same non-fatal outcome as any other
+# refresh failure.
 #
-# REFRESH_TIMEOUT (5s default) is deliberately shorter than refresh_claim's
-# own ~25s graceful contention-exhaustion budget above: this hook only cares
-# about bounding wall-clock, not about letting refresh_claim's own
-# ClaimContended path run to completion, so the external kill firing first is
-# the intended outcome under real contention, not a bug. It also means a kill
-# CAN land while refresh_claim holds the recovery mutex (Python's default
-# SIGTERM disposition does not run `finally`), orphaning `.recovery.d`. That
-# window is narrow - only the fast read+atomic-rewrite after the mutex is
-# already acquired, not the (much longer) wait to acquire it - and self-heals
-# via the existing corpse-steal path (`steal_if_stale`, mutex.py,
-# STALE_MUTEX_STEAL_S=120s), the same bounded-recovery mechanism every other
-# stale mutex in this file relies on. Narrowing that window further would
-# mean either raising REFRESH_TIMEOUT back toward 25s+ (reintroducing the
-# hang this bound exists to prevent) or making the CLI's own SIGTERM handling
-# interruption-safe globally - a materially larger change than this hook's
-# scope.
+# REFRESH_TIMEOUT (5s default) bounds wall-clock rather than letting the
+# engine's own contention path run to completion, so the external kill
+# firing first is the intended outcome under real contention, not a bug. It
+# also means a kill CAN land while the engine holds the recovery mutex,
+# orphaning the recovery directory. That window is narrow - only the fast
+# read+atomic-rewrite after the mutex is already acquired, not the (much
+# longer) wait to acquire it - and self-heals via the existing corpse-steal
+# path (the stale-mutex timeout), the same bounded-recovery mechanism every
+# other stale mutex in this file relies on. Narrowing that window further
+# would mean raising REFRESH_TIMEOUT back toward the engine's own
+# contention-exhaustion budget (reintroducing the hang this bound exists to
+# prevent) or making the CLI's own SIGTERM handling interruption-safe
+# globally - a materially larger change than this hook's scope.
 
 set -uo pipefail
 
@@ -84,6 +81,19 @@ if ! source "$WITH_TIMEOUT_LIB"; then
   exit 0
 fi
 
+# One binary resolution for every claim call below, through the shared
+# resolver: the supported FNO_AGENTS_BIN override and checkout builds rank
+# ahead of PATH. A bare `command -v` would renew through a stale PATH copy or
+# skip renewal where the binary exists only as a checkout or wheel build -
+# the exact active-claim-lapse this hook exists to prevent.
+AGENTS_BIN=""
+if [[ -r "$PLUGIN_ROOT/hooks/lib/agents-bin.sh" ]]; then
+  # shellcheck source=lib/agents-bin.sh
+  source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
+  AGENTS_BIN="$(fno_agents_bin "$PLUGIN_ROOT")"
+fi
+[[ -z "$AGENTS_BIN" ]] && AGENTS_BIN="$(command -v fno-agents 2>/dev/null || true)"
+
 # Refresh at most once per THROTTLE seconds of activity. Well under the claim's
 # default 2h TTL, so an actively-working session stays LIVE with wide margin.
 # ponytail: a plain stamp-mtime throttle, not half-life arithmetic - refresh is
@@ -102,8 +112,9 @@ _JQ_INTEGRAL_EXPIRES='
 # Separate from claim TTL: a 30s stamp stays fresh inside the 120s peer window.
 LIVE_THROTTLE=30
 
-# Re-arm to the node claim's canonical 2h window. `fno agents claim refresh` with no
-# --ttl defaults to MIN_TTL (1 min) and does NOT guard against shortening, so an
+# Re-arm to the node claim's canonical 2h window. The native `fno-agents claim
+# refresh` leaf with no --ttl defaults to MIN_TTL (1 min) and does NOT guard
+# against shortening, so an
 # omitted ttl would SHRINK the very claim we mean to keep alive. 2h matches the
 # init acquire window; refreshing to now+2h always extends a live (<=2h-left)
 # claim, so the "only ever extends" invariant holds.
@@ -278,7 +289,7 @@ fi
 if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       && "$_HANDOVER_HOLDER" == spawn-handover:* \
       && "$_HANDOVER_HOLDER" != "spawn-handover:" ]] \
-      && command -v fno >/dev/null 2>&1 \
+      && [[ -n "$AGENTS_BIN" ]] \
       && [[ -z "$_handover_repo_fno_phys" \
             || "$_handover_repo_fno_phys" != "$_handover_state_phys" ]]; then
   _HANDOVER_STAMP="$CWD/.fno/.claim-handover-heartbeat.stamp"
@@ -294,10 +305,7 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
     _handover_status_json() {
       local status_json
       status_json="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-        fno agents claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
-      [[ -n "$status_json" ]] || status_json="$(with_timeout \
-        "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-        fno agents claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+        "$AGENTS_BIN" claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
       printf '%s' "$status_json"
     }
     _HANDOVER_STATUS="$(_handover_status_json)"
@@ -323,7 +331,7 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       if [[ ! "$_RECORDED_HANDOVER_EXPIRES" =~ ^[0-9]+$ ]]; then
         echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE (missing deadline); refresh remains due" >&2
       elif with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
-        fno agents claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
+        "$AGENTS_BIN" claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
         --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1; then
         _HANDOVER_AFTER="$(_handover_status_json)"
         _HANDOVER_AFTER_VALID="$(printf '%s' "$_HANDOVER_AFTER" | jq -r '
@@ -360,7 +368,7 @@ fi
 # owning verb so this hook never spells the path. Degraded fallback for an fno
 # predating the verb: the legacy checkout-relative path (same contract as
 # target-stop-hook.sh).
-MANIFEST="$(fno-agents state path target-state 2>/dev/null || true)"
+MANIFEST="$("$AGENTS_BIN" state path target-state 2>/dev/null || true)"
 [[ -z "$MANIFEST" ]] && MANIFEST="$CWD/.fno/target-state.md"
 [[ -f "$MANIFEST" ]] || exit 0   # no target session here -> nothing to refresh
 
@@ -445,40 +453,30 @@ write_stamp() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
-command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
+# The claim reads and the renewal go through the native `fno-agents` leaf, not
+# the `fno` Python shim: the 2026-10-08 slowness audit measured this hook's
+# Python-shim trips at ~4.7 s of import cold start each (3 trips per renewal
+# window), and the native leaf answers the same record in ~0.1-0.2 s. An
+# unresolvable binary is an infrastructure fault, named here rather than
+# reading as a quiet forever-noop (same posture as the with-timeout guard).
+[[ -n "$AGENTS_BIN" ]] || {
+  echo "claim-heartbeat: fno-agents binary unresolvable (FNO_AGENTS_BIN, checkout build, or PATH); claim renewal skipped" >&2
+  exit 0
+}
 
 # Holder gate: refresh ONLY our own claim. A different holder (or no live claim)
 # stamps and returns so we do not re-probe on every tool call.
-# --no-roster: this runs on tool calls and reads .holder ONLY. The roster
-# cross-check shells out to the harness, and it fires on exactly the branch this
-# gate hits when a claim has lapsed, so leaving it on would tax every tool call
-# to compute a field discarded on the next line.
 #
-# The flag is NEW, and this hook runs against the DEPLOYED fno, which lags the
-# source. An older binary rejects the unknown option, exits 2 with empty stdout,
-# and the gate below then reads "not our claim" and returns - so a live session
-# stops refreshing and its claim expires underneath it. Fall back to the
-# unflagged call, which every version understands, and pay the cross-check
-# rather than lose the heartbeat.
-# Keyed on EMPTY OUTPUT, not on the exit code. `fno agents claim status` happens to
-# exit 0 for every state today, but its own docstring says the exit code
-# reflects state, so an `||` here would one day run BOTH calls and print two
-# JSON objects. `jq .holder` then emits two lines, the gate below never matches,
-# and a live session silently stops refreshing its claim.
-# BOUNDED, like the refresh below it. This runs on the PostToolUse path, and the
-# unflagged fallback pays the roster cross-check - a full `claude agents --json
-# --all` enumeration - so an unbounded call would hang a tool call on a slow
-# fleet. A bound that fires reads as no claim, which only skips one heartbeat.
-# A kill also trips the empty-output retry below, so the worst case is two
-# bounded calls rather than one; the alternative is a hook that hangs.
+# The native `claim status` always prints the record JSON (free included) and
+# never runs a roster cross-check, so the old `--no-roster` flag and its
+# empty-output retry for a deployed binary that predated the flag are gone:
+# one call, one shape, no version-lag fallback to maintain.
+# BOUNDED, like the refresh below it. A bound that fires reads as no claim,
+# which only skips one heartbeat; the alternative is a hook that hangs.
 _STATUS_TIMEOUT="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
 _status_json() {
-  local out
-  out="$(with_timeout "$_STATUS_TIMEOUT" \
-    fno agents claim status "node:$NODE_ID" --json --no-roster 2>/dev/null)"
-  [ -n "$out" ] || out="$(with_timeout "$_STATUS_TIMEOUT" \
-    fno agents claim status "node:$NODE_ID" --json 2>/dev/null)"
-  printf '%s' "$out"
+  with_timeout "$_STATUS_TIMEOUT" \
+    "$AGENTS_BIN" claim status "node:$NODE_ID" --json 2>/dev/null
 }
 _STATUS_ONCE="$(_status_json)"
 HOLDER="$(printf '%s' "$_STATUS_ONCE" | jq -r '.holder // empty' 2>/dev/null)"
@@ -531,15 +529,16 @@ fi
 # unverified - one bounded status call per window.
 REFRESH_TIMEOUT="${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}"
 REFRESH_JSON="$(with_timeout "$REFRESH_TIMEOUT" \
-  fno agents claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" --json \
+  "$AGENTS_BIN" claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" --json \
   2>/dev/null)"
 REFRESH_RC=$?
 if [[ "$REFRESH_RC" -ne 0 ]]; then
   # rc names the failure class where stderr cannot (it is discarded at
-  # capture): 1 contention, 2 expired-before-refresh, 3 gone/corrupted,
-  # 4 holder mismatch, 124 the bound fired. A 2 means reclaim territory, a
-  # 4 means split-brain - neither should read as "transient, retry".
-  echo "claim-heartbeat: refresh failed for node:$NODE_ID rc=$REFRESH_RC (1 contention, 2 expired, 3 gone/corrupted, 4 holder mismatch, 124 timeout; non-fatal)" >&2
+  # capture): the native leaf's taxonomy - 1 write failure, 2 expired/
+  # refused (stale lease with a dead holder), 3 gone/corrupted, 4 holder
+  # mismatch, 124 the bound fired. A 2 means reclaim territory, a 4 means
+  # split-brain - neither should read as "transient, retry".
+  echo "claim-heartbeat: refresh failed for node:$NODE_ID rc=$REFRESH_RC (1 write failure, 2 expired/refused, 3 gone/corrupted, 4 holder mismatch, 124 timeout; non-fatal)" >&2
   write_stamp refresh_failed
   exit 0
 fi

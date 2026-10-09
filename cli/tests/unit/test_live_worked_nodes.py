@@ -53,7 +53,11 @@ def test_ac8_edge_degrades_loudly_when_roster_is_unreadable(monkeypatch, capsys)
     )
 
     assert live_worked_node_ids() == {}
-    assert "worked overlay degraded: roster timeout" in capsys.readouterr().err
+    # The degrade names the reader that failed: read_roster prefixes the raise.
+    assert (
+        "worked overlay degraded: read_roster: roster timeout"
+        in capsys.readouterr().err
+    )
     with pytest.raises(RuntimeError, match="roster timeout"):
         live_worked_node_ids(strict=True)
 

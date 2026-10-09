@@ -534,26 +534,6 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     );
 }
 
-/// Whether the interactive path must disable OSC 133 injection. Bounded +
-/// fail-open through [`crate::server::config_get`]: any spawn/read error, a
-/// non-`off` value, or a read that overruns the budget all leave injection on
-/// (the default). The bound matters because this runs synchronously inside
-/// `spawn_server`, *before* the client's spawn-connect wait loop exists -
-/// nothing downstream would rescue an unbounded read, so a slow or wedged
-/// config read would freeze `fno` startup with no notice.
-fn shell_integration_off() -> bool {
-    crate::server::config_get("mux.shell_integration")
-        .as_deref()
-        .map(config_says_off)
-        .unwrap_or(false)
-}
-
-/// The one off-switch, matched exactly like the Rust pane-spawn side
-/// (`pty::integration_disabled`): only a trimmed `off` disables injection.
-fn config_says_off(stdout: &str) -> bool {
-    stdout.trim() == "off"
-}
-
 // ---------------------------------------------------------------------------
 // View state + pure composition
 // ---------------------------------------------------------------------------
@@ -1001,6 +981,10 @@ pub(crate) struct View {
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
     reply_notice_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The session-details modal's off-loop token fetch: (participant key,
+    /// tokens-or-miss). The select arm paints only the modal whose key and
+    /// pending flag still match, so a stale answer is dropped.
+    details_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, Option<serde_json::Value>)>>,
     next_reply_request_id: u64,
     pending_reply_journals: HashMap<u64, messages_reply::PendingJournal>,
     /// The row-scoped outcome stamp and its armed action, one at a
@@ -2015,6 +1999,7 @@ impl View {
             digest: None,
             notice: None,
             reply_notice_tx: None,
+            details_tx: None,
             next_reply_request_id: 1,
             pending_reply_journals: HashMap::new(),
             row_stamp: None,
@@ -7440,6 +7425,9 @@ async fn attach_and_run(
     )>();
     let (reply_notice_tx, mut reply_notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     view.reply_notice_tx = Some(reply_notice_tx);
+    let (details_tx, mut details_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<serde_json::Value>)>();
+    view.details_tx = Some(details_tx);
     let (bell_tx, mut bell_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Result<serde_json::Value, String>)>();
 
@@ -8206,6 +8194,15 @@ async fn attach_and_run(
                 view.set_notice(text);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
+                }
+            }
+            Some((key, tokens)) = details_rx.recv() => {
+                // The stale-key and double-answer guards live beside the
+                // modal; this arm only repaints on a real hit.
+                if messages_detail::apply_token_answer(&mut view, &key, tokens) {
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
                 }
             }
             Some((gen, projection)) = bell_rx.recv() => {

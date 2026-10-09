@@ -273,6 +273,12 @@ if [[ -n "$NODE" ]]; then
         fail "family-2 guard blocked node:$NODE; no worker launched"
       fi
       exit 0 ;;
+    unknown)
+      # The guard could not check (worked authority unavailable). NOT
+      # occupancy: no worker was found and none may be assumed, so the only
+      # honest receipt says the check itself failed and names the reader.
+      detail="$(printf '%s' "$guard_json" | jq -r '.detail // empty' 2>/dev/null)"
+      fail "could not check node:$NODE (${detail:-worked authority unavailable}); no worker launched, retry" ;;
     corrupted)
       fail "node:$NODE claim is corrupted; force-release or repair before dispatching" ;;
     refused)

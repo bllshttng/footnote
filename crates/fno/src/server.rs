@@ -998,7 +998,7 @@ pub(crate) enum CoreMsg {
         ctx: HashMap<String, String>,
     },
     /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
-    /// probe (`fno agents list --json`, one process for the whole fleet).
+    /// probe (the daemon's `agent.list` RPC, one request for the whole fleet).
     /// Replaces the map wholesale; a failed probe sends nothing so the last
     /// good map stands until the next success. `seq` is the probe's launch
     /// order (review finding: a probe can outlive the next tick's probe under
@@ -2100,75 +2100,6 @@ pub(crate) fn fno_bin() -> PathBuf {
         return PathBuf::from(v);
     }
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno"))
-}
-
-/// How long one `fno config get` may take before it is killed and read as
-/// absent. Bounded because the sync callers run on a startup path with nothing
-/// downstream to rescue a wedged read.
-const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Read one config key through `fno config get <key>`, bounded and fail-open:
-/// any spawn error, non-zero exit, or overrun reads as `None` (absent), never
-/// as a value. `fno config get` prints the bare value on stdout and its
-/// provenance on stderr, so stdout is the value.
-///
-/// Callers are the CLIENT (at server spawn) and `mux doctor`. Never the server:
-/// a subprocess on its startup path delayed shutdown past the SIGTERM grace and
-/// perturbed multiclient frame ordering, so the server reads only the env the
-/// client latched.
-///
-/// Capture stdout to a FILE, not a pipe. A pipe read blocks until EOF (every
-/// write-end closed), so a descendant of `fno config get` that inherits stdout
-/// and outlives the direct child would hang the read even after `try_wait`
-/// reports the child gone - re-introducing the very freeze the bound exists to
-/// prevent. A file read never blocks on EOF; the bounded try_wait/kill still
-/// caps the child's own runtime.
-pub(crate) fn config_get(key: &str) -> Option<String> {
-    let dir = crate::proto::mux_dir();
-    crate::proto::ensure_private_dir(&dir).ok()?;
-    // 0700 per-user dir (never world-writable /tmp); a pid+key-unique name, so
-    // no two processes and no two KEYS share a capture file. Callers read keys
-    // one at a time, so the same key twice at once does not arise. Removed on
-    // every return path.
-    let safe_key: String = key
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let out_path = dir.join(format!("config-{}-{safe_key}.out", std::process::id()));
-    let out_file = std::fs::File::create(&out_path).ok()?;
-    let mut command = crate::process_admission::std_command(fno_bin());
-    command
-        .args(["config", "get", key])
-        .stdin(std::process::Stdio::null())
-        .stdout(out_file)
-        .stderr(std::process::Stdio::null());
-    let mut child = match crate::process_admission::std_spawn(&mut command) {
-        Ok(c) => c,
-        Err(_) => {
-            let _ = std::fs::remove_file(&out_path);
-            return None;
-        }
-    };
-    let deadline = std::time::Instant::now() + CONFIG_READ_TIMEOUT;
-    let value = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                break status
-                    .success()
-                    .then(|| std::fs::read_to_string(&out_path).ok())
-                    .flatten();
-            }
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break None,
-        }
-    };
-    let _ = std::fs::remove_file(&out_path);
-    value
 }
 
 /// Sanitize peek-overlay free-text mail: strip control chars, trim,

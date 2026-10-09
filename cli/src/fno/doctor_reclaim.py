@@ -13,7 +13,7 @@ def reclaim_command(
     apply: bool = typer.Option(False, "--apply", help="Remove what the lanes found."),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="List every path."),
 ) -> None:
-    """Reclaim disk bloat: plugin-cache build copies, leaked test HOMEs, stale scratch."""
+    """Reclaim disk bloat: plugin-cache build copies, leaked test HOMEs, stale scratch, backup-stamp report (retention is opt-in)."""
     binary = resolve_binary()
     if binary is None:
         typer.echo(

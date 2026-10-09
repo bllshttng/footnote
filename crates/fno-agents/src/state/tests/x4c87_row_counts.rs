@@ -5,7 +5,8 @@ use super::*;
 #[test]
 fn a_rust_registry_write_moves_the_revision_python_compares() {
     // Python and Rust writers no longer share a flock: a Python commit names
-    // the revision it read, so every Rust write must move that revision.
+    // the revision it read, so every Rust write that changes the registry
+    // must move that revision. A write that changes nothing must not.
     let dir = tmpdir("revision-cas");
     let path = dir.join("agents/registry.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -13,6 +14,16 @@ fn a_rust_registry_write_moves_the_revision_python_compares() {
     update_registry(&path, |r| r.entries.push(sample_entry("w1"))).unwrap();
     let (_, after) = crate::registry_store::read_versioned(&path).unwrap();
     assert!(after > before, "revision {before} -> {after}");
+    update_registry(&path, |_| {}).unwrap();
+    let (_, unchanged) = crate::registry_store::read_versioned(&path).unwrap();
+    assert_eq!(unchanged, after);
+    // The other write door stamps its own writer_rev; that alone is no change.
+    let write = crate::registry_store::begin(&path).unwrap();
+    let mut doc = write.document.clone();
+    doc["writer_rev"] = serde_json::json!("other/registry-commit");
+    assert!(!write.commit(doc).unwrap());
+    let (_, still) = crate::registry_store::read_versioned(&path).unwrap();
+    assert_eq!(still, after);
     std::fs::remove_dir_all(dir).ok();
 }
 

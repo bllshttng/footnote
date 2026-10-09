@@ -184,17 +184,25 @@ async fn watch_registry_decodes_a_served_document_and_the_unchanged_answer() {
     let sock_path = dir.join("supervisor.sock");
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server = tokio::spawn(async move {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        // The real daemon's framing: a 4-byte little-endian body length,
+        // then the body, no newline anywhere (crates/fno-agents/src/
+        // protocol.rs). The old newline mock agreed with the old newline
+        // client, which is how both drifted from the daemon together.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for answer in [
             r#"{"id":1,"result":{"version":{"mtime_nanos":123,"len":4},"doc":{"schema_version":6,"agents":[{"name":"served-row","cwd":"/w"}]}}}"#,
             r#"{"id":1,"result":{"version":{"mtime_nanos":123,"len":4},"doc":null}}"#,
         ] {
-            let (conn, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(conn);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            reader.get_mut().write_all(answer.as_bytes()).await.unwrap();
-            reader.get_mut().write_all(b"\n").await.unwrap();
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            conn.read_exact(&mut len_buf).await.unwrap();
+            let len = u32::from_le_bytes(len_buf) as usize;
+            let mut body = vec![0u8; len];
+            conn.read_exact(&mut body).await.unwrap();
+            let mut frame = Vec::with_capacity(4 + answer.len());
+            frame.extend_from_slice(&(answer.len() as u32).to_le_bytes());
+            frame.extend_from_slice(answer.as_bytes());
+            conn.write_all(&frame).await.unwrap();
         }
     });
     // Give the accept loop a moment to start; the client has its own bound.

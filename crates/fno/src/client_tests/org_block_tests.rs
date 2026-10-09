@@ -20,6 +20,7 @@ fn the_org_block_shrinks_the_sideline_and_yields_when_too_short() {
             focus_node: None,
         },
     );
+    view.org.toggle(); // the fold runs expanded-only; a reading can only land there
     assert!(view.org.take_want());
     view.org.apply(Some(crate::org_overlay::Org {
         lane_count: None,
@@ -31,6 +32,7 @@ fn the_org_block_shrinks_the_sideline_and_yields_when_too_short() {
         arms: Vec::new(),
     }));
 
+    view.org.toggle(); // back to minimized for the glance-shape checks
     assert_eq!(view.org_block_rows(), 4, "minimized is four lines");
     let full = view.sideline_visible_rows() + view.org_block_rows();
 
@@ -68,6 +70,7 @@ fn the_org_fold_holds_no_rows_in_the_board_view() {
             focus_node: None,
         },
     );
+    view.org.toggle(); // the fold runs expanded-only; a reading can only land there
     assert!(view.org.take_want());
     view.org.apply(Some(crate::org_overlay::Org {
         lane_count: None,
@@ -78,7 +81,6 @@ fn the_org_fold_holds_no_rows_in_the_board_view() {
         census: Default::default(),
         arms: Vec::new(),
     }));
-    view.org.toggle();
     view.sideline_view = crate::view_store::SidelineView::Backlog;
 
     assert_eq!(

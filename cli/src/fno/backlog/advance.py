@@ -200,6 +200,7 @@ class DispatchClaimObservation:
     action: str
     worker: str = ""
     block_reason: Optional[str] = None
+    worked_error: Optional[str] = None
 
     @property
     def blocks_dispatch(self) -> bool:
@@ -2579,8 +2580,9 @@ def _observe_node_claim(
     if workers:
         occupied = True
         worker = ", ".join(workers)
-    block_reason = "worked-authority-unavailable" if worked_error else None
-    if occupied and block_reason is None:
+    # Occupancy outranks the outage; the ternary keeps block_reason bound.
+    block_reason = "worked-authority-unavailable" if worked_error and not occupied else None
+    if occupied:
         # task 2.2: `blocked`/`already-claimed` starved auto_continue
         # for 97 minutes; name what was consulted and what it found.
         parts = [
@@ -2624,6 +2626,8 @@ def _observe_node_claim(
             event_data["worker"] = worker
         if block_reason:
             event_data["block_reason"] = block_reason
+        if worked_error:
+            event_data["worked_error"] = worked_error
         agent_events.emit(EVENT_CLAIM_OBSERVED, **event_data)
     if emit and claim_state in ("stale", "suspect"):
         # Lead with the worker when one is on the node: this line pointed at a
@@ -2652,6 +2656,7 @@ def _observe_node_claim(
         action=action,
         worker=worker,
         block_reason=block_reason,
+        worked_error=worked_error,
     )
 
 
