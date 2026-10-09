@@ -115,8 +115,7 @@ def _build_resume_argv(
         # around: this lane has no posture to hand it. Clearing the approval
         # modal needs an operator opt-in this verb does not have yet. Hook
         # trust is posture-free, so it rides every resume, last.
-        from fno.agents.harnesses.codex import codex_hook_trust_args
-
+        from fno.agents.mux_spawn import codex_hook_trust_args
         place = ["--cd", cwd] if cwd else []
         return [argv[0], *grant, *place, *argv[1:], *codex_hook_trust_args()]
     return argv

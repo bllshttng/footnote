@@ -38,6 +38,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.agents.harnesses.base import ReachabilityProbeError
 
+BOUNDED_NETWORK_OVERRIDE = "sandbox_workspace_write.network_access=true"  # codex_posture twin
 
 # Pinned from a real codex 0.130.0 capture (scripts/smoke/capture-codex-jsonl.sh).
 # DO NOT reference these literal string values outside this constants block;
@@ -131,10 +132,6 @@ def inject_from_name(prompt: str, from_name: str) -> str:
     return f"[from: {from_name}]\n\n{prompt}"
 
 
-#: Mirror of ``codex_posture::BOUNDED_NETWORK_OVERRIDE``.
-BOUNDED_NETWORK_OVERRIDE = "sandbox_workspace_write.network_access=true"
-
-
 def sandbox_flag(yolo: bool) -> list[str]:
     """Return the argv tokens selecting codex's create-path SANDBOX posture.
 
@@ -142,9 +139,8 @@ def sandbox_flag(yolo: bool) -> list[str]:
     ``exec`` in the argv. The approval policy is a separate GLOBAL flag emitted
     before ``exec`` - see :func:`approval_flag`.
 
-    - bounded (``yolo=False``, default): ``--sandbox workspace-write`` with
-      network on - workspace-write alone denies AF_UNIX, which takes out both
-      ``gh`` and the graph keeper socket. Mirror of ``codex_ask::sandbox_flag``.
+    - bounded (``yolo=False``, default): ``--sandbox workspace-write`` -
+      workspace sandbox with network on, so ``gh`` and the keeper socket work.
     - full yolo (``yolo=True``, explicit opt-in):
       ``--dangerously-bypass-approvals-and-sandbox`` - unsandboxed bypass. The
       two are mutually exclusive; never combine the workspace sandbox with the
@@ -153,23 +149,6 @@ def sandbox_flag(yolo: bool) -> list[str]:
     if yolo:
         return ["--dangerously-bypass-approvals-and-sandbox"]
     return ["--sandbox", "workspace-write", "-c", BOUNDED_NETWORK_OVERRIDE]
-
-
-def codex_hook_trust_args() -> list[str]:
-    """``--dangerously-bypass-hook-trust`` for every fno-launched codex worker.
-
-    Codex 0.148+ skips a new or changed hook until a human trusts it, and a
-    plugin install never trusts. Without the flag a worker either parks on the
-    `Hooks need review` modal (pane) or runs without fno's guards and Stop
-    hook (exec). Only hook review is skipped: sandbox and approval stay as the
-    posture set them. Empty on a codex too old to parse the flag. Mirror of
-    ``codex_ask::hook_trust_flag``.
-    """
-    from fno.agents.mux_spawn import _CODEX_HOOK_TRUST_FLAG_MIN_VERSION, _codex_cli_version
-
-    if (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
-        return ["--dangerously-bypass-hook-trust"]
-    return []
 
 
 def approval_flag(yolo: bool) -> list[str]:
@@ -842,6 +821,7 @@ def create(
     from fno.agents.harness_map import render_session_argv
 
     identity = render_session_argv("codex", "headless_create")
+    from fno.agents.mux_spawn import codex_hook_trust_args
     argv = [
         identity[0],
         *config_args,

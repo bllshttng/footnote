@@ -308,9 +308,8 @@ def _agy_hooks_json() -> Path:
 
 def _agy_adapter_path() -> "Optional[Path]":
     # The adapter ships in the plugin (hooks/), which the uv/curl wheel does NOT
-    # carry. The path is persisted in the user's global hooks.json, so resolve it
-    # durably: a worktree path dies when the worktree is archived. The resolver
-    # always returns a path, so gate on is_file(): None means manual.
+    # carry. The durable resolver always returns a path (last fallback may not
+    # exist), so gate on is_file(): None means "not in this install" -> manual.
     from fno.paths import resolve_plugin_script_durable
 
     p = resolve_plugin_script_durable("hooks/footnote-agy-target-stop-hook.sh")

@@ -135,19 +135,21 @@ fn count_dead(fn_map: &Map<String, Value>) -> usize {
 fn remove_handlers(fn_map: &mut Map<String, Value>, gone: impl Fn(&Value) -> bool) -> usize {
     let mut removed = 0;
     for list in fn_map.values_mut().filter_map(Value::as_array_mut) {
-        list.retain_mut(|entry| match entry.get_mut("hooks").and_then(Value::as_array_mut) {
-            Some(hooks) => {
-                let before = hooks.len();
-                hooks.retain(|h| !gone(h));
-                removed += before - hooks.len();
-                before == hooks.len() || !hooks.is_empty()
-            }
-            None => {
-                let drop = gone(entry);
-                removed += usize::from(drop);
-                !drop
-            }
-        });
+        list.retain_mut(
+            |entry| match entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                Some(hooks) => {
+                    let before = hooks.len();
+                    hooks.retain(|h| !gone(h));
+                    removed += before - hooks.len();
+                    before == hooks.len() || !hooks.is_empty()
+                }
+                None => {
+                    let drop = gone(entry);
+                    removed += usize::from(drop);
+                    !drop
+                }
+            },
+        );
     }
     removed
 }
@@ -463,7 +465,9 @@ pub fn install(
         .map_err(|e| format!("{}: could not replace: {e}", hooks_file.display()))?;
     let mut note = format!("Stop hook -> {}", hooks_file.display());
     if pruned > 0 {
-        note.push_str(&format!("; pruned {pruned} dead or superseded footnote handler(s)"));
+        note.push_str(&format!(
+            "; pruned {pruned} dead or superseded footnote handler(s)"
+        ));
     }
     if !enabled {
         note.push_str(
