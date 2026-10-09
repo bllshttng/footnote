@@ -280,6 +280,17 @@ class MaintainBlock(BaseModel):
         return v
 
 
+class PlanBlock(BaseModel):
+    """Plan budgets (nested under 'config.plan')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    # Added lines a target session's branch may carry before the commit-time
+    # diff-budget guard names the overrun; a plan's frontmatter diff_budget
+    # key overrides it per plan. 0 is off.
+    default_diff_budget: int = Field(default=300, ge=0)
+
+
 _RENDER_PROJECTIONS = ("backlog", "roadmap", "local")
 
 # Shared with the graph-layer auto-render so the array-of-tables typo warns
@@ -3917,6 +3928,7 @@ class ConfigBlock(BaseModel):
     user: UserBlock = Field(default_factory=UserBlock)
     sandbox: SandboxBlock = Field(default_factory=SandboxBlock)
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
+    plan: PlanBlock = Field(default_factory=PlanBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
     batch: BatchBlock = Field(default_factory=BatchBlock)
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
