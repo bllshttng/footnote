@@ -485,8 +485,32 @@ pub(crate) fn decide_with_payload(
         let ttl_ms = scan_manifest_field(&manifest_content, "target_claim_ttl")
             .and_then(|s| crate::claims::parse_ttl_ms(&s))
             .unwrap_or(7_200_000);
+        // Two answers from a shared primary end the run here. A primary the
+        // worker cannot reach means the turn ends and the worker holds: it
+        // can claim nothing new. A claim another machine took after this
+        // lease ran out means the work belongs to that machine now.
         match crate::claims::renew(&key, &holder, ttl_ms, None) {
-            Ok(_) => {}
+            Ok(true) => {}
+            Ok(false) => {
+                if let Some(reason) = crate::claim_store::lost_to_peer(&key, &holder) {
+                    let message =
+                        format!("claim lost: {reason}. Stop work on this node and do not push.");
+                    return (
+                        0,
+                        allow_output(
+                            "allow",
+                            Some(TerminationReason::Interrupted),
+                            &message,
+                            0,
+                            None,
+                        ),
+                    );
+                }
+            }
+            Err(e) if crate::store_remote::is_unreachable(&e) => {
+                let message = format!("holding: {e}");
+                return (0, allow_output("allow", None, &message, 0, None));
+            }
             Err(e) => eprintln!("loop-check: lease renewal for {key} failed (non-fatal): {e}"),
         }
     }
