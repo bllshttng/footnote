@@ -286,9 +286,12 @@ fn count_or_unknown(value: Option<u32>) -> String {
 }
 
 /// The panel's whole state. The block is painted on every frame now, so
-/// there is no open/close: `expanded` is the only operator-facing state, and
-/// the refresh cadence is independent of it - a minimized block still wants
-/// a fresh reading, and an expand never spawns a fold of its own.
+/// there is no open/close: `expanded` is the only operator-facing state.
+/// The fold runs ONLY while expanded (a 41s `fno doctor
+/// lanes` child every TTL for a block nobody opened is the mux client's
+/// largest child-CPU line), one in flight; a minimized block renders its
+/// last reading stale-honest and an expand arms the refresh from the
+/// deadline, never a fold of its own.
 #[derive(Debug, Default)]
 pub struct Panel {
     expanded: bool,
@@ -329,13 +332,14 @@ impl Panel {
     }
 
     /// The timer wake for the next refresh, or `None` while a fold is
-    /// already running: a past-due deadline would re-fire every pass and the
-    /// single-flight refusal would just burn loop passes until it lands.
-    /// `now` when no reading has ever landed (the block is visible from the
-    /// first frame, so the first fold must not wait for an event), the retry
-    /// backoff after a failure, else the last landing plus the TTL.
+    /// already running or the panel is minimized: a past-due deadline would
+    /// re-fire every pass and the single-flight refusal would just burn
+    /// loop passes until it lands. `now` when no reading has ever landed
+    /// (the first fold waits for the first expand, then must not wait for
+    /// a further event), the retry backoff after a failure, else the last
+    /// landing plus the TTL.
     pub fn refresh_deadline(&self) -> Option<Instant> {
-        if self.inflight {
+        if self.inflight || !self.expanded {
             return None;
         }
         // The retry backoff WINS over a stale reading's due time: otherwise a
@@ -349,13 +353,16 @@ impl Panel {
     }
 
     /// Arm and consume the refresh want: true exactly when a fold should
-    /// spawn now - none in flight, no live reading inside the TTL, and no
-    /// fresh failure in its retry backoff. Single-flight by construction, so
-    /// a permanently visible block can never mean a permanently folding one,
-    /// and a missing `fno` cannot become a hot refetch loop.
+    /// spawn now - the panel is expanded, none in flight, no live reading
+    /// inside the TTL, and no fresh failure in its retry backoff.
+    /// Single-flight by construction, so an expanded block can never mean a
+    /// permanently folding one, and a missing `fno` cannot become a hot
+    /// refetch loop. Minimized never wants: the fold is the expanded
+    /// panel's cost, and the minimized glance renders the last reading.
     pub fn take_want(&mut self) -> bool {
         let now = Instant::now();
-        if self.inflight
+        if !self.expanded
+            || self.inflight
             || self
                 .fold_at
                 .is_some_and(|t| now.duration_since(t) < CACHE_TTL)
@@ -406,12 +413,15 @@ impl Panel {
     /// view adds the detail.
     pub fn minimized_lines(&self, ages: &[Option<u64>]) -> Vec<String> {
         let Some(org) = self.fold.as_ref() else {
-            let first = if self.degraded {
-                "  org     fold failed - retrying".to_string()
-            } else {
-                "  org     reading the machine...".to_string()
-            };
-            return vec![first, String::new(), String::new(), String::new()];
+            // No reading in hand and minimized: the fold is expanded-only,
+            // so nothing is reading. Say where the reading lives instead of
+            // promising activity that is not running.
+            return vec![
+                "  org     expand for a machine reading".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ];
         };
         if !self.detailed {
             return vec![
@@ -858,12 +868,45 @@ mod tests {
         None,
     ];
 
-    /// A panel holding one landed reading.
+    /// A panel holding one landed reading, expanded (the fold runs only
+    /// while expanded, so a reading can only land there).
     fn opened(org: Org) -> Panel {
         let mut panel = Panel::default();
-        assert!(panel.take_want(), "a fresh panel wants a fold");
+        panel.toggle();
+        assert!(panel.take_want(), "a fresh expanded panel wants a fold");
         panel.apply(Some(org));
         panel
+    }
+
+    /// The fold is the expanded panel's cost: minimized
+    /// never wants one and never arms the timer, and expanding arms the
+    /// refresh again.
+    #[test]
+    fn minimized_panel_never_wants_a_fold() {
+        let mut panel = Panel::default();
+        assert!(!panel.take_want(), "minimized never wants a fold");
+        assert!(
+            panel.refresh_deadline().is_none(),
+            "minimized arms no timer wake"
+        );
+
+        panel.toggle();
+        assert!(panel.take_want(), "expanding arms the first fold");
+        assert!(panel.refresh_deadline().is_some());
+
+        panel.apply(Some(live()));
+        panel.fold_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(1));
+        panel.toggle();
+        assert!(
+            !panel.take_want(),
+            "a stale reading still waits while minimized"
+        );
+        assert!(panel.refresh_deadline().is_none());
+        panel.toggle();
+        assert!(
+            panel.take_want(),
+            "re-expanding refreshes the stale reading"
+        );
     }
 
     #[test]

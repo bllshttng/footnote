@@ -1,15 +1,19 @@
-//! The whole-machine resource meter: one `macmon` sample per refresh for CPU
-//! and watts; the memory figure and the capacity line come from the learned
-//! capacity state the machine_watch tick writes (one reader, one number).
-//! `config.mux.load_readout` picks plain words (the default) or the raw
-//! numbers; the sampler re-reads it each time the meter is switched on.
+//! The whole-machine resource meter: one long-lived `macmon pipe` child
+//! streaming CPU and watts sample lines; the memory figure and the capacity
+//! line come from the learned capacity state the machine_watch tick writes
+//! (one reader, one number). `config.mux.load_readout` picks plain words
+//! (the default) or the raw numbers; the sampler re-reads it each time the
+//! meter is switched on.
 
 use std::path::PathBuf;
 
-/// Spawn the meter sampler: one bounded `macmon pipe -s 1` sample per refresh
-/// interval, the one-line reading sent to the UI loop. Exits when the view's
-/// gate flips off, so a toggle-off never leaves a sampler running. Two
-/// overlapping tasks are harmless: the channel is last-send-wins.
+/// Spawn the meter sampler: ONE long-lived `macmon pipe -s 0` child whose
+/// streamed sample lines are parsed and sent to the UI loop as they land
+/// (the fork-a-new-macmon-every-refresh churn was a steady
+/// child-CPU line on every attached client). Exits when the view's gate
+/// flips off, so a toggle-off never leaves a child running; a child that
+/// dies is restarted at the refresh cadence, so a missing binary degrades
+/// at the pace the per-refresh spawn did, not hot.
 pub(super) fn spawn_meter_sampler(
     gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
     refresh: u64,
@@ -19,46 +23,84 @@ pub(super) fn spawn_meter_sampler(
     let detailed = crate::digest_overlay::load_readout_detailed(&cwd);
     tokio::spawn(async move {
         while gate.load(std::sync::atomic::Ordering::Relaxed) {
-            let text = sample_macmon_line(detailed).await;
-            if meter_tx.send(text).is_err() {
-                // The UI loop is gone; nothing left to report to.
-                break;
+            let stop = stream_macmon(detailed, refresh, &gate, &meter_tx).await;
+            if stop {
+                // The gate flipped or the UI loop is gone: done.
+                return;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(refresh)).await;
+            // The child died: back off at the refresh cadence, not hot.
+            tokio::time::sleep(std::time::Duration::from_secs(refresh.max(1))).await;
         }
     });
 }
 
-/// One bounded `macmon pipe -s 1` sample rendered as a status-row segment.
-/// macmon streams forever, so the timeout is the normal exit; anything that
-/// fails to arrive or parse renders as "sensor unavailable" - a dark sensor
-/// is named, never read as a zero.
-async fn sample_macmon_line(detailed: bool) -> String {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(6),
-        tokio::process::Command::new("macmon")
-            .arg("pipe")
-            .arg("-s")
-            .arg("1")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    let parsed = match output {
-        Ok(Ok(out)) => parse_macmon_sample(&out.stdout, detailed),
-        _ => None,
-    };
-    match parsed {
-        Some(cpu) => {
-            let state = capacity_state();
-            let mut line = cpu;
-            line.push_str(&memory_segment(state.as_ref(), detailed));
-            line.push_str(&capacity_segment(state.as_ref()));
-            line
+/// One long-lived `macmon pipe -s 0 -i 1000` child. macmon streams one JSON
+/// sample line per interval forever; each line is parsed and forwarded
+/// last-wins. Returns true when the sampler should stop (gate off or the
+/// UI loop gone), false when the child died and the outer loop should
+/// restart it. A line that does not land inside the refresh interval, or
+/// that fails to parse, renders as "sensor unavailable" - a dark sensor is
+/// named, never read as a zero. The timeout's cancel drops at most a
+/// partial line from an already-stalled child.
+async fn stream_macmon(
+    detailed: bool,
+    refresh: u64,
+    gate: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    meter_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> bool {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut child = match tokio::process::Command::new("macmon")
+        .arg("pipe")
+        .args(["-s", "0"])
+        .args(["-i", "1000"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = meter_tx.send("meter: sensor unavailable".into());
+            return false;
         }
-        None => "meter: sensor unavailable".into(),
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return false;
+    };
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        if !gate.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(refresh.max(1)),
+            lines.next_line(),
+        )
+        .await
+        {
+            Ok(Ok(Some(line))) => {
+                let parsed = parse_macmon_sample(line.as_bytes(), detailed);
+                let text = match parsed {
+                    Some(cpu) => {
+                        let state = capacity_state();
+                        let mut text = cpu;
+                        text.push_str(&memory_segment(state.as_ref(), detailed));
+                        text.push_str(&capacity_segment(state.as_ref()));
+                        text
+                    }
+                    None => "meter: sensor unavailable".into(),
+                };
+                if meter_tx.send(text).is_err() {
+                    // The UI loop is gone; nothing left to report to.
+                    return true;
+                }
+            }
+            Ok(Ok(None)) => return false, // child exited
+            Ok(Err(_)) => return false,   // stdout read error
+            Err(_) => {
+                let _ = meter_tx.send("meter: sensor unavailable".into());
+            }
+        }
     }
 }
 
