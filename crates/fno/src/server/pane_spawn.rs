@@ -263,7 +263,10 @@ impl Core {
         }
         let core_tx = self.self_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let outcome = job.run();
+            // A panicking job must still land: the parked tail is what
+            // releases this gesture's row and portal gates.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()))
+                .unwrap_or_else(|_| Err(format!("pane {id} spawn panicked")));
             // A closed loop (server shutting down) drops the outcome: a
             // keeper-hosted child survives for the next server to adopt.
             let _ = core_tx.blocking_send(CoreMsg::PaneSpawnReady {
