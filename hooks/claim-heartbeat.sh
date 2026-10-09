@@ -81,6 +81,19 @@ if ! source "$WITH_TIMEOUT_LIB"; then
   exit 0
 fi
 
+# One binary resolution for every claim call below, through the shared
+# resolver: the supported FNO_AGENTS_BIN override and checkout builds rank
+# ahead of PATH. A bare `command -v` would renew through a stale PATH copy or
+# skip renewal where the binary exists only as a checkout or wheel build -
+# the exact active-claim-lapse this hook exists to prevent.
+AGENTS_BIN=""
+if [[ -r "$PLUGIN_ROOT/hooks/lib/agents-bin.sh" ]]; then
+  # shellcheck source=lib/agents-bin.sh
+  source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
+  AGENTS_BIN="$(fno_agents_bin "$PLUGIN_ROOT")"
+fi
+[[ -z "$AGENTS_BIN" ]] && AGENTS_BIN="$(command -v fno-agents 2>/dev/null || true)"
+
 # Refresh at most once per THROTTLE seconds of activity. Well under the claim's
 # default 2h TTL, so an actively-working session stays LIVE with wide margin.
 # ponytail: a plain stamp-mtime throttle, not half-life arithmetic - refresh is
@@ -276,7 +289,7 @@ fi
 if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       && "$_HANDOVER_HOLDER" == spawn-handover:* \
       && "$_HANDOVER_HOLDER" != "spawn-handover:" ]] \
-      && command -v fno-agents >/dev/null 2>&1 \
+      && [[ -n "$AGENTS_BIN" ]] \
       && [[ -z "$_handover_repo_fno_phys" \
             || "$_handover_repo_fno_phys" != "$_handover_state_phys" ]]; then
   _HANDOVER_STAMP="$CWD/.fno/.claim-handover-heartbeat.stamp"
@@ -292,7 +305,7 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
     _handover_status_json() {
       local status_json
       status_json="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-        fno-agents claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+        "$AGENTS_BIN" claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
       printf '%s' "$status_json"
     }
     _HANDOVER_STATUS="$(_handover_status_json)"
@@ -318,7 +331,7 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       if [[ ! "$_RECORDED_HANDOVER_EXPIRES" =~ ^[0-9]+$ ]]; then
         echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE (missing deadline); refresh remains due" >&2
       elif with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
-        fno-agents claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
+        "$AGENTS_BIN" claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
         --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1; then
         _HANDOVER_AFTER="$(_handover_status_json)"
         _HANDOVER_AFTER_VALID="$(printf '%s' "$_HANDOVER_AFTER" | jq -r '
@@ -355,7 +368,7 @@ fi
 # owning verb so this hook never spells the path. Degraded fallback for an fno
 # predating the verb: the legacy checkout-relative path (same contract as
 # target-stop-hook.sh).
-MANIFEST="$(fno-agents state path target-state 2>/dev/null || true)"
+MANIFEST="$("$AGENTS_BIN" state path target-state 2>/dev/null || true)"
 [[ -z "$MANIFEST" ]] && MANIFEST="$CWD/.fno/target-state.md"
 [[ -f "$MANIFEST" ]] || exit 0   # no target session here -> nothing to refresh
 
@@ -443,11 +456,11 @@ write_stamp() {
 # The claim reads and the renewal go through the native `fno-agents` leaf, not
 # the `fno` Python shim: the 2026-10-08 slowness audit measured this hook's
 # Python-shim trips at ~4.7 s of import cold start each (3 trips per renewal
-# window), and the native leaf answers the same record in ~0.1-0.2 s. A
-# missing native binary is an infrastructure fault, named here rather than
+# window), and the native leaf answers the same record in ~0.1-0.2 s. An
+# unresolvable binary is an infrastructure fault, named here rather than
 # reading as a quiet forever-noop (same posture as the with-timeout guard).
-command -v fno-agents >/dev/null 2>&1 || {
-  echo "claim-heartbeat: fno-agents unavailable; claim renewal skipped" >&2
+[[ -n "$AGENTS_BIN" ]] || {
+  echo "claim-heartbeat: fno-agents binary unresolvable (FNO_AGENTS_BIN, checkout build, or PATH); claim renewal skipped" >&2
   exit 0
 }
 
@@ -460,10 +473,10 @@ command -v fno-agents >/dev/null 2>&1 || {
 # one call, one shape, no version-lag fallback to maintain.
 # BOUNDED, like the refresh below it. A bound that fires reads as no claim,
 # which only skips one heartbeat; the alternative is a hook that hangs.
-_STATUS_TIMEOUT="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
+_status_timeout="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
 _status_json() {
   with_timeout "$_STATUS_TIMEOUT" \
-    fno-agents claim status "node:$NODE_ID" --json 2>/dev/null
+    "$AGENTS_BIN" claim status "node:$NODE_ID" --json 2>/dev/null
 }
 _STATUS_ONCE="$(_status_json)"
 HOLDER="$(printf '%s' "$_STATUS_ONCE" | jq -r '.holder // empty' 2>/dev/null)"
@@ -516,7 +529,7 @@ fi
 # unverified - one bounded status call per window.
 REFRESH_TIMEOUT="${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}"
 REFRESH_JSON="$(with_timeout "$REFRESH_TIMEOUT" \
-  fno-agents claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" --json \
+  "$AGENTS_BIN" claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" --json \
   2>/dev/null)"
 REFRESH_RC=$?
 if [[ "$REFRESH_RC" -ne 0 ]]; then

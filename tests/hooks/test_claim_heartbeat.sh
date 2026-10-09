@@ -129,6 +129,9 @@ fi
 exit 0
 EOF
   chmod +x "${bindir}/fno-agents"
+  # The hook resolves the binary through the shared resolver; pin the override
+  # to the stub so a checkout build in the worktree can never bypass it.
+  export FNO_AGENTS_BIN="${bindir}/fno-agents"
   export PATH="${bindir}:${PATH}"
 }
 
@@ -138,6 +141,7 @@ teardown_env() {
   unset STUB_HOLDER_AFTER STUB_STATE_AFTER STUB_EXPIRES_BEFORE STUB_EXPIRES_AFTER
   unset STUB_BIND_OUTPUT STUB_BIND_RC STUB_BIND_SLEEP STUB_REFRESH_JSON
   unset STUB_STATE_PATH STUB_STATE_PATH_RC
+  unset FNO_AGENTS_BIN
 }
 
 mtime_of() {
