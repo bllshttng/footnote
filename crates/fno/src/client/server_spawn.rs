@@ -27,7 +27,8 @@ pub(super) fn spawn_server(path: &Path) -> Result<(), String> {
     if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
         // The server must not shell out for config on its SIGTERM-critical
         // startup path; the client resolves the scope and passes it by env.
-        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+        let (scope, _why) =
+            crate::backlog_view::resolve_board_scope(crate::config_defaults::lookup_key);
         cmd.env(
             "FNO_BOARD_SCOPE",
             crate::backlog_view::board_scope_wire(&scope),

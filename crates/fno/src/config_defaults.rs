@@ -212,6 +212,26 @@ pub fn key_set(global: Option<&Path>, project: Option<&Path>, key: &str) -> bool
         || project.map(|p| file_sets(p, key)).unwrap_or(false)
 }
 
+/// Effective value of one dotted key, read straight from the config files
+/// with the same precedence [`inventory`] documents: project beats global.
+/// Fail-open: an absent file, an unreadable one, or a non-string value all
+/// answer `None`, so the caller keeps its default.
+///
+/// This is the no-subprocess read path. `fno config get` cold-starts the
+/// Python shim (seconds on a loaded machine), which no per-attach or
+/// per-render caller may pay; the split-brain risk is bounded by the
+/// migrated single-file reality (a legacy settings.yaml is converted to a
+/// flat config.toml exactly once, then every reader sees config.toml).
+pub fn lookup_key(key: &str) -> Option<String> {
+    fn file_value(path: &Path, key: &str) -> Option<String> {
+        match read_flat(path) {
+            Ok(Some(map)) => map.get(key).and_then(|v| v.as_str()).map(str::to_string),
+            _ => None,
+        }
+    }
+    file_value(&project_config_path(), key).or_else(|| file_value(&global_config_path(), key))
+}
+
 /// The global config file, beside the state root's other durable files.
 fn global_config_path() -> PathBuf {
     crate::model_catalog::state_dir().join("config.toml")

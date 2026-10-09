@@ -534,15 +534,15 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     );
 }
 
-/// Whether the interactive path must disable OSC 133 injection. Bounded +
-/// fail-open through [`crate::server::config_get`]: any spawn/read error, a
-/// non-`off` value, or a read that overruns the budget all leave injection on
-/// (the default). The bound matters because this runs synchronously inside
-/// `spawn_server`, *before* the client's spawn-connect wait loop exists -
-/// nothing downstream would rescue an unbounded read, so a slow or wedged
-/// config read would freeze `fno` startup with no notice.
+/// Whether the interactive path must disable OSC 133 injection. Fail-open
+/// through the native config read ([`crate::config_defaults::lookup_key`]):
+/// an absent file, an unreadable one, or a non-`off` value all leave
+/// injection on (the default). Runs synchronously inside `spawn_server`,
+/// *before* the client's spawn-connect wait loop exists - the native read is
+/// one bounded file parse, where the retired `fno config get` subprocess
+/// cold-started the Python shim and could freeze `fno` startup for seconds.
 fn shell_integration_off() -> bool {
-    crate::server::config_get("mux.shell_integration")
+    crate::config_defaults::lookup_key("mux.shell_integration")
         .as_deref()
         .map(config_says_off)
         .unwrap_or(false)
