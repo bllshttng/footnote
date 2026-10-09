@@ -57,9 +57,9 @@ _FENCE_RE = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 #: category says.
 _CONFIRMED = "confirmed"
 
-#: The autofix class a finding carries (CE adoption): ``gated_auto`` may be
-#: applied mechanically by ``--fix``; ``manual`` names a fix the author
-#: applies; ``advisory`` records judgment with no fix intended. Only the
+#: The autofix class a finding carries (CE adoption): ``gated_auto`` can be
+#: applied mechanically by ``--fix``, ``manual`` names a fix the author
+#: applies, and ``advisory`` records judgment with no fix intended. Only the
 #: exact lowercase value is machine-acted on: any other value (or none)
 #: reads as absent, and ``--fix`` applies nothing it cannot name.
 AUTOFIX_CLASSES: tuple[str, ...] = ("gated_auto", "manual", "advisory")
