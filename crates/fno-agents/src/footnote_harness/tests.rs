@@ -133,9 +133,11 @@ impl Fixture {
 }
 
 /// A sibling test's fork holds an inherited lock fd until its exec, so a
-/// reopen right after a drop can meet a lock that is about to free.
+/// reopen right after a drop can meet a lock that is about to free. The old
+/// two-second cap flaked under CI load; fifteen seconds is the same patience
+/// the otel receiver wait grants.
 fn retry<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
-    for _ in 0..100 {
+    for _ in 0..750 {
         match f() {
             Err(e) if e.contains("live writer") => std::thread::sleep(Duration::from_millis(20)),
             other => return other,
