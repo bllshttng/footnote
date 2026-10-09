@@ -902,7 +902,7 @@ def logs_file(name: str) -> Path:
 # passes. SHRINK-ONLY like the rows it mirrors - a writer that moves deletes
 # its name here and its doc row in the same PR (the parity test in
 # cli/tests/test_state_root_inventory.py refuses a name no row matches).
-_ROOT_STATE_FILE_ROWS: frozenset = frozenset(
+_ROOT_STATE_FILE_ROWS: frozenset[str] = frozenset(
     {
         "config.toml", "config.toml.lock", "config.toml.bak",
         "settings.yaml", "settings.yaml.lock",

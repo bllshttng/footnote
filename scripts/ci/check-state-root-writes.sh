@@ -74,8 +74,12 @@ layout_rows = {
     if line.strip() and not line.lstrip().startswith("#")
 }
 
-PY_STATE_LEAF = re.compile(r'state_dir\(\)\s*/\s*"([A-Za-z0-9_.\-]+)"')
-PY_DOOR = re.compile(r'root_state_file\(\s*"([^"]+)"')
+PY_STATE_LEAF = re.compile(r'state_dir\(\)\s*/\s*([\'"])([A-Za-z0-9_.\-]+)\1')
+PY_DOOR = re.compile(r'root_state_file\(\s*([\'"])([^"\']+)\1')
+# state_dir().join("leaf") / .joinpath('leaf'): the other common spellings.
+PY_JOIN = re.compile(
+    r'state_dir\(\)\s*\.\s*join(?:path)?\s*\(\s*([\'"])([A-Za-z0-9_.\-]+)\1'
+)
 # One nesting level in the receiver: place(&state_root(cwd), "name").
 RUST_PLACE = re.compile(r'place\(\s*(?:[^,()]|\([^()]*\))+,\s*"([^"]+)"\s*\)')
 
@@ -85,7 +89,7 @@ for line in added_text.splitlines():
         continue  # -U0: no context lines; deletions never speak here
     body = line[1:]
     for match in PY_STATE_LEAF.finditer(body):
-        leaf = match.group(1)
+        leaf = match.group(2)
         if not rowed(leaf) and leaf not in _ROOT_STATE_FILE_ROWS:
             refused.append(
                 f"{line}\n  state_dir() / \"{leaf}\": '{leaf}' has no state-root "
@@ -94,8 +98,15 @@ for line in added_text.splitlines():
                 "paths.state_runtime_file() / logs_file(), or an existing rowed "
                 "accessor."
             )
+    for match in PY_JOIN.finditer(body):
+        leaf = match.group(2)
+        if not rowed(leaf) and leaf not in _ROOT_STATE_FILE_ROWS:
+            refused.append(
+                f"{line}\n  state_dir().join(\"{leaf}\"): '{leaf}' has no "
+                "state-root inventory row; use a subfolder resolver."
+            )
     for match in PY_DOOR.finditer(body):
-        leaf = match.group(1)
+        leaf = match.group(2)
         if leaf not in _ROOT_STATE_FILE_ROWS:
             refused.append(
                 f"{line}\n  root_state_file(\"{leaf}\"): not in the fence; the "
@@ -134,6 +145,17 @@ if [[ "$SELF_TEST" == 1 ]]; then
     printf '+    p = state_dir() / "new-junk.out"\n' >"$tmp/added-bad"
     if check_lines "$tmp/added-bad" "$tmp/baseline" "$tmp/layout" 2>/dev/null; then
         echo "check-state-root-writes: self-test: an unrowed root write must refuse" >&2
+        exit 2
+    fi
+    # Single-quoted and .joinpath spellings refuse the same way.
+    printf "+    p = state_dir() / 'new-junk.out'\n" >"$tmp/added-single"
+    if check_lines "$tmp/added-single" "$tmp/baseline" "$tmp/layout" 2>/dev/null; then
+        echo "check-state-root-writes: self-test: a single-quoted root write must refuse" >&2
+        exit 2
+    fi
+    printf '+    p = state_dir().joinpath("new-junk.out")\n' >"$tmp/added-joinpath"
+    if check_lines "$tmp/added-joinpath" "$tmp/baseline" "$tmp/layout" 2>/dev/null; then
+        echo "check-state-root-writes: self-test: a joinpath root write must refuse" >&2
         exit 2
     fi
     # A rowed leaf passes.

@@ -519,7 +519,6 @@ fn migrate_runtime_state_to_state_dir(base: &Path) -> PathBuf {
         return new;
     }
     match std::fs::create_dir_all(new.parent().unwrap_or(root))
-        .ok()
         .and_then(|()| std::fs::rename(base, &new))
     {
         Ok(()) => new,
