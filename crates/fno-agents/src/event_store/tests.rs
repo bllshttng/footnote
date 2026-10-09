@@ -397,6 +397,7 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
             tick("2026-05-01T08:00:00Z".to_string(), "expired"),
             tick(fresh_ts(), "legacy"),
             tick(fresh_ts(), "fresh"),
+            tick(fresh_ts(), "machine_watch"),
             checkin("2026-05-01T08:00:00Z", "x-aaaa", "ancient durable"),
             guard("graph-write-protect", "allow"),
             guard("pipe-guard", "block"),
@@ -405,7 +406,7 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
     let store = sync(&live).unwrap().store;
     assert_eq!(
         count_type(&store, "control_plane_tick"),
-        2,
+        3,
         "the expired tick left"
     );
     // A row written before its kind joined the class carries `durable`.
@@ -415,6 +416,13 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
         .execute(
             "UPDATE events SET retention_class = 'durable', ts_ms = ?1 \
              WHERE type = 'control_plane_tick' AND line LIKE '%legacy%'",
+            params![eight_days_ago],
+        )
+        .unwrap();
+    // Past the telemetry horizon, inside the 30-day machine_watch one.
+    writable
+        .execute(
+            "UPDATE events SET ts_ms = ?1 WHERE line LIKE '%machine_watch%'",
             params![eight_days_ago],
         )
         .unwrap();
@@ -435,9 +443,27 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
     sync(&live).unwrap();
     assert_eq!(
         count_type(&store, "control_plane_tick"),
-        1,
-        "the legacy tick left"
+        2,
+        "the legacy tick left; the 8-day machine_watch tick stays"
     );
+    // Every pruned row left a count behind.
+    let pruned: Vec<(String, String, i64)> =
+        crate::event_store::read_rollup(&open_read(&store).unwrap(), "2000-01-01")
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.kind, r.subject, r.occurrences))
+            .collect();
+    for want in [
+        ("control_plane_tick", "expired"),
+        ("control_plane_tick", "legacy"),
+        ("guard_decision", "graph-write-protect:allow"),
+    ] {
+        assert!(
+            pruned.contains(&(want.0.to_string(), want.1.to_string(), 1)),
+            "{want:?} missing: {pruned:?}"
+        );
+    }
+    assert_eq!(pruned.len(), 3, "kept rows are not counted: {pruned:?}");
     assert_eq!(count_type(&store, "lead_checkin"), 1, "durable rows stay");
     let guards: Vec<String> = open_read(&store)
         .unwrap()
