@@ -34,14 +34,16 @@ pub(super) fn spawn_meter_sampler(
     });
 }
 
-/// One long-lived `macmon pipe -s 0 -i 1000` child. macmon streams one JSON
-/// sample line per interval forever; each line is parsed and forwarded
-/// last-wins. Returns true when the sampler should stop (gate off or the
-/// UI loop gone), false when the child died and the outer loop should
-/// restart it. A line that does not land inside the refresh interval, or
-/// that fails to parse, renders as "sensor unavailable" - a dark sensor is
-/// named, never read as a zero. The timeout's cancel drops at most a
-/// partial line from an already-stalled child.
+/// One long-lived `macmon pipe -s 0` child sampling at the CONFIGURED
+/// refresh cadence (`-i` is milliseconds, so the config's seconds scale by
+/// 1000). macmon streams one JSON sample line per interval forever; each
+/// line is parsed and forwarded last-wins. Returns true when the sampler
+/// should stop (gate off or the UI loop gone), false when the child died
+/// and the outer loop should restart it. A line that does not land inside
+/// the interval plus a 2s grace, or that fails to parse, renders as
+/// "sensor unavailable" - a dark sensor is named, never read as a zero.
+/// The timeout's cancel drops at most a partial line from an
+/// already-stalled child.
 async fn stream_macmon(
     detailed: bool,
     refresh: u64,
@@ -49,10 +51,11 @@ async fn stream_macmon(
     meter_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> bool {
     use tokio::io::{AsyncBufReadExt, BufReader};
+    let secs = refresh.max(1);
     let mut child = match tokio::process::Command::new("macmon")
         .arg("pipe")
         .args(["-s", "0"])
-        .args(["-i", "1000"])
+        .args(["-i", &format!("{secs}000")])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -70,20 +73,21 @@ async fn stream_macmon(
     let mut lines = BufReader::new(stdout).lines();
     // The capacity state file re-reads at the refresh cadence, not per
     // streamed line: the machine_watch tick writes it far slower than
-    // macmon samples, and a blocking read per second buys nothing.
+    // macmon samples, and a blocking read per sample buys nothing.
     let mut capacity: Option<(std::time::Instant, Option<serde_json::value::Value>)> = None;
     // Consecutive silent intervals: three in a row means the child is
     // alive but wedged (EOF would have ended it), so give it back to the
     // outer loop to respawn - the per-refresh spawn this replaces healed a
     // wedged child within one interval, and the long-lived shape must not
-    // lose that.
+    // lose that. The grace keeps a just-slow line from reading as silence.
     let mut silent: u32 = 0;
-    let cadence = std::time::Duration::from_secs(refresh.max(1));
+    let cadence = std::time::Duration::from_secs(secs);
+    let silence = std::time::Duration::from_secs(secs + 2);
     loop {
         if !gate.load(std::sync::atomic::Ordering::Relaxed) {
             return true;
         }
-        match tokio::time::timeout(cadence, lines.next_line()).await {
+        match tokio::time::timeout(silence, lines.next_line()).await {
             Ok(Ok(Some(line))) => {
                 silent = 0;
                 let parsed = parse_macmon_sample(line.as_bytes(), detailed);
