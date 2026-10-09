@@ -188,15 +188,19 @@ pub(crate) fn read_signals(
     Ok(out)
 }
 
-const USAGE: &str =
-    "usage: fno doctor event signals [--events <events.jsonl>] [--window-hours N] [--check]";
+const USAGE: &str = "usage: fno doctor event signals [--events <events.jsonl>] \
+[--window-hours N] [--pruned-days N] [--check]";
 
-/// `signals [--events <events.jsonl>] [--window-hours N] [--check]`. Prints
-/// one JSON receipt. Exit 0 on a read, 3 with `--check` when any signal
-/// fired, 2 on a bad argument, 1 when the store cannot be read.
+/// `signals [--events <events.jsonl>] [--window-hours N] [--pruned-days N]
+/// [--check]`. Prints one JSON receipt. Its `pruned` list totals what the
+/// telemetry prune deleted over the last `--pruned-days` (30 by default), per
+/// kind and subject: the rows are gone, the counts stay. Exit 0 on a read, 3
+/// with `--check` when any signal fired, 2 on a bad argument, 1 when the
+/// store cannot be read.
 pub(crate) fn run(args: &[OsString]) -> i32 {
     let mut journal: Option<PathBuf> = None;
     let mut limits = Limits::default();
+    let mut pruned_days: i64 = 30;
     let mut check = false;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
@@ -217,6 +221,15 @@ pub(crate) fn run(args: &[OsString]) -> i32 {
                     }
                 }
             }
+            Some("--pruned-days") => {
+                match it.next().and_then(|v| v.to_str()?.parse::<i64>().ok()) {
+                    Some(d) if d > 0 => pruned_days = d,
+                    _ => {
+                        eprintln!("error: --pruned-days takes a positive integer\n{USAGE}");
+                        return 2;
+                    }
+                }
+            }
             Some("--check") => check = true,
             _ => {
                 eprintln!("error: unknown argument {tok:?}\n{USAGE}");
@@ -231,13 +244,20 @@ pub(crate) fn run(args: &[OsString]) -> i32 {
         return 1;
     }
     let now_ms = chrono::Utc::now().timestamp_millis();
-    match read_signals(&store, now_ms, &limits) {
-        Ok(signals) => {
+    let since_day = (chrono::Utc::now() - chrono::Duration::days(pruned_days))
+        .format("%Y-%m-%d")
+        .to_string();
+    let pruned = crate::event_store::open_read(&store)
+        .and_then(|conn| crate::event_store::read_rollup(&conn, &since_day));
+    match read_signals(&store, now_ms, &limits).and_then(|s| Ok((s, pruned?))) {
+        Ok((signals, pruned)) => {
             let receipt = serde_json::json!({
                 "store": store.display().to_string(),
                 "window_hours": limits.window_ms / HOUR_MS,
                 "clean": signals.is_empty(),
                 "signals": signals,
+                "pruned_days": pruned_days,
+                "pruned": pruned,
             });
             println!("{receipt}");
             if check && !signals.is_empty() {

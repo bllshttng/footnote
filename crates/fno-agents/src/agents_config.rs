@@ -1412,8 +1412,9 @@ pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     .unwrap_or(1800)
 }
 
-/// `[notify] arm_starved_after_s` (default 604800, 7 days): how long an armed loop may tick without acting on anything before the arms table calls it starved. `0` or a value that does not parse falls back to the default.
+/// `[notify] arm_starved_after_s` (default 604800, 7 days): how long an armed loop may tick without acting on anything before the arms table calls it starved. `0` or a value that does not parse falls back to the default. A value past the telemetry retention is capped at it: the store holds no older ticks to judge.
 pub fn notify_arm_starved_after_s(cwd: &Path) -> u64 {
+    let retention_s = crate::event_store::TELEMETRY_TTL_HOURS as u64 * 3600;
     resolve(cwd, |t| {
         t.get("notify")?
             .as_table()?
@@ -1423,6 +1424,7 @@ pub fn notify_arm_starved_after_s(cwd: &Path) -> u64 {
     })
     .filter(|v| *v > 0)
     .unwrap_or(604_800)
+    .min(retention_s)
 }
 
 /// `[auto_heal] enabled` (default false): whether the CI healer drive loop is armed.

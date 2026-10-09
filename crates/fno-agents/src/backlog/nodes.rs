@@ -467,83 +467,12 @@ pub(crate) fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
 }
 
 /// The claims store's node records: the db is the holder source of truth
-/// (claim_store folds legacy lockfiles in on first open), so this is the
-/// primary projection source.
+/// (claim_store folds legacy lockfiles in on first open, and routes node
+/// keys to the shared primary when one is set), so this is the primary
+/// projection source.
 fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
-    // Read-only leg: an absent claims db is an empty answer, never a
-    // creation. Opening the store here would mint graph.db at whatever
-    // claims root the process env names at this instant.
-    match crate::claim_store::database_path(None) {
-        Ok(path) if path.exists() => {}
-        _ => return Ok(Default::default()),
-    }
-    let connection = crate::claim_store::open(None)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT key, holder, schema_version, acquired_at, expires_at, pid,
-                    pid_unavailable, host, machine_id, reason, harness, session_id,
-                    pid_provenance, metadata
-             FROM claims WHERE key LIKE 'node:%'
-               AND (expires_at IS NULL OR expires_at > ?1)
-             ORDER BY key",
-        )
-        .map_err(|error| error.to_string())?;
-    let now = crate::claims::now_ms();
     let mut claims = std::collections::HashMap::new();
-    struct Row {
-        key: String,
-        holder: String,
-        schema_version: u32,
-        acquired_at: i64,
-        expires_at: Option<i64>,
-        pid: Option<i32>,
-        pid_unavailable: bool,
-        host: String,
-        machine_id: Option<String>,
-        reason: Option<String>,
-        harness: Option<String>,
-        session_id: Option<String>,
-        pid_provenance: Option<String>,
-        metadata: String,
-    }
-    let mut rows = statement
-        .query_map(rusqlite::params![now], |row| {
-            Ok(Row {
-                key: row.get(0)?,
-                holder: row.get(1)?,
-                schema_version: row.get(2)?,
-                acquired_at: row.get(3)?,
-                expires_at: row.get(4)?,
-                pid: row.get(5)?,
-                pid_unavailable: row.get(6)?,
-                host: row.get(7)?,
-                machine_id: row.get(8)?,
-                reason: row.get(9)?,
-                harness: row.get(10)?,
-                session_id: row.get(11)?,
-                pid_provenance: row.get(12)?,
-                metadata: row.get(13)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-    while let Some(row) = rows.next() {
-        let row = row.map_err(|error| error.to_string())?;
-        let record = crate::claims::ClaimRecord {
-            key: row.key,
-            holder: row.holder,
-            schema_version: row.schema_version,
-            acquired_at: row.acquired_at,
-            expires_at: row.expires_at,
-            pid: row.pid,
-            pid_unavailable: row.pid_unavailable,
-            host: row.host,
-            machine_id: row.machine_id,
-            reason: row.reason,
-            harness: row.harness,
-            session_id: row.session_id,
-            pid_provenance: row.pid_provenance,
-            metadata: serde_json::from_str(&row.metadata).unwrap_or_default(),
-        };
+    for record in crate::claim_store::unexpired_node_records()? {
         if let Some(node_id) = record.key.strip_prefix("node:") {
             claims.insert(node_id.to_string(), project_claim(&record)?);
         }
@@ -593,7 +522,10 @@ pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, No
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(hit) = cached.as_ref() {
+    // A peer's write to the shared primary bumps no local mtime, so with a
+    // primary set the cache would serve a stale holder.
+    let primary = matches!(crate::store_remote::configured(), Ok(Some(_)));
+    if let Some(hit) = cached.as_ref().filter(|_| !primary) {
         if hit.key == key {
             return Ok(hit.map.clone());
         }

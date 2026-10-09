@@ -1230,6 +1230,71 @@ pub fn resolve_payload_with<C: CursorAccess>(
     })
 }
 
+/// The last `n` rendered turns of one session, oldest first, resolved the
+/// way a truth read resolves its handle. The lead check-in reads a quiet
+/// worker's last report here: a `fno agents peek` per worker cost a cold
+/// interpreter and a full discovery sweep each.
+pub(crate) fn tail_texts(handle: &str, n: usize) -> Result<Vec<String>, String> {
+    let rows = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+        .ok()
+        .map(|r| r.entries);
+    let stores = Stores::ambient();
+    let mut cursors = cursor::global();
+    let session = resolve_handle(rows.as_deref(), handle, &stores, &mut cursors)
+        .ok_or_else(|| format!("{handle} resolves to no session"))?;
+    let parse: fn(&Value) -> Option<TruthRecord> = match session.agent.as_str() {
+        "claude" => parse_claude_record,
+        "codex" => parse_codex_record,
+        "opencode" => {
+            let records = opencode_records_db(&stores.opencode_db, &session.session_id, n);
+            return Ok(records.into_iter().map(|r| r.text).collect());
+        }
+        other => {
+            return Err(format!(
+                "{handle}: no transcript reader for harness {other}"
+            ))
+        }
+    };
+    let path = transcript_for(&session, &stores, &mut cursors)
+        .ok_or_else(|| format!("{handle} names no readable transcript"))?;
+    tail_records(&path, n, parse)
+}
+
+/// The newest `n` records of a JSONL transcript, read from EOF in windows
+/// that grow until they hold `n` records, reach the file start, or hit 8 MB.
+fn tail_records(
+    path: &Path,
+    n: usize,
+    parse: fn(&Value) -> Option<TruthRecord>,
+) -> Result<Vec<String>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CAP: u64 = 8 * 1024 * 1024;
+    let read_err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let len = std::fs::metadata(path).map_err(read_err)?.len();
+    let mut window: u64 = 256 * 1024;
+    loop {
+        let from = len.saturating_sub(window);
+        let mut file = std::fs::File::open(path).map_err(read_err)?;
+        file.seek(SeekFrom::Start(from)).map_err(read_err)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(read_err)?;
+        let text = String::from_utf8_lossy(&bytes);
+        // A window that starts mid-file starts mid-line: drop that fragment.
+        let skip = usize::from(from > 0);
+        let texts: Vec<String> = text
+            .lines()
+            .skip(skip)
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|v| parse(&v))
+            .map(|r| r.text)
+            .collect();
+        if texts.len() >= n || from == 0 || window >= CAP {
+            return Ok(texts[texts.len().saturating_sub(n)..].to_vec());
+        }
+        window = (window * 4).min(CAP);
+    }
+}
+
 /// Build (or reuse) the cursor for one registry row. The daemon's warm pass
 /// calls this per row after a restart; `false` when the row names no
 /// readable transcript.
@@ -1429,6 +1494,36 @@ mod tests {
     }
 
     const NOW: f64 = 1_791_460_800.0; // 2026-10-08T12:00:00Z
+
+    /// The tail window grows until it holds `n` records: here the last 256 KB
+    /// holds fewer than three, so the read reaches back. Non-turn lines
+    /// (tool results) never count, and the newest turns come oldest first.
+    #[test]
+    fn a_tail_read_grows_its_window_to_hold_n_turns() {
+        let dir = tmp("tail");
+        let path = dir.join("t.jsonl");
+        let turn = |text: &str| {
+            format!(r#"{{"type":"assistant","message":{{"role":"assistant","content":"{text}"}}}}"#)
+        };
+        let filler = format!(
+            r#"{{"type":"user","toolUseResult":"{}"}}"#,
+            "x".repeat(200_000)
+        );
+        let lines = [
+            turn("first"),
+            turn("RESULT: DONE second"),
+            filler.clone(),
+            turn("third"),
+            filler,
+            turn("fourth"),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let tail = tail_records(&path, 3, parse_claude_record).unwrap();
+        assert_eq!(tail, ["RESULT: DONE second", "third", "fourth"]);
+        let all = tail_records(&path, 40, parse_claude_record).unwrap();
+        assert_eq!(all.len(), 4, "a short file returns every turn it has");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Until the warm pass rebuilds a session, truth answers `warming`, and
     /// the decoded probe is neither live nor dead. After the rebuild the same

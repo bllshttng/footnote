@@ -1806,6 +1806,11 @@ PYEOF
             fi
             echo "target_claim_blocked_reason: claim_held_by_other" >> "$STATE_FILE"
           fi
+        elif grep -q 'store.remote_url) is unreachable' "$STATE_DIR/.claim-err" 2>/dev/null; then
+          # A shared primary that cannot be reached decides nothing. A peer
+          # machine may hold this node, so this session must not build it.
+          printf 'author: init\nreason: store_unreachable\n' > "$STATE_DIR/.target-cancelled"
+          echo "target_claim_blocked_reason: store_unreachable" >> "$STATE_FILE"
         else
           echo "target_claim_blocked_reason: acquire_error_rc_${_acq_rc}" >> "$STATE_FILE"
         fi

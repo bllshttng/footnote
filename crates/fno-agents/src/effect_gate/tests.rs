@@ -100,12 +100,9 @@ fn table_digest_and_tool_map_match_the_python_legs_they_replaced() {
     assert_eq!(send.effect_class, "external.communication");
     assert_eq!(send.destination, "b@example.com");
 
-    assert_eq!(
-        map_tool_call("Bash", &json!({"command": "gh issue comment 5 -b x"}))
-            .unwrap()
-            .effect_class,
-        "external.communication"
-    );
+    // A PR or issue comment is review traffic, not outside communication.
+    assert!(map_tool_call("Bash", &json!({"command": "gh issue comment 5 -b x"})).is_none());
+    assert!(map_tool_call("Bash", &json!({"command": "gh pr comment 5 -b x"})).is_none());
     assert_eq!(
         map_tool_call(
             "Bash",

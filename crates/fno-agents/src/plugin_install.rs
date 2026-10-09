@@ -542,36 +542,6 @@ fn marketplace_source_kind(home: &Path) -> Option<String> {
         .map(String::from)
 }
 
-/// True when the footnote marketplace's registered source is a local
-/// directory. The cache converge re-reads that source, so a remote
-/// marketplace never enters the step: its cache stays the harness updater's.
-fn claude_marketplace_is_local(home: &Path) -> bool {
-    matches!(
-        marketplace_source_kind(home).as_deref(),
-        Some("directory" | "file")
-    )
-}
-
-/// The registered fno@footnote installPaths inside the Claude plugin cache
-/// (`~/.claude/plugins/cache/footnote/...`) that exist on disk. The harness
-/// re-copies this pinned copy only when the plugin version changes, and the
-/// stage serves one version forever, so at an unchanged version the pin is
-/// the bytes Claude sessions load, whatever the stage carries.
-fn pinned_claude_caches(home: &Path) -> Vec<PathBuf> {
-    let cache_root = home.join(".claude/plugins/cache/footnote");
-    registry_install_paths(home)
-        .into_iter()
-        .filter(|p| p.starts_with(&cache_root) && p.is_dir())
-        .collect()
-}
-
-fn which_claude() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("claude"))
-        .find(|candidate| candidate.is_file())
-}
-
 /// Every fno plugin root this machine could load or mistake for the loaded
 /// one, plus one detail line per registry file that could not be read. A
 /// path that does not exist on disk is never reported, and an unreadable
@@ -719,7 +689,6 @@ fn check_roots_report(
     scan: &[PluginRoot],
     detail: Vec<String>,
     source_dir: &Path,
-    home: &Path,
 ) -> (RootsReport, i32) {
     // Worst status reads stale above unknown: stale carries a remedy and the
     // doctor exit gate keys on it, while unknown only names its gap.
@@ -733,46 +702,24 @@ fn check_roots_report(
     let mut roots = Vec::new();
     let mut worst: Option<(u8, &'static str)> = None;
     // A live root means the marketplace shape is local and the harness loads
-    // it in place. A registry pin inside the Claude cache is the exception to
-    // the retired fold below (B7): the harness re-copies that copy only when
-    // the plugin version changes, so its drift is load-bearing and blocks.
-    // Other non-live roots (the leftover cache path installed_plugins.json
-    // stopped pinning) never block: a correct directory install must not
-    // exit 3 over a cache nobody loads.
+    // it in place; every other root is then a retired copy (B7): the leftover
+    // GitHub cache path installed_plugins.json still records. Its drift stays
+    // reported per root, but it never blocks the check - a correct directory
+    // install must not exit 3 over a cache nobody loads.
     let any_live = scan.iter().any(|r| r.live);
-    let cache_root = home.join(".claude/plugins/cache/footnote");
     for root in scan {
         let check = check_stage_report(&root.path, source_dir);
         let drift = check.differing_count + check.missing_count;
-        // A registry-pinned copy inside the Claude cache is load-bearing:
-        // the harness re-copies it only when the plugin version changes, so
-        // its drift is the stale-cache outage itself. Other non-live roots
-        // (a leftover cache path the registry stopped pointing at) keep the
-        // retired fold below.
-        let pinned = root.origin == "registry" && root.path.starts_with(&cache_root);
-        let retired = !root.live && any_live && !pinned;
+        let retired = !root.live && any_live;
         let blocker = if check.status == "stale" && !retired {
-            let role = if root.live {
-                "live"
-            } else if pinned {
-                "pinned claude cache"
-            } else {
-                "second copy"
-            };
-            let remedy = if pinned {
-                "fno doctor update (converges it), or: claude plugin marketplace \
-                 update footnote && claude plugin update fno@footnote"
-                    .to_string()
-            } else {
-                check.remedy.clone()
-            };
+            let role = if root.live { "live" } else { "second copy" };
             Some(format!(
                 "plugin root {} ({}) differs from source HEAD in {} file(s) (e.g. {}). Fix: {}",
                 root.path.display(),
                 role,
                 drift,
                 check.sample.first().map(String::as_str).unwrap_or("?"),
-                remedy
+                check.remedy
             ))
         } else {
             None
@@ -781,11 +728,6 @@ fn check_roots_report(
             " (retired cache: kept because installed_plugins.json registers it; \
              the harness loads the live root in place)"
                 .to_string()
-        } else if pinned && drift > 0 {
-            format!(
-                " (pinned cache: Claude sessions load this copy; {drift} file(s) \
-                 differ from source HEAD)"
-            )
         } else {
             root_note(root.live, drift, &check.remedy)
         };
@@ -876,98 +818,6 @@ fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcom
         root,
         head12: head.chars().take(12).collect(),
     })
-}
-
-/// Byte verdict for every pinned cache copy against the source checkout's
-/// HEAD. First stale copy exits 3 naming the drift; an unverifiable copy
-/// exits 4; all matching exits 0. Same instrument as `--check`, so a
-/// converge and the doctor gate cannot disagree about what fresh means.
-fn verify_pinned_caches(pinned: &[PathBuf], source_dir: &Path) -> i32 {
-    for path in pinned {
-        let check = check_stage_report(path, source_dir);
-        match check.status {
-            "stale" => {
-                let drift = check.differing_count + check.missing_count;
-                eprintln!(
-                    "claude cache: {} still differs from source HEAD in {} file(s) (e.g. {})",
-                    path.display(),
-                    drift,
-                    check.sample.first().map(String::as_str).unwrap_or("?")
-                );
-                return 3;
-            }
-            "unknown" => {
-                eprintln!(
-                    "claude cache: {} unverifiable: {}",
-                    path.display(),
-                    check.detail.as_deref().unwrap_or("no detail")
-                );
-                return 4;
-            }
-            _ => {}
-        }
-    }
-    0
-}
-
-/// Converge the pinned Claude cache: re-read the marketplace from its local
-/// source and re-copy the plugin, then byte-verify against source HEAD. The
-/// harness re-copies the pin only when the plugin version changes and the
-/// stage serves one version forever, so without this step the cache ages
-/// against the stage at every unchanged-version restage.
-fn run_converge_claude(source: Option<&str>) -> i32 {
-    let home = dirs_home();
-    if !claude_marketplace_is_local(&home) {
-        println!("claude cache: no local footnote marketplace; skipped");
-        return 0;
-    }
-    let pinned = pinned_claude_caches(&home);
-    if pinned.is_empty() {
-        println!("claude cache: no pinned cache copy; skipped");
-        return 0;
-    }
-    if which_claude().is_none() {
-        eprintln!(
-            "claude cache: `claude` is not on PATH, so the pinned copy cannot \
-             converge. Run by hand: claude plugin marketplace update footnote \
-             && claude plugin update fno@footnote"
-        );
-        return 1;
-    }
-    for cmd in [
-        vec![
-            "claude".into(),
-            "plugin".into(),
-            "marketplace".into(),
-            "update".into(),
-            "footnote".into(),
-        ],
-        vec![
-            "claude".into(),
-            "plugin".into(),
-            "update".into(),
-            "fno@footnote".into(),
-        ],
-    ] {
-        if let Err(e) = run_checked(&cmd, None) {
-            eprintln!("claude cache: converge failed: {e}");
-            return 1;
-        }
-    }
-    let source_dir = source.map(PathBuf::from).unwrap_or_else(default_source_dir);
-    // Re-resolve the pin before verifying: a re-copy can move installPath to
-    // a new version directory, and the pre-converge list would then verify a
-    // retired tree.
-    let pinned = pinned_claude_caches(&home);
-    if pinned.is_empty() {
-        println!("claude cache: pin moved or vanished during converge; the registry is the harness's truth");
-        return 0;
-    }
-    let exit = verify_pinned_caches(&pinned, &source_dir);
-    if exit == 0 {
-        println!("claude cache: converged; restart Claude sessions to load the refreshed copy");
-    }
-    exit
 }
 
 fn install_claude(stage: &Path, force: bool) -> Result<String, String> {
@@ -1415,7 +1265,7 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
                 parsed.hooks_status = true;
                 i += 1;
             }
-            "--check" | "--restage" | "--stage-only" | "--env-only" | "--converge-claude" => {
+            "--check" | "--restage" | "--stage-only" | "--env-only" => {
                 if parsed.mode.is_none() {
                     parsed.mode = Some(args[i].clone());
                 } else {
@@ -1491,7 +1341,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 check_exit_code(report.status)
             } else {
                 let (roots, detail) = plugin_roots();
-                let (report, worst) = check_roots_report(&roots, detail, &source_dir, &dirs_home());
+                let (report, worst) = check_roots_report(&roots, detail, &source_dir);
                 if json {
                     match serde_json::to_string(&report) {
                         Ok(s) => println!("{s}"),
@@ -1561,12 +1411,6 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             env_exports_receipt();
             0
         }
-        // Converge the pinned Claude cache from its marketplace; fno doctor
-        // update chains this after a restage. Nothing pinned or no local
-        // marketplace is a no-op (exit 0), never an install. Drift after the
-        // converge exits 3 - the same verdict --check reports and fno doctor
-        // gates on.
-        Some("--converge-claude") => run_converge_claude(source.as_deref()),
         Some(harness) => {
             if harness == "opencode" {
                 return run_opencode_arm(harness, json, uninstall, status, quick, yes, dry_run);
@@ -1621,7 +1465,6 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             eprintln!("       fno-agents plugin-install --check [--stage <dir>] [--source <dir>] [--json|-J]");
             eprintln!("         (no --stage checks every plugin root; exit is the worst status across roots)");
             eprintln!("       fno-agents plugin-install --restage [--source <dir>]");
-            eprintln!("       fno-agents plugin-install --converge-claude [--source <dir>]");
             2
         }
     }
@@ -2829,20 +2672,6 @@ mod tests {
         (source, stage)
     }
 
-    /// A byte copy of a tree, standing in as a pinned cache copy.
-    fn copy_tree(src: &Path, dst: &Path) {
-        fs::create_dir_all(dst).unwrap();
-        for entry in fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            let to = dst.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_tree(&entry.path(), &to);
-            } else {
-                fs::copy(entry.path(), &to).unwrap();
-            }
-        }
-    }
-
     /// AC1-HP: the swap is atomic (no temp dirs left), new bytes land, and a
     /// handle opened before the rebuild still reads the old bytes.
     #[test]
@@ -3380,7 +3209,7 @@ mod tests {
 
         let (roots, detail) = plugin_roots_for(&home);
         assert_eq!(roots.len(), 2, "roots: {roots:?} detail: {detail:?}");
-        let (report, exit) = check_roots_report(&roots, detail, &source, &home);
+        let (report, exit) = check_roots_report(&roots, detail, &source);
         // B7: the registered cache nobody loads must not fail a correct
         // directory-source install.
         assert_eq!(exit, 0);
@@ -3458,7 +3287,7 @@ mod tests {
             detail.iter().any(|d| d.contains("installed_plugins.json")),
             "detail: {detail:?}"
         );
-        let (report, exit) = check_roots_report(&roots, detail, &source, &home);
+        let (report, exit) = check_roots_report(&roots, detail, &source);
         assert_eq!(exit, 0);
         assert!(report.roots.iter().all(|r| r.check.status == "fresh"));
 
@@ -3504,7 +3333,7 @@ mod tests {
         let (roots, _) = plugin_roots_for(&home);
         assert_eq!(roots.len(), 1, "only the registry copy exists: {roots:?}");
         assert!(!roots[0].live, "a github marketplace yields no live root");
-        let (report, exit) = check_roots_report(&roots, Vec::new(), &source, &home);
+        let (report, exit) = check_roots_report(&roots, Vec::new(), &source);
         assert_eq!(exit, 3);
         assert_eq!(report.roots[0].check.status, "stale");
         assert_eq!(
@@ -3612,115 +3441,6 @@ mod tests {
             install_path.exists(),
             "the registered installPath must survive the sweep"
         );
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    /// The pin filter keeps only existing installPaths inside the Claude
-    /// cache, and the locality gate accepts only a local directory source.
-    #[test]
-    fn pinned_cache_filter_and_locality_gate() {
-        let base = std::env::temp_dir().join(format!("pi-pinf-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let stage = base.join("stage/fno");
-        fs::create_dir_all(&stage).unwrap();
-        let cache = base.join("home/.claude/plugins/cache/footnote/fno/0.4.1");
-        fs::create_dir_all(&cache).unwrap();
-        let elsewhere = base.join("home/elsewhere/fno");
-        fs::create_dir_all(&elsewhere).unwrap();
-        let home = fixture_home(&base);
-        let v = json!({"version": 2, "plugins": {"fno@footnote": [
-            {"scope": "user", "installPath": cache.display().to_string()},
-            {"scope": "user", "installPath": elsewhere.display().to_string()},
-            {"scope": "user", "installPath": base.join("gone").display().to_string()},
-        ]}});
-        fs::write(
-            home.join(".claude/plugins/installed_plugins.json"),
-            serde_json::to_string(&v).unwrap(),
-        )
-        .unwrap();
-        let mut got = pinned_claude_caches(&home);
-        got.sort();
-        assert_eq!(got, vec![cache]);
-        write_marketplace(&home, "directory", &stage, &stage);
-        assert!(claude_marketplace_is_local(&home));
-        write_marketplace(&home, "github", &stage, &stage);
-        assert!(!claude_marketplace_is_local(&home));
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    /// A drifted pinned cache is a blocker naming the converge as the repair;
-    /// the cache parent and a registry leftover outside the cache keep the
-    /// retired fold.
-    #[test]
-    fn pinned_cache_drift_blocks_and_leftovers_stay_retired() {
-        let base = std::env::temp_dir().join(format!("pi-pind-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
-        let (source, stage) = fresh_stage(&base);
-        let cache = base.join("home/.claude/plugins/cache/footnote/fno/0.4.1");
-        copy_tree(&stage, &cache);
-        let leftover = base.join("home/elsewhere/fno");
-        copy_tree(&stage, &leftover);
-        fs::write(cache.join("hooks/live.sh"), "stale bytes\n").unwrap();
-        fs::write(leftover.join("hooks/live.sh"), "stale too\n").unwrap();
-        let home = fixture_home(&base);
-        write_marketplace(&home, "directory", &stage, &stage);
-        let v = json!({"version": 2, "plugins": {"fno@footnote": [
-            {"scope": "user", "installPath": cache.display().to_string()},
-            {"scope": "user", "installPath": leftover.display().to_string()},
-        ]}});
-        fs::write(
-            home.join(".claude/plugins/installed_plugins.json"),
-            serde_json::to_string(&v).unwrap(),
-        )
-        .unwrap();
-        let (roots, detail) = plugin_roots_for(&home);
-        assert!(detail.is_empty(), "{detail:?}");
-        let (report, exit) = check_roots_report(&roots, detail, &source, &home);
-        assert_eq!(exit, 3);
-        let pinned_root = report
-            .roots
-            .iter()
-            .find(|r| r.path == cache.display().to_string())
-            .expect("pinned cache root enumerated");
-        assert_eq!(pinned_root.check.status, "stale");
-        let blocker = pinned_root.blocker.as_deref().expect("pinned cache blocks");
-        assert!(blocker.contains("pinned claude cache"), "{blocker}");
-        assert!(blocker.contains("fno doctor update"), "{blocker}");
-        // The cache parent root (orphan origin) reports its byte verdict but
-        // folds fresh: nobody loads the bare parent.
-        let parent = report
-            .roots
-            .iter()
-            .find(|r| r.origin == "orphan")
-            .expect("cache parent enumerated");
-        assert_eq!(parent.check.status, "stale");
-        assert!(parent.blocker.is_none());
-        // The leftover outside the cache folds fresh: the retired-copy rule
-        // still holds for roots the pin does not cover.
-        let leftover_root = report
-            .roots
-            .iter()
-            .find(|r| r.path == leftover.display().to_string())
-            .expect("leftover root enumerated");
-        assert_eq!(leftover_root.check.status, "stale");
-        assert!(leftover_root.blocker.is_none());
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    /// verify_pinned_caches: matching bytes exit 0, drift exits 3.
-    #[test]
-    fn pinned_cache_verify_exit_codes() {
-        let base = std::env::temp_dir().join(format!("pi-pinv-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
-        let (source, stage) = fresh_stage(&base);
-        let cache = base.join("home/.claude/plugins/cache/footnote/fno/0.4.1");
-        copy_tree(&stage, &cache);
-        let pinned = vec![cache.clone()];
-        assert_eq!(verify_pinned_caches(&pinned, &source), 0);
-        fs::write(cache.join("hooks/live.sh"), "changed\n").unwrap();
-        assert_eq!(verify_pinned_caches(&pinned, &source), 3);
         let _ = fs::remove_dir_all(&base);
     }
 }

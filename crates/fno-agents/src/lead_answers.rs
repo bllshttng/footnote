@@ -206,39 +206,43 @@ pub(crate) fn node_from_name(name: &str) -> Option<String> {
     None
 }
 
-/// The worker's own last word, through the same door a human reads: one
-/// `fno agents peek` tail. Nonzero exit is a failed read, named.
+/// The worker's own last word, read in process from its transcript tail:
+/// the same records a peek renders, with no interpreter per worker. A worker
+/// with no transcript yet (a pane row before reconcile backfills its session)
+/// falls back to one `fno agents peek`, which reads the pane screen.
 fn peek_last_report(handle: &str) -> Result<String, String> {
+    let texts = match crate::session_truth::tail_texts(handle, PEEK_RECORDS) {
+        Ok(texts) => texts,
+        Err(_) => peek_texts(handle)?,
+    };
+    last_report(&texts)
+        .ok_or_else(|| format!("no RESULT or help block in the last {PEEK_RECORDS} records"))
+}
+
+fn peek_texts(handle: &str) -> Result<Vec<String>, String> {
     let n = PEEK_RECORDS.to_string();
     let (code, out, err) =
         crate::lead_checkin::fno_verb(&["agents", "peek", handle, "--json", "-n", &n])?;
     if code != 0 {
-        return Err(stderr_fallback(&err, code));
+        let cause = crate::lead_checkin::stderr_cause(&err);
+        return Err(if cause == "no stderr" {
+            format!("peek exited {code}")
+        } else {
+            cause
+        });
     }
-    last_report_from_peek(&out)
-        .ok_or_else(|| format!("no RESULT or help block in the last {n} records"))
+    Ok(out
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|rec| rec.get("text").and_then(Value::as_str).map(str::to_string))
+        .collect())
 }
 
-fn stderr_fallback(err: &str, code: i32) -> String {
-    let cause = crate::lead_checkin::stderr_cause(err);
-    if cause == "no stderr" {
-        format!("peek exited {code}")
-    } else {
-        cause
-    }
-}
-
-/// The last report in a peek tail, newest record winning; inside one
+/// The last report in a record tail, newest record winning; inside one
 /// record a RESULT line outranks a help block.
-fn last_report_from_peek(out: &str) -> Option<String> {
+fn last_report(texts: &[String]) -> Option<String> {
     let mut report: Option<String> = None;
-    for line in out.lines() {
-        let Ok(rec) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(text) = rec.get("text").and_then(Value::as_str) else {
-            continue;
-        };
+    for text in texts {
         if let Some(l) = last_result_line(text) {
             report = Some(l);
         } else if let Some(h) = help_line(text) {
@@ -766,38 +770,39 @@ mod tests {
         );
     }
 
+    fn texts(items: &[&str]) -> Vec<String> {
+        items.iter().map(|t| t.to_string()).collect()
+    }
+
     #[test]
     fn the_newest_record_carries_the_report() {
-        let tail = concat!(
-            "{\"role\": \"assistant\", \"text\": \"RESULT: BLOCKED need a ruling\"}\n",
-            "{\"role\": \"assistant\", \"text\": \"[tool_use: Bash]\"}\n",
-            "{\"role\": \"assistant\", \"text\": \"<help reason=\\\"scope\\\">which epic?</help>\"}\n",
-        );
+        let tail = texts(&[
+            "RESULT: BLOCKED need a ruling",
+            "[tool_use: Bash]",
+            "<help reason=\"scope\">which epic?</help>",
+        ]);
         assert_eq!(
-            last_report_from_peek(tail).as_deref(),
+            last_report(&tail).as_deref(),
             Some("<help reason=\"scope\">which epic?</help>"),
             "the later record wins"
         );
-        let result_last = concat!(
-            "{\"role\": \"assistant\", \"text\": \"<help reason=\\\"scope\\\">which epic?</help>\"}\n",
-            "{\"role\": \"assistant\", \"text\": \"RESULT: BLOCKED need a ruling\\n\\nmore prose\"}\n",
-        );
+        let result_last = texts(&[
+            "<help reason=\"scope\">which epic?</help>",
+            "RESULT: BLOCKED need a ruling\n\nmore prose",
+        ]);
         assert_eq!(
-            last_report_from_peek(result_last).as_deref(),
+            last_report(&result_last).as_deref(),
             Some("RESULT: BLOCKED need a ruling"),
             "RESULT is one line; the prose after it is cut"
         );
-        assert_eq!(
-            last_report_from_peek("{\"role\": \"assistant\", \"text\": \"thinking\"}"),
-            None
-        );
+        assert_eq!(last_report(&texts(&["thinking"])), None);
     }
 
     #[test]
     fn an_unterminated_help_block_still_reports() {
-        let tail = "{\"role\": \"assistant\", \"text\": \"asking <help reason=\\\"budget\\\">need more room\"}\n";
+        let tail = texts(&["asking <help reason=\"budget\">need more room"]);
         assert_eq!(
-            last_report_from_peek(tail).as_deref(),
+            last_report(&tail).as_deref(),
             Some("<help reason=\"budget\">need more room"),
         );
     }

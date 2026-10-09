@@ -92,6 +92,11 @@ pub const TELEMETRY_TTL_HOURS: i64 = 168;
 /// telemetry horizon.
 pub const GUARD_ALLOW_TTL_HOURS: i64 = 24;
 
+/// Retention horizon for `control_plane_tick` rows of the `machine_watch`
+/// arm. They carry the load readings `fno-agents intel --fleet` folds over
+/// its 30-day window.
+pub const MACHINE_WATCH_TTL_HOURS: i64 = 720;
+
 /// Marks a judged refusal inside `append_envelope`'s error string. The
 /// door strips it and answers exit 3, the class Python maps to
 /// `ValidationError`; every other error stays a store fault on exit 1.
@@ -1118,40 +1123,141 @@ fn prune_telemetry_due(conn: &mut Connection, now_ms: i64) -> Result<(), String>
     Ok(())
 }
 
+/// Daily counts of the telemetry rows a prune deleted. The row is gone, but
+/// the fact that it happened is not: each delete batch adds its rows here
+/// in the same transaction, keyed by UTC day, kind, and subject.
+const ROLLUP_DDL: &str = "CREATE TABLE IF NOT EXISTS event_rollup (
+         day TEXT NOT NULL,
+         type TEXT NOT NULL,
+         subject TEXT NOT NULL,
+         stored INTEGER NOT NULL,
+         occurrences INTEGER NOT NULL,
+         PRIMARY KEY (day, type, subject)
+     )";
+
+/// The rollup subject of one row: the arm of a tick, `guard:decision` of a
+/// guard row, the state of an inside-leg row, and empty for the rest.
+const ROLLUP_SUBJECT_SQL: &str = "CASE type \
+     WHEN 'control_plane_tick' THEN coalesce(json_extract(line, '$.data.arm'), '') \
+     WHEN 'guard_decision' THEN coalesce(json_extract(line, '$.data.guard'), '') \
+         || ':' || coalesce(json_extract(line, '$.data.decision'), '') \
+     WHEN 'inside_leg_report' THEN coalesce(json_extract(line, '$.data.state'), '') \
+     WHEN 'codex_thread_inside_leg' THEN coalesce(json_extract(line, '$.data.state'), '') \
+     ELSE '' END";
+
+/// Rollup totals for one kind and subject: what prunes deleted from the
+/// first day in range on. `occurrences` sums each row's `occurrence_count`
+/// (default 1), so a coalesced poll counts every poll it stood for.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct RollupRow {
+    pub since_day: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub subject: String,
+    pub stored: i64,
+    pub occurrences: i64,
+}
+
+/// Rollup totals per kind and subject over the days at or after
+/// `since_day` (`YYYY-MM-DD`), most occurrences first. A store no prune has
+/// touched has no table and reads empty.
+pub fn read_rollup(conn: &Connection, since_day: &str) -> Result<Vec<RollupRow>, String> {
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'event_rollup'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has_table == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT min(day), type, subject, sum(stored), sum(occurrences) FROM event_rollup \
+             WHERE day >= ?1 GROUP BY type, subject \
+             ORDER BY sum(occurrences) DESC, type, subject",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![since_day], |r| {
+            Ok(RollupRow {
+                since_day: r.get(0)?,
+                kind: r.get(1)?,
+                subject: r.get(2)?,
+                stored: r.get(3)?,
+                occurrences: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
 /// Delete telemetry rows past their horizon, oldest first within each
 /// kind, until none are left (`true`) or `budget` is spent (`false`). The
 /// match is by kind, not class: rows stored before their kind joined the
 /// class still read `durable`. Rejected rows stay. `guard_decision` allow
-/// rows then go on their shorter [`GUARD_ALLOW_TTL_HOURS`] horizon.
+/// rows go on their shorter [`GUARD_ALLOW_TTL_HOURS`] horizon, and
+/// `machine_watch` ticks on their longer [`MACHINE_WATCH_TTL_HOURS`] one.
+/// Each batch counts its rows into `event_rollup` in the transaction that
+/// deletes them, so a crash never drops a count or counts a row twice.
 fn prune_telemetry(
-    conn: &Connection,
+    conn: &mut Connection,
     now_ms: i64,
     budget: std::time::Duration,
 ) -> Result<bool, String> {
     let started = std::time::Instant::now();
+    conn.execute_batch(ROLLUP_DDL).map_err(|e| e.to_string())?;
     let cutoff = now_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
     let allow_cutoff = now_ms.saturating_sub(GUARD_ALLOW_TTL_HOURS * HOUR_MS);
+    let machine_cutoff = now_ms.saturating_sub(MACHINE_WATCH_TTL_HOURS * HOUR_MS);
+    let arm = "coalesce(json_extract(line, '$.data.arm'), '')";
     let passes = TELEMETRY_EVENT_TYPES
         .iter()
-        .map(|kind| (*kind, cutoff, ""))
-        .chain(std::iter::once((
-            "guard_decision",
-            allow_cutoff,
-            " AND json_extract(line, '$.data.decision') = 'allow'",
-        )));
+        .map(|kind| match *kind {
+            "control_plane_tick" => (*kind, cutoff, format!(" AND {arm} <> 'machine_watch'")),
+            _ => (*kind, cutoff, String::new()),
+        })
+        .chain([
+            (
+                "control_plane_tick",
+                machine_cutoff,
+                format!(" AND {arm} = 'machine_watch'"),
+            ),
+            (
+                "guard_decision",
+                allow_cutoff,
+                " AND json_extract(line, '$.data.decision') = 'allow'".to_string(),
+            ),
+        ]);
     for (kind, cutoff_ms, filter) in passes {
-        let sql = format!(
-            "DELETE FROM events WHERE seq IN (SELECT seq FROM events \
-             WHERE type = ?1 AND ts_ms < ?2 AND reject_reason IS NULL{filter} \
-             ORDER BY ts_ms LIMIT ?3)"
+        let batch = format!(
+            "SELECT seq FROM events WHERE type = ?1 AND ts_ms < ?2 \
+             AND reject_reason IS NULL{filter} ORDER BY ts_ms, seq LIMIT ?3"
         );
+        let count_sql = format!(
+            "INSERT INTO event_rollup (day, type, subject, stored, occurrences) \
+             SELECT date(ts_ms / 1000, 'unixepoch'), type, {ROLLUP_SUBJECT_SQL}, count(*), \
+             sum(coalesce(json_extract(line, '$.data.occurrence_count'), 1)) \
+             FROM events WHERE seq IN ({batch}) GROUP BY 1, 2, 3 \
+             ON CONFLICT (day, type, subject) DO UPDATE SET \
+             stored = stored + excluded.stored, \
+             occurrences = occurrences + excluded.occurrences"
+        );
+        let delete_sql = format!("DELETE FROM events WHERE seq IN ({batch})");
         loop {
             if started.elapsed() >= budget {
                 return Ok(false);
             }
-            let deleted = conn
-                .execute(&sql, params![kind, cutoff_ms, TELEMETRY_PRUNE_BATCH])
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| e.to_string())?;
+            tx.execute(&count_sql, params![kind, cutoff_ms, TELEMETRY_PRUNE_BATCH])
+                .map_err(|e| e.to_string())?;
+            let deleted = tx
+                .execute(&delete_sql, params![kind, cutoff_ms, TELEMETRY_PRUNE_BATCH])
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
             if (deleted as i64) < TELEMETRY_PRUNE_BATCH {
                 break;
             }
