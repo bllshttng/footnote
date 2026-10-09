@@ -102,7 +102,7 @@ fn the_named_child_claims_its_record_once() {
 }
 
 #[test]
-fn two_equal_nameless_records_claim_nothing() {
+fn ambiguous_unattributed_and_stale_records_claim_nothing() {
     let home = tempfile::tempdir().unwrap();
     let cwd = home.path().to_string_lossy().into_owned();
     record_command(
@@ -130,12 +130,8 @@ fn two_equal_nameless_records_claim_nothing() {
             .count(),
         2
     );
-}
-
-#[test]
-fn no_launcher_session_and_stale_records_claim_nothing() {
-    let home = tempfile::tempdir().unwrap();
-    let cwd = home.path().to_string_lossy().into_owned();
+    // No launcher session writes nothing; a record past the window is
+    // never claimed.
     assert_eq!(
         record_command(home.path(), "claude --bg x", &cwd, None, None, 1).unwrap(),
         0
