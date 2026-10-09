@@ -12,6 +12,7 @@
 //! its callers (`wait`, `needs`, `org_board`, the daemon's list rows) reach it
 //! without going near an ask.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// One family-1 truth answer: the supervision state, plus the model the worker
@@ -259,44 +260,30 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
 /// basis, ...}` object `_truth_payload` writes, whether it arrived alone or as
 /// one value of a `--handles` batch.
 ///
-/// `None` when `state` is absent or is not one of the six the verb emits, which
-/// is the malformed-output case both entry points already refuse.
+/// `None` when `state` is absent or is not one of the seven the reader emits,
+/// which is the malformed-output case both entry points already refuse.
+/// `warming` is the restart answer: reachability `unknown`, so every reader
+/// takes its inconclusive branch.
 ///
 /// The single decoder is the point. Two of them is how a batch reading and a
 /// single reading of the same transcript start disagreeing about the same row.
 fn parse_truth_payload(value: &serde_json::Value) -> Option<TruthProbe> {
     let state = value.get("state")?.as_str()?;
     match state {
-        "done" | "watching" | "your-move" | "working" | "stalled" | "unknown" => {
+        "done" | "watching" | "your-move" | "working" | "stalled" | "unknown" | "warming" => {
             Some(build_truth_probe(Some(value), state))
         }
         _ => None,
     }
 }
 
-/// [`family1_truth_probe`] for many handles at once: the registry loads
-/// once and every handle answers in process, so N rows cost one registry
-/// read and N tail reads instead of N interpreter cold starts. The one
-/// reader is `crate::session_truth`, so `state` and `observed_model` still
-/// come from the SAME reader no matter who asks. An EMPTY slice answers an
-/// empty map without touching anything.
-///
-/// A batch that FAILS after its retry falls back to one probe per handle. That
-/// costs exactly what this function exists to delete, and it is still right,
-/// because the alternative is a total outage of the truth column. The trigger
-/// is not hypothetical: an `fno` on PATH that predates `--handles` exits 2 on
-/// the unknown option, and every worktree carries its own binary, so a
-/// half-deployed tree is the ORDINARY state right after this lands. Without the
-/// fallback every list row renders null reachability and `no-transcript`, the
-/// dormant gate can never reach the positive `done` reading an eviction needs,
-/// and `fno agents needs` reports no refused workers - all three at once, until
-/// someone runs `fno update`.
-///
-/// The fallback is keyed on a FAILURE, never on an empty answer. A batch that
-/// ran and legitimately resolved nothing returns an empty map and spends no
-/// second round; only a batch that never answered escalates. Reading "no
-/// answers" as "the batch broke" would re-spawn N processes every sweep over a
-/// roster where nothing resolves.
+/// [`family1_truth_probe`] for many handles at once. Inside the daemon every
+/// handle answers from the in-memory cursors. Anywhere else the batch asks
+/// the daemon over its socket, one round trip, so a CLI caller reads the
+/// same warm cursors instead of rebuilding them. A daemon that is down, or
+/// one that predates the `agent.truth` verb, falls back to the same reader
+/// in this process: still Rust, still bounded, never a Python child. An
+/// EMPTY slice answers an empty map without touching anything.
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
@@ -332,29 +319,175 @@ pub fn family1_truth_probe_many_measured_within(
     handles: &[String],
     deadline: Option<Instant>,
 ) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
+    if handles.is_empty() {
+        return (std::collections::HashMap::new(), BatchOutcome::Measured);
+    }
+    let answered = if in_daemon() {
+        None
+    } else {
+        ask_daemon(handles, deadline)
+    };
+    let (payloads, outcome) = match answered {
+        Some(payloads) => (payloads, BatchOutcome::Measured),
+        None => answer_payloads(handles, deadline),
+    };
+    let probes = payloads
+        .into_iter()
+        .filter_map(|(handle, payload)| Some((handle, parse_truth_payload(&payload)?)))
+        .collect();
+    (probes, outcome)
+}
+
+/// Answer every handle from the process-global cursors. The daemon reads
+/// warm-only until its restart pass finishes, so a session it has not
+/// rebuilt yet answers `warming` instead of a guess.
+fn answer_payloads(
+    handles: &[String],
+    deadline: Option<Instant>,
+) -> (Vec<(String, serde_json::Value)>, BatchOutcome) {
     let rows = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
         .ok()
         .map(|r| r.entries);
     let stores = crate::session_truth::Stores::ambient();
-    let mut cursors = crate::session_truth::global_cursors();
-    let mut probes = std::collections::HashMap::new();
+    let cursors = crate::session_truth::cursor::global();
+    let mode = if in_daemon() && !WARM_DONE.load(Ordering::Acquire) {
+        crate::session_truth::ReadMode::WarmOnly
+    } else {
+        crate::session_truth::ReadMode::Build
+    };
+    let mut payloads = Vec::with_capacity(handles.len());
     for handle in handles {
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            return (probes, BatchOutcome::NotMeasured);
+            return (payloads, BatchOutcome::NotMeasured);
         }
-        let payload = crate::session_truth::resolve_payload(
+        let payload = crate::session_truth::resolve_payload_with(
             rows.as_deref(),
             handle,
             now_epoch_s(),
             &stores,
-            &mut cursors,
+            cursors,
+            mode,
         );
-        if let Some(probe) = parse_truth_payload(&payload) {
-            probes.insert(handle.clone(), probe);
-        }
+        payloads.push((handle.clone(), payload));
     }
-    (probes, BatchOutcome::Measured)
+    (payloads, BatchOutcome::Measured)
 }
+
+static IN_DAEMON: AtomicBool = AtomicBool::new(false);
+static WARM_DONE: AtomicBool = AtomicBool::new(false);
+
+fn in_daemon() -> bool {
+    IN_DAEMON.load(Ordering::Acquire)
+}
+
+/// Mark this process as the daemon and rebuild every registry row's cursor
+/// on a background thread. Each rebuild reads back from EOF to the newest
+/// compact boundary or the 64 KB cap, never from the start. Until the pass
+/// ends, a session it has not reached answers `warming`. The pass emits
+/// `truth_warm_done` with its row count and wall time.
+pub fn start_daemon_warm(home: &crate::paths::AgentsHome) {
+    if IN_DAEMON.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let home = home.clone();
+    let spawned = std::thread::Builder::new()
+        .name("truth-warm".into())
+        .spawn(move || {
+            let started = Instant::now();
+            let rows = crate::state::load_registry(&home.registry_json())
+                .map(|r| r.entries)
+                .unwrap_or_default();
+            let stores = crate::session_truth::Stores::ambient();
+            let cursors = crate::session_truth::cursor::global();
+            let warmed = rows
+                .iter()
+                .filter(|row| crate::session_truth::warm_row(row, &stores, cursors))
+                .count();
+            WARM_DONE.store(true, Ordering::Release);
+            let _ = crate::events::EventEmitter::new(home.events_jsonl(), "daemon").emit(
+                "truth_warm_done",
+                &serde_json::json!({
+                    "rows": rows.len(),
+                    "warmed": warmed,
+                    "ms": started.elapsed().as_millis() as u64,
+                }),
+            );
+        });
+    if spawned.is_err() {
+        // No thread, no warm pass: read every cursor on demand instead.
+        WARM_DONE.store(true, Ordering::Release);
+    }
+}
+
+/// The daemon's `agent.truth` verb: `{"handles": [...]}` in, `{"answers":
+/// {handle: payload}}` out, every payload from memory.
+pub fn truth_rpc<C>(_ctx: &C, req: &crate::protocol::Request) -> crate::protocol::Response {
+    let handles: Vec<String> = req
+        .params
+        .get("handles")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| h.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (payloads, outcome) = answer_payloads(&handles, None);
+    let answers: serde_json::Map<String, serde_json::Value> = payloads.into_iter().collect();
+    crate::protocol::Response::ok(
+        req.id,
+        serde_json::json!({
+            "answers": answers,
+            "measured": outcome == BatchOutcome::Measured,
+        }),
+    )
+}
+
+/// One bounded `agent.truth` round trip on the daemon socket. `None` when no
+/// daemon listens, the deadline passes, or the daemon does not know the
+/// verb; the caller then reads in process.
+fn ask_daemon(
+    handles: &[String],
+    deadline: Option<Instant>,
+) -> Option<Vec<(String, serde_json::Value)>> {
+    use std::io::{Read, Write};
+    let budget = deadline
+        .map(|d| d.saturating_duration_since(Instant::now()))
+        .unwrap_or(ASK_BUDGET)
+        .min(ASK_BUDGET);
+    if budget.is_zero() {
+        return None;
+    }
+    let sock = crate::paths::AgentsHome::from_env().supervisor_sock();
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
+    stream.set_read_timeout(Some(budget)).ok()?;
+    stream.set_write_timeout(Some(budget)).ok()?;
+    let req =
+        crate::protocol::Request::new(1, "agent.truth", serde_json::json!({ "handles": handles }));
+    let body = serde_json::to_vec(&req).ok()?;
+    stream.write_all(&(body.len() as u32).to_le_bytes()).ok()?;
+    stream.write_all(&body).ok()?;
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).ok()?;
+    let len = u32::from_le_bytes(len);
+    if len > crate::protocol::MAX_FRAME_BYTES {
+        return None;
+    }
+    let mut reply = vec![0u8; len as usize];
+    stream.read_exact(&mut reply).ok()?;
+    let resp: crate::protocol::Response = serde_json::from_slice(&reply).ok()?;
+    let answers = resp.result()?.get("answers")?.as_object()?;
+    Some(
+        answers
+            .iter()
+            .map(|(h, payload)| (h.clone(), payload.clone()))
+            .collect(),
+    )
+}
+
+/// A daemon answer comes from memory, so a round trip this slow means the
+/// daemon is wedged; the caller reads in process instead.
+const ASK_BUDGET: Duration = Duration::from_secs(5);
 
 fn now_epoch_s() -> f64 {
     std::time::SystemTime::now()

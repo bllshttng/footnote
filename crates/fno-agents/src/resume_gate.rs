@@ -164,11 +164,14 @@ fn roster_holder_with(
     }
     let probes = probe_many(&tokens);
     for (token, name) in tokens.iter().zip(&names) {
-        if probes
-            .get(token)
-            .is_some_and(|p| p.reachability.as_deref() == Some("reachable"))
-        {
-            return Some(name.clone());
+        match probes.get(token) {
+            Some(p) if p.reachability.as_deref() == Some("reachable") => return Some(name.clone()),
+            // The daemon has not rebuilt this session's cursor since its
+            // restart: holding beats a second writer on one node.
+            Some(p) if p.state == "warming" => {
+                return Some(format!("{name} (truth warming; retry)"))
+            }
+            _ => {}
         }
     }
     None
