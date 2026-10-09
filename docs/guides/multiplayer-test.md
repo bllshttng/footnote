@@ -59,7 +59,7 @@ Keep B offline past 10 minutes, then take one of B's nodes on A. Bring B back. E
 Remove the `[store]` table on both machines, and restart each daemon. Then copy the primary into a local file:
 
 ```bash
-fno-agents store-export --url http://r2d2:18080 --out ~/fno-primary-export.db
+fno-agents claim export --url http://r2d2:18080 --out ~/fno-primary-export.db
 ```
 
 The receipt names each table and its row count. Read a claim back from the file:

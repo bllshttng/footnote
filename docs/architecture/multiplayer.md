@@ -36,7 +36,7 @@ A machine that stays offline past its lease loses the claim, and a peer can take
 
 ## Leaving: export
 
-`fno-agents store-export --out <file> [--url <primary>]` copies every table on the primary into a new local SQLite file. The file opens as a normal store. The primary stamps its claims table as the authority at creation, so the local open keeps the exported rows. Use `--url` after the key is unset.
+`fno-agents claim export --out <file> [--url <primary>]` copies every table on the primary into a new local SQLite file. The file opens as a normal store. The primary stamps its claims table as the authority at creation, so the local open keeps the exported rows. Use `--url` after the key is unset.
 
 ## Test it
 

@@ -429,11 +429,6 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::test_delta::run_test_delta(&args[1..]);
     }
 
-    // The shared primary's way back to a local file; binary-direct, no daemon.
-    if matches!(verb, "store-export") {
-        return fno_agents::store_export::run_store_export(&args[1..]);
-    }
-
     // The style gate's hidden binary-direct door (mail, encounters, markdown);
     // matched with `matches!` so the routable-verb parity sets never see it.
     if matches!(verb, "style-check") {

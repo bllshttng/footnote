@@ -1,4 +1,4 @@
-//! `fno-agents store-export --out <file> [--url <primary>]`: copy every table
+//! `fno-agents claim export --out <file> [--url <primary>]`: copy every table
 //! on the shared primary into a local SQLite file that opens as a normal
 //! store. It is the way back to one machine, and a backup. With `--url`
 //! absent it reads `store.remote_url`, so it also works after the key is
@@ -14,7 +14,7 @@ const PAGE: i64 = 200;
 
 #[derive(Parser)]
 #[command(
-    name = "store-export",
+    name = "claim export",
     about = "Copy the shared primary into a local store file"
 )]
 struct Args {
@@ -28,7 +28,7 @@ struct Args {
 
 pub fn run_store_export(args: &[String]) -> i32 {
     let args = match Args::try_parse_from(
-        std::iter::once("store-export".to_string()).chain(args.iter().cloned()),
+        std::iter::once("claim export".to_string()).chain(args.iter().cloned()),
     ) {
         Ok(args) => args,
         Err(error) => {
@@ -47,7 +47,7 @@ pub fn run_store_export(args: &[String]) -> i32 {
             0
         }
         Err(error) => {
-            eprintln!("store-export: {error}");
+            eprintln!("claim export: {error}");
             1
         }
     }
