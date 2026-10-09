@@ -146,7 +146,7 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
     # BLOCKING with the literal key "(truncated remainder)", which no
     # disposition can clear. Losing a sentence is recoverable; losing a
     # finding into an unclearable blocker is not.
-    for limit in (120, 60, 0):
+    for limit in (120, 60, 30, 0):
         if len(json.dumps(record, ensure_ascii=False)) <= _RECORD_BYTE_BUDGET:
             break
         for item in findings:
