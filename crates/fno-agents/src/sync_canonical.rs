@@ -903,7 +903,15 @@ fn sync_under_lease(
     }
     let out = shell(&cfg.sync_command, canonical);
     if matches!(prio, crate::claims::AcquireOutcome::Acquired(_)) {
-        let _ = crate::claims::release(crate::test_run::PRIORITY_KEY, &prio_holder, None, None);
+        // A swallowed release failure leaves a TTL hold the next sync parks
+        // behind, invisible in every receipt.
+        if let Err(error) =
+            crate::claims::release(crate::test_run::PRIORITY_KEY, &prio_holder, None, None)
+        {
+            stderr.push(format!(
+                "post-merge install: priority lane release failed: {error}"
+            ));
+        }
     }
     if out.timed_out {
         stderr.push(format!(
@@ -1636,12 +1644,15 @@ mod tests {
         assert_eq!(row["re_pulled"], 1);
         assert_eq!(row["pr"], 5);
         // The priority lane was taken and released: no live hold left.
-        let (state, _) =
+        let (state, rec) =
             crate::claims::status(crate::test_run::PRIORITY_KEY, Some(claims_root.path()));
-        assert!(!matches!(
-            state,
-            crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
-        ));
+        assert!(
+            !matches!(
+                state,
+                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+            ),
+            "priority lane hold left behind: {state:?} {rec:?}"
+        );
 
         // Phase 2: a failing pull keeps the marks for the next sweep.
         pulls.borrow_mut().1 = false;
