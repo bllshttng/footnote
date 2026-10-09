@@ -2210,35 +2210,50 @@ pub fn supervisor_sock_path() -> PathBuf {
     base.join(".fno").join("agents").join("supervisor.sock")
 }
 
-/// One daemon RPC round trip: connect, write one newline-terminated
-/// request, read one newline-terminated answer, decode the envelope. The
-/// framing (id 1, one line each way, error beats result) is the daemon's
-/// wire contract, so it lives in exactly one place; [`watch_registry`] and
-/// [`agent_list_rpc`] bound their own round trips and read their own
-/// result shapes.
+/// One daemon RPC round trip: connect, write one length-prefixed request
+/// frame, read one length-prefixed answer frame, decode the envelope. The
+/// framing (a 4-byte little-endian body length, then the body, no newline
+/// anywhere) is the daemon's wire contract
+/// (crates/fno-agents/src/protocol.rs), so it lives in exactly one place;
+/// [`watch_registry`] and [`agent_list_rpc`] bound their own round trips
+/// and read their own result shapes. The 16 MiB cap mirrors the daemon's
+/// MAX_FRAME_BYTES, so an oversize answer is refused, not read.
 async fn daemon_rpc(
     sock: &std::path::Path,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let req = serde_json::json!({"id": 1u64, "method": method, "params": params});
-    let mut frame = req.to_string();
-    frame.push('\n');
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "id": 1u64,
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|e| format!("encode: {e}"))?;
     let mut conn = tokio::net::UnixStream::connect(sock)
         .await
         .map_err(|e| format!("connect: {e}"))?;
-    conn.write_all(frame.as_bytes())
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&body);
+    conn.write_all(&frame)
         .await
         .map_err(|e| format!("write: {e}"))?;
-    let mut reader = BufReader::new(conn);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
+    let mut len_buf = [0u8; 4];
+    conn.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("read: {e}"))?;
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_BYTES {
+        return Err(format!("{method}: answer frame too large: {len}"));
+    }
+    let mut answer = vec![0u8; len as usize];
+    conn.read_exact(&mut answer)
         .await
         .map_err(|e| format!("read: {e}"))?;
     let resp: serde_json::Value =
-        serde_json::from_str(line.trim()).map_err(|e| format!("decode: {e}"))?;
+        serde_json::from_slice(&answer).map_err(|e| format!("decode: {e}"))?;
     if let Some(err) = resp.get("error") {
         return Err(format!("{method} error: {err}"));
     }
