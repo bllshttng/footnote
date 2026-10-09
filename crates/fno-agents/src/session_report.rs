@@ -592,6 +592,45 @@ fn record_origin(params: &Value) {
     );
 }
 
+/// Claim the launch record this session is the child of, and stamp its
+/// node's first-launch edge (see `crate::launch_record`). Every harness sends
+/// this report, so this is the one claim point. A resume is not a launch.
+fn claim_launch(params: &Value, home: &AgentsHome) {
+    let field = |key: &str| {
+        params
+            .get("payload")
+            .and_then(|p| p.get(key))
+            .or_else(|| params.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let session_id = field("session_id");
+    if field("source") == "resume" || session_id.is_empty() {
+        return;
+    }
+    let cwd = Some(field("cwd"))
+        .filter(|c| !c.is_empty())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    let child = crate::launch_record::Child {
+        harness: field("harness"),
+        session_id,
+        cwd,
+        name: crate::launch_record::child_name_from_env(),
+        started_at_ms: crate::claims::now_ms(),
+    };
+    crate::launch_record::claim_and_stamp(
+        home.root(),
+        &crate::backlog::settings::graph_path(),
+        &child,
+    );
+}
+
 /// The `report` verb's dispatcher. `--kind session` selects the SessionStart
 /// transport; every other invocation is the inside-leg report, unchanged. The
 /// SessionStart form rides the EXISTING action because the client action list
@@ -642,6 +681,7 @@ pub async fn run_session_report(rest: &[String], home: &AgentsHome) -> i32 {
     if let Some(payload) = read_stdin_payload() {
         params["payload"] = payload;
     }
+    claim_launch(&params, home);
     record_origin(&params);
     // --origin-only writes the record and sends nothing: the daemon learns
     // nothing new, and a hand-started session spools no frame for it.
