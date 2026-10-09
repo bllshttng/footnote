@@ -207,11 +207,35 @@ pub(crate) fn node_from_name(name: &str) -> Option<String> {
 }
 
 /// The worker's own last word, read in process from its transcript tail:
-/// the same records a peek renders, with no interpreter per worker.
+/// the same records a peek renders, with no interpreter per worker. A worker
+/// with no transcript yet (a pane row before reconcile backfills its session)
+/// falls back to one `fno agents peek`, which reads the pane screen.
 fn peek_last_report(handle: &str) -> Result<String, String> {
-    let texts = crate::session_truth::tail_texts(handle, PEEK_RECORDS)?;
+    let texts = match crate::session_truth::tail_texts(handle, PEEK_RECORDS) {
+        Ok(texts) => texts,
+        Err(_) => peek_texts(handle)?,
+    };
     last_report(&texts)
         .ok_or_else(|| format!("no RESULT or help block in the last {PEEK_RECORDS} records"))
+}
+
+fn peek_texts(handle: &str) -> Result<Vec<String>, String> {
+    let n = PEEK_RECORDS.to_string();
+    let (code, out, err) =
+        crate::lead_checkin::fno_verb(&["agents", "peek", handle, "--json", "-n", &n])?;
+    if code != 0 {
+        let cause = crate::lead_checkin::stderr_cause(&err);
+        return Err(if cause == "no stderr" {
+            format!("peek exited {code}")
+        } else {
+            cause
+        });
+    }
+    Ok(out
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|rec| rec.get("text").and_then(Value::as_str).map(str::to_string))
+        .collect())
 }
 
 /// The last report in a record tail, newest record winning; inside one
