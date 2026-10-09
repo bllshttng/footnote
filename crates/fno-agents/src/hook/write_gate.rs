@@ -555,8 +555,14 @@ fn refuse_for(abs: &Path, roots: &[Root], state: &Root, session_id: &str) -> Opt
     for root in roots {
         let rp = root.physical.to_string_lossy();
         let rp = rp.trim_end_matches('/');
-        let top_level = phys == rp
-            || (phys.starts_with(&format!("{rp}/")) && !phys.starts_with(&format!("{rp}/*/")));
+        // Exactly one extra segment: the shell guard's `$phys/*` matched any
+        // depth (bash [[ == ]] stars cross slashes) and `$phys/*/*` then
+        // excluded two or more, so only DIRECT children count as top-level.
+        // A literal `"{rp}/*/"` prefix never matches a real path, so the
+        // exclusion must be a segment count, not a string compare.
+        let under = phys.strip_prefix(&format!("{rp}/"));
+        let top_level =
+            phys == rp || under.is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
         if top_level {
             if keeplisted(&name) {
                 return None;
@@ -579,10 +585,9 @@ fn refuse_for(abs: &Path, roots: &[Root], state: &Root, session_id: &str) -> Opt
             "{phys} is the fno state root itself; a copy there lands a new top-level file. State belongs in a named subfolder under it, or this session's job dir: {jd}."
         ));
     }
-    if phys.starts_with(&format!("{sp}/"))
-        && !phys.starts_with(&format!("{sp}/*/"))
-        && !abs.exists()
-    {
+    let under_state = phys.strip_prefix(&format!("{sp}/"));
+    let state_top_level = under_state.is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
+    if state_top_level && !abs.exists() {
         let jd = jobdir_for(&ambient_cfg(), session_id);
         return Some(format!(
             "{phys} would create a new top-level entry in the fno state root ({}). Nothing writes at the top level: put state in a named subfolder under it, or this session's job dir: {jd}.",
