@@ -610,12 +610,8 @@ mod tests {
 
     #[test]
     fn handoff_requires_an_explicit_new_person_name_before_any_transfer() {
-        let _env_lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let old_home = std::env::var("FNO_AGENTS_HOME").ok();
-        std::env::set_var("FNO_AGENTS_HOME", tmp.path());
+        let _home = crate::AgentsHomeEnvGuard::set(tmp.path());
         let mut payload = json!({"scope":"scope", "succession":true,
             "caller":{"kind":"agent", "name":"Jordan"},
             "rows":[{"name":"Jordan", "status":"live", "role_scope":"scope",
@@ -645,10 +641,6 @@ mod tests {
             store["teams"]["scope"]["pending_succession"]["successor_session"],
             "new-session"
         );
-        match old_home {
-            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
-            None => std::env::remove_var("FNO_AGENTS_HOME"),
-        }
     }
 
     fn row(name: &str, scope: &str, status: &str) -> Value {

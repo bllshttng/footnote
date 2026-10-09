@@ -158,44 +158,20 @@ fn settings_rows() {
         PopupRow::Entry { hint, .. } if hint == "session only"
     )));
 
-    // Keybindings: the prefix first, then every rebindable chord under its
-    // section, then the editor row and the file it opens.
+    // The Keys tab renders no rows of its own: switching to it opens the
+    // which-key table (one table, US1), so the tab is a bare launcher.
     let (rows, actions) = v.settings_rows_for(SettingsTab::Keys);
-    assert!(matches!(
-        &rows[0],
-        PopupRow::Entry { glyph, label, .. }
-            if *glyph == crate::keys::prefix_display() && label == "prefix"
-    ));
-    assert_eq!(actions[0], AuxAction::KeyCapture("prefix".into()));
-    for kb in crate::keys::editable_bindings() {
-        assert!(
-            actions.contains(&AuxAction::KeyCapture(kb.action.into())),
-            "{} has a row",
-            kb.action
-        );
-    }
-    for title in ["global", "navigation", "workspaces & tabs", "panes"] {
-        assert!(rows.contains(&PopupRow::Header(title.into())), "{title}");
-    }
-    assert!(rows.iter().any(
-        |r| matches!(r, PopupRow::Entry { glyph, label, .. } if glyph == "unbound" && label == "split up")
-    ));
-    assert_eq!(actions.last(), Some(&AuxAction::EditKeysFile));
-    let cwd = std::env::current_dir().unwrap();
-    let path = crate::digest_overlay::keys_file_path(&cwd);
-    assert!(rows.contains(&PopupRow::Info {
-        label: "file".into(),
-        value: path.display().to_string(),
-    }));
+    assert!(rows.is_empty() && actions.is_empty());
 }
 
 #[tokio::test]
 async fn settings_tabs_switch_by_tab_and_by_tap() {
     let mut v = settings_on(SettingsTab::General);
     let mut keys = Keys::new();
+    // The tab cycle skips the keybindings tab: it is a launcher, reached by
+    // click, never something to tab past.
     for want in [
         SettingsTab::Theme,
-        SettingsTab::Keys,
         SettingsTab::Colors,
         SettingsTab::General,
     ] {
@@ -214,8 +190,21 @@ async fn settings_tabs_switch_by_tab_and_by_tap() {
     keys.tap(&mut v, "colors").await;
     assert_eq!(v.settings_tab, SettingsTab::Colors);
     keys.tap(&mut v, "keybindings").await;
-    assert_eq!(v.settings_tab, SettingsTab::Keys);
-    assert!(v.aux.is_some(), "a tab tap keeps settings open");
+    // The keybindings tab opens the SAME table the menu's keybindings row
+    // opens: settings closes, the which-key modal takes over.
+    assert!(v.aux.is_none(), "settings hands off to the table");
+    let m = v.keys_modal.as_ref().expect("the which-key table opens");
+    // The prefix line leads and the editor button rides the table.
+    assert!(matches!(
+        m.popup.rows.first(),
+        Some(PopupRow::Entry { glyph, label, .. })
+            if *glyph == crate::keys::prefix_display() && label == "prefix"
+    ));
+    let edit = m.edit_row.expect("the table carries an editor button");
+    assert!(matches!(
+        &m.popup.rows[edit],
+        PopupRow::FullWidth(l) if l.starts_with("[ edit keys in ") && l.ends_with(" ]")
+    ));
 }
 
 #[tokio::test]
@@ -330,62 +319,4 @@ async fn lane_entry_buffer_dies_with_a_mouse_dismiss() {
         "the buffer died with the modal"
     );
     assert_eq!(v.lane.pick, Some(("route".into(), "zai".into())));
-}
-
-#[tokio::test]
-async fn key_capture_refuses_a_conflict_and_takes_a_free_key() {
-    let _config = IsolatedConfig::new();
-    let before = crate::keys::key_bindings()
-        .into_iter()
-        .map(|kb| (kb.action, kb.key))
-        .collect::<Vec<_>>();
-    let mut v = settings_on(SettingsTab::Keys);
-    let mut keys = Keys::new();
-    // The page is taller than the terminal: select the row, then Enter.
-    let modal = v.aux.as_mut().unwrap();
-    let detach = AuxAction::KeyCapture("detach".into());
-    let row = modal.actions.iter().position(|a| *a == detach).unwrap();
-    modal.popup.sel = row;
-    keys.send(&mut v, b"\r").await;
-    assert!(frame_text(&mut v)
-        .iter()
-        .any(|l| l.contains("press the new key for detach")));
-    // `c` is new tab: refused with the resolver's sentence, nothing moves.
-    // An arrow, CSI or SS3, is no key: dropped whole, the capture stays.
-    keys.send(&mut v, b"\x1b[A\x1bOA").await;
-    assert!(
-        v.key_capture.is_some(),
-        "an arrow neither binds nor cancels"
-    );
-    keys.send(&mut v, b"c").await;
-    assert!(
-        v.notice
-            .as_ref()
-            .is_some_and(|(n, _)| n.starts_with("config.mux.keys.detach: c would also be")),
-        "{:?}",
-        v.notice
-    );
-    assert!(v.key_capture.is_some(), "the capture stays open");
-    let now: Vec<_> = crate::keys::key_bindings()
-        .into_iter()
-        .map(|kb| (kb.action, kb.key))
-        .collect();
-    assert_eq!(now, before, "the live keymap is unchanged");
-    // A digit is refused the same way.
-    keys.send(&mut v, b"3").await;
-    assert!(v.notice.as_ref().is_some_and(|(n, _)| n.contains("1-9")));
-    // Its own shipped key is free: it takes, saves, and reads back. (A key
-    // that moves detach would change the process keymap other tests read.)
-    keys.send(&mut v, b"d").await;
-    assert!(v.key_capture.is_none(), "the capture closes");
-    assert_eq!(
-        v.aux.as_ref().unwrap().popup.sel,
-        row,
-        "the cursor returns to the edited row"
-    );
-    assert_eq!(crate::keys::key_for("detach").as_deref(), Some("d"));
-    assert_eq!(
-        v.notice.as_ref().map(|(n, _)| n.as_str()),
-        Some("detach: d")
-    );
 }

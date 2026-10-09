@@ -22,7 +22,7 @@ const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
 [--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
 [--font <family>] [--message <fmail-id>] \
-[--view bell|row-menu|tab-menu|sideline-menu]";
+[--view bell|row-menu|tab-menu|sideline-menu|composer]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
@@ -45,6 +45,9 @@ pub enum ViewKind {
     TabMenu,
     /// The sideline menu popup.
     SidelineMenu,
+    /// The new-agent composer sheet, with a seeded draft so the editor text
+    /// and the real terminal cursor's cell are in the picture.
+    Composer,
 }
 
 fn parse_view(v: &str) -> Option<ViewKind> {
@@ -53,6 +56,7 @@ fn parse_view(v: &str) -> Option<ViewKind> {
         "row-menu" => Some(ViewKind::RowMenu),
         "tab-menu" => Some(ViewKind::TabMenu),
         "sideline-menu" => Some(ViewKind::SidelineMenu),
+        "composer" => Some(ViewKind::Composer),
         _ => None,
     }
 }
@@ -125,7 +129,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
             "--view" => {
                 let v = value()?;
                 view = Some(parse_view(&v).ok_or_else(|| {
-                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, row-menu, tab-menu or sideline-menu")
+                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, row-menu, tab-menu, sideline-menu or composer")
                 })?)
             }
             tok @ ("--server" | "--session") => {
@@ -420,6 +424,13 @@ fn live_frame(
             view.open_tab_menu_by_id(tid, Anchor::Center);
         }
         Some(ViewKind::SidelineMenu) => view.open_sideline_menu(Anchor::Center),
+        Some(ViewKind::Composer) => {
+            super::agent_launcher::open(&mut view);
+            if let Some(l) = view.launcher.as_mut() {
+                l.draft.message = "fix the mux composer cursor and paste".to_string();
+                l.draft.cursor_chars = "fix the mux composer ".chars().count();
+            }
+        }
         None => {}
     }
     crate::lattice::freeze_spin();
@@ -537,13 +548,14 @@ mod tests {
             ("row-menu", ViewKind::RowMenu),
             ("tab-menu", ViewKind::TabMenu),
             ("sideline-menu", ViewKind::SidelineMenu),
+            ("composer", ViewKind::Composer),
         ] {
             let args = parse_extra(&["--view", name]).expect(name);
             assert_eq!(args.view, Some(kind), "{name}");
         }
         let e = parse_extra(&["--view", "feed"]).expect_err("unknown view names the options");
         assert!(
-            e.contains("bell, row-menu, tab-menu or sideline-menu"),
+            e.contains("bell, row-menu, tab-menu, sideline-menu or composer"),
             "{e}"
         );
     }

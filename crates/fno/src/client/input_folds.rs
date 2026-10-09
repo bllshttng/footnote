@@ -17,6 +17,10 @@ pub(super) enum ModalKey {
     Right,
     PageUp,
     PageDown,
+    /// A Shift+arrow (`ESC [ 1 ; 2 X`). Overlays that carry split cells
+    /// (the row menu) answer it; the rest swallow it, exactly as they
+    /// swallowed the sequence before it was folded.
+    ShiftArrow(crate::tree::Dir),
 }
 /// The ceiling on a partially-read escape sequence, shared by all four folds.
 /// A real CSI is far shorter, so this only ever fires on a pathological stream,
@@ -130,6 +134,29 @@ pub(super) fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> 
                 }
                 ([0x1b, b'[', b'1'], b'~') => {
                     out.push(ModalKey::Byte(b'g'));
+                    esc.clear();
+                    continue;
+                }
+                // Shift+arrows (`ESC [ 1 ; 2 A/B/C/D`): a distinct token, so
+                // the row menu's split cells can answer them without any
+                // overlay aliasing a modified arrow onto a plain one.
+                ([0x1b, b'[', b'1', b';', b'2'], b'A') => {
+                    out.push(ModalKey::ShiftArrow(crate::tree::Dir::Up));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'1', b';', b'2'], b'B') => {
+                    out.push(ModalKey::ShiftArrow(crate::tree::Dir::Down));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'1', b';', b'2'], b'C') => {
+                    out.push(ModalKey::ShiftArrow(crate::tree::Dir::Right));
+                    esc.clear();
+                    continue;
+                }
+                ([0x1b, b'[', b'1', b';', b'2'], b'D') => {
+                    out.push(ModalKey::ShiftArrow(crate::tree::Dir::Left));
                     esc.clear();
                     continue;
                 }
