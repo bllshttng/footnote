@@ -583,6 +583,12 @@ pub fn classify(args: &[OsString]) -> FrontDoor {
             },
         },
         Err(e) => {
+            // The root version spellings carry no subcommand (the version flag
+            // is disabled), so they arrive here as unknown args: answer them
+            // the way `fno version` answers, in this binary, without Python.
+            if args.len() == 1 && matches!(args[0].to_str(), Some("--version" | "-V")) {
+                return FrontDoor::Version { json: false };
+            }
             if !native_first(args) {
                 return FrontDoor::Forward;
             }
@@ -987,7 +993,6 @@ mod tests {
     fn forward_keeps_the_python_surface_byte_verbatim() {
         assert_eq!(classify(&os(&["backlog", "list"])), FrontDoor::Forward);
         assert_eq!(classify(&os(&["--help"])), FrontDoor::Forward);
-        assert_eq!(classify(&os(&["--version"])), FrontDoor::Forward);
         assert_eq!(classify(&os(&["--wat"])), FrontDoor::Forward);
         // A non-UTF-8 payload inside the forwarded tail must survive as raw
         // bytes, never a parse error.
@@ -1061,6 +1066,17 @@ mod tests {
             classify(&os(&["version", "--help"])),
             FrontDoor::Usage { .. }
         ));
+    }
+
+    #[test]
+    fn root_version_spellings_answer_without_python() {
+        assert_eq!(
+            classify(&os(&["--version"])),
+            FrontDoor::Version { json: false }
+        );
+        assert_eq!(classify(&os(&["-V"])), FrontDoor::Version { json: false });
+        // Anything past the flag is not the root spelling; it forwards.
+        assert_eq!(classify(&os(&["--version", "x"])), FrontDoor::Forward);
     }
 
     #[test]

@@ -171,6 +171,11 @@ enum Role {
     DoctorUpdate(Vec<OsString>),
     /// `fno agents history ... --graph ...`: the native session-card reader.
     AgentsHistory(Vec<OsString>),
+    /// `fno agents claim refresh|acquire|release ...` and
+    /// `fno agents truth ...`: the hot leaves exec the sibling binary
+    /// directly. The argv carries from the verb word on
+    /// (`claim refresh ...` / `truth ...`).
+    AgentsFront(Vec<OsString>),
     /// `fno agents transcript ...`: the native session-bundle transfer.
     AgentsTranscript(Vec<OsString>),
     /// `fno agents mail show ...`: the native one-message reader, lexically
@@ -241,6 +246,19 @@ fn mail_show_exec(rest: &[OsString]) -> i32 {
     }
 }
 
+/// The hot agents leaves exec the sibling directly: stdio inherited, the
+/// child's exit code returned. A sibling that cannot start is not a second
+/// refusal surface; the fall-through runs the Python forward, whose own
+/// answer names the install remedy.
+fn agents_front_exec(rest: &[OsString], full: &[OsString]) -> ! {
+    let mut cmd = std::process::Command::new(fno::digest_overlay::fno_agents_bin());
+    cmd.args(rest);
+    match cmd.status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(_) => bootstrap::forward(full),
+    }
+}
+
 /// Parse `serve` flags into [`fno::web::WebArgs`]. One of `--web`, `--stop`,
 /// `--status` is required; a missing flag value, an unknown flag, a non-UTF-8
 /// arg, or a bad `--port` is `None` (the caller maps that to `MuxUsage`, exit
@@ -302,6 +320,27 @@ fn classify_mail_show(args: &[OsString]) -> Option<Role> {
     }
 }
 
+/// The hot `agents` leaves claim themselves lexically, beside the mail
+/// reader: `claim refresh|acquire|release` and `truth` are the heartbeat
+/// surfaces whose per-call Python cold start the slowness law prices, so
+/// they exec the sibling binary directly. Every other `agents` word keeps
+/// forwarding, including `claim status`, whose native JSON is not yet proven
+/// equal to the Python answer.
+fn classify_agents_front(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.first().and_then(|a| a.to_str()) != Some("agents") {
+        return None;
+    }
+    let hot = match args.get(1)?.to_str()? {
+        "truth" => true,
+        "claim" => matches!(
+            args.get(2).and_then(|a| a.to_str()),
+            Some("refresh" | "acquire" | "release")
+        ),
+        _ => false,
+    };
+    hot.then(|| args[1..].to_vec())
+}
+
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     #[cfg(not(test))]
     fno::doctor_cost::default_report(args);
@@ -332,6 +371,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(role) = classify_mail_show(args) {
         return role;
+    }
+    if let Some(rest) = classify_agents_front(args) {
+        return Role::AgentsFront(rest);
     }
     // The `fno agents org` group claims itself lexically, beside
     // agents_history: the people spelling of the role verbs rewrites to the
@@ -568,6 +610,7 @@ fn main() {
         Role::PathsCli(rest) => std::process::exit(fno::paths_route::run(&rest)),
         Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
+        Role::AgentsFront(rest) => agents_front_exec(&rest, &args),
         Role::AgentsTranscript(rest) => std::process::exit(fno::transcript_transfer::run(&rest)),
         Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),
         Role::MailViewRenamed => {
@@ -722,6 +765,32 @@ mod tests {
             decide_role(&os(&["agents", "history", "--help"]), false),
             Role::Forward
         );
+        // The hot agents leaves exec the sibling directly; the argv carries
+        // from the verb word on.
+        assert_eq!(
+            decide_role(&os(&["agents", "truth", "h", "--json"]), false),
+            Role::AgentsFront(os(&["truth", "h", "--json"]))
+        );
+        assert_eq!(
+            decide_role(
+                &os(&["agents", "claim", "refresh", "node:x", "--holder", "h", "--json"]),
+                false
+            ),
+            Role::AgentsFront(os(&[
+                "claim", "refresh", "node:x", "--holder", "h", "--json"
+            ]))
+        );
+        // `claim status` stays on the Python surface until its native JSON is
+        // proven equal, and every other agents verb keeps forwarding.
+        assert_eq!(
+            decide_role(&os(&["agents", "claim", "status", "--json"]), false),
+            Role::Forward
+        );
+        assert_eq!(
+            decide_role(&os(&["agents", "claim", "birth"]), false),
+            Role::Forward
+        );
+        assert_eq!(decide_role(&os(&["agents", "list"]), false), Role::Forward);
         // The mail reader claims its verb and refuses the renamed one by
         // name; the send verb still forwards to Python.
         assert_eq!(
