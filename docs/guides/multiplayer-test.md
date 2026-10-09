@@ -54,7 +54,25 @@ Turn off Wi-Fi on machine B during a run. Expected:
 
 Keep B offline past 10 minutes, then take one of B's nodes on A. Bring B back. Expected: B's daemon writes a `claim_lost` event, and B's worker ends at its next stop with `claim lost:` and the taker's name.
 
-## 5. Roll back
+## 5. Share the backlog on rehearsal homes
+
+Run this step only on the per-machine temp homes from step 2, never on `~/.fno`. Copy the real store into home A so the test has real rows:
+
+```bash
+cp ~/.fno/db/graph.db "$HOME_A/.fno/db/graph.db"
+```
+
+Add `share_backlog = true` under `[store]` in both homes' config. Then, with home A's environment:
+
+```bash
+fno agents claim backlog seed
+```
+
+The receipt names each table and its row count. With home B's environment, run `fno agents claim backlog sync`. Expected: `snapshot: true`, and `fno backlog get <id>` on B prints the node A holds.
+
+File a node on A, run the sync on B, and read it on B. Then change one node's title on A, and change the same node on B before B syncs. Expected: B's write refuses, names the `nodes` row, and leaves B's row as it was. After the next sync, B shows A's title.
+
+## 6. Roll back
 
 Remove the `[store]` table on both machines, and restart each daemon. Then copy the primary into a local file:
 
