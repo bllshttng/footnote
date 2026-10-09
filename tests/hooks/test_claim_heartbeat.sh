@@ -41,6 +41,7 @@ setup_env() {
   mkdir -p "${CWD}/.fno"
   git init -q "$CWD"
   LIVE_DIR="$(git -C "$CWD" rev-parse --absolute-git-dir)/fno/live"
+  HANDOVER_STAMP="${LIVE_DIR%/live}/claim-handover-heartbeat.stamp"
   CALLLOG="${TMP_DIR}/fno-calls.log"
   : > "$CALLLOG"
 
@@ -508,7 +509,7 @@ export STUB_HOLDER="spawn-handover:some-other-worker"
 run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
 if grep -q "claim refresh" "$CALLLOG"; then
   fail "T22 pre-init handover refreshed another holder"
-elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+elif [[ ! -f "$HANDOVER_STAMP" ]]; then
   fail "T22 verified foreign holder did not throttle the positive no-op"
 else
   pass "T22 pre-init handover mismatch does not acquire or steal and throttles"
@@ -591,7 +592,7 @@ export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="stale"
 run_hook_sid "owner" >/dev/null 2>&1
 if grep -q "claim refresh" "$CALLLOG"; then
   fail "T28 stale exact-holder claim refreshed"
-elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+elif [[ ! -f "$HANDOVER_STAMP" ]]; then
   fail "T28 verified stale state did not throttle its positive no-op"
 else
   pass "T28 non-live exact holder never refreshes"
@@ -607,7 +608,7 @@ export STUB_STATUS_JSON='{"holder":"spawn-handover:build-x-a166"}'
 err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
 if grep -q "claim refresh" "$CALLLOG"; then
   fail "T29 status without a live state refreshed"
-elif [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+elif [[ -f "$HANDOVER_STAMP" ]]; then
   fail "T29 malformed status incorrectly throttled the retry"
 elif [[ "$err" != *"status unreadable"* ]]; then
   fail "T29 malformed status emitted no diagnostic: [$err]"
@@ -623,7 +624,7 @@ rm -f "${CWD}/.fno/target-state.md"
 export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
 export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="live" STUB_REFRESH_RC=1
 err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
-if [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+if [[ -f "$HANDOVER_STAMP" ]]; then
   fail "T30 failed refresh incorrectly throttled the retry"
 elif [[ "$err" != *"refresh failed"* ]]; then
   fail "T30 failed refresh emitted no diagnostic: [$err]"
@@ -712,7 +713,7 @@ export STUB_STATUS_JSON='{"key":"node:x-a166","state":"free"}'
 run_hook_sid "owner" >/dev/null 2>&1
 if grep -q "claim refresh" "$CALLLOG"; then
   fail "T35 missing claim was refreshed"
-elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+elif [[ ! -f "$HANDOVER_STAMP" ]]; then
   fail "T35 positive free result was not throttled"
 else
   pass "T35 missing claim never refreshes and throttles the positive no-op"
@@ -782,7 +783,7 @@ export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
 export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="suspect"
 export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=100 STUB_STATE_AFTER="stale"
 err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
-if [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+if [[ -f "$HANDOVER_STAMP" ]]; then
   fail "T40 unconfirmed exit-zero refresh incorrectly throttled later repair"
 elif [[ "$err" != *"ownership-lost/refresh-not-confirmed"* ]]; then
   fail "T40 unconfirmed refresh emitted no ownership diagnostic: [$err]"
@@ -895,19 +896,6 @@ else
 fi
 teardown_env
 
-# ── T48: any outcome ledger still throttles the next window ────────────────
-setup_env
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
-run_hook >/dev/null 2>&1
-: > "$CALLLOG"
-run_hook >/dev/null 2>&1
-if [[ ! -s "$CALLLOG" ]]; then
-  pass "T48 a written ledger throttles the next window like the touch did"
-else
-  fail "T48 ledger cycle did not throttle: $(cat "$CALLLOG")"
-fi
-teardown_env
-
 # ── T49: non-JSON status output is status_unreadable, never no_claim ───────
 setup_env
 export STUB_STATUS_JSON='Traceback (most recent call last): boom'
@@ -971,15 +959,18 @@ setup_env
 SHARED_DIR="${TMP_DIR}/shared"
 mkdir -p "$SHARED_DIR"
 mv "${CWD}/.fno/target-state.md" "${SHARED_DIR}/target-state.md"
+# A linked worktree has no checkout-local .fno at all.
+rm -rf "${CWD}/.fno"
 export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
 export STUB_STATE_PATH="${SHARED_DIR}/target-state.md"
 export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=200
 run_hook >/dev/null 2>&1
-stamp="${CWD}/.fno/.claim-heartbeat.stamp"
-if grep -q "claim refresh node:x-a166 --holder target-session:20260707T203700Z-cl55246-f3fe72 --ttl 2h" "$CALLLOG" \
+run_hook >/dev/null 2>&1
+stamp="${SHARED_DIR}/.claim-heartbeat.stamp"
+if [[ "$(grep -c "claim refresh node:x-a166 --holder target-session:20260707T203700Z-cl55246-f3fe72 --ttl 2h" "$CALLLOG")" -eq 1 ]] \
       && [[ -f "$stamp" ]] && grep -q '^outcome=renewed$' "$stamp" \
       && grep -q '^expires_at=200$' "$stamp"; then
-  pass "T53 state-path-resolved shared manifest renews the claim"
+  pass "T53 shared manifest renews once, ledger beside it throttles the next call"
 else
   fail "T53 shared-space renewal wrong: calls=$(cat "$CALLLOG") ledger=$(cat "$stamp" 2>/dev/null || echo missing)"
 fi

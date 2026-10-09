@@ -74,7 +74,9 @@ pub(super) fn read_prior_fires(
 
     let mut total: u64 = 0;
 
-    for line in content.lines() {
+    // Every session's loop_check rows arrive here; a line that does not name
+    // this session is skipped before the JSON parse, which is the cost.
+    for line in content.lines().filter(|l| l.contains(session_id)) {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -95,7 +97,7 @@ pub(super) fn read_prior_fires(
     let mut last_fp: Option<String> = None;
     let mut next_ts = now;
     let mut oldest_counted_ts: Option<DateTime<Utc>> = None;
-    for line in content.lines().rev() {
+    for line in content.lines().rev().filter(|l| l.contains(session_id)) {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -171,7 +173,7 @@ pub(super) fn read_last_row_fields(rows: Option<&str>, session_id: &str) -> (Str
     let Some(content) = rows else {
         return ("none".to_string(), "none".to_string());
     };
-    for line in content.lines().rev() {
+    for line in content.lines().rev().filter(|l| l.contains(session_id)) {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
         };

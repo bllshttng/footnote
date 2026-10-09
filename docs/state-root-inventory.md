@@ -267,6 +267,7 @@ The deleter: a whole space (or a `<space>/worktrees/<name>` slice) whose source 
 | `<space>/scratchpad-adjacent diagnostics`: `loop-check.stderr.log`, `finalize.stderr.log`, `.loop-check-unavail-*`, `.lead-resolve-unavail-*`, `.think-offer-cursor` | `hooks/target-stop-hook.sh`, `hooks/footnote-agy-target-stop-hook.sh`, `hooks/born-with-why-offer-inject.sh` | bounded retries/diagnostics; counters self-heal on the first clean decision |
 | `<space>/worktrees/<name>/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
 | `<space>/worktrees/<name>/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per worktree; retained as the lifecycle fold and deleted with a disposable worktree |
+| `<space>/worktrees/<name>/.claim-heartbeat.stamp` | `hooks/claim-heartbeat.sh` | one key=value outcome ledger, replaced each renewal window; its mtime is the 20-minute throttle |
 | `<space>/worktrees/<name>/codemap.md` | `fno doctor codemap` | regenerated |
 | `<space>/worktrees/<name>/scratchpad/` | `/target` sessions, per the manifest's `scratchpad_path` | live session scratch; archived at session end |
 

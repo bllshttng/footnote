@@ -127,17 +127,26 @@ CWD=""
 CUR_CLAUDE_SID=""
 CUR_CODEX_THREAD_ID="${CODEX_THREAD_ID:-}"
 HOOK_SESSION_ID=""
+TOOL_NAME=""
+TOOL_COMMAND=""
 IS_CODEX_HOOK=0
 _ENV_CODEX_COMPACT="${CUR_CODEX_THREAD_ID//[[:space:]]/}"
 if [[ "${FNO_PLATFORM:-}" == "codex" || -n "${CODEX_PLUGIN_ROOT:-}" \
       || -n "$_ENV_CODEX_COMPACT" ]]; then
   IS_CODEX_HOOK=1
 fi
+# One jq fork for the three scalar fields: this hook fires on every tool call,
+# and under fleet load each fork costs tens to hundreds of milliseconds. The
+# unit separator is not IFS whitespace, so an empty field keeps its position.
 if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
-  CWD="$(printf '%s' "$STDIN" | jq -r '.cwd // empty' 2>/dev/null)"
-  HOOK_SESSION_ID="$(printf '%s' "$STDIN" \
-    | jq -r 'if (.session_id? | type) == "string" then .session_id else empty end' \
-      2>/dev/null)"
+  IFS=$'\x1f' read -r CWD HOOK_SESSION_ID TOOL_NAME < <(printf '%s' "$STDIN" | jq -r '
+    [ (.cwd // "" | tostring),
+      (if (.session_id? | type) == "string" then .session_id else "" end),
+      (.tool_name // "" | tostring) ] | join("\u001f")' 2>/dev/null)
+  if [[ "$TOOL_NAME" =~ ^(Bash|Shell|exec_command)$ ]]; then
+    TOOL_COMMAND="$(printf '%s' "$STDIN" \
+      | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null)"
+  fi
 fi
 if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
   [[ -n "$_ENV_CODEX_COMPACT" ]] || CUR_CODEX_THREAD_ID="$HOOK_SESSION_ID"
@@ -166,13 +175,6 @@ fi
 # its successful URL. Bind only one unambiguous GitHub PR URL; the binder then
 # verifies the current branch names exactly one real graph node. Every refusal
 # is non-fatal and leaves the graph unchanged.
-TOOL_NAME=""
-TOOL_COMMAND=""
-if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
-  TOOL_NAME="$(printf '%s' "$STDIN" | jq -r '.tool_name // empty' 2>/dev/null)"
-  TOOL_COMMAND="$(printf '%s' "$STDIN" \
-    | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null)"
-fi
 if [[ "$TOOL_NAME" =~ ^(Bash|Shell|exec_command)$ \
       && "$TOOL_COMMAND" == *gh* && "$TOOL_COMMAND" == *pr* \
       && "$TOOL_COMMAND" == *create* ]]; then
@@ -292,7 +294,14 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       && [[ -n "$AGENTS_BIN" ]] \
       && [[ -z "$_handover_repo_fno_phys" \
             || "$_handover_repo_fno_phys" != "$_handover_state_phys" ]]; then
+  # A linked worktree has no $CWD/.fno, and a stamp that cannot be written
+  # never throttles: every tool call then paid a native status read. The git
+  # dir's fno/ folder is per physical worktree and already holds live stamps.
   _HANDOVER_STAMP="$CWD/.fno/.claim-handover-heartbeat.stamp"
+  if [[ -n "$LIVE_DIR" ]]; then
+    _HANDOVER_STAMP="${LIVE_DIR%/live}/claim-handover-heartbeat.stamp"
+    mkdir -p "${_HANDOVER_STAMP%/*}" 2>/dev/null || true
+  fi
   _HANDOVER_THROTTLE="${FNO_CLAIM_HANDOVER_HEARTBEAT_THROTTLE:-300}"
   _handover_due=1
   if [[ -f "$_HANDOVER_STAMP" ]]; then
@@ -424,8 +433,11 @@ if [[ -z "$LEDGER_SID" || "$LEDGER_SID" == "$CLAIM_HOLDER" || "$LEDGER_SID" == "
 fi
 [[ -n "$LEDGER_SID" && "$LEDGER_SID" != "null" ]] || LEDGER_SID="$SESSION_ID"
 
-# Throttle: skip when the stamp is younger than THROTTLE seconds.
-STAMP="$CWD/.fno/.claim-heartbeat.stamp"
+# Throttle: skip when the stamp is younger than THROTTLE seconds. The stamp
+# sits beside the resolved manifest, not under $CWD/.fno: a linked worktree has
+# no such dir, so the write failed, the throttle never engaged, and every tool
+# call paid the full status + refresh + status round (p50 11 s under load).
+STAMP="${MANIFEST%/*}/.claim-heartbeat.stamp"
 if [[ -f "$STAMP" ]]; then
   now="$(date +%s 2>/dev/null || echo 0)"
   mtime="$(stat -c %Y "$STAMP" 2>/dev/null || stat -f %m "$STAMP" 2>/dev/null || echo 0)"
