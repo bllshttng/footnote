@@ -168,16 +168,25 @@ fn settings_rows() {
 async fn settings_tabs_switch_by_tab_and_by_tap() {
     let mut v = settings_on(SettingsTab::General);
     let mut keys = Keys::new();
-    // The tab cycle skips the keybindings tab: it is a launcher, reached by
-    // click, never something to tab past.
-    for want in [
+    // The tab cycle walks the header order: general, theme, keybindings,
+    // colors. Keybindings is a launcher - landing on it opens the which-key
+    // table, and esc returns to the settings modal on the section the user
+    // came from.
+    keys.send(&mut v, b"\t").await;
+    assert_eq!(v.settings_tab, SettingsTab::Theme);
+    keys.send(&mut v, b"\t").await;
+    assert!(v.aux.is_none(), "settings hands off to the table");
+    assert!(
+        v.keys_modal.is_some(),
+        "the launcher opens the which-key table"
+    );
+    keys.send(&mut v, b"\x1b").await;
+    assert!(v.aux.is_some(), "esc returns to settings");
+    assert_eq!(
+        v.settings_tab,
         SettingsTab::Theme,
-        SettingsTab::Colors,
-        SettingsTab::General,
-    ] {
-        keys.send(&mut v, b"\t").await;
-        assert_eq!(v.settings_tab, want);
-    }
+        "back on the section the user came from"
+    );
     // A hover over a tab label moves no row selection.
     let sel = v.aux.as_ref().unwrap().popup.sel;
     let (row, col) = aux_cell(&v, "colors");
