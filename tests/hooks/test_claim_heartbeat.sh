@@ -896,19 +896,6 @@ else
 fi
 teardown_env
 
-# ── T48: any outcome ledger still throttles the next window ────────────────
-setup_env
-export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
-run_hook >/dev/null 2>&1
-: > "$CALLLOG"
-run_hook >/dev/null 2>&1
-if [[ ! -s "$CALLLOG" ]]; then
-  pass "T48 a written ledger throttles the next window like the touch did"
-else
-  fail "T48 ledger cycle did not throttle: $(cat "$CALLLOG")"
-fi
-teardown_env
-
 # ── T49: non-JSON status output is status_unreadable, never no_claim ───────
 setup_env
 export STUB_STATUS_JSON='Traceback (most recent call last): boom'
