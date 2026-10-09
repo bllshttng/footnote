@@ -1625,7 +1625,13 @@ pub(crate) struct LeadFireHistory {
 ///    outlive the only action a lead has for them, and a reset-on-repeat
 ///    counter would never converge.
 pub(crate) fn lead_fire_history(events_path: &Path, session_id: &str) -> LeadFireHistory {
-    let content = crate::event_store::journal_text(events_path, &[]);
+    // Every lead Stop runs this. Reading all rows of every type and parsing
+    // each one cost most of a multi-second Stop on a busy journal, so the
+    // store filters by type and a line without the session id is never parsed.
+    let content = crate::event_store::journal_text(
+        events_path,
+        &["lead_action", "termination", "lead_loop_check"],
+    );
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total: u64 = 0;
     let mut dry: u64 = 0;
@@ -1633,6 +1639,9 @@ pub(crate) fn lead_fire_history(events_path: &Path, session_id: &str) -> LeadFir
     let mut last_undelivered: Option<i64> = None;
     let mut last_terminal: Option<(String, String)> = None;
     for line in content.lines() {
+        if !line.contains(session_id) {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
