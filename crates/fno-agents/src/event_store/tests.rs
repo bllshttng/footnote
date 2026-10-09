@@ -383,6 +383,10 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
 fn prune_expires_telemetry_including_rows_stored_as_durable() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
+    let guard = |name: &str, decision: &str| {
+        json!({"ts": fresh_ts(), "type": "guard_decision", "source": "hook",
+               "data": {"guard": name, "decision": decision, "tool": "Bash"}})
+    };
     let tick = |ts: String, arm: &str| {
         json!({"ts": ts, "type": "control_plane_tick", "source": "daemon",
                "data": {"arm": arm, "scheduler": "daemon", "acted": 0, "interval_s": 30}})
@@ -394,6 +398,8 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
             tick(fresh_ts(), "legacy"),
             tick(fresh_ts(), "fresh"),
             checkin("2026-05-01T08:00:00Z", "x-aaaa", "ancient durable"),
+            guard("graph-write-protect", "allow"),
+            guard("pipe-guard", "block"),
         ],
     );
     let store = sync(&live).unwrap().store;
@@ -412,6 +418,13 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
             params![eight_days_ago],
         )
         .unwrap();
+    // Two days old: past the allow horizon, inside the block one.
+    writable
+        .execute(
+            "UPDATE events SET ts_ms = ?1 WHERE type = 'guard_decision'",
+            params![chrono::Utc::now().timestamp_millis() - 2 * DAY_MS],
+        )
+        .unwrap();
     writable
         .execute(
             "DELETE FROM events_meta WHERE key = 'telemetry_pruned_ms'",
@@ -426,6 +439,15 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
         "the legacy tick left"
     );
     assert_eq!(count_type(&store, "lead_checkin"), 1, "durable rows stay");
+    let guards: Vec<String> = open_read(&store)
+        .unwrap()
+        .prepare("SELECT json_extract(line, '$.data.decision') FROM events WHERE type = 'guard_decision'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(guards, ["block"], "a day-old allow row left; the block row stays");
     let backlog: String = open_read(&store)
         .unwrap()
         .query_row(

@@ -87,6 +87,11 @@ pub const MINIMUM_EPHEMERAL_TTL_HOURS: i64 = 672;
 /// `retention.telemetry_ttl_hours`).
 pub const TELEMETRY_TTL_HOURS: i64 = 168;
 
+/// Retention horizon for `guard_decision` allow rows. They only prove a
+/// guard still runs, so a day of them is enough; block rows keep the
+/// telemetry horizon.
+pub const GUARD_ALLOW_TTL_HOURS: i64 = 24;
+
 /// Marks a judged refusal inside `append_envelope`'s error string. The
 /// door strips it and answers exit 3, the class Python maps to
 /// `ValidationError`; every other error stays a store fault on exit 1.
@@ -1107,35 +1112,45 @@ fn prune_telemetry_due(conn: &mut Connection, now_ms: i64) -> Result<(), String>
     stamp_meta(&tx, TELEMETRY_PRUNED_KEY, now_ms)?;
     stamp_meta(&tx, TELEMETRY_BACKLOG_KEY, 1)?;
     tx.commit().map_err(|e| e.to_string())?;
-    let cutoff = now_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
-    if prune_telemetry(conn, cutoff, TELEMETRY_PRUNE_BUDGET)? {
+    if prune_telemetry(conn, now_ms, TELEMETRY_PRUNE_BUDGET)? {
         stamp_meta(conn, TELEMETRY_BACKLOG_KEY, 0)?;
     }
     Ok(())
 }
 
-/// Delete telemetry rows older than `cutoff_ms`, oldest first within each
+/// Delete telemetry rows past their horizon, oldest first within each
 /// kind, until none are left (`true`) or `budget` is spent (`false`). The
 /// match is by kind, not class: rows stored before their kind joined the
-/// class still read `durable`. Rejected rows stay.
+/// class still read `durable`. Rejected rows stay. `guard_decision` allow
+/// rows then go on their shorter [`GUARD_ALLOW_TTL_HOURS`] horizon.
 fn prune_telemetry(
     conn: &Connection,
-    cutoff_ms: i64,
+    now_ms: i64,
     budget: std::time::Duration,
 ) -> Result<bool, String> {
     let started = std::time::Instant::now();
-    for kind in TELEMETRY_EVENT_TYPES {
+    let cutoff = now_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
+    let allow_cutoff = now_ms.saturating_sub(GUARD_ALLOW_TTL_HOURS * HOUR_MS);
+    let passes = TELEMETRY_EVENT_TYPES
+        .iter()
+        .map(|kind| (*kind, cutoff, ""))
+        .chain(std::iter::once((
+            "guard_decision",
+            allow_cutoff,
+            " AND json_extract(line, '$.data.decision') = 'allow'",
+        )));
+    for (kind, cutoff_ms, filter) in passes {
+        let sql = format!(
+            "DELETE FROM events WHERE seq IN (SELECT seq FROM events \
+             WHERE type = ?1 AND ts_ms < ?2 AND reject_reason IS NULL{filter} \
+             ORDER BY ts_ms LIMIT ?3)"
+        );
         loop {
             if started.elapsed() >= budget {
                 return Ok(false);
             }
             let deleted = conn
-                .execute(
-                    "DELETE FROM events WHERE seq IN (SELECT seq FROM events \
-                     WHERE type = ?1 AND ts_ms < ?2 AND reject_reason IS NULL \
-                     ORDER BY ts_ms LIMIT ?3)",
-                    params![kind, cutoff_ms, TELEMETRY_PRUNE_BATCH],
-                )
+                .execute(&sql, params![kind, cutoff_ms, TELEMETRY_PRUNE_BATCH])
                 .map_err(|e| e.to_string())?;
             if (deleted as i64) < TELEMETRY_PRUNE_BATCH {
                 break;
@@ -1833,13 +1848,17 @@ pub fn coverage(journal: &Path, since_ms: Option<i64>, types: &[String]) -> Cove
     // back to the last prune's cutoff for its class. A mixed list takes the
     // later start.
     let ephemeral_cutoff = last_prune_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
-    let telemetry_cutoff =
-        meta_ms(&conn, TELEMETRY_PRUNED_KEY).saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
+    let telemetry_pruned_ms = meta_ms(&conn, TELEMETRY_PRUNED_KEY);
+    let telemetry_cutoff = telemetry_pruned_ms.saturating_sub(TELEMETRY_TTL_HOURS * HOUR_MS);
+    let guard_cutoff = telemetry_pruned_ms.saturating_sub(GUARD_ALLOW_TTL_HOURS * HOUR_MS);
     let proven_start = types
         .iter()
         .map(|t| {
             if is_ephemeral_event(t) {
                 epoch.max(ephemeral_cutoff)
+            } else if t.as_str() == "guard_decision" {
+                // Its allow rows only prove back one day.
+                epoch.max(guard_cutoff)
             } else if is_telemetry_event(t) {
                 epoch.max(telemetry_cutoff)
             } else {

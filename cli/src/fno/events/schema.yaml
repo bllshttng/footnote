@@ -4120,7 +4120,7 @@ event_types:
 
   - name: guard_decision
     retention: telemetry
-    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Healthy allow polls for the same (guard, tool) subject coalesce inside a heartbeat window at the event store: a summary row then carries occurrence_count and the window bounds, while every block and unknown-decision shape still emits one row each."
+    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Healthy allow polls for the same (guard, tool) subject coalesce inside a heartbeat window at the event store: a summary row then carries occurrence_count and the window bounds, while every block and unknown-decision shape still emits one row each. Allow rows expire after 24 hours, block rows after the telemetry horizon."
     sources: [hook]
     data:
       required: [guard, decision, tool]
