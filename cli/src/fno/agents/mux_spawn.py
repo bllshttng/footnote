@@ -926,7 +926,12 @@ def _codex_cli_version() -> Optional[tuple]:
     process so a version check never costs more than one subprocess call no
     matter how many panes this process spawns. None on any miss (missing
     binary, timeout, unparseable output) - treated as "assume incompatible"
-    by every caller, never as "assume compatible"."""
+    by every caller, never as "assume compatible". ``FNO_CODEX_VERSION`` pins
+    the answer; the Rust twin reads the same key."""
+    pinned = os.environ.get("FNO_CODEX_VERSION")
+    if pinned is not None:
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", pinned)
+        return tuple(int(part) for part in found.groups()) if found else None
     try:
         proc = subprocess.run(
             ["codex", "--version"], capture_output=True, text=True, timeout=5

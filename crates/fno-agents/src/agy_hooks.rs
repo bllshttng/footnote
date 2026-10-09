@@ -83,42 +83,73 @@ fn group_has_handler(list: Option<&Value>, command: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A handler whose absolute script path no longer exists (an archived
-/// worktree, a renamed adapter). agy runs it on every event and it fails.
+/// A handler whose absolute script no longer exists (an archived worktree, a
+/// renamed adapter); agy runs it on every event and it fails. Install writes
+/// the bare path unquoted, so the whole command is checked before its first
+/// token: a path with a space is one script, not a script plus arguments.
 fn is_dead(handler: &Value) -> bool {
+    let Some(command) = handler.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    let whole = Path::new(command.trim());
+    let first = command.split_whitespace().next().map(Path::new);
+    whole.is_absolute() && !whole.exists() && !first.is_some_and(Path::exists)
+}
+
+/// Another copy of `script`: same file name, different path. A footnote
+/// handler left by an older checkout is replaced, never run beside the new
+/// one.
+fn other_copy_of(handler: &Value, script: &Path) -> bool {
     handler
         .get("command")
         .and_then(Value::as_str)
-        .and_then(|c| c.split_whitespace().next())
-        .map(Path::new)
-        .is_some_and(|p| p.is_absolute() && !p.exists())
+        .is_some_and(|c| {
+            let path = Path::new(c.trim());
+            path != script && path.file_name().is_some() && path.file_name() == script.file_name()
+        })
 }
 
-/// Count, and with `prune` remove, dead handlers across every event list in
-/// the footnote namespace: flat entries and grouped `hooks` lists alike. A
-/// group emptied by the prune goes too. Only footnote's own namespace is
-/// read here; foreign namespaces stay untouched even when dead.
-fn dead_handlers(fn_map: &mut Map<String, Value>, prune: bool) -> usize {
-    let mut dead = 0;
+/// Every handler in one event list, flat or grouped under `hooks`.
+fn handlers(list: &[Value]) -> Vec<&Value> {
+    list.iter()
+        .flat_map(|entry| match entry.get("hooks").and_then(Value::as_array) {
+            Some(hooks) => hooks.iter().collect(),
+            None => vec![entry],
+        })
+        .collect()
+}
+
+/// Dead handlers across the footnote namespace. Only footnote's own
+/// namespace is read here; foreign namespaces stay untouched even when dead.
+fn count_dead(fn_map: &Map<String, Value>) -> usize {
+    fn_map
+        .values()
+        .filter_map(Value::as_array)
+        .map(|list| handlers(list).into_iter().filter(|h| is_dead(h)).count())
+        .sum()
+}
+
+/// Remove the handlers `gone` selects from every footnote event list. A group
+/// this removal empties goes too; a group that was already empty stays.
+/// Returns how many handlers went.
+fn remove_handlers(fn_map: &mut Map<String, Value>, gone: impl Fn(&Value) -> bool) -> usize {
+    let mut removed = 0;
     for list in fn_map.values_mut().filter_map(Value::as_array_mut) {
-        for entry in list.iter_mut() {
-            if let Some(hooks) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
-                dead += hooks.iter().filter(|h| is_dead(h)).count();
-                if prune {
-                    hooks.retain(|h| !is_dead(h));
-                }
-            } else if is_dead(entry) {
-                dead += 1;
+        list.retain_mut(|entry| match entry.get_mut("hooks").and_then(Value::as_array_mut) {
+            Some(hooks) => {
+                let before = hooks.len();
+                hooks.retain(|h| !gone(h));
+                removed += before - hooks.len();
+                before == hooks.len() || !hooks.is_empty()
             }
-        }
-        if prune {
-            list.retain(|entry| match entry.get("hooks").and_then(Value::as_array) {
-                Some(hooks) => !hooks.is_empty(),
-                None => !is_dead(entry),
-            });
-        }
+            None => {
+                let drop = gone(entry);
+                removed += usize::from(drop);
+                !drop
+            }
+        });
     }
-    dead
+    removed
 }
 
 /// The footnote namespace as an object, or a word for why not.
@@ -219,7 +250,7 @@ pub fn status(
     s.footnote = footnote_word.to_string();
     if let Some(fn_map) = fn_map {
         s.enabled = !matches!(fn_map.get("enabled"), Some(Value::Bool(false)));
-        s.dead = dead_handlers(&mut fn_map.clone(), false);
+        s.dead = count_dead(fn_map);
     }
     s.stop = match (adapter, fn_map) {
         (None, _) => "unverifiable",
@@ -310,7 +341,18 @@ pub fn install(
         }
     };
     let enabled = !matches!(fn_map.get("enabled"), Some(Value::Bool(false)));
-    let pruned = dead_handlers(fn_map, true);
+    // The session-state reporter ships beside the stop adapter in the same
+    // plugin stage; when the sibling exists on disk, register it under
+    // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
+    // event's decision contract). Append-once like the team.
+    let report = adapter
+        .parent()
+        .map(|dir| dir.join("agy-session-report.sh"))
+        .filter(|path| path.is_file());
+    let mut pruned = remove_handlers(fn_map, is_dead);
+    for script in [team, guard, report.as_deref()].into_iter().flatten() {
+        pruned += remove_handlers(fn_map, |h| other_copy_of(h, script));
+    }
     fn_map.insert(
         "Stop".to_string(),
         json!([{"type": "command", "command": adapter.display().to_string(), "timeout": 60}]),
@@ -367,14 +409,6 @@ pub fn install(
             }));
         }
     }
-    // The session-state reporter ships beside the stop adapter in the same
-    // plugin stage; when the sibling exists on disk, register it under
-    // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
-    // event's decision contract). Append-once like the team.
-    let report = adapter
-        .parent()
-        .map(|dir| dir.join("agy-session-report.sh"))
-        .filter(|path| path.is_file());
     if let Some(report) = report {
         match fn_map.get("PreInvocation") {
             Some(Value::Array(_)) => {}
@@ -429,7 +463,7 @@ pub fn install(
         .map_err(|e| format!("{}: could not replace: {e}", hooks_file.display()))?;
     let mut note = format!("Stop hook -> {}", hooks_file.display());
     if pruned > 0 {
-        note.push_str(&format!("; pruned {pruned} dead footnote handler(s)"));
+        note.push_str(&format!("; pruned {pruned} dead or superseded footnote handler(s)"));
     }
     if !enabled {
         note.push_str(
@@ -591,17 +625,20 @@ mod tests {
     }
 
     /// A footnote handler whose script is gone (an archived worktree) blocks
-    /// `installed`, and the next install drops it while keeping live
-    /// handlers and a dead foreign one.
+    /// `installed`, and the next install drops it and replaces a live copy of
+    /// the same script from an older checkout. Live handlers on a path with a
+    /// space survive, and so does a dead foreign one.
     #[test]
     fn dead_footnote_handlers_block_installed_and_are_pruned() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hooks.json");
-        let hooks = dir.path().join("hooks");
+        let hooks = dir.path().join("Jane Doe/hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let adapter = hooks.join("footnote-agy-target-stop-hook.sh");
         let team = hooks.join("agy-team-inject.sh");
-        for p in [&adapter, &team] {
+        let older = dir.path().join("older-tree/hooks/agy-team-inject.sh");
+        std::fs::create_dir_all(older.parent().unwrap()).unwrap();
+        for p in [&adapter, &team, &older] {
             std::fs::write(p, "#!/usr/bin/env bash\n").unwrap();
         }
         let gone = dir.path().join("archived-worktree/hooks/agy-old-inject.sh");
@@ -611,6 +648,7 @@ mod tests {
                 "Stop": [{"type": "command", "command": adapter.display().to_string()}],
                 "PreInvocation": [
                     {"type": "command", "command": gone.display().to_string()},
+                    {"type": "command", "command": older.display().to_string()},
                     {"type": "command", "command": team.display().to_string()}
                 ],
                 "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": gone.display().to_string()}]}]
@@ -621,7 +659,7 @@ mod tests {
         assert_eq!(before.dead, 2);
         assert!(!before.installed, "a dead handler is not installed");
         let receipt = install(&path, &adapter, Some(&team), None).expect("install");
-        assert!(receipt.note.contains("pruned 2"), "{}", receipt.note);
+        assert!(receipt.note.contains("pruned 3"), "{}", receipt.note);
         let after = status(&path, Some(&adapter), Some(&team), None);
         assert_eq!(after.dead, 0);
         assert!(after.installed);

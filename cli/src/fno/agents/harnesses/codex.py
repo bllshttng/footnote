@@ -131,6 +131,10 @@ def inject_from_name(prompt: str, from_name: str) -> str:
     return f"[from: {from_name}]\n\n{prompt}"
 
 
+#: Mirror of ``codex_posture::BOUNDED_NETWORK_OVERRIDE``.
+BOUNDED_NETWORK_OVERRIDE = "sandbox_workspace_write.network_access=true"
+
+
 def sandbox_flag(yolo: bool) -> list[str]:
     """Return the argv tokens selecting codex's create-path SANDBOX posture.
 
@@ -148,7 +152,7 @@ def sandbox_flag(yolo: bool) -> list[str]:
     """
     if yolo:
         return ["--dangerously-bypass-approvals-and-sandbox"]
-    return ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
+    return ["--sandbox", "workspace-write", "-c", BOUNDED_NETWORK_OVERRIDE]
 
 
 def codex_hook_trust_args() -> list[str]:

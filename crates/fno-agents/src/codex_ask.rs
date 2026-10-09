@@ -139,6 +139,12 @@ const HOOK_TRUST_FLAG_MIN_VERSION: &str = "0.148.0";
 /// posture set them. Valid on `codex`, `exec`, `exec resume` and `resume`.
 /// Mirror of `codex.py::codex_hook_trust_args`.
 pub fn hook_trust_flag() -> Vec<String> {
+    // `FNO_CODEX_VERSION` pins the answer, and the Python twin reads the same
+    // key, so a run that sets it gets one argv from both runtimes. Empty
+    // means unknown, so the flag is omitted.
+    if let Ok(pinned) = std::env::var("FNO_CODEX_VERSION") {
+        return hook_trust_tokens(pinned.split_whitespace().last());
+    }
     // Unit tests swap fake codex binaries onto PATH, and the probe below is
     // cached once per process, so a probe here would make exact-argv tests
     // depend on test order. `hook_trust_tokens` carries the logic under test.
@@ -146,8 +152,22 @@ pub fn hook_trust_flag() -> Vec<String> {
         return Vec::new();
     }
     static INSTALLED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let installed = INSTALLED.get_or_init(crate::codex_daemon_readiness::installed_cli_version);
+    let installed = INSTALLED.get_or_init(path_codex_version);
     hook_trust_tokens(installed.as_deref())
+}
+
+/// `codex --version` of the bare PATH `codex`, which is what every argv here
+/// launches (not `FNO_CODEX_BIN`), bounded so a wedged or fake CLI cannot
+/// hang a spawn.
+fn path_codex_version() -> Option<String> {
+    let mut cmd = std::process::Command::new("codex");
+    cmd.arg("--version");
+    let out = crate::bounded_cmd::output_with_timeout(cmd, 5)?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().last().map(str::to_string)
 }
 
 pub(crate) fn hook_trust_tokens(installed: Option<&str>) -> Vec<String> {

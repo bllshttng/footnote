@@ -95,10 +95,13 @@ def _stub_codex_cli_version(monkeypatch):
     of the pytest run, making --dangerously-bypass-hook-trust presence
     host-dependent. Pin to a known-supporting version; a test that needs a
     different answer overrides this per-test (monkeypatch order: test wins).
+    The env pin carries the same answer to any fno-agents child, whose Rust
+    probe reads ``FNO_CODEX_VERSION`` first, so parity argvs agree.
     """
     from fno.agents import mux_spawn
 
     monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 148, 0))
+    monkeypatch.setenv("FNO_CODEX_VERSION", "0.148.0")
 
 
 @pytest.fixture(autouse=True)

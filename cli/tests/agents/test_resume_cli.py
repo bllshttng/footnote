@@ -43,6 +43,7 @@ def _no_installed_codex(monkeypatch):
     from fno.agents import mux_spawn
 
     monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: None)
+    monkeypatch.setenv("FNO_CODEX_VERSION", "")
 
 # ---------------------------------------------------------------------------
 # AC2-HP — codex resume happy path
