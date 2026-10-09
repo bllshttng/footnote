@@ -2332,12 +2332,7 @@ fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
     // `.git`. A cargo marker on an ancestor proves the tree is a build tree
     // (deployed binaries have none), and the compile-time manifest dir then
     // names the crate it was built from, so the guard stays armed.
-    let build_tree = exe
-        .ancestors()
-        .skip(1)
-        .take(6)
-        .any(|p| p.join("CACHEDIR.TAG").is_file() || p.join(".rustc_info.json").is_file());
-    if !build_tree {
+    if !in_build_tree(exe) {
         return None;
     }
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2348,15 +2343,26 @@ fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
     Some(root.to_path_buf())
 }
 
+fn in_build_tree(exe: &Path) -> bool {
+    exe.ancestors()
+        .skip(1)
+        .take(6)
+        .any(|p| p.join("CACHEDIR.TAG").is_file() || p.join(".rustc_info.json").is_file())
+}
+
 /// Recover the source root for a build whose binary a path walk cannot place:
 /// a build-dir override (cargo's build.build-dir, e.g. the machine pool)
 /// detaches the exe from its checkout, so [`source_root_for_exe`] finds no
 /// `.git`. When this build's own OUT_DIR was likewise detached, the exe is a
-/// dev build and the manifest dir - baked in at compile time, present only on
-/// the build machine - recovers the root. A deployed binary never takes this
-/// arm: its OUT_DIR sat inside its build checkout, and on a user machine
-/// neither baked path exists.
-fn source_root_for_detached_build() -> Option<PathBuf> {
+/// dev build and the manifest dir - baked in at compile time - recovers the
+/// root. The baked paths cannot tell an install apart on the machine that
+/// built it: `fno doctor update` builds in the shared build base, so the
+/// installed binary also has a detached OUT_DIR and a live manifest dir. Only
+/// an exe still inside its build tree takes this arm.
+fn source_root_for_detached_build(exe: &Path) -> Option<PathBuf> {
+    if !in_build_tree(exe) {
+        return None;
+    }
     let out_dir = Path::new(env!("FNO_AGENTS_BUILD_OUT_DIR"));
     if out_dir.ancestors().any(|p| p.join(".git").exists()) {
         return None;
@@ -2453,7 +2459,7 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
         // consult build-time baked facts.
         .or_else(|| {
             if found < REGISTRY_SCHEMA_VERSION && resolved == shared.as_path() {
-                source_root_for_detached_build()
+                source_root_for_detached_build(&exe)
             } else {
                 None
             }

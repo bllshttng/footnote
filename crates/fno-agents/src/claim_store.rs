@@ -750,44 +750,120 @@ pub(crate) fn reap_with_session_witness(
     witness: Option<SessionWitness<'_>>,
     recheck: Option<SessionWitness<'_>>,
 ) -> Result<Value, String> {
-    reap_in_directory(&directory(root)?, apply, witness, recheck, None)
+    let recheck = recheck.or(witness);
+    reap_in_directory(
+        &directory(root)?,
+        apply,
+        |_: &[ClaimRecord]| witness.map(boxed),
+        |_: &[ClaimRecord]| recheck.map(boxed),
+        None,
+        None,
+    )
 }
 
-pub(crate) fn reap_in_directory(
+/// A borrowed witness as the owned shape the reap phases hand around.
+pub(crate) fn boxed<'a>(witness: SessionWitness<'a>) -> BoxedWitness<'a> {
+    Box::new(move |record: &ClaimRecord| witness(record))
+}
+
+pub(crate) type BoxedWitness<'a> = Box<dyn Fn(&ClaimRecord) -> claims::SessionLiveness + 'a>;
+
+/// Rows one reap chunk classifies together. Small, so one chunk's truth
+/// batch can finish inside a reconcile beat's budget on a loaded machine.
+const REAP_CHUNK: usize = 8;
+
+/// Retire every same-machine claim that classifies Stale.
+///
+/// Rows go in chunks of [`REAP_CHUNK`]. Each chunk is classified with the
+/// witness `scan_for` builds over that chunk, so a caller answers a chunk's
+/// sessions in one batch. The apply step asks again, with the witness
+/// `recheck_for` builds over the chunk's candidates or else the scan's own,
+/// and deletes exactly the observed row, so a claim whose session came back
+/// or that changed hands since the scan stays.
+///
+/// `deadline` bounds the pass, checked before every chunk and every delete.
+/// A chunk starts only while the time left covers the slowest scan and the
+/// slowest recheck seen so far: a recheck the deadline cuts
+/// keeps every candidate, so the scan before it was spent for nothing. The
+/// rows a pass never settled are `deferred`. A bounded pass
+/// starts at a clock-chosen row and wraps, so live rows that cost a probe
+/// cannot hold the same dead rows out of reach on every pass. One row that
+/// fails to delete is named in `reap_failed`, and the pass goes on.
+pub(crate) fn reap_in_directory<'w>(
     dir: &Path,
     apply: bool,
-    witness: Option<SessionWitness<'_>>,
-    recheck: Option<SessionWitness<'_>>,
+    mut scan_for: impl FnMut(&[ClaimRecord]) -> Option<BoxedWitness<'w>>,
+    mut recheck_for: impl FnMut(&[ClaimRecord]) -> Option<BoxedWitness<'w>>,
     key: Option<&str>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Value, String> {
-    let records = records_in(dir, key, true)?
+    let spent = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+    let mut records = records_in(dir, key, true)?
         .into_iter()
         .filter(|r| key.is_none_or(|k| r.key == k))
+        .filter(|r| claims::is_same_machine(&r.host, r.machine_id.as_deref()))
         .collect::<Vec<_>>();
-    let mut would_reap = 0;
-    let mut reaped = 0;
+    if deadline.is_some() && !records.is_empty() {
+        let start = (claims::now_ms().max(0) / 1000) as usize % records.len();
+        records.rotate_left(start);
+    }
+    let (mut would_reap, mut reaped, mut settled) = (0, 0, 0);
     let mut failures = Vec::new();
-    for record in &records {
-        if !claims::is_same_machine(&record.host, record.machine_id.as_deref())
-            || claims::classify_with_session_witness(record, witness) != ClaimState::Stale
-        {
+    let slowest_scan = std::cell::Cell::new(std::time::Duration::ZERO);
+    let slowest_recheck = std::cell::Cell::new(std::time::Duration::ZERO);
+    let timed = |slowest: &std::cell::Cell<std::time::Duration>,
+                 build: &mut dyn FnMut() -> Option<BoxedWitness<'w>>| {
+        let started = std::time::Instant::now();
+        let witness = build();
+        slowest.set(slowest.get().max(started.elapsed()));
+        witness
+    };
+    'pass: for chunk in records.chunks(REAP_CHUNK) {
+        if deadline.is_some_and(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                <= slowest_scan.get() + slowest_recheck.get()
+        }) {
+            break;
+        }
+        let witness = timed(&slowest_scan, &mut || scan_for(chunk));
+        let mut candidates = Vec::new();
+        for record in chunk {
+            if claims::classify_with_session_witness(record, witness.as_deref())
+                == ClaimState::Stale
+            {
+                candidates.push(record.clone());
+            } else {
+                settled += 1;
+            }
+        }
+        would_reap += candidates.len();
+        if !apply {
+            settled += candidates.len();
             continue;
         }
-        would_reap += 1;
-        if !apply
-            || claims::classify_with_session_witness(record, recheck.or(witness))
-                != ClaimState::Stale
-        {
+        if candidates.is_empty() {
             continue;
         }
-        match delete_observed(dir, record) {
-            Ok(true) => reaped += 1,
-            Ok(false) => {}
-            Err(e) => failures.push(e),
+        let recheck = timed(&slowest_recheck, &mut || recheck_for(&candidates));
+        let recheck = recheck.as_deref().or(witness.as_deref());
+        for record in &candidates {
+            if spent() {
+                break 'pass;
+            }
+            settled += 1;
+            if claims::classify_with_session_witness(record, recheck) != ClaimState::Stale {
+                continue;
+            }
+            match delete_observed(dir, record) {
+                Ok(true) => reaped += 1,
+                Ok(false) => {}
+                Err(e) => failures.push(format!("{}: {e}", record.key)),
+            }
         }
     }
+    let deferred = records.len() - settled;
     Ok(
-        json!({"apply":apply,"scanned":records.len(),"would_reap":would_reap,"reaped":reaped,"reap_failed":failures,"root":dir}),
+        json!({"apply":apply,"scanned":records.len(),"would_reap":would_reap,"reaped":reaped,"deferred":deferred,"reap_failed":failures,"root":dir}),
     )
 }
 
@@ -847,5 +923,45 @@ mod tests {
         assert_eq!(released["reaped"], 1);
         assert!(read(key, Some(root.path())).unwrap().is_none());
         assert_eq!(record.holder, "owner");
+    }
+
+    /// A spent budget defers every row it did not reach and deletes nothing;
+    /// the next unbounded pass reaps them. Dead holders here are cargo-shaped:
+    /// a pid with no TTL, which frees the moment the pid is gone.
+    #[test]
+    fn reap_defers_rows_past_its_deadline_and_the_next_pass_reaps_them() {
+        let root = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        for key in ["build:cargo", "test:cargo-run:0", "test:cargo-run:1"] {
+            let outcome = claims::acquire(
+                key,
+                &format!("cargo:/tmp/w:{dead}"),
+                AcquireOpts {
+                    root: Some(root.path().to_path_buf()),
+                    pid: Some(dead),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(outcome, AcquireOutcome::Acquired(_)),
+                "{outcome:?}"
+            );
+        }
+        let dir = directory(Some(root.path())).unwrap();
+        let spent = Some(std::time::Instant::now());
+        let held = reap_in_directory(&dir, true, |_| None, |_| None, None, spent).unwrap();
+        assert_eq!(
+            (held["reaped"].as_u64(), held["deferred"].as_u64()),
+            (Some(0), Some(3))
+        );
+        assert_eq!(records_in(&dir, None, true).unwrap().len(), 3);
+        let swept = reap_in_directory(&dir, true, |_| None, |_| None, None, None).unwrap();
+        assert_eq!(
+            (swept["reaped"].as_u64(), swept["deferred"].as_u64()),
+            (Some(3), Some(0))
+        );
+        assert!(records_in(&dir, None, true).unwrap().is_empty());
     }
 }

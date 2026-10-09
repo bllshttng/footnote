@@ -13,6 +13,7 @@ from fno.graph.statuses import (
     is_stale_lock,
     lock_timestamp_quality,
     live_claimed_node_ids,
+    live_worked_node_ids,
     recompute_statuses,
 )
 
@@ -790,3 +791,19 @@ def test_triage_health_names_ownership_defect(monkeypatch, capsys):
     report = _json.loads(capsys.readouterr().out)
     assert report["ownership_defects"] == []
     assert report["totals"]["ownership_defects"] == 0
+
+
+def test_an_unconsulted_roster_raises_naming_the_reader():
+    """A not-consulted roster read raises with the reader prefixed, so the
+    spawn-guard receipt points at read_roster instead of implying the node is
+    occupied. The function arrives via the module-level import: the conftest
+    autouse stub rebinds the module attribute at setup, and a test-body
+    import would bind the stub, not the real gate."""
+    from fno.claims.roster import RosterReading
+
+    with pytest.raises(RuntimeError, match=r"^read_roster: boom$"):
+        live_worked_node_ids(
+            strict=True,
+            entries=[{"status": "ready"}],
+            reading=RosterReading(False, 0, {}, "boom"),
+        )

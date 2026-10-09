@@ -2,6 +2,18 @@ use super::*;
 use serde_json::json;
 use std::sync::{Arc, Barrier, Mutex};
 
+/// `mm:ss` past an hour anchored once, one to two hours ago: inside every
+/// prune horizon, and late enough that each coalescing window has expired.
+fn at(mm_ss: &str) -> String {
+    static ANCHOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let hour = ANCHOR.get_or_init(|| {
+        (chrono::Utc::now() - chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H")
+            .to_string()
+    });
+    format!("{hour}:{mm_ss}Z")
+}
+
 fn allow(ts: &str, tool: &str) -> serde_json::Value {
     json!({"ts": ts, "type": "guard_decision", "source": "hook",
            "data": {"guard": "git-protection", "decision": "allow", "tool": tool}})
@@ -14,9 +26,9 @@ fn import_coalesces_identical_allow_polls() {
     append(
         &live,
         &[
-            allow("2026-09-10T12:00:00Z", "Bash"),
-            allow("2026-09-10T12:01:00Z", "Bash"),
-            allow("2026-09-10T12:02:00Z", "Bash"),
+            allow(&at("00:00"), "Bash"),
+            allow(&at("01:00"), "Bash"),
+            allow(&at("02:00"), "Bash"),
         ],
     );
     let receipt = sync(&live).unwrap();
@@ -32,7 +44,7 @@ fn import_coalesces_identical_allow_polls() {
     );
     assert!(rows[1].line.contains("\"window_started_ms\":"));
     assert!(rows[1].line.contains("\"window_finished_ms\":"));
-    append(&live, &[allow("2026-09-10T12:10:00Z", "Bash")]);
+    append(&live, &[allow(&at("10:00"), "Bash")]);
     sync(&live).unwrap();
     let rows = query_events(&live, &EventQuery::default()).unwrap();
     assert_eq!(rows.len(), 3, "transition, summary, new transition");
@@ -42,8 +54,8 @@ fn import_coalesces_identical_allow_polls() {
 fn append_gate_suppresses_and_retry_is_idempotent_hit() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    let first = allow("2026-09-10T12:00:00Z", "Bash").to_string();
-    let second = allow("2026-09-10T12:01:00Z", "Bash").to_string();
+    let first = allow(&at("00:00"), "Bash").to_string();
+    let second = allow(&at("01:00"), "Bash").to_string();
     let first_receipt = append_envelope(&live, &first, None).unwrap();
     assert!(first_receipt.inserted);
     assert!(!first_receipt.suppressed);
@@ -65,11 +77,7 @@ fn append_gate_suppresses_and_retry_is_idempotent_hit() {
 fn blocks_and_malformed_never_coalesce() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    for ts in [
-        "2026-09-10T12:00:00Z",
-        "2026-09-10T12:01:00Z",
-        "2026-09-10T12:02:00Z",
-    ] {
+    for ts in [&at("00:00"), &at("01:00"), &at("02:00")] {
         let block = json!({"ts": ts, "type": "guard_decision", "source": "hook",
             "data": {"guard": "git-protection", "decision": "block", "tool": "Bash"}});
         let receipt = append_envelope(&live, &block.to_string(), None).unwrap();
@@ -79,7 +87,7 @@ fn blocks_and_malformed_never_coalesce() {
             "each block is a separate attempted action"
         );
     }
-    let malformed = json!({"ts": "2026-09-10T12:03:00Z", "type": "guard_decision",
+    let malformed = json!({"ts": &at("03:00"), "type": "guard_decision",
         "source": "hook", "data": {"guard": "git-protection", "tool": "Bash"}});
     // The judge owns the schema now: a guard_decision with no decision is
     // refused at the commit, so the always-audit tolerance is gone and the
@@ -96,8 +104,8 @@ fn blocks_and_malformed_never_coalesce() {
 fn undeclared_type_identical_payloads_stay_two_rows() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    let a = checkin("2026-09-10T12:00:00Z", "x-aaaa", "same").to_string();
-    let b = checkin("2026-09-10T12:01:00Z", "x-aaaa", "same").to_string();
+    let a = checkin(&at("00:00"), "x-aaaa", "same").to_string();
+    let b = checkin(&at("01:00"), "x-aaaa", "same").to_string();
     let receipt_a = append_envelope(&live, &a, None).unwrap();
     let receipt_b = append_envelope(&live, &b, None).unwrap();
     assert!(receipt_a.inserted);
@@ -109,30 +117,10 @@ fn undeclared_type_identical_payloads_stay_two_rows() {
 fn fingerprint_change_flushes_pending() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    append_envelope(
-        &live,
-        &allow("2026-09-10T12:00:00Z", "Bash").to_string(),
-        None,
-    )
-    .unwrap();
-    append_envelope(
-        &live,
-        &allow("2026-09-10T12:01:00Z", "Bash").to_string(),
-        None,
-    )
-    .unwrap();
-    append_envelope(
-        &live,
-        &allow("2026-09-10T12:02:00Z", "Bash").to_string(),
-        None,
-    )
-    .unwrap();
-    let changed = append_envelope(
-        &live,
-        &allow("2026-09-10T12:03:00Z", "Edit").to_string(),
-        None,
-    )
-    .unwrap();
+    append_envelope(&live, &allow(&at("00:00"), "Bash").to_string(), None).unwrap();
+    append_envelope(&live, &allow(&at("01:00"), "Bash").to_string(), None).unwrap();
+    append_envelope(&live, &allow(&at("02:00"), "Bash").to_string(), None).unwrap();
+    let changed = append_envelope(&live, &allow(&at("03:00"), "Edit").to_string(), None).unwrap();
     assert!(changed.inserted);
     let rows = query_events(&live, &EventQuery::default()).unwrap();
     assert_eq!(
@@ -160,18 +148,8 @@ fn advance_subject_isolation() {
         json!({"ts": ts, "type": "advance_skipped", "source": "backlog",
                "data": {"reason": "no-work", "rank": "config", "closed_node_id": node}})
     };
-    let a = append_envelope(
-        &live,
-        &mk("2026-09-10T12:00:00Z", "x-aaaa").to_string(),
-        None,
-    )
-    .unwrap();
-    let b = append_envelope(
-        &live,
-        &mk("2026-09-10T12:01:00Z", "x-bbbb").to_string(),
-        None,
-    )
-    .unwrap();
+    let a = append_envelope(&live, &mk(&at("00:00"), "x-aaaa").to_string(), None).unwrap();
+    let b = append_envelope(&live, &mk(&at("01:00"), "x-bbbb").to_string(), None).unwrap();
     assert!(a.inserted && b.inserted);
     assert!(
         !a.suppressed && !b.suppressed,
@@ -193,7 +171,7 @@ fn concurrent_identical_first_polls_yield_one_transition() {
         let receipts = receipts.clone();
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            let ts = format!("2026-09-10T12:00:0{i}Z");
+            let ts = at(&format!("00:0{i}"));
             let receipt = append_envelope(&live, &allow(&ts, "Bash").to_string(), None);
             receipts.lock().unwrap().push(receipt);
         }));
@@ -223,10 +201,10 @@ fn replay_after_cursor_loss_does_not_double_count() {
     append(
         &live,
         &[
-            allow("2026-09-10T12:00:00Z", "Bash"),
-            allow("2026-09-10T12:01:00Z", "Bash"),
-            allow("2026-09-10T12:02:00Z", "Bash"),
-            allow("2026-09-10T12:03:00Z", "Bash"),
+            allow(&at("00:00"), "Bash"),
+            allow(&at("01:00"), "Bash"),
+            allow(&at("02:00"), "Bash"),
+            allow(&at("03:00"), "Bash"),
         ],
     );
     let receipt = sync(&live).unwrap();
@@ -252,10 +230,7 @@ fn replay_after_cursor_loss_does_not_double_count() {
         let conn = Connection::open(&store).unwrap();
         conn.execute("DELETE FROM ingest_cursor", []).unwrap();
     }
-    append(
-        &live,
-        &[checkin("2026-09-10T12:05:00Z", "x-aaaa", "cursor loss")],
-    );
+    append(&live, &[checkin(&at("05:00"), "x-aaaa", "cursor loss")]);
     sync(&live).unwrap();
     let conn = Connection::open(&store).unwrap();
     let guards: i64 = conn
@@ -290,12 +265,7 @@ fn replay_after_cursor_loss_does_not_double_count() {
 fn unavailable_observation_state_is_an_explicit_failure() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    append_envelope(
-        &live,
-        &allow("2026-09-10T12:00:00Z", "Bash").to_string(),
-        None,
-    )
-    .unwrap();
+    append_envelope(&live, &allow(&at("00:00"), "Bash").to_string(), None).unwrap();
     let store = store_path(&live);
     {
         let conn = Connection::open(&store).unwrap();
@@ -305,11 +275,7 @@ fn unavailable_observation_state_is_an_explicit_failure() {
         )
         .unwrap();
     }
-    let broken = append_envelope(
-        &live,
-        &allow("2026-09-10T12:01:00Z", "Bash").to_string(),
-        None,
-    );
+    let broken = append_envelope(&live, &allow(&at("01:00"), "Bash").to_string(), None);
     let err = broken.unwrap_err();
     assert!(err.contains("event_observation_state"), "err: {err}");
     let conn = Connection::open(&store).unwrap();
@@ -347,16 +313,13 @@ fn flush_with_nothing_pending_closes_the_window_without_a_summary() {
         json!({"ts": ts, "type": "guard_decision", "source": "hook",
                "data": {"guard": "git-protection", "decision": "allow", "tool": tool}})
     };
-    let first =
-        append_envelope(&live, &mk("2026-09-10T12:00:00Z", "Bash").to_string(), None).unwrap();
+    let first = append_envelope(&live, &mk(&at("00:00"), "Bash").to_string(), None).unwrap();
     assert!(first.inserted);
-    let second =
-        append_envelope(&live, &mk("2026-09-10T12:01:00Z", "Edit").to_string(), None).unwrap();
+    let second = append_envelope(&live, &mk(&at("01:00"), "Edit").to_string(), None).unwrap();
     assert!(second.inserted, "the changed poll inserts as a transition");
     assert!(!second.suppressed);
     // Heartbeat expiry with nothing pending is the same no-op.
-    let third =
-        append_envelope(&live, &mk("2026-09-10T12:20:00Z", "Edit").to_string(), None).unwrap();
+    let third = append_envelope(&live, &mk(&at("20:00"), "Edit").to_string(), None).unwrap();
     assert!(third.inserted);
     let rows = query_events(&live, &EventQuery::default()).unwrap();
     assert_eq!(rows.len(), 3, "three transitions, no summary row: {rows:?}");
@@ -373,9 +336,9 @@ fn sweep_flushes_expired_window_on_next_sync() {
     append(
         &live,
         &[
-            allow("2026-09-10T12:00:00Z", "Bash"),
-            allow("2026-09-10T12:01:00Z", "Bash"),
-            allow("2026-09-10T12:02:00Z", "Bash"),
+            allow(&at("00:00"), "Bash"),
+            allow(&at("01:00"), "Bash"),
+            allow(&at("02:00"), "Bash"),
         ],
     );
     sync(&live).unwrap();
@@ -411,10 +374,10 @@ fn sweep_flushes_expired_window_on_next_sync() {
 fn late_line_from_older_generation_stores_verbatim() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    append(&live, &[allow("2026-09-10T12:10:00Z", "Bash")]);
+    append(&live, &[allow(&at("10:00"), "Bash")]);
     sync(&live).unwrap();
     assert_eq!(count_events(&store_path(&live)), 1);
-    append(&live, &[allow("2026-09-10T12:00:00Z", "Bash")]);
+    append(&live, &[allow(&at("00:00"), "Bash")]);
     sync(&live).unwrap();
     let rows = query_events(&live, &EventQuery::default()).unwrap();
     assert_eq!(rows.len(), 2, "the late line stores verbatim");
@@ -433,7 +396,7 @@ fn late_line_from_older_generation_stores_verbatim() {
         .unwrap();
     assert_eq!(
         Some(started),
-        parse_rfc3339_ms("2026-09-10T12:10:00Z"),
+        parse_rfc3339_ms(&at("10:00")),
         "the window never rewinds to the late line"
     );
     let flushed: i64 = conn
@@ -453,15 +416,15 @@ fn journal_text_tail_excludes_suppressed_lines() {
     append(
         &live,
         &[
-            allow("2026-09-10T12:00:00Z", "Bash"),
-            allow("2026-09-10T12:01:00Z", "Bash"),
-            allow("2026-09-10T12:02:00Z", "Bash"),
+            allow(&at("00:00"), "Bash"),
+            allow(&at("01:00"), "Bash"),
+            allow(&at("02:00"), "Bash"),
         ],
     );
     sync(&live).unwrap();
     let text = journal_text(&live, &["guard_decision"]);
     assert!(
-        text.contains("2026-09-10T12:00:00Z"),
+        text.contains(&at("00:00")),
         "the transition row reads: {text}"
     );
     assert!(
@@ -469,7 +432,7 @@ fn journal_text_tail_excludes_suppressed_lines() {
         "the summary row reads: {text}"
     );
     assert!(
-        !text.contains("2026-09-10T12:01:00Z"),
+        !text.contains(&at("01:00")),
         "a suppressed poll never double-represents: {text}"
     );
 }

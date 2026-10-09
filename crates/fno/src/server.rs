@@ -998,7 +998,7 @@ pub(crate) enum CoreMsg {
         ctx: HashMap<String, String>,
     },
     /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
-    /// probe (`fno agents list --json`, one process for the whole fleet).
+    /// probe (the daemon's `agent.list` RPC, one request for the whole fleet).
     /// Replaces the map wholesale; a failed probe sends nothing so the last
     /// good map stands until the next success. `seq` is the probe's launch
     /// order (review finding: a probe can outlive the next tick's probe under

@@ -689,6 +689,12 @@ pub fn gc_sweep(
         .map(|row| (row.node, row.harness, row.session_id))
         .collect();
     summary.settle_refused = refused;
+    // A reap leaves nothing behind: a retired worker's dead cargo still
+    // holds the build lock and a run slot under its own pid.
+    let freed = crate::claim_verbs::reap_dead_cargo_claims();
+    if freed > 0 {
+        eprintln!("reap: freed {freed} build or run-slot claim(s) held by a dead cargo");
+    }
     summary
 }
 

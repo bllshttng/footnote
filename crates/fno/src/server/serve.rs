@@ -199,13 +199,15 @@ pub(super) async fn serve(
                 if *count_rx.borrow() == 0 {
                     continue; // no viewer -> skip both file reads entirely
                 }
-                // (v48) Reachability evidence, one `fno agents list --json`
-                // process for the whole fleet on a slow sub-interval. Each
-                // probe runs as its own task so a slow CLI start never stalls
-                // the 1s registry tick; a failed probe sends nothing and the
-                // last good map stands. The latch skips a tick whose
+                // (v48) Reachability evidence, one `agent.list` RPC for the
+                // whole fleet on a slow sub-interval (the
+                // `fno agents list` interpreter it replaced was the mux
+                // server's largest child, 5-32s of Python every 60s). Each
+                // probe runs as its own task so a slow daemon answer never
+                // stalls the 1s registry tick; a failed probe sends nothing
+                // and the last good map stands. The latch skips a tick whose
                 // predecessor still runs, so a probe slower than the interval
-                // stacks no second interpreter. Ages are measured at probe
+                // stacks no second request. Ages are measured at probe
                 // time, so between probes a row's displayed age lags by at
                 // most this interval - invisible next to the 600s threshold
                 // it feeds.
@@ -217,10 +219,7 @@ pub(super) async fn serve(
                             let seq = truth_probe_seq;
                             let tx = core_tx.clone();
                             tokio::spawn(async move {
-                                let probe = tokio::task::spawn_blocking(probe_truth_map)
-                                    .await
-                                    .ok()
-                                    .flatten();
+                                let probe = probe_truth_map().await;
                                 drop(latch);
                                 if let Some(map) = probe {
                                     let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
