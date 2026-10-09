@@ -1686,6 +1686,38 @@ fn load_supersession_many(
     Ok(out)
 }
 
+/// Direct child ids for a set of parents, one query per id batch, grouped
+/// per parent in the same per-parent (ordinal, id) order the per-parent
+/// query produces.
+pub(crate) fn child_ids_many(
+    connection: &Connection,
+    parents: &[String],
+) -> Result<HashMap<String, Vec<String>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for batch in parents.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT id, parent_id FROM nodes WHERE parent_id IN ({placeholders})
+                 ORDER BY parent_id, ordinal, id"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (id, parent_id) = row.map_err(|error| error.to_string())?;
+            out.entry(parent_id).or_default().push(id);
+        }
+    }
+    Ok(out)
+}
+
 /// The provenance row read as parts; origin/request ride the residual.
 pub(crate) type ProvenanceParts = (
     Option<String>,

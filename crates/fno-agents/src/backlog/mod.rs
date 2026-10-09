@@ -1665,21 +1665,24 @@ fn query_rows(
                 rows.push(body);
             }
         }
-        for parent in parents {
-            let mut statement = connection
-                .prepare_cached("SELECT id FROM nodes WHERE parent_id = ?1 ORDER BY ordinal, id")
-                .map_err(|error| error.to_string())?;
-            let ids = statement
-                .query_map(params![parent], |row| row.get::<_, String>(0))
-                .map_err(|error| error.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?;
-            for id in ids {
+        let mut support_ids: Vec<String> = Vec::new();
+        for children in nodes::child_ids_many(connection, &parents)?.values() {
+            for id in children {
                 if loaded.insert(id.clone()) {
-                    if let Some(row) = load(&id, Some(&support_fields))? {
-                        rows.push(row);
-                    }
+                    support_ids.push(id.clone());
                 }
+            }
+        }
+        let mut support_parts =
+            nodes::load_parts_many(connection, &support_ids, Some(&support_fields))?;
+        for id in &support_ids {
+            if let Some(node) = nodes::load_from_parts(
+                &mut support_parts,
+                id,
+                Some(node_claims.get(id).cloned().unwrap_or_default()),
+                Some(&support_fields),
+            )? {
+                rows.push(node.to_json());
             }
         }
     }
