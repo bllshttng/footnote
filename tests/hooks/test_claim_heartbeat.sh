@@ -29,8 +29,8 @@ fail() { FAIL=$((FAIL+1)); printf '[heartbeat] FAIL: %s\n' "$*" >&2; }
 command -v jq >/dev/null 2>&1 || { echo "[heartbeat] SKIP: jq not on PATH"; exit 77; }
 
 # setup_env: build a tmp project with a manifest + stubbed `fno`/`fno-agents`
-# on PATH. The hook's claim traffic runs through the native `fno-agents` leaf
-# (x-b976); its PR binder still runs through `fno`. Env knobs read by the
+# on PATH. The hook's claim traffic runs through the native `fno-agents` leaf;
+# its PR binder still runs through `fno`. Env knobs read by the
 # stubs: STUB_HOLDER/STATE/STATUS_JSON, STUB_REFRESH_RC, STUB_BIND_RC/OUTPUT.
 # Every claim call (either binary) is appended to $CALLLOG; the state-path
 # reads go to $AGENTSLOG. Sets: TMP_DIR CWD CALLLOG (and prepends the stubs
