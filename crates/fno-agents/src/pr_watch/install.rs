@@ -567,6 +567,9 @@ fn install_verb(
             plist_path.display()
         );
         println!("[dry-run] Nothing written.");
+        // The leaf printed the heal readout after every install() return,
+        // dry-run included.
+        println!("{}", heal_status_line(cwd));
         return 0;
     }
 
