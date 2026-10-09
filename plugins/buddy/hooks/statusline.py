@@ -7,7 +7,6 @@ the copy. It reads only files the mod wrote beside it, so it stays fast.
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import unicodedata
@@ -158,6 +157,9 @@ def inner_rows(stdin, data):
     command = inner.get("command") if inner.get("type") == "command" else None
     if command:
         try:
+            # Imported here: most ticks reuse cached rows and never pay for it.
+            import subprocess
+
             out = subprocess.run(command, shell=True, input=stdin, capture_output=True, text=True, timeout=5).stdout
         except Exception:
             out = ""
