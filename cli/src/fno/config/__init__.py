@@ -4,8 +4,7 @@ Settings are DEEP-MERGED across every candidate file that exists, higher
 priority overriding lower key-by-key (nested dicts merge recursively,
 scalars and lists replace wholesale). The candidate priority list, the
 per-key fallthrough, and the design decisions are locked in
-docs/path-config.md, which also records the shell-reader and provider-loader
-parity this module mirrors.
+docs/path-config.md.
 
 Cache: load_settings() is an uncached wrapper over _load_settings_at(),
 keyed on the declaration (_settings_key: env overrides + HOME + resolved
