@@ -232,6 +232,21 @@ The per-repository journal `<space>/events.jsonl` resolves through `paths.projec
 
 `neutralise` pins the override at one line, and that env reaches the pytest, shell, and cargo trees. All three writers read it: the Python resolver, `scripts/lib/events.sh`, and `claim_events_path` in the Rust claims module. Rust has to read it because the two implementations share that journal and its `.lock.d` mutex as a wire contract. A pin one side ignores splits the writers apart. The loop-journal writers in `fno-agents` still build their path by hand and remain outside the pin. Reach for the pin, not for a marker the fold recognises. A fold that must know about test data carries an exception list, and the next fixture that misses the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and reads the journal back must name the same file in `FNO_EVENTS_PATH`. The pin outranks the root.
 
+## Event retention and its readers
+
+Each `events.db` store prunes by event kind: the project journal, the global journal, and the agents lifecycle journal. The prune mechanics live in [event-log-storage](architecture/event-log-storage.md). This table names who reads each pruned kind, and how far back. A **GAP** row has a reader whose window is longer than the retention. That reader now sees a short or skewed history, and nothing tells it so.
+
+| Event type | Retention | Readers and their window | Gap |
+|---|---|---|---|
+| control_plane_tick | 168h (telemetry) | `fno agents loops table`: 7 days (`ARM_WINDOW_FLOOR_S`). `fno do pr watch status`: newest rows. `fno doctor event signals`: 24h plus six prior days. `fno-agents intel --fleet`: 30 days of `machine_watch` load readings. `fno doctor evals macro --all`: 30 days. | **GAP.** `intel --fleet` loses CPU load, band, and runnable readings after day 7. Its `machine_sample` memory rows are durable and stay. `evals macro --all` sees 7 of its 30 days. The loops table fits only at the default `notify.arm_starved_after_s`. A larger value reads a starved arm as UNOBSERVED. |
+| guard_decision, allow rows | 24h | [hook-budget-audit](architecture/hook-budget-audit.md) block rate, `block / (allow + block)`. `fno doctor event find guard_decision`: its coverage proves only 24h. `fno doctor evals macro --all`: 30 days. | **GAP.** Over any window past 24h the rate has one day of allows and seven days of blocks, so it reads high. The audit's multi-day allow counts cannot be measured again. |
+| guard_decision, block rows | 168h (telemetry) | The same hook-budget audit. `fno doctor evals macro --all`: 30 days. | **GAP.** A block count over more than 7 days is short. |
+| inside_leg_report | 168h (telemetry) | `fno-agents subscribe`: live, from connect time. The spawn-journal scan skips it as noise. | None. A same-state repeat now journals no row at all. |
+| codex_thread_inside_leg | 168h (telemetry) | No reader in the tree. | None. A same-state repeat now journals no row at all. |
+| store_seat_lock_unlinked, store_socket_unlinked | 168h (telemetry) | `fno doctor event signals`: 24h `burst` and `spike`, with six prior days as the baseline. | None at the default window. |
+
+Retros read none of these kinds. `fno backlog retro` folds `gate_escape` only, and that kind is durable. The self-improvement loops in [self-improvement-loops](architecture/self-improvement-loops.md) read none of them either: autocorrect, the S2 corrections path, the evals regression banks, and pr-watch heal. The one evals reader is the `evals macro` fold. By default it drops `guard_decision` and `control_plane_tick` as noise, so only `--all` meets the gap.
+
 ## Adding a new root writer
 
 You do not. The root rows are shrink-only (see The rule). The runtime guard refuses a new top-level write, and the CI gate fails a PR that adds a row. The remedy for a new surface is a subfolder:
