@@ -654,21 +654,6 @@ pub(crate) enum CoreMsg {
         id: u64,
         notice: String,
     },
-    /// The first-attach restore's membership read (squad store, registry
-    /// file, live-id snapshot), resolved OFF the core loop and routed back
-    /// so the restore continues exactly as the sync path did: an empty set
-    /// restores synchronously, a non-empty one resolves the plan batch
-    /// off-loop.
-    /// Constructed only in the non-test body of `restore_with_plans`;
-    /// test fixtures take the synchronous branch and never send it.
-    #[cfg_attr(test, allow(dead_code))]
-    RestoreTargetsReady {
-        id: u64,
-        rows: u16,
-        cols: u16,
-        home_sid: u64,
-        wanted: Vec<(String, String)>,
-    },
     /// The reader refused one undecodable frame from client `id` and kept the
     /// connection (the frame was fully consumed, so the stream stays on a
     /// boundary). Routed back so the refusal rides the reliable channel the
@@ -7774,7 +7759,7 @@ impl Core {
     /// so the batch and the loop agree on membership without a third
     /// resolver. Worker members never appear: restore holds them idle and
     /// their resume gesture (a focus) plans its own re-entry.
-    fn restore_plan_targets() -> Vec<(String, String)> {
+    fn restore_plan_targets(&self) -> Vec<(String, String)> {
         let store = crate::squad_store::load();
         if store.squads.is_empty() {
             return Vec::new();
@@ -7838,44 +7823,22 @@ impl Core {
     /// to plan restores synchronously, exactly as before - which also keeps
     /// the runtime-less test attach paths free of a spawn.
     fn restore_with_plans(&mut self, client_id: u64, rows: u16, cols: u16, home_sid: u64) {
-        #[cfg(test)]
-        {
-            let wanted = Self::restore_plan_targets();
-            if wanted.is_empty() {
-                self.restore_squads(rows, cols, home_sid);
-                self.reconcile_external_lifecycle();
-            } else {
-                self.restore_pending = true;
-                self.resolve_plan_batch(
-                    client_id,
-                    wanted,
-                    BatchReplay::Restore {
-                        home_sid,
-                        rows,
-                        cols,
-                    },
-                );
-            }
+        let wanted = self.restore_plan_targets();
+        if wanted.is_empty() {
+            self.restore_squads(rows, cols, home_sid);
+            self.reconcile_external_lifecycle();
+            return;
         }
-        #[cfg(not(test))]
-        {
-            // The membership read (squad store, registry file, live-id
-            // snapshot) is three file reads behind the first-attach
-            // gesture. Run them on the blocking pool and continue from the
-            // completion; tests keep the synchronous body, since their
-            // fixtures have no loop running to deliver the message.
-            let core_tx = self.self_tx.clone();
-            tokio::task::spawn_blocking(move || {
-                let wanted = Core::restore_plan_targets();
-                let _ = core_tx.blocking_send(CoreMsg::RestoreTargetsReady {
-                    id: client_id,
-                    rows,
-                    cols,
-                    home_sid,
-                    wanted,
-                });
-            });
-        }
+        self.restore_pending = true;
+        self.resolve_plan_batch(
+            client_id,
+            wanted,
+            BatchReplay::Restore {
+                home_sid,
+                rows,
+                cols,
+            },
+        );
     }
 
     /// Consume one member's staged batch plan. `Ok` is the argv to
@@ -11651,30 +11614,6 @@ impl Core {
             // A batch's plans landed: stage them keyed by attach id
             // and re-enter the loop that asked. A refused entry keeps its
             // row and starts no pane (the consuming loop's own Err handling).
-            CoreMsg::RestoreTargetsReady {
-                id,
-                rows,
-                cols,
-                home_sid,
-                wanted,
-            } => {
-                if wanted.is_empty() {
-                    self.restore_squads(rows, cols, home_sid);
-                    self.reconcile_external_lifecycle();
-                } else {
-                    self.restore_pending = true;
-                    self.resolve_plan_batch(
-                        id,
-                        wanted,
-                        BatchReplay::Restore {
-                            home_sid,
-                            rows,
-                            cols,
-                        },
-                    );
-                }
-                Flow::Continue
-            }
             CoreMsg::BatchPlansReady { id, plans, replay } => {
                 self.batch_plans = plans;
                 match *replay {
