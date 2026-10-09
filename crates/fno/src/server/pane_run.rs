@@ -207,13 +207,19 @@ impl Core {
             mut dest,
             mut create_name,
         } = plan;
-        // A second `pane run --squad <name>` landing first may have minted
-        // the squad this one meant to create: join it, never mint a twin.
+        // A concurrent run that landed first may have minted the squad this
+        // one would mint (the named squad, or the cwd's lane): join it, never
+        // mint a twin.
         if let Some(name) = create_name.clone() {
             if let Ok(Some(sid)) = self.resolve_placement_target(&PaneTarget::SquadName(name), None)
             {
                 dest = Some(sid);
                 create_name = None;
+            }
+        } else if dest.is_none() {
+            let current = self.session.find_by_cwd(&squad_key);
+            if let Ok(now) = self.resolve_placement_target(&placement.target, current) {
+                dest = now;
             }
         }
         if claim {
