@@ -35,6 +35,7 @@ pub mod doctor_update;
 #[path = "doctor_update_tests.rs"]
 mod doctor_update_tests;
 pub mod event_cli;
+mod event_signals;
 pub mod event_store;
 pub mod feed_overlay;
 pub(crate) mod first_check;

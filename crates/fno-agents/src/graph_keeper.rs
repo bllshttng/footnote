@@ -35,7 +35,7 @@ mod seat_lock;
 
 mod splice;
 
-use seat_lock::take_seat;
+use seat_lock::{release_seat, take_seat};
 use splice::splice_reply;
 
 use serde_json::{json, Map, Value};
@@ -890,6 +890,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // rebinding keeper's socket, and removing it would kill THEIR listener.
     if seat_still_ours(&cfg.sock, sock_ino) {
         let _ = std::fs::remove_file(&cfg.sock);
+        release_seat(&cfg.sock);
     }
     Ok(())
 }
@@ -1128,6 +1129,7 @@ fn serve_client(
                 let sock = store_socket_for(&state.graph);
                 if seat_still_ours(&sock, state.sock_ino) {
                     let _ = std::fs::remove_file(&sock);
+                    release_seat(&sock);
                 }
                 std::process::exit(0);
             }
@@ -4509,6 +4511,10 @@ mod tests {
         let result = handle.join().unwrap();
         assert!(result.is_ok(), "{result:?}");
         assert!(!sock.exists(), "idle exit must unlink the socket");
+        assert!(
+            !dir.path().join("idle.store.sock.lock").exists(),
+            "idle exit must unlink its seat lock"
+        );
     }
 
     #[test]

@@ -57,10 +57,12 @@ retro sentinel so a later session captures follow-ups. It never
 auto-creates inbox lines or backlog nodes, never auto-resumes work, and
 never clobbers a node that is already done.
 
-Side effect: also runs claim GC (reap_dead_claims), archiving dead
-lockfiles under the claims store's .expired/. --dry-run propagates to it
-(no archiving). This fires on every throttled auto-reconcile, including
-the SessionStart hook - not just a manual invocation.
+Side effect: also runs claim GC, retiring dead claims from graph.db
+into claim_history for at most 20s. Claims it did not reach are
+reported as deferred and wait for a later run. --dry-run
+propagates to it (no retiring). This fires on every throttled
+auto-reconcile, including the SessionStart hook - not just a manual
+invocation.
 
 Options:
   --dry-run, -N    Report candidates only; mutate nothing (graph stays byte-identical).
@@ -1858,79 +1860,59 @@ fn sync_catchup_leg(dry_run: bool, json_out: bool) -> Value {
 }
 
 /// Claim GC. This leg reaches every path that fires reconcile (the
-/// SessionStart hook and a manual invocation), so a reaper on any one
-/// caller would be a guard on one of N reachable paths. --dry-run
-/// propagates (one mode contract); best-effort like sync_catchup: a reap
-/// error never fails the sweep.
+/// SessionStart hook, the daemon's merge-close beat, and a manual run), so a
+/// reaper on any one caller would be a guard on one of N reachable paths.
+/// --dry-run propagates (one mode contract). The reap runs in this process
+/// under [`CLAIM_REAP_BUDGET`]: a shelled reaper outlived the caller's bound
+/// and printed nothing, so no dead claim was ever archived. Best-effort like
+/// sync_catchup: a reap error never fails the sweep.
 fn claim_reap_leg(dry_run: bool, json_out: bool) -> Value {
-    let mut cmd = std::process::Command::new(crate::scrape::fno_py());
-    cmd.args(["claims", "reap", "--json"]);
-    if !dry_run {
-        cmd.arg("--apply");
-    }
-    let outcome = cmd.output();
-    let parsed: Option<Value> = match outcome {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            serde_json::from_str(stdout.trim()).ok()
-        }
-        Err(_) => None,
-    };
-    let Some(summary) = parsed else {
-        let detail = "the claims reap subprocess did not return JSON".to_string();
-        if !json_out {
-            eprintln!("warning: claim reap skipped: {detail}");
-        }
-        return json!({"outcome": "error", "detail": detail});
-    };
+    let summary = crate::claim_verbs::reap_roots(Vec::new(), !dry_run, None, CLAIM_REAP_BUDGET);
     if !json_out {
-        let count = if dry_run {
-            summary
-                .get("would_reap")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-        } else {
-            summary.get("reaped").and_then(Value::as_i64).unwrap_or(0)
-        };
+        let count = summary[if dry_run { "would_reap" } else { "reaped" }]
+            .as_u64()
+            .unwrap_or(0);
         if count > 0 {
             let verb = if dry_run { "would archive" } else { "archived" };
             eprintln!("claim reap: {verb} {count} dead claim(s)");
         }
-        let failed = summary
-            .get("reap_failed")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if !failed.is_empty() {
-            // A provably-dead claim whose archive move never completed is
-            // not the same as zero dead claims found - the reaped=0 count
-            // above stays silent about it, so this must not be gated on
-            // count (AC5's "positive marker" rule applies to output too).
-            let paths: Vec<String> = failed
-                .iter()
-                .take(3)
-                .filter_map(|f| {
-                    f.as_array()
-                        .and_then(|pair| pair.first())
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .collect();
-            let more = if failed.len() > 3 { "..." } else { "" };
+        let deferred = summary["deferred"].as_u64().unwrap_or(0);
+        if deferred > 0 {
             eprintln!(
-                "warning: claim reap left {} dead claim(s) un-archived (move did not complete): {paths}{more}",
-                failed.len(),
-                paths = paths.join(", ")
+                "claim reap: {deferred} claim(s) left for the next pass (the {}s budget ran out)",
+                CLAIM_REAP_BUDGET.as_secs()
             );
+        }
+        // A provably-dead claim whose delete never landed is not the same as
+        // zero dead claims found, so this line never hides behind the count.
+        for list in ["reap_failed", "root_errors"] {
+            let failed = summary[list].as_array().cloned().unwrap_or_default();
+            if !failed.is_empty() {
+                let shown: Vec<&str> = failed.iter().take(3).filter_map(Value::as_str).collect();
+                let more = if failed.len() > 3 { "..." } else { "" };
+                eprintln!(
+                    "warning: claim reap {list}: {} ({}{more})",
+                    failed.len(),
+                    shown.join("; ")
+                );
+            }
         }
     }
     let mut merged = serde_json::Map::new();
-    merged.insert("outcome".into(), json!("ok"));
+    let errors = summary["root_errors"]
+        .as_array()
+        .is_some_and(|e| !e.is_empty());
+    merged.insert("outcome".into(), json!(if errors { "error" } else { "ok" }));
     if let Value::Object(map) = summary {
         merged.extend(map);
     }
     Value::Object(merged)
 }
+
+/// The reconcile beat's share for the claim reap. The rest of the sweep
+/// runs under the same caller bound, so the reap takes a slice of it, and
+/// rows it leaves are `deferred` to the next beat.
+const CLAIM_REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Parent epics of this run's closure claims that are still open, each
 /// naming its still-open sibling children exactly - else a PR that ships

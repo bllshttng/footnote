@@ -774,22 +774,11 @@ pub fn family1_truth_probe_many_measured_within(
     // batchable leg's `timed_out` carries: the instrument never produced a
     // reading for that handle. Fold it into the page outcome, so the row words
     // `unmeasured` instead of publishing the `no-evidence` verdict a clean
-    // page earns. A spent deadline answers the same way without spawning:
-    // the fallback probes each carry their own 5s bound.
-    let mut fallback_unanswered = false;
-    if page_bound(Duration::from_secs(5), deadline, Instant::now()).is_none() {
-        fallback_unanswered = unrepresentable.len() > 0;
-    } else {
-        for handle in unrepresentable {
-            match family1_truth_probe(&handle) {
-                Some(probe) => {
-                    probes.insert(handle, probe);
-                }
-                None => fallback_unanswered = true,
-            }
-        }
-    }
-    let outcome = page_outcome(timed_out, fallback_unanswered);
+    // page earns. A spent deadline answers the same way without spawning,
+    // and each fallback probe is capped by what remains of the deadline.
+    let (fallback, cut, failed) = probe_each_within(&unrepresentable, deadline);
+    probes.extend(fallback);
+    let outcome = page_outcome(timed_out, cut || failed);
     (probes, outcome)
 }
 
@@ -851,13 +840,41 @@ fn family1_truth_probe_batchable_within(
                  PATH right now (a `uv tool install --reinstall` window).",
                 handles.len()
             );
-            let probes = handles
-                .iter()
-                .filter_map(|handle| Some((handle.clone(), family1_truth_probe(handle)?)))
-                .collect();
-            (probes, false)
+            let (probes, cut, _) = probe_each_within(handles, deadline);
+            (probes, cut)
         }
     }
+}
+
+/// One probe per handle, the fallback when a batch cannot carry them. Under
+/// a deadline each probe is capped by what remains of it, and a handle reached
+/// after it spawns nothing; with no deadline each probe keeps its own bound.
+/// Returns the answers, whether the deadline cut any handle off, and whether
+/// any probe ran and failed.
+fn probe_each_within(
+    handles: &[String],
+    deadline: Option<Instant>,
+) -> (std::collections::HashMap<String, TruthProbe>, bool, bool) {
+    let (mut probes, mut cut, mut failed) = (std::collections::HashMap::new(), false, false);
+    for handle in handles {
+        let probe = match deadline {
+            None => family1_truth_probe(handle),
+            Some(_) => match page_bound(Duration::from_secs(60), deadline, Instant::now()) {
+                Some(left) => family1_truth_probe_with_timeout(handle, left),
+                None => {
+                    cut = true;
+                    break;
+                }
+            },
+        };
+        match probe {
+            Some(probe) => {
+                probes.insert(handle.clone(), probe);
+            }
+            None => failed = true,
+        }
+    }
+    (probes, cut, failed)
 }
 
 /// One `fno agents truth --handles` in flight per handle SET, machine-wide.

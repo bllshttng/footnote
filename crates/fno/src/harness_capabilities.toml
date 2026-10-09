@@ -1933,17 +1933,25 @@ blocked = "none"
 state = "supported"
 via = ["crates/fno-agents/src/footnote_harness/mod.rs"]
 
+# agy, opencode and pi push presence only: one `fno-agents report --kind
+# session` at session start, so the registry knows the session id and
+# transcript. No per-turn push reaches `fno-agents hook session-state`
+# (hook/adapter/ has claude and codex only), so these rows read their turn
+# state from the screen scrape and never observe model, effort or posture.
 [harness.agy.hooks.session_state]
 state = "supported"
 via = ["hooks/agy-session-report.sh", "crates/fno-agents/src/agy_hooks.rs"]
+reason = "presence only: a session-start report; no per-turn state, model, effort or posture"
 
 [harness.opencode.hooks.session_state]
 state = "supported"
 via = ["cli/src/fno/setup/assets/opencode/footnote.js"]
+reason = "presence only: a session-start report; no per-turn state, model, effort or posture"
 
 [harness.pi.hooks.session_state]
 state = "supported"
 via = ["cli/src/fno/setup/assets/pi/footnote.ts"]
+reason = "presence only: a session-start report; no per-turn state, model, effort or posture"
 
 [harness.gemini.hooks.session_state]
 state = "missing"

@@ -2731,7 +2731,8 @@ event_types:
           type: string
 
   - name: inside_leg_report
-    description: "Signal that an inside-leg state push (E3.2) was stored. Carries session_id/seq/state; the full stored report (reason/ttl_ms/received_at) lives on the matching claude registry row, which is the audit source -- this event is not a reconstruction record."
+    retention: telemetry
+    description: "Signal that an inside-leg state push (E3.2) was stored and changed the row's state; a same-state repeat updates the row and journals nothing. Carries session_id/seq/state; the full stored report (reason/ttl_ms/received_at) lives on the matching claude registry row, which is the audit source -- this event is not a reconstruction record."
     sources: [daemon]
     data:
       required: [session_id, seq, state]
@@ -2826,7 +2827,8 @@ event_types:
             type: string
 
   - name: codex_thread_inside_leg
-    description: "Driver-sourced thread-row status : the codex thread actor's turn phases landed on the row's inside_leg through the shared seq gate; one event per accepted write."
+    retention: telemetry
+    description: "Driver-sourced thread-row status : the codex thread actor's turn phases landed on the row's inside_leg through the shared seq gate; one event per state change, a same-state write is quiet."
     sources: [daemon]
     data:
       required: [name, session_id, state, seq]
@@ -3876,6 +3878,7 @@ event_types:
     consumers: [operator]
 
   - name: control_plane_tick
+    retention: telemetry
     description: "One tick of one control-plane arm (lead_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch, reap, retire): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
     sources: [daemon, loop, hook, test, pr-heal]
     data:
@@ -4129,7 +4132,8 @@ event_types:
     consumers: [operator]
 
   - name: guard_decision
-    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Healthy allow polls for the same (guard, tool) subject coalesce inside a heartbeat window at the event store: a summary row then carries occurrence_count and the window bounds, while every block and unknown-decision shape still emits one row each."
+    retention: telemetry
+    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Healthy allow polls for the same (guard, tool) subject coalesce inside a heartbeat window at the event store: a summary row then carries occurrence_count and the window bounds, while every block and unknown-decision shape still emits one row each. Allow rows expire after 24 hours, block rows after the telemetry horizon."
     sources: [hook]
     data:
       required: [guard, decision, tool]
@@ -7263,6 +7267,7 @@ event_types:
           type: string
 
   - name: store_socket_unlinked
+    retention: telemetry
     description: "A store-keeper socket that positively proved dead (refused, vanished, or not a socket) was unlinked from the state root or the hashed temp root at daemon start; a live listener is left as found."
     sources: [daemon]
     data:
@@ -7272,6 +7277,7 @@ event_types:
           type: string
 
   - name: store_seat_lock_unlinked
+    retention: telemetry
     description: "An orphaned store seat lock (<sock>.sock.lock whose socket is gone) was unlinked from the hashed temp root at daemon start while its flock was held; a lock another process still holds is left as found."
     sources: [daemon]
     data:
@@ -8426,6 +8432,7 @@ limits:
 retention:
   default: durable
   minimum_ephemeral_ttl_hours: 672
+  telemetry_ttl_hours: 168
   joins:
     - [agent_spawned, agent_raw_inject]
 

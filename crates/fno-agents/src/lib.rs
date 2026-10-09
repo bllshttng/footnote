@@ -1842,7 +1842,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "inside_leg_buffer_flushed",
     // Driver-sourced thread-row status: the codex thread actor's
     // turn phases land on the row's inside_leg through the shared seq gate;
-    // one event per accepted write.
+    // one event per state change.
     "codex_thread_inside_leg",
     // Screen-manifest fallback rung (daemon-emitted, scrape sweep): a scraped
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
