@@ -268,7 +268,9 @@ fn resolve_follows_a_configured_state_dir() {
     let p = Paths::resolve(&repo);
     assert_eq!(
         p.state,
-        repo.join("alt-state").join("pr-watcher-state.json")
+        repo.join("alt-state")
+            .join("state")
+            .join("pr-watcher-state.json")
     );
     assert_eq!(p.events, repo.join("alt-state").join("events.jsonl"));
     write(
@@ -278,7 +280,9 @@ fn resolve_follows_a_configured_state_dir() {
     let p = Paths::resolve(&repo);
     assert_eq!(
         p.state,
-        Path::new("/tmp/park-alt-abs").join("pr-watcher-state.json")
+        Path::new("/tmp/park-alt-abs")
+            .join("state")
+            .join("pr-watcher-state.json")
     );
     // No key, no divergence: the home default, so a default install (and a
     // test env) resolves exactly where the watcher already writes.

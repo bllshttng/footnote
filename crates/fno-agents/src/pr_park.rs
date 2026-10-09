@@ -46,16 +46,18 @@ pub(crate) struct Paths {
 impl Paths {
     fn for_root(root: PathBuf) -> Paths {
         Paths {
-            state: root.join("pr-watcher-state.json"),
-            delivery: root.join("pr-watcher-state-delivery.json"),
+            state: crate::state_layout::place(&root, "pr-watcher-state.json"),
+            delivery: crate::state_layout::place(&root, "pr-watcher-state-delivery.json"),
             events: root.join("events.jsonl"),
             err_log: crate::state_layout::place(&root, "pr-watcher.err.log"),
         }
     }
 
     /// The durable defaults beside the state root: the same files the Python
-    /// watcher writes (`~/.fno/pr-watcher-state.json` + its `-delivery`
-    /// sidecar, `~/.fno/events.jsonl`, `~/.fno/logs/pr-watcher.err.log`).
+    /// watcher writes (`~/.fno/state/pr-watcher-state.json` + its `-delivery`
+    /// sidecar, `~/.fno/events.jsonl`, `~/.fno/logs/pr-watcher.err.log`),
+    /// resolved through the layout ladder so a root the mover has not reached
+    /// yet still reads its legacy files.
     pub fn from_home() -> Paths {
         let root = AgentsHome::from_env()
             .root()

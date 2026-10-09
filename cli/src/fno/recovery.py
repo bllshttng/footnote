@@ -468,7 +468,7 @@ def recovery_sweep(
 def _counts_path() -> Path:
     from fno import paths
 
-    return paths.state_dir() / "recovery-nudges.json"
+    return paths.state_runtime_file("recovery-nudges.json")
 
 
 def load_counts() -> dict:

@@ -263,8 +263,9 @@ def test_ac3fr_uninstall_removes_plist_preserves_watermark(
     plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
     plist_path.write_text("<plist/>")
 
-    # Pre-seed a watermark store in the tmp HOME's .fno dir
-    state_file = tmp_home / ".fno" / "pr-watcher-state.json"
+    # Pre-seed a watermark store in the tmp HOME's .fno state dir
+    state_file = tmp_home / ".fno" / "state" / "pr-watcher-state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(json.dumps({"some/repo#1": {"parked": None}}))
 
     # Stub launchctl so we don't call the real one
@@ -761,7 +762,9 @@ def test_bounce_records_caller_sidecar_and_event(tmp_launch_agents):
     )
     assert rc == 0
     state_root = Path(fno.paths.state_dir())
-    sidecar = json.loads((state_root / "pr-watch-bounce.json").read_text())
+    sidecar = json.loads(
+        (state_root / "state" / "pr-watch-bounce.json").read_text()
+    )
     assert sidecar["caller"] == "heal"
     assert sidecar["pid"] == os.getpid()
     assert sidecar["ppid"] == os.getppid()
@@ -792,6 +795,7 @@ def test_bounce_defer_emits_event_but_no_sidecar(tmp_launch_agents, monkeypatch)
     assert (msg, rc) == ("tick in flight (pid 4242); bounce deferred", 0)
     assert calls == []
     state_root = Path(fno.paths.state_dir())
+    assert not (state_root / "state" / "pr-watch-bounce.json").exists()
     assert not (state_root / "pr-watch-bounce.json").exists()
     from tests._event_rows import event_rows
 
@@ -816,6 +820,7 @@ def test_bounce_foreign_label_writes_nothing(tmp_launch_agents):
     )
     assert rc == 0
     state_root = Path(fno.paths.state_dir())
+    assert not (state_root / "state" / "pr-watch-bounce.json").exists()
     assert not (state_root / "pr-watch-bounce.json").exists()
     events_path = state_root / "events.jsonl"
     assert not events_path.exists() or "pr_watch_bounce" not in events_path.read_text()

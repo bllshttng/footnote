@@ -561,6 +561,19 @@ jobs:
           bash scripts/ci/check-state-root-rows.sh --self-test
           bash scripts/ci/check-state-root-rows.sh
 
+      # The write-side half of the same rule: a diff that ADDS a hand-built
+      # root-level write (a bare state_dir() leaf, a fence-less
+      # root_state_file, a Rust place() with no layout row) fails, so a new
+      # writer cannot skip the paths-module doors the doc's rule names.
+      - name: State-root writes are rowed or subfoldered
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        env:
+          PR_BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          bash scripts/ci/check-state-root-writes.sh --self-test
+          bash scripts/ci/check-state-root-writes.sh
+
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}

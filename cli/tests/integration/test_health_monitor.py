@@ -611,7 +611,7 @@ def test_check_to_history_to_throttle_to_trend_journey(tmp_graph, tmp_path, monk
     # Second check: still breach. History appends a second line. The
     # alert log (from log_only) should NOT have grown - throttle
     # suppresses the second info-severity dispatch.
-    alert_log = Path.home() / ".fno" / "health-alerts.log"
+    alert_log = Path.home() / ".fno" / "logs" / "health-alerts.log"
     log_size_before = alert_log.stat().st_size if alert_log.exists() else 0
     r2 = runner.invoke(app, ["backlog", "triage", "health", "--check", "--all"])
     assert r2.exit_code == 4, r2.output

@@ -101,10 +101,9 @@ def _bounce_sender(window_s: float = 15.0) -> str:
     """
     try:
         import time
-        from fno.paths import state_dir
-        from fno.pr_watch._install import _BOUNCE_SIDECAR
+        from fno.pr_watch._install import bounce_sidecar_path
 
-        raw = json.loads((state_dir() / _BOUNCE_SIDECAR).read_text(encoding="utf-8"))
+        raw = json.loads(bounce_sidecar_path().read_text(encoding="utf-8"))
         if time.time() - float(raw["ts"]) <= window_s:
             return f"{raw['caller']} pid {raw['pid']} via {raw.get('parent', '')}".rstrip()
     except Exception:  # noqa: BLE001 - evidence, never a gate

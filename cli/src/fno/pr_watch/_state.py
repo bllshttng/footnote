@@ -1,7 +1,7 @@
 """PR-state watcher: atomic watermark store.
 
-Persists per-PR polling state to ``~/.fno/pr-watcher-state.json`` (default).
-The path is injectable for tests.
+Persists per-PR polling state to ``~/.fno/state/pr-watcher-state.json``
+(default). The path is injectable for tests.
 
 Entry schema per key::
 
@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from fno.paths import state_dir
+from fno.paths import state_runtime_file
 
 log = logging.getLogger(__name__)
 
@@ -136,11 +136,13 @@ def _merge_entries(legacy: dict, canonical: dict) -> dict:
 def pr_watcher_state_path() -> Path:
     """Return the default path to the pr-watcher state JSON file.
 
-    Mirrors graph_json() / ledger_json() style: delegates to state_dir()
-    so the path follows any user-configured ``config.state_dir`` override
-    (and the test HOME redirect in conftest.py keeps it out of ~/.fno).
+    Mirrors graph_json() / ledger_json() style: delegates to the paths
+    module so the path follows any user-configured ``config.state_dir``
+    override (and the test HOME redirect in conftest.py keeps it out of
+    ~/.fno). Resolves under ``state/`` per the state-root tidiness law,
+    renaming a legacy root file on first resolve.
     """
-    return state_dir() / "pr-watcher-state.json"
+    return state_runtime_file("pr-watcher-state.json")
 
 
 # ---------------------------------------------------------------------------

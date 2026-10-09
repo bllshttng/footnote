@@ -324,12 +324,25 @@ def _tick_in_flight(run: Optional[Callable[[list[str]], str]] = None) -> Optiona
     return pid if age is not None and age < 600 else None
 
 
+def bounce_sidecar_path(state_root: Optional[Path] = None) -> Path:
+    """Where the bounce receipt lives: ``state/`` per the tidiness law, the
+    legacy root spelling renamed in on first resolve. An explicit root (a
+    test or alternate root) always reads the new spelling beside it.
+    """
+    if state_root is not None:
+        return state_root / "state" / _BOUNCE_SIDECAR
+    from fno.paths import state_runtime_file
+
+    return state_runtime_file(_BOUNCE_SIDECAR)
+
+
 def _record_bounce(*, caller: str, deferred: bool, state_root: Optional[Path] = None) -> None:
     """Name this bounce so the next killed tick can name its sender.
 
-    Writes ``pr-watch-bounce.json`` in the state dir (a deferred bounce writes
-    no sidecar: there is no kill to join) and emits ``pr_watch_bounce`` so
-    deferrals are countable. Never raises; a receipt must not block a cure.
+    Writes ``pr-watch-bounce.json`` under the state root's ``state/`` folder
+    (a deferred bounce writes no sidecar: there is no kill to join) and emits
+    ``pr_watch_bounce`` so deferrals are countable. Never raises; a receipt
+    must not block a cure.
     """
     data: dict = {
         "caller": caller,
@@ -340,9 +353,7 @@ def _record_bounce(*, caller: str, deferred: bool, state_root: Optional[Path] = 
     }
     if not deferred:
         try:
-            from fno.paths import state_dir
-
-            sidecar = Path(state_root or state_dir()) / _BOUNCE_SIDECAR
+            sidecar = bounce_sidecar_path(state_root)
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             tmp = sidecar.with_name(sidecar.name + ".tmp")
             tmp.write_text(json.dumps({"ts": time.time(), **data}), encoding="utf-8")
