@@ -778,8 +778,8 @@ const REAP_CHUNK: usize = 8;
 /// witness `scan_for` builds over that chunk, so a caller answers a chunk's
 /// sessions in one batch. The apply step asks again, with the witness
 /// `recheck_for` builds over the chunk's candidates or else the scan's own,
-/// and deletes exactly the observed row, so a claim that changed hands since
-/// the scan stays.
+/// and deletes exactly the observed row, so a claim whose session came back
+/// or that changed hands since the scan stays.
 ///
 /// `deadline` bounds the pass, checked before every chunk and every delete.
 /// The rows a spent deadline never settled are `deferred`. A bounded pass

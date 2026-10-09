@@ -469,13 +469,22 @@ pub(crate) fn reap_roots(
     }
     dirs.sort();
     dirs.dedup();
+    // The roots share one deadline, so a clock-chosen first root keeps an
+    // expensive root from starving the one after it on every pass.
+    if !dirs.is_empty() {
+        let start = (crate::claims::now_ms().max(0) / 1000) as usize % dirs.len();
+        dirs.rotate_left(start);
+    }
     let deadline = std::time::Instant::now() + budget;
     let mut summary = serde_json::json!({"apply":apply,"scanned":0,"would_reap":0,"reaped":0,"deferred":0,"reap_failed":[],"root_errors":[],"roots":dirs});
     for dir in &dirs {
-        // One batch answers a chunk's sessions. A lazy witness spawned one
-        // truth probe per session, which made a 400-row pass run for minutes.
-        // A session the batch did not answer before the deadline reads live,
-        // so its claim is kept and counted as deferred, never reaped.
+        // One batch answers a chunk's sessions, and a fresh batch over the
+        // chunk's candidates is the look before a delete: the compare-and-swap
+        // on the row cannot see a session that resumed during the scan. A lazy
+        // witness spawned one truth probe per session, which made a 400-row
+        // pass run for minutes. A session no batch answered before the
+        // deadline reads live, so its claim is kept and counted as deferred,
+        // never reaped.
         let kept_by_deadline = std::rc::Rc::new(std::cell::Cell::new(0u64));
         let scan = |records: &[crate::claims::ClaimRecord]| {
             let records: Vec<&crate::claims::ClaimRecord> = records.iter().collect();
@@ -492,19 +501,15 @@ pub(crate) fn reap_roots(
                 answer
             }) as crate::claim_store::BoxedWitness<'static>)
         };
-        let reaped = crate::claim_store::reap_in_directory(
-            dir,
-            apply,
-            scan,
-            |_: &[crate::claims::ClaimRecord]| None,
-            key,
-            Some(deadline),
-        )
-        .map(|mut result| {
-            let deferred = result["deferred"].as_u64().unwrap_or(0) + kept_by_deadline.get();
-            result["deferred"] = serde_json::json!(deferred);
-            result
-        });
+        let reaped =
+            crate::claim_store::reap_in_directory(dir, apply, scan, scan, key, Some(deadline)).map(
+                |mut result| {
+                    let deferred =
+                        result["deferred"].as_u64().unwrap_or(0) + kept_by_deadline.get();
+                    result["deferred"] = serde_json::json!(deferred);
+                    result
+                },
+            );
         match reaped {
             Ok(result) => {
                 for field in ["scanned", "would_reap", "reaped", "deferred"] {
