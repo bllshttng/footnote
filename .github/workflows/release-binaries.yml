@@ -4,7 +4,8 @@ name: release-binaries
 # `fno-agents` binaries) into one tarball per platform. Build-only: this
 # workflow publishes nothing. It runs on manual dispatch (an inspection
 # build) or as a reusable workflow called from release.yml, which owns every
-# publish leg behind the `release` environment approval.
+# publish leg behind the `release` environment approval, and from
+# main-binaries.yml, which feeds the bin-cache `fno update` downloads from.
 
 on:
   workflow_dispatch:
@@ -44,6 +45,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          # Full history: build.rs bakes in the last commit that touched
+          # crates/. A shallow clone has one commit, so the binaries would
+          # report HEAD and `fno update` would judge them stale forever.
+          fetch-depth: 0
 
       - name: Stamp release version
         if: inputs.version != ''
