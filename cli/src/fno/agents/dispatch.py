@@ -7447,8 +7447,7 @@ def dispatch_send(
 
     registry_path = paths.agents_registry_path()
     requested_name = name
-    # The locked re-resolution reuses this discovery sweep unless the lock
-    # made the send wait, when a new address owner may have appeared.
+    # One discovery sweep per send; a lock wait clears it (a new owner may appear).
     discovered: dict[str, list] = {}
 
     def _load_and_resolve_target(
