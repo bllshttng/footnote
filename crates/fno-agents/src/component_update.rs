@@ -883,7 +883,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_accepts_a_newer_descendant_rev() {
+    fn classify_descendant_matrix() {
+        // A proven descendant converges: Fresh unattempted, with the detail
+        // naming why the differing revs passed.
         let mut p = probe(AGENTS_CLIENT, Some("def456"));
         p.observed_is_descendant = Some(true);
         let v = classify(&p, &req(vec![]));
@@ -893,27 +895,16 @@ mod tests {
             "the pass names why the differing revs converged: {:?}",
             v.detail
         );
-    }
-
-    #[test]
-    fn classify_attempted_descendant_is_updated_not_failed() {
+        // Attempted, the same proof reads Updated, never Failed.
         let mut p = probe(AGENTS_CLIENT, Some("def456"));
         p.observed_is_descendant = Some(true);
         p.effect_attempted = true;
-        let v = classify(&p, &req(vec![]));
-        assert_eq!(v.status, Status::Updated);
-    }
-
-    #[test]
-    fn mismatched_rev_without_descendant_proof_stays_stale() {
+        assert_eq!(classify(&p, &req(vec![])).status, Status::Updated);
+        // No proof on a mismatch: stale, exactly as before the stamp existed.
         let mut p = probe(AGENTS_CLIENT, Some("def456"));
         p.observed_is_descendant = Some(false);
-        let v = classify(&p, &req(vec![]));
-        assert_eq!(v.status, Status::Stale);
-    }
-
-    #[test]
-    fn descendant_proof_without_mismatch_changes_nothing() {
+        assert_eq!(classify(&p, &req(vec![])).status, Status::Stale);
+        // Proof without a mismatch is the exact-match arm: Fresh, no note.
         let mut p = probe(AGENTS_CLIENT, Some("abc123"));
         p.observed_is_descendant = Some(true);
         let v = classify(&p, &req(vec![]));
@@ -924,8 +915,7 @@ mod tests {
         );
     }
 
-    /// Run git in `dir`, asserting success; stdout trimmed. Shared by the
-    /// ancestry tests.
+    /// Run git in `dir`, asserting success; stdout trimmed.
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
@@ -941,12 +931,14 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// A real temp git repo answers the ancestry question both ways:
-    /// child descends from base (Some(true)), base does not descend from
-    /// child (Some(false)).
+    /// The descendant proof end-to-end through real git, in one temp repo:
+    /// the ancestry read answers both ways plus the unknown-rev None, the
+    /// probe pass stamps a NEWER observed rev and the fleet converges with
+    /// the ancestry named, and an OLDER observed rev stays Failed under
+    /// --attempted.
     #[test]
     #[cfg(unix)]
-    fn rev_is_descendant_reads_git_ancestry() {
+    fn descendant_passes_through_real_git() {
         let dir = std::env::temp_dir().join(format!("fno-cu-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -982,47 +974,6 @@ mod tests {
         assert_eq!(rev_is_descendant(&base, &child, &dir), Some(true));
         assert_eq!(rev_is_descendant(&child, &base, &dir), Some(false));
         assert_eq!(rev_is_descendant("nonexistent", &child, &dir), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The probe pass stamps a descendant rev through the real git path and
-    /// the fleet converges with differing revs; an OLDER observed rev stays
-    /// Failed under --attempted.
-    #[test]
-    #[cfg(unix)]
-    fn probe_pass_stamps_a_descendant_and_converges() {
-        let dir = std::env::temp_dir().join(format!("fno-cu-git2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-q"]);
-        git(
-            &dir,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-        );
-        let base = git(&dir, &["rev-parse", "HEAD"]);
-        git(
-            &dir,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "child",
-            ],
-        );
-        let child = git(&dir, &["rev-parse", "HEAD"]);
         write_script(&dir, "fno-agents", &version_script(&child, ""));
         write_script(&dir, "fno-agents-daemon", &version_script(&child, ""));
         write_script(&dir, "fno-agents-worker", &version_script(&child, ""));

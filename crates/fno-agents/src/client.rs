@@ -1181,8 +1181,12 @@ mod restart_rebound_tests {
         })
     }
 
+    /// The three arms in one contract test (the suite is shrink-only):
+    /// adopt a rebound daemon, fail loud on a held lock with nothing
+    /// answering, and return the start-fresh arm the moment the lock frees.
     #[tokio::test]
-    async fn rebound_daemon_is_adopted_not_failed() {
+    async fn rebound_waits_on_the_new_daemon_not_the_lock() {
+        // Adopt: the lock is held and a fresh daemon answers on the socket.
         let (home, root) = temp_home("adopt");
         let _lock = hold_lock(&home);
         let old_pid: u32 = 424242;
@@ -1195,10 +1199,8 @@ mod restart_rebound_tests {
             other => panic!("expected adoption of pid {new_pid}, got {other:?}"),
         }
         std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[tokio::test]
-    async fn held_lock_with_no_new_daemon_is_the_failure_arm() {
+        // Wedge: the lock is held and nothing ever answers; the bound spent
+        // is the loud failure, naming the pid.
         let (home, root) = temp_home("wedge");
         let _lock = hold_lock(&home);
         let out =
@@ -1211,10 +1213,7 @@ mod restart_rebound_tests {
             other => panic!("expected ForceDidNotFree, got {other:?}"),
         }
         std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[tokio::test]
-    async fn freed_lock_starts_fresh_without_a_probe_penalty() {
+        // Free: the start-fresh arm answers on its first tick, no probe penalty.
         let (home, root) = temp_home("free");
         let started = std::time::Instant::now();
         let out = super::await_lock_free_or_rebound(&home, 424242, Duration::from_secs(2)).await;
