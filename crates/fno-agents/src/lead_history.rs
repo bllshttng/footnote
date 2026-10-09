@@ -2249,7 +2249,7 @@ mod tests {
         // The holder walk crosses journals, so the newest row wins even
         // though the older journal is listed first.
         let row = source.row.expect("the newest row across both journals");
-        assert_eq!(row["change"], json!("newer beat"));
+        assert_eq!(row["data"]["change"], json!("newer beat"));
         // live_journal canonicalizes the recorded path, so the expectation
         // is spelled the same way, never against the raw tempdir path.
         assert_eq!(
@@ -2266,7 +2266,7 @@ mod tests {
         )
         .unwrap();
         let row = source.row.expect("the scope's newest row");
-        assert_eq!(row["change"], json!("newer beat"));
+        assert_eq!(row["data"]["change"], json!("newer beat"));
         assert_eq!(
             source.journal,
             Some(crate::event_store::live_journal(&new_path))
@@ -2280,7 +2280,7 @@ mod tests {
         )
         .unwrap()
         .expect("the wrapper returns the same row");
-        assert_eq!(row["change"], json!("newer beat"));
+        assert_eq!(row["data"]["change"], json!("newer beat"));
     }
 
     #[test]

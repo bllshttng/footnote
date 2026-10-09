@@ -651,13 +651,19 @@ mod tests {
         let named = journal.display().to_string();
         emit_receipt(&home, &lead, 3600, 55 * 60, Some(&named), 1);
         emit_receipt(&home, &lead, 3600, 55 * 60, None, 0);
-        let rows = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        // Emissions commit to the SQL store, not a JSONL file, so the
+        // read-back rides the store query.
+        let rows = crate::event_store::query_events(
+            &home.events_jsonl(),
+            &crate::event_store::EventQuery::default(),
+        )
+        .unwrap();
         let wakes: Vec<Value> = rows
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .iter()
+            .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
             .filter(|r| r["type"] == json!("lead_wake"))
             .collect();
-        assert_eq!(wakes.len(), 2, "one receipt per wake: {rows}");
+        assert_eq!(wakes.len(), 2, "one receipt per wake: {} rows", rows.len());
         assert_eq!(wakes[0]["data"]["beat_journal"], json!(named));
         assert_eq!(wakes[1]["data"]["beat_journal"], Value::Null);
         let _ = std::fs::remove_dir_all(&base);
