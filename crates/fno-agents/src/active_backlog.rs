@@ -1768,15 +1768,15 @@ fn drain_config_for(
     })
 }
 
-/// The wake nudge sentinel path ($HOME/.fno/.active-backlog-nudge by default).
-/// Mirrors the Python writer (`fno.active_backlog.nudge_sentinel_path`) under
-/// the default state dir; a non-default state_dir only loses the latency
+/// The wake nudge sentinel path ($HOME/.fno/state/active-backlog-nudge by
+/// default). Mirrors the Python writer (`fno.active_backlog.nudge_sentinel_path`)
+/// under the default state dir; a non-default state_dir only loses the latency
 /// optimization, never correctness (the poll floor is the guarantee).
 fn nudge_sentinel_path() -> PathBuf {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
-    home.join(".fno").join(".active-backlog-nudge")
+    home.join(".fno").join("state").join("active-backlog-nudge")
 }
 
 /// The sentinel's mtime, or `None` if it does not exist / cannot be stat'd.

@@ -170,6 +170,22 @@ impl Core {
         // tab closable, not swapped for a shell the operator never asked
         // for.
         let keep_seat = seat && cause == CloseCause::ViewerDied;
+        // A NON-seat attach viewer (split right, open-here, a plain attach
+        // tab) whose claude-attach child churned out gets the same replay a
+        // portal seat got: the watched bg job came back under a new pid, and
+        // closing the pane deletes a window the operator is reading. The
+        // same live-argv witness gates it: a uuid no live process argv names
+        // is a genuinely ended session, and today's close stands.
+        let rescue_view = !seat
+            && cause == CloseCause::ViewerDied
+            && self.attached.values().any(|&p| p == pid)
+            && self
+                .panes
+                .get(&pid)
+                // A transient command view rides `attached` too, but its
+                // machine-owned lifecycle cleans up by pane id; replaying it
+                // would strand that cleanup on a dead pid.
+                .is_some_and(|e| e.cmd.is_some() && !e.transient_view);
         if keep_seat {
             let (rows, cols) = self
                 .panes
@@ -201,7 +217,7 @@ impl Core {
                         pid,
                         sid,
                         ti,
-                        idx,
+                        Some(idx),
                         new_pid,
                         &name,
                         &format!("portal {idx}: session resumed - re-attached"),
@@ -221,7 +237,7 @@ impl Core {
                     pid,
                     sid,
                     ti,
-                    idx,
+                    Some(idx),
                     screen_pid,
                     &channel,
                     &format!("portal {idx}: no signal - {channel} ended"),
@@ -234,6 +250,41 @@ impl Core {
                 // through to the plain close below.
                 self.reap_pane(screen_pid);
             }
+        }
+        if rescue_view {
+            let (rows, cols) = self
+                .panes
+                .get(&pid)
+                .map(|e| e.vt.size())
+                .unwrap_or((24, 80));
+            let cwd = self
+                .session
+                .squad(sid)
+                .map(|s| s.canonical_cwd().to_string())
+                .unwrap_or_default();
+            if let Some((id, argv, name)) = self.reattach_view_argv(pid) {
+                if let Ok(new_pid) = self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
+                    if self.swap_dead_seat(
+                        pid,
+                        sid,
+                        ti,
+                        None,
+                        new_pid,
+                        &name,
+                        &format!("{name}: session resumed - re-attached"),
+                        "resumed session re-attached",
+                        reason,
+                    ) {
+                        self.attached.insert(id, new_pid);
+                        return Flow::Continue;
+                    }
+                    // The tab closed under the swap: undo and fall through
+                    // to the plain close.
+                    self.reap_pane(new_pid);
+                }
+            }
+            // No live argv names the session uuid, or the spawn or swap
+            // failed: today's close stands below.
         }
 
         // No screen took the seat. The portal is GONE: an operator close
@@ -326,10 +377,34 @@ impl Core {
     /// liveness is the argv witness, never the pid.
     pub(super) fn reattach_seat_argv(&self, pid: u64) -> Option<(String, Vec<String>, String)> {
         let row = crate::thread_viewer::row_for_pane(&self.portals, pid, &self.agents)?;
+        let id = row.attach_id.clone()?;
+        self.attach_replay_argv(&id, row)
+    }
+
+    /// [`Self::reattach_seat_argv`] for a NON-seat attach viewer: the row
+    /// resolves through the attached map - the pane's own attach id - never
+    /// a portal.
+    fn reattach_view_argv(&self, pid: u64) -> Option<(String, Vec<String>, String)> {
+        let id = self.attached.iter().find(|(_, &p)| p == pid)?.0.clone();
+        let row = self
+            .agents
+            .iter()
+            .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))?;
+        self.attach_replay_argv(&id, row)
+    }
+
+    /// The replay plan both death paths share: the claude gate, the session
+    /// uuid, and the live-argv witness. A uuid no live process argv names is
+    /// a genuinely ended session and reads `None`, so the plain close
+    /// stands.
+    fn attach_replay_argv(
+        &self,
+        id: &str,
+        row: &crate::agents_view::RegistryAgent,
+    ) -> Option<(String, Vec<String>, String)> {
         if row.harness.as_deref() != Some("claude") {
             return None;
         }
-        let id = row.attach_id.clone()?;
         let uuid = row
             .claude_session_uuid
             .as_deref()
@@ -338,10 +413,10 @@ impl Core {
             .iter()
             .any(|a| a.contains(uuid));
         live.then(|| {
-            let (acct, cd) = self.attach_account_ctx(&id);
+            let (acct, cd) = self.attach_account_ctx(id);
             (
-                id.clone(),
-                attach_argv(&id, acct.as_deref(), cd.as_deref()),
+                id.to_string(),
+                attach_argv(id, acct.as_deref(), cd.as_deref()),
                 row.name.clone(),
             )
         })
@@ -356,7 +431,9 @@ impl Core {
         pid: u64,
         sid: u64,
         ti: usize,
-        seat_portal: u8,
+        // `None` for a NON-seat attach viewer: the swap repoints only the
+        // tab leaf; there is no portal entry to move.
+        seat_portal: Option<u8>,
         new_pid: u64,
         pane_name: &str,
         line: &str,
@@ -367,8 +444,10 @@ impl Core {
         if !tree::replace_leaf(tab, pid, new_pid) {
             return false;
         }
-        if let Some(portal) = self.portals.get_mut(&seat_portal) {
-            portal.seat = new_pid;
+        if let Some(idx) = seat_portal {
+            if let Some(portal) = self.portals.get_mut(&idx) {
+                portal.seat = new_pid;
+            }
         }
         if let Some(entry) = self.panes.get_mut(&new_pid) {
             entry.name = Some(pane_name.to_string());

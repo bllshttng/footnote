@@ -1987,7 +1987,7 @@ def emit_event(kind: str, data: dict) -> None:
 def sweep_path() -> Path:
     from fno import paths
 
-    return paths.state_dir() / "watchdog-sweep.json"
+    return paths.state_runtime_file("watchdog-sweep.json")
 
 
 def write_sweep_file(

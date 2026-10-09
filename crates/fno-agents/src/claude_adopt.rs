@@ -138,6 +138,22 @@ pub fn transcript_title_in(base: &Path, session_id: &str) -> Option<String> {
     None
 }
 
+/// The provider axis a spawn gate decides on: the spawn seam's bound
+/// `FNO_ROUTE_PROVIDER` stamp wins, else the recorded route-settings lookup
+/// by the request's model. `None` keeps the axis-skipped semantics for an
+/// unrouted spawn, the same posture the Python lane's gate takes when it
+/// resolved no route.
+pub fn gate_route_provider(params: &serde_json::Value) -> Option<String> {
+    if let Some(stamp) = std::env::var_os("FNO_ROUTE_PROVIDER")
+        .map(|v| v.to_string_lossy().trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return Some(stamp);
+    }
+    let model = params.get("model").and_then(|v| v.as_str());
+    provider_from_route_settings(model)
+}
+
 /// The model-provider this session's observed model is recorded to run on,
 /// matched against `~/.fno/route-settings/*.json`. The file's
 /// `FNO_ROUTE_PROVIDER` stamp is the source - the observed model only SELECTS

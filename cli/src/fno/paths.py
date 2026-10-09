@@ -814,7 +814,7 @@ def ledger_json() -> Path:
     back to the user-global ``~/.fno`` instead.
     """
     if os.environ.get("FNO_STATE_DIR"):
-        return _guard_state_path(state_dir() / "ledger.json")
+        return root_state_file("ledger.json")
     settings = _settings()
     override = settings.paths.ledger_json
     if override is not None:
@@ -826,7 +826,7 @@ def ledger_json() -> Path:
         )
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return _guard_state_path(state_dir() / "ledger.json")
+        return root_state_file("ledger.json")
     return _guard_state_path(_resolve("~/.fno/") / "ledger.json")
 
 
@@ -849,13 +849,89 @@ def operator_lane() -> Path:
         )
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return _guard_state_path(state_dir() / "my-priorities.md")
+        return root_state_file("my-priorities.md")
     return _guard_state_path(_resolve("~/.fno/") / "my-priorities.md")
 
 
 def global_events_json() -> Path:
     """Return the cross-checkout event journal beside the global ledger."""
     return _guard_state_path(ledger_json().parent / "events.jsonl")
+
+
+def _state_subfile_at(root: Path, subfolder: str, name: str, legacy_name: str) -> Path:
+    """The move ladder against an explicit root (so a must-not-raise caller
+    can name ``~/.fno`` without loading settings): answer
+    ``<root>/<subfolder>/<name>``, renaming the legacy root spelling into it
+    on first resolve. The rename never clobbers an existing ``state/`` file
+    (merge-capable readers fold the legacy remainder themselves) and keeps
+    the caller on the legacy path when it cannot land.
+    """
+    new = root / subfolder / name
+    legacy = root / legacy_name
+    if legacy.exists() and not new.exists():
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            legacy.rename(new)
+        except OSError:
+            # A racer's winning rename removed legacy; answering legacy would
+            # send the write back to the root, so prefer a new that exists.
+            return _guard_state_path(new if new.exists() else legacy)
+    return _guard_state_path(new)
+
+
+def state_runtime_file(name: str, legacy_name: Optional[str] = None) -> Path:
+    """A rewritten runtime-state file under ``state/``, reading the legacy
+    root spelling while it exists. The one resolver for the pr-watch,
+    fleet-sweep, provider-runtime, failover, health-throttle, recovery-nudge
+    and watchdog-sweep state the tidiness law moved off the root
+    (docs/state-root-inventory.md): the resolver is the mover, so no second
+    mechanism can drift. ``legacy_name`` carries a root file whose spelling
+    the move also changed (the dot-stamps drop their dot).
+    """
+    return _state_subfile_at(state_dir(), "state", name, legacy_name or name)
+
+
+def logs_file(name: str) -> Path:
+    """A log file under ``logs/``: the same ladder as
+    :func:`state_runtime_file` for the root logs the tidiness law moved.
+    """
+    return _state_subfile_at(state_dir(), "logs", name, name)
+
+
+# The inventory doc's remaining root-file rows: the fence a root-level write
+# passes. SHRINK-ONLY like the rows it mirrors - a writer that moves deletes
+# its name here and its doc row in the same PR (the parity test in
+# cli/tests/test_state_root_inventory.py refuses a name no row matches).
+_ROOT_STATE_FILE_ROWS: frozenset[str] = frozenset(
+    {
+        "config.toml", "config.toml.lock", "config.toml.bak",
+        "settings.yaml", "settings.yaml.lock",
+        "ledger.json", "ledger.md",
+        "events.jsonl", "events.jsonl.1", "events.jsonl.ephemeral",
+        "decisions.jsonl", "decisions.jsonl.compact", "decisions.jsonl.corrupt",
+        "questions.jsonl",
+        "my-priorities.md", "my-priorities.md.lock",
+        ".env", ".gitignore", ".path-migration-done",
+    }
+)
+
+
+def root_state_file(name: str) -> Path:
+    """A root-level state file, refusing any leaf the inventory does not row.
+
+    Root rows are shrink-only, so a NEW root-level write has no row and this
+    door refuses it, naming the remedy. The remaining root writers route
+    through here so the day one moves, the row, the fence entry and the
+    accessor leave in one change.
+    """
+    if name not in _ROOT_STATE_FILE_ROWS:
+        raise ValueError(
+            f"'{name}' has no state-root inventory row; the root holds no new "
+            "writers (docs/state-root-inventory.md, 'The rule'). Put the state "
+            "in a named subfolder - state_runtime_file() for rewritten runtime "
+            "state, logs_file() for logs, or an existing folder accessor."
+        )
+    return state_dir() / name
 
 
 def decisions_jsonl() -> Path:
@@ -1098,12 +1174,16 @@ def benchmarks_json() -> Path:
     ``~/.fno`` rather than forking into a repo checkout. No dedicated
     ``config.paths`` override: callers that need isolation pass an explicit path
     to the benchmarks module (the refresh/show/load functions all accept one).
+
+    Resolves under ``cache/`` per the state-root tidiness law, renaming the
+    legacy root spelling on first resolve (the same move ladder
+    :func:`state_runtime_file` runs).
     """
     settings = _settings()
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return _guard_state_path(state_dir() / "benchmarks.json")
-    return _guard_state_path(_resolve("~/.fno/") / "benchmarks.json")
+        return _state_subfile_at(state_dir(), "cache", "benchmarks.json", "benchmarks.json")
+    return _state_subfile_at(_resolve("~/.fno/"), "cache", "benchmarks.json", "benchmarks.json")
 
 
 def runtime_state_json() -> Path:
@@ -1118,15 +1198,20 @@ def runtime_state_json() -> Path:
     429-lock WRITE path, and a bad config must never turn a rate-limit into a
     crash that loses the lock. Tests pin an explicit file via the
     ``FNO_RUNTIME_STATE_PATH`` env override instead of a config key.
+
+    Resolves under ``state/`` per the state-root tidiness law through
+    :func:`state_runtime_file`; the Rust reader
+    (``fno-agents provider_cap::runtime_state_path``) mirrors the same
+    ladder, so the two languages answer one file.
     """
     try:
         settings = _settings()
         raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
         if os.path.isabs(raw):
-            return _guard_state_path(state_dir() / "provider-runtime-state.json")
+            return state_runtime_file("provider-runtime-state.json")
     except Exception:  # noqa: BLE001 - see docstring: never raise on config
         pass
-    return _guard_state_path(_resolve("~/.fno/") / "provider-runtime-state.json")
+    return _state_subfile_at(_resolve("~/.fno/"), "state", "provider-runtime-state.json", "provider-runtime-state.json")
 
 
 def observer_reports_dir(
@@ -1682,7 +1767,7 @@ def config_file() -> Path:
     actual = loaded_from()
     if actual is not None:
         return actual
-    return state_dir() / "config.toml"
+    return root_state_file("config.toml")
 
 
 # ---------------------------------------------------------------------------

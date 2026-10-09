@@ -5174,7 +5174,7 @@ def _a2a_first_use_gate(
 
     from fno import paths
 
-    marker = paths.state_dir() / ".a2a-confirmed"
+    marker = paths.state_runtime_file("a2a-confirmed", legacy_name=".a2a-confirmed")
     if marker.exists():
         return True  # answered once already; honor the persisted setting.
 

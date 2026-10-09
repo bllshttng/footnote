@@ -75,7 +75,7 @@ fn client_compose_keys_modal_renders_the_which_key_reference() {
     view.term = (57, 80);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
-    assert!(text.contains("Keybindings"), "chrome title present");
+    assert!(text.contains("keybindings"), "chrome title present");
     assert!(text.contains("esc close"), "dismiss affordance present");
     assert!(
         text.contains("⏎ runs the selected chord"),

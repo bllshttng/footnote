@@ -698,7 +698,7 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
     assert_eq!(labels[1], "sweep threads");
     assert_eq!(labels[2], "new agent");
     assert_eq!(labels[3], "experimental: backlog view");
-    assert_eq!(labels[4], "Keybindings");
+    assert_eq!(labels[4], "keybindings");
     assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
 }
 

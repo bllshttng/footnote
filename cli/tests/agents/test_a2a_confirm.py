@@ -62,6 +62,12 @@ def _wire(monkeypatch, *, answer="y", stdin_tty=True, stderr_tty=True):
     return err
 
 
+def _marker_path():
+    """The confirmation marker where the gate writes it now (state/, renamed
+    from the legacy root spelling on first resolve)."""
+    return paths.state_runtime_file("a2a-confirmed", legacy_name=".a2a-confirmed")
+
+
 def test_ac6_hp_yes_keeps_on_and_persists(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
@@ -71,7 +77,7 @@ def test_ac6_hp_yes_keeps_on_and_persists(tmp_path, monkeypatch):
     # AC6-UI: prompt names the ceiling + plan credit.
     assert "6" in err.text() and "plan credit" in err.text()
     # AC6-FR: marker persisted + setting written.
-    assert (paths.state_dir() / ".a2a-confirmed").exists()
+    assert _marker_path().exists()
     assert tomllib.loads((tmp_path / "config.toml").read_text())["agents"]["a2a"]["auto"] is True
 
 
@@ -81,7 +87,7 @@ def test_ac6_hp_no_turns_off_and_persists(tmp_path, monkeypatch):
     _wire(monkeypatch, answer="n\n")
 
     assert dispatch._a2a_first_use_gate(True, 6) is False
-    assert (paths.state_dir() / ".a2a-confirmed").exists()
+    assert _marker_path().exists()
     assert tomllib.loads((tmp_path / "config.toml").read_text())["agents"]["a2a"]["auto"] is False
 
 
@@ -101,7 +107,7 @@ def test_ac6_edge_no_tty_conservative_off(tmp_path, monkeypatch):
     assert dispatch._a2a_first_use_gate(True, 6) is False  # conservative OFF
     assert "conservative fallback" in err.text()
     # NOT persisted -> no marker, so an interactive run later still asks.
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()
 
 
 def test_ac3_err_unanswered_tty_times_out_without_persisting(tmp_path, monkeypatch):
@@ -139,7 +145,7 @@ def test_ac3_err_unanswered_tty_times_out_without_persisting(tmp_path, monkeypat
     assert effective is False
     assert "timed out" in err.text()
     assert "conservative fallback" in err.text()
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()
     assert not (tmp_path / "config.toml").exists()
 
 
@@ -151,7 +157,7 @@ def test_ac3_err_tty_eof_falls_back_without_persisting(tmp_path, monkeypatch):
     assert dispatch._a2a_first_use_gate(True, 6) is False
     assert "could not be read" in err.text()
     assert "conservative fallback" in err.text()
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()
     assert not (tmp_path / "config.toml").exists()
 
 
@@ -170,7 +176,7 @@ def test_ac3_err_invalid_prompt_timeout_falls_back(tmp_path, monkeypatch, timeou
         is False
     )
     assert "conservative fallback" in err.text()
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()
 
 
 def test_ac3_err_config_lock_contention_is_bounded_and_unconfirmed(
@@ -202,7 +208,7 @@ def test_ac3_err_config_lock_contention_is_bounded_and_unconfirmed(
     assert effective is False
     assert "could not persist" in err.text()
     assert "conservative fallback" in err.text()
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()
     assert not target.exists()
 
 
@@ -221,14 +227,14 @@ def test_ac3_err_config_write_failure_does_not_persist_marker(tmp_path, monkeypa
 
     assert dispatch._a2a_first_use_gate(True, 6) is False
     assert "could not persist" in err.text()
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()
 
 
 def test_ac4_hp_marker_write_failure_is_visible(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
     err = _wire(monkeypatch, answer="y\n")
-    marker = paths.state_dir() / ".a2a-confirmed"
+    marker = _marker_path()
     original_write_text = type(marker).write_text
 
     def _write_text(path, *args, **kwargs):
@@ -245,7 +251,7 @@ def test_ac4_hp_marker_write_failure_is_visible(tmp_path, monkeypatch):
 
 def test_ac6_fr_marker_means_no_reask(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
-    marker = paths.state_dir() / ".a2a-confirmed"
+    marker = _marker_path()
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("answered\n")
 
@@ -278,4 +284,4 @@ def test_observed_mode_passes_through_without_ask(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch.sys, "stderr", _FakeErr())
     monkeypatch.delenv("FNO_A2A_NO_CONFIRM", raising=False)
     assert dispatch._a2a_first_use_gate(False, 6) is False
-    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not _marker_path().exists()

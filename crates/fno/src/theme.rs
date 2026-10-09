@@ -77,6 +77,11 @@ pub enum Role {
     Title,
     /// The `esc close` affordance.
     Chip,
+    /// The composer chip that holds the keyboard: the one filled chip. A
+    /// terminal-following inverse block (fg/bg swapped by the emulator), so
+    /// the focused chip is unmistakable on a dark and a light ground alike
+    /// and no theme can pick a fill that washes out. Bold carries the label.
+    ChipFocus,
     Subtitle,
     /// `(is_active,)` - a section tab; the active one carries the accent.
     Tab(bool),
@@ -219,6 +224,16 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         // washing the default fg out on a light terminal, while index 8 stays
         // a readable gray under both.
         Role::PanelMeta | Role::PanelRule => return (Color::Indexed(8), Color::Default, 0),
+        // The focused composer chip resolves above the theme split too: the
+        // terminal's own pair, swapped, is the fill - visible under every
+        // theme and every emulator ground.
+        Role::ChipFocus => {
+            return (
+                Color::Default,
+                Color::Default,
+                cell_flags::INVERSE | cell_flags::BOLD,
+            )
+        }
         _ => {}
     }
     if t.inherit {
@@ -875,6 +890,34 @@ mod tests {
                 flags & cell_flags::INVERSE,
                 cell_flags::INVERSE,
                 "{n} stamp is reverse video"
+            );
+        }
+    }
+
+    #[test]
+    fn the_focused_chip_is_a_terminal_following_inverse_under_every_theme() {
+        // The focused-chip ruling: all chips read at one dim weight, so
+        // Tab's landing spot is the only tell, and it told nothing. The
+        // focused chip is the one
+        // filled chip: the terminal's own pair swapped (INVERSE), bold
+        // label, under EVERY theme - no theme picks a fill that washes out
+        // on the disagreeing ground.
+        for n in THEME_NAMES {
+            let t = Theme::from_name(n).0;
+            let (fg, bg, flags) = cell_style(Role::ChipFocus, &t);
+            assert_eq!(fg, Color::Default, "{n} focused-chip fg");
+            assert_eq!(bg, Color::Default, "{n} focused-chip bg");
+            assert_eq!(
+                flags & cell_flags::INVERSE,
+                cell_flags::INVERSE,
+                "{n} focused chip carries INVERSE"
+            );
+            // A focused chip must not read like its neighbors: unfocused
+            // chips ride PanelBody (default video) under every theme.
+            assert_ne!(
+                cell_style(Role::ChipFocus, &t),
+                cell_style(Role::PanelBody, &t),
+                "{n} focused vs unfocused chip"
             );
         }
     }

@@ -186,6 +186,7 @@ fn load_document(connection: &Connection, path: &Path) -> Result<Value, StateErr
             &row.map_err(|e| failure(path, e))?,
         )?);
     }
+    crate::role_migration::upgrade_registry_rows(&mut values);
     document
         .as_object_mut()
         .ok_or_else(|| failure(path, "registry metadata is not an object"))?

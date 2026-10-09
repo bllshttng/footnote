@@ -1031,8 +1031,10 @@ pub(crate) struct View {
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `footnote-superscript` is
     /// the default; a terminal reporting a light background defaults to
-    /// `footnote-paper`, and `terminal` stays available as the no-op that
-    /// inherits the emulator's own colors.
+    /// `footnote-paper`, whose ground an inferred pick never paints (the
+    /// terminal keeps its own bg and fg, the theme-ground ruling), and
+    /// `terminal` stays available as the no-op that inherits the emulator's
+    /// own colors.
     theme: Theme,
     /// The user's own themes, latched at startup (theme_ground::launch_theme).
     user_themes: Vec<(String, Theme)>,
@@ -1155,8 +1157,6 @@ pub(crate) struct View {
     /// The theme file importer, active only inside Settings > Theme.
     theme_import: theme_import_ui::ThemeImportUi,
     theme_import_gen: u64,
-    /// The Keybindings tab's open "press the new key" capture.
-    key_capture: Option<keys_settings::KeyCapture>,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -1480,6 +1480,9 @@ struct KeysModal {
     /// The live `/` filter query. `None` = browsing; `Some` (possibly empty) =
     /// filtering, rows rebuilt per keystroke by [`keys_modal_with_filter`].
     filter: Option<String>,
+    /// The row index of the "[ edit keys in ... ]" button (`None` while
+    /// filtering): Enter there opens `$EDITOR`, not a chord.
+    edit_row: Option<usize>,
 }
 
 /// (US2) The right-click / `m` row context menu over a sideline agent
@@ -1771,10 +1774,6 @@ pub(crate) enum AuxAction {
     SettingsBack,
     /// Open the macOS file picker for a theme file.
     ThemePick,
-    /// Open the "press the new key" capture for an action id, or "prefix".
-    KeyCapture(String),
-    /// Open the key config in `$EDITOR`, then reload the keymap.
-    EditKeysFile,
     /// Open the color picker for one `[sideline.colors]` axis key
     /// (existing or just typed). The axis names its table
     /// (`harness` / `route` / `model` / `row`).
@@ -1826,6 +1825,7 @@ pub(crate) mod input_field;
 mod input_folds;
 mod mail_input;
 mod overlay_keys;
+mod terminal_cursor;
 // The overlay key state machines live in the module; the re-import keeps
 // every existing bare-name caller (the tests' `use super::*` chain) resolving.
 #[cfg(test)]
@@ -2041,7 +2041,6 @@ impl View {
             lane: LaneColorsUi::default(),
             theme_import: theme_import_ui::ThemeImportUi::Idle,
             theme_import_gen: 0,
-            key_capture: None,
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -4942,6 +4941,10 @@ impl View {
         let (rows, cols) = self.term;
         let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
         let mut cells = vec![Cell::default(); rows * cols];
+        // The composer sheet's editor cursor cell, when the launcher drew
+        // this frame and no picker holds the keyboard: the terminal's real
+        // cursor belongs there, ahead of any pane's cursor.
+        let mut launcher_cursor = None;
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
         backlog_style::node_spans_begin();
@@ -5012,7 +5015,13 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if agent_launcher::draw_overlay(self, &mut cells, rows, cols) {
+        } else if self.launcher.is_some() {
+            // The sheet paints whenever the launcher is open, even while a
+            // picker holds the keyboard (the returned cursor cell is then
+            // None): the chain stops here so a later overlay never draws
+            // over the composer, and the pane branch below never shows a
+            // pane's cursor behind it.
+            launcher_cursor = agent_launcher::draw_overlay(self, &mut cells, rows, cols);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -5203,54 +5212,10 @@ impl View {
             messages_view::paint_full(self, &mut cells, rows, cols);
         }
 
-        // Terminal cursor: the FOCUSED pane's, offset into its rect - the
-        // one place the cursor may sit (AC1-UI/AC5-UI).
-        let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
-        if self.selector.is_none()
-            && self.answers.is_none()
-            && self.yard.is_none()
-            && self.digest.is_none()
-            && self.move_pick.is_none()
-            && self.attach_place.is_none()
-            && self.portal_pick.is_none()
-            && self.nav.is_none()
-            && self.peek.is_none()
-            && self.connections.is_none()
-            && self.keys_modal.is_none()
-            && self.row_menu.is_none()
-            && self.aux.is_none()
-            && !((self.backlog_board.is_some() || self.org_board.is_some())
-                && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
-            && self.messages_board.is_none()
-        {
-            if let Some((_, rect)) = self
-                .layout
-                .panes
-                .iter()
-                .find(|(id, _)| *id == self.layout.focus)
-            {
-                if let Some(f) = self.frames.get(&self.layout.focus) {
-                    // The cursor sits in the pty grid, which is the CONTENT
-                    // rect for a framed pane.
-                    let content = crate::pane_border::content_rect(*rect);
-                    cur_r =
-                        TAB_BAR_ROWS + content.y + f.cursor_row.min(content.rows.saturating_sub(1));
-                    cur_c = self.left_chrome_w()
-                        + content.x
-                        + f.cursor_col.min(content.cols.saturating_sub(1));
-                    if !self.sideline_full && self.layout.area != (0, 0) {
-                        // Never in the filler (AC1-UI), even mid-race when a
-                        // stale rect exceeds the just-shrunk area. Skipped in
-                        // full-screen sideline: the cursor belongs to the
-                        // composer, not a pane that is not painted.
-                        cur_r = cur_r.min(TAB_BAR_ROWS + self.layout.area.0.saturating_sub(1));
-                        cur_c =
-                            cur_c.min(self.left_chrome_w() + self.layout.area.1.saturating_sub(1));
-                    }
-                    cur_vis = f.cursor_visible;
-                }
-            }
-        }
+        // Terminal cursor: the composer sheet's editor while it is open (the
+        // keyboard owner), else the FOCUSED pane's, offset into its rect -
+        // the one place the cursor may sit (AC1-UI/AC5-UI).
+        let (cur_r, cur_c, cur_vis) = terminal_cursor::compose_cursor(self, launcher_cursor);
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
         backlog_style::node_spans_end();
         Frame {
@@ -7931,12 +7896,12 @@ async fn attach_and_run(
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
                     // External opens run off-loop; a cold browser must not stall
-                    // rendering. The router names the opener for each pseudo
-                    // scheme; the message leg finishes here on the UI loop.
+                    // rendering. The router names the opener per pseudo scheme;
+                    // open_link::finish lands the UI-loop legs.
                     if let Some(routed) =
                         crate::client::open_link::start(&url, link_tx.clone(), sender_tx.clone())
                     {
-                        messages_view::open_message(&mut view, routed.id);
+                        crate::client::open_link::finish(routed, &mut view);
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
                         }
@@ -9494,6 +9459,11 @@ async fn row_menu_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
+            // The split cells answer shift+arrows; a menu with none
+            // swallows the key, never dismisses (row_menu::run_shift_arrow).
+            ModalKey::ShiftArrow(dir) => {
+                row_menu::run_shift_arrow(view, dir, sock_w).await?;
+            }
             ModalKey::PageUp => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
@@ -9649,7 +9619,6 @@ async fn execute_aux_action(
         AuxAction::OpenSettings => {
             view.lane.reset();
             theme_import_ui::reset(view);
-            view.key_capture = None;
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
@@ -9715,8 +9684,6 @@ async fn execute_aux_action(
         | AuxAction::ThemeImportCancel
         | AuxAction::ThemePick
         | AuxAction::SettingsBack
-        | AuxAction::KeyCapture(_)
-        | AuxAction::EditKeysFile
         | AuxAction::LaneColorEdit(..)
         | AuxAction::LaneColorAdd(_)
         | AuxAction::LaneColorCustom(..)
@@ -9793,6 +9760,9 @@ async fn aux_keys(
                     m.popup.nav(NavDir::Right);
                 }
             }
+            // No split cells on a settings page either: the folded
+            // Shift+arrow is inert, never a dismissal.
+            ModalKey::ShiftArrow(_) => {}
             ModalKey::PageUp => {
                 if let Some(m) = view.aux.as_mut() {
                     m.popup.scroll_by(-(trows as isize - 2).max(1));
@@ -9877,7 +9847,6 @@ async fn aux_mouse(
                     if !view.aux_block_contains(rep.row, rep.col) {
                         view.lane.clear_entry();
                         theme_import_ui::reset(view);
-                        view.key_capture = None;
                         view.aux = None;
                     }
                 }

@@ -38,6 +38,15 @@ pub(super) fn ground_repaint(theme: &Theme, paint: bool) -> Option<PendingGround
     })
 }
 
+/// The ground-paint rule: an INFERRED light theme (no config named one; the
+/// COLORFGBG ladder picked paper) never repaints the ground. The terminal's
+/// own light bg and fg stay as the user had them; the theme contributes the
+/// chrome colors only (the theme-ground ruling). An explicit theme pick, the
+/// dark default, and the `paint_background` kill switch keep their behavior.
+pub(super) fn ground_paint_allowed(paint_enabled: bool, inferred: bool, theme: &Theme) -> bool {
+    paint_enabled && !(inferred && crate::theme::is_light(theme))
+}
+
 /// Apply a staged theme-switch ground repaint: write the OSC bytes, move
 /// the compositor ground, and latch the exit restore. The takeover gate
 /// (paint_background) was already checked at arm time.
@@ -68,10 +77,16 @@ pub(super) struct LaunchTheme {
 }
 
 pub(super) fn launch_theme(cwd: &Path, view: &mut View) -> LaunchTheme {
-    let (theme, theme_warn) = crate::digest_overlay::theme_for(cwd);
+    let (theme, theme_warn, inferred) = crate::digest_overlay::theme_for(cwd);
     // The OSC ground: set + restore ride together through the kill switch,
-    // so an operator who opts out gets byte-for-byte the old launch.
-    let paint = crate::digest_overlay::paint_background_enabled(cwd);
+    // so an operator who opts out gets byte-for-byte the old launch. The
+    // paint rule (an inferred light theme never repaints) is
+    // [`ground_paint_allowed`], pinned by its test.
+    let paint = ground_paint_allowed(
+        crate::digest_overlay::paint_background_enabled(cwd),
+        inferred,
+        &theme,
+    );
     let ground = if paint {
         crate::theme::ground_set(&theme)
     } else {

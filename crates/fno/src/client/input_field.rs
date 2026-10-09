@@ -65,6 +65,28 @@ impl InputField {
                         self.cursor = self.text[..start].chars().count();
                     }
                 }
+                // The launcher fold's word keys reach the settings fields
+                // too: one byte grammar, one editing grammar.
+                LKey::KillWord => {
+                    let before: Vec<char> = self.text.chars().take(self.cursor).collect();
+                    let drop = super::agent_launcher::word_kill_run(&before);
+                    let at = self.byte_at(self.cursor - drop);
+                    self.text.replace_range(at..self.byte_at(self.cursor), "");
+                    self.cursor -= drop;
+                }
+                LKey::Home => self.cursor = 0,
+                LKey::End => self.cursor = self.text.chars().count(),
+                LKey::WordLeft | LKey::WordRight => {
+                    let cur = self.cursor;
+                    let rev = matches!(key, LKey::WordLeft);
+                    let taken: Vec<char> = if rev {
+                        self.text.chars().take(cur).collect()
+                    } else {
+                        self.text.chars().skip(cur).collect()
+                    };
+                    let step = super::agent_launcher::word_run(&taken, rev);
+                    self.cursor = if rev { cur - step } else { cur + step };
+                }
                 LKey::Left => self.cursor = self.cursor.saturating_sub(1),
                 LKey::Right => self.cursor = (self.cursor + 1).min(self.text.chars().count()),
                 LKey::Enter | LKey::CtrlJ => {

@@ -110,7 +110,7 @@ fn watchdog_gate(watchdog: Option<bool>, recovery: Option<bool>, autonomy: Optio
 
 fn sweep_staleness(cwd: &std::path::Path, now: f64, stale_after_s: f64) -> SweepStaleness {
     sweep_staleness_at(
-        &state_root(cwd).join("watchdog-sweep.json"),
+        &crate::state_layout::place(&state_root(cwd), "watchdog-sweep.json"),
         now,
         stale_after_s,
     )

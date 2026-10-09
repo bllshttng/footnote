@@ -382,11 +382,11 @@ def evaluate_thresholds(
 
 
 def _default_throttle_path() -> Path:
-    return _paths.state_dir() / "health-throttle.json"
+    return _paths.state_runtime_file("health-throttle.json")
 
 
 def _default_alert_log_path() -> Path:
-    return _paths.state_dir() / "health-alerts.log"
+    return _paths.logs_file("health-alerts.log")
 
 
 def _read_throttle_state(path: Path) -> dict[str, str]:

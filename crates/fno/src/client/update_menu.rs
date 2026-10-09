@@ -259,7 +259,7 @@ pub(crate) fn build_sideline_menu(
             enabled: true,
         });
     }
-    rows.push(entry("⌨", "Keybindings"));
+    rows.push(entry("⌨", "keybindings"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));

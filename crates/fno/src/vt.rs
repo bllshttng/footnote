@@ -487,10 +487,73 @@ impl Pane {
     /// click would open. The click path keeps [`Pane::link_at`] as the URI-only
     /// projection of this match, so click and hover cannot disagree.
     ///
+    /// fno's own protocol tokens (`@handle`, a bare `fmail-` id) outrank
+    /// everything else on the line, OSC 8 included: an app may hyperlink-wrap
+    /// them, but the landing (the Messages thread) is fno's to name. OSC 8
+    /// then wins over the plain-text linkify pass (see `link_at`).
+    ///
     /// `cwd` is the pane's live working directory, from which bare relative
     /// candidates are resolved; see [`crate::link::find_paths`].
     pub fn link_span(&self, row: u16, col: u16, cwd: &str) -> Option<LinkSpan> {
         let point = self.viewport_point(row, col);
+        let line = self.logical_line(point.line);
+        if let Some((text, points)) = &line {
+            if let Some(idx) = points.iter().position(|p| *p == point) {
+                // Hover fires this per mouse move, and each finder below
+                // allocates a char vector of the line: the two byte scans
+                // keep an ordinary line free of all four walks. Each token
+                // finder answers ONE occurrence; a line can carry several,
+                // so the walks below step over spans that sit left of the
+                // clicked cell.
+                if text.contains("fmail-") {
+                    if let Some((start, end, id)) = crate::link::find_mail_message(text) {
+                        if idx >= start && idx < end {
+                            return Some(LinkSpan {
+                                uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
+                                cells: self.visible_cells(&points[start..end]),
+                            });
+                        }
+                    }
+                    if let Some((start, end, id)) = crate::link::find_mail_sender(text) {
+                        if idx >= start && idx < end {
+                            return Some(LinkSpan {
+                                uri: format!("{}{id}", crate::link::SENDER_SCHEME),
+                                cells: self.visible_cells(&points[start..end]),
+                            });
+                        }
+                    }
+                    let mut skip = 0;
+                    while let Some((start, end, id)) = crate::link::find_fmail_token(text, skip) {
+                        if idx < end {
+                            if idx >= start {
+                                return Some(LinkSpan {
+                                    uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
+                                    cells: self.visible_cells(&points[start..end]),
+                                });
+                            }
+                            break;
+                        }
+                        skip = end;
+                    }
+                }
+                if text.contains('@') {
+                    let mut skip = 0;
+                    while let Some((start, end, name)) = crate::link::find_handle_token(text, skip)
+                    {
+                        if idx < end {
+                            if idx >= start {
+                                return Some(LinkSpan {
+                                    uri: format!("{}{name}", crate::link::HANDLE_SCHEME),
+                                    cells: self.visible_cells(&points[start..end]),
+                                });
+                            }
+                            break;
+                        }
+                        skip = end;
+                    }
+                }
+            }
+        }
         if let Some(h) = self.term.grid()[point.line][point.column].hyperlink() {
             // OSC 8 wins when present (see `link_at`); the span is the run of
             // cells carrying the SAME anchor, soft wraps included.
@@ -501,24 +564,8 @@ impl Pane {
                 cells: self.osc8_span_cells(point, &anchor),
             });
         }
-        let (text, points) = self.logical_line(point.line)?;
+        let (text, points) = line?;
         let idx = points.iter().position(|p| *p == point)?;
-        if let Some((start, end, id)) = crate::link::find_mail_message(&text) {
-            if idx >= start && idx < end {
-                return Some(LinkSpan {
-                    uri: format!("{}{id}", crate::link::MESSAGE_SCHEME),
-                    cells: self.visible_cells(&points[start..end]),
-                });
-            }
-        }
-        if let Some((start, end, id)) = crate::link::find_mail_sender(&text) {
-            if idx >= start && idx < end {
-                return Some(LinkSpan {
-                    uri: format!("{}{id}", crate::link::SENDER_SCHEME),
-                    cells: self.visible_cells(&points[start..end]),
-                });
-            }
-        }
         if let Some((start, end)) = crate::link::find_urls(&text)
             .into_iter()
             .find(|&(a, b)| idx >= a && idx < b)
@@ -2223,6 +2270,46 @@ mod tests {
             .link_span(0, 0, "/nonexistent")
             .expect("the top row resolves");
         assert_eq!(top.cells.len(), 25);
+    }
+
+    #[test]
+    fn fno_tokens_outrank_osc8_and_plain_body_text() {
+        // A bare fmail id in body text - no delivered header around it - is a
+        // message link wherever it prints.
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"quote: fmail-0123456789ab done");
+        let span = pane
+            .link_span(0, 10, "/nonexistent")
+            .expect("the bare id resolves");
+        assert_eq!(span.uri, "fno-message:fmail-0123456789ab");
+        assert_eq!(
+            span.cells,
+            (7..25).map(|c| (0, c)).collect::<Vec<_>>(),
+            "exactly the id token"
+        );
+
+        // An app hyperlink-wrapped the handle: the token still wins, because
+        // the landing is fno's to name, and the span is the token's cells.
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"\x1b]8;;https://example.com\x07@nemo\x1b]8;;\x07 shipped it");
+        let span = pane
+            .link_span(0, 2, "/nonexistent")
+            .expect("the wrapped handle resolves");
+        assert_eq!(span.uri, "fno-handle:nemo");
+        assert_eq!(span.cells, vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]);
+
+        // The token pass answers only its own cells: an OSC 8 anchor beside a
+        // token on one line keeps its own cells, and the two never bleed.
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"\x1b]8;;https://example.com\x07open\x1b]8;;\x07 @nemo now");
+        let anchor = pane
+            .link_span(0, 1, "/nonexistent")
+            .expect("the anchor's own cell resolves");
+        assert_eq!(anchor.uri, "https://example.com");
+        let token = pane
+            .link_span(0, 5, "/nonexistent")
+            .expect("the handle's own cell resolves");
+        assert_eq!(token.uri, "fno-handle:nemo");
     }
 
     #[test]

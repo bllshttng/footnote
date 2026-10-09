@@ -3918,10 +3918,10 @@ fn row_menu_rows() {
         (
             build_row_menu(&attachable_row("a", "att-1"), Anchor::Center),
             vec![
-                ("Split Left", super::MenuAction::Split(Dir::Left)),
-                ("Split Right", super::MenuAction::Split(Dir::Right)),
-                ("Split Up", super::MenuAction::Split(Dir::Up)),
-                ("Split Down", super::MenuAction::Split(Dir::Down)),
+                ("shift+←", super::MenuAction::Split(Dir::Left)),
+                ("shift+→", super::MenuAction::Split(Dir::Right)),
+                ("shift+↑", super::MenuAction::Split(Dir::Up)),
+                ("shift+↓", super::MenuAction::Split(Dir::Down)),
             ],
         ),
     ];

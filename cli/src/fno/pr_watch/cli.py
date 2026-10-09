@@ -101,10 +101,9 @@ def _bounce_sender(window_s: float = 15.0) -> str:
     """
     try:
         import time
-        from fno.paths import state_dir
-        from fno.pr_watch._install import _BOUNCE_SIDECAR
+        from fno.pr_watch._install import bounce_sidecar_path
 
-        raw = json.loads((state_dir() / _BOUNCE_SIDECAR).read_text(encoding="utf-8"))
+        raw = json.loads(bounce_sidecar_path().read_text(encoding="utf-8"))
         if time.time() - float(raw["ts"]) <= window_s:
             return f"{raw['caller']} pid {raw['pid']} via {raw.get('parent', '')}".rstrip()
     except Exception:  # noqa: BLE001 - evidence, never a gate
@@ -1583,26 +1582,14 @@ def refresh() -> None:
     and is safe to run by hand. A no-op when ``pr_watch.enabled`` is false, so
     an install that does not use the watcher gets nothing. Never fails loud:
     the update chain calls it best-effort and a refresh failure must not fail
-    the update.
+    the update. Force and caller identity (doctor --fix) are verb-level
+    flags on ``fno-agents pr-watch refresh`` itself; a new flag is a new
+    verb and belongs in crates.
     """
-    from fno.pr_watch import _install as m
+    from fno.pr.cli import _forward_to_binary
 
-    settings = load_settings()
-    if not settings.pr_watch.enabled:
-        typer.echo("pr-watch: disabled; nothing to refresh.")
-        return
-
-    msg, _rc = m.refresh_watcher(
-        launch_agents_dir=_LAUNCH_AGENTS_DIR,
-        fno_binary=_resolve_fno_binary(),
-        interval=settings.pr_watch.interval_seconds,
-        defer_when_ticking=True,
-        caller="refresh",
-    )
-    typer.echo(f"pr-watch refresh: {msg}")
-    from fno.pr_watch._install import heal_status_line
-
-    typer.echo(heal_status_line())
+    argv = ["refresh", "--fno-binary", _resolve_fno_binary(), "--caller", "refresh"]
+    _forward_to_binary("pr-watch", argv)
 
 
 # Single-flight window for the SessionStart self-heal: long enough to cover the

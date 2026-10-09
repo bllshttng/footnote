@@ -28,7 +28,7 @@ const BROKEN_OUTCOMES: &[&str] = &["timeout", "error"];
 const RECENT_ENDS_KEEP: usize = 16;
 
 /// The LaunchAgent label and its plist file name, as the installer writes it.
-const LABEL: &str = "sh.fno.pr-watcher";
+pub(crate) const LABEL: &str = "sh.fno.pr-watcher";
 pub(crate) const PLIST_FILENAME: &str = "sh.fno.pr-watcher.plist";
 
 /// The `pr_watch` config slice the verdict reads.
