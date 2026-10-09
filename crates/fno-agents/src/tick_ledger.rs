@@ -400,7 +400,7 @@ pub struct ArmStatus {
     pub failing: bool,
     /// Seconds since the newest run that did NOT fail, set only while
     /// [`ArmStatus::failing`]. `None` while failing means the read window
-    /// (`ARM_WINDOW_FLOOR_S`, widened by the starvation threshold) holds
+    /// (`ARM_WINDOW_FLOOR_S`) holds
     /// no non-failure run for the arm.
     pub failing_for_s: Option<u64>,
     /// Why a stale row is red, set by [`explain`]. `Some("unexplained")`
@@ -458,8 +458,8 @@ const TICK_TRACE_TYPES: &[&str] = &["pr_watch_tick_attempt", "pr_watch_tick_end"
 /// window reads STALE, one outside it reads UNOBSERVED, so the window is
 /// the depth the verdicts stay truthful to. It matches the default
 /// starvation lookback (`notify.arm_starved_after_s`, 7 days), the depth
-/// the readout vocabulary already commits to; a configured larger
-/// threshold widens the reads that feed the starvation mark past it.
+/// the readout vocabulary already commits to. It is also the telemetry
+/// retention, so the config reader caps a larger threshold at it.
 const ARM_WINDOW_FLOOR_S: u64 = 7 * 24 * 3600;
 
 /// Every parsed row of `types` the journals hold at or after `since_unix`:

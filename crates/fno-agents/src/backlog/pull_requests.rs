@@ -5,6 +5,8 @@
 use super::model::PullRequest;
 use super::schema_v4::{norm_sql, stamps, touch, NOW};
 use rusqlite::{params, Connection};
+use serde_json::Value;
+use std::collections::HashMap;
 
 /// Schema 4. seq 0 is the primary (pr_number, pr_url, merge_status).
 pub fn ddl() -> String {
@@ -126,6 +128,19 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// One node's pull requests in list order (seq). Schema 3: the extras
 /// column round-trips the item keys the typed model keeps as `extras`; an
 /// unparsable value reads as empty.
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequest> {
+    let extras_raw: String = row.get(4)?;
+    let extras: serde_json::Map<String, Value> =
+        serde_json::from_str(&extras_raw).unwrap_or_default();
+    Ok(PullRequest {
+        number: row.get(0)?,
+        url: row.get(1)?,
+        merge_status: row.get(2)?,
+        note: row.get(3)?,
+        extras,
+    })
+}
+
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<PullRequest>, String> {
     let mut statement = connection
         .prepare(
@@ -134,29 +149,42 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<PullRequest>, 
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
+        .query_map(params![node_id], record_from_row)
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (number, url, merge_status, note, extras_raw) =
-            row.map_err(|error| error.to_string())?;
-        let extras: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&extras_raw).unwrap_or_default();
-        out.push(PullRequest {
-            number,
-            url,
-            merge_status,
-            note,
-            extras,
-        });
+        out.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Bulk twin of [`load`]: one query per id batch, rows grouped per node in
+/// the same per-node seq order `load` produces.
+pub fn load_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Vec<PullRequest>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<PullRequest>> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT number, url, merge_status, note, extras, node_id
+             FROM pull_requests WHERE node_id IN ({placeholders}) ORDER BY node_id, seq",
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((record_from_row(row)?, row.get::<_, String>(5)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.entry(node_id).or_default().push(record);
+        }
     }
     Ok(out)
 }

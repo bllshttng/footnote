@@ -494,6 +494,23 @@ fn state_dir_resolved(cwd: &Path) -> Result<PathBuf, String> {
     resolve_template(raw.trim_end_matches('/'), None)
 }
 
+/// Python `paths.global_events_json()`: the machine journal beside the
+/// ledger. The `FNO_STATE_DIR` seal wins, then an absolute or `~`
+/// `paths.ledger_json` override, then an absolute `state_dir`.
+pub fn global_events_json(cwd: &Path) -> PathBuf {
+    let sealed = std::env::var_os("FNO_STATE_DIR").is_some_and(|v| !v.is_empty());
+    let override_dir = cfg_str(cwd, &["paths", "ledger_json"])
+        .filter(|_| !sealed)
+        .and_then(|raw| resolve_override(&raw).ok())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    override_dir
+        .or_else(|| state_dir_resolved(cwd).ok().filter(|d| d.is_absolute()))
+        .unwrap_or_else(|| crate::decision_index::default_state_path(""))
+        .join("events.jsonl")
+}
+
 /// One `paths.<key>` override value, the shape Python's emitter shares for
 /// every override: a `{template}` resolves at codegen time, a `~` value
 /// goes `$HOME`-relative, anything else passes through verbatim.

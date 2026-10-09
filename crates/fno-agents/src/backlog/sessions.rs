@@ -6,6 +6,7 @@ use super::model::SessionRecord;
 use super::schema_v4::{iso, iso_sql, norm_sql, stamps, touch, NOW};
 use rusqlite::{params, Connection};
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Schema 4. The legacy `at` and `claimed_at` columns are gone: both held a
 /// stamp time, the fact started_at carries (user ruling 2026-09-23).
@@ -228,6 +229,57 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// One node's sessions in list order (seq). The extras column round-trips
 /// the item keys the typed model keeps as `extras`; an unparsable value
 /// reads as empty.
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+    let (
+        phase,
+        harness,
+        session_id,
+        started_at,
+        ended_at,
+        ended_by,
+        effort,
+        observed_model,
+        merge_grant,
+        extras_raw,
+    ): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = (
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+    );
+    let extras: serde_json::Map<String, Value> =
+        serde_json::from_str(&extras_raw).unwrap_or_default();
+    Ok(SessionRecord {
+        phase,
+        harness,
+        session_id,
+        started_at,
+        ended_at,
+        ended_by,
+        effort: effort.and_then(|v| serde_json::from_str(&v).ok()),
+        observed_model: observed_model.and_then(|v| serde_json::from_str(&v).ok()),
+        merge_grant: merge_grant.and_then(|v| serde_json::from_str(&v).ok()),
+        extras,
+    })
+}
+
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<SessionRecord>, String> {
     let mut statement = connection
         .prepare(
@@ -237,49 +289,43 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<SessionRecord>
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-            ))
-        })
+        .query_map(params![node_id], record_from_row)
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (
-            phase,
-            harness,
-            session_id,
-            started_at,
-            ended_at,
-            ended_by,
-            effort,
-            observed_model,
-            merge_grant,
-            extras_raw,
-        ) = row.map_err(|error| error.to_string())?;
-        let extras: serde_json::Map<String, Value> =
-            serde_json::from_str(&extras_raw).unwrap_or_default();
-        out.push(SessionRecord {
-            phase,
-            harness,
-            session_id,
-            started_at,
-            ended_at,
-            ended_by,
-            effort: effort.and_then(|v| serde_json::from_str(&v).ok()),
-            observed_model: observed_model.and_then(|v| serde_json::from_str(&v).ok()),
-            merge_grant: merge_grant.and_then(|v| serde_json::from_str(&v).ok()),
-            extras,
-        });
+        out.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Bulk twin of [`load`]: one query per id batch, rows grouped per node in
+/// the same per-node seq order `load` produces.
+pub fn load_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Vec<SessionRecord>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<SessionRecord>> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT phase, harness, session_id, started_at, ended_at, ended_by, effort,
+                    observed_model, merge_grant, extras, node_id
+             FROM sessions WHERE node_id IN ({placeholders}) ORDER BY node_id, seq",
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((record_from_row(row)?, row.get::<_, String>(10)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.entry(node_id).or_default().push(record);
+        }
     }
     Ok(out)
 }

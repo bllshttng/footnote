@@ -11,6 +11,7 @@
 use super::model::Relations;
 use super::schema_v4::{stamps, touch};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 
 const TABLES: [&str; 2] = ["relations", "relations_unresolved"];
 
@@ -279,4 +280,59 @@ pub fn load_grouped(connection: &Connection, node_id: &str) -> Result<Relations,
         related: (!related.is_empty()).then_some(related),
         supersedes: (!supersedes.is_empty()).then_some(supersedes),
     })
+}
+
+/// Bulk twin of [`load_grouped`]: the same relations union over an id set,
+/// one query per id batch, grouped per node in per-node seq order.
+pub fn load_grouped_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Relations>, String> {
+    const SQLITE_BIND_BATCH: usize = 400;
+    let mut out: HashMap<String, Relations> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT node_id, related_node_id, type, listed_on, seq FROM relations
+             WHERE listed_on IN ({placeholders})
+             UNION ALL
+             SELECT node_id, related_node_id, type, listed_on, seq FROM relations_unresolved
+             WHERE listed_on IN ({placeholders})
+             ORDER BY 4, 5",
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(batch.iter().chain(batch.iter())),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (row_node_id, related_node_id, relation_type, listed_on) =
+                row.map_err(|error| error.to_string())?;
+            let entry = out.entry(listed_on.clone()).or_default();
+            if relation_type == "blocks" && related_node_id == listed_on {
+                entry.blocked_by.get_or_insert_default().push(row_node_id);
+            } else if relation_type == "related" && row_node_id == listed_on {
+                entry.related.get_or_insert_default().push(related_node_id);
+            } else if relation_type == "supersedes" && row_node_id == listed_on {
+                entry
+                    .supersedes
+                    .get_or_insert_default()
+                    .push(related_node_id);
+            }
+        }
+    }
+    Ok(out)
 }

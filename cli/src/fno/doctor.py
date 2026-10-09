@@ -576,15 +576,6 @@ def _probe_installed_verb() -> ProbeResult:
     return "unknown"
 
 
-def _read_rust_marker() -> Optional[str]:
-    """Return the installed-rust-rev marker content, or None if missing/empty.
-
-    Reads the native readiness payload so this collector stays
-    monkeypatchable at the doctor module level (mirrors _read_marker's style).
-    """
-    return _probes(None).get("rust_marker")
-
-
 def _rust_source_rev(source: Optional[Path]) -> Optional[str]:
     """Return the last crates/ subtree commit SHA for the given source, or None.
 
@@ -674,9 +665,9 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
 def _human_age(seconds: int) -> str:
     """Compact process-age label. Reuses the fleet's formatter (the same
     cross-module import `mail/receipts.py` makes) rather than a 4th copy."""
-    from fno.agents.top import _fmt_age
+    from fno.agents.session_truth import fmt_age
 
-    return _fmt_age(seconds)
+    return fmt_age(seconds)
 
 
 def _daemon_drift_warning() -> Optional[str]:
@@ -1907,10 +1898,10 @@ def _verdict(
     assembled in exactly one place.
 
     Rust staleness is proven only with full evidence: a cargo binary exists,
-    the installed-rust-rev marker is known, the crates/ subtree rev is known,
-    and they differ. Any missing evidence piece degrades to "not stale" (never
-    cry wolf). Rust evidence gaps never upgrade unknown to fresh and never
-    block fresh.
+    the binary's self-reported crates/ rev is known, the crates/ subtree rev is
+    known, and they differ. Any missing evidence piece degrades to "not stale"
+    (never cry wolf). Rust evidence gaps never upgrade unknown to fresh and
+    never block fresh.
 
     Config-schema drift follows the same full-evidence rule: only when BOTH
     keysets are known and the source defines keys the deployed CLI lacks is the
@@ -4692,13 +4683,7 @@ def doctor_command(
     # A stale stage runs its hooks byte for byte; drift there is a blocker,
     # not the after-every-merge advisory the git cache kind stays as.
     pc = result.get("plugin_cache") or {}
-    # Roots present: status is the worst across enumerated roots, and a stale
-    # root blocks whatever the live-root kind reads. Covers a pinned cache
-    # that drifted after its marketplace registration vanished.
-    stage_stale = (
-        (pc.get("kind") == "stage" or bool(pc.get("roots")))
-        and pc.get("status") == "stale"
-    )
+    stage_stale = pc.get("kind") == "stage" and pc.get("status") == "stale"
     raise typer.Exit(
         1
         if result["status"] == "stale"

@@ -10,6 +10,7 @@
 
 pub mod adapter;
 pub mod bin_install_guard;
+pub mod diff_budget;
 pub mod edit_integrity;
 pub mod lead_guard;
 pub mod lead_guard_wire;
@@ -33,6 +34,7 @@ use std::path::{Path, PathBuf};
 pub fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("bin-install-guard") => bin_install_guard::run(&args[1..]),
+        Some("diff-budget") => diff_budget::run(&args[1..]),
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("effect-guard") => crate::effect_gate::run_hook(&args[1..]),
         Some("lead-guard") => lead_guard::run(&args[1..]),
@@ -49,7 +51,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("write-gate") => write_gate::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, pipe-guard, posttooluse-bash, pretooluse-bash, prompt, rules, send-message-guard, session-state, subagent-worktree-guard, test-run-guard, write-gate or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, diff-budget, edit-integrity, effect-guard, lead-guard, pipe-guard, posttooluse-bash, pretooluse-bash, prompt, rules, send-message-guard, session-state, subagent-worktree-guard, test-run-guard, write-gate or stop"
             );
             2
         }

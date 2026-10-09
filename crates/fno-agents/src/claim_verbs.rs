@@ -31,7 +31,7 @@ use std::path::PathBuf;
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|root|flight-acquire|flight-release|long-holds|release-stopped"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|root|export|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
@@ -56,6 +56,9 @@ pub fn run_claim(args: &[String]) -> i32 {
                 return 2;
             }
         }
+    }
+    if op == "export" {
+        return crate::store_export::run_store_export(&args[1..]);
     }
     if op == "root" {
         return run_claim_root(&args[1..]);

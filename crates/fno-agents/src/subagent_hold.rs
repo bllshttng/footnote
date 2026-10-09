@@ -29,8 +29,9 @@ pub fn live_threshold() -> u64 {
 }
 
 fn threshold_from(raw: Option<&str>) -> u64 {
-    raw.and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|v| *v > 0)
+    raw.and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| v.ceil() as u64)
         .unwrap_or(600)
 }
 
@@ -364,5 +365,6 @@ mod tests {
         assert_eq!(threshold_from(Some("junk")), 600);
         assert_eq!(threshold_from(Some("0")), 600);
         assert_eq!(threshold_from(Some("120")), 120);
+        assert_eq!(threshold_from(Some("900.0")), 900);
     }
 }

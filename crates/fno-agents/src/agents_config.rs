@@ -446,6 +446,26 @@ impl SandboxUnavailablePolicy {
     }
 }
 
+/// Default added-line budget the commit-time diff-budget guard measures a
+/// target session against when its bound plan declares no frontmatter
+/// `diff_budget`. 0 is off.
+pub const DEFAULT_PLAN_DIFF_BUDGET: u32 = 300;
+
+/// Resolve `plan.default_diff_budget`, same precedence + fail-open degrade
+/// as [`worktree_prune_done`]: a missing or malformed value takes the
+/// default, and 0 disables the guard. `$FNO_PLAN_DEFAULT_DIFF_BUDGET` is a
+/// global test/tuning override.
+pub fn default_diff_budget(cwd: &Path) -> u32 {
+    if let Some(v) = non_empty_env("FNO_PLAN_DEFAULT_DIFF_BUDGET")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u32>().ok()))
+    {
+        return v;
+    }
+    config_lookup(cwd, &["plan", "default_diff_budget"])
+        .and_then(|v| v.as_integer().and_then(|i| u32::try_from(i).ok()))
+        .unwrap_or(DEFAULT_PLAN_DIFF_BUDGET)
+}
+
 /// Apply the shared headless confinement boundary for harnesses whose own argv
 /// has no usable sandbox backend. Explicit bypass remains an operator choice;
 /// otherwise the configured policy decides whether the child may spawn.
@@ -1412,8 +1432,9 @@ pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     .unwrap_or(1800)
 }
 
-/// `[notify] arm_starved_after_s` (default 604800, 7 days): how long an armed loop may tick without acting on anything before the arms table calls it starved. `0` or a value that does not parse falls back to the default.
+/// `[notify] arm_starved_after_s` (default 604800, 7 days): how long an armed loop may tick without acting on anything before the arms table calls it starved. `0` or a value that does not parse falls back to the default. A value past the telemetry retention is capped at it: the store holds no older ticks to judge.
 pub fn notify_arm_starved_after_s(cwd: &Path) -> u64 {
+    let retention_s = crate::event_store::TELEMETRY_TTL_HOURS as u64 * 3600;
     resolve(cwd, |t| {
         t.get("notify")?
             .as_table()?
@@ -1423,6 +1444,7 @@ pub fn notify_arm_starved_after_s(cwd: &Path) -> u64 {
     })
     .filter(|v| *v > 0)
     .unwrap_or(604_800)
+    .min(retention_s)
 }
 
 /// `[auto_heal] enabled` (default false): whether the CI healer drive loop is armed.

@@ -150,7 +150,10 @@ impl HarnessStoreIndex {
                         }
                         continue;
                     }
-                    files.extend(index_tree(root, 0)?);
+                    files.extend(match harness {
+                        "claude" => index_claude_store(root)?,
+                        _ => index_tree(root, 0)?,
+                    });
                 }
                 Ok(files)
             })();
@@ -201,6 +204,32 @@ pub(crate) fn index_tree(
             out.extend(index_tree(&path, depth + 1)?);
         } else {
             out.push((entry.file_name().to_string_lossy().into_owned(), path));
+        }
+    }
+    Ok(out)
+}
+
+/// The claude store's session transcripts: the files directly inside each
+/// project dir. Claude writes one `<uuid>.jsonl` per session there; every
+/// deeper file is a subagent sidechain or a tool-result spill that no session
+/// lookup matches (55k of a measured 66k-file store), so the walk skips them.
+pub(crate) fn index_claude_store(
+    root: &std::path::Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
+    let mut out = Vec::new();
+    for project in std::fs::read_dir(root).map_err(|_| ())? {
+        let project = project.map_err(|_| ())?;
+        if !project.file_type().map_err(|_| ())?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(project.path()).map_err(|_| ())? {
+            let entry = entry.map_err(|_| ())?;
+            if entry.file_type().map_err(|_| ())?.is_file() {
+                out.push((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                ));
+            }
         }
     }
     Ok(out)
@@ -397,7 +426,7 @@ fn claude_store_sessions() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut any_readable = false;
     for root in &roots {
-        if let Ok(pair) = index_tree(root, 0) {
+        if let Ok(pair) = index_claude_store(root) {
             any_readable = true;
             files.extend(pair);
         }

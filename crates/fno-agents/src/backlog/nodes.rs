@@ -21,14 +21,15 @@
 //! the provenance columns first and those extras keys second.
 
 use super::model::{
-    Dispatch, Lifecycle, Node, NodeClaim, OwnershipDefect, Priority, Provenance, PullRequest,
-    Relations, Status, Supersession,
+    Comment, CostRecord, Dispatch, Encounter, Finding, Lifecycle, Node, NodeClaim, OwnershipDefect,
+    Priority, Provenance, PullRequest, Relations, SessionRecord, Status, Supersession,
 };
 use super::schema_v4::{iso, norm_sql, stamps, touch, updated, NOW};
 use super::{comments, costs, encounters, findings, pull_requests, relations, sessions};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// The tables this module owns, for the updated_at triggers. node_claims is
 /// not here: the mirror table is retired, claims project from the holder
@@ -466,83 +467,12 @@ pub(crate) fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
 }
 
 /// The claims store's node records: the db is the holder source of truth
-/// (claim_store folds legacy lockfiles in on first open), so this is the
-/// primary projection source.
+/// (claim_store folds legacy lockfiles in on first open, and routes node
+/// keys to the shared primary when one is set), so this is the primary
+/// projection source.
 fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
-    // Read-only leg: an absent claims db is an empty answer, never a
-    // creation. Opening the store here would mint graph.db at whatever
-    // claims root the process env names at this instant.
-    match crate::claim_store::database_path(None) {
-        Ok(path) if path.exists() => {}
-        _ => return Ok(Default::default()),
-    }
-    let connection = crate::claim_store::open(None)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT key, holder, schema_version, acquired_at, expires_at, pid,
-                    pid_unavailable, host, machine_id, reason, harness, session_id,
-                    pid_provenance, metadata
-             FROM claims WHERE key LIKE 'node:%'
-               AND (expires_at IS NULL OR expires_at > ?1)
-             ORDER BY key",
-        )
-        .map_err(|error| error.to_string())?;
-    let now = crate::claims::now_ms();
     let mut claims = std::collections::HashMap::new();
-    struct Row {
-        key: String,
-        holder: String,
-        schema_version: u32,
-        acquired_at: i64,
-        expires_at: Option<i64>,
-        pid: Option<i32>,
-        pid_unavailable: bool,
-        host: String,
-        machine_id: Option<String>,
-        reason: Option<String>,
-        harness: Option<String>,
-        session_id: Option<String>,
-        pid_provenance: Option<String>,
-        metadata: String,
-    }
-    let mut rows = statement
-        .query_map(rusqlite::params![now], |row| {
-            Ok(Row {
-                key: row.get(0)?,
-                holder: row.get(1)?,
-                schema_version: row.get(2)?,
-                acquired_at: row.get(3)?,
-                expires_at: row.get(4)?,
-                pid: row.get(5)?,
-                pid_unavailable: row.get(6)?,
-                host: row.get(7)?,
-                machine_id: row.get(8)?,
-                reason: row.get(9)?,
-                harness: row.get(10)?,
-                session_id: row.get(11)?,
-                pid_provenance: row.get(12)?,
-                metadata: row.get(13)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-    while let Some(row) = rows.next() {
-        let row = row.map_err(|error| error.to_string())?;
-        let record = crate::claims::ClaimRecord {
-            key: row.key,
-            holder: row.holder,
-            schema_version: row.schema_version,
-            acquired_at: row.acquired_at,
-            expires_at: row.expires_at,
-            pid: row.pid,
-            pid_unavailable: row.pid_unavailable,
-            host: row.host,
-            machine_id: row.machine_id,
-            reason: row.reason,
-            harness: row.harness,
-            session_id: row.session_id,
-            pid_provenance: row.pid_provenance,
-            metadata: serde_json::from_str(&row.metadata).unwrap_or_default(),
-        };
+    for record in crate::claim_store::unexpired_node_records()? {
         if let Some(node_id) = record.key.strip_prefix("node:") {
             claims.insert(node_id.to_string(), project_claim(&record)?);
         }
@@ -592,7 +522,10 @@ pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, No
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(hit) = cached.as_ref() {
+    // A peer's write to the shared primary bumps no local mtime, so with a
+    // primary set the cache would serve a stale holder.
+    let primary = matches!(crate::store_remote::configured(), Ok(Some(_)));
+    if let Some(hit) = cached.as_ref().filter(|_| !primary) {
         if hit.key == key {
             return Ok(hit.map.clone());
         }
@@ -1386,6 +1319,336 @@ pub(crate) fn load_with_claim(
         }
     }
     Ok(Some(node))
+}
+
+/// Field-gate predicate shared by [`load_parts_many`] (which reads a table
+/// only when the projection asks for it) and [`load_from_parts`] (which
+/// assembles only what was read), so the two can never disagree.
+pub(crate) fn wants(fields: Option<&[String]>, names: &[&str]) -> bool {
+    fields.is_none_or(|fields| fields.iter().any(|field| names.contains(&field.as_str())))
+}
+
+fn wants_dispatch(fields: Option<&[String]>) -> bool {
+    fields.is_none_or(|fields| {
+        fields
+            .iter()
+            .any(|field| field.starts_with("dispatch_") || field == "model")
+    })
+}
+
+fn wants_provenance(fields: Option<&[String]>) -> bool {
+    fields.is_none_or(|fields| {
+        fields.iter().any(|field| {
+            field.starts_with("source")
+                || field.starts_with("spawned_by")
+                || field.starts_with("think_")
+                || ["request_origin", "origin_evidence"].contains(&field.as_str())
+        })
+    })
+}
+
+/// Pre-read bulk parts for a set of ids: one query per table per id batch
+/// instead of one query per node per table. Rows reach the caller through
+/// [`load_many`], whose per-node assembly mirrors [`load_with_claim`].
+#[derive(Default)]
+pub(crate) struct NodeParts {
+    bases: HashMap<String, (Node, Map<String, Value>, Vec<String>)>,
+    costs: HashMap<String, Vec<CostRecord>>,
+    dispatch: HashMap<String, Dispatch>,
+    provenance: HashMap<String, ProvenanceParts>,
+    supersession: HashMap<String, SupersessionParts>,
+    sessions: HashMap<String, Vec<SessionRecord>>,
+    comments: HashMap<String, Vec<Comment>>,
+    encounters: HashMap<String, Vec<Encounter>>,
+    findings: HashMap<String, Vec<Finding>>,
+    pull_requests: HashMap<String, Vec<PullRequest>>,
+    relations: HashMap<String, Relations>,
+}
+
+/// Read every table the projection asks for, once per id batch per table.
+pub(crate) fn load_parts_many(
+    connection: &Connection,
+    ids: &[String],
+    fields: Option<&[String]>,
+) -> Result<NodeParts, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut parts = NodeParts::default();
+    for batch in ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id IN ({placeholders})");
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), map_base_row)
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let parts_row = row.map_err(|error| error.to_string())?;
+            let (node, extras, child_lists) = base_from_parts(parts_row)?;
+            parts
+                .bases
+                .insert(node.id.clone(), (node, extras, child_lists));
+        }
+    }
+    if wants(fields, &["costs", "cost_sessions"]) {
+        parts.costs = costs::load_many(connection, ids)?;
+    }
+    if wants_dispatch(fields) {
+        parts.dispatch = load_dispatch_many(connection, ids)?;
+    }
+    if wants_provenance(fields) {
+        parts.provenance = load_provenance_many(connection, ids)?;
+    }
+    if wants(fields, &["supersession", "superseded_by"]) {
+        parts.supersession = load_supersession_many(connection, ids)?;
+    }
+    if wants(fields, &["sessions"]) {
+        parts.sessions = sessions::load_many(connection, ids)?;
+    }
+    if wants(fields, &["comments", "progress_notes"]) {
+        parts.comments = comments::load_many(connection, ids)?;
+    }
+    if wants(fields, &["encounters"]) {
+        parts.encounters = encounters::load_many(connection, ids)?;
+    }
+    if wants(fields, &["findings"]) {
+        parts.findings = findings::load_many(connection, ids)?;
+    }
+    if wants(
+        fields,
+        &[
+            "primary_pr",
+            "additional_prs",
+            "pr_number",
+            "pr_url",
+            "merge_status",
+        ],
+    ) {
+        parts.pull_requests = pull_requests::load_many(connection, ids)?;
+    }
+    if wants(fields, &["blocked_by", "related", "supersedes"]) {
+        parts.relations = relations::load_grouped_many(connection, ids)?;
+    }
+    Ok(parts)
+}
+
+/// Assemble one node from pre-read parts. Consumes the id's entries so a
+/// batched read never clones the whole set. The per-node pipeline mirrors
+/// [`load_with_claim`]'s original body statement for statement; the golden
+/// renders gate the rows byte-identical.
+pub(crate) fn load_from_parts(
+    parts: &mut NodeParts,
+    id: &str,
+    claim: Option<NodeClaim>,
+    fields: Option<&[String]>,
+) -> Result<Option<Node>, String> {
+    let Some((mut node, supersession_extras, child_lists_present)) = parts.bases.remove(id) else {
+        return Ok(None);
+    };
+    let stored_costs = parts.costs.remove(id).unwrap_or_default();
+    if !stored_costs.is_empty() {
+        node.costs = Some(stored_costs);
+    }
+    let claim = match claim {
+        Some(claim) => claim,
+        None => claim_for_node(id)?,
+    };
+    set_node_claim(&mut node, claim);
+    if wants_dispatch(fields) {
+        node.dispatch = parts.dispatch.remove(id).unwrap_or_default();
+    }
+    if wants_provenance(fields) {
+        apply_provenance(&mut node, parts.provenance.remove(id));
+    }
+    if wants(fields, &["supersession", "superseded_by"]) {
+        node.supersession = parts
+            .supersession
+            .remove(id)
+            .map(|p| supersession_from_parts(p, supersession_extras));
+    }
+    let present = |name: &str| child_lists_present.iter().any(|listed| listed == name);
+    if wants(fields, &["sessions"]) {
+        let loaded = parts.sessions.remove(id).unwrap_or_default();
+        node.sessions = present("sessions").then_some(loaded);
+    }
+    if wants(fields, &["comments", "progress_notes"]) {
+        let loaded = parts.comments.remove(id).unwrap_or_default();
+        node.comments = present("comments").then_some(loaded);
+    }
+    if wants(fields, &["encounters"]) {
+        let loaded = parts.encounters.remove(id).unwrap_or_default();
+        node.encounters = present("encounters").then_some(loaded);
+    }
+    if wants(fields, &["findings"]) {
+        let loaded = parts.findings.remove(id).unwrap_or_default();
+        node.findings = present("findings").then_some(loaded);
+    }
+    if wants(
+        fields,
+        &[
+            "primary_pr",
+            "additional_prs",
+            "pr_number",
+            "pr_url",
+            "merge_status",
+        ],
+    ) {
+        let pr_rows = parts.pull_requests.remove(id).unwrap_or_default();
+        let primary = if present("primary_pr") {
+            pr_rows.first().cloned()
+        } else {
+            None
+        };
+        let rest: Vec<PullRequest> = if primary.is_some() {
+            pr_rows.into_iter().skip(1).collect()
+        } else {
+            pr_rows
+        };
+        node.primary_pr = primary;
+        node.additional_prs = if present("additional_prs") {
+            Some(rest)
+        } else {
+            None
+        };
+    }
+    if wants(fields, &["blocked_by", "related", "supersedes"]) {
+        node.relations = parts.relations.remove(id).unwrap_or_default();
+        // An empty relation list leaves no rows; the marker restores presence.
+        if present("blocked_by") && node.relations.blocked_by.is_none() {
+            node.relations.blocked_by = Some(Vec::new());
+        }
+        if present("related") && node.relations.related.is_none() {
+            node.relations.related = Some(Vec::new());
+        }
+        if present("supersedes") && node.relations.supersedes.is_none() {
+            node.relations.supersedes = Some(Vec::new());
+        }
+    }
+    Ok(Some(node))
+}
+
+fn load_dispatch_many(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, Dispatch>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out = HashMap::new();
+    for batch in ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT verb, brief, model, node_id FROM node_dispatch WHERE node_id IN ({placeholders})"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((map_dispatch_row(row)?, row.get::<_, String>(3)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.insert(node_id, record);
+        }
+    }
+    Ok(out)
+}
+
+fn load_provenance_many(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, ProvenanceParts>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out = HashMap::new();
+    for batch in ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT source, source_kind, source_project, source_session_id, source_harness,
+                    source_cwd, source_node_id, source_plan_path, source_inbox_msg,
+                    spawned_by_session, spawned_by_harness, spawned_by_cwd, think_session_id,
+                    think_output_path, request_origin, origin_evidence, node_id
+             FROM node_provenance WHERE node_id IN ({placeholders})"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((map_provenance_parts(row)?, row.get::<_, String>(16)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (parts, node_id) = row.map_err(|error| error.to_string())?;
+            out.insert(node_id, parts);
+        }
+    }
+    Ok(out)
+}
+
+fn load_supersession_many(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, SupersessionParts>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out = HashMap::new();
+    for batch in ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
+                    matched_surfaces, node_id
+             FROM supersessions WHERE node_id IN ({placeholders})"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((map_supersession_parts(row)?, row.get::<_, String>(7)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (parts, node_id) = row.map_err(|error| error.to_string())?;
+            out.insert(node_id, parts);
+        }
+    }
+    Ok(out)
+}
+
+/// Direct child ids for a set of parents, one query per id batch, grouped
+/// per parent in the same per-parent (ordinal, id) order the per-parent
+/// query produces.
+pub(crate) fn child_ids_many(
+    connection: &Connection,
+    parents: &[String],
+) -> Result<HashMap<String, Vec<String>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for batch in parents.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT id, parent_id FROM nodes WHERE parent_id IN ({placeholders})
+                 ORDER BY parent_id, ordinal, id"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (id, parent_id) = row.map_err(|error| error.to_string())?;
+            out.entry(parent_id).or_default().push(id);
+        }
+    }
+    Ok(out)
 }
 
 /// The provenance row read as parts; origin/request ride the residual.

@@ -174,7 +174,6 @@ def test_default_doctor_run_never_touches_cost_collectors(
     monkeypatch.setattr(
         doctor, "_rust_report", lambda: {"binary": None, "revision": None}
     )
-    monkeypatch.setattr(doctor, "_read_rust_marker", lambda: None)
     monkeypatch.setattr(doctor, "_rust_source_rev", lambda source: None)
     monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: False)
     # A default doctor run reaches the agent-health collectors, and a dead

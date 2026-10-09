@@ -113,9 +113,9 @@ def role_reading(row) -> Optional[dict[str, Any]]:
     """The one rendering of a role, or ``None`` when ``row`` holds none.
 
     Reads ``row.role_label`` (``registry.AgentEntry.role_label``) rather than
-    re-deriving the "L{level} {scope}" string, so ``fno whoami``, ``fno agents
-    whoami`` and ``fno agents top`` cannot drift into three different renderings
-    of the same fact. Safe on the :func:`calling_agent_row` sentinels and on
+    re-deriving the "L{level} {scope}" string, so ``fno whoami`` and ``fno agents
+    whoami`` cannot drift into two renderings of the same fact (the Rust
+    ``fno agents top`` formats the same ``L{level} {scope}`` label). Safe on the :func:`calling_agent_row` sentinels and on
     ``None``: neither carries ``role_label``, so ``getattr`` answers ``None``
     rather than raising.
     """

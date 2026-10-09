@@ -120,7 +120,7 @@ The DeepSeek search was `RIPGREP_CONFIG_PATH= rg -uu -n -g '!.git/**' -g '!**/ta
 
 ## Recorded Guard Decisions
 
-The decision rate is `block / (allow + block)` among rows that carry `type=guard_decision`. The raw project-space logs cover 2026-09-20 20:53:55Z through 2026-09-23 06:14:55Z. The current worktree log covers 2026-09-27 16:47:33Z through 17:42:37Z. These are partial samples, not lifetime rates.
+The decision rate is `block / (allow + block)` among rows that carry `type=guard_decision`. The raw project-space logs cover 2026-09-20 20:53:55Z through 2026-09-23 06:14:55Z. The current worktree log covers 2026-09-27 16:47:33Z through 17:42:37Z. These are partial samples, not lifetime rates. The store now keeps allow rows for 24 hours and block rows for 7 days. A rerun over raw rows counts both inside the last 24 hours. For a longer window, add the `pruned` counts from `fno doctor event signals` to the live rows, so allows and blocks cover the same days.
 
 | Guard | Observed allow | Observed block | Recorded block rate | Coverage |
 |---|---:|---:|---:|---|
