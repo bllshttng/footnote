@@ -105,6 +105,17 @@ pub fn card_graph(cwd: &Path) -> crate::client::CardGraph {
     }
 }
 
+/// `config.split.opens` (default `pane`) — where the row menu's Split
+/// Direction toggle starts: `portal` starts it on portal, anything else reads
+/// pane. The toggle flips it in-menu; the flip persists through
+/// `fno config set split.opens`. Latched once at client startup.
+pub fn split_opens(cwd: &Path) -> crate::client::SplitOpens {
+    match config_str(cwd, "split", "opens").as_deref() {
+        Some("portal") => crate::client::SplitOpens::Portal,
+        _ => crate::client::SplitOpens::Pane,
+    }
+}
+
 /// `config.mux.status_row` (default ON), latched once at client startup.
 pub fn status_row_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "status_row", true)

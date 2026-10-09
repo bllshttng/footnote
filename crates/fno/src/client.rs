@@ -48,7 +48,10 @@ use wire_version::{server_has_splitdir, split_skew_notice};
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
-use row_menu::{build_row_menu, build_section_menu, build_tab_menu};
+#[cfg(test)]
+use row_menu::build_row_menu;
+pub use row_menu::SplitOpens;
+use row_menu::{build_row_menu_with, build_section_menu, build_tab_menu};
 
 // Pickers, the launch moment and the snapshot action live in their own
 // modules: client.rs is shrink-only under the file-budget gate.
@@ -1046,6 +1049,16 @@ pub(crate) struct View {
     experimental_backlog: bool,
     /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
+    /// Whether the which-key modal was opened FROM the settings modal (tab or
+    /// click on its keybindings section). Esc and the other pure-dismiss paths
+    /// return to the settings modal instead of dropping to the board; a run of
+    /// an actual chord closes for real. The keybindings section is a launcher
+    /// with no rows of its own, so `settings_tab` stays on the section the
+    /// user came from.
+    keys_modal_return: bool,
+    /// `config.split.opens`: where the row menu's Split Direction toggle
+    /// starts. Latched once at startup; the in-menu toggle flips and persists.
+    split_opens: SplitOpens,
     /// Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
@@ -1632,6 +1645,11 @@ enum MenuAction {
     PortalAt(Option<Dir>),
     /// Release the row's mail hold; built only on a row wearing a hold mark.
     ReleaseHold,
+    /// Flip the Split Direction group's pane|portal toggle in-menu. Never
+    /// reaches [`execute_row_menu_action`]: the execute path closes the menu,
+    /// and the toggle's whole point is flipping BEFORE the arrow is pressed,
+    /// so [`row_menu_execute_selected`] intercepts it and keeps the menu open.
+    ToggleSplitOpens,
 }
 
 impl MenuAction {
@@ -1667,6 +1685,7 @@ impl MenuAction {
             MenuAction::ClosePortal => Some("close-portal"),
             MenuAction::PortalPicker => Some("open-in-portal"),
             MenuAction::ReleaseHold => Some("release-hold"),
+            MenuAction::ToggleSplitOpens => Some("toggle-split-opens"),
             _ => None,
         }
     }
@@ -2023,6 +2042,8 @@ impl View {
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
+            keys_modal_return: false,
+            split_opens: SplitOpens::Pane,
             lane: LaneColorsUi::default(),
             theme_import: theme_import_ui::ThemeImportUi::Idle,
             theme_import_gen: 0,
@@ -2655,7 +2676,7 @@ impl View {
             // A card's detail and metrics lines are the agent row's own
             // span, so the menu opens from any line of the card.
             Some(DisplayRow::Agent(a) | DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a)) => {
-                let mut menu = build_row_menu(a, anchor);
+                let mut menu = build_row_menu_with(a, anchor, self.split_opens);
                 // A pane-hosted row can relocate its live pane into another
                 // workspace; a paneless row already gets the `p` placement
                 // picker. Append the entry only when another
@@ -7246,6 +7267,7 @@ async fn attach_and_run(
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     view.card_graph = crate::digest_overlay::card_graph(Path::new(&cwd));
+    view.split_opens = crate::digest_overlay::split_opens(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
     view.org = crate::org_overlay::Panel::with_detail(
         crate::digest_overlay::load_readout_detailed(Path::new(&cwd)),
@@ -9396,7 +9418,9 @@ async fn confirm_keys(
 }
 
 /// Run the row menu's selected entry (Enter/click), then close - the popup never
-/// lingers after execute (AC1-FR).
+/// lingers after execute (AC1-FR). The split-opens toggle is the exception: it
+/// flips in place and the menu stays open, so the arrow is pressed against the
+/// flipped target.
 async fn row_menu_execute_selected(
     view: &mut View,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
@@ -9407,6 +9431,10 @@ async fn row_menu_execute_selected(
             .copied()
             .map(|a| (a, m.target.clone()))
     });
+    if let Some((MenuAction::ToggleSplitOpens, _)) = picked {
+        row_menu::toggle_split_opens(view).await;
+        return Ok(());
+    }
     view.row_menu = None;
     if let Some((action, target)) = picked {
         execute_row_menu_action(view, action, target, sock_w).await?;

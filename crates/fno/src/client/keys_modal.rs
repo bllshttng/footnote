@@ -262,7 +262,7 @@ pub(crate) async fn keys_modal_keys(
             break; // closed mid-chunk: swallow the rest, never forward
         }
         match tok {
-            ModalKey::Esc => view.keys_modal = None,
+            ModalKey::Esc => settings_modal::dismiss_keys_modal(view),
             ModalKey::Up => {
                 if let Some(m) = view.keys_modal.as_mut() {
                     m.popup.nav(NavDir::Up);
@@ -314,7 +314,7 @@ pub(crate) async fn keys_modal_keys(
                 if !keys_modal_byte(view, b) {
                     match resolve_chord(b) {
                         // Unbound key dismisses (AC2-EDGE): no action fires.
-                        Event::Bell => view.keys_modal = None,
+                        Event::Bell => settings_modal::dismiss_keys_modal(view),
                         // Bound key runs immediately through the SAME dispatch
                         // a typed chord uses (Locked 3), then the modal closes.
                         ev => {
@@ -422,7 +422,7 @@ pub(crate) async fn keys_modal_mouse(
                     // A click inside the block that hit no target (a header, a border)
                     // is swallowed; only a click OFF the modal dismisses.
                     if !view.keys_modal_block_contains(rep.row, rep.col) {
-                        view.keys_modal = None;
+                        settings_modal::dismiss_keys_modal(view);
                     }
                 }
             }
