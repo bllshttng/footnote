@@ -30,8 +30,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The backlog tables. They live on the primary when sharing is on.
+/// The backlog tables. They live on the primary when sharing is on. A
+/// parent comes before every table that references it: the primary enforces
+/// foreign keys, so seed and publish write in this order.
 pub(crate) const SHARED_TABLES: &[&str] = &[
+    "harnesses",
+    "models",
+    "agent_sessions",
     "nodes",
     "nodes_raw",
     "node_dispatch",
@@ -48,10 +53,15 @@ pub(crate) const SHARED_TABLES: &[&str] = &[
     "decisions",
     "node_decisions",
     "edges",
-    "harnesses",
-    "models",
-    "agent_sessions",
 ];
+
+/// The position of `table` in `SHARED_TABLES`.
+fn rank(table: &str) -> usize {
+    SHARED_TABLES
+        .iter()
+        .position(|t| *t == table)
+        .unwrap_or(SHARED_TABLES.len())
+}
 
 /// Tables in graph.db that stay on this machine: store metadata (the content
 /// version, the sync cursor, render marks), the outbox, and the search index,
@@ -319,7 +329,7 @@ fn row_key(table: &str, row: &[SqlValue]) -> String {
 /// records by value, each one's new row being the next one's old row,
 /// instead of trusting the record order. Deletes go first, then updates,
 /// then inserts, so a key freed by one row is free before another row takes
-/// it.
+/// it. Inserts go parent table first and deletes child table first.
 fn net(changes: Vec<Change>) -> Vec<Change> {
     let mut by_old: std::collections::HashMap<String, Vec<usize>> = Default::default();
     let mut news = std::collections::HashSet::new();
@@ -372,9 +382,9 @@ fn net(changes: Vec<Change>) -> Vec<Change> {
         });
     }
     out.sort_by_key(|c| match c.op {
-        Op::Delete => 0,
-        Op::Update => 1,
-        Op::Insert => 2,
+        Op::Delete => (0, SHARED_TABLES.len() - rank(&c.table)),
+        Op::Update => (1, 0),
+        Op::Insert => (2, rank(&c.table)),
     });
     out
 }
@@ -964,7 +974,10 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
     remote.script(&ddl)?;
     let columns = shared_columns(&connection)?;
     let mut counts = serde_json::Map::new();
-    for (table, columns) in &columns {
+    for table in SHARED_TABLES {
+        let Some(columns) = columns.get(*table) else {
+            continue;
+        };
         let insert = insert_sql(table, columns);
         let mut steps = vec![(format!("DELETE FROM \"{table}\""), Vec::new())];
         let mut statement = connection
@@ -990,7 +1003,7 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
                 .transaction(&steps)
                 .map_err(|(_, e)| format!("{table}: {e}"))?;
         }
-        counts.insert(table.clone(), json!(count));
+        counts.insert(table.to_string(), json!(count));
     }
     remote.script(
         "CREATE TABLE backlog_seed (at INTEGER NOT NULL); INSERT INTO backlog_seed (at) VALUES (0);",
@@ -1168,10 +1181,32 @@ mod tests {
             .map(Result::unwrap)
             .filter(|t| !SHARED_TABLES.contains(&t.as_str()) && !LOCAL_TABLES.contains(&t.as_str()))
             .collect();
+        let late_parents: Vec<(String, String)> = SHARED_TABLES
+            .iter()
+            .flat_map(|child| {
+                let mut parents = connection
+                    .prepare(&format!(
+                        "SELECT \"table\" FROM pragma_foreign_key_list('{child}')"
+                    ))
+                    .unwrap();
+                let late = parents
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .filter(|parent| parent != child && rank(parent) > rank(child))
+                    .map(|parent| (child.to_string(), parent))
+                    .collect::<Vec<_>>();
+                late
+            })
+            .collect();
         route_to_primary(None);
         assert!(
             unclassified.is_empty(),
             "classify these tables: {unclassified:?}"
+        );
+        assert!(
+            late_parents.is_empty(),
+            "move each parent before its child in SHARED_TABLES: {late_parents:?}"
         );
     }
 
