@@ -213,6 +213,8 @@ test('a fresh buddy hatches from the egg into the original card, and any key clo
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
   on('session.root', () => ({ value: '/work' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // The card opens as a pane only where the pane docks on the right: a wide fullscreen terminal.
+  await (await $.ui.mount({ ...band(3), viewport: { columns: 160, rows: 40, isFullscreen: true } })).unmount()
   await $.command.run({ command: 'buddy', args: '' })
   const row = { plugin: 'buddy', component: 'Pane', requestId: 'buddy-card', surface: 'terminal', viewport: { columns: 120, rows: 40 }, props: { title: 'Quip', isFocused: true, bodyColumns: 60, placement: 'above', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
 
@@ -261,4 +263,22 @@ test('on Desktop the buddy shows above the prompt even when it wraps the termina
   const roomy = await $.ui.mount({ ...band(10), surface: 'desktop' })
   expect(await roomy.find({ type: 'Text', text: 'Quip' })).toBeDefined()
   expect(await roomy.find({ type: 'Text', text: /: / })).toBeUndefined()
+})
+
+test('a slower interval on the wrapper moves to the user status line, so the buddy still ticks every second', async ($, on) => {
+  const mine = { type: 'command', command: '~/bin/my-status', padding: 0 }
+  const ours = { type: 'command', command: 'python3 /home/u/.fno/state/buddy/statusline.py', padding: 0, refreshInterval: 30 }
+  const files = new Map([
+    ['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: ours })],
+    ['/home/u/.fno/state/buddy/inner.json', JSON.stringify({ statusLine: mine })],
+  ])
+  boot(on, OLD_CONFIG, new Map(), files)
+  on('process.run', ($: any, e: any) =>
+    e.argv.join(' ') === 'fno config get state_dir'
+      ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual({ ...ours, refreshInterval: 1 })
+  expect(JSON.parse(files.get('/home/u/.fno/state/buddy/inner.json')!).statusLine).toEqual({ ...mine, refreshInterval: 30 })
 })

@@ -21,7 +21,8 @@ NARROW = 60
 BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
 STALE_S = 30
-# The user's own status line reruns at most this often unless its input changes.
+# The user's own status line reruns at most this often unless its input changes,
+# or at its own refreshInterval when it has one.
 INNER_MAX_AGE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
 LEAD = "⠀"
@@ -124,7 +125,7 @@ def cached_inner_rows(stdin, data, session):
     try:
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
-        if cached.get("key") == key and time.time() - cached.get("at", 0) < INNER_MAX_AGE_S:
+        if cached.get("key") == key and time.time() - cached.get("at", 0) < inner_max_age():
             return cached["rows"]
     except (OSError, ValueError, KeyError):
         pass
@@ -139,12 +140,21 @@ def cached_inner_rows(stdin, data, session):
     return rows
 
 
-def inner_rows(stdin, data):
+def inner_line():
     try:
         with open(os.path.join(HOME, "inner.json"), encoding="utf-8") as f:
-            inner = json.load(f).get("statusLine") or {}
-    except (OSError, ValueError):
-        inner = {}
+            return json.load(f).get("statusLine") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def inner_max_age():
+    every = inner_line().get("refreshInterval")
+    return every if isinstance(every, (int, float)) and every >= 1 else INNER_MAX_AGE_S
+
+
+def inner_rows(stdin, data):
+    inner = inner_line()
     command = inner.get("command") if inner.get("type") == "command" else None
     if command:
         try:

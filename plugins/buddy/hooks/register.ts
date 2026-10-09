@@ -411,6 +411,20 @@ async function installWrapper($: EngineInterface): Promise<void> {
   if (theirs !== ours) await $.fs.write(target, ours)
 }
 
+// The buddy animates only while the status line reruns every second. A slower interval set on
+// the wrapper is the user's wish for their own line, so it moves there and the wrapper keeps 1 s.
+async function keepTicking($: EngineInterface, settings: Record<string, unknown>): Promise<void> {
+  const ours = settings.statusLine as any
+  if (ours.refreshInterval === 1) return
+  const inner = (await readJson($, `${buddyDir()}/inner.json`)) ?? {}
+  if (inner.statusLine && typeof ours.refreshInterval === 'number') {
+    inner.statusLine.refreshInterval = ours.refreshInterval
+    await $.fs.write(`${buddyDir()}/inner.json`, JSON.stringify(inner, null, 2) + '\n')
+  }
+  settings.statusLine = { ...ours, refreshInterval: 1 }
+  await $.fs.write(settingsPath(), JSON.stringify(settings, null, 2) + '\n')
+}
+
 async function statuslineOn($: EngineInterface): Promise<string> {
   if (!stateDir) return 'The status line needs HOME to be set.'
   const settings = await readSettings($)
@@ -636,6 +650,9 @@ const BUBBLE_COLUMNS = 34
 // Desktop sets text in a proportional font, which collapses the spaces in a sprite. There the
 // sprite is an SVG in a monospace font; SVG cannot read theme keys, so it takes the theme's value.
 let desktop = false
+// A terminal docks a pane on the right only in a wide fullscreen layout; anywhere else it opens above the prompt.
+let docks = false
+const DOCK_COLUMNS = 110
 // Claude Code's theme setting, so the status line and the SVG draw the color the card draws.
 let theme = 'dark'
 const svgColor = (c: Companion) => {
@@ -671,7 +688,10 @@ export function register(on: On) {
       if (mux && muxPane && stateDir) muxVisible = `${(await $.env.get('FNO_MUX_DIR')) || `${stateDir}/mux`}/${mux}.visible.json`
       const settings = await readSettings($)
       wrapped = isOurs(settings?.statusLine)
-      if (wrapped && stateDir) await installWrapper($).catch(() => {})
+      if (wrapped && stateDir) {
+        await installWrapper($).catch(() => {})
+        await keepTicking($, settings!).catch(() => {})
+      }
       else if (stateDir) {
         const saved = await readJson($, `${buddyDir()}/inner.json`).catch(() => undefined)
         // The user wrapped once, then ran /statusline again: ask, never re-wrap on their behalf.
@@ -782,12 +802,14 @@ export function register(on: On) {
     }
     const snap: Shown = { c: buddy!, last: lastSaid, r, ...(fresh ? { hatchAt: now } : {}) }
     try {
+      // Above the prompt the card would push the transcript away, so there it draws in the transcript, as the original's did.
+      if (!desktop && !docks) throw new Error('no dock')
       cardSnap = snap
       await $.ui.open({ id: CARD_ID, title: buddy!.name, focus: true, closeOnEscape: true })
       $.ui.invalidate('ui.render')
       return { text: `${buddy!.name} the ${buddy!.species} · ${RARITY_STARS[buddy!.rarity]} ${buddy!.rarity}` }
     } catch {
-      // No pane here (a narrow terminal, another app): the card draws in the output row instead.
+      // No docked pane here (a terminal that is not wide and fullscreen): the card draws in the output row instead.
       cardSnap = undefined
       pending = snap
       $.ui.invalidate('ui.render')
@@ -886,6 +908,7 @@ export function register(on: On) {
   // The band only holds a one-line face, and only where neither the status line nor the dock has the buddy.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     desktop = e.surface === 'desktop'
+    docks = e.viewport?.isFullscreen === true && (e.viewport?.columns ?? 0) >= DOCK_COLUMNS
     // Desktop draws no status line but shares its settings, so a wrapped status line hides nothing there.
     if (!buddy || muted || (wrapped && e.surface !== 'desktop') || e.props.hasSurvey) return next(e)
     const now = await $.clock.now()
