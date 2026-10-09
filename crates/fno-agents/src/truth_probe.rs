@@ -504,14 +504,6 @@ fn now_epoch_s() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// How many handles a feed may carry within `bound`. Every handle answers
-/// in process now, so the bound no longer prices interpreter cold starts:
-/// the honest answer is "all of them", whatever `bound` says. Kept because
-/// `org_board` sizes its slice with it and its shape is unchanged.
-pub fn family1_truth_affordable_handles(_bound: Duration) -> usize {
-    usize::MAX
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,21 +537,6 @@ mod tests {
             .unwrap()
             .provider_refusal
             .is_none());
-    }
-
-    /// The affordability helper is the timeout formula's inverse: a feed of
-    /// `n <= affordable` handles self-bounds at or under the bound the
-    /// caller measured, the next handle overshoots it, and the boundaries
-    /// hold (nothing under the cold start, everything at the ceiling). The
-    /// pin keeps the two from drifting apart.
-    #[test]
-    fn every_handle_is_affordable_in_process() {
-        // The reader answers in process now, so the bound prices nothing:
-        // any feed size fits any bound.
-        assert_eq!(
-            family1_truth_affordable_handles(Duration::from_secs(0)),
-            usize::MAX
-        );
     }
 
     /// The age's instrument parses off the same wire, and on the

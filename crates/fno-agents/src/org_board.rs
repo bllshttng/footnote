@@ -285,29 +285,6 @@ pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
-/// The probe feed a board slice can afford, as `(tokens, cap_warning)`.
-///
-/// The per-handle arithmetic the batch prices with (`0.75s` a handle after a
-/// `20s` cold start, ceiling `60s`) bounds the feed to a measured prefix:
-/// claim-derived holders ride first, so a cap withholds the roster tail,
-/// which the unmeasured-holders warning then names. `affordable == 0` keeps
-/// the whole feed: the page bound declines to spawn and the run reads
-/// timed-out, the receipt the board-budget pins expect, never a silent
-/// trim. `affordable >= len` feeds everything.
-pub(crate) fn bound_truth_feed(
-    tokens: Vec<String>,
-    affordable: usize,
-) -> (Vec<String>, Option<String>) {
-    if affordable == 0 || affordable >= tokens.len() {
-        return (tokens, None);
-    }
-    let note = format!(
-        "truth probe: measuring the first {affordable} of {} holders within the board slice; the tail reads unmeasured",
-        tokens.len()
-    );
-    (tokens[..affordable].to_vec(), Some(note))
-}
-
 pub(crate) fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
 }
@@ -841,12 +818,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                             .unwrap_or_else(|| h.clone())
                     })
                     .collect();
-                let affordable =
-                    crate::truth_probe::family1_truth_affordable_handles(Budget::spawn_bound(dl));
-                let (tokens, cap_note) = bound_truth_feed(tokens, affordable);
-                if let Some(note) = cap_note {
-                    warnings.push(note);
-                }
                 Some(s.spawn(move || {
                     crate::truth_probe::family1_truth_probe_many_measured_within(&tokens, Some(dl))
                 }))
@@ -2607,30 +2578,6 @@ mod tests {
                 .unwrap_or(false)),
             "{warnings:?}"
         );
-    }
-
-    #[test]
-    fn the_probe_feed_is_capped_to_the_affordable_prefix_and_names_the_tail() {
-        // The per-handle bound converts a killed empty page into a measured
-        // prefix: a slice funding part of the feed keeps the prefix
-        // (claim-derived holders ride first) and names the withheld tail.
-        let tokens: Vec<String> = (0..5).map(|i| format!("t-{i}")).collect();
-        let (feed, note) = bound_truth_feed(tokens.clone(), 3);
-        assert_eq!(feed, tokens[..3].to_vec());
-        let note = note.expect("a mid-feed cap names the tail");
-        assert!(
-            note.contains("measuring the first 3 of 5 holders"),
-            "{note:?}"
-        );
-        // A slice funding everything, and one funding nothing (the page
-        // bound declines to spawn, the run reads timed out - the receipt
-        // the budget pins expect), keep the whole feed and stay quiet.
-        let (feed, note) = bound_truth_feed(tokens.clone(), 5);
-        assert_eq!(feed, tokens);
-        assert!(note.is_none());
-        let (feed, note) = bound_truth_feed(tokens, 0);
-        assert_eq!(feed.len(), 5);
-        assert!(note.is_none());
     }
 
     #[test]

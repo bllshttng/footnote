@@ -1,7 +1,7 @@
 //! Golden parity: the native truth reader answers exactly what the Python
 //! `resolve_session_truth` answered over the committed fixture transcripts,
-//! field for field, with `now_s` pinned. AC1, plus the incremental-cursor
-//! and unknown-handle acceptance reads (AC2/AC3/AC4).
+//! field for field, with `now_s` pinned, on a cold read and again on warm
+//! cursors. The golden set carries the unknown handle (AC1, AC4).
 //!
 //! parity-stage: differential
 //! parity-oracle: fno.agents.session_truth.resolve_session_truth
@@ -113,16 +113,6 @@ fn every_fixture_answers_its_python_golden() {
             assert_matches(case, &warm, golden);
         }
     }
-}
-
-#[test]
-fn an_unknown_handle_answers_not_found_without_panicking() {
-    let stores = stores();
-    let mut cursors = TruthCursors::new();
-    let payload = resolve_payload(None, "no-such-handle", NOW_S, &stores, &mut cursors);
-    assert_eq!(payload["state"], "unknown");
-    assert_eq!(payload["reason"], "not-found");
-    assert_eq!(payload["suggestions"], serde_json::json!([]));
 }
 
 #[test]
