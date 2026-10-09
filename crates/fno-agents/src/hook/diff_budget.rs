@@ -132,15 +132,18 @@ fn manifest_path(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// The effective budget: the bound plan's frontmatter `diff_budget` when a
-/// plan is bound and declares one, else the configured default.
+/// plan is bound and declares one (0 = the plan turns the guard off), else
+/// the configured default.
 fn resolve_budget(manifest: &Path, cwd: &Path) -> Option<u32> {
-    plan_path(manifest)
+    plan_path(manifest, cwd)
         .and_then(|p| plan_frontmatter_budget(&p))
         .or_else(|| Some(crate::agents_config::default_diff_budget(cwd)))
 }
 
-/// The manifest's `plan_path` value, unquoted; None while empty.
-fn plan_path(manifest: &Path) -> Option<PathBuf> {
+/// The manifest's `plan_path` value, unquoted; None while empty. A relative
+/// path resolves against the worktree root, where plans live (the `internal/`
+/// vault link is a checkout child), never against the space root.
+fn plan_path(manifest: &Path, cwd: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(manifest).ok()?;
     for line in text.lines() {
         let Some(value) = line.strip_prefix("plan_path:") else {
@@ -154,20 +157,20 @@ fn plan_path(manifest: &Path) -> Option<PathBuf> {
         return Some(if path.is_absolute() {
             path
         } else {
-            manifest
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|space| space.join(&path))
-                .unwrap_or(path)
+            let root = crate::paths::worktree_repo_root(cwd);
+            if root.is_dir() {
+                root.join(&path)
+            } else {
+                path
+            }
         });
     }
     None
 }
 
 /// The plan frontmatter's `diff_budget` key. A missing or unparseable key
-/// is None so the config default answers; a plan cannot set 0 to disable
-/// the guard the config turned on.
+/// is None so the config default answers; `diff_budget: 0` reads as the
+/// plan turning the guard off.
 fn plan_frontmatter_budget(plan: &Path) -> Option<u32> {
     let text = std::fs::read_to_string(plan).ok()?;
     let mut closed = false;
