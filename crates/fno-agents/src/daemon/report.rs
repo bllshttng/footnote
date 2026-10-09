@@ -369,7 +369,8 @@ pub(super) fn handle_report(ctx: &Ctx, req: &Request) -> Response {
             }
             let prev_state = entry.inside_leg.as_ref().map(|r| r.state);
             let prev_posture = entry.inside_leg.as_ref().and_then(|r| r.posture.clone());
-            state_changed = journals_transition(entry.inside_leg.as_ref(), rep);
+            state_changed =
+                super::thread_row_status::journals_transition(entry.inside_leg.as_ref(), rep);
             if state::enters(prev_state, rep.state, state::InsideLegState::Blocked) {
                 let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
                 notify = Some((entry.name.clone(), body, false));
