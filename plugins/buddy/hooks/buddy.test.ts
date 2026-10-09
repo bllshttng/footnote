@@ -265,14 +265,14 @@ test('on Desktop the buddy shows above the prompt even when it wraps the termina
   expect(await roomy.find({ type: 'Text', text: /: / })).toBeUndefined()
 })
 
-test('an old python wrapper at a slow interval moves to the fast path at 1 s, and the user line keeps the interval', async ($, on) => {
+test('an old python wrapper moves to the fast path at 1 s, and an idle buddy holds still until something happens', async ($, on) => {
   const mine = { type: 'command', command: '~/bin/my-status', padding: 0 }
   const ours = { type: 'command', command: 'python3 /home/u/.fno/state/buddy/statusline.py', padding: 0, refreshInterval: 30 }
   const files = new Map([
     ['/home/u/.claude/settings.json', JSON.stringify({ model: 'opus', statusLine: ours })],
     ['/home/u/.fno/state/buddy/inner.json', JSON.stringify({ statusLine: mine })],
   ])
-  boot(on, OLD_CONFIG, new Map(), files)
+  const { clock } = boot(on, OLD_CONFIG, new Map(), files)
   on('process.run', ($: any, e: any) =>
     e.argv.join(' ') === 'fno config get state_dir'
       ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
@@ -282,4 +282,20 @@ test('an old python wrapper at a slow interval moves to the fast path at 1 s, an
   expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual({ ...ours, command: 'bash /home/u/.fno/state/buddy/statusline.sh', refreshInterval: 1 })
   expect(files.get('/home/u/.fno/state/buddy/statusline.sh')).toBe('# wrapper')
   expect(JSON.parse(files.get('/home/u/.fno/state/buddy/inner.json')!).statusLine).toEqual({ ...mine, refreshInterval: 30 })
+
+  // Every new frame costs the status line a Python start, so a quiet buddy stops changing its frame.
+  const sprites = () => JSON.parse(files.get('/home/u/.fno/state/buddy/frames/s1.json')!).sprite
+  await clock.advance(70_000)
+  const still = sprites()
+  await clock.advance(8_000)
+  expect(sprites()).toEqual(still)
+  // A pet is activity: the fidget moves again, one step every 2 s.
+  await $.command.run({ command: 'buddy', args: 'pet' })
+  await clock.advance(3_000)
+  const seen = new Set<string>()
+  for (let i = 0; i < 4; i++) {
+    await clock.advance(2_000)
+    seen.add(JSON.stringify(sprites()))
+  }
+  expect(seen.size).toBeGreaterThan(1)
 })

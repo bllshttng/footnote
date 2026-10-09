@@ -19,7 +19,7 @@ NARROW = 60
 # The original speech bubble held about 30 columns of text.
 BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
-STALE_S = 30
+STALE_S = 45
 # The user's own status line reruns at most this often unless its input changes,
 # or at its own refreshInterval when it has one.
 INNER_MAX_AGE_S = 30

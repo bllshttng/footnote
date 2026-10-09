@@ -22,7 +22,13 @@ const SEEN_MS = 5_000
 // in this session's prompt box within this window stands in for that.
 const TYPED_MS = 600_000
 // The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
-const FRAME_REFRESH_MS = 10_000
+const FRAME_REFRESH_MS = 25_000
+// Each new frame starts Python in the status line, so the buddy moves only while something
+// happens: for this long after you type, a turn ends, it speaks, or you pet it. Then it holds still.
+const ANIMATE_MS = 60_000
+// While it moves, the fidget steps this often; one step per status line run would cost a Python start a second.
+const STEP_MS = 2_000
+let turnAt = -Infinity
 const PANE_ID = 'buddy'
 // The /buddy card opens here, focused, so any key closes it like the original.
 const CARD_ID = 'buddy-card'
@@ -615,7 +621,7 @@ function talking(now: number): string | null {
 }
 
 function sprite(c: Companion, now: number): string[] {
-  const lines = renderSprite(c, IDLE_SEQUENCE[tick % IDLE_SEQUENCE.length]!)
+  const lines = renderSprite(c, IDLE_SEQUENCE[Math.floor(now / STEP_MS) % IDLE_SEQUENCE.length]!)
   // A 5-line sprite keeps row 0 for a hat; a shorter one has no free row, so the hearts go above it.
   if (now - pettedAt < PET_MS) lines.splice(0, lines.length < 5 ? 0 : 1, PET_HEARTS[tick % PET_HEARTS.length]!)
   return lines
@@ -636,11 +642,17 @@ async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
 }
 
 // The status line wrapper reads this file; frames change on screen at each status line refresh.
+// A pane the mux hides never moves; anywhere else the buddy moves for ANIMATE_MS after activity.
+function moving(now: number): boolean {
+  const last = Math.max(typedAt, turnAt, bubble?.at ?? -Infinity, pettedAt, hatchUntil)
+  return onScreen !== false && now - last < ANIMATE_MS
+}
+
 async function writeFrame($: EngineInterface, now: number): Promise<void> {
   if (!buddy || !sessionId || !stateDir) return
   const frame = JSON.stringify({
     // A pane the mux hides holds still, so its status line can reuse its last output.
-    sprite: onScreen === false ? renderSprite(buddy, 0) : sprite(buddy, now),
+    sprite: moving(now) ? sprite(buddy, now) : renderSprite(buddy, 0),
     name: buddy.name,
     face: renderFace(buddy),
     color: rarityColor(theme, buddy.rarity),
@@ -836,6 +848,7 @@ export function register(on: On) {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) turnAt = await $.clock.now()
     if (buddy && !muted && !e.agentId && !e.isAborted) {
       const now = await $.clock.now()
       if (now - drawnAt < SEEN_MS && attended(now)) {
