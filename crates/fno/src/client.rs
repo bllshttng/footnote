@@ -7896,12 +7896,12 @@ async fn attach_and_run(
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
                     // External opens run off-loop; a cold browser must not stall
-                    // rendering. The router names the opener for each pseudo
-                    // scheme; the message leg finishes here on the UI loop.
+                    // rendering. The router names the opener per pseudo scheme;
+                    // open_link::finish lands the UI-loop legs.
                     if let Some(routed) =
                         crate::client::open_link::start(&url, link_tx.clone(), sender_tx.clone())
                     {
-                        messages_view::open_message(&mut view, routed.id);
+                        crate::client::open_link::finish(routed, &mut view);
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
                         }

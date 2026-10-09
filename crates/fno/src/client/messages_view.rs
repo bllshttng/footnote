@@ -128,6 +128,9 @@ pub(crate) struct MessagesBoard {
     pub(crate) filter: ListFilter,
     pub(crate) sort_mode: SortMode,
     pub(crate) pending_message_id: Option<String>,
+    /// A clicked `@handle` awaiting the gather: resolves to the participant
+    /// whose name (or key) matches, then selects it in column 1.
+    pub(crate) pending_handle: Option<String>,
     selected_message_id: Option<String>,
     pub(crate) detail: Option<super::messages_detail::SessionDetail>,
     pub(super) reply: Option<super::messages_reply::ReplyState>,
@@ -156,6 +159,7 @@ impl MessagesBoard {
             filter: ListFilter::All,
             sort_mode: SortMode::Last,
             pending_message_id: None,
+            pending_handle: None,
             selected_message_id: None,
             detail: None,
             reply: None,
@@ -904,6 +908,16 @@ pub(crate) fn open_message(view: &mut View, id: String) {
     }
 }
 
+/// Open the Messages tab filtered to a clicked `@handle`. The projection
+/// gather resolves the name to its participant, then column 1 selects it;
+/// a handle that never messaged this fleet notices instead of selecting.
+pub(crate) fn open_handle(view: &mut View, name: String) {
+    open(view);
+    if let Some(board) = view.messages_board.as_mut() {
+        board.pending_handle = Some(name);
+    }
+}
+
 /// Restore after launch: a persisted Messages sideline reopens it.
 pub(crate) fn restore(view: &mut View) {
     if view.sideline_view == SidelineView::Messages {
@@ -1005,6 +1019,25 @@ pub(crate) fn apply_gather(
                     b.col = Col::Thread;
                 } else {
                     notice = Some(format!("message {id}: no conversation found"));
+                }
+            }
+            if let Some(handle) = b.pending_handle.take() {
+                let want = handle.trim_start_matches('@').to_string();
+                let rows = b.tree_rows();
+                let hit = rows.iter().position(|r| {
+                    matches!(r, TreeRow::Agent { key, name, .. }
+                        if name.eq_ignore_ascii_case(&want) || key.eq_ignore_ascii_case(&want))
+                });
+                match hit {
+                    Some(i) => {
+                        if let TreeRow::Agent { key, .. } = &rows[i] {
+                            b.sel_agent = Some(key.clone());
+                            b.sel_thread = None;
+                            b.cursors[0] = i;
+                            b.col = Col::Chats;
+                        }
+                    }
+                    None => notice = Some(format!("@{want}: no messages found")),
                 }
             }
         }
