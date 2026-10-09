@@ -606,7 +606,7 @@ mod tests {
         }
         let gone = dir
             .path()
-            .join("archived-worktree/hooks/agy-crown-inject.sh");
+            .join("archived-worktree/hooks/agy-old-inject.sh");
         let data = json!({
             "other": {"Stop": [{"type": "command", "command": gone.display().to_string()}]},
             "footnote": {
