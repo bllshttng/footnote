@@ -145,8 +145,12 @@ expect "unrelated Edit approved" approve \
 # agent whose state.json holds an open interactive window for this session's
 # short id.
 _DRIVE_STUB=$(mktemp -d)
-_DRIVE_EVENTS="$_DRIVE_STUB/events.jsonl"
-mkdir -p "$_DRIVE_STUB/agents/drive-agent"
+_DRIVE_EVENTS="$_DRIVE_STUB/journal/events.jsonl"
+# The journal lives under its own directory, disjoint from the agents-home
+# parent: the store routes to the state root only when the journal sits in
+# the agents-home's parent, and this read must answer the same rows on a
+# reader that predates the routing.
+mkdir -p "$_DRIVE_STUB/journal" "$_DRIVE_STUB/agents/drive-agent"
 printf '%s\n' '{"short_id":"drive-test","pty":{"drive_active":true,"drive_mode":"interactive","drive_session_id":"s-drive"}}' \
   > "$_DRIVE_STUB/agents/drive-agent/state.json"
 _DRIVE_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/artifacts/proof.md","old_string":"a","new_string":"b"}}' \

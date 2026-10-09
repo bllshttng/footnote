@@ -291,8 +291,8 @@ fn graph_edit_write(p: &Payload, cwd: &Path) -> Sec {
     if fp.contains("/.fno/artifacts/") && fp.ends_with(".md") && drive_authority_active() {
         emit_event(
             cwd,
+            "hook",
             "operator_initiated",
-            "artifact_edited_operator_initiated",
             json!({
                 "action_type": "artifact_edited_operator_initiated",
                 "file_path": p.file_path,
@@ -457,7 +457,15 @@ pub(crate) fn physicalize(abs: &Path) -> PathBuf {
         }
         match (dir.parent(), dir.file_name()) {
             (Some(parent), Some(name)) if parent != dir => {
-                tail = Path::new(name).join(tail);
+                // Join onto an empty tail with the bare name: `join("")`
+                // appends a separator, and a trailing slash here would
+                // survive into every comparison downstream (exists(), the
+                // depth checks) and flip them.
+                if tail.as_os_str().is_empty() {
+                    tail = PathBuf::from(name);
+                } else {
+                    tail = Path::new(name).join(tail);
+                }
                 dir = parent.to_path_buf();
             }
             _ => break,
@@ -912,11 +920,19 @@ fn generated_target(t: &str, payload_cwd: &str) -> Option<String> {
         }
     }
 
-    // Repo manifests live at the git toplevel the target sits in.
-    let dir = abs
+    // Repo manifests live at the git toplevel the target sits in. The target
+    // is usually a file that does not exist yet, so walk up to the nearest
+    // existing ancestor before asking git, exactly as the shell guard did.
+    let mut dir = abs
         .parent()
         .map(|d| d.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/"));
+    while !dir.is_dir() {
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent.to_path_buf(),
+            _ => break,
+        }
+    }
     let out = match std::process::Command::new("git")
         .args(["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
         .output()
@@ -1130,17 +1146,15 @@ mod tests {
         let patch =
             "*** Begin Patch\n*** Update File: .codex/agents/archer.toml\n@@\n*** End Patch";
         assert_eq!(write_targets("", patch), vec![".codex/agents/archer.toml"]);
-        // The generated-artifacts.tsv rows are bash [[ == ]] glob patterns.
+        // The generated-artifacts.tsv rows are bash [[ == ]] glob patterns:
+        // a pattern star crosses slashes there, unlike pathname expansion.
         assert!(bash_glob_match("docs/gen.md", "docs/gen.md"));
         assert!(bash_glob_match(
             ".codex/agents/*.toml",
             ".codex/agents/archer.toml"
         ));
-        assert!(!bash_glob_match(
-            ".codex/agents/*.toml",
-            ".codex/agents/sub/archer.toml"
-        ));
-        assert!(!bash_glob_match("docs/*.md", "docs/a/b.md"));
+        assert!(bash_glob_match("docs/*.md", "docs/a/b.md"));
+        assert!(!bash_glob_match("docs/*.md", "notes.md"));
         assert!(bash_glob_match("a?c", "abc"));
         assert!(bash_glob_match("[abc]x", "bx"));
         assert!(bash_glob_match("[!abc]x", "dx"));
