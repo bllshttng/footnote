@@ -173,6 +173,7 @@ enum Role {
     AgentsHistory(Vec<OsString>),
     /// `fno agents transcript ...`: the native session-bundle transfer.
     AgentsTranscript(Vec<OsString>),
+    ClaimStore(Vec<OsString>),
     /// `fno agents mail show ...`: the native one-message reader, lexically
     /// classified beside agents_history. The Python CLI keeps the rest of
     /// the mail tree; the carried tail runs `fno-agents chats show`.
@@ -283,6 +284,33 @@ fn classify_agents_transcript(args: &[OsString]) -> Option<Vec<OsString>> {
     Some(args[2..].to_vec())
 }
 
+/// `fno agents claim backlog|export ...`: the shared-store verbs live only
+/// in `fno-agents claim`, and the Python claim group names its actions one
+/// by one, so the front claims these two and execs the native binary.
+fn classify_claim_store(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.len() < 3
+        || args[0].to_str()? != "agents"
+        || args[1].to_str()? != "claim"
+        || !matches!(args[2].to_str()?, "backlog" | "export")
+    {
+        return None;
+    }
+    Some(args[2..].to_vec())
+}
+
+fn claim_store_exec(rest: &[OsString]) -> i32 {
+    let mut cmd = std::process::Command::new(fno::digest_overlay::fno_agents_bin());
+    cmd.arg("claim");
+    cmd.args(rest);
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("fno agents claim: could not run fno-agents: {e}");
+            1
+        }
+    }
+}
+
 fn classify_mail_show(args: &[OsString]) -> Option<Role> {
     let (verb, tail): (&str, &[OsString]) = if args.len() >= 3
         && args[0].to_str() == Some("agents")
@@ -329,6 +357,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = classify_agents_transcript(args) {
         return Role::AgentsTranscript(rest);
+    }
+    if let Some(rest) = classify_claim_store(args) {
+        return Role::ClaimStore(rest);
     }
     if let Some(role) = classify_mail_show(args) {
         return role;
@@ -570,6 +601,7 @@ fn main() {
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::AgentsTranscript(rest) => std::process::exit(fno::transcript_transfer::run(&rest)),
         Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),
+        Role::ClaimStore(rest) => std::process::exit(claim_store_exec(&rest)),
         Role::MailViewRenamed => {
             eprintln!("fno agents mail view was renamed: use fno agents mail show");
             std::process::exit(2);

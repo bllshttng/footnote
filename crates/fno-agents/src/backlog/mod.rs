@@ -271,7 +271,15 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
     open_connection(graph)
 }
 
+/// Every write connection leaves through here, so the shared-backlog write
+/// path attaches once, after setup, whichever way the setup returned.
 fn open_connection(graph: &Path) -> Result<Connection, String> {
+    let connection = open_connection_inner(graph)?;
+    crate::backlog_share::attach(&connection, graph)?;
+    Ok(connection)
+}
+
+fn open_connection_inner(graph: &Path) -> Result<Connection, String> {
     // A migration publishing under this root parks the legacy inode we
     // would otherwise open; the bounded fence wait orders us after it.
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
@@ -864,7 +872,18 @@ pub fn authoritative_sync(
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
     confirm_ids_landed(&transaction, after)?;
-    transaction.commit().map_err(|error| error.to_string())?;
+    if let Err(error) = transaction.commit() {
+        // The shared primary refused: bring the replica up so the caller's
+        // conflict retry re-reads current rows.
+        if let Some(reason) = crate::backlog_share::take_refusal() {
+            drop(connection);
+            if let Err(sync) = crate::backlog_share::sync(graph) {
+                return Err(format!("{reason} The replica sync failed too: {sync}"));
+            }
+            return Err(reason);
+        }
+        return Err(error.to_string());
+    }
     Ok(version)
 }
 

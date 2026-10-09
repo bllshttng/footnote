@@ -70,6 +70,7 @@ pub mod attention_reply;
 pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
+pub mod backlog_share;
 pub mod backlog_ready;
 pub mod bash_census;
 #[cfg(test)]

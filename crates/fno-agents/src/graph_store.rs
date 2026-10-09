@@ -2498,7 +2498,17 @@ pub fn locked_mutate_with_hook(
     let (version, _retries) = crate::backlog::retry_on_busy(|| {
         crate::backlog::authoritative_sync(path, &baseline, &entries)
     })
-    .map_err(StoreError::Sqlite)?;
+    .map_err(|error| {
+        // A row a peer changed first: the replica has synced, so the
+        // caller's conflict retry re-reads and tries again.
+        if error.starts_with(crate::backlog_share::REFUSED)
+            && error.contains(crate::backlog_share::CHANGED)
+        {
+            StoreError::Conflict
+        } else {
+            StoreError::Sqlite(error)
+        }
+    })?;
     crate::backlog::snapshot_db(path, crate::backlog::now_ms()).map_err(StoreError::Sqlite)?;
     let backup: Option<PathBuf> = None;
     let shadow_warning = None;
