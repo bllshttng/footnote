@@ -234,18 +234,21 @@ The per-repository journal `<space>/events.jsonl` resolves through `paths.projec
 
 ## Event retention and its readers
 
-Each `events.db` store prunes by event kind: the project journal, the global journal, and the agents lifecycle journal. The prune mechanics live in [event-log-storage](architecture/event-log-storage.md). This table names who reads each pruned kind, and how far back. A **GAP** row has a reader whose window is longer than the retention. That reader now sees a short or skewed history, and nothing tells it so.
+Each `events.db` store prunes by event kind: the project journal, the global journal, and the agents lifecycle journal. The prune mechanics live in [event-log-storage](architecture/event-log-storage.md). This table names who reads each pruned kind, and how far back. A **GAP** row has a reader whose window is longer than the retention. That reader sees a short or skewed history, and nothing tells it so.
 
-| Event type | Retention | Readers and their window | Gap |
+Every pruned row leaves a count in the `event_rollup` table, per UTC day, kind, and subject. `fno doctor event signals` prints those counts as its `pruned` list. So a kind that still fires often stays visible after its rows are gone.
+
+| Event type | Retention | Readers and their window | Status |
 |---|---|---|---|
-| control_plane_tick | 168h (telemetry) | `fno agents loops table`: 7 days (`ARM_WINDOW_FLOOR_S`). `fno do pr watch status`: newest rows. `fno doctor event signals`: 24h plus six prior days. `fno-agents intel --fleet`: 30 days of `machine_watch` load readings. `fno doctor evals macro --all`: 30 days. | **GAP.** `intel --fleet` loses CPU load, band, and runnable readings after day 7. Its `machine_sample` memory rows are durable and stay. `evals macro --all` sees 7 of its 30 days. The loops table fits only at the default `notify.arm_starved_after_s`. A larger value reads a starved arm as UNOBSERVED. |
-| guard_decision, allow rows | 24h | [hook-budget-audit](architecture/hook-budget-audit.md) block rate, `block / (allow + block)`. `fno doctor event find guard_decision`: its coverage proves only 24h. `fno doctor evals macro --all`: 30 days. | **GAP.** Over any window past 24h the rate has one day of allows and seven days of blocks, so it reads high. The audit's multi-day allow counts cannot be measured again. |
-| guard_decision, block rows | 168h (telemetry) | The same hook-budget audit. `fno doctor evals macro --all`: 30 days. | **GAP.** A block count over more than 7 days is short. |
+| control_plane_tick, machine_watch arm | 720h | `fno-agents intel --fleet`: 30 days of load readings. `fno doctor evals macro --all`: 30 days. | Fixed. The prune keeps these rows for the full 30 days. |
+| control_plane_tick, other arms | 168h (telemetry) | `fno agents loops table`: 7 days (`ARM_WINDOW_FLOOR_S`). `fno do pr watch status`: newest rows. `fno doctor event signals`: 24h plus six prior days. `fno doctor evals macro --all`: 30 days. | Fixed for the loops table. The config reader caps `notify.arm_starved_after_s` at the 168h retention. **GAP** for `evals macro --all`: it sees 7 of its 30 days. The rollup keeps the tick count per arm. |
+| guard_decision, allow rows | 24h | [hook-budget-audit](architecture/hook-budget-audit.md) block rate, `block / (allow + block)`. `fno doctor event find guard_decision`: its coverage proves only 24h. `fno doctor evals macro --all`: 30 days. | Fixed for the block rate. Take allows and blocks from the rollup plus the live rows, or count both inside the last 24h. A raw row count over a longer window still reads high. |
+| guard_decision, block rows | 168h (telemetry) | The same hook-budget audit. `fno doctor evals macro --all`: 30 days. | Fixed. The rollup keeps the block count per guard. |
 | inside_leg_report | 168h (telemetry) | `fno-agents subscribe`: live, from connect time. The spawn-journal scan skips it as noise. | None. A same-state repeat now journals no row at all. |
 | codex_thread_inside_leg | 168h (telemetry) | No reader in the tree. | None. A same-state repeat now journals no row at all. |
 | store_seat_lock_unlinked, store_socket_unlinked | 168h (telemetry) | `fno doctor event signals`: 24h `burst` and `spike`, with six prior days as the baseline. | None at the default window. |
 
-Retros read none of these kinds. `fno backlog retro` folds `gate_escape` only, and that kind is durable. The self-improvement loops in [self-improvement-loops](architecture/self-improvement-loops.md) read none of them either: autocorrect, the S2 corrections path, the evals regression banks, and pr-watch heal. The one evals reader is the `evals macro` fold. By default it drops `guard_decision` and `control_plane_tick` as noise, so only `--all` meets the gap.
+Retros read none of these kinds. `fno backlog retro` folds `gate_escape` only, and that kind is durable. The self-improvement loops in [self-improvement-loops](architecture/self-improvement-loops.md) read none of them either: autocorrect, the S2 corrections path, the evals regression banks, and pr-watch heal. The one evals reader is the `evals macro` fold. By default it drops `guard_decision` and `control_plane_tick` as noise, so only `--all` meets the one open gap.
 
 ## Adding a new root writer
 
