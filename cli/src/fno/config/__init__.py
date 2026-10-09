@@ -53,6 +53,7 @@ from pydantic import (
 )
 
 from fno.user import UserBlock
+from fno.config.split_block import SplitBlock as SplitBlock
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle and re-exported
 # here; the redundant `X as X` aliases are the explicit-reexport idiom mypy's
@@ -2046,27 +2047,6 @@ class SidelineBlock(BaseModel):
         if isinstance(v, str) and v.strip().lower() == "list":
             return "list"
         return "card"
-
-
-class SplitBlock(BaseModel):
-    """Split placement config (nested under 'config.split')."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    # Where the mux row menu's Split Direction toggle starts. Mirrors the Rust
-    # reader's tolerance (crates/fno digest_overlay): an unknown value reads as
-    # the pane default, never an error.
-    opens: Literal["pane", "portal"] = "pane"
-
-    @field_validator("opens", mode="before")
-    @classmethod
-    def _coerce_opens(cls, v: object) -> object:
-        """Unknown or wrong-shaped values degrade to the pane default, never error."""
-        if v is None:
-            return "pane"
-        if isinstance(v, str) and v.strip().lower() == "portal":
-            return "portal"
-        return "pane"
 
 
 class DispatchBlock(BaseModel):

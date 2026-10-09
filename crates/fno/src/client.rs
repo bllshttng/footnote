@@ -42,7 +42,6 @@ mod row_menu;
 mod sweep_scope;
 mod wire_version;
 use open_chooser::open_for_session;
-use row_menu::execute_row_menu_action;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
