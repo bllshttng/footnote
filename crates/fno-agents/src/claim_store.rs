@@ -447,27 +447,33 @@ pub(crate) fn records_in(
         .prepare(&format!("SELECT {COLUMNS} FROM claims ORDER BY key"))
         .map_err(|e| e.to_string())?;
     let rows = statement.query_map([], decode).map_err(|e| e.to_string())?;
-    let mut records = Vec::new();
-    for row in rows {
-        // One unreadable row must not blind the whole scan; `claim status`
-        // on its key still reports it corrupted.
-        let Ok(record) = row else {
-            continue;
-        };
-        if prefix.is_some_and(|p| !record.key.starts_with(p)) {
-            continue;
-        }
-        if !include_stale
-            && !matches!(
-                crate::claim_verbs::status_verdict(&record).0,
-                ClaimState::Live | ClaimState::Suspect
-            )
-        {
-            continue;
-        }
-        records.push(record);
+    // One unreadable row must not blind the whole scan; `claim status` on its
+    // key still reports it corrupted.
+    let records: Vec<ClaimRecord> = rows
+        .flatten()
+        .filter(|record| prefix.is_none_or(|p| record.key.starts_with(p)))
+        .collect();
+    if include_stale {
+        return Ok(records);
     }
-    Ok(records)
+    // One primed witness for the whole scan: a per-row verdict paid one cold
+    // `fno agents truth` interpreter per unresolved session, in series, and a
+    // loaded host stretched a lead check-in past half an hour on 11 rows.
+    let (witness, _answer) = crate::claim_verbs::session_witness_primed_for(&records);
+    Ok(records
+        .iter()
+        .filter(|record| {
+            let (state, _) = claims::classify_with_basis_and_exclusivity(
+                record,
+                None,
+                &|pid| claims::probe_pid(pid),
+                None,
+                Some(&witness),
+            );
+            matches!(state, ClaimState::Live | ClaimState::Suspect)
+        })
+        .cloned()
+        .collect())
 }
 
 pub(crate) fn acquire(

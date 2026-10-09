@@ -964,6 +964,7 @@ def _discover_from_registry(
     registry_path: Optional[Path] = None,
     *,
     exclude_session_ids: Iterable[str] = (),
+    falsify: bool = True,
 ) -> list[dict]:
     """Registered fno-agent sessions, resolvable by canonical handle (US2).
 
@@ -1039,7 +1040,7 @@ def _discover_from_registry(
                 # already condemned (dead pid, exited pane, recorded exit) would
                 # otherwise arrive in the discovered lane with nothing to falsify
                 # on and read reachable off a still-warm transcript.
-                "registry_falsifier": registry_falsifier(e),
+                "registry_falsifier": registry_falsifier(e) if falsify else None,
             }
         )
     return rows
@@ -1234,7 +1235,11 @@ def discovery_address_matches(
     The sweep takes the resolver-only lane: matching reads identity fields
     alone, so per-session truth classification here is discarded cost.
     """
-    sessions = discover_live_sessions(registry_path=registry_path, classify_truth=False)
+    # No falsifier either: it spawns one holder probe per claude row (11
+    # probes, about 8s of a 74s send) for a verdict this match never reads.
+    sessions = discover_live_sessions(
+        registry_path=registry_path, classify_truth=False, falsify_registry=False
+    )
     return _exact_address_matches(token, sessions)
 
 
@@ -2636,6 +2641,7 @@ def discover_live_sessions(
     truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
     classify_truth: bool = True,
     resolve_metadata: bool = True,
+    falsify_registry: bool = True,
 ) -> list[DiscoveredSession]:
     """Enumerate host-local session candidates and attach family-1 truth.
 
@@ -2767,7 +2773,9 @@ def discover_live_sessions(
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
-    for r in _discover_from_registry(registry_path, exclude_session_ids=excluded_session_ids):
+    for r in _discover_from_registry(
+        registry_path, exclude_session_ids=excluded_session_ids, falsify=falsify_registry
+    ):
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
@@ -2792,8 +2800,14 @@ def discover_live_sessions(
     live = list(by_sid.values())
 
     if resolve_metadata:
+        # Rows repeat cwds (299 rows, 109 cwds measured); a resolve parses
+        # every settings file, so each cwd resolves once per sweep.
+        projects: dict[str, Optional[str]] = {}
         for r in live:
-            r["project"] = resolver(r["cwd"]) if r["cwd"] else None
+            cwd = r["cwd"]
+            if cwd and cwd not in projects:
+                projects[cwd] = resolver(cwd)
+            r["project"] = projects[cwd] if cwd else None
         aliases = _resolve_aliases(live, name_map_path or default_name_map_path())
     else:
         aliases = {}

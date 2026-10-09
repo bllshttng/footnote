@@ -74,10 +74,10 @@ def _render_in_rust(payload: dict) -> str:
             timeout=5,
         )
     except subprocess.TimeoutExpired:
-        # The renderer reads the registry under a shared flock; a sustained
-        # writer leaves the send blocked with no envelope to paste.
+        # The registry read takes no lock and the render takes milliseconds,
+        # so a 5s miss points at a starved host, not at registry contention.
         raise ForgedEnvelopeError(
-            "mail-envelope render timed out after 5s (registry lock contention?); "
+            "mail-envelope render timed out after 5s (host CPU starved?); "
             "refusing to deliver a body without its attribution frame."
         ) from None
     if result.returncode:
