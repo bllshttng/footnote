@@ -447,7 +447,11 @@ fn prune_expires_telemetry_including_rows_stored_as_durable() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(guards, ["block"], "a day-old allow row left; the block row stays");
+    assert_eq!(
+        guards,
+        ["block"],
+        "a day-old allow row left; the block row stays"
+    );
     let backlog: String = open_read(&store)
         .unwrap()
         .query_row(

@@ -77,11 +77,7 @@ fn append_gate_suppresses_and_retry_is_idempotent_hit() {
 fn blocks_and_malformed_never_coalesce() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    for ts in [
-        &at("00:00"),
-        &at("01:00"),
-        &at("02:00"),
-    ] {
+    for ts in [&at("00:00"), &at("01:00"), &at("02:00")] {
         let block = json!({"ts": ts, "type": "guard_decision", "source": "hook",
             "data": {"guard": "git-protection", "decision": "block", "tool": "Bash"}});
         let receipt = append_envelope(&live, &block.to_string(), None).unwrap();
@@ -121,30 +117,10 @@ fn undeclared_type_identical_payloads_stay_two_rows() {
 fn fingerprint_change_flushes_pending() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    append_envelope(
-        &live,
-        &allow(&at("00:00"), "Bash").to_string(),
-        None,
-    )
-    .unwrap();
-    append_envelope(
-        &live,
-        &allow(&at("01:00"), "Bash").to_string(),
-        None,
-    )
-    .unwrap();
-    append_envelope(
-        &live,
-        &allow(&at("02:00"), "Bash").to_string(),
-        None,
-    )
-    .unwrap();
-    let changed = append_envelope(
-        &live,
-        &allow(&at("03:00"), "Edit").to_string(),
-        None,
-    )
-    .unwrap();
+    append_envelope(&live, &allow(&at("00:00"), "Bash").to_string(), None).unwrap();
+    append_envelope(&live, &allow(&at("01:00"), "Bash").to_string(), None).unwrap();
+    append_envelope(&live, &allow(&at("02:00"), "Bash").to_string(), None).unwrap();
+    let changed = append_envelope(&live, &allow(&at("03:00"), "Edit").to_string(), None).unwrap();
     assert!(changed.inserted);
     let rows = query_events(&live, &EventQuery::default()).unwrap();
     assert_eq!(
@@ -172,18 +148,8 @@ fn advance_subject_isolation() {
         json!({"ts": ts, "type": "advance_skipped", "source": "backlog",
                "data": {"reason": "no-work", "rank": "config", "closed_node_id": node}})
     };
-    let a = append_envelope(
-        &live,
-        &mk(&at("00:00"), "x-aaaa").to_string(),
-        None,
-    )
-    .unwrap();
-    let b = append_envelope(
-        &live,
-        &mk(&at("01:00"), "x-bbbb").to_string(),
-        None,
-    )
-    .unwrap();
+    let a = append_envelope(&live, &mk(&at("00:00"), "x-aaaa").to_string(), None).unwrap();
+    let b = append_envelope(&live, &mk(&at("01:00"), "x-bbbb").to_string(), None).unwrap();
     assert!(a.inserted && b.inserted);
     assert!(
         !a.suppressed && !b.suppressed,
@@ -264,10 +230,7 @@ fn replay_after_cursor_loss_does_not_double_count() {
         let conn = Connection::open(&store).unwrap();
         conn.execute("DELETE FROM ingest_cursor", []).unwrap();
     }
-    append(
-        &live,
-        &[checkin(&at("05:00"), "x-aaaa", "cursor loss")],
-    );
+    append(&live, &[checkin(&at("05:00"), "x-aaaa", "cursor loss")]);
     sync(&live).unwrap();
     let conn = Connection::open(&store).unwrap();
     let guards: i64 = conn
@@ -302,12 +265,7 @@ fn replay_after_cursor_loss_does_not_double_count() {
 fn unavailable_observation_state_is_an_explicit_failure() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
-    append_envelope(
-        &live,
-        &allow(&at("00:00"), "Bash").to_string(),
-        None,
-    )
-    .unwrap();
+    append_envelope(&live, &allow(&at("00:00"), "Bash").to_string(), None).unwrap();
     let store = store_path(&live);
     {
         let conn = Connection::open(&store).unwrap();
@@ -317,11 +275,7 @@ fn unavailable_observation_state_is_an_explicit_failure() {
         )
         .unwrap();
     }
-    let broken = append_envelope(
-        &live,
-        &allow(&at("01:00"), "Bash").to_string(),
-        None,
-    );
+    let broken = append_envelope(&live, &allow(&at("01:00"), "Bash").to_string(), None);
     let err = broken.unwrap_err();
     assert!(err.contains("event_observation_state"), "err: {err}");
     let conn = Connection::open(&store).unwrap();
@@ -359,16 +313,13 @@ fn flush_with_nothing_pending_closes_the_window_without_a_summary() {
         json!({"ts": ts, "type": "guard_decision", "source": "hook",
                "data": {"guard": "git-protection", "decision": "allow", "tool": tool}})
     };
-    let first =
-        append_envelope(&live, &mk(&at("00:00"), "Bash").to_string(), None).unwrap();
+    let first = append_envelope(&live, &mk(&at("00:00"), "Bash").to_string(), None).unwrap();
     assert!(first.inserted);
-    let second =
-        append_envelope(&live, &mk(&at("01:00"), "Edit").to_string(), None).unwrap();
+    let second = append_envelope(&live, &mk(&at("01:00"), "Edit").to_string(), None).unwrap();
     assert!(second.inserted, "the changed poll inserts as a transition");
     assert!(!second.suppressed);
     // Heartbeat expiry with nothing pending is the same no-op.
-    let third =
-        append_envelope(&live, &mk(&at("20:00"), "Edit").to_string(), None).unwrap();
+    let third = append_envelope(&live, &mk(&at("20:00"), "Edit").to_string(), None).unwrap();
     assert!(third.inserted);
     let rows = query_events(&live, &EventQuery::default()).unwrap();
     assert_eq!(rows.len(), 3, "three transitions, no summary row: {rows:?}");
