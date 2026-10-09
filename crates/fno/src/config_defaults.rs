@@ -402,7 +402,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod lookup_tests {
     use super::*;
@@ -415,7 +414,8 @@ mod lookup_tests {
         let global = dir.path().join("global.toml");
         let project = dir.path().join("project.toml");
         std::fs::write(&global, "[mux]\nshell_integration = \"off\"\n").expect("write global");
-        std::fs::write(&project, "[mux]\nshell_integration = \"mux-panes\"\n").expect("write project");
+        std::fs::write(&project, "[mux]\nshell_integration = \"mux-panes\"\n")
+            .expect("write project");
         assert_eq!(
             lookup(
                 Some(global.as_path()),
