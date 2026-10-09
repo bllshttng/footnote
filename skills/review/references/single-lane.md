@@ -149,7 +149,7 @@ fi
 
 A prior head that is not an ancestor of HEAD (rebase, squash, force-push) reads as `first-round`: full scope. An empty increment resets to full scope the same way, so a zero-file round can never pass vacuously. The single changed-files producer is this block; no other diff read in the pass names its own base.
 
-On an incremental round, read the prior round's findings from the SAME journal row. The bounded `findings` primitives it carries (category, verdict, finding_key, summary, autofix_class) are the prior report body. A prior row without findings primitives is unreadable evidence, not an empty prior report. Re-run this round at full scope before any verdict. Emit no attestation from the incomplete round - a live blocking finding can sit in an unread prior round.
+On an incremental round, read the prior round's findings from the SAME journal row. The bounded `findings` primitives it carries (category, verdict, finding_key, summary, autofix_class) are the prior report body. A prior row without findings primitives is unreadable evidence, not an empty prior report. Re-run this round at full scope before any verdict, and emit no attestation from the incomplete round. A live blocking finding can sit in an unread prior round.
 
 For each critical or high finding in a readable prior round, re-validate its cited quote at the CURRENT head, the same cite-or-drop check as above:
 
