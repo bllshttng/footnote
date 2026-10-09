@@ -472,12 +472,16 @@ fn metadata(record: &ClaimRecord) -> Result<SqlValue, String> {
 
 fn decode(row: &[SqlValue]) -> Result<ClaimRecord, String> {
     let record = parse(row)?;
+    if let Some(SqlValue::Text(metadata)) = row.get(13) {
+        serde_json::from_str::<serde_json::Map<String, Value>>(metadata)
+            .map_err(|e| format!("claim metadata: {e}"))?;
+    }
     claims::validate_record(&record)?;
     Ok(record)
 }
 
 /// A row as a record, unvalidated: the board shows a holder even when its
-/// row would fail validation.
+/// row would fail validation or its metadata is not JSON.
 fn parse(row: &[SqlValue]) -> Result<ClaimRecord, String> {
     let at = |i: usize| row.get(i).unwrap_or(&SqlValue::Null);
     let need_text = |i: usize| {
@@ -522,7 +526,7 @@ fn parse(row: &[SqlValue]) -> Result<ClaimRecord, String> {
         harness: maybe_text(10)?,
         session_id: maybe_text(11)?,
         pid_provenance: maybe_text(12)?,
-        metadata: serde_json::from_str(&need_text(13)?).map_err(|e| e.to_string())?,
+        metadata: serde_json::from_str(&need_text(13)?).unwrap_or_default(),
     };
     Ok(record)
 }
