@@ -872,18 +872,7 @@ pub fn authoritative_sync(
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
     confirm_ids_landed(&transaction, after)?;
-    if let Err(error) = transaction.commit() {
-        // The shared primary refused: bring the replica up so the caller's
-        // conflict retry re-reads current rows.
-        if let Some(reason) = crate::backlog_share::take_refusal() {
-            drop(connection);
-            if let Err(sync) = crate::backlog_share::sync(graph) {
-                return Err(format!("{reason} The replica sync failed too: {sync}"));
-            }
-            return Err(reason);
-        }
-        return Err(error.to_string());
-    }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(version)
 }
 

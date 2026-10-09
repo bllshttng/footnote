@@ -24,13 +24,13 @@ The agent registry, mail and the event store stay local. A second key moves the 
 
 The tables that move are listed in `SHARED_TABLES` in `crates/fno-agents/src/backlog_share.rs`. The content version, the sync cursor and the search index stay local in `graph.db`. A new table in neither list fails a test.
 
-Reads stay local. This machine's `graph.db` is a replica. One daemon arm per machine applies the primary's change log every 5 seconds. `fno agents claim backlog sync` does it at once.
+Reads stay local. This machine's `graph.db` is a replica. Every 5 seconds, one daemon arm per machine sends the outbox and then applies the primary's change log. `fno agents claim backlog sync` does both at once.
 
-Every backlog write opens through one seam, `backlog::open_connection`. With the key on, a hook there records each row change. At commit, the changes go to the primary in one request, as one transaction. Each update and delete matches every old column of its row. Each insert must not collide. The same request adds one row to the primary's change log.
+Every backlog write opens through one seam, `backlog::open_connection`. With the key on, triggers there copy each row change into the local `backlog_outbox`, in the writer's own transaction. The commit stays local, so no writer holds the graph lock across the network. A flush then sends the outbox to the primary in one request, as one transaction. Each update and delete matches every old column of its row. Each insert must not collide. The same request adds one row to the primary's change log. The flush takes its own lock file, never the graph lock. A write through `mutate_rows` flushes right after the graph lock drops. The daemon flushes every other write within 5 seconds.
 
-A row that a peer changed first refuses the whole write. The local transaction rolls back, so nothing is written on either side. The refusal names the table. A locked mutate syncs the replica and retries by itself. Other writers print the refusal and stop.
+A row that a peer changed first refuses the whole batch, and the primary writes nothing. The replica then takes the primary's rows back for every row the batch touched, and the refusal names the table. A write through `mutate_rows` syncs and retries by itself.
 
-A primary that cannot be reached refuses every backlog write, with the URL in the message. Reads keep working from the replica. To work alone, unset `store.share_backlog`.
+If the primary cannot be reached, backlog writes still land in the replica and wait in the outbox. The next flush that reaches the primary sends them, and a peer's newer change refuses them then. Reads keep working from the replica. To work alone for good, unset `store.share_backlog`.
 
 ## Start sharing
 
@@ -38,7 +38,7 @@ A primary that cannot be reached refuses every backlog write, with the URL in th
 2. On one machine, set both keys and run `fno agents claim backlog seed`. It copies this backlog to the primary. It refuses a primary that already holds one.
 3. On every other machine, set both keys and run `fno agents claim backlog sync`.
 
-A write to a primary with no seeded backlog refuses and names the seed verb.
+If the primary holds no seeded backlog, a flush refuses and names the seed verb. The writes wait in the outbox.
 
 A later fno version that adds a backlog column does not change the primary. Writes then refuse with the primary's "no such column" error. Export, unset the keys, and seed again from a current machine.
 

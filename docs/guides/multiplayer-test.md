@@ -70,7 +70,7 @@ fno agents claim backlog seed
 
 The receipt names each table and its row count. With home B's environment, run `fno agents claim backlog sync`. Expected: `snapshot: true`, and `fno backlog get <id>` on B prints the node A holds.
 
-File a node on A, run the sync on B, and read it on B. Then change one node's title on A, and change the same node on B before B syncs. Expected: B's write refuses, names the `nodes` row, and leaves B's row as it was. After the next sync, B shows A's title.
+File a node on A, run the sync on B, and read it on B. Then change one node's title on A, and change the same node on B before B syncs. Then run the sync on B. Expected: B's flush refuses and names the `nodes` row. B shows A's title, and the primary never held B's.
 
 ## 6. Roll back
 

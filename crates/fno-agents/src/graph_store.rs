@@ -2498,17 +2498,7 @@ pub fn locked_mutate_with_hook(
     let (version, _retries) = crate::backlog::retry_on_busy(|| {
         crate::backlog::authoritative_sync(path, &baseline, &entries)
     })
-    .map_err(|error| {
-        // A row a peer changed first: the replica has synced, so the
-        // caller's conflict retry re-reads and tries again.
-        if error.starts_with(crate::backlog_share::REFUSED)
-            && error.contains(crate::backlog_share::CHANGED)
-        {
-            StoreError::Conflict
-        } else {
-            StoreError::Sqlite(error)
-        }
-    })?;
+    .map_err(StoreError::Sqlite)?;
     crate::backlog::snapshot_db(path, crate::backlog::now_ms()).map_err(StoreError::Sqlite)?;
     let backup: Option<PathBuf> = None;
     let shadow_warning = None;
@@ -2658,7 +2648,14 @@ pub fn mutate_rows(
             )
         };
         match published {
-            Ok(outcome) => return Ok(Some(outcome)),
+            // The graph lock is gone here, so the shared-backlog flush holds
+            // up no writer. A refusal took the primary's rows back: retry on
+            // a fresh read.
+            Ok(outcome) => match crate::backlog_share::publish_after_write(path) {
+                Ok(()) => return Ok(Some(outcome)),
+                Err(_) if attempt + 1 < ATTEMPTS => std::thread::sleep(RETRY_BACKOFF),
+                Err(refusal) => return Err(StoreError::Sqlite(refusal)),
+            },
             Err(err @ (StoreError::Conflict | StoreError::LockTimeout(..)))
                 if attempt + 1 < ATTEMPTS =>
             {

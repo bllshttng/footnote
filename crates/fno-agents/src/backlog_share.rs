@@ -3,18 +3,21 @@
 //! is a replica of them.
 //!
 //! Write: every backlog write opens through `backlog::open_connection`, which
-//! calls [`attach`]. TEMP triggers record each row change to a shared
-//! table. At commit, the changes go to the primary in one request, as one
-//! transaction of conditional statements: each update and delete matches
-//! every old column, each insert must not collide. A row that changed on the
-//! primary since this replica read it refuses the whole write, and the local
-//! transaction rolls back. So the primary decides, and no machine overwrites
-//! a peer's change it never saw.
+//! calls [`attach`]. TEMP triggers copy each row change to a shared table into
+//! the local `backlog_outbox`, in the writer's own transaction, so a commit
+//! stays local and holds no lock across the network. [`flush`] then sends the
+//! outbox to the primary in one request, under its own lock file, after the
+//! graph lock is gone: one transaction of conditional statements, where each
+//! update and delete matches every old column and each insert must not
+//! collide. A row a peer changed first refuses the whole batch, and the
+//! replica takes the primary's rows back for every row the batch touched.
+//! So the primary decides, and no machine overwrites a peer's change it never
+//! saw.
 //!
-//! Read: reads stay local. One daemon arm per machine runs [`sync`], which
-//! applies the primary's change log to the replica.
+//! Read: reads stay local. One daemon arm per machine runs [`flush`] and then
+//! [`sync`], which applies the primary's change log to the replica.
 //!
-//! Unset, [`attach`] returns at once: no hook, no socket.
+//! Unset, [`attach`] returns at once: no table, no trigger, no socket.
 
 use crate::store_remote::{Remote, SqlValue};
 use rusqlite::config::DbConfig;
@@ -51,10 +54,12 @@ pub(crate) const SHARED_TABLES: &[&str] = &[
 ];
 
 /// Tables in graph.db that stay on this machine: store metadata (the content
-/// version, the sync cursor, render marks), the claims (their shared keys
-/// have their own path), and the search index, which each replica rebuilds.
-pub(crate) const LOCAL_TABLES: &[&str] = &[
+/// version, the sync cursor, render marks), the outbox, and the search index,
+/// which each replica rebuilds.
+#[cfg(test)]
+const LOCAL_TABLES: &[&str] = &[
     "graph_meta",
+    "backlog_outbox",
     "nodes_fts",
     "nodes_fts_data",
     "nodes_fts_idx",
@@ -62,8 +67,7 @@ pub(crate) const LOCAL_TABLES: &[&str] = &[
     "nodes_fts_config",
 ];
 
-/// A refused write's text starts with this, so the locked mutate retries
-/// it as a conflict.
+/// A refused flush's text starts with this.
 pub const REFUSED: &str = "backlog write refused by the shared primary";
 
 /// A refusal carrying this names a row a peer changed first: a conflict to
@@ -73,16 +77,23 @@ pub const CHANGED: &str = "changed on the primary after this machine read it";
 const CURSOR: &str = "backlog_share_cursor";
 const PAGE: i64 = 200;
 pub const INTERVAL: Duration = Duration::from_secs(5);
+const FLUSH_WAIT: Duration = Duration::from_secs(30);
+
+const OUTBOX_DDL: &str = "CREATE TABLE IF NOT EXISTS main.backlog_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  change TEXT NOT NULL
+);";
 
 /// The primary-side bookkeeping. `backlog_cas.n` takes only 1, so a
-/// conditional statement that matched no row fails its batch. The seed
-/// marker exists only once the seed finished, so a write to a half-seeded
-/// primary refuses.
+/// conditional statement that matched no row fails its batch. A batch id
+/// lands once, so a resent outbox never applies twice. The seed marker exists
+/// only once the seed finished, so a write to a half-seeded primary refuses.
 const PRIMARY_DDL: &str = "
 CREATE TABLE IF NOT EXISTS backlog_cas (n INTEGER NOT NULL CHECK (n = 1));
 CREATE TABLE IF NOT EXISTS backlog_changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   origin TEXT NOT NULL,
+  batch TEXT NOT NULL UNIQUE,
   at INTEGER NOT NULL,
   ops TEXT NOT NULL
 );";
@@ -124,6 +135,39 @@ struct Change {
     new: Vec<SqlValue>,
 }
 
+impl Change {
+    fn to_json(&self) -> Value {
+        let values = |row: &[SqlValue]| row.iter().map(SqlValue::to_hrana).collect::<Vec<_>>();
+        json!({"op": self.op.code(), "t": self.table, "c": self.columns,
+               "o": values(&self.old), "n": values(&self.new)})
+    }
+
+    fn from_json(row: &Value) -> Result<Self, String> {
+        let values = |v: &Value| -> Result<Vec<SqlValue>, String> {
+            v.as_array()
+                .into_iter()
+                .flatten()
+                .map(SqlValue::from_hrana)
+                .collect()
+        };
+        Ok(Change {
+            op: row["op"]
+                .as_str()
+                .and_then(Op::parse)
+                .ok_or("change without an op")?,
+            table: row["t"].as_str().ok_or("change without a table")?.into(),
+            columns: row["c"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect(),
+            old: values(&row["o"])?,
+            new: values(&row["n"])?,
+        })
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_PRIMARY: std::cell::RefCell<Option<(Remote, std::path::PathBuf)>> =
@@ -135,15 +179,6 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn route_to_primary(route: Option<(Remote, std::path::PathBuf)>) {
     TEST_PRIMARY.with(|p| *p.borrow_mut() = route);
-}
-
-thread_local! {
-    static REFUSAL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The reason the last commit on this thread was refused, if it was.
-pub(crate) fn take_refusal() -> Option<String> {
-    REFUSAL.with(|r| r.borrow_mut().take())
 }
 
 /// The primary that holds the backlog behind `graph`. Only this machine's
@@ -166,14 +201,10 @@ pub(crate) fn primary_for(graph: &Path) -> Result<Option<Remote>, String> {
 fn shared_columns(connection: &Connection) -> Result<BTreeMap<String, Vec<String>>, String> {
     let mut out = BTreeMap::new();
     for table in SHARED_TABLES {
-        let mut statement = connection
-            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
-            .map_err(|e| e.to_string())?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+        let columns = column_info(connection, table)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
         if !columns.is_empty() {
             out.insert(table.to_string(), columns);
         }
@@ -181,21 +212,39 @@ fn shared_columns(connection: &Connection) -> Result<BTreeMap<String, Vec<String
     Ok(out)
 }
 
+/// `(name, primary-key position)` per column; position 0 is not in the key.
+fn column_info(connection: &Connection, table: &str) -> Result<Vec<(String, i64)>, String> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT name, pk FROM pragma_table_info('{table}')"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string());
+    rows
+}
+
 /// Install the write path on a backlog connection when sharing is on.
 ///
-/// TEMP triggers on each shared table hand every row change to a Rust
-/// function on this connection. They live in this connection only, so the
-/// file's schema never changes. (The preupdate hook and the session
-/// extension would capture the same rows, but either one makes the SQLite
-/// build need libclang through bindgen, on every machine, key on or off.)
+/// TEMP triggers live in this connection only, so the shared tables keep
+/// their schema. They hand each row to a Rust function, which keeps every
+/// value's type, and write the result to the outbox in the same transaction.
+/// (The preupdate hook and the session extension would capture the same
+/// rows, but either one makes the SQLite build need libclang through
+/// bindgen, on every machine, key on or off.)
 pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String> {
-    let Some(remote) = primary_for(graph)? else {
+    if primary_for(graph)?.is_none() {
         return Ok(());
-    };
+    }
+    connection
+        .execute_batch(OUTBOX_DDL)
+        .map_err(|e| e.to_string())?;
     let columns = shared_columns(connection)?;
-    let pending: Arc<Mutex<Vec<Change>>> = Arc::default();
-
-    let record = Arc::clone(&pending);
     let names = columns.clone();
     connection
         .create_scalar_function(
@@ -206,7 +255,9 @@ pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String
                 let text = |i: usize| ctx.get_raw(i).as_str().unwrap_or("").to_string();
                 let (table, op) = (text(0), text(1));
                 let (Some(columns), Some(op)) = (names.get(&table), Op::parse(&op)) else {
-                    return Ok(0);
+                    return Err(rusqlite::Error::UserFunctionError(
+                        format!("fno_backlog_change: unknown table {table} or op {op}").into(),
+                    ));
                 };
                 let values: Vec<SqlValue> = (2..ctx.len())
                     .map(|i| SqlValue::from(ctx.get_raw(i)))
@@ -215,21 +266,18 @@ pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String
                     Op::Insert => (Vec::new(), values),
                     Op::Delete => (values, Vec::new()),
                     Op::Update => {
-                        let (old, new) = values.split_at(columns.len());
+                        let (old, new) = values.split_at(columns.len().min(values.len()));
                         (old.to_vec(), new.to_vec())
                     }
                 };
-                record
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(Change {
-                        op,
-                        table,
-                        columns: columns.clone(),
-                        old,
-                        new,
-                    });
-                Ok(0)
+                let change = Change {
+                    op,
+                    table,
+                    columns: columns.clone(),
+                    old,
+                    new,
+                };
+                Ok(change.to_json().to_string())
             },
         )
         .map_err(|e| e.to_string())?;
@@ -249,46 +297,14 @@ pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String
         ] {
             triggers.push_str(&format!(
                 "CREATE TEMP TRIGGER IF NOT EXISTS fno_share_{table}_{op} AFTER {event} ON main.\"{table}\" \
-                 BEGIN SELECT fno_backlog_change('{table}', '{op}', {values}); END;\n"
+                 BEGIN INSERT INTO main.backlog_outbox (change) \
+                 VALUES (fno_backlog_change('{table}', '{op}', {values})); END;\n"
             ));
         }
     }
     connection
         .execute_batch(&triggers)
-        .map_err(|e| e.to_string())?;
-
-    let send = Arc::clone(&pending);
-    let origin = crate::claims::machine_id();
-    connection
-        .commit_hook(Some(move || {
-            // A refusal belongs to this commit only: an earlier one left
-            // unread must not explain a later, unrelated failure.
-            REFUSAL.with(|r| r.borrow_mut().take());
-            let changes = net(std::mem::take(
-                &mut *send.lock().unwrap_or_else(|e| e.into_inner()),
-            ));
-            if changes.is_empty() {
-                return false;
-            }
-            match publish(&remote, &origin, &changes) {
-                Ok(()) => false,
-                Err(reason) => {
-                    eprintln!("{reason}");
-                    REFUSAL.with(|r| *r.borrow_mut() = Some(reason));
-                    // True turns this commit into a rollback.
-                    true
-                }
-            }
-        }))
-        .map_err(|e| e.to_string())?;
-
-    let clear = Arc::clone(&pending);
-    connection
-        .rollback_hook(Some(move || {
-            clear.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        }))
-        .map_err(|e| e.to_string())?;
-    Ok(())
+        .map_err(|e| e.to_string())
 }
 
 /// One row's identity for chaining: its table and every value.
@@ -297,13 +313,13 @@ fn row_key(table: &str, row: &[SqlValue]) -> String {
     format!("{table}\u{1f}{}", Value::Array(values))
 }
 
-/// Fold one transaction's trigger records into one change per row: the row
-/// as it was before the transaction and as it is after. Triggers can record
-/// a nested change (a touch trigger's update) before the change that caused
-/// it, so the fold chains records by value, each one's new row being the
-/// next one's old row, instead of trusting the record order. Deletes go
-/// first, then updates, then inserts, so a key freed by one row is free
-/// before another row takes it.
+/// Fold the outbox into one change per row: the row as the primary last saw
+/// it and as it is now. Triggers can record a nested change (a touch
+/// trigger's update) before the change that caused it, so the fold chains
+/// records by value, each one's new row being the next one's old row,
+/// instead of trusting the record order. Deletes go first, then updates,
+/// then inserts, so a key freed by one row is free before another row takes
+/// it.
 fn net(changes: Vec<Change>) -> Vec<Change> {
     let mut by_old: std::collections::HashMap<String, Vec<usize>> = Default::default();
     let mut news = std::collections::HashSet::new();
@@ -322,7 +338,8 @@ fn net(changes: Vec<Change>) -> Vec<Change> {
     let is_head = |c: &Change| c.old.is_empty() || !news.contains(&row_key(&c.table, &c.old));
     let order = (0..changes.len())
         .filter(|&i| is_head(&changes[i]))
-        .chain(0..changes.len());
+        .chain(0..changes.len())
+        .collect::<Vec<_>>();
     let mut out = Vec::new();
     for head in order {
         if used[head] {
@@ -362,7 +379,7 @@ fn net(changes: Vec<Change>) -> Vec<Change> {
     out
 }
 
-/// `col IS ?n AND ...` over every column, numbered from `first`.
+/// `col IS ?n AND ...` over `columns`, numbered from `first`.
 fn match_all(columns: &[String], first: usize) -> String {
     columns
         .iter()
@@ -372,17 +389,23 @@ fn match_all(columns: &[String], first: usize) -> String {
         .join(" AND ")
 }
 
-fn insert_sql(table: &str, columns: &[String]) -> String {
-    let names = columns
+fn quoted(columns: &[String]) -> String {
+    columns
         .iter()
         .map(|c| format!("\"{c}\""))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(", ")
+}
+
+fn insert_sql(table: &str, columns: &[String]) -> String {
     let marks = (1..=columns.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("INSERT INTO \"{table}\" ({names}) VALUES ({marks})")
+    format!(
+        "INSERT INTO \"{table}\" ({}) VALUES ({marks})",
+        quoted(columns)
+    )
 }
 
 /// The statement that applies `change` only when the row is still as this
@@ -416,52 +439,17 @@ fn conditional(change: &Change) -> (String, Vec<SqlValue>) {
 }
 
 fn ops_json(changes: &[Change]) -> String {
-    let values = |row: &[SqlValue]| row.iter().map(SqlValue::to_hrana).collect::<Vec<_>>();
-    Value::Array(
-        changes
-            .iter()
-            .map(|c| {
-                json!({"op": c.op.code(), "t": c.table, "c": c.columns,
-                       "o": values(&c.old), "n": values(&c.new)})
-            })
-            .collect(),
-    )
-    .to_string()
+    Value::Array(changes.iter().map(Change::to_json).collect()).to_string()
 }
 
 fn parse_ops(text: &str) -> Result<Vec<Change>, String> {
     let rows: Vec<Value> = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let values = |v: &Value| -> Result<Vec<SqlValue>, String> {
-        v.as_array()
-            .into_iter()
-            .flatten()
-            .map(SqlValue::from_hrana)
-            .collect()
-    };
-    rows.iter()
-        .map(|row| {
-            Ok(Change {
-                op: row["op"]
-                    .as_str()
-                    .and_then(Op::parse)
-                    .ok_or("change without an op")?,
-                table: row["t"].as_str().ok_or("change without a table")?.into(),
-                columns: row["c"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.as_str().map(str::to_string))
-                    .collect(),
-                old: values(&row["o"])?,
-                new: values(&row["n"])?,
-            })
-        })
-        .collect()
+    rows.iter().map(Change::from_json).collect()
 }
 
-/// Send one write to the primary: every change as a conditional statement
-/// with its row-count check, then the change-log row, in one request.
-fn publish(remote: &Remote, origin: &str, changes: &[Change]) -> Result<(), String> {
+/// Send one outbox batch: every change as a conditional statement with its
+/// row-count check, then the change-log row, in one request.
+fn publish(remote: &Remote, origin: &str, batch: &str, changes: &[Change]) -> Result<(), String> {
     let mut steps = vec![(
         "SELECT 1 FROM backlog_seed".to_string(),
         Vec::<SqlValue>::new(),
@@ -478,32 +466,233 @@ fn publish(remote: &Remote, origin: &str, changes: &[Change]) -> Result<(), Stri
     }
     steps.push(("DELETE FROM backlog_cas".to_string(), Vec::new()));
     owner.push(None);
-    let at = crate::backlog::now_ms() as i64;
     steps.push((
-        "INSERT INTO backlog_changes (origin, at, ops) VALUES (?1, ?2, ?3)".to_string(),
+        "INSERT INTO backlog_changes (origin, batch, at, ops) VALUES (?1, ?2, ?3, ?4)".to_string(),
         vec![
             SqlValue::Text(origin.to_string()),
-            SqlValue::Integer(at),
+            SqlValue::Text(batch.to_string()),
+            SqlValue::Integer(crate::backlog::now_ms() as i64),
             SqlValue::Text(ops_json(changes)),
         ],
     ));
     owner.push(None);
     remote.transaction(&steps).map(drop).map_err(|(step, error)| {
-        let hint = if error.contains("no such table: backlog_seed") {
+        let hint = if unseeded(&error) {
             " The primary holds no seeded backlog: run `fno agents claim backlog seed` on one machine first.".to_string()
-        } else if crate::store_remote::is_unreachable(&error) {
+        } else if crate::store_remote::is_unreachable(&error) || landed_before(&error) {
             String::new()
         } else {
             match step.and_then(|s| owner.get(s).copied().flatten()) {
                 Some(i) => format!(
-                    " The {} row {CHANGED}. Run `fno agents claim backlog sync` (the daemon does it every 5 s), then retry.",
+                    " The {} row {CHANGED}. This machine took the primary's rows back; retry the write.",
                     changes[i].table
                 ),
                 None => String::new(),
             }
         };
-        format!("{REFUSED}: {error}.{hint} Nothing was written locally.")
+        format!("{REFUSED}: {error}.{hint}")
     })
+}
+
+fn unseeded(error: &str) -> bool {
+    error.contains("no such table: backlog_seed")
+}
+
+/// The batch id is already on the primary: an earlier flush landed it and
+/// died before it cleared the outbox.
+fn landed_before(error: &str) -> bool {
+    error.contains("UNIQUE constraint failed: backlog_changes.batch")
+}
+
+/// The replica's connection: no TEMP triggers, no main-schema triggers (the
+/// change log already carries every row a trigger made), no foreign-key
+/// actions. It never takes the graph lock; only a store that does not exist
+/// yet goes through the full open once.
+fn replica(graph: &Path) -> Result<Connection, String> {
+    let db = crate::backlog::database_path(graph);
+    if !db.exists() {
+        drop(crate::backlog::open(graph)?);
+    }
+    let connection = crate::store_conn::open_write(&db)?;
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
+        .map_err(|e| e.to_string())?;
+    connection
+        .execute_batch(&format!("PRAGMA foreign_keys=OFF;\n{OUTBOX_DDL}"))
+        .map_err(|e| e.to_string())?;
+    Ok(connection)
+}
+
+/// Send this machine's outbox to the primary. Runs under its own lock file,
+/// never the graph lock, so a slow primary holds up no writer. `Ok(n)` is the
+/// number of row changes the primary took. A refusal takes the primary's
+/// rows back for every row the batch touched, clears the batch, and returns
+/// the refusal. An unreachable or unseeded primary keeps the outbox for the
+/// next flush.
+pub fn flush(graph: &Path) -> Result<usize, String> {
+    let Some(remote) = primary_for(graph)? else {
+        return Ok(0);
+    };
+    let db = crate::backlog::database_path(graph);
+    let _lock = crate::graph_store::BoundedLock::acquire(&db.with_extension("share"), FLUSH_WAIT)
+        .map_err(|e| e.to_string())?;
+    let mut connection = replica(graph)?;
+    let rows: Vec<(i64, String)> = {
+        let mut statement = connection
+            .prepare("SELECT id, change FROM backlog_outbox ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    let Some(&(last, _)) = rows.last() else {
+        return Ok(0);
+    };
+    let changes = net(rows
+        .iter()
+        .map(|(_, text)| {
+            serde_json::from_str(text)
+                .map_err(|e| e.to_string())
+                .and_then(|v| Change::from_json(&v))
+        })
+        .collect::<Result<Vec<_>, _>>()?);
+    let clear = |connection: &Connection| {
+        connection
+            .execute("DELETE FROM backlog_outbox WHERE id <= ?1", [last])
+            .map(drop)
+            .map_err(|e| e.to_string())
+    };
+    if changes.is_empty() {
+        clear(&connection)?;
+        return Ok(0);
+    }
+    let origin = crate::claims::machine_id();
+    let batch = format!("{origin}:{}:{last}", db.display());
+    match publish(&remote, &origin, &batch, &changes) {
+        Ok(()) => {
+            clear(&connection)?;
+            Ok(changes.len())
+        }
+        Err(error) if landed_before(&error) => {
+            clear(&connection)?;
+            Ok(changes.len())
+        }
+        Err(error) if crate::store_remote::is_unreachable(&error) || unseeded(&error) => Err(error),
+        Err(error) => {
+            repair(&remote, &mut connection, &changes, last)?;
+            Err(error)
+        }
+    }
+}
+
+/// Take the primary's rows back for every row a refused batch touched, and
+/// clear the batch from the outbox, in one local transaction. The primary
+/// reads run first, outside the transaction.
+fn repair(
+    remote: &Remote,
+    connection: &mut Connection,
+    changes: &[Change],
+    last: i64,
+) -> Result<(), String> {
+    let mut targets: Vec<(String, Vec<String>, Vec<String>, Vec<SqlValue>)> = Vec::new();
+    for change in changes {
+        let info = column_info(connection, &change.table)?;
+        let mut key: Vec<(usize, i64)> = change
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                info.iter()
+                    .find(|(name, pk)| name == c && *pk > 0)
+                    .map(|(_, pk)| (i, *pk))
+            })
+            .collect();
+        key.sort_by_key(|(_, pk)| *pk);
+        // A table with no declared key matches on every column.
+        let key: Vec<usize> = if key.is_empty() {
+            (0..change.columns.len()).collect()
+        } else {
+            key.into_iter().map(|(i, _)| i).collect()
+        };
+        let names: Vec<String> = key.iter().map(|&i| change.columns[i].clone()).collect();
+        for row in [&change.old, &change.new] {
+            if row.is_empty() {
+                continue;
+            }
+            let values: Vec<SqlValue> = key.iter().map(|&i| row[i].clone()).collect();
+            let target = (
+                change.table.clone(),
+                change.columns.clone(),
+                names.clone(),
+                values,
+            );
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    let mut fetched = Vec::new();
+    for (table, columns, names, values) in &targets {
+        let reply = remote.execute(
+            &format!(
+                "SELECT {} FROM \"{table}\" WHERE {}",
+                quoted(columns),
+                match_all(names, 1)
+            ),
+            values,
+        )?;
+        fetched.push(reply.rows);
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let mut nodes_moved = false;
+    for ((table, columns, names, values), rows) in targets.iter().zip(fetched) {
+        transaction
+            .execute(
+                &format!("DELETE FROM \"{table}\" WHERE {}", match_all(names, 1)),
+                rusqlite::params_from_iter(values),
+            )
+            .map_err(|e| format!("{table}: {e}"))?;
+        let insert = insert_sql(table, columns).replacen("INSERT", "INSERT OR REPLACE", 1);
+        for row in &rows {
+            transaction
+                .execute(&insert, rusqlite::params_from_iter(row))
+                .map_err(|e| format!("{table}: {e}"))?;
+        }
+        nodes_moved |= table == "nodes";
+    }
+    transaction
+        .execute("DELETE FROM backlog_outbox WHERE id <= ?1", [last])
+        .map_err(|e| e.to_string())?;
+    if nodes_moved {
+        rebuild_search(&transaction)?;
+    }
+    stamp_fresh(&transaction, "repair")?;
+    transaction.commit().map_err(|e| e.to_string())
+}
+
+/// After a write through `mutate_rows`, once the graph lock is gone: flush
+/// the outbox. `Ok` covers a primary that is unreachable or unseeded, since
+/// the write waits in the outbox for the next flush. A refusal syncs the
+/// replica and returns the refusal, so the caller retries on fresh rows.
+pub(crate) fn publish_after_write(graph: &Path) -> Result<(), String> {
+    match flush(graph) {
+        Ok(_) => Ok(()),
+        Err(error) if crate::store_remote::is_unreachable(&error) || unseeded(&error) => {
+            eprintln!("{error} The write is kept and sent on the next flush.");
+            Ok(())
+        }
+        Err(error) => {
+            if let Err(sync_error) = sync(graph) {
+                eprintln!("backlog-share: sync after a refusal: {sync_error}");
+            }
+            Err(error)
+        }
+    }
 }
 
 /// What one sync did.
@@ -513,20 +702,6 @@ pub struct Receipt {
     pub snapshot: bool,
     pub applied: usize,
     pub cursor: i64,
-}
-
-/// The replica's connection: no hooks, no triggers (the change log already
-/// carries every row a trigger made), no foreign-key actions.
-fn replica(graph: &Path) -> Result<Connection, String> {
-    drop(crate::backlog::open(graph)?);
-    let connection = crate::store_conn::open_write(&crate::backlog::database_path(graph))?;
-    connection
-        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
-        .map_err(|e| e.to_string())?;
-    connection
-        .execute_batch("PRAGMA foreign_keys=OFF;")
-        .map_err(|e| e.to_string())?;
-    Ok(connection)
 }
 
 /// Bring the replica up to the primary. A replica that never synced takes
@@ -543,7 +718,8 @@ pub fn sync(graph: &Path) -> Result<Receipt, String> {
     catch_up(&remote, &mut connection, cursor)
 }
 
-/// Apply the change log past `cursor`.
+/// Apply the change log past `cursor`, one page per local transaction. Each
+/// page is read from the primary before its transaction opens.
 fn catch_up(
     remote: &Remote,
     connection: &mut Connection,
@@ -562,33 +738,32 @@ fn catch_up(
         if page.rows.is_empty() {
             return Ok(receipt);
         }
+        let mut batches = Vec::new();
+        for row in &page.rows {
+            let seq = row[0].integer().ok_or("change row without a seq")?;
+            batches.push((seq, parse_ops(row[1].text().unwrap_or("[]"))?));
+        }
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
         let mut nodes_moved = false;
-        for row in &page.rows {
-            let seq = row[0].integer().ok_or("change row without a seq")?;
-            for change in parse_ops(row[1].text().unwrap_or("[]"))? {
-                match apply(&transaction, &change)? {
-                    Applied::Done => {
-                        receipt.applied += 1;
-                        nodes_moved |= change.table == "nodes";
-                    }
-                    Applied::Present => {}
+        for (seq, changes) in &batches {
+            for change in changes {
+                if apply(&transaction, change)? {
+                    receipt.applied += 1;
+                    nodes_moved |= change.table == "nodes";
                 }
             }
-            cursor = seq;
+            cursor = *seq;
         }
-        finish(&transaction, cursor, nodes_moved)?;
+        crate::backlog::stamp_meta(&transaction, CURSOR, &cursor.to_string())?;
+        if nodes_moved {
+            rebuild_search(&transaction)?;
+        }
+        stamp_fresh(&transaction, &cursor.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         receipt.cursor = cursor;
     }
-}
-
-enum Applied {
-    Done,
-    /// The replica already holds this change (its own write, or a replay).
-    Present,
 }
 
 fn row_exists(connection: &Connection, change: &Change, row: &[SqlValue]) -> Result<bool, String> {
@@ -607,7 +782,11 @@ fn row_exists(connection: &Connection, change: &Change, row: &[SqlValue]) -> Res
         .map_err(|e| format!("{}: {e}", change.table))
 }
 
-fn apply(connection: &Connection, change: &Change) -> Result<Applied, String> {
+/// Apply one logged change. The primary already decided it, and the log is
+/// in order, so the replica takes the new row whatever it held: the old row
+/// goes, and the new one replaces any row it collides with. `false` means
+/// the replica already held the change, so a replay is harmless.
+fn apply(connection: &Connection, change: &Change) -> Result<bool, String> {
     if !SHARED_TABLES.contains(&change.table.as_str()) {
         return Err(format!(
             "the change log names a local table {}",
@@ -621,8 +800,8 @@ fn apply(connection: &Connection, change: &Change) -> Result<Applied, String> {
             .map_err(|e| format!("{}: {e}", change.table))
     };
     match change.op {
-        Op::Insert | Op::Update if present(&change.new)? => return Ok(Applied::Present),
-        Op::Delete if !present(&change.old)? => return Ok(Applied::Present),
+        Op::Insert | Op::Update if present(&change.new)? => return Ok(false),
+        Op::Delete if !present(&change.old)? => return Ok(false),
         Op::Insert => {}
         Op::Update | Op::Delete => {
             let (sql, args) = conditional(&Change {
@@ -637,28 +816,62 @@ fn apply(connection: &Connection, change: &Change) -> Result<Applied, String> {
             insert_sql(&change.table, &change.columns).replacen("INSERT", "INSERT OR REPLACE", 1);
         run(&sql, &change.new)?;
     }
-    Ok(Applied::Done)
+    Ok(true)
 }
 
-/// Stamp the cursor and a fresh content version, so a locked mutate that
-/// read before this sync sees a conflict and re-reads. Rebuild the search
-/// index when nodes moved, since triggers were off.
-fn finish(connection: &Connection, cursor: i64, nodes_moved: bool) -> Result<(), String> {
-    crate::backlog::stamp_meta(connection, CURSOR, &cursor.to_string())?;
-    if nodes_moved {
-        connection
-            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])
-            .map_err(|e| e.to_string())?;
-    }
+/// Triggers were off, so the search index rebuilds from the nodes it mirrors.
+fn rebuild_search(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+/// A fresh content version, so a locked mutate that read before this write
+/// sees a conflict and re-reads.
+fn stamp_fresh(connection: &Connection, why: &str) -> Result<(), String> {
     crate::backlog::stamp_version(
         connection,
-        &format!("sqlite:sync-{cursor}-{}", crate::backlog::now_ms()),
+        &format!("sqlite:share-{why}-{}", crate::backlog::now_ms()),
     )
 }
 
-/// Replace every shared table with the primary's rows. The first snapshot
-/// keeps a backup copy of the replica beside it, because this machine's
-/// own backlog rows are replaced.
+/// Every shared table's rows on the primary, read page by page.
+fn primary_rows(
+    remote: &Remote,
+    columns: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<(String, Vec<Vec<SqlValue>>)>, String> {
+    let mut out = Vec::new();
+    for (table, columns) in columns {
+        let mut rows = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = remote.execute(
+                &format!(
+                    "SELECT rowid, {} FROM \"{table}\" WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+                    quoted(columns)
+                ),
+                &[SqlValue::Integer(after), SqlValue::Integer(PAGE)],
+            )?;
+            let full = page.rows.len() as i64 == PAGE;
+            for mut row in page.rows {
+                after = row[0].integer().unwrap_or(after);
+                row.remove(0);
+                rows.push(row);
+            }
+            if !full {
+                break;
+            }
+        }
+        out.push((table.clone(), rows));
+    }
+    Ok(out)
+}
+
+/// Replace every shared table with the primary's rows. All primary reads run
+/// before the local transaction opens. The first snapshot keeps a backup
+/// copy of the replica beside it, because this machine's own backlog rows
+/// are replaced.
 fn snapshot(remote: &Remote, graph: &Path, connection: &mut Connection) -> Result<Receipt, String> {
     let top = remote
         .execute("SELECT COALESCE(MAX(seq), 0) FROM backlog_changes", &[])?
@@ -666,6 +879,8 @@ fn snapshot(remote: &Remote, graph: &Path, connection: &mut Connection) -> Resul
         .first()
         .and_then(|r| r[0].integer())
         .unwrap_or(0);
+    let columns = shared_columns(connection)?;
+    let tables = primary_rows(remote, &columns)?;
     if crate::backlog::meta(connection, CURSOR)?.is_none() {
         let db = crate::backlog::database_path(graph);
         let backup = db.with_extension(format!("pre-share-{}.db", crate::backlog::now_ms()));
@@ -674,42 +889,25 @@ fn snapshot(remote: &Remote, graph: &Path, connection: &mut Connection) -> Resul
             .and_then(|b| b.run_to_completion(256, Duration::ZERO, None))
             .map_err(|e| format!("backup {}: {e}", backup.display()))?;
     }
-    let columns = shared_columns(connection)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let mut applied = 0;
-    for (table, columns) in &columns {
+    for (table, rows) in &tables {
         transaction
             .execute(&format!("DELETE FROM \"{table}\""), [])
             .map_err(|e| format!("{table}: {e}"))?;
-        let names = columns
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let insert = insert_sql(table, columns);
-        let mut after = 0;
-        loop {
-            let page = remote.execute(
-                &format!(
-                    "SELECT rowid, {names} FROM \"{table}\" WHERE rowid > ?1 ORDER BY rowid LIMIT ?2"
-                ),
-                &[SqlValue::Integer(after), SqlValue::Integer(PAGE)],
-            )?;
-            for row in &page.rows {
-                after = row[0].integer().unwrap_or(after);
-                transaction
-                    .execute(&insert, rusqlite::params_from_iter(&row[1..]))
-                    .map_err(|e| format!("{table}: {e}"))?;
-                applied += 1;
-            }
-            if (page.rows.len() as i64) < PAGE {
-                break;
-            }
+        let insert = insert_sql(table, &columns[table]);
+        for row in rows {
+            transaction
+                .execute(&insert, rusqlite::params_from_iter(row))
+                .map_err(|e| format!("{table}: {e}"))?;
+            applied += 1;
         }
     }
-    finish(&transaction, top, true)?;
+    crate::backlog::stamp_meta(&transaction, CURSOR, &top.to_string())?;
+    rebuild_search(&transaction)?;
+    stamp_fresh(&transaction, "snapshot")?;
     transaction.commit().map_err(|e| e.to_string())?;
     // Rows written after `top` replay as present or apply.
     let caught = catch_up(remote, connection, top)?;
@@ -751,8 +949,8 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
                 .query_map([table], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?
             {
-                let sql = sql.map_err(|e| e.to_string())?;
                 let sql = sql
+                    .map_err(|e| e.to_string())?
                     .replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
                     .replacen("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
                     .replacen(
@@ -771,14 +969,9 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
     let mut counts = serde_json::Map::new();
     for (table, columns) in &columns {
         let insert = insert_sql(table, columns);
-        let names = columns
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
         let mut steps = vec![(format!("DELETE FROM \"{table}\""), Vec::new())];
         let mut statement = connection
-            .prepare(&format!("SELECT {names} FROM \"{table}\""))
+            .prepare(&format!("SELECT {} FROM \"{table}\"", quoted(columns)))
             .map_err(|e| e.to_string())?;
         let mut rows = statement.query([]).map_err(|e| e.to_string())?;
         let mut count = 0;
@@ -802,7 +995,9 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
         }
         counts.insert(table.clone(), json!(count));
     }
-    remote.script("CREATE TABLE backlog_seed (at INTEGER NOT NULL); INSERT INTO backlog_seed (at) VALUES (0);")?;
+    remote.script(
+        "CREATE TABLE backlog_seed (at INTEGER NOT NULL); INSERT INTO backlog_seed (at) VALUES (0);",
+    )?;
     let top = remote
         .execute("SELECT COALESCE(MAX(seq), 0) FROM backlog_changes", &[])?
         .rows
@@ -810,6 +1005,10 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
         .and_then(|r| r[0].integer())
         .unwrap_or(0);
     crate::backlog::stamp_meta(&connection, CURSOR, &top.to_string())?;
+    // The seed carried every row the outbox held.
+    connection
+        .execute("DELETE FROM backlog_outbox", [])
+        .map_err(|e| e.to_string())?;
     Ok(json!({"primary": remote.url(), "rows": counts, "cursor": top}))
 }
 
@@ -818,12 +1017,13 @@ pub fn run(args: &[String]) -> i32 {
     let graph = crate::backlog::settings::graph_path();
     let outcome = match args.first().map(String::as_str) {
         Some("seed") => seed(&graph),
-        Some("sync") => {
-            sync(&graph).and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
-        }
+        Some("sync") => flush(&graph).and_then(|sent| {
+            let receipt = sync(&graph)?;
+            Ok(json!({"sent": sent, "sync": receipt}))
+        }),
         _ => {
             eprintln!(
-                "usage: fno agents claim backlog seed|sync\n  seed  copy this machine's backlog into an empty shared primary\n  sync  bring this machine's replica up to the primary"
+                "usage: fno agents claim backlog seed|sync\n  seed  copy this machine's backlog into an empty shared primary\n  sync  send this machine's outbox, then bring its replica up to the primary"
             );
             return 2;
         }
@@ -840,8 +1040,8 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-/// The resident syncer: one sync every [`INTERVAL`], one in flight, off
-/// the daemon's own loop.
+/// The resident syncer: one flush and one sync every [`INTERVAL`], one in
+/// flight, off the daemon's own loop.
 #[derive(Default)]
 pub struct Arm {
     last_tick: Mutex<Option<Instant>>,
@@ -869,7 +1069,11 @@ pub fn maybe_tick(arm: &Arm) {
     }
     let flag = Arc::clone(&arm.in_flight);
     std::thread::spawn(move || {
-        if let Err(error) = sync(&crate::backlog::settings::graph_path()) {
+        let graph = crate::backlog::settings::graph_path();
+        if let Err(error) = flush(&graph) {
+            eprintln!("backlog-share: flush: {error}");
+        }
+        if let Err(error) = sync(&graph) {
             eprintln!("backlog-share: sync: {error}");
         }
         flag.store(false, Ordering::SeqCst);
@@ -910,28 +1114,47 @@ mod tests {
             .unwrap()
     }
 
-    fn add_node(m: &Machine, id: &str, title: &str) -> Result<(), String> {
-        let mut connection = crate::backlog::open(&m.graph)?;
-        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    fn retitle(m: &Machine, id: &str, title: &str) {
+        crate::backlog::open(&m.graph)
+            .unwrap()
+            .execute(
+                "UPDATE nodes SET title = ?2 WHERE id = ?1",
+                params![id, title],
+            )
+            .unwrap();
+    }
+
+    fn outbox(m: &Machine) -> i64 {
+        crate::backlog::open(&m.graph)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM backlog_outbox", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn add_node(m: &Machine, id: &str, title: &str) {
+        let mut connection = crate::backlog::open(&m.graph).unwrap();
+        let transaction = connection.transaction().unwrap();
         transaction
             .execute(
                 "INSERT INTO nodes (id, ordinal, slug, title, status, priority)
                  VALUES (?1, 1, ?1, 'draft', 'idea', 'p2')",
                 params![id],
             )
-            .map_err(|e| e.to_string())?;
+            .unwrap();
         transaction
             .execute(
                 "UPDATE nodes SET title = ?2 WHERE id = ?1",
                 params![id, title],
             )
-            .map_err(|e| e.to_string())?;
-        transaction.commit().map_err(|e| e.to_string())
+            .unwrap();
+        transaction.commit().unwrap();
     }
 
     #[test]
     fn every_graph_table_is_shared_or_local() {
+        let primary = test_primary::start();
         let m = machine();
+        on(&primary, &m);
         let connection = crate::backlog::open(&m.graph).unwrap();
         let mut statement = connection
             .prepare(
@@ -944,6 +1167,7 @@ mod tests {
             .map(Result::unwrap)
             .filter(|t| !SHARED_TABLES.contains(&t.as_str()) && !LOCAL_TABLES.contains(&t.as_str()))
             .collect();
+        route_to_primary(None);
         assert!(
             unclassified.is_empty(),
             "classify these tables: {unclassified:?}"
@@ -951,30 +1175,32 @@ mod tests {
     }
 
     #[test]
-    fn a_write_lands_on_the_primary_and_a_peer_syncs_it() {
+    fn a_flushed_write_lands_on_the_primary_and_a_peer_syncs_it() {
         let primary = test_primary::start();
         let (a, b) = (machine(), machine());
         on(&primary, &a);
         seed(&a.graph).unwrap();
-        add_node(&a, "x-1", "shared").unwrap();
-        let on_primary: String = primary
+        add_node(&a, "x-1", "shared");
+        assert_eq!(
+            flush(&a.graph).unwrap(),
+            1,
+            "insert then update fold to one row"
+        );
+        assert_eq!(outbox(&a), 0);
+        let (on_primary, log): (String, i64) = primary
             .db
             .lock()
             .unwrap()
-            .query_row("SELECT title FROM nodes WHERE id = 'x-1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT (SELECT title FROM nodes WHERE id = 'x-1'), (SELECT COUNT(*) FROM backlog_changes)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(on_primary, "shared");
-        let log: i64 = primary
-            .db
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM backlog_changes", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(log, 1, "one write, one change-log row");
+        assert_eq!((on_primary.as_str(), log), ("shared", 1));
 
         on(&primary, &b);
-        let receipt = sync(&b.graph).unwrap();
-        assert!(receipt.snapshot);
+        assert!(sync(&b.graph).unwrap().snapshot);
         assert_eq!(title(&b, "x-1").as_deref(), Some("shared"));
         let found: i64 = crate::backlog::open(&b.graph)
             .unwrap()
@@ -994,45 +1220,39 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_or_unreachable_write_is_refused_and_rolled_back() {
+    fn a_stale_write_is_refused_and_an_unreachable_one_waits() {
         let primary = test_primary::start();
         let (a, b) = (machine(), machine());
         on(&primary, &a);
         seed(&a.graph).unwrap();
-        add_node(&a, "x-1", "first").unwrap();
+        add_node(&a, "x-1", "first");
+        flush(&a.graph).unwrap();
         on(&primary, &b);
         sync(&b.graph).unwrap();
         on(&primary, &a);
-        crate::backlog::open(&a.graph)
-            .unwrap()
-            .execute("UPDATE nodes SET title = 'from a' WHERE id = 'x-1'", [])
-            .unwrap();
+        retitle(&a, "x-1", "from a");
+        flush(&a.graph).unwrap();
 
         on(&primary, &b);
-        assert!(crate::backlog::open(&b.graph)
-            .unwrap()
-            .execute("UPDATE nodes SET title = 'from b' WHERE id = 'x-1'", [])
-            .is_err());
-        let reason = take_refusal().unwrap();
+        retitle(&b, "x-1", "from b");
+        let refusal = flush(&b.graph).unwrap_err();
         assert!(
-            reason.starts_with(REFUSED) && reason.contains("nodes row changed"),
-            "{reason}"
+            refusal.starts_with(REFUSED) && refusal.contains("nodes row changed"),
+            "{refusal}"
         );
-        assert_eq!(title(&b, "x-1").as_deref(), Some("first"));
-
-        sync(&b.graph).unwrap();
         assert_eq!(title(&b, "x-1").as_deref(), Some("from a"));
+        assert_eq!(outbox(&b), 0);
 
-        // A second seed refuses; an unreachable primary refuses the write.
+        // A second seed refuses; an unreachable primary keeps the outbox.
         on(&primary, &a);
         assert!(seed(&a.graph).unwrap_err().contains("already holds"));
         route_to_primary(Some((
             test_primary::dead(),
             crate::backlog::database_path(&a.graph),
         )));
-        assert!(add_node(&a, "x-2", "lost").is_err());
-        assert!(take_refusal().unwrap().contains("is unreachable"));
+        add_node(&a, "x-2", "waits");
+        assert!(flush(&a.graph).unwrap_err().contains("is unreachable"));
+        assert!(outbox(&a) > 0);
         route_to_primary(None);
-        assert_eq!(title(&a, "x-2"), None);
     }
 }
