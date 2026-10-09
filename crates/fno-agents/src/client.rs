@@ -658,17 +658,46 @@ async fn terminate_confirmed(
     }
 }
 
-/// True once nothing holds the supervisor singleton lock, bounded by
-/// [`FORCE_LOCK_TIMEOUT`].
-async fn await_lock_free(home: &AgentsHome) -> bool {
+/// Wait for the singleton to become startable again after a confirmed kill,
+/// WITHOUT demanding the lock sit free (bounded by `bound`, [`FORCE_LOCK_TIMEOUT`]
+/// in production). Whatever supervises the daemon can re-bind a fresh one the
+/// moment the old pid dies, and that new holder owns the lock; requiring a
+/// free lock turned that heal into a false FAILED (`ForceDidNotFree`) while a
+/// healthy daemon was already coming up on the new build. So wait on the NEW
+/// daemon instead: `Ok(Some(pid))` adopts a serving daemon whose pid differs
+/// from `old_pid`; `Ok(None)` means the lock freed (start fresh ourselves);
+/// `Err` means the whole bound was spent with the lock held and no new daemon
+/// answering - the real wedge the failure arm exists for.
+///
+/// Each probe is wrapped in a 2s hard bound so a bound holder that accepts but
+/// never answers (a wedged rebinding) costs one tick, not the 120s response
+/// deadline.
+async fn await_lock_free_or_rebound(
+    home: &AgentsHome,
+    old_pid: u32,
+    bound: Duration,
+) -> Result<Option<u32>, RestartError> {
     let start = Instant::now();
-    while start.elapsed() < FORCE_LOCK_TIMEOUT {
-        if daemon_lock_is_free(home) {
-            return true;
+    while start.elapsed() < bound {
+        let serving =
+            match tokio::time::timeout(Duration::from_secs(2), read_daemon_pid(home)).await {
+                Ok(Ok(pid)) => Some(pid),
+                Ok(Err(_)) | Err(_) => None,
+            };
+        if let Some(pid) = serving {
+            if pid != old_pid {
+                return Ok(Some(pid));
+            }
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        if daemon_lock_is_free(home) {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    daemon_lock_is_free(home)
+    Err(RestartError::ForceDidNotFree {
+        pid: old_pid,
+        secs: bound.as_secs(),
+    })
 }
 
 /// Read the lockfile's holder, tolerating the bind window: a daemon takes the
@@ -778,11 +807,20 @@ pub async fn restart_daemon(
                             return Err(RestartError::SigkillFailed { pid, reason })
                         }
                     }
-                    if !await_lock_free(home).await {
-                        return Err(RestartError::ForceDidNotFree {
-                            pid,
-                            secs: FORCE_LOCK_TIMEOUT.as_secs(),
-                        });
+                    match await_lock_free_or_rebound(home, pid, FORCE_LOCK_TIMEOUT).await {
+                        Ok(Some(new_pid)) => {
+                            return Ok(RestartOutcome {
+                                old_pid: Some(pid),
+                                new_pid,
+                                forced: true,
+                                note: Some(format!(
+                                    "SIGKILLed pid {pid}; a fresh daemon rebound the singleton \
+                                     before the lock cleared; adopted it"
+                                )),
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Err(e),
                     }
                     let new_pid = start_fresh(home, daemon_bin).await?;
                     return Ok(RestartOutcome {
@@ -892,15 +930,34 @@ pub async fn restart_daemon(
     if termination == Termination::Survived {
         return Err(RestartError::DidNotDie { pid: old_pid });
     }
-    // Both arms wait for the supervisor flock to dissolve before starting
-    // fresh, so start_fresh never binds while the old daemon still holds it.
-    if !await_lock_free(home).await {
-        return Err(RestartError::ForceDidNotFree {
-            pid: old_pid,
-            secs: FORCE_LOCK_TIMEOUT.as_secs(),
-        });
+    // Both arms wait for the singleton to become startable again before
+    // starting fresh, so start_fresh never binds while the old daemon still
+    // holds it - and a supervisor that re-binds a fresh daemon in that window
+    // is a SUCCESS to adopt, not a wedge to fail on (see the helper).
+    let escalated = termination == Termination::Escalated;
+    match await_lock_free_or_rebound(home, old_pid, FORCE_LOCK_TIMEOUT).await {
+        Ok(Some(new_pid)) => {
+            return Ok(RestartOutcome {
+                old_pid: Some(old_pid),
+                new_pid,
+                forced: escalated,
+                note: Some(if escalated {
+                    format!(
+                        "pid {old_pid} died after escalation to SIGKILL; a fresh daemon \
+                         rebound the singleton before the lock cleared; adopted it"
+                    )
+                } else {
+                    format!(
+                        "pid {old_pid} died; a fresh daemon rebound the singleton before \
+                         the lock cleared; adopted it"
+                    )
+                }),
+            });
+        }
+        Ok(None) => {}
+        Err(e) => return Err(e),
     }
-    if termination == Termination::Escalated {
+    if escalated {
         let new_pid = start_fresh(home, daemon_bin).await?;
         return Ok(RestartOutcome {
             old_pid: Some(old_pid),
@@ -1079,6 +1136,97 @@ mod response_timeout_tests {
         assert_eq!(response.result().unwrap()["removed"], true);
         server.await.unwrap();
         std::fs::remove_file(&sock_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod restart_rebound_tests {
+    use super::*;
+    use crate::protocol::{write_response, Response};
+    use tokio::net::UnixListener;
+
+    fn temp_home(tag: &str) -> (AgentsHome, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("fno-agents-rebound-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        (AgentsHome::at(root.clone()), root)
+    }
+
+    /// Hold the supervisor lock the way a booting daemon would, so
+    /// `daemon_lock_is_free` reads false for the helper's whole bound.
+    fn hold_lock(home: &AgentsHome) -> std::fs::File {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(home.supervisor_lock())
+            .unwrap();
+        file.try_lock().expect("exclusive hold");
+        file
+    }
+
+    /// Serve `agent.status` naming `pid` for the helper's probes; accepts up
+    /// to 8 connects (one per 100ms tick of a 2s bound, plus slop).
+    async fn serve_status(sock: PathBuf, pid: u64) -> tokio::task::JoinHandle<()> {
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let resp = Response::ok(1, json!({"daemon": {"pid": pid}}));
+                let _ = write_response(&mut stream, &resp).await;
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn rebound_daemon_is_adopted_not_failed() {
+        let (home, root) = temp_home("adopt");
+        let _lock = hold_lock(&home);
+        let old_pid: u32 = 424242;
+        let new_pid: u32 = 424243;
+        let server = serve_status(home.supervisor_sock(), u64::from(new_pid)).await;
+        let out = super::await_lock_free_or_rebound(&home, old_pid, Duration::from_secs(2)).await;
+        server.abort();
+        match out {
+            Ok(Some(pid)) => assert_eq!(pid, new_pid, "the rebound daemon is adopted"),
+            other => panic!("expected adoption of pid {new_pid}, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn held_lock_with_no_new_daemon_is_the_failure_arm() {
+        let (home, root) = temp_home("wedge");
+        let _lock = hold_lock(&home);
+        let out =
+            super::await_lock_free_or_rebound(&home, 424242, Duration::from_millis(400)).await;
+        match out {
+            Err(RestartError::ForceDidNotFree { pid, secs }) => {
+                assert_eq!(pid, 424242);
+                assert_eq!(secs, 0, "the bound names itself in the error");
+            }
+            other => panic!("expected ForceDidNotFree, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn freed_lock_starts_fresh_without_a_probe_penalty() {
+        let (home, root) = temp_home("free");
+        let started = std::time::Instant::now();
+        let out = super::await_lock_free_or_rebound(&home, 424242, Duration::from_secs(2)).await;
+        assert!(
+            matches!(out, Ok(None)),
+            "a free lock is the start-fresh arm, got {out:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the free arm returns on its first tick"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 
