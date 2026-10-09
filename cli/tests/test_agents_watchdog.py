@@ -3783,7 +3783,7 @@ def test_ac9_manual_and_tick_stamps_agree_for_one_snapshot(tmp_path, monkeypatch
     (source, tick epoch) differs."""
     import fno.paths as paths_mod
 
-    sweep_file = tmp_path / "watchdog-sweep.json"
+    sweep_file = tmp_path / "state" / "watchdog-sweep.json"
     monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -3841,7 +3841,7 @@ def test_report_write_preserves_the_verdict_lanes_stamps(tmp_path, monkeypatch):
     --apply run re-mails an unchanged verdict digest."""
     import fno.paths as paths_mod
 
-    sweep_file = tmp_path / "watchdog-sweep.json"
+    sweep_file = tmp_path / "state" / "watchdog-sweep.json"
     monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
     monkeypatch.setattr(
