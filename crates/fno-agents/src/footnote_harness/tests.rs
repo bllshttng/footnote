@@ -53,7 +53,7 @@ fn the_launcher_refuses_a_login_endpoint_and_a_missing_binary() {
         &home,
         "fx-missing",
         "hi",
-        "",
+        "tester",
         tmp.path(),
         Some("glm-test"),
         None,

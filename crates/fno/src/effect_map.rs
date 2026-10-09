@@ -90,16 +90,6 @@ pub fn canonical_digest(value: &Value) -> String {
     format!("{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
-/// Python `datetime.isoformat()` on an aware UTC datetime: no fraction when
-/// the microsecond is zero, `+00:00` suffix either way.
-pub(crate) fn isoformat(t: chrono::DateTime<chrono::Utc>) -> String {
-    if t.timestamp_subsec_micros() == 0 {
-        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        t.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
-}
-
 // -- Tool call to effect class ----------------------------------------------
 
 /// One tool call mapped to the effect class it would exercise.

@@ -14,10 +14,19 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::effect_map::isoformat;
 pub use crate::effect_map::{
     canonical_digest, classify, map_bash_command, map_tool_call, Disposition, MappedEffect,
 };
+
+/// Python `datetime.isoformat()` on an aware UTC datetime: no fraction when
+/// the microsecond is zero, `+00:00` suffix either way.
+pub(crate) fn isoformat(t: chrono::DateTime<chrono::Utc>) -> String {
+    if t.timestamp_subsec_micros() == 0 {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+    } else {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+    }
+}
 
 // -- Submit (port of EffectStore.submit) ------------------------------------
 
