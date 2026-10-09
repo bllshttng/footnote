@@ -444,3 +444,45 @@ pub(super) async fn run_action(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn settings_tab_cycle_reaches_every_header_section_and_keys_returns() {
+        // The tab strip lists general, theme, keybindings, colors; tab walks all
+        // four and closes the cycle. The keybindings section is a launcher:
+        // landing on it opens the which-key table, whose dismiss returns to the
+        // settings modal on the section the user came from.
+        let cycle: Vec<SettingsTab> = (0..4)
+            .scan(SettingsTab::General, |tab, _| {
+                let next = tab.next();
+                *tab = next;
+                Some(next)
+            })
+            .collect();
+        assert_eq!(
+            cycle,
+            vec![
+                SettingsTab::Theme,
+                SettingsTab::Keys,
+                SettingsTab::Colors,
+                SettingsTab::General
+            ],
+            "tab reaches keybindings between theme and colors"
+        );
+        let mut v = super::super::tests::two_pane_view();
+        switch_tab(&mut v, SettingsTab::Keys);
+        assert!(v.keys_modal.is_some(), "the launcher opens the table");
+        assert!(v.aux.is_none(), "the settings modal is parked while away");
+        dismiss_keys_modal(&mut v);
+        assert!(v.keys_modal.is_none(), "the table closed");
+        assert!(v.aux.is_some(), "the settings modal is back");
+        assert_eq!(
+            v.settings_tab,
+            SettingsTab::General,
+            "the section the user came from is in front"
+        );
+    }
+}
