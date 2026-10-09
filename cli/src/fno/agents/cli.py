@@ -502,10 +502,8 @@ def _spawn_guard_decision(
                 return {
                     "verdict": "unknown",
                     "reason": block,
-                    "detail": (
-                        f"could not check whether node:{node_id} is running: "
-                        f"{observation.worked_error or block}; retry"
-                    ),
+                    "detail": f"could not check node:{node_id} is running: "
+                              f"{observation.worked_error or block}; retry",
                     **common,
                 }, 0
             reason = (

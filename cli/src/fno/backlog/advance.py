@@ -2580,8 +2580,11 @@ def _observe_node_claim(
     if workers:
         occupied = True
         worker = ", ".join(workers)
-    # Occupancy outranks the outage (task 2.2); only an unproven node reads it.
+    # Occupancy outranks the outage; the ternary keeps block_reason bound.
+    block_reason = "worked-authority-unavailable" if worked_error and not occupied else None
     if occupied:
+        # task 2.2: `blocked`/`already-claimed` starved auto_continue
+        # for 97 minutes; name what was consulted and what it found.
         parts = [
             p for p in (
                 f"claim {claim_state} held by {holder}" if claim_state in ("live", "suspect") else "",
@@ -2589,8 +2592,6 @@ def _observe_node_claim(
             ) if p
         ]
         block_reason = "held: " + "; ".join(parts) if parts else None
-    elif worked_error:
-        block_reason = "worked-authority-unavailable"
     dead_action = (
         None
         if occupied or not enforce_failure_limit

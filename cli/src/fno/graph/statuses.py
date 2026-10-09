@@ -345,9 +345,7 @@ def live_worked_node_ids(
         if reading is None:
             reading = read_roster(require_live_probe=False)
         if not reading.consulted:
-            raise RuntimeError(
-                f"read_roster: {reading.reason or 'roster not consulted'}"
-            )
+            raise RuntimeError(f"read_roster: {reading.reason or 'roster not consulted'}")
         return _worked_nodes_reply(_live_rows(reading))
     except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
         if strict:
