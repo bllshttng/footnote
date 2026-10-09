@@ -508,6 +508,17 @@ fn claude_config_tmp_lane(apply: bool) -> Lane {
     lane
 }
 
+/// The stale-spaces lane: space dirs (and `worktrees/<name>` slices of live
+/// spaces) whose source dir no longer exists, quiet past the grace window.
+/// [`crate::stale_spaces::sweep`] judges; a failed read never judges dead.
+fn stale_spaces_lane(apply: bool) -> Lane {
+    let rep = crate::stale_spaces::sweep(apply, SystemTime::now());
+    let mut lane = Lane::new("stale_spaces", rep.reaped);
+    lane.bytes = rep.bytes;
+    lane.note = rep.note;
+    lane
+}
+
 /// The operator's retention days for the stamp dirs, `None` when unset: env
 /// override first, then the global `reclaim.backups_retention_days`. Both
 /// read zero as disabled, because a zero-day retention that deleted on the
@@ -880,6 +891,7 @@ fn run_reclaim_lanes(
     drop(codex_lock);
     lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     lanes.push(claude_config_tmp_lane(apply));
+    lanes.push(stale_spaces_lane(apply));
     lanes.push(backups_retention_lane(home, apply));
     lanes.push(state_layout_lane(home, apply));
     lanes.push(state_root_drift_lane(home));
