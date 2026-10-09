@@ -149,7 +149,7 @@ fi
 
 A prior head that is not an ancestor of HEAD (rebase, squash, force-push) reads as `first-round`: full scope. An empty increment resets to full scope the same way, so a zero-file round can never pass vacuously. The single changed-files producer is this block; no other diff read in the pass names its own base.
 
-On an incremental round, read the prior round's findings from the SAME journal row: the bounded `findings` primitives it carries (category, verdict, finding_key, summary) are the prior report body. A prior row without findings primitives is unreadable evidence, not an empty prior report: re-run this round at full scope before any verdict, and emit no attestation from the incomplete round - a live blocking finding can sit in an unread prior round.
+On an incremental round, read the prior round's findings from the SAME journal row. The bounded `findings` primitives it carries (category, verdict, finding_key, summary, autofix_class) are the prior report body. A prior row without findings primitives is unreadable evidence, not an empty prior report. Re-run this round at full scope before any verdict, and emit no attestation from the incomplete round. A live blocking finding can sit in an unread prior round.
 
 For each critical or high finding in a readable prior round, re-validate its cited quote at the CURRENT head, the same cite-or-drop check as above:
 
@@ -189,12 +189,16 @@ The findings payload is a fenced JSON array, at most the level's cap, ranked mos
     "short_summary": "the claim alone at 60 characters or less",
     "failure_scenario": "concrete inputs/state -> wrong output/crash",
     "category": "correctness",
-    "verdict": "CONFIRMED"
+    "verdict": "CONFIRMED",
+    "autofix_class": "gated_auto",
+    "owner": "author"
   }
 ]
 ```
 
 `short_summary` is the claim alone, no rationale or consequence clause. `category` is a short kebab-case slug for the angle that produced it (`correctness`, `simplification`, `efficiency`, `reuse`, `altitude`, `conventions`, or a more specific slug like `test-coverage`). `verdict` is CONFIRMED or PLAUSIBLE; a REFUTED candidate never enters the array. A carried finding enters the array with the verdict its re-validation produced.
+
+`autofix_class` is `gated_auto`, `manual`, or `advisory`. `gated_auto` names a fix a machine can apply: mechanical, scoped to the reviewed diff, provable by a test. `manual` names a fix the author applies. `advisory` records judgment with no fix intended. When two candidates dedup to one, the survivor carries the more conservative class (advisory over manual over gated_auto). A disagreement about fixability resolves against the machine. An absent class reads as absent: nothing is auto-applied on a guess. `owner` names who acts (`author` or `reviewer`), and `--fix` prints it. The class rides the attestation ledger beside the finding, so the next round reads what can be applied without re-deriving it.
 
 Write the array to a temp file, classify it, and attest in the same command. The verb writes the `review_attestation` row with the verdict it measured from the classified findings (pass only on zero blocking), so the lane never counts its own findings and no separate pass step exists:
 
@@ -202,10 +206,10 @@ Write the array to a temp file, classify it, and attest in the same command. The
 fno do review classify --findings-file "$FINDINGS" --emit-record --attest code-review
 ```
 
-When earlier rounds on this branch raised blocking findings, the payload carries them and their dispositions: `{"findings": [...], "dispositions": [{"finding_key", "disposition", "reason"}]}`. Dispose each blocking finding as `fixed`, or as `declined` with a reason. A pass that leaves one out is refused at emit. Never drop a finding from the array to reach a pass. A round that declines its own finding stays a fail, and under the two-round law a fail row counts once the cap is reached. `nonblocking` never clears a finding the gate reads as blocking.
+When earlier rounds on this branch raised blocking findings, the payload carries them and their dispositions: `{"findings": [...], "dispositions": [{"finding_key", "disposition", "reason"}]}`. Dispose each blocking finding as `fixed`, or as `declined` with a cited reason. A declined reason quotes the proving line at the current head as a double-quoted span, which the emit gate enforces. It also names the failure scenario that does not hold. The row records it as disposed-by-decline, and it counts against the round cap the same as a fix. A pass that leaves one out is refused at emit. Never drop a finding from the array to reach a pass. A round that declines its own finding stays a fail, and under the two-round law a fail row counts once the cap is reached. `nonblocking` never clears a finding the gate reads as blocking.
 
 ## Flags
 
 `--comment`: on a GitHub PR target, post each finding as an inline PR comment, one call per finding (`gh api repos/{owner}/{repo}/pulls/<n>/comments`). Add a suggestion block only for a fix that resolves the finding whole. On any other target the findings are HELD, not dropped. The `review_attestation` row the attest step writes already carries the branch and HEAD. When the branch's PR opens, the create flow's `fno do pr publish-review` step posts the held findings as one PR comment. The post is idempotent by marker. A reviewed head behind the PR head posts with both shas named. Print `held for PR: branch <b> head <sha>, N findings`. If HEAD later moves, review the new head as owed.
 
-`--fix`: apply the findings to the working tree after the report: fix each one directly - correctness bugs and reuse/simplification/efficiency cleanups alike. Skip any finding whose fix would change intended behavior, require changes well outside the reviewed diff, or that you judge to be a false positive - note the skip rather than arguing with it. Then emit on the NEW head after the fix commit: a pass on a superseded commit is discarded, so the attestation must name the head the fixes landed on. Verify the fix delta first.
+`--fix`: apply the findings to the working tree after the report, gated by class. Apply `gated_auto` findings only. The lane is one context, so the finder and the verifier are a single witness. A single-witness blocking finding is auto-applied only with class `gated_auto` and a passing test. Print every `manual` and `advisory` finding as a row with its `owner` and a one-line reason it was not applied, for the author to decide. A skip you judge a false positive is noted the same way, never argued with. Then emit on the NEW head after the fix commit. A pass on a superseded commit is discarded, so the attestation must name the head the fixes landed on. Verify the fix delta first.

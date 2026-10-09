@@ -273,7 +273,7 @@ Do not change reap to agree with `top`. Reap holds the correct guards, and a cha
 
 **Specimen.** `top` printed `retirable: <id> holds a zai lane; <node> is done, merged` for two rows. `reap --dry-run` retired zero and placed the same two in `kept_promoted` and `kept_active`, with `age_s: 56`, because that session had just sent mail.
 
-*Graduates to:* the retirable label reading the same guards as reap, or a weaker name that does not promise a reap.
+*Graduated:* `top` no longer prints a retirable label. `fno agents reap --dry-run` is the one reader of that verdict.
 
 ## The operator-turn queue lists turns the operator never typed
 

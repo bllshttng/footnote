@@ -383,6 +383,7 @@ crates/fno-agents/src/backlog/session_cli.rs
 crates/fno-agents/src/backlog/update_cli.rs
 crates/fno-agents/src/blueprint_judge.rs
 crates/fno-agents/src/delivery_completion.rs
+crates/fno-agents/src/hook/diff_budget.rs
 crates/fno-agents/src/kill_criteria.rs
 crates/fno-agents/src/merge_hold.rs
 crates/fno-agents/src/surface_check.rs"
@@ -405,6 +406,9 @@ crates/fno-agents/src/surface_check.rs"
 # surface_check.rs reads only the surface: block (shape + the cross-language
 # walk); it never extracts a plan status, so the shelling rule does not
 # apply to it.
+# hook/diff_budget.rs reads only the plan frontmatter `diff_budget` scalar
+# (the commit-time budget line); it never extracts a plan status, so the
+# shelling rule does not apply to it.
 # The plan-doc writer writes the status line the graph decides (stamp,
 # graduate, projection). It reads status only to keep its writes forward-only,
 # so it is exempt from both scans; readiness stays with `fno do plan rung`.

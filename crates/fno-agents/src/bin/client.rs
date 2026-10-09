@@ -1046,11 +1046,6 @@ async fn run(args: Vec<String>) -> i32 {
     if matches!(verb, "worker-wake") {
         return fno_agents::worker_wake::run_dry_run(&args[1..], &AgentsHome::from_env());
     }
-    // sessions-map: the daemon-free session-to-node join the top view reads
-    // (graph sessions rows + node claims, claim precedence). Starts nothing.
-    if verb == "sessions-map" {
-        return fno_agents::session_join::run_sessions_map(&AgentsHome::from_env());
-    }
     // revival-check: whether a spawn --resume revives an existing row instead
     // of forking. Starts nothing.
     if verb == "revival-check" {
