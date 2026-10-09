@@ -589,20 +589,32 @@ mod tests {
             .filter(|_| home.otel_dir().join("port").exists())
             .unwrap_or(0);
         let task = tokio::spawn(async move { run_on_port(h, sd, port).await });
-        for _ in 0..100 {
-            if let Ok(port) = std::fs::read_to_string(home.otel_dir().join("port")) {
-                if let Ok(port) = port.trim().parse() {
-                    if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                        .await
-                        .is_ok()
-                    {
-                        return (port, task);
+        // Binding and publishing run on the receiver task, and under CI load
+        // that can take seconds. Poll the ready signal (published port
+        // answers TCP) against a deadline, and fail fast when the receiver
+        // dies first.
+        let wait = async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(home.otel_dir().join("port")) {
+                    if let Ok(port) = text.trim().parse() {
+                        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                            .await
+                            .is_ok()
+                        {
+                            return port;
+                        }
                     }
                 }
+                if task.is_finished() {
+                    panic!("receiver exited before publishing a port");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("receiver never published a port");
+        };
+        let port = tokio::time::timeout(Duration::from_secs(30), wait)
+            .await
+            .expect("receiver never published a port within 30s");
+        (port, task)
     }
 
     fn stored(home: &AgentsHome) -> Vec<(String, Option<i64>, Option<String>)> {
