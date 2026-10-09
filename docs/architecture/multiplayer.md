@@ -34,9 +34,10 @@ If the primary cannot be reached, backlog writes still land in the replica and w
 
 ## Start sharing
 
-1. Copy `graph.db` first. The first sync on a machine replaces that machine's backlog with the primary's. It also writes a `graph.pre-share-<ms>.db` backup beside the store.
-2. On one machine, set both keys and run `fno agents claim backlog seed`. It copies this backlog to the primary. It refuses a primary that already holds one.
-3. On every other machine, set both keys and run `fno agents claim backlog sync`.
+1. Run `fno doctor update` on every machine and restart its daemon. An older `fno-agents`, `fno-agents-daemon` or `fno-agents-worker` writes with no outbox. The primary never sees that write, and the next refused flush takes the primary's row back over it.
+2. Copy `graph.db`. The first sync on a machine replaces that machine's backlog with the primary's. It also writes a `graph.pre-share-<ms>.db` backup beside the store.
+3. On one machine, set both keys and run `fno agents claim backlog seed`. It copies this backlog to the primary. It refuses a primary that already holds one.
+4. On every other machine, set both keys and run `fno agents claim backlog sync`.
 
 If the primary holds no seeded backlog, a flush refuses and names the seed verb. The writes wait in the outbox.
 

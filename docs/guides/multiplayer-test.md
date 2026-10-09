@@ -59,8 +59,12 @@ Keep B offline past 10 minutes, then take one of B's nodes on A. Bring B back. E
 Run this step only on the per-machine temp homes from step 2, never on `~/.fno`. Copy the real store into home A so the test has real rows:
 
 ```bash
-cp ~/.fno/db/graph.db "$HOME_A/.fno/db/graph.db"
+sqlite3 -readonly ~/.fno/db/graph.db ".backup '$HOME_A/.fno/db/graph.db'"
 ```
+
+A plain `cp` of a live store can copy a half-written WAL. The backup reads one consistent snapshot.
+
+Every binary that writes must carry the outbox. To rehearse a branch build, export `FNO_AGENTS_BIN` and `FNO_AGENTS_WORKER` with that build's paths in both homes. An installed older worker writes with no outbox, and the next refused flush takes the primary's row back over that write.
 
 Add `share_backlog = true` under `[store]` in both homes' config. Then, with home A's environment:
 
