@@ -56,6 +56,10 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/backlog/mod.rs",
     "crates/fno-agents/src/backlog/note_history.rs",
     "crates/fno-agents/src/backlog/note_migrate.rs",
+    # The pr-watch installer's plist template: its doc comment names the
+    # store the launchd tick polls, and the rendered bytes are golden-frozen;
+    # the installer itself never opens the store, never a read.
+    "crates/fno-agents/src/pr_watch/install.rs",
     "crates/fno-agents/src/backlog/settings.rs",  # the porcelain reads' store-path builder (FNO_CONFIG state_dir, then the .fno anchor), never a read
     # The identity projection's store-path builder (the registry write
     # projects each row's identity through backlog::open), never a read.

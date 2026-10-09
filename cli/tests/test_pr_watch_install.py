@@ -105,108 +105,6 @@ def test_ac3hp_render_plist_contains_required_keys(tmp_home, plist_kwargs):
     assert "<string>Background</string>" not in rendered
 
 
-def test_ac3hp_install_prints_plist_before_writing(
-    tmp_home, tmp_launch_agents, capsys, monkeypatch
-):
-    """install() prints the full plist text before writing (confirmed path)."""
-    m = _install()
-
-    # Simulate user confirmation
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=False,
-        activate=False,
-    )
-
-    captured = capsys.readouterr()
-    # Plist content must appear in stdout
-    assert "sh.fno.pr-watcher" in captured.out
-    assert "<false/>" in captured.out  # RunAtLoad=false
-
-
-def test_ac3hp_install_writes_file_on_confirm(
-    tmp_home, tmp_launch_agents, monkeypatch
-):
-    """install() writes the plist file when user confirms."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=False,
-        activate=False,
-    )
-
-    plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
-    assert plist_path.exists(), "plist file should be written after confirm"
-    content = plist_path.read_text()
-    assert "sh.fno.pr-watcher" in content
-
-
-def test_ac3hp_dry_run_prints_plist_writes_nothing(
-    tmp_home, tmp_launch_agents, capsys
-):
-    """--dry-run prints the plist and writes nothing."""
-    m = _install()
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=True,
-    )
-
-    captured = capsys.readouterr()
-    assert "sh.fno.pr-watcher" in captured.out
-
-    plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
-    assert not plist_path.exists(), "dry-run must not write the plist file"
-
-
-# ---------------------------------------------------------------------------
-# AC3-ERR: confirm=no -> no file, non-zero exit, message "not installed"
-# ---------------------------------------------------------------------------
-
-
-def test_ac3err_decline_writes_nothing(tmp_home, tmp_launch_agents, monkeypatch):
-    """Declining the confirm prompt writes no file and exits with SystemExit."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: False)
-
-    with pytest.raises(SystemExit) as exc_info:
-        m.install(
-            launch_agents_dir=tmp_launch_agents,
-            fno_binary="/usr/local/bin/fno",
-            dry_run=False,
-        )
-
-    assert exc_info.value.code != 0
-
-    plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
-    assert not plist_path.exists(), "declined install must not write the plist"
-
-
-def test_ac3err_decline_message_contains_not_installed(
-    tmp_home, tmp_launch_agents, capsys, monkeypatch
-):
-    """Declining shows a message containing 'not installed'."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: False)
-
-    with pytest.raises(SystemExit):
-        m.install(
-            launch_agents_dir=tmp_launch_agents,
-            fno_binary="/usr/local/bin/fno",
-            dry_run=False,
-        )
-
-    captured = capsys.readouterr()
-    assert "not installed" in (captured.out + captured.err).lower()
-
-
 # ---------------------------------------------------------------------------
 # AC3-EDGE: plist security and correctness checks
 # ---------------------------------------------------------------------------
@@ -527,122 +425,6 @@ def test_config_pr_watch_null_degrades_to_defaults():
     assert cb.pr_watch.enabled is False
 
 
-# ---------------------------------------------------------------------------
-# x-e106 AC1-HP: install activates (launchctl load) unless --no-activate
-# ---------------------------------------------------------------------------
-
-
-def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monkeypatch):
-    """install(activate=True) bounces the agent and reports activation."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-    calls: list[tuple] = []
-    monkeypatch.setattr(
-        m, "_run_launchctl_timed", lambda *a, **kw: (calls.append(a) or 0, False)
-    )
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=False,
-        activate=True,
-    )
-
-    verbs = [a[0] for a in calls]
-    assert verbs == ["bootout", "bootstrap", "kickstart"], f"got {verbs}"
-    assert "Activated" in capsys.readouterr().out
-
-
-def test_install_no_activate_skips_load(tmp_home, tmp_launch_agents, capsys, monkeypatch):
-    """install(activate=False) writes the plist but does NOT launchctl load."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-    calls: list[tuple] = []
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: calls.append(a) or 0)
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=False,
-        activate=False,
-    )
-
-    assert not any(a and a[0] == "load" for a in calls), "--no-activate must skip load"
-    out = capsys.readouterr().out
-    assert "To activate" in out
-
-
-def test_install_reload_bounces_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
-    """A re-install boots the (possibly wedged) agent out before re-bootstrapping."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-    calls: list[tuple] = []
-    monkeypatch.setattr(
-        m, "_run_launchctl_timed", lambda *a, **kw: (calls.append(a) or 0, False)
-    )
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=False,
-        activate=True,
-    )
-
-    verbs = [a[0] for a in calls]
-    assert verbs == ["bootout", "bootstrap", "kickstart"], f"got {verbs}"
-
-
-def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, monkeypatch):
-    """Re-enable of an existing plist re-renders it (config drift + fresh mtime)."""
-    import os
-    import time as _time
-
-    m = _install()
-    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
-    plist.write_text("<plist/>")  # stale stub content
-    old = _time.time() - 10_000
-    os.utime(plist, (old, old))
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 0)
-
-    m.ensure_activated(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-    )
-
-    content = plist.read_text()
-    assert "sh.fno.pr-watcher" in content, "existing plist should be re-rendered, not left stale"
-    assert plist.stat().st_mtime > old + 100, "re-render refreshes the plist mtime"
-
-
-def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys, monkeypatch):
-    """A failing bounce prints a loud WARNING but still writes the plist (AC1-ERR)."""
-    m = _install()
-    monkeypatch.setattr("typer.confirm", lambda *a, **kw: True)
-
-    # bootout ok, bootstrap fails (rc=1) -> bounce reports failure, plist stays.
-    def _fail_bootstrap(*a, **kw):
-        return (0 if a[0] == "bootout" else 1, False)
-
-    monkeypatch.setattr(m, "_run_launchctl_timed", _fail_bootstrap)
-
-    m.install(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-        dry_run=False,
-        activate=True,
-    )
-
-    out = capsys.readouterr().out
-    assert "WARNING" in out and "activation failed" in out
-    assert (tmp_launch_agents / "sh.fno.pr-watcher.plist").exists()
-
-
-# ---------------------------------------------------------------------------
-# x-8c3b: bounce (bootout -> bootstrap -> kickstart) cures a wedged launchd job
-# ---------------------------------------------------------------------------
-
-
 def _record_runner(calls, *, rc_by_verb=None, timeout_verb=None):
     """A _run_launchctl_timed stub that records calls and can inject rc/timeout."""
     rc_by_verb = rc_by_verb or {}
@@ -659,6 +441,7 @@ def _record_runner(calls, *, rc_by_verb=None, timeout_verb=None):
 
 def test_bounce_order_is_bootout_bootstrap_kickstart(tmp_launch_agents):
     m = _install()
+    calls: list[tuple] = []
     calls: list[tuple] = []
     msg, rc = m.bounce(
         plist_path=tmp_launch_agents / "x.plist", uid=501,
@@ -952,49 +735,8 @@ def test_heal_watcher_bounces_when_plist_present(tmp_launch_agents):
 
 
 # ---------------------------------------------------------------------------
-# x-e106: ensure_activated + unload_only (config-set coupling primitives)
+# x-e106: unload_only (the config-set disable coupling primitive)
 # ---------------------------------------------------------------------------
-
-
-def test_ensure_activated_noop_when_loaded(tmp_home, tmp_launch_agents, monkeypatch):
-    """ensure_activated is a no-op when the agent is already loaded."""
-    m = _install()
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: pytest.fail("must not load"))
-
-    assert m.ensure_activated(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-    ) == "already-running"
-
-
-def test_ensure_activated_installs_and_loads(tmp_home, tmp_launch_agents, monkeypatch):
-    """ensure_activated writes the plist and loads it when absent."""
-    m = _install()
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
-    loaded: list[tuple] = []
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: loaded.append(a) or 0)
-
-    outcome = m.ensure_activated(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-    )
-
-    assert outcome == "activated"
-    assert (tmp_launch_agents / "sh.fno.pr-watcher.plist").exists()
-    assert loaded and loaded[0][0] == "load"
-
-
-def test_ensure_activated_reports_load_failure(tmp_home, tmp_launch_agents, monkeypatch):
-    """A launchctl failure returns 'load-failed' (never raises); AC1-ERR upstream."""
-    m = _install()
-    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
-    monkeypatch.setattr(m, "_run_launchctl", lambda *a: 1)
-
-    assert m.ensure_activated(
-        launch_agents_dir=tmp_launch_agents,
-        fno_binary="/usr/local/bin/fno",
-    ) == "load-failed"
 
 
 def test_unload_only_missing_plist_is_noop(tmp_home, tmp_launch_agents):
