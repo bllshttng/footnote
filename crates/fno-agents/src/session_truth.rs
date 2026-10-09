@@ -27,7 +27,7 @@ use std::sync::OnceLock;
 use serde_json::json;
 use serde_json::Value;
 
-use crate::claude_transcript_paths::{choose_from, store_listing};
+use crate::claude_transcript_paths::choose_from;
 use crate::state::RegistryEntry;
 use cursor::TruthCursors;
 
@@ -187,6 +187,23 @@ pub(crate) struct TailSummary {
 impl TailSummary {
     pub(crate) fn has_record(&self) -> bool {
         self.records > 0
+    }
+
+    /// True once a non-peer turn sits inside the 40-turn window.
+    pub(crate) fn has_actor(&self) -> bool {
+        self.actor.is_some() && self.since_actor < TAIL_N
+    }
+
+    /// The summary a rebuild starting at a compact boundary would hold: no
+    /// turns, the provenance (model, title) kept as its backfill finds it.
+    pub(crate) fn after_boundary(&self) -> Self {
+        Self {
+            model: self.model.clone(),
+            model_samples: self.model_samples,
+            model_unscanned: self.model_unscanned,
+            title: self.title.clone(),
+            ..Self::default()
+        }
     }
 
     #[cfg(test)]
@@ -446,12 +463,16 @@ fn parse_codex_record(v: &Value) -> Option<TruthRecord> {
 // The opencode arm: the shared SQLite store, read-only
 // ---------------------------------------------------------------------------
 
-/// The opencode store path the age probe resolves against, mirroring
-/// `default_opencode_db_path` (`<xdg data home>/opencode/opencode.db`); the
-/// truth module does NOT pass a per-call override there, so the age leg of a
-/// fixture session (absent from the real store) reads age-unknown by
-/// construction.
+/// The opencode store path the age probe resolves against: `OPENCODE_DB`
+/// when set, else `default_opencode_db_path` (`<xdg data home>/opencode/
+/// opencode.db`). The records leg reads the same env, so records and age
+/// never come from two stores. The truth module does NOT pass a per-call
+/// override here, so the age leg of a fixture session (absent from the real
+/// store) reads age-unknown by construction.
 fn ambient_opencode_db() -> PathBuf {
+    if let Some(db) = std::env::var_os("OPENCODE_DB").filter(|v| !v.is_empty()) {
+        return PathBuf::from(db);
+    }
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -710,6 +731,11 @@ fn resolve_handle<C: CursorAccess>(
     if !is_session_id_prefix(handle) {
         return None;
     }
+    // Only the store leg is costly, so only it remembers a miss: a row that
+    // registers inside the beat still resolves on the next ask.
+    if cursors.with(|c| c.recent_miss(handle)) {
+        return None;
+    }
     for agent in ["claude", "codex"] {
         if let Some(path) = lookup_path(cursors, stores, agent, handle) {
             return Some(TruthSession {
@@ -720,6 +746,7 @@ fn resolve_handle<C: CursorAccess>(
             });
         }
     }
+    cursors.with(|c| c.note_miss(handle));
     None
 }
 
@@ -739,9 +766,21 @@ fn session_from_row(row: &RegistryEntry) -> TruthSession {
 }
 
 /// The claude projects store leg of the session-id rung.
-fn claude_path_for(handle: &str, stores: &Stores) -> Option<PathBuf> {
-    let listing = store_listing(&stores.projects_root);
-    choose_from(&listing, handle)
+fn claude_path_for(
+    handle: &str,
+    listing: &[crate::claude_transcript_paths::Hit],
+) -> Option<PathBuf> {
+    // A short prefix naming two sessions is ambiguous: answer nothing rather
+    // than the first sorted session's truth.
+    let mut names = listing
+        .iter()
+        .filter(|h| h.name.starts_with(handle))
+        .map(|h| h.name.as_str());
+    let first = names.next()?;
+    if names.any(|n| n != first) {
+        return None;
+    }
+    choose_from(listing, handle)
 }
 
 /// A session id or an id prefix: 8+ hex digits and dashes. The claude
@@ -768,10 +807,7 @@ impl Stores {
         Self {
             projects_root: crate::claude_roster::config_dir().join("projects"),
             codex_sessions_dir: None,
-            opencode_db: match std::env::var_os("OPENCODE_DB") {
-                Some(db) if !db.is_empty() => PathBuf::from(db),
-                _ => ambient_opencode_db(),
-            },
+            opencode_db: ambient_opencode_db(),
         }
     }
 }
@@ -1058,23 +1094,8 @@ pub fn resolve_payload_with<C: CursorAccess>(
     mut cursors: C,
     mode: ReadMode,
 ) -> Value {
-    if cursors.with(|c| c.recent_miss(handle)) {
-        return unknown_payload(handle, "not-found", None, None, None);
-    }
     let Some(session) = resolve_handle(rows, handle, stores, &mut cursors) else {
-        cursors.with(|c| c.note_miss(handle));
         return unknown_payload(handle, "not-found", None, None, None);
-    };
-    let falsifier = session
-        .row
-        .as_ref()
-        .and_then(|row| row_falsifier(row, &mut cursors));
-    // A falsified row is dead on process evidence, not on a guess: read it
-    // now rather than answer warming.
-    let mode = if falsifier.is_some() {
-        ReadMode::Build
-    } else {
-        mode
     };
     let path = transcript_for(&session, stores, &mut cursors);
     let store_key = format!("opencode:{}", session.session_id);
@@ -1099,6 +1120,10 @@ pub fn resolve_payload_with<C: CursorAccess>(
         }
         _ => None,
     };
+    let falsifier = session
+        .row
+        .as_ref()
+        .and_then(|row| row_falsifier(row, &mut cursors));
     let observed = observed_model(&session.agent, path.as_deref(), summary.as_ref());
     let Some(summary) = summary.filter(TailSummary::has_record) else {
         return unknown_payload(
@@ -1253,13 +1278,16 @@ fn lookup_path<C: CursorAccess>(
     if let Some(path) = cursors.with(|c| c.cached_path(&key)) {
         return Some(path);
     }
-    let found = match agent {
-        "claude" => claude_path_for(session_id, stores),
-        "codex" => {
-            crate::codex_store::codex_rollout_path(stores.codex_sessions_dir.as_deref(), session_id)
-        }
+    let found = cursors.with(|c| match agent {
+        "claude" => claude_path_for(session_id, c.claude_hits(&stores.projects_root)),
+        "codex" => c
+            .codex_files(stores.codex_sessions_dir.as_deref())
+            .iter()
+            .find_map(|(name, path)| {
+                crate::codex_store::codex_rollout_matches(name, session_id).then(|| path.clone())
+            }),
         _ => None,
-    }?;
+    })?;
     cursors.with(|c| c.cache_path(&key, &found));
     Some(found)
 }
@@ -1344,7 +1372,7 @@ mod tests {
         let path = dir.join("t.jsonl");
         std::fs::write(
             &path,
-            r#"{"type":"assistant","timestamp":"2026-10-08T11:59:00Z","message":{"role":"assistant","content":"reading"}}"#.to_string() + "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-08T11:59:00Z","message":{"role":"assistant","model":"claude-opus-5-5","content":"reading"}}"#.to_string() + "\n",
         )
         .unwrap();
         let rows = vec![row("w1", "claude", &path)];
@@ -1386,6 +1414,12 @@ mod tests {
         let first = resolve_payload(None, handle, NOW, &stores, &mut cursors);
         assert_eq!(first["reason"], "not-found");
         assert!(cursors.recent_miss(handle), "the miss is remembered");
+        // A registry row naming the handle still answers inside the beat.
+        let path = dir.join("row.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let rows = vec![row(handle, "claude", &path)];
+        let by_row = resolve_payload(Some(&rows), handle, NOW, &stores, &mut cursors);
+        assert_eq!(by_row["reason"], "no-records", "{by_row}");
         // A store that now holds the session is not consulted inside the beat.
         let project = stores.projects_root.join("-p");
         std::fs::create_dir_all(&project).unwrap();

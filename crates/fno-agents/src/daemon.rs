@@ -1308,7 +1308,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // daemon swallowing its own read failure while discovery kept answering).
     load_registry_asserted(&home.registry_json())?;
     let _ = state::heal_full_uuid_short_ids(&home.registry_json());
-    crate::truth_probe::start_daemon_warm(&home);
 
     // State: cold_start.
     // `_supervisor_lock` is a named (not `let _`) binding: it must stay alive
@@ -1323,6 +1322,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         }
         Err(e) => return Err(e),
     };
+    crate::truth_probe::start_daemon_warm(&home);
     let sock_path = home.supervisor_sock();
     let bound_ino = std::fs::metadata(&sock_path).ok().map(|m| m.ino());
 

@@ -381,7 +381,8 @@ fn in_daemon() -> bool {
 }
 
 /// Mark this process as the daemon and rebuild every registry row's cursor
-/// on a background thread. Each rebuild reads back from EOF to the newest
+/// on a background thread. Called only by the process that won the
+/// supervisor socket, so a race loser never answers truth as the daemon. Each rebuild reads back from EOF to the newest
 /// compact boundary or the 64 KB cap, never from the start. Until the pass
 /// ends, a session it has not reached answers `warming`. The pass emits
 /// `truth_warm_done` with its row count and wall time.

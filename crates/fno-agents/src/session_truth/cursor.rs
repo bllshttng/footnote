@@ -34,7 +34,8 @@ const IDLE_TTL: Duration = Duration::from_secs(10 * 60);
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
 
 /// One beat: how long a handle that resolved to nothing answers `not-found`
-/// from memory before the resolver tries it again.
+/// from memory before the resolver tries it again, and how long a resolved
+/// transcript path stands before the store is listed again.
 pub(crate) const MISS_BEAT: Duration = Duration::from_secs(60);
 
 /// How long a row's falsifier verdict (pid, pane, exit record, claude holder)
@@ -80,6 +81,10 @@ pub struct TruthCursors {
     misses: HashMap<String, Instant>,
     // Registry falsifier verdicts by row identity, for one short beat.
     verdicts: HashMap<String, (Option<&'static str>, Instant)>,
+    // One listing of each harness store per beat, shared by every lookup in
+    // it: a rebuild of N rows lists the store once, not N times.
+    claude_hits: Option<(PathBuf, Vec<crate::claude_transcript_paths::Hit>, Instant)>,
+    codex_files: Option<(Option<PathBuf>, Vec<(String, PathBuf)>, Instant)>,
     last_bytes_read: u64,
     last_prune: Option<Instant>,
 }
@@ -125,14 +130,16 @@ impl TruthCursors {
         self.stores.contains_key(key)
     }
 
-    /// A cached transcript path for `key`, when the file still exists.
+    /// A cached transcript path for `key`, for one beat after its lookup.
+    /// The beat runs from the lookup, not the last read: claude re-keys a
+    /// session into another project dir and leaves the old file behind, so
+    /// an existing path is not proof it is still the live copy.
     pub(crate) fn cached_path(&mut self, key: &str) -> Option<PathBuf> {
-        let (path, touched) = self.paths.get_mut(key)?;
-        if !path.exists() {
+        let (path, found_at) = self.paths.get(key)?;
+        if found_at.elapsed() >= MISS_BEAT || !path.exists() {
             self.paths.remove(key);
             return None;
         }
-        *touched = Instant::now();
         Some(path.clone())
     }
 
@@ -159,9 +166,40 @@ impl TruthCursors {
 
     #[cfg(test)]
     pub(crate) fn expire_misses_for_test(&mut self) {
-        for at in self.misses.values_mut() {
-            *at -= MISS_BEAT;
+        self.misses.clear();
+    }
+
+    /// The claude projects store listing, read at most once a beat.
+    pub(crate) fn claude_hits(&mut self, root: &Path) -> &[crate::claude_transcript_paths::Hit] {
+        let fresh =
+            matches!(&self.claude_hits, Some((r, _, at)) if r == root && at.elapsed() < MISS_BEAT);
+        if !fresh {
+            let hits = crate::claude_transcript_paths::store_listing(root);
+            self.claude_hits = Some((root.to_path_buf(), hits, Instant::now()));
         }
+        self.claude_hits
+            .as_ref()
+            .map_or(&[], |(_, hits, _)| hits.as_slice())
+    }
+
+    /// The codex sessions tree index, read at most once a beat. `None` reads
+    /// the ambient `$CODEX_HOME/sessions`.
+    pub(crate) fn codex_files(&mut self, root: Option<&Path>) -> &[(String, PathBuf)] {
+        let root = root
+            .map(Path::to_path_buf)
+            .or_else(|| crate::codex_store::codex_home().map(|home| home.join("sessions")));
+        let fresh =
+            matches!(&self.codex_files, Some((r, _, at)) if *r == root && at.elapsed() < MISS_BEAT);
+        if !fresh {
+            let files = root
+                .as_deref()
+                .and_then(|r| crate::daemon::index_tree(r, 0).ok())
+                .unwrap_or_default();
+            self.codex_files = Some((root, files, Instant::now()));
+        }
+        self.codex_files
+            .as_ref()
+            .map_or(&[], |(_, files, _)| files.as_slice())
     }
 
     /// A row's falsifier verdict from the last beat, if one is fresh.
@@ -238,7 +276,10 @@ impl TruthCursors {
     }
 
     fn prune_idle(&mut self) {
-        let now = Instant::now();
+        self.prune_at(Instant::now());
+    }
+
+    fn prune_at(&mut self, now: Instant) {
         if self
             .last_prune
             .is_some_and(|at| now.duration_since(at) < PRUNE_EVERY)
@@ -251,22 +292,20 @@ impl TruthCursors {
         self.stores
             .retain(|_, e| now.duration_since(e.touched) < IDLE_TTL);
         self.paths
-            .retain(|_, (_, touched)| now.duration_since(*touched) < IDLE_TTL);
+            .retain(|_, (_, found_at)| now.duration_since(*found_at) < MISS_BEAT);
         self.misses
             .retain(|_, at| now.duration_since(*at) < MISS_BEAT);
         self.verdicts
             .retain(|_, (_, at)| now.duration_since(*at) < FALSIFIER_BEAT);
     }
 
+    /// Run the idle prune as if `now` were the clock. Tests move the clock
+    /// forward rather than ageing an `Instant` backward, which underflows on
+    /// a freshly booted host.
     #[cfg(test)]
-    pub(crate) fn age_all_for_test(&mut self, by: Duration) {
-        for e in self.entries.values_mut() {
-            e.touched -= by;
-        }
-        for e in self.stores.values_mut() {
-            e.touched -= by;
-        }
+    pub(crate) fn prune_as_of_for_test(&mut self, now: Instant) {
         self.last_prune = None;
+        self.prune_at(now);
     }
 }
 
@@ -282,9 +321,16 @@ fn advance(entry: &mut CursorEntry, path: &Path, len: u64, folder: &Folder) -> O
         None => 0,
     };
     for line in String::from_utf8_lossy(&appended[..consumed]).lines() {
-        if !line.trim().is_empty() {
-            (folder.fold)(&mut entry.summary, line);
+        if line.trim().is_empty() {
+            continue;
         }
+        // A compact boundary ends the window a rebuild would read, so the
+        // turns before it stop counting here too.
+        if (folder.is_boundary)(line) {
+            entry.summary = entry.summary.after_boundary();
+            continue;
+        }
+        (folder.fold)(&mut entry.summary, line);
     }
     entry.len_read += consumed as u64;
     Some(consumed as u64)
@@ -320,8 +366,9 @@ fn rebuild(path: &Path, len: u64, folder: &Folder) -> Option<(TailSummary, u64, 
             folded += line.len() as u64 + 1;
             (folder.fold)(&mut summary, line);
         }
-        let done =
-            boundary.is_some() || start == 0 || summary.has_record() || window >= REBUILD_MAX;
+        // A window of relayed mail turns alone has no actor yet: the
+        // Python reader would find one further back in its 40-turn tail.
+        let done = boundary.is_some() || start == 0 || summary.has_actor() || window >= REBUILD_MAX;
         if done {
             (folder.backfill)(&mut summary, path, start + head as u64);
             return Some((summary, start + end as u64, folded));
@@ -447,6 +494,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A compact boundary appended to a warm cursor drops the turns before
+    /// it, exactly as a fresh rebuild of the same file would.
+    #[test]
+    fn an_appended_compact_boundary_matches_a_rebuild() {
+        let dir = dir("boundary");
+        let path = dir.join("t.jsonl");
+        std::fs::write(&path, line("assistant", "2026-10-08T10:00:00Z", "one")).unwrap();
+        let mut cursors = TruthCursors::new();
+        assert_eq!(summary(&mut cursors, &path).records(), 1);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"system\",\"subtype\":\"compact_boundary\"}\n")
+            .unwrap();
+        let warm = summary(&mut cursors, &path);
+        let fresh = summary(&mut TruthCursors::new(), &path);
+        assert_eq!(warm.records(), 0, "the boundary drops the earlier turn");
+        assert_eq!(warm.records(), fresh.records());
+        assert_eq!(warm.last_role(), fresh.last_role());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// AC3: truncation or an inode swap resets the cursor, and the answer
     /// equals a fresh rebuild.
     #[test]
@@ -543,7 +613,8 @@ mod tests {
         summary(&mut cursors, &a);
         summary(&mut cursors, &b);
         assert_eq!(cursors.len(), 2);
-        cursors.age_all_for_test(IDLE_TTL + Duration::from_secs(1));
+        cursors.prune_as_of_for_test(Instant::now() + IDLE_TTL + Duration::from_secs(1));
+        assert!(cursors.is_empty(), "both idle entries dropped");
         summary(&mut cursors, &a);
         assert!(
             cursors.has(&a) && !cursors.has(&b),
