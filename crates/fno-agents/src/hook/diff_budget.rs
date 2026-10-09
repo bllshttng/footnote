@@ -269,21 +269,16 @@ mod tests {
             "{line}"
         );
         // Under the threshold the advice stays silent; at the cap it names
-        // the refactor remedy instead.
+        // the refactor remedy instead. A payload outside a target session
+        // (no manifest under the cwd) is silent the same way.
         assert!(!build_message(30, 5, 100, "feature/x").contains("smaller design"));
         let blown = build_message(120, 0, 100, "feature/x");
         assert!(blown.contains("refactor growth away in THIS PR"), "{blown}");
-    }
-
-    #[test]
-    fn silence_without_a_target_manifest() {
         let payload = json!({
             "cwd": std::env::temp_dir().join("fno-diff-budget-test-missing"),
             "tool_input": {"command": "git commit -m x"},
             "tool_response": {"exit_code": 0}
         });
-        // No manifest under a missing cwd: silent, which is also the guard
-        // against measuring a non-target session.
         assert_eq!(budget_line(&payload), None);
     }
 }

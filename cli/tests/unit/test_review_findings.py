@@ -230,6 +230,8 @@ class TestSummarize:
             "has_required_fields": True,
             "finding_key": "a.py:1:style",
             "summary": "a summary",
+            "autofix_class": None,
+            "owner": None,
         }
 
     def test_as_dict_shape(self) -> None:
