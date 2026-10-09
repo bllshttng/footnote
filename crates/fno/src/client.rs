@@ -1031,8 +1031,10 @@ pub(crate) struct View {
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `footnote-superscript` is
     /// the default; a terminal reporting a light background defaults to
-    /// `footnote-paper`, and `terminal` stays available as the no-op that
-    /// inherits the emulator's own colors.
+    /// `footnote-paper`, whose ground an inferred pick never paints (the
+    /// terminal keeps its own bg and fg, the theme-ground ruling), and
+    /// `terminal` stays available as the no-op that inherits the emulator's
+    /// own colors.
     theme: Theme,
     /// The user's own themes, latched at startup (theme_ground::launch_theme).
     user_themes: Vec<(String, Theme)>,
@@ -1823,6 +1825,7 @@ pub(crate) mod input_field;
 mod input_folds;
 mod mail_input;
 mod overlay_keys;
+mod terminal_cursor;
 // The overlay key state machines live in the module; the re-import keeps
 // every existing bare-name caller (the tests' `use super::*` chain) resolving.
 #[cfg(test)]
@@ -4938,6 +4941,10 @@ impl View {
         let (rows, cols) = self.term;
         let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
         let mut cells = vec![Cell::default(); rows * cols];
+        // The composer sheet's editor cursor cell, when the launcher drew
+        // this frame and no picker holds the keyboard: the terminal's real
+        // cursor belongs there, ahead of any pane's cursor.
+        let mut launcher_cursor = None;
         let panel_w = self.panel_w() as usize;
         chrome::close_chips_begin();
         backlog_style::node_spans_begin();
@@ -5008,7 +5015,13 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if agent_launcher::draw_overlay(self, &mut cells, rows, cols) {
+        } else if self.launcher.is_some() {
+            // The sheet paints whenever the launcher is open, even while a
+            // picker holds the keyboard (the returned cursor cell is then
+            // None): the chain stops here so a later overlay never draws
+            // over the composer, and the pane branch below never shows a
+            // pane's cursor behind it.
+            launcher_cursor = agent_launcher::draw_overlay(self, &mut cells, rows, cols);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -5199,54 +5212,10 @@ impl View {
             messages_view::paint_full(self, &mut cells, rows, cols);
         }
 
-        // Terminal cursor: the FOCUSED pane's, offset into its rect - the
-        // one place the cursor may sit (AC1-UI/AC5-UI).
-        let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
-        if self.selector.is_none()
-            && self.answers.is_none()
-            && self.yard.is_none()
-            && self.digest.is_none()
-            && self.move_pick.is_none()
-            && self.attach_place.is_none()
-            && self.portal_pick.is_none()
-            && self.nav.is_none()
-            && self.peek.is_none()
-            && self.connections.is_none()
-            && self.keys_modal.is_none()
-            && self.row_menu.is_none()
-            && self.aux.is_none()
-            && !((self.backlog_board.is_some() || self.org_board.is_some())
-                && (self.board_full || self.input_owner() == region_focus::RegionOwner::Board))
-            && self.messages_board.is_none()
-        {
-            if let Some((_, rect)) = self
-                .layout
-                .panes
-                .iter()
-                .find(|(id, _)| *id == self.layout.focus)
-            {
-                if let Some(f) = self.frames.get(&self.layout.focus) {
-                    // The cursor sits in the pty grid, which is the CONTENT
-                    // rect for a framed pane.
-                    let content = crate::pane_border::content_rect(*rect);
-                    cur_r =
-                        TAB_BAR_ROWS + content.y + f.cursor_row.min(content.rows.saturating_sub(1));
-                    cur_c = self.left_chrome_w()
-                        + content.x
-                        + f.cursor_col.min(content.cols.saturating_sub(1));
-                    if !self.sideline_full && self.layout.area != (0, 0) {
-                        // Never in the filler (AC1-UI), even mid-race when a
-                        // stale rect exceeds the just-shrunk area. Skipped in
-                        // full-screen sideline: the cursor belongs to the
-                        // composer, not a pane that is not painted.
-                        cur_r = cur_r.min(TAB_BAR_ROWS + self.layout.area.0.saturating_sub(1));
-                        cur_c =
-                            cur_c.min(self.left_chrome_w() + self.layout.area.1.saturating_sub(1));
-                    }
-                    cur_vis = f.cursor_visible;
-                }
-            }
-        }
+        // Terminal cursor: the composer sheet's editor while it is open (the
+        // keyboard owner), else the FOCUSED pane's, offset into its rect -
+        // the one place the cursor may sit (AC1-UI/AC5-UI).
+        let (cur_r, cur_c, cur_vis) = terminal_cursor::compose_cursor(self, launcher_cursor);
         *self.close_chips.borrow_mut() = chrome::close_chips_end();
         backlog_style::node_spans_end();
         Frame {

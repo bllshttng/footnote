@@ -1250,10 +1250,16 @@ pub(crate) enum LKey {
     Tab,
     BackTab,
     Backspace,
-    /// Cmd+Backspace or Ctrl+U: delete everything left of the cursor on the
-    /// row. Terminals send Cmd+Backspace as ESC+DEL or Ctrl+U depending on
-    /// the emulator, so the fold maps both to this one key.
+    /// Ctrl+U: delete everything left of the cursor on the row. Kept apart
+    /// from [`LKey::KillWord`]: Cmd+Backspace arrives as Ctrl+U on the
+    /// emulators that spell it that way, and the line kill must survive.
     KillLeft,
+    /// Option+Backspace: kill the word left of the cursor. Terminals that
+    /// spell it ESC+DEL (`\x1b\x7f`) or the CSI-u alt form (`[127;3u`) both
+    /// fold here; a terminal that spells Cmd+Backspace the same way gets the
+    /// word kill where the line kill used to be - the bytes are not
+    /// distinguishable, and word kill is the readline default for ESC+DEL.
+    KillWord,
     /// Shift+Enter, when the terminal spells it (`CSI 13;2u`). Handled by
     /// the force launch; dropped where force means nothing.
     ShiftEnter,
@@ -1263,6 +1269,16 @@ pub(crate) enum LKey {
     Right,
     Up,
     Down,
+    /// Home/Cmd+Left: the cursor jumps to its row's first column. macOS
+    /// Cmd+Left/Right spell as Home/End on iTerm2 and Ghostty.
+    Home,
+    /// End/Cmd+Right: the cursor jumps to its row's last column.
+    End,
+    /// Option+Left: the cursor moves one word left (a run of
+    /// alphanumeric-or-underscore chars; `\n` counts as whitespace).
+    WordLeft,
+    /// Option+Right: one word right, flat like [`LKey::WordLeft`].
+    WordRight,
     Char(char),
     Paste(String),
 }
@@ -1330,11 +1346,24 @@ impl LauncherEsc {
                         self.esc.push(b);
                         continue;
                     }
-                    // ESC+DEL is Cmd+Backspace on emulators that spell it
-                    // that way: the pair is one key, never Esc then delete.
+                    // ESC+DEL is Option+Backspace (word kill); Ctrl+U keeps
+                    // the line kill for the emulators that spell Cmd+
+                    // Backspace as Ctrl+U. The pair is one key, never Esc
+                    // then delete.
                     if b == 0x7f {
                         self.esc.clear();
-                        keys.push(LKey::KillLeft);
+                        keys.push(LKey::KillWord);
+                        continue;
+                    }
+                    // Alt-spelled word motion: ESC b/f are Option+Left and
+                    // Option+Right on emulators with Option as meta.
+                    if b == b'b' || b == b'f' {
+                        self.esc.clear();
+                        keys.push(if b == b'f' {
+                            LKey::WordRight
+                        } else {
+                            LKey::WordLeft
+                        });
                         continue;
                     }
                     // A lone ESC then a normal byte: the ESC was the key.
@@ -1436,14 +1465,30 @@ impl LauncherEsc {
     }
 }
 
-/// A completed CSI/SS3 sequence's arrow mapping: bare and modified (`[1;5B`)
+/// A completed CSI/SS3 sequence's key mapping: bare and modified (`[1;5B`)
 /// CSI arrows and SS3 `O A..D` application-mode arrows become the launcher's
-/// arrow keys; everything else (a focus report, a function key) is dropped
-/// whole. `seq` is the sequence text between the ESC introducer's follower
-/// ([ or O) and the final byte, both included.
+/// arrow keys; Home/End (macOS Cmd+Left/Right spell as `[H`/`[F`/`OH`/`OF`)
+/// fold to their line jumps; an alt-modified left/right (`[1;3C`/`[1;3D`,
+/// also `;4` for shift+alt) is Option+Left/Right word motion; the CSI-u
+/// alt+backspace (`[127;3u`) is Option+Backspace word kill; everything else
+/// (a focus report, a function key) is dropped whole. `seq` is the sequence
+/// text between the ESC introducer's follower ([ or O) and the final byte,
+/// both included.
 fn arrow_key(seq: &[u8]) -> Option<LKey> {
     if seq == b"[Z" {
         return Some(LKey::BackTab);
+    }
+    // Home/End: bare CSI and SS3 spellings, macOS Cmd+Left/Right among them.
+    if seq == b"[H" || seq == b"OH" {
+        return Some(LKey::Home);
+    }
+    if seq == b"[F" || seq == b"OF" {
+        return Some(LKey::End);
+    }
+    // The CSI-u alt+backspace: Option+Backspace as Ghostty, iTerm2 and kitty
+    // spell it when the kitty keyboard protocol is on.
+    if seq == b"[127;3u" {
+        return Some(LKey::KillWord);
     }
     let arrow = match *seq.last()? {
         b'A' => LKey::Up,
@@ -1462,6 +1507,18 @@ fn arrow_key(seq: &[u8]) -> Option<LKey> {
         b'O' => seq.len() == 2,
         _ => false,
     };
+    // An alt modifier in the params (`1;3`, `1;4` = shift+alt) turns
+    // Left/Right into word motion. Other modifiers keep the plain arrow.
+    if ok && seq[0] == b'[' && matches!(seq[seq.len() - 1], b'C' | b'D') {
+        let params = &seq[1..seq.len() - 1];
+        if params.ends_with(b";3") || params.ends_with(b";4") {
+            return Some(if seq[seq.len() - 1] == b'C' {
+                LKey::WordRight
+            } else {
+                LKey::WordLeft
+            });
+        }
+    }
     ok.then_some(arrow)
 }
 
@@ -1499,6 +1556,29 @@ fn kill_to_line_start(draft: &mut LaunchDraft) {
     draft.bump();
 }
 
+/// KillWord: the word left of the cursor, row-local like
+/// [`kill_to_line_start`]. A word is a run of alphanumeric-or-underscore
+/// chars; the kill also clears the separator chars between the words, in
+/// the readline manner.
+fn kill_to_word_start(draft: &mut LaunchDraft) {
+    let cur = draft.cursor_chars;
+    let before: Vec<char> = draft.message.chars().take(cur).collect();
+    let drop = word_kill_run(&before);
+    if drop == 0 {
+        return;
+    }
+    let at = char_byte(&draft.message, cur - drop);
+    draft
+        .message
+        .replace_range(at..char_byte(&draft.message, cur), "");
+    draft.cursor_chars -= drop;
+    draft.bump();
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 fn char_byte(s: &str, chars: usize) -> usize {
     s.char_indices()
         .nth(chars)
@@ -1520,6 +1600,68 @@ fn move_left(draft: &mut LaunchDraft) {
 fn move_right(draft: &mut LaunchDraft) {
     let total = draft.message.chars().count();
     draft.cursor_chars = (draft.cursor_chars + 1).min(total);
+}
+
+/// One word step's width over `chars`: the whitespace run, then the word
+/// run behind or after it. `rev` counts from the back (a leftward step),
+/// otherwise from the front. Word motion is flat (a `\n` counts as
+/// whitespace, so it crosses rows) while the kills stay row-local: a
+/// motion undoes with one keystroke, a kill that ate a newline does not.
+/// The settings input fields share it (one editing grammar).
+pub(crate) fn word_run(chars: &[char], rev: bool) -> usize {
+    let ws = if rev {
+        chars.iter().rev().take_while(|c| c.is_whitespace()).count()
+    } else {
+        chars.iter().take_while(|c| c.is_whitespace()).count()
+    };
+    let rest = if rev {
+        &chars[..chars.len() - ws]
+    } else {
+        &chars[ws..]
+    };
+    let word = if rev {
+        rest.iter().rev().take_while(|c| is_word_char(**c)).count()
+    } else {
+        rest.iter().take_while(|c| is_word_char(**c)).count()
+    };
+    ws + word
+}
+
+/// One backward word KILL's width: the word behind the cursor, then the
+/// whitespace run before it - the delimiter goes with the word (the
+/// desktop-editor kill; plain motion above keeps the readline landing
+/// instead, where the cursor parks after the separator).
+pub(crate) fn word_kill_run(chars: &[char]) -> usize {
+    let word = chars.iter().rev().take_while(|c| is_word_char(**c)).count();
+    let rest = &chars[..chars.len() - word];
+    let ws = rest.iter().rev().take_while(|c| c.is_whitespace()).count();
+    word + ws
+}
+
+fn move_word_left(draft: &mut LaunchDraft) {
+    let cur = draft.cursor_chars;
+    let before: Vec<char> = draft.message.chars().take(cur).collect();
+    draft.cursor_chars = cur - word_run(&before, true);
+}
+
+fn move_word_right(draft: &mut LaunchDraft) {
+    let cur = draft.cursor_chars;
+    let after: Vec<char> = draft.message.chars().skip(cur).collect();
+    draft.cursor_chars = cur + word_run(&after, false);
+}
+
+fn move_line_start(draft: &mut LaunchDraft) {
+    let cur = draft.cursor_chars;
+    let before: Vec<char> = draft.message.chars().take(cur).collect();
+    let row = before.iter().rev().take_while(|c| **c != '\n').count();
+    draft.cursor_chars = cur - row;
+}
+
+fn move_line_end(draft: &mut LaunchDraft) {
+    let cur = draft.cursor_chars;
+    let after: Vec<char> = draft.message.chars().skip(cur).collect();
+    let rest = after.iter().take_while(|c| **c != '\n').count();
+    draft.cursor_chars = cur + rest;
 }
 
 fn move_up_down(draft: &mut LaunchDraft, delta: i32) {
@@ -1746,6 +1888,35 @@ pub(crate) async fn launcher_keys(
                 if let Some(l) = view.launcher.as_mut() {
                     if l.focus == Focus::Message && !l.draft.pill_value_capture {
                         kill_to_line_start(&mut l.draft);
+                    }
+                }
+            }
+            LKey::KillWord => {
+                if let Some(l) = view.launcher.as_mut() {
+                    if l.focus == Focus::Message && !l.draft.pill_value_capture {
+                        kill_to_word_start(&mut l.draft);
+                    }
+                }
+            }
+            LKey::Home | LKey::End => {
+                if let Some(l) = view.launcher.as_mut() {
+                    if l.focus == Focus::Message && !l.draft.pill_value_capture {
+                        if matches!(key, LKey::Home) {
+                            move_line_start(&mut l.draft);
+                        } else {
+                            move_line_end(&mut l.draft);
+                        }
+                    }
+                }
+            }
+            LKey::WordLeft | LKey::WordRight => {
+                if let Some(l) = view.launcher.as_mut() {
+                    if l.focus == Focus::Message && !l.draft.pill_value_capture {
+                        if matches!(key, LKey::WordLeft) {
+                            move_word_left(&mut l.draft);
+                        } else {
+                            move_word_right(&mut l.draft);
+                        }
                     }
                 }
             }
@@ -3431,6 +3602,9 @@ pub(crate) fn open_help(l: &mut Launcher, anchor: Anchor) {
         "@: pick a backlog node into the prompt",
         "!: run a shell line in a pane",
         "ctrl+u or cmd+backspace: clear left of the cursor",
+        "option+backspace: delete the word left of the cursor",
+        "option+left / option+right: move by word",
+        "cmd+left / cmd+right: jump to the line start / end",
         "ctrl+o: show a refusal's raw text",
         "tab: next chip \u{b7} esc: close",
     ];
@@ -4179,6 +4353,32 @@ impl Launcher {
         })
     }
 
+    /// The editor's cursor cell in SCREEN coordinates (row, col): the one
+    /// place the terminal's real cursor sits while the sheet is open. The
+    /// terminal renders it in its own configured cursor color, so the
+    /// cursor follows the terminal theme on dark and light grounds alike.
+    /// `None` = the sheet did not lay out.
+    pub(crate) fn editor_cursor_cell(&self, sl: &SheetLayout) -> Option<(u16, u16)> {
+        let wrap_w = sl.framed_w.saturating_sub(2).saturating_sub(PROMPT_GUTTER);
+        let chunks = wrap_message(&self.draft.message, wrap_w);
+        let (cur_row, cur_col) =
+            wrapped_cursor(&self.draft.message, self.draft.cursor_chars, wrap_w);
+        let (_, text) = chunks.get(cur_row)?;
+        let disp_col: usize = text
+            .chars()
+            .take(cur_col)
+            .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
+            .sum();
+        // `sl.message` is body-local; the sheet body blits at origin + 1,
+        // so the screen cell carries that offset.
+        let x = sl.origin.1 + 1 + sl.message.x + PROMPT_GUTTER as u16 + disp_col as u16;
+        let in_sheet = cur_row >= sl.start_chunk && x < sl.message.x + sl.message.width;
+        in_sheet.then(|| {
+            let y = sl.origin.0 + 1 + sl.message.y + (cur_row - sl.start_chunk) as u16;
+            (y, x)
+        })
+    }
+
     /// Paint the sheet: the chrome frame first, then the body Buffer
     /// (values strip, tab bar, the active tab's body, keybar, lifecycle)
     /// blitted over the frame's empty body rows via [`blit_area`].
@@ -4244,12 +4444,13 @@ impl Launcher {
         for (f, r) in &sl.chips {
             let never = *f == Focus::Worktree && self.draft.policy_never(&view.launcher_catalog);
             // Tab must SHOW where it landed: the focused chip carries the
-            // brand accent (bold, the same emphasis grammar the popups use),
-            // the `never` box included - focus names where the keyboard
-            // sits, not what the box will do (Enter still refuses there).
+            // filled inverse block (the accent text alone read at the same
+            // weight as every other chip), the `never` box
+            // included - focus names where the keyboard sits, not what the
+            // box will do (Enter still refuses there).
             // An UNfocused `never` box is the disabled grammar: dim.
             let style = if *f == self.focus {
-                role_style(Role::BodyAccent, &view.theme)
+                role_style(Role::ChipFocus, &view.theme)
             } else if never {
                 role_style(Role::BodyDim, &view.theme)
             } else {
@@ -4268,36 +4469,20 @@ impl Launcher {
                 buf[(caret_x, r.y)].set_style(role_style(Role::PanelMeta, &view.theme));
             }
         }
-        // The editor: prompt gutter, wrapped rows, cursor mark, and on an
-        // empty draft the dim placeholder naming the shape. The flags
-        // editor takes the same rows while it holds the keyboard.
-        // The editor: prompt gutter, wrapped rows, cursor mark, and on
-        // an empty draft the dim placeholder naming the shape.
+        // The editor: prompt gutter, wrapped rows, and on an empty draft the
+        // dim placeholder naming the shape. No painted cursor glyph: the
+        // terminal's REAL cursor marks the insert point (it is routed to
+        // [`Self::editor_cursor_cell`]), so its color follows the terminal
+        // theme on every ground. The flags editor takes the same rows while
+        // it holds the keyboard.
         let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
         let chunks = wrap_message(&self.draft.message, wrap_w);
-        let (cur_row, cur_col) =
-            wrapped_cursor(&self.draft.message, self.draft.cursor_chars, wrap_w);
         for k in 0..sl.editor_rows {
             let Some((_, text)) = chunks.get(sl.start_chunk + k) else {
                 break;
             };
             let y = sl.message.y + k as u16;
             buf.set_string(sl.message.x + PROMPT_GUTTER as u16, y, text, RtStyle::new());
-            if cur_row == sl.start_chunk + k {
-                let disp_col: usize = text
-                    .chars()
-                    .take(cur_col)
-                    .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
-                    .sum();
-                if (disp_col as u16) + (PROMPT_GUTTER as u16) < sl.message.width {
-                    let (x, yy) = (sl.message.x + disp_col as u16 + PROMPT_GUTTER as u16, y);
-                    // The theme's cursor surface, not a default-styled bar:
-                    // the same role the popups' input cursor paints with.
-                    buf[(x, yy)]
-                        .set_char('\u{258f}')
-                        .set_style(role_style(Role::BodyCursor, &view.theme));
-                }
-            }
         }
         if sl.editor_rows > 0 {
             // Shell mode paints its own glyph in the accent role so the
@@ -4438,19 +4623,22 @@ fn launcher_can_launch(view: &View) -> bool {
 
 /// The one draw arm the client's overlay chain calls: the sheet, then the
 /// open popover (a chip picker, or the `@` node picker), in that order.
+/// Returns the editor cursor's screen cell when the sheet drew AND no picker
+/// holds the keyboard: the one place the terminal's real cursor may sit
+/// (`None` otherwise, including the closed launcher).
 pub(crate) fn draw_overlay(
     view: &View,
     cells: &mut [crate::proto::Cell],
     rows: usize,
     cols: usize,
-) -> bool {
+) -> Option<(u16, u16)> {
     let Some(l) = view.launcher.as_ref() else {
-        return false;
+        return None;
     };
-    let mut drew = false;
+    let mut cursor = None;
     if let Some(sl) = l.sheet_layout(view) {
         l.paint_sheet(view, cells, rows, cols, &sl);
-        drew = true;
+        cursor = l.editor_cursor_cell(&sl);
     }
     if let Some(pk) = l.picker.as_ref() {
         // A chip picker's rows are a snapshot: when the axis's row source
@@ -4488,8 +4676,11 @@ pub(crate) fn draw_overlay(
             &draw_pk.popup.render(view.term),
             &view.theme,
         );
+        // A picker holds the keyboard: the terminal cursor hides while it
+        // is open (nothing in the sheet is taking characters).
+        cursor = None;
     }
-    drew
+    cursor
 }
 
 /// One chip label's terminal column width.
