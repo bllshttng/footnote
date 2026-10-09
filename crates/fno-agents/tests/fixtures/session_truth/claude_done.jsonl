@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2026-10-08T11:58:00Z", "message": {"role": "user", "content": "ship the gate"}}
+{"type": "assistant", "timestamp": "2026-10-08T11:59:00Z", "message": {"role": "assistant", "content": "<promise>MISSION COMPLETE: gate shipped</promise>", "model": "claude-sonnet-5-5"}}

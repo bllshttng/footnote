@@ -1,0 +1,3 @@
+{"type": "assistant", "timestamp": "2026-10-08T11:55:00Z", "message": {"role": "assistant", "content": "first real answer", "model": "claude-sonnet-5-5"}}
+{"type": "agent-name", "timestamp": "2026-10-08T11:58:00Z", "agentName": "tgt-x-aaaa-liveness"}
+{"type": "assistant", "timestamp": "2026-10-08T11:59:30Z", "message": {"role": "assistant", "content": "Interrupted by the user", "model": "<synthetic>"}}

@@ -417,6 +417,7 @@ pub mod session_names_fold;
 pub(crate) mod session_origin;
 pub mod session_report;
 pub mod session_start_bytes;
+pub mod session_truth;
 pub mod single_flight;
 pub mod skill_drift;
 pub mod slot_cutover;

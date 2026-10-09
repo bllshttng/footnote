@@ -1,0 +1,2 @@
+{"type": "assistant", "timestamp": "2026-10-08T11:59:00Z", "message": {"role": "assistant", "content": "<promise>MISSION COMPLETE: earlier task</promise>", "model": "claude-sonnet-5-5"}}
+{"type": "user", "timestamp": "2026-10-08T11:59:30Z", "message": {"role": "user", "content": "<cross-session-message from=\"lead-session-1\">ack, continuing</cross-session-message>"}}
