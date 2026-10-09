@@ -96,7 +96,7 @@ pub fn migrate_node_provenance(value: &mut Value) -> Result<bool, String> {
 /// Rename the legacy `crown_*` keys on registry table rows to their current
 /// names. The table was imported from a snapshot that still held them, and
 /// the file walk never opens graph.db. A row that holds both spellings keeps
-/// the current one. Returns whether any row changed.
+/// the current one unless it is null. Returns whether any row changed.
 pub(crate) fn upgrade_registry_rows(rows: &mut [Value]) -> bool {
     let mut changed = false;
     for row in rows {
@@ -112,7 +112,10 @@ pub(crate) fn upgrade_registry_rows(rows: &mut [Value]) -> bool {
             let Some(value) = map.remove(&key) else {
                 continue;
             };
-            map.entry(vocabulary(&key)).or_insert(value);
+            let current = map.entry(vocabulary(&key)).or_insert(Value::Null);
+            if current.is_null() {
+                *current = value;
+            }
             changed = true;
         }
     }
@@ -578,9 +581,13 @@ pub fn run_at(root: &Path) -> Result<(), String> {
         walk(root, 0)?;
         atomic_write(&marker, b"1\n")?;
     }
+    // A failed table pass must not stop the daemon: the read path still
+    // serves current keys, and the next start retries.
     if !table_marker.exists() {
-        migrate_registry_table(root)?;
-        atomic_write(&table_marker, b"1\n")?;
+        match migrate_registry_table(root) {
+            Ok(()) => atomic_write(&table_marker, b"1\n")?,
+            Err(error) => eprintln!("role migration: registry table left unmigrated: {error}"),
+        }
     }
     Ok(())
 }
