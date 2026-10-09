@@ -68,7 +68,6 @@ evals-history.jsonl	history/evals-history.jsonl	append	daemon
 lesson-candidates.jsonl	history/lesson-candidates.jsonl	append	daemon
 # install/ - install markers; new wins.
 installed-rev	install/installed-rev	marker	daemon
-installed-rust-rev	install/installed-rust-rev	marker	daemon
 source-path	install/source-path	marker	daemon
 source-pin.json	install/source-pin.json	marker	daemon
 plugin-root	install/plugin-root	marker	daemon

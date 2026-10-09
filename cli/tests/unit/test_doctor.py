@@ -7,7 +7,7 @@ partial evidence -> not stale, --fix rust-only leg runs the refresh helper,
 never shells out to cargo directly).
 
 The signal collectors (_resolve_source, _source_rev, _read_marker,
-_probe_installed_verb, _rust_report, _read_rust_marker, _rust_source_rev,
+_probe_installed_verb, _rust_report, _rust_source_rev,
 _cargo_bin) are module-level so each test stubs them for a hermetic,
 network-free verdict.
 """
@@ -76,7 +76,6 @@ def _stub_signals(
         lambda: {"binary": rust_binary, "revision": rust_marker},
     )
     monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: None)
-    monkeypatch.setattr(doctor, "_read_rust_marker", lambda: rust_marker)
     monkeypatch.setattr(doctor, "_rust_source_rev", lambda source: rust_source_rev)
     monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: cargo_bin_present)
     # Component convergence (deployed-shape probes + native verdict): default

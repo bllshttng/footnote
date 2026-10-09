@@ -576,15 +576,6 @@ def _probe_installed_verb() -> ProbeResult:
     return "unknown"
 
 
-def _read_rust_marker() -> Optional[str]:
-    """Return the installed-rust-rev marker content, or None if missing/empty.
-
-    Reads the native readiness payload so this collector stays
-    monkeypatchable at the doctor module level (mirrors _read_marker's style).
-    """
-    return _probes(None).get("rust_marker")
-
-
 def _rust_source_rev(source: Optional[Path]) -> Optional[str]:
     """Return the last crates/ subtree commit SHA for the given source, or None.
 
@@ -1907,10 +1898,10 @@ def _verdict(
     assembled in exactly one place.
 
     Rust staleness is proven only with full evidence: a cargo binary exists,
-    the installed-rust-rev marker is known, the crates/ subtree rev is known,
-    and they differ. Any missing evidence piece degrades to "not stale" (never
-    cry wolf). Rust evidence gaps never upgrade unknown to fresh and never
-    block fresh.
+    the binary's self-reported crates/ rev is known, the crates/ subtree rev is
+    known, and they differ. Any missing evidence piece degrades to "not stale"
+    (never cry wolf). Rust evidence gaps never upgrade unknown to fresh and
+    never block fresh.
 
     Config-schema drift follows the same full-evidence rule: only when BOTH
     keysets are known and the source defines keys the deployed CLI lacks is the
