@@ -109,11 +109,13 @@ fn decode_slug(slug: &str) -> Decode {
     }
 }
 
-/// Age of the newest entry anywhere under `path`, or `None` when any stat
-/// failed: an unreadable probe is never evidence of quiet.
-fn newest_age(path: &Path, now: SystemTime) -> Option<Duration> {
+/// One walk over a candidate tree: the age of its newest entry and its total
+/// bytes, or `None` when any stat failed. An unreadable probe is never
+/// evidence of quiet, and the bytes of an unreadable tree are never promised.
+fn probe_candidate(path: &Path, now: SystemTime) -> Option<(Duration, u64)> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     let mut newest = meta.modified().ok()?;
+    let mut bytes = if meta.is_file() { meta.len() } else { 0 };
     let mut budget = 65_536usize;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -127,12 +129,15 @@ fn newest_age(path: &Path, now: SystemTime) -> Option<Duration> {
             if modified > newest {
                 newest = modified;
             }
+            if m.is_file() {
+                bytes += m.len();
+            }
             if m.is_dir() {
                 stack.push(entry.path());
             }
         }
     }
-    now.duration_since(newest).ok()
+    now.duration_since(newest).ok().map(|age| (age, bytes))
 }
 
 /// The worktree basenames registered by EVERY repo in `repos` that answers
@@ -176,10 +181,6 @@ fn registered_worktree_names(repos: &[PathBuf]) -> Option<Vec<String>> {
     }
 }
 
-fn past_grace(path: &Path, now: SystemTime) -> bool {
-    matches!(newest_age(path, now), Some(age) if age.as_secs() >= SPACE_GRACE_SECS)
-}
-
 /// Walk the spaces root and judge every dir. Dry run lists the dead ones;
 /// `apply` removes them. A live source, an unprovable decode, a read error,
 /// an entry inside the grace window, or a name that is not a path slug is
@@ -201,7 +202,7 @@ pub(crate) fn sweep(apply: bool, now: SystemTime) -> SpacesReport {
     let (mut kept_live, mut kept_grace, mut kept_unproven, mut kept_shape) =
         (0usize, 0usize, 0usize, 0usize);
     let mut live_spaces: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
-    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
@@ -231,13 +232,13 @@ pub(crate) fn sweep(apply: bool, now: SystemTime) -> SpacesReport {
                 kept_live += 1;
                 live_spaces.push((path, repos));
             }
-            Decode::Gone => {
-                if past_grace(&path, now) {
-                    candidates.push(path);
-                } else {
-                    kept_grace += 1;
+            Decode::Gone => match probe_candidate(&path, now) {
+                Some((age, bytes)) if age.as_secs() >= SPACE_GRACE_SECS => {
+                    candidates.push((path, bytes));
                 }
-            }
+                Some(_) => kept_grace += 1,
+                None => kept_unproven += 1,
+            },
             Decode::Unproven => kept_unproven += 1,
         }
     }
@@ -263,18 +264,20 @@ pub(crate) fn sweep(apply: bool, now: SystemTime) -> SpacesReport {
             if registered.contains(&sname) {
                 continue;
             }
-            if past_grace(&slice.path(), now) {
-                candidates.push(slice.path());
-            } else {
-                kept_grace += 1;
+            match probe_candidate(&slice.path(), now) {
+                Some((age, bytes)) if age.as_secs() >= SPACE_GRACE_SECS => {
+                    candidates.push((slice.path(), bytes));
+                }
+                Some(_) => kept_grace += 1,
+                None => kept_unproven += 1,
             }
         }
     }
-    for candidate in &candidates {
-        rep.bytes += crate::reclaim::tree_bytes(candidate);
+    for (_, bytes) in &candidates {
+        rep.bytes += bytes;
     }
     if apply {
-        for candidate in &candidates {
+        for (candidate, _) in &candidates {
             // Freshness re-check for whole spaces: the source may have come
             // back between the listing and the delete. Slices skip this; git
             // answered for them moments ago in this same pass.
@@ -289,7 +292,7 @@ pub(crate) fn sweep(apply: bool, now: SystemTime) -> SpacesReport {
             let _ = std::fs::remove_dir_all(candidate);
         }
     }
-    rep.reaped = candidates;
+    rep.reaped = candidates.into_iter().map(|(path, _)| path).collect();
     rep.note = format!(
         "kept: {kept_live} live, {kept_grace} in grace, {kept_unproven} unprovable, {kept_shape} not slugs"
     );
