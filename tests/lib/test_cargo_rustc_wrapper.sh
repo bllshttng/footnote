@@ -138,7 +138,7 @@ STUB
   grep -q "build admission unavailable (exit 2)" "$err_file" \
     || { fail "T04: stderr does not name the unadmitted build: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$fno_calls" ]] \
       && grep -q "doctor event emit build_admission_unavailable" "$fno_calls" \
       && grep -q '"reason":"error"' "$fno_calls"; then
@@ -327,7 +327,7 @@ STUB
   grep -q "fno doctor update" "$err_file" \
     || { fail "T12: stderr does not name the remedy: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$fno_calls" ]] \
       && grep -q "doctor event emit build_admission_unavailable" "$fno_calls" \
       && grep -q '"reason":"verb_missing"' "$fno_calls"; then
@@ -370,7 +370,7 @@ STUB
   grep -q "has no run-admit" "$err_file" \
     || { fail "T13: stderr does not name the missing verb: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$fno_calls" ]] \
       && grep -q "doctor event emit run_admission_unavailable" "$fno_calls" \
       && grep -q '"reason":"verb_missing"' "$fno_calls"; then
