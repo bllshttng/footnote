@@ -1571,77 +1571,42 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&state);
     }
 
-    /// Unset retention is report-only: the pile is named in the note, and
-    /// nothing is removed, even when `--apply` runs. The inventory doc holds
-    /// migration and recovery stamps to the operator's yes.
+    /// Every no-deletion gate in one walk: unset retention, a zero-day
+    /// retention, and a positive retention with no zero-missing audit
+    /// verdict all leave the pile untouched, because the inventory doc
+    /// holds these stamps to the operator's yes plus a recovery receipt.
     #[test]
-    fn backups_retention_defaults_to_report_only() {
+    fn backups_retention_without_yes_and_audit_is_report_only() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let state = temp_lane_root("backups-report");
         let migration = state.join("backups/state-root-migration");
         std::fs::create_dir_all(migration.join("20260101T000000Z")).unwrap();
         std::fs::write(migration.join("20260101T000000Z/payload"), vec![0u8; 512]).unwrap();
         age(&migration.join("20260101T000000Z"), 40 * 24 * 60);
-
-        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
-        std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
+        let stamp = migration.join("20260101T000000Z");
         let home = AgentsHome::at(state.join("agents"));
-        let lane = backups_retention_lane(&home, true);
-        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
 
-        assert!(lane.paths.is_empty(), "nothing is reaped without the yes");
-        assert_eq!(lane.bytes, 0);
-        assert!(
-            lane.note.contains("report only"),
-            "the note names the unset retention: {}",
-            lane.note
-        );
-        assert!(
-            migration.join("20260101T000000Z").exists(),
-            "the aged stamp survives report-only"
-        );
-        let _ = std::fs::remove_dir_all(&state);
-    }
+        for (label, days) in [("unset", None), ("zero", Some("0"))] {
+            std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+            match days {
+                Some(v) => std::env::set_var("FNO_RECLAIM_BACKUPS_DAYS", v),
+                None => std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS"),
+            }
+            std::env::remove_var("FNO_RECLAIM_BACKUPS_AUDIT");
+            let lane = backups_retention_lane(&home, true);
+            std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
+            std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
 
-    /// Zero days is disabled, not "delete on the next sweep": both the env
-    /// override and the config knob filter non-positive values to the
-    /// report-only path.
-    #[test]
-    fn backups_retention_zero_days_reads_as_disabled() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let state = temp_lane_root("backups-zero");
-        let migration = state.join("backups/state-root-migration");
-        std::fs::create_dir_all(migration.join("20260101T000000Z")).unwrap();
-        age(&migration.join("20260101T000000Z"), 40 * 24 * 60);
+            assert!(lane.paths.is_empty(), "{label}: nothing is reaped");
+            assert_eq!(lane.bytes, 0, "{label}");
+            assert!(lane.note.contains("report only"), "{label}: {}", lane.note);
+            assert!(stamp.exists(), "{label}: the aged stamp survives");
+        }
 
-        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
-        std::env::set_var("FNO_RECLAIM_BACKUPS_DAYS", "0");
-        let home = AgentsHome::at(state.join("agents"));
-        let lane = backups_retention_lane(&home, true);
-        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
-        std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
-
-        assert!(lane.paths.is_empty(), "zero days deletes nothing");
-        assert!(lane.note.contains("report only"), "{}", lane.note);
-        assert!(migration.join("20260101T000000Z").exists());
-        let _ = std::fs::remove_dir_all(&state);
-    }
-
-    /// A retention without a zero-missing audit verdict deletes nothing:
-    /// the inventory doc requires the recovery receipt, and a stamp can
-    /// hold the only copy of a parked conflict.
-    #[test]
-    fn backups_retention_without_an_audit_verdict_is_report_only() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let state = temp_lane_root("backups-noaudit");
-        let migration = state.join("backups/state-root-migration");
-        std::fs::create_dir_all(migration.join("20260101T000000Z")).unwrap();
-        age(&migration.join("20260101T000000Z"), 40 * 24 * 60);
-
+        // A positive retention without the audit verdict is still held.
         std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
         std::env::set_var("FNO_RECLAIM_BACKUPS_DAYS", "7");
         std::env::remove_var("FNO_RECLAIM_BACKUPS_AUDIT");
-        let home = AgentsHome::at(state.join("agents"));
         let lane = backups_retention_lane(&home, true);
         std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
         std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
@@ -1652,7 +1617,7 @@ pub(crate) mod tests {
             "the note names the missing gate: {}",
             lane.note
         );
-        assert!(migration.join("20260101T000000Z").exists());
+        assert!(stamp.exists());
         let _ = std::fs::remove_dir_all(&state);
     }
 
