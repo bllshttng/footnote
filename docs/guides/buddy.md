@@ -53,7 +53,7 @@ The length of your status line does not move the buddy. The buddy always aligns 
 
 `/buddy statusline` saves your current `statusLine` setting. Then it points `statusLine` at a small wrapper. The wrapper runs your status line first, then draws the buddy beside it. If you have no status line, the left side shows the model, the folder, the context use, and the cost.
 
-The wrapper reruns every second, so the buddy animates. Your own status line does not rerun every second. It reruns when the session changes, or every 30 seconds at most. To choose that time, give your status line its own `refreshInterval`. If you set `refreshInterval` on the wrapper itself, the next session moves that number to your status line and sets the wrapper back to 1 second.
+The wrapper reruns every second, so the buddy animates. Most of those runs cost almost nothing: a small bash script prints the last output again when the session, the width, and the buddy's frame have not changed, and Python starts only when one of them has. A session the fno mux hides holds its buddy still, so it stays on that cheap path. Your own status line does not rerun every second. It reruns when the session changes, or every 30 seconds at most. To choose that time, give your status line its own `refreshInterval`. If you set `refreshInterval` on the wrapper itself, the next session moves that number to your status line and sets the wrapper back to 1 second.
 
 `/buddy pane` puts your saved setting back, exactly as it was, and moves the buddy to the side pane. `/buddy restore` does the same thing. If the buddy cannot read the saved copy, it does not change your settings.
 

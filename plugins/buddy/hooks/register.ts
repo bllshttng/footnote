@@ -29,6 +29,8 @@ const CARD_ID = 'buddy-card'
 let cardSnap: Shown | undefined
 const PANE_COLUMNS = 24
 const WRAPPER = 'statusline.py'
+// The status line runs this first; it skips Python on ticks where nothing changed.
+const FAST = 'statusline.sh'
 // bbb: bring back buddy.
 const COMMANDS = ['buddy', 'bbb']
 
@@ -73,7 +75,7 @@ let unwrappedAt = -Infinity
 
 const buddyDir = () => `${stateDir}/state/buddy`
 const settingsPath = () => `${home}/.claude/settings.json`
-const wrapperCommand = () => `python3 ${buddyDir()}/${WRAPPER}`
+const wrapperCommand = () => `bash ${buddyDir()}/${FAST}`
 
 async function load($: EngineInterface, now: number): Promise<void> {
   muted = (await $.store.get('muted')) === true
@@ -384,7 +386,7 @@ async function readSettings($: EngineInterface): Promise<Record<string, unknown>
 }
 
 function isOurs(statusLine: any): boolean {
-  return typeof statusLine?.command === 'string' && statusLine.command.includes(`/state/buddy/${WRAPPER}`)
+  return typeof statusLine?.command === 'string' && [WRAPPER, FAST].some(file => statusLine.command.includes(`/state/buddy/${file}`))
 }
 
 async function resolveStateDir($: EngineInterface): Promise<string> {
@@ -400,28 +402,31 @@ async function resolveStateDir($: EngineInterface): Promise<string> {
 
 // Keeps a copy of the wrapper at a path that survives plugin updates, so statusLine never points into the plugin cache.
 async function installWrapper($: EngineInterface): Promise<void> {
-  const ours = await $.fs.read(`${$.plugin.root}/hooks/${WRAPPER}`)
-  const target = `${buddyDir()}/${WRAPPER}`
-  let theirs = ''
-  try {
-    theirs = await $.fs.read(target)
-  } catch {
-    theirs = ''
+  for (const file of [WRAPPER, FAST]) {
+    const ours = await $.fs.read(`${$.plugin.root}/hooks/${file}`)
+    const target = `${buddyDir()}/${file}`
+    let theirs = ''
+    try {
+      theirs = await $.fs.read(target)
+    } catch {
+      theirs = ''
+    }
+    if (theirs !== ours) await $.fs.write(target, ours)
   }
-  if (theirs !== ours) await $.fs.write(target, ours)
 }
 
 // The buddy animates only while the status line reruns every second. A slower interval set on
 // the wrapper is the user's wish for their own line, so it moves there and the wrapper keeps 1 s.
+// An install from before the shell fast path moves to it here too.
 async function keepTicking($: EngineInterface, settings: Record<string, unknown>): Promise<void> {
   const ours = settings.statusLine as any
-  if (ours.refreshInterval === 1) return
+  if (ours.refreshInterval === 1 && ours.command === wrapperCommand()) return
   const inner = (await readJson($, `${buddyDir()}/inner.json`)) ?? {}
-  if (inner.statusLine && typeof ours.refreshInterval === 'number') {
+  if (inner.statusLine && typeof ours.refreshInterval === 'number' && ours.refreshInterval !== 1) {
     inner.statusLine.refreshInterval = ours.refreshInterval
     await $.fs.write(`${buddyDir()}/inner.json`, JSON.stringify(inner, null, 2) + '\n')
   }
-  settings.statusLine = { ...ours, refreshInterval: 1 }
+  settings.statusLine = { ...ours, command: wrapperCommand(), refreshInterval: 1 }
   await $.fs.write(settingsPath(), JSON.stringify(settings, null, 2) + '\n')
 }
 
@@ -616,13 +621,15 @@ function sprite(c: Companion, now: number): string[] {
   return lines
 }
 
-// The wrapper stamps a heartbeat on each run, so a status line set in any settings file counts.
+// The wrapper stamps a heartbeat each time Python runs, so a status line set in any settings file counts.
+// The shell fast path skips Python, but a new frame lands at least every FRAME_REFRESH_MS and runs it.
+const WRAPPER_SEEN_MS = FRAME_REFRESH_MS + 5_000
 async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
   if (!stateDir) return false
   try {
     const at = Number(await $.fs.read(`${buddyDir()}/frames/${sessionId}.seen`))
     // A beat from before /buddy pane is the old wrapper's last run, not a live one.
-    return at > unwrappedAt && now - at < SEEN_MS
+    return at > unwrappedAt && now - at < WRAPPER_SEEN_MS
   } catch {
     return false
   }
@@ -632,7 +639,8 @@ async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
 async function writeFrame($: EngineInterface, now: number): Promise<void> {
   if (!buddy || !sessionId || !stateDir) return
   const frame = JSON.stringify({
-    sprite: sprite(buddy, now),
+    // A pane the mux hides holds still, so its status line can reuse its last output.
+    sprite: onScreen === false ? renderSprite(buddy, 0) : sprite(buddy, now),
     name: buddy.name,
     face: renderFace(buddy),
     color: rarityColor(theme, buddy.rarity),

@@ -287,8 +287,18 @@ def main():
     left = cached_inner_rows(stdin, data, session)
     # Claude Code's usable status width runs a few columns under COLUMNS.
     cols = int(os.environ.get("COLUMNS") or 120) - 4
-    print("\n".join(layout(left, read_frame(session), cols)))
-
+    out = "\n".join(layout(left, read_frame(session), cols))
+    print(out)
+    # statusline.sh prints this again, with no Python, until the input or the width changes or a new frame lands.
+    if session and os.environ.get("BUDDY_FAST"):
+        base = os.path.join(HOME, "frames", session)
+        try:
+            with open(base + ".out", "w", encoding="utf-8") as f:
+                f.write(out + "\n")
+            # The key goes in last, so a half-written output never matches.
+            os.replace(base + ".in.next", base + ".in")
+        except OSError:
+            pass
 
 if __name__ == "__main__":
     main()

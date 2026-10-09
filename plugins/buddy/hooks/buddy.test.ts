@@ -47,7 +47,7 @@ function boot(on: any, config = OLD_CONFIG, saved = new Map<string, unknown>(), 
   on('fs.read', ($: any, e: any) => {
     if (e.path === '/home/u/.claude.json') return { value: config }
     if (files.has(e.path)) return { value: files.get(e.path) }
-    if (e.path.endsWith('/hooks/statusline.py')) return { value: '# wrapper' }
+    if (e.path.endsWith('/hooks/statusline.py') || e.path.endsWith('/hooks/statusline.sh')) return { value: '# wrapper' }
     throw new Error('ENOENT')
   })
   on('fs.write', ($: any, e: any) => {
@@ -97,7 +97,7 @@ test('/buddy statusline wraps the user status line, writes frames, and pane rest
 
   await $.command.run({ command: 'buddy', args: 'statusline' })
   const wrapped = JSON.parse(files.get('/home/u/.claude/settings.json')!)
-  expect(wrapped.statusLine).toEqual({ type: 'command', command: 'python3 /home/u/.fno/state/buddy/statusline.py', padding: 2, refreshInterval: 1 })
+  expect(wrapped.statusLine).toEqual({ type: 'command', command: 'bash /home/u/.fno/state/buddy/statusline.sh', padding: 2, refreshInterval: 1 })
   expect(wrapped.model).toBe('opus')
   expect(JSON.parse(files.get('/home/u/.fno/state/buddy/inner.json')!).statusLine).toEqual(mine)
 
@@ -265,7 +265,7 @@ test('on Desktop the buddy shows above the prompt even when it wraps the termina
   expect(await roomy.find({ type: 'Text', text: /: / })).toBeUndefined()
 })
 
-test('a slower interval on the wrapper moves to the user status line, so the buddy still ticks every second', async ($, on) => {
+test('an old python wrapper at a slow interval moves to the fast path at 1 s, and the user line keeps the interval', async ($, on) => {
   const mine = { type: 'command', command: '~/bin/my-status', padding: 0 }
   const ours = { type: 'command', command: 'python3 /home/u/.fno/state/buddy/statusline.py', padding: 0, refreshInterval: 30 }
   const files = new Map([
@@ -279,6 +279,7 @@ test('a slower interval on the wrapper moves to the user status line, so the bud
       : { value: { exitCode: 1, stdout: '', stderr: '' } })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 
-  expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual({ ...ours, refreshInterval: 1 })
+  expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual({ ...ours, command: 'bash /home/u/.fno/state/buddy/statusline.sh', refreshInterval: 1 })
+  expect(files.get('/home/u/.fno/state/buddy/statusline.sh')).toBe('# wrapper')
   expect(JSON.parse(files.get('/home/u/.fno/state/buddy/inner.json')!).statusLine).toEqual({ ...mine, refreshInterval: 30 })
 })
