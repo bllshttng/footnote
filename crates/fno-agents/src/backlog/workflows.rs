@@ -17,6 +17,7 @@ use super::merge_evidence::{
 use super::node_ref::has_node_id_prefix;
 use super::promise::resolve_promise_evidence;
 use super::settings;
+use super::supersession::normalize_surface;
 use crate::backlog::mutate_single_row;
 use crate::graph_store;
 
@@ -1967,21 +1968,57 @@ fn refuse_dead_owner(owner: &Value, context: &str) -> Option<String> {
     ))
 }
 
-/// `fno backlog contain <owner> <ids...>`: folds existing nodes into an
-/// owner. One locked mutation, atomic across the batch; the guard ladder is
-/// the _contain.py twin, message for message and exit code for exit code.
+/// `fno backlog contain <owner> <ids...> [--surface <path>...]`: folds
+/// existing nodes into an owner. One locked mutation, atomic across the
+/// batch; the guard ladder is the _contain.py twin, message for message and
+/// exit code for exit code. `--surface` stamps each contained child with the
+/// repo-relative paths its work is expected to touch; the merge cascade
+/// closes on a match and releases the containment without one.
 pub fn run_contain(tail: &[String]) -> i32 {
-    if tail.is_empty() || tail.iter().any(|a| a == "--help" || a == "-h") {
+    if tail.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "Usage: fno backlog contain <owner> <task_id>... [--surface <repo-relative-path>]..."
+        );
+        println!();
+        println!("Fold existing nodes into an owner in one locked mutation.");
+        println!("A contained child ships inside the owner's PR and closes with it.");
+        println!("--surface stamps the declared work files on each contained child.");
+        println!("Pass it once per path.");
+        println!("A declared child closes on the owner's merge only when the merged PR touches a declared surface, or the PR body binds the child.");
+        println!("With neither, the cascade releases the containment and the child stays open.");
+        return 0;
+    }
+    if tail.is_empty() {
         return forward_to_python("contain", tail);
     }
     let mut positionals: Vec<&String> = Vec::new();
-    for arg in tail {
-        if arg.starts_with('-') {
-            return forward_to_python("contain", tail);
+    let mut surfaces: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tail.len() {
+        let tok = tail[i].as_str();
+        if tok == "--surface" {
+            match take_value(tail, &mut i) {
+                Some(v) => surfaces.push(v),
+                None => {
+                    eprintln!("Error: --surface needs a path value");
+                    return 2;
+                }
+            }
+        } else if let Some(v) = tok.strip_prefix("--surface=") {
+            surfaces.push(v.to_string());
+        } else if tok.starts_with('-') {
+            eprintln!("Error: --surface cannot be mixed with other flags: {tok}");
+            return 2;
+        } else {
+            positionals.push(&tail[i]);
         }
-        positionals.push(arg);
+        i += 1;
     }
     if positionals.is_empty() {
+        if !surfaces.is_empty() {
+            eprintln!("Error: --surface needs an owner and at least one task_id");
+            return 2;
+        }
         return forward_to_python("contain", tail);
     }
     let owner_arg = positionals[0].clone();
@@ -1990,12 +2027,23 @@ pub fn run_contain(tail: &[String]) -> i32 {
         return code;
     }
     let ids = expand_id_args(&ids_raw);
-    contain_write(&settings::graph_path(), &owner_arg, &ids)
+    contain_write(&settings::graph_path(), &owner_arg, &ids, &surfaces)
 }
-fn contain_write(graph: &Path, owner_arg: &str, ids: &[String]) -> i32 {
+fn contain_write(graph: &Path, owner_arg: &str, ids: &[String], surfaces: &[String]) -> i32 {
     if ids.is_empty() {
         eprintln!("Error: at least one task_id is required");
         return 1;
+    }
+    let mut declared: Vec<String> = Vec::new();
+    for raw in surfaces {
+        let path = normalize_surface(raw);
+        if path.is_empty() {
+            eprintln!("Error: --surface {raw:?} normalizes to an empty path");
+            return 2;
+        }
+        if !declared.contains(&path) {
+            declared.push(path);
+        }
     }
     let Ok(rows) = graph_store::read_rows(graph) else {
         eprintln!("Error: the backlog graph could not be read");
@@ -2141,6 +2189,11 @@ fn contain_write(graph: &Path, owner_arg: &str, ids: &[String]) -> i32 {
                     if let Some(o) = obj.get_mut("released_from") {
                         o.take();
                     }
+                    if !declared.is_empty() {
+                        obj.insert("containment_surfaces".into(), json!(declared.clone()));
+                    } else {
+                        obj.remove("containment_surfaces");
+                    }
                 }
                 if let Some(reason) = &warning {
                     out_warnings.borrow_mut().push(format!(
@@ -2172,8 +2225,13 @@ fn contain_write(graph: &Path, owner_arg: &str, ids: &[String]) -> i32 {
         eprintln!("{line}");
     }
     let owner_id = owner.as_str();
+    let surfaces_note = if declared.is_empty() {
+        String::new()
+    } else {
+        format!(" (surfaces: {})", declared.join(", "))
+    };
     for tid in out_contained.into_inner() {
-        println!("contained {tid} into {owner_id}; it ships inside {owner_id}'s PR");
+        println!("contained {tid} into {owner_id}; it ships inside {owner_id}'s PR{surfaces_note}");
     }
     0
 }
@@ -2187,17 +2245,30 @@ fn release_contained_children(entries: &mut [Value], owner_id: &str) -> Vec<Stri
         if text_at(e, "contained_in") != Some(owner_id) {
             continue;
         }
-        let obj = e.as_object_mut().expect("row");
-        obj.remove("contained_in");
-        drop_owner_pr_refs(obj, &owner_refs);
-        obj.insert("released_from".into(), Value::String(owner_id.to_string()));
-        if let Some(id) = obj.get("id").and_then(Value::as_str) {
+        release_contained_row(e, owner_id, &owner_refs);
+        if let Some(id) = e.get("id").and_then(Value::as_str) {
             if !id.is_empty() {
                 freed.push(id.to_string());
             }
         }
     }
     freed
+}
+
+/// The one row-level release shape: drop `contained_in`, drop the owner's PR
+/// refs so the owner's merge cannot close it, and stamp `released_from` (the
+/// marker the claim-line binder reads as "a claim line predates the
+/// release"). Shared by the owner-delete release and the cascade's
+/// evidence-less release.
+pub(crate) fn release_contained_row(
+    e: &mut Value,
+    owner_id: &str,
+    owner_refs: &std::collections::BTreeSet<(i64, String)>,
+) {
+    let obj = e.as_object_mut().expect("row");
+    obj.remove("contained_in");
+    drop_owner_pr_refs(obj, owner_refs);
+    obj.insert("released_from".into(), Value::String(owner_id.to_string()));
 }
 
 /// Clear parent on the owner's non-done children; return the ids freed (the
@@ -2221,7 +2292,10 @@ fn release_parented_children(entries: &mut [Value], owner_id: &str) -> Vec<Strin
 
 /// The owner's (pr_number, repo-lowered slug) ref set (the release_contained
 /// comparison key).
-fn pr_ref_set(entries: &[Value], owner_id: &str) -> std::collections::BTreeSet<(i64, String)> {
+pub(crate) fn pr_ref_set(
+    entries: &[Value],
+    owner_id: &str,
+) -> std::collections::BTreeSet<(i64, String)> {
     let owner = entries.iter().find(|e| text_at(e, "id") == Some(owner_id));
     let Some(owner) = owner else {
         return Default::default();

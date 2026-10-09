@@ -279,6 +279,10 @@ const FIELD_POLICY: &[(&str, Policy)] = &[
     ("queued_at", Policy::Owned("fno backlog queue")),
     ("queued_reason", Policy::Owned("fno backlog queue")),
     ("contained_in", Policy::Owned("fno backlog contain")),
+    (
+        "containment_surfaces",
+        Policy::Owned("fno backlog contain --surface"),
+    ),
     ("cost_usd", Policy::Owned("the execution ledger")),
     ("cost_sessions", Policy::Owned("the execution ledger")),
     (
