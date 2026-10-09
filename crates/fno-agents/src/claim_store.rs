@@ -782,7 +782,10 @@ const REAP_CHUNK: usize = 8;
 /// or that changed hands since the scan stays.
 ///
 /// `deadline` bounds the pass, checked before every chunk and every delete.
-/// The rows a spent deadline never settled are `deferred`. A bounded pass
+/// A chunk starts only while the time left covers the slowest scan and the
+/// slowest recheck seen so far: a recheck the deadline cuts
+/// keeps every candidate, so the scan before it was spent for nothing. The
+/// rows a pass never settled are `deferred`. A bounded pass
 /// starts at a clock-chosen row and wraps, so live rows that cost a probe
 /// cannot hold the same dead rows out of reach on every pass. One row that
 /// fails to delete is named in `reap_failed`, and the pass goes on.
@@ -806,11 +809,23 @@ pub(crate) fn reap_in_directory<'w>(
     }
     let (mut would_reap, mut reaped, mut settled) = (0, 0, 0);
     let mut failures = Vec::new();
+    let slowest_scan = std::cell::Cell::new(std::time::Duration::ZERO);
+    let slowest_recheck = std::cell::Cell::new(std::time::Duration::ZERO);
+    let timed = |slowest: &std::cell::Cell<std::time::Duration>,
+                 build: &mut dyn FnMut() -> Option<BoxedWitness<'w>>| {
+        let started = std::time::Instant::now();
+        let witness = build();
+        slowest.set(slowest.get().max(started.elapsed()));
+        witness
+    };
     'pass: for chunk in records.chunks(REAP_CHUNK) {
-        if spent() {
+        if deadline.is_some_and(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                <= slowest_scan.get() + slowest_recheck.get()
+        }) {
             break;
         }
-        let witness = scan_for(chunk);
+        let witness = timed(&slowest_scan, &mut || scan_for(chunk));
         let mut candidates = Vec::new();
         for record in chunk {
             if claims::classify_with_session_witness(record, witness.as_deref())
@@ -829,7 +844,7 @@ pub(crate) fn reap_in_directory<'w>(
         if candidates.is_empty() {
             continue;
         }
-        let recheck = recheck_for(&candidates);
+        let recheck = timed(&slowest_recheck, &mut || recheck_for(&candidates));
         let recheck = recheck.as_deref().or(witness.as_deref());
         for record in &candidates {
             if spent() {
