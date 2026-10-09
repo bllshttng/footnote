@@ -118,17 +118,12 @@ fn is_commit_command(command: &str) -> bool {
     false
 }
 
-/// The live target manifest for this cwd: the space's worktree row, else
-/// the legacy in-tree copy. None outside a target session.
+/// The live target manifest for this cwd, through the declared state-path
+/// resolver (space worktree row, legacy in-tree fallback). The resolver
+/// answers even when no manifest exists; the reads downstream treat that as
+/// no budget.
 fn manifest_path(cwd: &Path) -> Option<PathBuf> {
-    let wt = crate::paths::worktree_space_dir(cwd).join("target-state.md");
-    if wt.exists() {
-        return Some(wt);
-    }
-    let legacy = crate::paths::worktree_repo_root(cwd)
-        .join(".fno")
-        .join("target-state.md");
-    legacy.exists().then_some(legacy)
+    crate::state_path::resolve("target-state", cwd)
 }
 
 /// The effective budget: the bound plan's frontmatter `diff_budget` when a
