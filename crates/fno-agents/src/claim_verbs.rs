@@ -1917,188 +1917,20 @@ mod tests {
         );
     }
 
-    // ---- the primed witness's batch wire ----------------------------------
-
-    /// A PATH shim named `fno` that logs its argv and answers `--handles`
-    /// with one reachable payload per handle. Unique handle names per process
-    /// keep this test's batch off every other flight record keyed on the
-    /// same handles.
-    fn write_truth_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-        let shim_dir = dir.join("bin");
-        std::fs::create_dir_all(&shim_dir).unwrap();
-        crate::write_exec_stub(&shim_dir, "fno", &format!("#!/bin/sh\n{}", body));
-        shim_dir
-    }
-
-    fn batch_shim_body() -> String {
-        [
-            "printf '%s\\n' \"$*\" >> \"$X_A45C_SHIM_LOG\"",
-            "handles=''",
-            "prev=''",
-            "for a in \"$@\"; do",
-            "  if [ \"$prev\" = '--handles' ]; then handles=\"$a\"; fi",
-            "  prev=\"$a\"",
-            "done",
-            "first=1",
-            "printf '{'",
-            "for h in $(printf '%s' \"$handles\" | tr ',' ' '); do",
-            "  if [ \"$first\" = '1' ]; then first=0; else printf ','; fi",
-            "  printf '\"%s\":{\"state\":\"working\",\"reachability\":\"reachable\",\"basis\":\"transcript\"}' \"$h\"",
-            "done",
-            "printf '}'",
-        ]
-        .join("\n")
-    }
+    // ---- the primed witness ------------------------------------------------
 
     #[test]
-    fn primed_witness_batches_every_subject_into_one_interpreter() {
-        // The positive marker is the shim log, not an absence: exactly one
-        // line that names --handles AND carries every distinct subject. The
-        // one-line count alone would also pass for a run that spawned
-        // nothing, so the handle list is the load-bearing assertion.
-        // PATH and FNO_AGENTS_HOME are both process-global, so every mutation
-        // below rides with_registry's env lock; no outer guard, that lock is
-        // not reentrant.
-        let td = tempfile::TempDir::new().unwrap();
-        let shim_dir = write_truth_shim(td.path(), &batch_shim_body());
-        let log_path = td.path().join("shim.log");
-        let uniq = std::process::id();
-        let s_live = format!("xa45c-live-{uniq}");
-        let s_wire1 = format!("xa45c-wire-{uniq}");
-        let s_worker = format!("xa45c-worker-{uniq}");
-        let s_leg = format!("xa45c-leg-{uniq}");
-        with_registry(
-            serde_json::json!([
-                {
-                    "name": "w-live",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-12T00:00:00Z",
-                    "harness_session_id": s_live,
-                    "pid": std::process::id(),
-                    "pid_start_time": own_pid_start(),
-                },
-                {
-                    "name": "w-thread",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-12T00:00:00Z",
-                    "harness_session_id": s_worker,
-                },
-                {
-                    // The incident shape: a pidless thread row whose fresh
-                    // inside-leg report is the only live evidence. The
-                    // row_verdict rung answers it without the transcript.
-                    "name": "w-leg",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-12T00:00:00Z",
-                    "harness_session_id": s_leg,
-                    "inside_leg": {
-                        "state": "working",
-                        "seq": 1,
-                        "received_at": crate::daemon::now_rfc3339_like(),
-                        "ttl_ms": 90_000u64,
-                    },
-                },
-            ]),
-            || {
-                let old_path = std::env::var("PATH").unwrap_or_default();
-                std::env::set_var("X_A45C_SHIM_LOG", &log_path);
-                let prev_bin = std::env::var_os("FNO_BIN");
-                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
-                // The probe execs through scrape::fno_bin, which under
-                // cfg!(test) answers only a declared FNO_BIN: pin the same
-                // shim PATH pins.
-                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
-                let records = vec![
-                    witness_rec("holder-a", &s_live),
-                    witness_rec("holder-b", &s_wire1),
-                    witness_rec("spawn-handover:w-thread", "s-elsewhere"),
-                    witness_rec("holder-leg", &s_leg),
-                ];
-                let (witness, _drain) = session_witness_primed_for(&records);
-                // The verdicts agree with the lazy path: registry-live off
-                // the wire, batch-answered sessions transcript-live.
-                assert!(matches!(
-                    witness(&records[0]),
-                    crate::claims::SessionLiveness::Live(
-                        crate::claims::basis::REGISTRY_SESSION_LIVE
-                    )
-                ));
-                // The row-verdict rung: a fresh inside-leg report on a
-                // pidless row answers Live without the transcript wire
-                // (the reap is held instead of starving).
-                assert!(matches!(
-                    witness(&records[3]),
-                    crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE)
-                ));
-                // The two WIRE sessions only: the fourth record is the
-                // row-verdict-live session, asserted above.
-                for rec in records.iter().skip(1).take(2) {
-                    assert!(matches!(
-                        witness(rec),
-                        crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
-                    ));
-                }
-                let logged = std::fs::read_to_string(&log_path).unwrap();
-                match prev_bin {
-                    Some(v) => std::env::set_var("FNO_BIN", v),
-                    None => std::env::remove_var("FNO_BIN"),
-                }
-                std::env::set_var("PATH", old_path);
-                std::env::remove_var("X_A45C_SHIM_LOG");
-                // Other tests in this binary share the process PATH and can
-                // land their own probes in this log; the uniq prefix isolates
-                // THIS witness's wire from theirs.
-                let mine: Vec<&str> = logged
-                    .lines()
-                    .filter(|l| l.contains("--handles") && l.contains("xa45c-"))
-                    .collect();
-                assert_eq!(mine.len(), 1, "one batch, one interpreter: {logged:?}");
-                assert!(
-                    mine[0].contains(s_wire1.as_str()) && mine[0].contains(s_worker.as_str()),
-                    "every distinct subject on the wire: {logged:?}"
-                );
-                assert!(
-                    !logged.contains(s_live.as_str()),
-                    "the registry-live session stays off the wire: {logged:?}"
-                );
-                assert!(
-                    !logged.contains(s_leg.as_str()),
-                    "the row-verdict-live session stays off the wire: {logged:?}"
-                );
-            },
-        );
-    }
-
-    #[test]
-    fn primed_witness_answers_through_a_failed_batch_without_hanging() {
-        // A shim that refuses every call: the batch crashes twice, the
-        // per-handle fallback crashes twice more, and the witness answers
-        // Unresolved on the plain record - the same answer the lazy path
-        // gives a dead probe, never a hang and never a seeded verdict from a
-        // run that measured nothing.
-        let td = tempfile::TempDir::new().unwrap();
-        let shim_dir = write_truth_shim(td.path(), "exit 1");
+    fn primed_witness_answers_unresolved_when_truth_finds_no_transcript() {
+        // A session no store holds: the batch answers nothing for it, and the
+        // witness answers Unresolved on the plain record - the same answer
+        // the lazy path gives, never a seeded verdict from a read that
+        // measured nothing.
         let uniq = std::process::id();
         let s_wire = format!("xa45c-dead-{uniq}");
         with_registry(serde_json::json!([]), || {
-            let old_path = std::env::var("PATH").unwrap_or_default();
-            let prev_bin = std::env::var_os("FNO_BIN");
-            std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
-            // The probe execs through scrape::fno_bin, which under
-            // cfg!(test) answers only a declared FNO_BIN: pin the same
-            // shim PATH pins.
-            std::env::set_var("FNO_BIN", shim_dir.join("fno"));
             let rec = witness_rec("holder-x", &s_wire);
             let (witness, _drain) = session_witness_primed_for(std::iter::once(&rec));
             let answer = witness(&rec);
-            match prev_bin {
-                Some(v) => std::env::set_var("FNO_BIN", v),
-                None => std::env::remove_var("FNO_BIN"),
-            }
-            std::env::set_var("PATH", old_path);
             assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
         });
     }
@@ -2143,85 +1975,10 @@ mod tests {
     }
 
     #[test]
-    fn primed_wire_excludes_served_alive_and_keeps_a_stale_word_on_it() {
-        // AC1-HP + AC1-ERR: a fresh served word keeps the session off the
-        // probe wire; past the 120s window the word is withheld and the
-        // session rides the wire exactly as before this tier existed.
-        let td = tempfile::TempDir::new().unwrap();
-        let shim_dir = write_truth_shim(td.path(), &batch_shim_body());
-        let log_path = td.path().join("shim.log");
-        let uniq = std::process::id();
-        let s_fresh = format!("xa80a-fresh-{uniq}");
-        let s_stale = format!("xa80a-stale-{uniq}");
-        with_registry(
-            serde_json::json!([
-                {
-                    "name": "w-fresh",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-15T00:00:00Z",
-                    "harness_session_id": s_fresh,
-                    "liveness": "alive",
-                    "liveness_measured_at": z_stamp(10),
-                },
-                {
-                    "name": "w-stale",
-                    "status": "live",
-                    "cwd": "/w",
-                    "created_at": "2026-09-15T00:00:00Z",
-                    "harness_session_id": s_stale,
-                    "liveness": "alive",
-                    "liveness_measured_at": z_stamp(600),
-                },
-            ]),
-            || {
-                let old_path = std::env::var("PATH").unwrap_or_default();
-                std::env::set_var("X_A45C_SHIM_LOG", &log_path);
-                let prev_bin = std::env::var_os("FNO_BIN");
-                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
-                // The probe execs through scrape::fno_bin, which under
-                // cfg!(test) answers only a declared FNO_BIN: pin the same
-                // shim PATH pins.
-                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
-                let records = vec![
-                    witness_rec("holder-fresh", &s_fresh),
-                    witness_rec("holder-stale", &s_stale),
-                ];
-                let (witness, _drain) = session_witness_primed_for(&records);
-                // Touch the witness so the primed answers are actually read.
-                let _ = witness(&records[0]);
-                let _ = witness(&records[1]);
-                match prev_bin {
-                    Some(v) => std::env::set_var("FNO_BIN", v),
-                    None => std::env::remove_var("FNO_BIN"),
-                }
-                std::env::set_var("PATH", old_path);
-                std::env::remove_var("X_A45C_SHIM_LOG");
-                let logged = std::fs::read_to_string(&log_path).unwrap();
-                let mine: Vec<&str> = logged
-                    .lines()
-                    .filter(|l| l.contains("--handles") && l.contains("xa80a-"))
-                    .collect();
-                assert_eq!(mine.len(), 1, "one batch, one interpreter: {logged:?}");
-                assert!(
-                    mine[0].contains(s_stale.as_str()),
-                    "a stale word never blocks the wire: {logged:?}"
-                );
-                assert!(
-                    !logged.contains(s_fresh.as_str()),
-                    "the fresh served word stays off the wire: {logged:?}"
-                );
-            },
-        );
-    }
-
-    #[test]
     fn served_dead_word_never_reads_absent() {
         // AC1-EDGE: a served `dead` only lowers the witness to the transcript
         // leg - the cached word can predate a resume, and Absent reaps a
         // same-machine claim. No transcript answer is Unresolved, not Absent.
-        let td = tempfile::TempDir::new().unwrap();
-        let shim_dir = write_truth_shim(td.path(), "exit 1");
         with_registry(
             serde_json::json!([{
                 "name": "w-dead",
@@ -2233,21 +1990,9 @@ mod tests {
                 "liveness_measured_at": z_stamp(10),
             }]),
             || {
-                let old_path = std::env::var("PATH").unwrap_or_default();
-                let prev_bin = std::env::var_os("FNO_BIN");
-                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
-                // The probe execs through scrape::fno_bin, which under
-                // cfg!(test) answers only a declared FNO_BIN: pin the same
-                // shim PATH pins.
-                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let (witness, _drain) = default_session_witness();
                 let rec = witness_rec("spawn-handover:w-dead", "s-lead-elsewhere");
                 let answer = witness(&rec);
-                match prev_bin {
-                    Some(v) => std::env::set_var("FNO_BIN", v),
-                    None => std::env::remove_var("FNO_BIN"),
-                }
-                std::env::set_var("PATH", old_path);
                 assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
             },
         );
@@ -2268,15 +2013,6 @@ mod tests {
                 "harness_session_id": "s-worker",
             }]),
             || {
-                let td = tempfile::TempDir::new().unwrap();
-                let shim_dir = write_truth_shim(td.path(), "exit 1");
-                let old_path = std::env::var("PATH").unwrap_or_default();
-                let prev_bin = std::env::var_os("FNO_BIN");
-                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
-                // The probe execs through scrape::fno_bin, which under
-                // cfg!(test) answers only a declared FNO_BIN: pin the same
-                // shim PATH pins.
-                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let cell = std::cell::RefCell::new(None);
                 let index_cell = std::cell::RefCell::new(None);
                 let rec = witness_rec("spawn-handover:w-worker", "s-lead");
@@ -2293,11 +2029,6 @@ mod tests {
                 let row = &sweep["claims"][0];
                 assert_eq!(row["session_id"], "s-worker");
                 assert_eq!(row["metadata"]["dispatched_by_session"], "s-lead");
-                match prev_bin {
-                    Some(v) => std::env::set_var("FNO_BIN", v),
-                    None => std::env::remove_var("FNO_BIN"),
-                }
-                std::env::set_var("PATH", old_path);
             },
         );
     }

@@ -1,0 +1,272 @@
+{
+ "cases": {
+  "claude_api_error": {
+   "basis": "silent",
+   "falsifier_error": null,
+   "handle": "claude_api_error",
+   "harness_title": null,
+   "last_activity_age_s": 30,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:30Z",
+   "last_message": "API Error: 429 usage limit reached for this account",
+   "observed_model": {
+    "kind": "no-model-yet"
+   },
+   "provider_refusal": "provider_4xx_quota",
+   "reachability": "unknown",
+   "reason": "api-error-tail",
+   "session_id": "sid-apierr-0001",
+   "state": "stalled",
+   "suggestions": []
+  },
+  "claude_done": {
+   "basis": "silent",
+   "falsifier_error": null,
+   "handle": "claude_done",
+   "harness_title": null,
+   "last_activity_age_s": 60,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:00Z",
+   "last_message": "<promise>MISSION COMPLETE: gate shipped</promise>",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "unknown",
+   "reason": null,
+   "session_id": "sid-done-0001",
+   "state": "done",
+   "suggestions": []
+  },
+  "claude_peer_skips": {
+   "basis": "silent",
+   "falsifier_error": null,
+   "handle": "claude_peer_skips",
+   "harness_title": null,
+   "last_activity_age_s": 30,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:30Z",
+   "last_message": "<cross-session-message from=\"lead-session-1\">ack, continuing</cross-session-message>",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "unknown",
+   "reason": null,
+   "session_id": "sid-peer-0001",
+   "state": "done",
+   "suggestions": []
+  },
+  "claude_stalled": {
+   "basis": "silent",
+   "falsifier_error": null,
+   "handle": "claude_stalled",
+   "harness_title": null,
+   "last_activity_age_s": 10800,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T09:00:00Z",
+   "last_message": "Reading the ledger now.",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "unknown",
+   "reason": null,
+   "session_id": "sid-stall-0001",
+   "state": "stalled",
+   "suggestions": []
+  },
+  "claude_title_and_synthetic_model": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "claude_title_and_synthetic_model",
+   "harness_title": "tgt-x-aaaa-liveness",
+   "last_activity_age_s": 30,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:30Z",
+   "last_message": "Interrupted by the user",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-title-0001",
+   "state": "working",
+   "suggestions": []
+  },
+  "claude_user_clears_promise": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "claude_user_clears_promise",
+   "harness_title": null,
+   "last_activity_age_s": 60,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:00Z",
+   "last_message": "new task: sweep the backlog",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-clear-0001",
+   "state": "working",
+   "suggestions": []
+  },
+  "claude_watching": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "claude_watching",
+   "harness_title": null,
+   "last_activity_age_s": 120,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:58:00Z",
+   "last_message": "<watching reason=\"ci\" pr=\"12\">waiting on CI</watching>",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-watch-0001",
+   "state": "watching",
+   "suggestions": []
+  },
+  "claude_working": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "claude_working",
+   "harness_title": null,
+   "last_activity_age_s": 30,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:30Z",
+   "last_message": "Reading the ledger now.",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-work-0001",
+   "state": "working",
+   "suggestions": []
+  },
+  "claude_your_move": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "claude_your_move",
+   "harness_title": null,
+   "last_activity_age_s": 300,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:55:00Z",
+   "last_message": "The schema has two candidate keys. Should I proceed with the migration?",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-move-0001",
+   "state": "your-move",
+   "suggestions": []
+  },
+  "claude_your_move_option": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "claude_your_move_option",
+   "harness_title": null,
+   "last_activity_age_s": 300,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:55:00Z",
+   "last_message": "Apply this to all four files? [Y/n]",
+   "observed_model": {
+    "kind": "observed",
+    "model": "claude-sonnet-5-5",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-opt-0001",
+   "state": "your-move",
+   "suggestions": []
+  },
+  "codex_working": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "codex_working",
+   "harness_title": null,
+   "last_activity_age_s": 45,
+   "last_activity_basis": "last-entry",
+   "last_event_at": "2026-10-08T11:59:15Z",
+   "last_message": "Running the sweep.",
+   "observed_model": {
+    "kind": "observed",
+    "model": "gpt-6.1-sol",
+    "samples": 1
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "sid-codex-0001",
+   "state": "working",
+   "suggestions": []
+  },
+  "opencode_fixture": {
+   "basis": "transcript",
+   "falsifier_error": null,
+   "handle": "opencode_fixture",
+   "harness_title": null,
+   "last_activity_age_s": null,
+   "last_activity_basis": null,
+   "last_event_at": null,
+   "last_message": "[tool_use: bash] Sweep done.",
+   "observed_model": {
+    "kind": "not-file-backed"
+   },
+   "provider_refusal": null,
+   "reachability": "reachable",
+   "reason": null,
+   "session_id": "ses_goldenfix01",
+   "state": "working",
+   "suggestions": []
+  },
+  "unknown_handle": {
+   "basis": "no-evidence",
+   "falsifier_error": null,
+   "handle": "unknown_handle",
+   "harness_title": null,
+   "last_activity_age_s": null,
+   "last_activity_basis": null,
+   "last_event_at": null,
+   "last_message": null,
+   "observed_model": {
+    "kind": "no-transcript"
+   },
+   "provider_refusal": null,
+   "reachability": "unknown",
+   "reason": "not-found",
+   "session_id": null,
+   "state": "unknown",
+   "suggestions": []
+  }
+ },
+ "now_s": 1791460800
+}

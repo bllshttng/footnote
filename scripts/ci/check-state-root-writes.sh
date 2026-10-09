@@ -81,7 +81,8 @@ PY_JOIN = re.compile(
     r'state_dir\(\)\s*\.\s*join(?:path)?\s*\(\s*([\'"])([A-Za-z0-9_.\-]+)\1'
 )
 # One nesting level in the receiver: place(&state_root(cwd), "name").
-RUST_PLACE = re.compile(r'place\(\s*(?:[^,()]|\([^()]*\))+,\s*"([^"]+)"\s*\)')
+# The word boundary keeps `.replace(x, "y")` from reading as a place() call.
+RUST_PLACE = re.compile(r'\bplace\(\s*(?:[^,()]|\([^()]*\))+,\s*"([^"]+)"\s*\)')
 
 refused = []
 for line in added_text.splitlines():
@@ -176,6 +177,12 @@ if [[ "$SELF_TEST" == 1 ]]; then
         echo "check-state-root-writes: self-test: an untabled place() must refuse" >&2
         exit 2
     fi
+    # A string replace() is not a place() call.
+    printf '+    let t = ts.replace(\x27Z\x27, "+00:00");\n' >"$tmp/added-replace"
+    check_lines "$tmp/added-replace" "$tmp/baseline" "$tmp/layout" >/dev/null || {
+        echo "check-state-root-writes: self-test: replace() must not read as place()" >&2
+        exit 2
+    }
     echo "check-state-root-writes: self-test passed"
     exit 0
 fi

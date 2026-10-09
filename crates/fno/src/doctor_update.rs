@@ -1440,6 +1440,31 @@ fn post_install_steps(resolved: &Path, failed: &mut Vec<String>) {
                 failed.push("post-install codex refresh".into());
             }
         }
+        // The pinned Claude cache re-copies only when the plugin version
+        // changes and the stage serves one version forever, so the restage
+        // above never reaches it. Converge it beside codex; the converge
+        // byte-verifies against source HEAD, and drift after it fails the
+        // update rather than warning.
+        let args: Vec<String> = [
+            "plugin-install".into(),
+            "--converge-claude".into(),
+            "--source".into(),
+            resolved.to_string_lossy().into_owned(),
+        ]
+        .to_vec();
+        let code = run_inherit(&agents_bin, &args);
+        if code == 2 {
+            // Usage exit: an installed fno-agents predating --converge-claude
+            // (a --no-rust update never redeploys the binary). Name the skip
+            // instead of failing every such update; fno doctor still fails
+            // loudly on real cache drift through its own check gate.
+            eprintln!(
+                "fno doctor update: installed fno-agents predates the claude cache converge; skipped. A full fno doctor update (without --no-rust) deploys it."
+            );
+        } else if code != 0 {
+            eprintln!("fno doctor update: claude cache converge exited {code}");
+            failed.push("claude cache converge".into());
+        }
     }
 }
 

@@ -285,29 +285,6 @@ pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
-/// The probe feed a board slice can afford, as `(tokens, cap_warning)`.
-///
-/// The per-handle arithmetic the batch prices with (`0.75s` a handle after a
-/// `20s` cold start, ceiling `60s`) bounds the feed to a measured prefix:
-/// claim-derived holders ride first, so a cap withholds the roster tail,
-/// which the unmeasured-holders warning then names. `affordable == 0` keeps
-/// the whole feed: the page bound declines to spawn and the run reads
-/// timed-out, the receipt the board-budget pins expect, never a silent
-/// trim. `affordable >= len` feeds everything.
-pub(crate) fn bound_truth_feed(
-    tokens: Vec<String>,
-    affordable: usize,
-) -> (Vec<String>, Option<String>) {
-    if affordable == 0 || affordable >= tokens.len() {
-        return (tokens, None);
-    }
-    let note = format!(
-        "truth probe: measuring the first {affordable} of {} holders within the board slice; the tail reads unmeasured",
-        tokens.len()
-    );
-    (tokens[..affordable].to_vec(), Some(note))
-}
-
 pub(crate) fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
 }
@@ -841,12 +818,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                             .unwrap_or_else(|| h.clone())
                     })
                     .collect();
-                let affordable =
-                    crate::truth_probe::family1_truth_affordable_handles(Budget::spawn_bound(dl));
-                let (tokens, cap_note) = bound_truth_feed(tokens, affordable);
-                if let Some(note) = cap_note {
-                    warnings.push(note);
-                }
                 Some(s.spawn(move || {
                     crate::truth_probe::family1_truth_probe_many_measured_within(&tokens, Some(dl))
                 }))
@@ -2610,30 +2581,6 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_feed_is_capped_to_the_affordable_prefix_and_names_the_tail() {
-        // The per-handle bound converts a killed empty page into a measured
-        // prefix: a slice funding part of the feed keeps the prefix
-        // (claim-derived holders ride first) and names the withheld tail.
-        let tokens: Vec<String> = (0..5).map(|i| format!("t-{i}")).collect();
-        let (feed, note) = bound_truth_feed(tokens.clone(), 3);
-        assert_eq!(feed, tokens[..3].to_vec());
-        let note = note.expect("a mid-feed cap names the tail");
-        assert!(
-            note.contains("measuring the first 3 of 5 holders"),
-            "{note:?}"
-        );
-        // A slice funding everything, and one funding nothing (the page
-        // bound declines to spawn, the run reads timed out - the receipt
-        // the budget pins expect), keep the whole feed and stay quiet.
-        let (feed, note) = bound_truth_feed(tokens.clone(), 5);
-        assert_eq!(feed, tokens);
-        assert!(note.is_none());
-        let (feed, note) = bound_truth_feed(tokens, 0);
-        assert_eq!(feed.len(), 5);
-        assert!(note.is_none());
-    }
-
-    #[test]
     fn a_working_handover_holder_keeps_its_node_out_of_unplanned_and_stale() {
         // AC7-HP: the ready feed cannot see a stale launch-window lease
         // (include_stale=false excludes it, worked ids too), so the old
@@ -3417,127 +3364,6 @@ mod tests {
         assert!(
             !parsed.blind_queues.is_empty(),
             "the killed source must still be named"
-        );
-    }
-
-    #[test]
-    fn a_timed_out_truth_batch_on_a_quiet_board_reads_not_read_never_unreadable() {
-        // At load 335 on 12 cores the truth batch timed out on budget and the
-        // claim-dependent queues read unreadable, so a quiet board blocked
-        // completion on about ten consecutive stops with nothing to act on.
-        // A timeout against the board's own deadline is the board stopping,
-        // not the source failing: the queues must read not-read, the flag
-        // must stay off, and the receipt must name the read. The board also
-        // returns inside budget plus the serialization reserve, and the
-        // holder reads unmeasured by the "timed out" receipt word - never
-        // no-evidence.
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _restore = EnvRestore::take(&[
-            "FNO_AGENTS_HOME",
-            "FNO_SPACES_DIR",
-            "HOME",
-            "FNO_CLAIMS_ROOT",
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
-        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
-        std::env::set_var("HOME", dir.path());
-        std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
-        // ONE stale claim: the dead-stated holder is exactly the token the
-        // board probes, so the truth batch runs and (stubbed below) times
-        // out against the budget-derived page bound.
-        let now_ms = crate::claims::now_ms();
-        let lock = crate::claims::claim_path("node:lead-truth-holder", Some(dir.path())).unwrap();
-        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
-        std::fs::write(
-            &lock,
-            serde_json::json!({
-                "schema_version": crate::claims::PID_UNAVAILABLE_SCHEMA_VERSION,
-                "key": "node:lead-truth-holder",
-                "holder": "claude:t-2440-truth",
-                "acquired_at": now_ms - 3_600_000,
-                "host": "board-test-off-host",
-                "pid_unavailable": true,
-                "expires_at": now_ms - 1_800_000,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        // The truth batch execs bare `fno`; stub it to sleep 30s. `gh` gets
-        // an empty-open-PR listing so the prs reads never reach the network.
-        // Everything else answers at once.
-        let stub_dir = dir.path().join("stub-bin");
-        std::fs::create_dir_all(&stub_dir).unwrap();
-        let stub = crate::write_exec_stub(
-            &stub_dir,
-            "fno",
-            "#!/bin/sh\nif [ \"$1\" = agents ] && [ \"$2\" = truth ]; then exec sleep 30; fi\necho '{}'\n",
-        );
-        crate::write_exec_stub(&stub_dir, "gh", "#!/bin/sh\necho '[]'\n");
-        let prev_py = std::env::var_os("FNO_PY");
-        let prev_path = std::env::var_os("PATH");
-        let prev_bin = std::env::var_os("FNO_BIN");
-        std::env::set_var("FNO_PY", &stub);
-        std::env::set_var("FNO_BIN", &stub);
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                stub_dir.display(),
-                prev_path.as_deref().and_then(|p| p.to_str()).unwrap_or("")
-            ),
-        );
-
-        let start = std::time::Instant::now();
-        let payload = read_board(&BoardOpts {
-            // The budget must survive the pre-truth sources on a loaded
-            // runner (measured: 2,000ms expired before the batch spawned and
-            // the queues read spent, never timed out), so the batch is the
-            // thing the budget kills, at its deadline-derived bound.
-            budget_ms: 8_000,
-            cwd: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        });
-        let elapsed = start.elapsed();
-
-        match prev_py {
-            Some(v) => std::env::set_var("FNO_PY", v),
-            None => std::env::remove_var("FNO_PY"),
-        }
-        match prev_path {
-            Some(v) => std::env::set_var("PATH", v),
-            None => std::env::remove_var("PATH"),
-        }
-        match prev_bin {
-            Some(v) => std::env::set_var("FNO_BIN", v),
-            None => std::env::remove_var("FNO_BIN"),
-        }
-        let parsed = crate::lead_termination::parse_org_board_value(&payload).expect("parses");
-        assert!(
-            !parsed.unreadable_sources,
-            "a timed-out batch is a budget kill, never an unreadable source: {payload}"
-        );
-        assert!(
-            parsed
-                .blind_queues
-                .iter()
-                .any(|q| q.contains("stale_claim not read: truth probe: batch of")),
-            "the receipt must name the timed-out read: {:?}",
-            parsed.blind_queues
-        );
-        // The board must return inside budget plus the serialization
-        // reserve, and the holder must read unmeasured by the receipt word,
-        // never no-evidence.
-        assert!(
-            elapsed < std::time::Duration::from_millis(8_750),
-            "board took {elapsed:?} against an 8,000ms budget with a 30s truth stub"
-        );
-        let err = payload["sources"]["holder_activity"]["error"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            err.contains("timed out"),
-            "the holder must read unmeasured, got holder_activity error: {err:?}"
         );
     }
 

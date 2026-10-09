@@ -417,6 +417,7 @@ pub mod session_names_fold;
 pub(crate) mod session_origin;
 pub mod session_report;
 pub mod session_start_bytes;
+pub mod session_truth;
 pub mod single_flight;
 pub mod skill_drift;
 pub mod slot_cutover;
@@ -1750,6 +1751,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
+    // Truth warm pass (daemon-emitted): every row's cursor rebuilt after a
+    // restart, so no session answers `warming` past this point.
+    "truth_warm_done",
     // Registry-side keeper sweep (daemon-emitted): the daemon-start
     // walk of the lane-B keeper thread sockets. Every dead or wedged verdict
     // carries its reason; the rebound/dead/wedged row events name the row.

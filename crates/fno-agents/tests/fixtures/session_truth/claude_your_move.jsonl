@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-10-08T11:55:00Z", "message": {"role": "assistant", "content": "The schema has two candidate keys. Should I proceed with the migration?", "model": "claude-sonnet-5-5"}}

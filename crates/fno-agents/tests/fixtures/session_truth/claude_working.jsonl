@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2026-10-08T11:59:00Z", "message": {"role": "user", "content": "summarize the failures"}}
+{"type": "assistant", "timestamp": "2026-10-08T11:59:30Z", "message": {"role": "assistant", "content": "Reading the ledger now.", "model": "claude-sonnet-5-5"}}
