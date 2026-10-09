@@ -123,6 +123,7 @@ fn write_case(root: &Path, case: &Case) -> PathBuf {
     std::fs::write(dir.join("config.toml"), config).unwrap();
 
     if case.agents_dir_is_file {
+        std::fs::create_dir_all(agents.parent().unwrap()).unwrap();
         std::fs::write(&agents, "not a directory").unwrap();
     } else {
         std::fs::create_dir_all(&agents).unwrap();
