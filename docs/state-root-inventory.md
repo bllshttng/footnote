@@ -245,6 +245,8 @@ You do not. The root rows are shrink-only (see The rule). The runtime guard refu
 
 Project state left the checkout. One space per repository, keyed on the CANONICAL repo root (the git common dir's checkout), slug = the canonical path with `/` swapped for `-` (Claude's project-dir shape: read the directory name, see the path). Every worktree of a repo resolves to ONE space, so cross-worktree state needs no symlink. Per-worktree state sits at `<space>/worktrees/<worktree basename>/`. A checkout keeps only `.fno/config.toml` (committed project config) and the sandbox breadcrumb below. The first resolve of a moved file renames the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
 
+The deleter: a whole space (or a `<space>/worktrees/<name>` slice) whose source dir no longer exists is pruned by the `stale_spaces` lane of `fno doctor reclaim` once its newest entry is quiet past 24 h. The `/`-to-`-` slug swap is lossy, so the lane judges a source gone only when NO segmentation of the slug names an existing dir; git's worktree list is the one authority for slices; a failed read or an entry inside the window keeps the space.
+
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `<space>/events.jsonl` | `paths.project_events_json()`; legacy bytes only since the event-store cutover | import source |
