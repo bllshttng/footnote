@@ -93,6 +93,98 @@ pub fn migrate_node_provenance(value: &mut Value) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Rename the legacy `crown_*` keys on registry table rows to their current
+/// names. The table was imported from a snapshot that still held them, and
+/// the file walk never opens graph.db. A row that holds both spellings keeps
+/// the current one unless it is null. Returns whether any row changed.
+pub(crate) fn upgrade_registry_rows(rows: &mut [Value]) -> bool {
+    let mut changed = false;
+    for row in rows {
+        let Some(map) = row.as_object_mut() else {
+            continue;
+        };
+        let legacy: Vec<String> = map
+            .keys()
+            .filter(|key| key.starts_with("crown_"))
+            .cloned()
+            .collect();
+        for key in legacy {
+            let Some(value) = map.remove(&key) else {
+                continue;
+            };
+            let current = map.entry(vocabulary(&key)).or_insert(Value::Null);
+            if current.is_null() {
+                *current = value;
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Rewrite the registry table once, so the stored rows carry current keys.
+/// Plain SQL, because the fno crate carries this file without the registry
+/// store.
+fn migrate_registry_table(root: &Path) -> Result<(), String> {
+    for path in [
+        root.join("registry.json"),
+        root.join("agents").join("registry.json"),
+    ] {
+        let Some(database) = crate::registry_read::database_path(&path) else {
+            continue;
+        };
+        if !path.is_dir() || !database.exists() {
+            continue;
+        }
+        let mut conn = crate::store_conn::open_write(&database)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let table: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !table {
+            continue;
+        }
+        let rows = {
+            let mut statement = tx
+                .prepare("SELECT identity, payload FROM registry")
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            let collected: Vec<(String, String)> =
+                rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+            collected
+        };
+        let mut changed = false;
+        for (identity, payload) in rows {
+            let mut row: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            if upgrade_registry_rows(std::slice::from_mut(&mut row)) {
+                tx.execute(
+                    "UPDATE registry SET payload=?1 WHERE identity=?2",
+                    rusqlite::params![row.to_string(), identity],
+                )
+                .map_err(|e| e.to_string())?;
+                changed = true;
+            }
+        }
+        if changed {
+            tx.execute(
+                "UPDATE registry_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn migrate_value(value: &mut Value, field: &str) -> Result<(), String> {
     match value {
         Value::Object(map) => {
@@ -468,7 +560,10 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     // v1 receipts were stamped by a walk that skipped a symlinked spaces
     // root, so they cannot vouch for it; a re-walk is idempotent.
     let marker = root.join("migrations/role-vocabulary-v2.done");
-    if marker.exists() {
+    // The table pass has its own receipt: roots stamped v2 before it existed
+    // still hold crown_* rows in graph.db.
+    let table_marker = root.join("migrations/role-registry-table-v1.done");
+    if marker.exists() && table_marker.exists() {
         return Ok(());
     }
     crate::live_store_fence::refuse_worktree_build_on_operator_store(root)?;
@@ -482,11 +577,19 @@ pub fn run_at(root: &Path) -> Result<(), String> {
         .open(marker.with_extension("lock"))
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
-    if marker.exists() {
-        return Ok(());
+    if !marker.exists() {
+        walk(root, 0)?;
+        atomic_write(&marker, b"1\n")?;
     }
-    walk(root, 0)?;
-    atomic_write(&marker, b"1\n")
+    // A failed table pass must not stop the daemon: the read path still
+    // serves current keys, and the next start retries.
+    if !table_marker.exists() {
+        match migrate_registry_table(root) {
+            Ok(()) => atomic_write(&table_marker, b"1\n")?,
+            Err(error) => eprintln!("role migration: registry table left unmigrated: {error}"),
+        }
+    }
+    Ok(())
 }
 
 /// The roots one migration run walks. Readers find spaces at

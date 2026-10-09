@@ -611,6 +611,7 @@ mod tests {
     #[test]
     fn handoff_requires_an_explicit_new_person_name_before_any_transfer() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::AgentsHomeEnvGuard::set(tmp.path());
         let mut payload = json!({"scope":"scope", "succession":true,
             "caller":{"kind":"agent", "name":"Jordan"},
             "rows":[{"name":"Jordan", "status":"live", "role_scope":"scope",
