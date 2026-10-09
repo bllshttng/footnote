@@ -380,6 +380,99 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
 }
 
 #[test]
+fn prune_expires_telemetry_including_rows_stored_as_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let guard = |name: &str, decision: &str| {
+        json!({"ts": fresh_ts(), "type": "guard_decision", "source": "hook",
+               "data": {"guard": name, "decision": decision, "tool": "Bash"}})
+    };
+    let tick = |ts: String, arm: &str| {
+        json!({"ts": ts, "type": "control_plane_tick", "source": "daemon",
+               "data": {"arm": arm, "scheduler": "daemon", "acted": 0, "interval_s": 30}})
+    };
+    append(
+        &live,
+        &[
+            tick("2026-05-01T08:00:00Z".to_string(), "expired"),
+            tick(fresh_ts(), "legacy"),
+            tick(fresh_ts(), "fresh"),
+            checkin("2026-05-01T08:00:00Z", "x-aaaa", "ancient durable"),
+            guard("graph-write-protect", "allow"),
+            guard("pipe-guard", "block"),
+        ],
+    );
+    let store = sync(&live).unwrap().store;
+    assert_eq!(
+        count_type(&store, "control_plane_tick"),
+        2,
+        "the expired tick left"
+    );
+    // A row written before its kind joined the class carries `durable`.
+    let eight_days_ago = chrono::Utc::now().timestamp_millis() - 8 * DAY_MS;
+    let writable = Connection::open(&store).unwrap();
+    writable
+        .execute(
+            "UPDATE events SET retention_class = 'durable', ts_ms = ?1 \
+             WHERE type = 'control_plane_tick' AND line LIKE '%legacy%'",
+            params![eight_days_ago],
+        )
+        .unwrap();
+    // Two days old: past the allow horizon, inside the block one.
+    writable
+        .execute(
+            "UPDATE events SET ts_ms = ?1 WHERE type = 'guard_decision'",
+            params![chrono::Utc::now().timestamp_millis() - 2 * DAY_MS],
+        )
+        .unwrap();
+    writable
+        .execute(
+            "DELETE FROM events_meta WHERE key = 'telemetry_pruned_ms'",
+            [],
+        )
+        .unwrap();
+    drop(writable);
+    sync(&live).unwrap();
+    assert_eq!(
+        count_type(&store, "control_plane_tick"),
+        1,
+        "the legacy tick left"
+    );
+    assert_eq!(count_type(&store, "lead_checkin"), 1, "durable rows stay");
+    let guards: Vec<String> = open_read(&store)
+        .unwrap()
+        .prepare("SELECT json_extract(line, '$.data.decision') FROM events WHERE type = 'guard_decision'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        guards,
+        ["block"],
+        "a day-old allow row left; the block row stays"
+    );
+    let backlog: String = open_read(&store)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM events_meta WHERE key = 'telemetry_backlog'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog, "0", "a finished pass clears its backlog mark");
+    let class: String = open_read(&store)
+        .unwrap()
+        .query_row(
+            "SELECT retention_class FROM events WHERE type = 'control_plane_tick'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(class, "telemetry");
+}
+
+#[test]
 fn v1_store_migrates_in_place_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("events.db");

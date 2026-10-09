@@ -29,6 +29,7 @@ pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &[
     "rows",
     "prune",
     "recover",
+    "signals",
 ];
 
 /// Classify `fno doctor event <sub> ...` for the front door: `Some(rest)`
@@ -69,9 +70,10 @@ pub fn run(args: &[OsString]) -> i32 {
             copy_recovery::run(&rest[1..])
         }
         "recover" => recovery::run(rest),
+        "signals" => crate::event_signals::run(rest),
         _ => {
             eprintln!(
-                "error: expected a subcommand (emit-envelope | export | import | rows | prune | find)"
+                "error: expected a subcommand (emit-envelope | export | import | rows | prune | find | signals)"
             );
             2
         }

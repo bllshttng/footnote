@@ -4652,10 +4652,24 @@ fn handle_report_stores_on_matching_row() {
     assert_eq!(rep.reason.as_deref(), Some("running tests"));
     assert!(!rep.received_at.is_empty(), "daemon stamps received_at");
 
+    // A same-state repeat stores its newer seq and journals nothing.
+    let repeat = Request::new(
+        2,
+        "agent.report",
+        json!({"session_id": "uuid-repA", "seq": 4, "state": "working"}),
+    );
+    assert_eq!(
+        handle_report(&ctx, &repeat).result().unwrap()["stored"],
+        true
+    );
     let events = read_events(&home);
-    assert!(
-        events.iter().any(|e| e["type"] == "inside_leg_report"),
-        "inside_leg_report not emitted: {events:?}"
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "inside_leg_report")
+            .count(),
+        1,
+        "one inside_leg_report per state change: {events:?}"
     );
     std::fs::remove_dir_all(home.root()).ok();
 }

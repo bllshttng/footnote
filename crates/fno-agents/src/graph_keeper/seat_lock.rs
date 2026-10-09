@@ -18,6 +18,15 @@ fn seat_lock_path(sock: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Unlink `<sock>.lock` at a clean exit, while this process still holds its
+/// flock, so a keeper leaves no seat file behind. Call it only while the
+/// seat is ours (the socket still names our bound inode). A racer that opened
+/// the name before the unlink reads the moved inode in [`take_seat`] and
+/// reopens a fresh file.
+pub(super) fn release_seat(sock: &Path) {
+    let _ = std::fs::remove_file(seat_lock_path(sock));
+}
+
 /// Take the exclusive seat flock on `<sock>.lock`, held for the process
 /// life (the returned File keeps it). `None` = the seat is owned: the
 /// daemon's bind_supervisor_socket rule, applied to the store.
