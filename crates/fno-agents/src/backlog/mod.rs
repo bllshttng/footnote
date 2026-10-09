@@ -1362,6 +1362,50 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     query_rows(connection, &RowQuery::default(), None)
 }
 
+/// The light resolution index for single-node doors: id, slug, and archived
+/// flag only, in store order. The single-node loader serves the body; the
+/// whole export exists for callers that read every row. Never pass these
+/// rows as a mutation base: the store-seam guards scope counts and diffs
+/// over fields this index does not carry.
+pub fn read_resolution_index(graph: &Path) -> Result<Vec<Value>, String> {
+    let connection = read_connection(graph)?;
+    let mut statement = connection
+        .prepare("SELECT id, slug, archived_at FROM nodes ORDER BY ordinal, id")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let slug: String = row.get(1)?;
+            let archived_at: Option<String> = row.get(2)?;
+            // The archived key stays ABSENT for live rows: the live/archived
+            // partition filters on the key's absence, the shape the full
+            // export serves.
+            let mut object = serde_json::Map::new();
+            object.insert("id".into(), Value::String(id));
+            object.insert("slug".into(), Value::String(slug));
+            if let Some(ts) = archived_at {
+                object.insert("archived_at".into(), Value::String(ts));
+            }
+            Ok(Value::Object(object))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut rows: Vec<Value> = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for (id, _, body) in nodes::raw_rows_where(&connection, None)? {
+        let mut object = serde_json::Map::new();
+        object.insert("id".into(), Value::String(id));
+        if let Some(slug) = body.get("slug").filter(|value| !value.is_null()) {
+            object.insert("slug".into(), slug.clone());
+        }
+        if let Some(ts) = body.get("archived_at").filter(|value| !value.is_null()) {
+            object.insert("archived_at".into(), ts.clone());
+        }
+        rows.push(Value::Object(object));
+    }
+    Ok(rows)
+}
+
 /// Narrow selection and projection. Whole-read defaults retain archived rows;
 /// readiness support stays internal when requested through `with_blockers`.
 #[derive(Clone, Debug)]
