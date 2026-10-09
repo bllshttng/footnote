@@ -473,7 +473,7 @@ write_stamp() {
 # one call, one shape, no version-lag fallback to maintain.
 # BOUNDED, like the refresh below it. A bound that fires reads as no claim,
 # which only skips one heartbeat; the alternative is a hook that hangs.
-_status_timeout="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
+_STATUS_TIMEOUT="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
 _status_json() {
   with_timeout "$_STATUS_TIMEOUT" \
     "$AGENTS_BIN" claim status "node:$NODE_ID" --json 2>/dev/null
