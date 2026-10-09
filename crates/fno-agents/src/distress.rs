@@ -167,16 +167,18 @@ const NEWEST_ASSISTANT_FIRST_WINDOW: u64 = 256 * 1024;
 /// `watching`: an older entry's distress was handled at its own stop. None
 /// on an unreadable file or a file with no assistant text.
 pub(crate) fn newest_assistant_text(transcript_path: &Path) -> Option<String> {
-    let len = std::fs::metadata(transcript_path).ok()?.len();
     let mut window = NEWEST_ASSISTANT_FIRST_WINDOW;
     loop {
-        let whole = window >= len;
         let bytes = crate::tail_bytes(transcript_path, window);
         let text = String::from_utf8_lossy(&bytes);
         if let Some(found) = text.lines().rev().find_map(assistant_text_of_line) {
             return Some(found);
         }
-        if whole {
+        // The length is read after the tail: a file that grew during the
+        // read can only push the window start later, never earlier, so this
+        // bound proves the read began at byte 0.
+        let len = std::fs::metadata(transcript_path).ok()?.len();
+        if window >= len {
             return None;
         }
         window = window.saturating_mul(4);
