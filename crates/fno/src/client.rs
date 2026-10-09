@@ -534,26 +534,6 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     );
 }
 
-/// Whether the interactive path must disable OSC 133 injection. Fail-open
-/// through the native config read ([`crate::config_defaults::lookup_key`]):
-/// an absent file, an unreadable one, or a non-`off` value all leave
-/// injection on (the default). Runs synchronously inside `spawn_server`,
-/// *before* the client's spawn-connect wait loop exists - the native read is
-/// one bounded file parse, where the retired `fno config get` subprocess
-/// cold-started the Python shim and could freeze `fno` startup for seconds.
-fn shell_integration_off() -> bool {
-    crate::config_defaults::lookup_key("mux.shell_integration")
-        .as_deref()
-        .map(config_says_off)
-        .unwrap_or(false)
-}
-
-/// The one off-switch, matched exactly like the Rust pane-spawn side
-/// (`pty::integration_disabled`): only a trimmed `off` disables injection.
-fn config_says_off(stdout: &str) -> bool {
-    stdout.trim() == "off"
-}
-
 // ---------------------------------------------------------------------------
 // View state + pure composition
 // ---------------------------------------------------------------------------
@@ -8217,23 +8197,9 @@ async fn attach_and_run(
                 }
             }
             Some((key, tokens)) = details_rx.recv() => {
-                // A session-details token answer paints only the modal that
-                // asked: a stale key (modal closed, or reopened on another
-                // row) is dropped, and an already-answered modal is never
-                // painted twice.
-                let mut repaint = false;
-                if let Some(b) = view.messages_board.as_mut() {
-                    if let Some(d) = b.detail.as_mut() {
-                        if d.key == key && d.tokens_pending {
-                            if let Some(tokens) = tokens {
-                                messages_detail::apply_tokens(&mut d.popup, &tokens);
-                            }
-                            d.tokens_pending = false;
-                            repaint = true;
-                        }
-                    }
-                }
-                if repaint {
+                // The stale-key and double-answer guards live beside the
+                // modal; this arm only repaints on a real hit.
+                if messages_detail::apply_token_answer(&mut view, &key, tokens) {
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }

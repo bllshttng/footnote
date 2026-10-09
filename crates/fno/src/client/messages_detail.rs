@@ -161,7 +161,6 @@ pub(crate) fn apply_tokens(popup: &mut Popup, tokens: &Value) {
     );
 }
 
-
 #[cfg(test)]
 mod detail_tests {
     use super::*;
@@ -182,4 +181,24 @@ mod detail_tests {
         apply_tokens(&mut popup, &empty);
         assert_eq!(popup.rows.len(), 6);
     }
+}
+
+/// Land one fetched token answer: paints only a modal still open on the
+/// same key with its tokens still pending, so a stale answer never paints
+/// another session's numbers. True when the caller must repaint.
+pub(crate) fn apply_token_answer(view: &mut View, key: &str, tokens: Option<Value>) -> bool {
+    let Some(b) = view.messages_board.as_mut() else {
+        return false;
+    };
+    let Some(d) = b.detail.as_mut() else {
+        return false;
+    };
+    if d.key != key || !d.tokens_pending {
+        return false;
+    }
+    if let Some(tokens) = tokens {
+        apply_tokens(&mut d.popup, &tokens);
+    }
+    d.tokens_pending = false;
+    true
 }

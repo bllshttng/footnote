@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::server_spawn::config_says_off;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
