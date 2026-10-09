@@ -30,6 +30,7 @@ pub mod connections_view;
 pub mod context_used;
 pub mod digest_overlay;
 pub mod dispatch_launch;
+pub mod effect_map;
 pub mod doctor_update;
 #[cfg(test)]
 #[path = "doctor_update_tests.rs"]
@@ -37,6 +38,7 @@ mod doctor_update_tests;
 pub mod event_cli;
 mod event_signals;
 pub mod event_store;
+pub mod footnote_transcript;
 pub mod feed_overlay;
 pub(crate) mod first_check;
 pub mod frame_html;
