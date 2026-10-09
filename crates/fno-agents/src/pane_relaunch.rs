@@ -231,9 +231,10 @@ pub(crate) fn build_resume_argv_tokens_split(
                 argv.splice(at..at, ["--cd".to_string(), cwd.to_string()]);
             }
         }
-        // Hook trust is posture-free, so it rides every resume, last, as in
-        // the Python twin.
-        argv.extend(crate::codex_ask::hook_trust_flag());
+        // Hook trust is posture-free, so it rides every resume. It is a global,
+        // so it goes right after the binary, ahead of the grant, as in the
+        // Python twin.
+        argv.splice(1..1, crate::codex_ask::hook_trust_flag());
     }
     Some(argv)
 }

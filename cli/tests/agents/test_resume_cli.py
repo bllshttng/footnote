@@ -725,9 +725,9 @@ def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass(monkeypatch)
     assert argv.index("--cd") < argv.index("resume")
     # No permission bypass: the row records no sandbox posture, so this lane
     # cannot tell a bounded worker from a yolo one. Hook trust is
-    # posture-free and rides last.
+    # posture-free and rides first, a global like the grant.
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
-    assert argv[-1] == "--dangerously-bypass-hook-trust"
+    assert argv[1] == "--dangerously-bypass-hook-trust"
     # Identity still comes from the contract.
     assert argv[0] == "codex"
     assert "01a03f51-4704-7f33-942a-e4e773d81cfd" in argv
