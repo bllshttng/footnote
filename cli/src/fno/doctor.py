@@ -4692,13 +4692,7 @@ def doctor_command(
     # A stale stage runs its hooks byte for byte; drift there is a blocker,
     # not the after-every-merge advisory the git cache kind stays as.
     pc = result.get("plugin_cache") or {}
-    # Roots present: status is the worst across enumerated roots, and a stale
-    # root blocks whatever the live-root kind reads. Covers a pinned cache
-    # that drifted after its marketplace registration vanished.
-    stage_stale = (
-        (pc.get("kind") == "stage" or bool(pc.get("roots")))
-        and pc.get("status") == "stale"
-    )
+    stage_stale = pc.get("kind") == "stage" and pc.get("status") == "stale"
     raise typer.Exit(
         1
         if result["status"] == "stale"
