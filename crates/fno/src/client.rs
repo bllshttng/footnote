@@ -8226,7 +8226,7 @@ async fn attach_and_run(
                     if let Some(d) = b.detail.as_mut() {
                         if d.key == key && d.tokens_pending {
                             if let Some(tokens) = tokens {
-                                super::messages_detail::apply_tokens(&mut d.popup, &tokens);
+                                messages_detail::apply_tokens(&mut d.popup, &tokens);
                             }
                             d.tokens_pending = false;
                             repaint = true;

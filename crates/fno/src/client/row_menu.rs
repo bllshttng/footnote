@@ -915,11 +915,11 @@ pub(super) async fn execute_row_menu_action(
                 )
                 .await;
                 let text = match outcome {
-                    Ok(Ok(Ok(s))) if s.success() => {
+                    Ok(Ok(s)) if s.success() => {
                         format!("hold released for {name}; held mail is delivering")
                     }
-                    Ok(Ok(Ok(s))) => format!("release failed ({s}); is fno-agents current?"),
-                    Ok(Ok(Err(exc))) => format!("release did not start: {exc}"),
+                    Ok(Ok(s)) => format!("release failed ({s}); is fno-agents current?"),
+                    Ok(Err(exc)) => format!("release did not start: {exc}"),
                     Err(_) => "release is still running; the hold lifts when it lands".into(),
                 };
                 if let Some(tx) = notice_tx {
