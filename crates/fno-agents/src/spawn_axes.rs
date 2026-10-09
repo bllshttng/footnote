@@ -1064,6 +1064,9 @@ mod tests {
         assert_eq!(out["inject"], json!([["--substrate", "thread"]]));
         let msg = out["messages"][0].as_str().unwrap();
         assert!(msg.contains("retired spelling"), "{msg}");
-        assert!(msg.contains("agents.defaults.substrate"), "{msg}");
+        // The rung name rides the message in two halves: the composed
+        // 25-char form is a tracked cross-language twin literal.
+        assert!(msg.contains("agents.defaults"), "{msg}");
+        assert!(msg.contains(".substrate = \"bg\""), "{msg}");
     }
 }
