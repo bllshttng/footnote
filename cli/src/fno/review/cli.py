@@ -109,9 +109,6 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
                         f"{list(_DISPOSITIONS)}, and a non-empty reason"
                     )
                 if disposition == "declined" and '"' not in reason:
-                    # The decline counts against the round cap like a fix, so
-                    # it must cite: the gate checks the quote exists; prose
-                    # quality stays the lane's job (single-lane.md).
                     raise RecordBuildError(
                         "a declined disposition's reason must cite the finding: "
                         'a double-quoted span quoting the proving line at the '
