@@ -8,10 +8,14 @@
 //! The default output IS `json.dumps(row, indent=2)` of the store row, so
 //! the renderer is a byte contract (see render.rs); the goldens were
 //! captured from the Python surface before its deletion.
+//!
+//! Resolution runs over a light index (id, slug, archived flag) and the
+//! winner is served through the single-node loader; the read never
+//! assembles the whole graph to answer one id.
 
 use serde_json::{json, Value};
 
-use super::node_ref::{archive_hit, resolve_tiers};
+use super::node_ref::resolve_tiers;
 use super::render::{py_json_compact, py_json_pretty, render_grouped};
 
 /// The unreadable-store exit: click reserves 2 for usage, so 3 is the first
@@ -100,10 +104,9 @@ pub fn run(tail: &[String]) -> i32 {
         return super::cli::forward_to_python("get", tail);
     }
     let graph_path = super::settings::graph_path();
-    // The store's own rows, served verbatim the way the keeper's read_ids
-    // answers: no defaults pass, no re-ordering - the row is the binary's
-    // typed export, and the golden bytes pin that shape.
-    let mut entries = match crate::backlog::read_entries(&graph_path) {
+    // The light index answers the resolution tiers without assembling any
+    // node body: id, slug, archived flag, in store order.
+    let index = match super::read_resolution_index(&graph_path) {
         Ok(rows) => rows,
         Err(err) => {
             eprintln!(
@@ -113,33 +116,31 @@ pub fn run(tail: &[String]) -> i32 {
             return GRAPH_UNREADABLE_EXIT;
         }
     };
-    // The defaults tail every stored row serves with (missing columns read
-    // as their typed defaults, appended in place), then the read-time
-    // readiness overlay (status + blocked_reason derive against the whole
-    // graph). Archived residents fall to the read-through: they live in the
-    // SAME store now (the `archived_at` column), so the read-through
-    // partitions this read instead of opening a sidecar file.
-    crate::graph_store::apply_defaults(&mut entries, false);
-    crate::graph_store::apply_readiness_overlay(&mut entries);
-    let live: Vec<Value> = entries
+    let live: Vec<Value> = index
         .iter()
         .filter(|r| r.get("archived_at").is_none())
         .cloned()
         .collect();
     if let Some(hit) = resolve_tiers(&live, args.id) {
-        let row = stamped_annotated(&hit, false);
-        println!("{}", render_out(&row, &args.render));
-        return 0;
+        let id = hit
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        return serve_loaded(&graph_path, &id, false, &args.render, &args.id);
     }
-    let archived: Vec<Value> = entries
+    let archived: Vec<Value> = index
         .iter()
         .filter(|r| r.get("archived_at").is_some())
         .cloned()
         .collect();
-    if let Some(row) = archive_hit(&archived, args.id) {
-        let out = stamped_annotated(&row, true);
-        println!("{}", render_out(&out, &args.render));
-        return 0;
+    if let Some(hit) = resolve_tiers(&archived, args.id) {
+        let id = hit
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        return serve_loaded(&graph_path, &id, true, &args.render, &args.id);
     }
     let served = served_store_path(&graph_path);
     eprintln!(
@@ -148,6 +149,192 @@ pub fn run(tail: &[String]) -> i32 {
         served.display()
     );
     1
+}
+
+/// Load one node and serve it with the same annotations the full-export read
+/// produced. `archived` stamps `_archived` before the work-map annotation,
+/// matching the captured Python bytes. The readiness overlay runs over the
+/// node plus its dependency closure so `status`/`blocked_reason` derive
+/// exactly as they do against the whole graph.
+fn serve_loaded(
+    graph_path: &std::path::Path,
+    id: &str,
+    archived: bool,
+    render: &Render,
+    query: &str,
+) -> i32 {
+    let connection = match super::read_connection(graph_path) {
+        Ok(connection) => connection,
+        Err(err) => {
+            eprintln!("Could not read the graph cleanly, so '{query}' cannot be resolved: {err}");
+            return GRAPH_UNREADABLE_EXIT;
+        }
+    };
+    let node = match super::nodes::node_claims_by_id() {
+        Ok(claims) => {
+            let claim = claims.get(id).cloned().unwrap_or_default();
+            let loaded =
+                match super::nodes::load_with_claim(&connection, id, Some(claim.clone()), None) {
+                    Ok(loaded) => loaded,
+                    Err(err) => {
+                        eprintln!(
+                        "Could not read the graph cleanly, so '{query}' cannot be resolved: {err}"
+                    );
+                        return GRAPH_UNREADABLE_EXIT;
+                    }
+                };
+            match loaded {
+                Some(node) => {
+                    let mut row = node.to_json();
+                    super::nodes::project_claim_value(&mut row, claim);
+                    Some(row)
+                }
+                None => {
+                    // A raw-carried resident loads only through raw_rows_where;
+                    // the whole-graph export served it verbatim, so the
+                    // single-node read does too. Still absent after that: a
+                    // node that vanished between the two reads, the same race
+                    // the export named `vanished mid-export`.
+                    let found = match super::nodes::raw_rows_where(
+                        &connection,
+                        Some(&[id.to_string()][..]),
+                    ) {
+                        Ok(found) => found,
+                        Err(err) => {
+                            eprintln!(
+                                "Could not read the graph cleanly, so '{query}' cannot be resolved: {err}"
+                            );
+                            return GRAPH_UNREADABLE_EXIT;
+                        }
+                    };
+                    found
+                        .into_iter()
+                        .find(|(raw_id, _, _)| raw_id == id)
+                        .map(|(_, _, mut row)| {
+                            super::nodes::project_claim_value(&mut row, claim);
+                            row
+                        })
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("Could not read the graph cleanly, so '{query}' cannot be resolved: {err}");
+            return GRAPH_UNREADABLE_EXIT;
+        }
+    };
+    let node = match node {
+        Some(node) => node,
+        None => {
+            eprintln!(
+                "Could not read the graph cleanly, so '{query}' cannot be resolved: node {id} vanished mid-export"
+            );
+            return GRAPH_UNREADABLE_EXIT;
+        }
+    };
+    let mut rows = vec![node];
+    let closure = match dependency_closure(&connection, &rows[0]) {
+        Ok(closure) => closure,
+        Err(err) => {
+            eprintln!("Could not read the graph cleanly, so '{query}' cannot be resolved: {err}");
+            return GRAPH_UNREADABLE_EXIT;
+        }
+    };
+    rows.extend(closure);
+    crate::graph_store::apply_defaults(&mut rows, false);
+    crate::graph_store::apply_readiness_overlay(&mut rows);
+    let row = rows.remove(0);
+    let out = stamped_annotated(row, archived);
+    println!("{}", render_out(&out, render));
+    0
+}
+
+/// The rows the single-node defaults pass can visit for this node: every
+/// direct child (the children summary rebuilds from the rows in the vec),
+/// every direct blocker, and each loaded row's supersession successor and
+/// own blockers, transitively. An id that loads absent stays absent, so
+/// `compute_readiness` answers `unknown-dep` exactly as it does against the
+/// whole-graph index. Read errors propagate: a silently skipped child would
+/// render a wrong children summary instead of failing the read.
+fn dependency_closure(
+    connection: &rusqlite::Connection,
+    target: &Value,
+) -> Result<Vec<Value>, String> {
+    let target_id = target
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut loaded: std::collections::BTreeMap<String, Value> = Default::default();
+    let mut queue: Vec<String> = target
+        .get("blocked_by")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Direct children in store order, then raw-carried children: the
+    // children summary in apply_defaults summarizes whatever rows the vec
+    // holds, so the vec must hold them.
+    let mut statement = connection
+        .prepare_cached("SELECT id FROM nodes WHERE parent_id = ?1 ORDER BY ordinal, id")
+        .map_err(|error| error.to_string())?;
+    let ids = statement
+        .query_map(rusqlite::params![target_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    queue.extend(ids);
+    let parents = vec![target_id.clone()];
+    let children = super::nodes::raw_children(connection, &parents)?;
+    for (id, _, body) in children {
+        if loaded.contains_key(&id) {
+            continue;
+        }
+        enqueue_deps(Some(&body), &mut queue);
+        loaded.insert(id, body);
+    }
+    while let Some(id) = queue.pop() {
+        if loaded.contains_key(&id) {
+            continue;
+        }
+        let row = match super::nodes::load(connection, &id) {
+            Ok(Some(node)) => Some(node.to_json()),
+            Ok(None) => {
+                // A raw-carried resident loads only through raw_rows_where.
+                let found = super::nodes::raw_rows_where(connection, Some(&[id.clone()][..]))?;
+                found.into_iter().next().map(|(_, _, row)| row)
+            }
+            Err(err) => return Err(err),
+        };
+        if let Some(row) = row {
+            enqueue_deps(Some(&row), &mut queue);
+            loaded.insert(id, row);
+        }
+    }
+    Ok(loaded.into_values().collect())
+}
+
+/// Queue a loaded row's blockers and supersession successor: everything the
+/// readiness pass may look up about it.
+fn enqueue_deps(row: Option<&Value>, queue: &mut Vec<String>) {
+    let Some(row) = row else {
+        return;
+    };
+    if let Some(blockers) = row.get("blocked_by").and_then(Value::as_array) {
+        for blocker in blockers {
+            if let Some(id) = blocker.as_str() {
+                queue.push(id.to_string());
+            }
+        }
+    }
+    if let Some(successor) = row.get("superseded_by").and_then(Value::as_str) {
+        if !successor.is_empty() {
+            queue.push(successor.to_string());
+        }
+    }
 }
 
 /// The render ladder: field, grouped, or the pretty JSON default. `_branch`
@@ -170,8 +357,7 @@ fn render_out(row: &Value, render: &Render) -> String {
 /// The served row's annotations: the `_resolved_cwd` work-map stamp, then
 /// the reading marker. An archived stamp lands before the annotation,
 /// matching the captured Python bytes.
-fn stamped_annotated(hit: &Value, archived: bool) -> Value {
-    let mut row = hit.clone();
+fn stamped_annotated(mut row: Value, archived: bool) -> Value {
     if archived {
         if let Some(obj) = row.as_object_mut() {
             obj.insert("_archived".to_string(), Value::Bool(true));
@@ -200,6 +386,7 @@ fn served_store_path(graph_path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::node_ref::archive_hit;
     use serde_json::json;
 
     fn fixture_entries() -> Vec<Value> {
