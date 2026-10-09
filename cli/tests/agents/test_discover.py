@@ -426,15 +426,9 @@ def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypa
         job_id="deadbeef",
         cwd="/Users/x/code/project",
     )
-    monkeypatch.setattr(discover, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(discover, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
-    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(lock_path, "w") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        started = time.monotonic()
-        sessions = discover.discover_live_sessions(
+    def scan():
+        return discover.discover_live_sessions(
             sessions_dir=sdir,
             projects_dir=tmp_path / "no-projects",
             codex_sessions_dir=tmp_path / "no-codex",
@@ -446,7 +440,30 @@ def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypa
             classify_truth=False,
         )
 
-    assert time.monotonic() - started < 0.5
+    # The uncontended baseline: the same scan with the lock free. The bound
+    # below applies to the delta the lock wait adds, never to absolute wall
+    # time, which a loaded CI runner inflates for both passes alike.
+    baseline_started = time.monotonic()
+    baseline = scan()
+    baseline_elapsed = time.monotonic() - baseline_started
+    assert len(baseline) == 1
+    name_map.unlink(missing_ok=True)
+
+    monkeypatch.setattr(discover, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(discover, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
+    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "w") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        started = time.monotonic()
+        sessions = scan()
+        contended = time.monotonic() - started
+
+    # The bounded wait engaged (the contender polled past the knob before
+    # giving up) and the contention overhead stayed inside its budget.
+    assert contended >= 0.05
+    assert contended < baseline_elapsed + 0.5
     assert [session.handle for session in sessions] == ["aaaaaaaa"]
     assert not name_map.exists()
 
