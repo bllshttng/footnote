@@ -1015,7 +1015,7 @@ pub(crate) struct SlotReservation {
 /// these for the call duration; concurrent gates see them here. `Suspect`
 /// counts like `Live` (TTL-protected, never up for grabs); a dead
 /// holder-process claim reads `Stale` before this counts it.
-fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
+pub(crate) fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
     let root = match gate_claims_root() {
         Some(r) => r,
         None => return Vec::new(),

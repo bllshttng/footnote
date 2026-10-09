@@ -173,6 +173,9 @@ enum Role {
     AgentsHistory(Vec<OsString>),
     /// `fno agents transcript ...`: the native session-bundle transfer.
     AgentsTranscript(Vec<OsString>),
+    /// `fno agents top ...`: the native worker table (`fno-agents census
+    /// --workers`), claimed here because the Python front alone cost seconds.
+    AgentsTop(Vec<OsString>),
     /// `fno agents mail show ...`: the native one-message reader, lexically
     /// classified beside agents_history. The Python CLI keeps the rest of
     /// the mail tree; the carried tail runs `fno-agents chats show`.
@@ -225,17 +228,17 @@ fn exit_mux(code: i32) -> ! {
     std::process::exit(code)
 }
 
-/// The carried tail runs through the store's one owner: stdio inherited, the
+/// The carried tail runs through the native owner: stdio inherited, the
 /// child's exit code returned. A missing binary is a refusal, never a silent
 /// empty read.
-fn mail_show_exec(rest: &[OsString]) -> i32 {
+fn fno_agents_exec(label: &str, action: &[&str], rest: &[OsString]) -> i32 {
     let mut cmd = std::process::Command::new(fno::digest_overlay::fno_agents_bin());
-    cmd.args(["chats", "show"]);
+    cmd.args(action);
     cmd.args(rest);
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("fno agents mail show: could not run fno-agents: {e}");
+            eprintln!("{label}: could not run fno-agents: {e}");
             1
         }
     }
@@ -277,7 +280,11 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
 /// lexically claimed beside agents_history. The Python group registers the
 /// same spelling as a shim that execs here, so both fronts answer once.
 fn classify_agents_transcript(args: &[OsString]) -> Option<Vec<OsString>> {
-    if args.len() < 2 || args[0].to_str()? != "agents" || args[1].to_str()? != "transcript" {
+    classify_agents_verb(args, "transcript")
+}
+
+fn classify_agents_verb(args: &[OsString], verb: &str) -> Option<Vec<OsString>> {
+    if args.len() < 2 || args[0].to_str()? != "agents" || args[1].to_str()? != verb {
         return None;
     }
     Some(args[2..].to_vec())
@@ -329,6 +336,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = classify_agents_transcript(args) {
         return Role::AgentsTranscript(rest);
+    }
+    if let Some(rest) = classify_agents_verb(args, "top") {
+        return Role::AgentsTop(rest);
     }
     if let Some(role) = classify_mail_show(args) {
         return role;
@@ -569,7 +579,16 @@ fn main() {
         Role::DoctorUpdate(rest) => std::process::exit(fno::doctor_update::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::AgentsTranscript(rest) => std::process::exit(fno::transcript_transfer::run(&rest)),
-        Role::MailShow(rest) => std::process::exit(mail_show_exec(&rest)),
+        Role::MailShow(rest) => std::process::exit(fno_agents_exec(
+            "fno agents mail show",
+            &["chats", "show"],
+            &rest,
+        )),
+        Role::AgentsTop(rest) => std::process::exit(fno_agents_exec(
+            "fno agents top",
+            &["census", "--workers"],
+            &rest,
+        )),
         Role::MailViewRenamed => {
             eprintln!("fno agents mail view was renamed: use fno agents mail show");
             std::process::exit(2);
@@ -792,6 +811,11 @@ mod tests {
         assert_eq!(
             decide_role(&os(&["agents", "whoami"]), false),
             Role::Forward
+        );
+        // `top` skips the Python front: the lead check-in reads it every beat.
+        assert_eq!(
+            decide_role(&os(&["agents", "top", "--json", "--subagents"]), false),
+            Role::AgentsTop(os(&["--json", "--subagents"]))
         );
     }
 

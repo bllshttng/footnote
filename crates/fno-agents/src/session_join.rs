@@ -1,13 +1,11 @@
-//! The session-to-node join the top view reads: one client-side read over
-//! the graph's `sessions[]` rows and the node claims, keyed by harness
-//! session id, a live claim outranking the graph record. Split from the
-//! Python top view under the file budget; the answer is one JSON object.
+//! The session-to-node join the top view reads: one read over the graph's
+//! `sessions[]` rows and the node claims, keyed by lowercased harness
+//! session id, a live claim outranking the graph record.
 
-use crate::paths::AgentsHome;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
-pub fn run_sessions_map(_home: &AgentsHome) -> i32 {
+pub fn sessions_map() -> Map<String, Value> {
     let mut out: Map<String, Value> = Map::new();
     let mut node_pr: HashMap<String, Option<i64>> = HashMap::new();
 
@@ -97,6 +95,5 @@ pub fn run_sessions_map(_home: &AgentsHome) -> i32 {
         }
     }
 
-    println!("{}", Value::Object(out));
-    0
+    out
 }
