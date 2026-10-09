@@ -151,45 +151,115 @@ fn extract_result_blocked_json(text: &str) -> Option<HelpDistress> {
     None
 }
 
-/// The NEWEST assistant entry's text from a transcript, read through the one
-/// transcript reader that speaks both harness shapes (`fno agents
-/// newest-assistant-text`, peek's parsers). The distress parse's
-/// transcript-only fallback (agy / opencode / codex stop hooks carry no
-/// `last_assistant_message` payload). The in-process parser this replaced
-/// resolved the speaker via /message/role and a top-level role alone, so a
-/// codex rollout (payload.role, content[].output_text) read as
-/// assistant-free on every line and no codex distress ever reached a parent
-///; routing through the reader deletes that second parser instead
-/// of teaching it the codex shape. Newest-entry-only mirrors the intent
-/// read's newest-entry rule for `watching`: an older entry's distress was
-/// handled at its own stop. Fail-quiet None on a missing fno, a timeout, or
-/// an empty answer - the same degrade an unreadable transcript always had.
-/// `fno_bin` comes from the caller (`loopcheck_fno_bin()`) so the read is
-/// hermetically testable with a stub script.
-pub(crate) fn newest_assistant_text_via_reader(
-    fno_bin: &str,
-    transcript_path: &Path,
-    cwd: &Path,
-) -> Option<String> {
-    let args = [
-        "agents",
-        "newest-assistant-text",
-        "--transcript",
-        transcript_path.to_str()?,
-    ];
-    let out = bounded_read(
-        std::ffi::OsStr::new(fno_bin),
-        &args,
-        cwd,
-        "newest_assistant_text",
-        std::time::Duration::from_secs(10),
-    )
-    .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
+/// First tail window the newest-assistant scan reads; it grows 4x per miss.
+const NEWEST_ASSISTANT_FIRST_WINDOW: u64 = 256 * 1024;
+
+/// The NEWEST assistant entry's text from a claude- or codex-shaped JSONL
+/// transcript. The distress parse's transcript-only fallback (agy / opencode
+/// / codex stop hooks carry no `last_assistant_message` payload). Read in
+/// process: the `fno agents newest-assistant-text` child it replaced started
+/// Python on every stop and hit its 10 s bound on a loaded machine. The scan
+/// runs newest-first over a tail window that grows until it finds an
+/// assistant turn or covers the whole file, so the answer equals a
+/// whole-file scan while a long transcript pays only for its tail. The two
+/// record shapes are disjoint per line, so trying both loses nothing.
+/// Newest-entry-only mirrors the intent read's newest-entry rule for
+/// `watching`: an older entry's distress was handled at its own stop. None
+/// on an unreadable file or a file with no assistant text.
+pub(crate) fn newest_assistant_text(transcript_path: &Path) -> Option<String> {
+    let len = std::fs::metadata(transcript_path).ok()?.len();
+    let mut window = NEWEST_ASSISTANT_FIRST_WINDOW;
+    loop {
+        let whole = window >= len;
+        let bytes = crate::tail_bytes(transcript_path, window);
+        let text = String::from_utf8_lossy(&bytes);
+        if let Some(found) = text.lines().rev().find_map(assistant_text_of_line) {
+            return Some(found);
+        }
+        if whole {
+            return None;
+        }
+        window = window.saturating_mul(4);
+    }
+}
+
+/// One transcript line's text when it is an assistant turn with text: a
+/// claude `user`/`assistant` line (speaker from /message/role, else the line
+/// type) or a codex `response_item` message (speaker from /payload/role).
+fn assistant_text_of_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let rec: Value = serde_json::from_str(line).ok()?;
+    let (holder, fallback_role) = match rec.get("type").and_then(Value::as_str) {
+        Some(kind @ ("user" | "assistant")) => (rec.get("message")?, kind),
+        Some("response_item") => {
+            let payload = rec.get("payload")?;
+            if payload.get("type").and_then(Value::as_str) != Some("message") {
+                return None;
+            }
+            (payload, "?")
+        }
+        _ => return None,
+    };
+    if !holder.is_object() {
+        return None;
+    }
+    // An empty or absent role falls back to the line type, so the speaker
+    // check reads the role only when it is set.
+    let role = holder.get("role").filter(|r| json_truthy(r));
+    let is_assistant = match role {
+        Some(r) => r.as_str() == Some("assistant"),
+        None => fallback_role == "assistant",
+    };
+    if !is_assistant {
+        return None;
+    }
+    let text = content_text(holder.get("content"));
+    (!text.is_empty()).then_some(text)
+}
+
+/// False for the JSON values a role field leaves unset with: null, false,
+/// zero, and an empty string, array, or object.
+fn json_truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// A message `content` as legible text: a bare string, or the blocks' `text`
+/// fields (claude `text`, codex `input_text` / `output_text`) with a compact
+/// marker for each `tool_use`, joined by single spaces. Thinking and
+/// tool-result bodies carry no `text` field and drop out.
+fn content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|block| block.is_object())
+            .filter_map(|block| match block.get("text") {
+                Some(Value::String(t)) => Some(t.trim().to_string()),
+                _ if block.get("type").and_then(Value::as_str) == Some("tool_use") => {
+                    let name = match block.get("name") {
+                        None => "?".to_string(),
+                        Some(Value::String(n)) => n.clone(),
+                        Some(Value::Null) => "None".to_string(),
+                        Some(other) => other.to_string(),
+                    };
+                    Some(format!("[tool_use: {name}]"))
+                }
+                _ => None,
+            })
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
     }
 }
 
@@ -248,7 +318,7 @@ pub(crate) fn scan_and_emit(
 ) -> bool {
     let distress_text: Option<String> = last_assistant_message
         .map(str::to_string)
-        .or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
+        .or_else(|| newest_assistant_text(transcript_path));
     // A help tag wins when a message somehow carries both: it is the more
     // specific signal and it already has a reason attribute.
     let Some(distress) = distress_text
@@ -456,7 +526,7 @@ pub fn run_distress_scan(args: &[String]) -> i32 {
         println!("distress: none");
         return 0;
     }
-    let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
+    let text = newest_assistant_text(&transcript);
     let Some(distress) = text
         .as_deref()
         .and_then(|t| extract_help_distress(t).or_else(|| extract_result_blocked(t)))
@@ -677,26 +747,42 @@ mod tests {
         );
     }
 
+    /// One codex rollout `response_item` message line.
+    fn codex_line(role: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": role,
+                        "content": [{"type": "output_text", "text": text}]}
+        })
+        .to_string()
+    }
+
+    /// One claude transcript line whose content is a bare string.
+    fn claude_line(role: &str, text: &str) -> String {
+        serde_json::json!({"type": role, "message": {"role": role, "content": text}}).to_string()
+    }
+
     #[test]
-    fn distress_flows_from_reader_output_to_a_blocked_row() {
-        // x-bbbb regression, Rust half: the transcript fallback must feed
-        // extract_help_distress and land a blocked row. The stub pins the
-        // seam contract: `agents newest-assistant-text --transcript <path>`
-        // with the newest assistant text on stdout. The codex record SHAPE
-        // itself is pinned on the Python side, in the reader that now owns
-        // this parse (cli/tests/agents/test_peek.py); a rollout whose
-        // payload.role is assistant and whose last message carries the tag
-        // produces exactly this stdout.
+    fn distress_flows_from_a_codex_rollout_to_a_blocked_row() {
+        // A codex rollout puts the speaker and text under payload, and its
+        // event_msg lines are not messages: the scan skips them and lands on
+        // the newest assistant turn, whose tag reaches the blocked row.
         let tmp = tempfile::tempdir().unwrap();
         let transcript = tmp.path().join("rollout-2026-09-06T00-00-00-cx-1.jsonl");
-        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
-        let stub = write_exec(
-            tmp.path(),
-            "fno",
-            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf '%s' '<help reason=\"worktree-init-blocked\" evidence=\"Unable to create .git/refs/heads lock: Operation not permitted\">'\n",
-        );
-        let text =
-            newest_assistant_text_via_reader(stub.to_str().unwrap(), &transcript, tmp.path());
+        let lines = [
+            serde_json::json!({"type": "session_meta", "payload": {"id": "cx-1"}}).to_string(),
+            codex_line("user", "run the target"),
+            codex_line("assistant", "branch created, continuing"),
+            serde_json::json!({"type": "event_msg",
+                "payload": {"type": "task_complete", "last_agent_message": "done"}})
+            .to_string(),
+            codex_line(
+                "assistant",
+                r#"<help reason="worktree-init-blocked" evidence="Unable to create .git/refs/heads lock: Operation not permitted">"#,
+            ),
+        ];
+        std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+        let text = newest_assistant_text(&transcript);
         let distress = text.as_deref().and_then(extract_help_distress);
         assert_eq!(
             distress.as_ref().map(|d| d.reason.as_str()),
@@ -722,14 +808,64 @@ mod tests {
             serde_json::json!("worktree-init-blocked")
         );
         assert_eq!(row["node"], serde_json::json!("x-bbbb"));
-        // No reader answer (missing binary, empty stdout): fail-quiet None,
-        // the same degrade an unreadable transcript always had.
-        let text = newest_assistant_text_via_reader(
-            tmp.path().join("no-such-fno").to_str().unwrap(),
-            &transcript,
-            tmp.path(),
+    }
+
+    #[test]
+    fn newest_assistant_text_takes_the_newest_turn_across_tail_windows() {
+        // The NEWEST assistant turn wins, not the newest distress-bearing
+        // one: an older entry's distress was handled at its own stop.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let lines = [
+            claude_line("assistant", r#"<help reason="old wall">"#),
+            claude_line("user", "go"),
+            claude_line("assistant", "still working"),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(
+            newest_assistant_text(&path).as_deref(),
+            Some("still working")
         );
-        assert_eq!(text, None);
+        // The agy stop hook's synthesized line (string content) and a block
+        // list with a tool_use marker both read; a role-less line falls back
+        // to its type.
+        let blocks = serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "hidden"},
+            {"type": "text", "text": " <help reason=\"agy-blocked\"> "},
+            {"type": "tool_use", "name": "Bash"}
+        ]}});
+        std::fs::write(&path, format!("{blocks}\n")).unwrap();
+        assert_eq!(
+            newest_assistant_text(&path).as_deref(),
+            Some(r#"<help reason="agy-blocked"> [tool_use: Bash]"#)
+        );
+        // An assistant turn older than the first tail window is still found:
+        // the window grows until it covers the whole file.
+        let filler = claude_line("user", &"x".repeat(1024));
+        let mut big = claude_line("assistant", "RESULT: BLOCKED") + "\n";
+        let fillers = (NEWEST_ASSISTANT_FIRST_WINDOW as usize / filler.len()) * 2;
+        big.push_str(&format!("{filler}\n").repeat(fillers));
+        std::fs::write(&path, big).unwrap();
+        assert_eq!(
+            newest_assistant_text(&path).as_deref(),
+            Some("RESULT: BLOCKED")
+        );
+    }
+
+    #[test]
+    fn newest_assistant_text_is_none_without_an_assistant_turn() {
+        // User-only, empty, torn, and absent files all read as no answer,
+        // which the caller treats as fail-quiet.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        std::fs::write(&path, claude_line("user", "go") + "\n{\"type\": \"assist").unwrap();
+        assert_eq!(newest_assistant_text(&path), None);
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(newest_assistant_text(&path), None);
+        assert_eq!(
+            newest_assistant_text(&tmp.path().join("absent.jsonl")),
+            None
+        );
     }
 
     #[test]
@@ -760,21 +896,15 @@ mod tests {
         // AC1-HP / AC3-HP, exercised through the same entry point both stop
         // paths call: no `last_assistant_message` (the agy/opencode/codex
         // shape), so the transcript reader supplies the tag, and the caller's
-        // harness lands on the envelope.
+        // harness lands on the envelope. The lock keeps a parallel test's
+        // stub fno out of this run's parent push.
         let _env_guard = fno_bin_env_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let var = "FNO_LOOPCHECK_FNO_BIN";
-        let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
         let transcript = tmp.path().join("rollout-2026-09-06T00-00-00-cx-1.jsonl");
-        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
-        let stub = write_exec(
-            tmp.path(),
-            "fno",
-            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf '%s' '<help reason=\"worktree-init-blocked\" evidence=\"Operation not permitted\">'\n",
-        );
-        std::env::set_var(var, stub.to_str().unwrap());
+        let tag = r#"<help reason="worktree-init-blocked" evidence="Operation not permitted">"#;
+        std::fs::write(&transcript, codex_line("assistant", tag) + "\n").unwrap();
 
         let project = tmp.path().join("events.jsonl");
         let global = tmp.path().join("global.jsonl");
@@ -789,11 +919,6 @@ mod tests {
             None,
         );
 
-        match prior {
-            Some(v) => std::env::set_var(var, v),
-            None => std::env::remove_var(var),
-        }
-
         assert!(wrote);
         let row: serde_json::Value =
             serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
@@ -801,26 +926,6 @@ mod tests {
         assert_eq!(row["data"]["evidence"], "Operation not permitted");
         assert_eq!(row["node"], "x-bbbb");
         assert_eq!(row["harness"], "codex");
-    }
-
-    /// The `agents newest-assistant-text --transcript <path>` contract this
-    /// crate cannot itself parse (that reader lives in Python, `peek.py`):
-    /// read the record's `payload.content[0].text`, the same field the real
-    /// reader returns for a codex rollout line.
-    fn write_transcript_reader_stub(dir: &Path) -> PathBuf {
-        write_exec(
-            dir,
-            "fno",
-            r#"#!/bin/sh
-[ "$1" = agents ] && [ "$2" = newest-assistant-text ] && [ "$3" = --transcript ] || exit 42
-python3 -c '
-import json, sys
-with open(sys.argv[1]) as fh:
-    rec = json.loads(fh.readline())
-print(rec["payload"]["content"][0]["text"], end="")
-' "$4"
-"#,
-        )
     }
 
     #[test]
@@ -834,11 +939,7 @@ print(rec["payload"]["content"][0]["text"], end="")
         let _env_guard = fno_bin_env_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let var = "FNO_LOOPCHECK_FNO_BIN";
-        let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
-        let stub = write_transcript_reader_stub(tmp.path());
-        std::env::set_var(var, stub.to_str().unwrap());
 
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/rollout-codex-help.jsonl");
@@ -890,11 +991,6 @@ print(rec["payload"]["content"][0]["text"], end="")
         .map(|s| s.to_string())
         .collect();
         let code2 = run_distress_scan(&args2);
-
-        match prior {
-            Some(v) => std::env::set_var(var, v),
-            None => std::env::remove_var(var),
-        }
 
         assert_eq!(code, 0);
         assert_eq!(code2, 0);
@@ -1078,17 +1174,10 @@ print(rec["payload"]["content"][0]["text"], end="")
         let _env_guard = fno_bin_env_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let var = "FNO_LOOPCHECK_FNO_BIN";
-        let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
-        let transcript = tmp.path().join("rollout-result-blocked.jsonl");
-        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
-        let stub = write_exec(
-            tmp.path(),
-            "fno",
-            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf 'RESULT: BLOCKED\\nREASON: probe reason'\n",
-        );
-        std::env::set_var(var, stub.to_str().unwrap());
+        let transcript = tmp.path().join("t-result-blocked.jsonl");
+        let line = claude_line("assistant", "RESULT: BLOCKED\nREASON: probe reason");
+        std::fs::write(&transcript, line + "\n").unwrap();
         let project = tmp.path().join("events.jsonl");
         let global = tmp.path().join("global.jsonl");
         let args: Vec<String> = [
@@ -1108,10 +1197,6 @@ print(rec["payload"]["content"][0]["text"], end="")
         .map(|s| s.to_string())
         .collect();
         let code = run_distress_scan(&args);
-        match prior {
-            Some(v) => std::env::set_var(var, v),
-            None => std::env::remove_var(var),
-        }
         assert_eq!(code, 0);
         let row: serde_json::Value =
             serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();

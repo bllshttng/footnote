@@ -44,22 +44,12 @@ if [[ ! -x "$REAL_BIN" ]]; then
     exit 77
 fi
 
-# ── helper: a fake `fno agents newest-assistant-text --transcript <path>` ──
-# The reader that speaks the real codex shape is Python (peek.py); this
-# stub prints the same answer for a fixture on disk without needing a full
-# `fno` install, the same shortcut distress.rs's own unit tests take.
-make_reader_stub() {
+# ── helper: a no-op `fno` for the blocked row's parent push ──
+# The hook reads the transcript in process; the only `fno` child left is the
+# best-effort parent push, which this stub answers so no installed `fno` runs.
+make_push_stub() {
     local path="$1"
-    cat > "$path" <<'STUB'
-#!/bin/sh
-[ "$1" = agents ] && [ "$2" = newest-assistant-text ] && [ "$3" = --transcript ] || exit 42
-python3 -c '
-import json, sys
-with open(sys.argv[1]) as fh:
-    rec = json.loads(fh.readline())
-print(rec["payload"]["content"][0]["text"], end="")
-' "$4"
-STUB
+    printf '#!/bin/sh\nexit 0\n' > "$path"
     chmod +x "$path"
 }
 
@@ -98,8 +88,8 @@ log "T1: pre-manifest stop with a real help-tag transcript"
     SPACES_DIR="${TMP_DIR}/spaces"
     mkdir -p "$HOME_DIR/.fno" "$SPACES_DIR"
     init_git_repo "$TMP_DIR"
-    READER_STUB="${TMP_DIR}/fno-reader-stub"
-    make_reader_stub "$READER_STUB"
+    PUSH_STUB="${TMP_DIR}/fno-push-stub"
+    make_push_stub "$PUSH_STUB"
 
     INPUT_JSON=$(jq -cn --arg t "$FIXTURE" --arg s "t1-session" \
         '{transcript_path:$t, session_id:$s}')
@@ -107,7 +97,7 @@ log "T1: pre-manifest stop with a real help-tag transcript"
         "HOME=${HOME_DIR}" \
         "FNO_SPACES_DIR=${SPACES_DIR}" \
         "FNO_AGENTS_BIN=${REAL_BIN}" \
-        "FNO_LOOPCHECK_FNO_BIN=${READER_STUB}" \
+        "FNO_LOOPCHECK_FNO_BIN=${PUSH_STUB}" \
         "CODEX_THREAD_ID=t1-codex-thread"
 
     t1_ok=true
@@ -198,8 +188,8 @@ with open("'"$FIXTURE"'") as fh:
 rec["payload"]["content"][0]["text"] = "all clear, nothing stuck here"
 print(json.dumps(rec))
 ' > "$NO_HELP_FIXTURE"
-        READER_STUB2="${T1_TMP_DIR}/fno-reader-stub-2"
-        make_reader_stub "$READER_STUB2"
+        PUSH_STUB2="${T1_TMP_DIR}/fno-push-stub-2"
+        make_push_stub "$PUSH_STUB2"
 
         INPUT_JSON=$(jq -cn --arg t "$NO_HELP_FIXTURE" --arg s "t3-session" \
             '{transcript_path:$t, session_id:$s}')
@@ -207,7 +197,7 @@ print(json.dumps(rec))
             "HOME=${T1_HOME_DIR}" \
             "FNO_SPACES_DIR=${T1_SPACES_DIR}" \
             "FNO_AGENTS_BIN=${REAL_BIN}" \
-            "FNO_LOOPCHECK_FNO_BIN=${READER_STUB2}" \
+            "FNO_LOOPCHECK_FNO_BIN=${PUSH_STUB2}" \
             "CODEX_THREAD_ID=t3-codex-thread"
 
         t3_ok=true
