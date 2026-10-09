@@ -782,10 +782,10 @@ const REAP_CHUNK: usize = 8;
 /// the scan stays.
 ///
 /// `deadline` bounds the pass, checked before every chunk and every delete.
-/// The rows a spent deadline never settled are `deferred`. A bounded pass starts at a clock-chosen row and wraps, so live
-/// rows that cost a probe cannot hold the same dead rows out of reach on every
-/// pass. One row that fails to delete is named in `reap_failed`, and the pass
-/// goes on.
+/// The rows a spent deadline never settled are `deferred`. A bounded pass
+/// starts at a clock-chosen row and wraps, so live rows that cost a probe
+/// cannot hold the same dead rows out of reach on every pass. One row that
+/// fails to delete is named in `reap_failed`, and the pass goes on.
 pub(crate) fn reap_in_directory<'w>(
     dir: &Path,
     apply: bool,

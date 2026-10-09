@@ -2460,4 +2460,28 @@ mod tests {
         assert_eq!(holder_session.as_deref(), Some("s1"));
         assert_eq!(dispatched_by, None);
     }
+
+    /// Past the reap's deadline an unread session reads live, so its claim is
+    /// kept: the transcript probe never runs, and nothing is reaped on
+    /// evidence nobody read.
+    #[test]
+    fn a_session_past_the_reap_deadline_reads_live_without_a_probe() {
+        let index = std::cell::RefCell::new(Some(SessionRegistryIndex {
+            known: true,
+            by_session: std::collections::HashMap::new(),
+            by_name: std::collections::HashMap::new(),
+            by_fno_id: std::collections::HashMap::new(),
+            served: std::collections::HashMap::new(),
+            rows: std::collections::HashMap::new(),
+        }));
+        let answer =
+            session_liveness_answer_uncached("s-gone", &index, Some(std::time::Instant::now()));
+        assert!(
+            matches!(
+                answer,
+                crate::claims::SessionLiveness::Live(REAP_DEADLINE_KEPT)
+            ),
+            "{answer:?}"
+        );
+    }
 }
