@@ -444,11 +444,9 @@ def _child_env(iso: Path, extra: dict) -> dict:
 
 
 def _wait_for_flight_held(key: str, iso: Path, proc: "subprocess.Popen | None" = None, timeout: float = 8.0) -> None:
-    from fno.claims.io import claim_path
-
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if claim_path(key, root=iso).exists():
+        if claim_status(key, root=iso)["state"] != "free":
             return
         if proc is not None and proc.poll() is not None:
             break
