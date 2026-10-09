@@ -98,7 +98,6 @@ crossing	crates/fno/src/org_overlay.rs	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/org_overlay.rs	crate::server::fno_bin()
 crossing	crates/fno/src/org_overlay.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	pub(crate) fn fno_bin() -> PathBuf {
-crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::std_command(fno_bin());
 crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server/agent_actions.rs	let bin = fno_bin();
