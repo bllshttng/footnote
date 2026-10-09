@@ -13,10 +13,9 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Always written by an agent cargo, empty when it already ran under pid 1:
+/// an empty chain has no link to lose, but it keeps the claim under the cap.
 const OWNER_CHAIN: &str = "owner_chain";
-/// Set when the cargo already ran under pid 1 at acquire: it has no owner
-/// to record, and without the mark it would hold a claim no sweep can judge.
-const NO_OWNER: &str = "no_owner";
 /// Set for the sanctioned whole-suite lane, whose run can outlast the cap.
 const FULL_SUITE: &str = "full_suite";
 const DEFAULT_MAX_HOLD_SECS: i64 = 3600;
@@ -29,7 +28,7 @@ const START_SLACK_MS: i64 = 1000;
 /// place the cargo.
 pub(crate) fn owner_metadata(cargo_pid: u32) -> Option<Map<String, Value>> {
     let (table, _) = crate::census::process_table();
-    let ppid = table.iter().find(|row| row.pid == cargo_pid)?.ppid;
+    table.iter().find(|row| row.pid == cargo_pid)?;
     let entries: Vec<Value> = ancestor_chain(&table, cargo_pid)
         .into_iter()
         .filter_map(|pid| match crate::claims::probe_pid(pid as i32) {
@@ -39,9 +38,6 @@ pub(crate) fn owner_metadata(cargo_pid: u32) -> Option<Map<String, Value>> {
         .collect();
     let mut map = Map::new();
     map.insert(OWNER_CHAIN.to_string(), Value::Array(entries));
-    if ppid == 1 {
-        map.insert(NO_OWNER.to_string(), Value::Bool(true));
-    }
     if crate::test_run::full_suite_lane() {
         map.insert(FULL_SUITE.to_string(), Value::Bool(true));
     }
@@ -77,9 +73,6 @@ fn orphan_reason(
     probe: &dyn Fn(i32) -> crate::claims::PidProbe,
 ) -> Option<String> {
     let chain = metadata.get(OWNER_CHAIN)?.as_array()?;
-    if metadata.get(NO_OWNER) == Some(&Value::Bool(true)) {
-        return Some("it ran under pid 1 when it took the claim".to_string());
-    }
     let full_suite = metadata.get(FULL_SUITE) == Some(&Value::Bool(true));
     if !full_suite && now_ms - acquired_at > max_hold_ms {
         return Some(format!(
@@ -222,11 +215,12 @@ mod tests {
         let mut full = metadata.clone();
         full.insert(FULL_SUITE.to_string(), Value::Bool(true));
         assert_eq!(orphan_reason(&full, 0, 2 * hour, hour, &alive), None);
-        // A cargo already under pid 1 at acquire has no owner to lose.
+        // A cargo already under pid 1 at acquire has an empty chain: no link
+        // to lose, so only the cap frees it.
         let mut no_owner = Map::new();
         no_owner.insert(OWNER_CHAIN.to_string(), json!([]));
-        no_owner.insert(NO_OWNER.to_string(), Value::Bool(true));
-        assert!(orphan_reason(&no_owner, 0, 60_000, hour, &alive).is_some());
+        assert_eq!(orphan_reason(&no_owner, 0, 60_000, hour, &alive), None);
+        assert!(orphan_reason(&no_owner, 0, hour + 60_000, hour, &alive).is_some());
         // A user build records no chain and is never judged, however long it holds.
         assert_eq!(
             orphan_reason(&Map::new(), 0, 10 * hour, hour, &session_gone),
