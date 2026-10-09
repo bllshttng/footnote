@@ -344,7 +344,8 @@ def _stamp_launch_edge(node: "str | None") -> None:
     try:
         import subprocess
 
-        subprocess.run(argv, timeout=10, check=False)
+        # stdout carries the spawn's JSON receipt; the stamp must not write there.
+        subprocess.run(argv, timeout=10, check=False, stdout=subprocess.DEVNULL)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
 

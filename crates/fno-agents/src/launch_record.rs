@@ -281,6 +281,13 @@ fn join_cwd(base: &str, dir: &str) -> String {
 
 /// Every launch a shell command starts, with the cwd each child starts in.
 pub fn parse_command(cmd: &str, cwd: &str) -> Vec<Launch> {
+    // A heredoc body is data, not commands: past its opening line, a
+    // document that mentions `claude --bg` must not read as a launch.
+    let cmd = if cmd.contains("<<") {
+        cmd.lines().next().unwrap_or_default()
+    } else {
+        cmd
+    };
     let mut out = Vec::new();
     let mut here = cwd.to_string();
     for seg in segments(cmd) {
@@ -536,9 +543,13 @@ pub fn claim(root: &Path, child: &Child) -> Option<Record> {
                 && r.launch.cwd == cwd
                 && r.launched_at_ms <= child.started_at_ms + 5_000
                 && child.started_at_ms - r.launched_at_ms <= WINDOW_MS
+                // A named record belongs to the child with that name only: an
+                // interactive session in the same cwd knows no name, and must
+                // never take a bg worker's record.
                 && match (&r.launch.name, &child.name) {
                     (Some(a), Some(b)) => a == b,
-                    _ => true,
+                    (Some(_), None) => false,
+                    (None, _) => true,
                 }
         })
         .collect();
@@ -584,6 +595,31 @@ pub fn claim(root: &Path, child: &Child) -> Option<Record> {
 // ---------------------------------------------------------------------------
 // the node's first-launch edge
 
+/// The stamp's answer when one read settles it: the node is missing, or its
+/// edge is already set. `None` means the locked write must decide.
+fn settled(graph: &Path, node: &str) -> Result<Option<Stamp>, String> {
+    use rusqlite::OptionalExtension;
+    let db = crate::backlog::open(graph)?;
+    let exists: Option<i64> = db
+        .query_row("SELECT 1 FROM nodes WHERE id = ?1", [node], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if exists.is_none() {
+        return Ok(Some(Stamp::NoNode));
+    }
+    let edge: Option<String> = db
+        .query_row(
+            "SELECT spawned_by_session FROM node_provenance WHERE node_id = ?1",
+            [node],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|s: &String| !s.is_empty());
+    Ok(edge.map(Stamp::Kept))
+}
+
 /// What one stamp did, for receipts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stamp {
@@ -603,6 +639,11 @@ pub fn stamp_node(
     harness: Option<&str>,
     cwd: Option<&str>,
 ) -> Result<Stamp, String> {
+    // Read before paying the locked write: the write transaction exports the
+    // whole graph, and most stamps meet a settled edge or a missing node.
+    if let Some(answer) = settled(graph, node)? {
+        return Ok(answer);
+    }
     let outcome = std::cell::RefCell::new(Stamp::NoNode);
     crate::backlog::mutate_single_row(graph, "launch_edge_stamp", |rows| {
         let Some(row) = rows

@@ -40,6 +40,7 @@ fn reads_and_help_are_not_launches() {
         "claude --version",
         "claude --bg --help",
         "grep -n 'claude --bg' notes.md",
+        "cat > notes.md <<'EOF'\nclaude --bg -n w run it\nEOF",
         "codex exec resume abc",
         "codex --help",
         "opencode",
@@ -73,6 +74,13 @@ fn the_named_child_claims_its_record_once() {
     )
     .unwrap();
     assert_eq!(n, 2);
+    // An interactive session in the same cwd knows no name: it takes no
+    // named worker's record, even when only one would be left.
+    assert!(claim(
+        home.path(),
+        &child("human", "claude", &cwd, None, 1_001_000)
+    )
+    .is_none());
     let got = claim(
         home.path(),
         &child("c-2", "claude", &cwd, Some("w2"), 1_003_000),
