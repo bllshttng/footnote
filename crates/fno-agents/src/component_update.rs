@@ -10,7 +10,7 @@
 //! the expected revision proves a component.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const PYTHON_TOOL: &str = "python-tool";
@@ -54,6 +54,13 @@ pub struct ComponentProbe {
     pub pre_rev: Option<String>,
     #[serde(default)]
     pub post_rev: Option<String>,
+    /// Positive evidence the reported rev is a NEWER git descendant of the
+    /// expected rev (`git merge-base --is-ancestor`). A deploy that lands a
+    /// build newer than the rev this pass expected is not behind; only a
+    /// proven descendant passes on a mismatched rev. Absent means not proven,
+    /// so a mismatched rev without it stays Stale/Failed.
+    #[serde(default)]
+    pub observed_is_descendant: Option<bool>,
     /// Why the post-effect probe could not answer (named instrument, AC3-HP).
     #[serde(default)]
     pub instrument_error: Option<String>,
@@ -219,6 +226,21 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
                 Status::Fresh
             };
         }
+        Some(rev) if probe.observed_is_descendant == Some(true) && rev != expected => {
+            // A deployed build NEWER than the rev this pass expected is not
+            // behind (a second deploy landed mid-flight, or the source moved
+            // between the expected-rev read and the post-deploy probe). The
+            // descendant proof is named in the detail so a converged verdict
+            // with differing revs is never a silent pass.
+            v.status = if attempted {
+                Status::Updated
+            } else {
+                Status::Fresh
+            };
+            v.detail = Some(format!(
+                "deployed rev {rev} is a newer descendant of the expected rev; accepted as newer"
+            ));
+        }
         Some(_) => {
             v.status = if attempted {
                 Status::Failed
@@ -295,6 +317,35 @@ fn probe_binary(
         outcome.instrument_error,
         outcome.repaired_after,
     )
+}
+
+/// True when `observed` is a git descendant of `expected` (expected is an
+/// ancestor of observed): the deployed build is NEWER than the rev this pass
+/// expected, which is convergence, not staleness. `None` when git cannot
+/// answer (no repo, unknown or ambiguous rev) - the caller then fails toward
+/// the exact-match rule, never toward a false fresh. `repo_dir` anchors the
+/// git call at the source checkout the revs belong to; prefixes are accepted
+/// when unambiguous.
+fn rev_is_descendant(expected: &str, observed: &str, repo_dir: &Path) -> Option<bool> {
+    if expected == observed || expected.is_empty() || observed.is_empty() {
+        return None;
+    }
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_dir.to_str()?,
+            "merge-base",
+            "--is-ancestor",
+            expected,
+            observed,
+        ])
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
 }
 
 struct ProbeArgs {
@@ -390,6 +441,7 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             contradicting_evidence: None,
             effect_attempted: p.attempted,
             effect_ok: None,
+            observed_is_descendant: None,
             repair_evidence: evidence,
         });
     }
@@ -416,6 +468,7 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             contradicting_evidence: None,
             effect_attempted: p.attempted,
             effect_ok: None,
+            observed_is_descendant: None,
             repair_evidence: evidence,
         });
     }
@@ -433,9 +486,11 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             contradicting_evidence: p.python_evidence.clone(),
             effect_attempted: p.attempted,
             effect_ok: None,
+            observed_is_descendant: None,
             repair_evidence: None,
         });
     }
+    stamp_newer_descendants(&mut components, &p.expected, p.agents_dir.as_deref());
     let req = VerdictRequest {
         expected_rev: p.expected.clone(),
         crates_agents_dir: p.agents_dir.clone(),
@@ -443,6 +498,47 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
         components,
     };
     verdict(&req)
+}
+
+/// Stamp `observed_is_descendant` on every cargo row whose reported rev
+/// differs from the expected rev. The triad bins share one build, so the
+/// ancestry answer is computed once per DISTINCT observed rev and reused;
+/// a missing `--agents-dir` (no repo to anchor the git call) leaves the
+/// field unset and the mismatch stale, exactly as before.
+fn stamp_newer_descendants(
+    components: &mut [ComponentProbe],
+    expected_rev: &str,
+    agents_dir: Option<&str>,
+) {
+    let Some(repo_dir) = agents_dir.map(std::path::Path::new) else {
+        return;
+    };
+    if !repo_dir.is_dir() {
+        return;
+    }
+    let mut cache: std::collections::HashMap<String, Option<bool>> =
+        std::collections::HashMap::new();
+    for probe in components.iter_mut() {
+        if probe.component == PYTHON_TOOL {
+            continue;
+        }
+        let Some(rev) = probe.post_rev.clone() else {
+            continue;
+        };
+        let expected = probe
+            .expected_rev
+            .clone()
+            .unwrap_or_else(|| expected_rev.to_string());
+        if rev == expected {
+            continue;
+        }
+        let answer = *cache
+            .entry(rev.clone())
+            .or_insert_with(|| rev_is_descendant(&expected, &rev, repo_dir));
+        if answer == Some(true) {
+            probe.observed_is_descendant = Some(true);
+        }
+    }
 }
 
 /// `fno-agents component-verdict`: probe + classify + print. Exit 0 whenever a
@@ -500,6 +596,7 @@ mod tests {
             contradicting_evidence: None,
             effect_attempted: false,
             effect_ok: None,
+            observed_is_descendant: None,
             repair_evidence: None,
         }
     }
@@ -783,5 +880,187 @@ mod tests {
             "r".to_string()
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn classify_accepts_a_newer_descendant_rev() {
+        let mut p = probe(AGENTS_CLIENT, Some("def456"));
+        p.observed_is_descendant = Some(true);
+        let v = classify(&p, &req(vec![]));
+        assert_eq!(v.status, Status::Fresh);
+        assert!(
+            v.detail.as_deref().unwrap().contains("newer descendant"),
+            "the pass names why the differing revs converged: {:?}",
+            v.detail
+        );
+    }
+
+    #[test]
+    fn classify_attempted_descendant_is_updated_not_failed() {
+        let mut p = probe(AGENTS_CLIENT, Some("def456"));
+        p.observed_is_descendant = Some(true);
+        p.effect_attempted = true;
+        let v = classify(&p, &req(vec![]));
+        assert_eq!(v.status, Status::Updated);
+    }
+
+    #[test]
+    fn mismatched_rev_without_descendant_proof_stays_stale() {
+        let mut p = probe(AGENTS_CLIENT, Some("def456"));
+        p.observed_is_descendant = Some(false);
+        let v = classify(&p, &req(vec![]));
+        assert_eq!(v.status, Status::Stale);
+    }
+
+    #[test]
+    fn descendant_proof_without_mismatch_changes_nothing() {
+        let mut p = probe(AGENTS_CLIENT, Some("abc123"));
+        p.observed_is_descendant = Some(true);
+        let v = classify(&p, &req(vec![]));
+        assert_eq!(v.status, Status::Fresh);
+        assert!(
+            v.detail.is_none(),
+            "an exact match never carries the descendant note"
+        );
+    }
+
+    /// A real temp git repo answers the ancestry question both ways:
+    /// child descends from base (Some(true)), base does not descend from
+    /// child (Some(false)).
+    #[test]
+    #[cfg(unix)]
+    fn rev_is_descendant_reads_git_ancestry() {
+        let dir = std::env::temp_dir().join(format!("fno-cu-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "child",
+        ]);
+        let child = git(&["rev-parse", "HEAD"]);
+        assert_eq!(rev_is_descendant(&base, &child, &dir), Some(true));
+        assert_eq!(rev_is_descendant(&child, &base, &dir), Some(false));
+        assert_eq!(rev_is_descendant("nonexistent", &child, &dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe pass stamps a descendant rev through the real git path and
+    /// the fleet converges with differing revs; an OLDER observed rev stays
+    /// Failed under --attempted.
+    #[test]
+    #[cfg(unix)]
+    fn probe_pass_stamps_a_descendant_and_converges() {
+        let dir = std::env::temp_dir().join(format!("fno-cu-git2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "child",
+        ]);
+        let child = git(&["rev-parse", "HEAD"]);
+        write_script(&dir, "fno-agents", &version_script(&child, ""));
+        write_script(&dir, "fno-agents-daemon", &version_script(&child, ""));
+        write_script(&dir, "fno-agents-worker", &version_script(&child, ""));
+        let newer = parse_probe_args(&[
+            "--bindir".to_string(),
+            dir.to_string_lossy().into_owned(),
+            "--expected".to_string(),
+            base.clone(),
+            "--agents-dir".to_string(),
+            dir.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let r = verdict_from_probe(&newer);
+        assert!(r.converged, "{:?}", r.components);
+        assert!(
+            r.components[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("newer descendant"),
+            "{:?}",
+            r.components[0].detail
+        );
+        // An OLDER observed rev (base deployed, child expected) never passes:
+        // the ancestry read goes the other way.
+        write_script(&dir, "fno-agents", &version_script(&base, ""));
+        write_script(&dir, "fno-agents-daemon", &version_script(&base, ""));
+        write_script(&dir, "fno-agents-worker", &version_script(&base, ""));
+        let older = parse_probe_args(&[
+            "--bindir".to_string(),
+            dir.to_string_lossy().into_owned(),
+            "--expected".to_string(),
+            child.clone(),
+            "--agents-dir".to_string(),
+            dir.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let r = verdict_from_probe(&older);
+        assert!(!r.converged, "{:?}", r.components);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
