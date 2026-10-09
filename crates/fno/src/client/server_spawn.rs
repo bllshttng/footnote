@@ -116,7 +116,6 @@ pub(crate) fn config_says_off(stdout: &str) -> bool {
     stdout.trim() == "off"
 }
 
-
 #[cfg(test)]
 mod spawn_config_tests {
     use super::config_says_off;
