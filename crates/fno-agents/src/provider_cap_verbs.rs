@@ -312,7 +312,7 @@ pub(crate) fn run_fno_output(
 
 /// [`run_fno_output`] with env set on the child: the transcript bridge must
 /// reach the python runtime even where agents verbs default to the Rust one,
-/// the same pin `family1_truth_command` rides. A stdin payload rides the
+/// the same pin the truth probe's wire rides. A stdin payload rides the
 /// piped stdin, written before the wait (the payload is far below the pipe
 /// buffer, so the write cannot block on the child's reads).
 pub(crate) fn run_fno_output_env(
