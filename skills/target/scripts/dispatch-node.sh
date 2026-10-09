@@ -283,6 +283,14 @@ for id in "${NODES[@]}"; do
         n_already=$((n_already + 1))
       fi
       continue ;;
+    unknown)
+      # The guard could not check whether the node is running (worked
+      # authority unavailable). NOT occupancy: skip the node honestly, name
+      # the reader that failed, and leave it for the next advance to retry.
+      detail="$(printf '%s' "$guard_json" | jq -r '.detail // empty' 2>/dev/null)"
+      echo "skipped $id reason=\"could not check node:$id (${detail:-worked authority unavailable}); retry\""
+      n_skipped=$((n_skipped + 1))
+      continue ;;
     corrupted)
       # The worker's init-side `fno agents claim acquire` cannot reclaim a corrupted
       # claim, so launching would run WITHOUT the node:<id> mutex and leave the
