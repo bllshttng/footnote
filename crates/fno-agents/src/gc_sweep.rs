@@ -1240,9 +1240,9 @@ pub(crate) fn mux_pane_kill_stop(
 //
 // `blocked` is NOT terminal: the session is waiting for input, so it holds.
 
-/// The three witnesses that say a worker finished. Any one suffices: a
-/// transcript older than the grace window, a held pid that answers ESRCH,
-/// or a terminal state on the harness roster. Liveness alone never vetoes:
+/// The three witnesses that say a worker finished. Any one suffices: a transcript older
+/// than the grace window (never at the cargo build door, which writes none), a held pid
+/// that answers ESRCH, or a terminal state on the harness roster. Liveness alone never vetoes:
 /// a terminal state outranks a fresh transcript. The merge reaper passes
 /// the roster's death evidence as `terminal`; the sweep passes `None` and
 /// keeps its own classify-to-apply gap clause on top, because only the
@@ -1253,7 +1253,8 @@ pub(crate) fn worker_finished(
     grace_secs: i64,
     terminal: Option<&str>,
 ) -> bool {
-    if matches!(age_s, Some(a) if a > grace_secs) {
+    let parked = || crate::test_run::build_wait_since_ms(Path::new(&e.cwd)).is_some();
+    if matches!(age_s, Some(a) if a > grace_secs) && !parked() {
         return true;
     }
     if e.pid.is_some_and(crate::daemon::pid_is_gone) {
