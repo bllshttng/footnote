@@ -86,15 +86,15 @@ pub(crate) fn emit_allow() -> i32 {
 /// One `guard_decision` row into the space events file, the bounded appender
 /// `emit_to_both` uses, shared by every native guard so the rows stay
 /// byte-identical (as `hooks/lib/guard-mark.sh` did). The ts carries
-/// milliseconds: the row's event id is the sha256 of the line, so two
-/// same-second decisions from one gate (three guards per call) would
-/// otherwise read as one deduped row and break the exactly-one-row liveness
-/// contract.
+/// nanoseconds: the row's event id is the sha256 of the line, and two
+/// decisions from one gate (three guards per call) can land inside one
+/// millisecond - a line-level collision would dedup into one row and break
+/// the exactly-one-row liveness contract.
 pub(crate) fn emit_guard_decision(cwd: &Path, guard: &str, tool: &str, denied: bool) {
     let path =
         crate::state_path::resolve("events", cwd).unwrap_or_else(|| crate::paths::events_path(cwd));
     let event = json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         "type": "guard_decision",
         "data": {"guard": guard, "decision": if denied { "block" } else { "allow" }, "tool": tool},
         "source": "hook"
