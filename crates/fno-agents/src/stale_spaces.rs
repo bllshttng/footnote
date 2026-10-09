@@ -250,7 +250,7 @@ pub(crate) fn sweep(apply: bool, now: SystemTime) -> SpacesReport {
                 continue;
             }
             let sname = slice.file_name().to_string_lossy().into_owned();
-            if registered.iter().any(|r| *r == sname) {
+            if registered.contains(&sname) {
                 continue;
             }
             if past_grace(&slice.path(), now) {
