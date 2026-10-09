@@ -160,3 +160,26 @@ pub(crate) fn apply_tokens(popup: &mut Popup, tokens: &Value) {
         &mut popup.rows,
     );
 }
+
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use crate::popup::Popup;
+
+    /// The token painter appends one row per field the answer holds; a
+    /// field no source holds prints nothing (the provenance card's rule).
+    #[test]
+    fn apply_tokens_appends_only_fields_the_answer_holds() {
+        let mut popup = Popup::new(vec![PopupRow::Rule], Anchor::Center).plain_body();
+        let tokens: Value = serde_json::json!({
+            "tokens": {"input": 10, "output": 2, "cache_read": 3, "cache_write": 4},
+            "cost_usd": 0.5
+        });
+        apply_tokens(&mut popup, &tokens);
+        assert_eq!(popup.rows.len(), 6);
+        let empty: Value = serde_json::json!({});
+        apply_tokens(&mut popup, &empty);
+        assert_eq!(popup.rows.len(), 6);
+    }
+}

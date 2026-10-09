@@ -401,3 +401,41 @@ mod tests {
         assert!(classify(&oss(&["config", "get", "branch.prefix"])).is_none());
     }
 }
+
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    /// The native config read: project beats global, a key only one file
+    /// sets falls through to the other, a miss answers None (fail-open).
+    #[test]
+    fn project_beats_global_and_a_miss_answers_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = dir.path().join("global.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(&global, "[mux]\nshell_integration = \"off\"\n").expect("write global");
+        std::fs::write(&project, "[mux]\nshell_integration = \"mux-panes\"\n").expect("write project");
+        assert_eq!(
+            lookup(
+                Some(global.as_path()),
+                Some(project.as_path()),
+                "mux.shell_integration"
+            )
+            .as_deref(),
+            Some("mux-panes")
+        );
+        assert_eq!(
+            lookup(Some(global.as_path()), None, "mux.shell_integration").as_deref(),
+            Some("off")
+        );
+        assert_eq!(
+            lookup(
+                Some(global.as_path()),
+                Some(project.as_path()),
+                "mux.absent"
+            ),
+            None
+        );
+    }
+}

@@ -659,6 +659,9 @@ pub(crate) enum CoreMsg {
     /// so the restore continues exactly as the sync path did: an empty set
     /// restores synchronously, a non-empty one resolves the plan batch
     /// off-loop.
+    /// Constructed only in the non-test body of `restore_with_plans`;
+    /// test fixtures take the synchronous branch and never send it.
+    #[cfg_attr(test, allow(dead_code))]
     RestoreTargetsReady {
         id: u64,
         rows: u16,
