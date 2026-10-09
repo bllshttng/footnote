@@ -1367,7 +1367,13 @@ fn open_chat_popup(view: &mut View) {
         .footer("esc close")
         .plain_body();
     if let Some(b) = view.messages_board.as_mut() {
-        b.detail = Some(super::messages_detail::SessionDetail { popup });
+        b.detail = Some(super::messages_detail::SessionDetail {
+            popup,
+            // A conversation popup carries no session key and never
+            // receives a token answer: the empty key matches nothing.
+            key: String::new(),
+            tokens_pending: false,
+        });
     }
 }
 

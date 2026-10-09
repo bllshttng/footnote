@@ -1001,6 +1001,10 @@ pub(crate) struct View {
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
     reply_notice_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The session-details modal's off-loop token fetch: (participant key,
+    /// tokens-or-miss). The select arm paints only the modal whose key and
+    /// pending flag still match, so a stale answer is dropped.
+    details_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, Option<serde_json::Value>)>>,
     next_reply_request_id: u64,
     pending_reply_journals: HashMap<u64, messages_reply::PendingJournal>,
     /// The row-scoped outcome stamp and its armed action, one at a
@@ -2015,6 +2019,7 @@ impl View {
             digest: None,
             notice: None,
             reply_notice_tx: None,
+            details_tx: None,
             next_reply_request_id: 1,
             pending_reply_journals: HashMap::new(),
             row_stamp: None,
@@ -7440,6 +7445,9 @@ async fn attach_and_run(
     )>();
     let (reply_notice_tx, mut reply_notice_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     view.reply_notice_tx = Some(reply_notice_tx);
+    let (details_tx, mut details_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<serde_json::Value>)>();
+    view.details_tx = Some(details_tx);
     let (bell_tx, mut bell_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Result<serde_json::Value, String>)>();
 
@@ -8206,6 +8214,29 @@ async fn attach_and_run(
                 view.set_notice(text);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
+                }
+            }
+            Some((key, tokens)) = details_rx.recv() => {
+                // A session-details token answer paints only the modal that
+                // asked: a stale key (modal closed, or reopened on another
+                // row) is dropped, and an already-answered modal is never
+                // painted twice.
+                let mut repaint = false;
+                if let Some(b) = view.messages_board.as_mut() {
+                    if let Some(d) = b.detail.as_mut() {
+                        if d.key == key && d.tokens_pending {
+                            if let Some(tokens) = tokens {
+                                super::messages_detail::apply_tokens(&mut d.popup, &tokens);
+                            }
+                            d.tokens_pending = false;
+                            repaint = true;
+                        }
+                    }
+                }
+                if repaint {
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
                 }
             }
             Some((gen, projection)) = bell_rx.recv() => {
