@@ -395,6 +395,8 @@ fn subagent_section(projects: &Path, live_threshold: u64, now: SystemTime) -> Va
                 .flatten()
                 .filter_map(|d| std::fs::read_dir(d.path()).ok())
                 .flat_map(|r| r.flatten())
+                // Half the entries are transcripts; the type is free from readdir.
+                .filter(|d| d.file_type().is_ok_and(|t| t.is_dir()))
             {
                 let Ok(files) = std::fs::read_dir(session_dir.path().join("subagents")) else {
                     continue;
@@ -510,15 +512,20 @@ fn pane_counter_rows(path: &Path) -> Value {
             .unwrap_or_default();
         by_session.entry(session).or_default().push(ev);
     }
-    let ts = |ev: &Value| {
+    // Three files feed one list, so file order is not time order: the
+    // rotated sibling is read after the live journal but holds older samples.
+    let millis = |ev: &Value| {
         ev.get("ts")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.timestamp_millis())
     };
+    for evs in by_session.values_mut() {
+        evs.sort_by_key(|ev| millis(ev));
+    }
     let Some(events) = by_session
         .values()
-        .max_by_key(|evs| evs.last().map(|e| ts(e)).unwrap_or_default())
+        .max_by_key(|evs| evs.last().and_then(|e| millis(e)))
         .filter(|evs| evs.len() >= 2)
     else {
         return empty("insufficient-samples");
@@ -561,12 +568,7 @@ fn pane_counter_rows(path: &Path) -> Value {
     );
     born.sort_unstable();
     gone.sort_unstable();
-    let secs = |ev: &Value| {
-        chrono::DateTime::parse_from_rfc3339(&ts(ev))
-            .ok()
-            .map(|t| t.timestamp_millis())
-    };
-    let window_s = match (secs(older), secs(newer)) {
+    let window_s = match (millis(older), millis(newer)) {
         (Some(a), Some(b)) => json!(((b - a) as f64 / 100.0).round() / 10.0),
         _ => Value::Null,
     };

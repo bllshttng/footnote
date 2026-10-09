@@ -211,4 +211,18 @@ fn pane_counters_difference_the_latest_session_and_report_resets() {
         pane_counter_rows(&dir.path().join("none.jsonl"))["status"],
         "insufficient-samples"
     );
+
+    // The rotated sibling is read after the live journal but holds the
+    // oldest sample: time order, not file order, picks the pair.
+    let live = dir.path().join("live.jsonl");
+    let rotated = format!("{}{}.1", live.display(), crate::events::EPHEMERAL_SUFFIX);
+    std::fs::write(&live, lines[1..].join("\n") + "\n").unwrap();
+    std::fs::write(
+        &rotated,
+        sample("2026-10-09T09:59:00Z", "main", json!([pane(1, 1)])) + "\n",
+    )
+    .unwrap();
+    let out = pane_counter_rows(&live);
+    assert_eq!(out["window_s"], 30.0);
+    assert_eq!(out["rows"][0]["bytes_in"], 60);
 }

@@ -58,25 +58,14 @@ pub fn sessions_map() -> Map<String, Value> {
     }
 
     // A live node claim is the session's own work order: it overwrites.
-    if let Ok(answer) = crate::claim_store::list_db(Some("node:"), true, None) {
-        for record in answer
-            .get("rows")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(node) = record
-                .get("key")
-                .and_then(Value::as_str)
-                .and_then(|k| k.strip_prefix("node:"))
-                .filter(|n| !n.is_empty())
-            else {
+    if let Ok(records) = crate::claim_store::records_db(Some("node:"), true, None) {
+        for record in &records {
+            let Some(node) = record.key.strip_prefix("node:").filter(|n| !n.is_empty()) else {
                 continue;
             };
             let Some(sid) = record
-                .get("holder")
-                .and_then(Value::as_str)
-                .and_then(|h| h.strip_prefix("target-session:"))
+                .holder
+                .strip_prefix("target-session:")
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             else {
