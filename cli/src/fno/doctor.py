@@ -2010,6 +2010,23 @@ def _verdict(
     }
 
 
+DISK_FREE_FLOOR_GB = 20
+
+
+def _disk_free_report() -> dict[str, Any]:
+    """Advisory free-disk reading for the volume holding ~/.fno; a reading under the floor is a blocker (see _blockers)."""
+    try:
+        usage = shutil.disk_usage(Path.home() / ".fno")
+    except OSError:
+        return {"verdict": "unreadable"}
+    free_gb = usage.free / 1e9
+    return {
+        "free_gb": round(free_gb, 1),
+        "floor_gb": DISK_FREE_FLOOR_GB,
+        "verdict": "low" if free_gb < DISK_FREE_FLOOR_GB else "ok",
+    }
+
+
 def _blockers(result: dict[str, Any]) -> list[str]:
     """The findings that mean the fleet will misbehave, in the order a new
     user should act on them. Pure: reads only the assembled result dict.
@@ -2052,6 +2069,13 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(
             f"open-file limit is low (launchd soft {fd_limit.get('launchd_soft')}); "
             "reaches spawned workers only, not this shell."
+        )
+
+    disk_free = result.get("disk_free") or {}
+    if disk_free.get("verdict") == "low":
+        blockers.append(
+            f"free disk is {disk_free.get('free_gb')} GB, under the {disk_free.get('floor_gb')} GB floor; "
+            "builds, stores and downloads fail near zero. Fix: fno doctor reclaim --apply"
         )
 
     plugin_hooks = result.get("plugin_hooks") or {}
@@ -4308,6 +4332,9 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         result["evals"] = None
     result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
+
+    # Advisory free-disk reading; under the floor is a blocker. Never changes status/exit.
+    result["disk_free"] = _disk_free_report()
 
     # Advisory silent-switch legibility (Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.
