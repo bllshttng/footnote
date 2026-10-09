@@ -557,7 +557,10 @@ pub fn run_at(root: &Path) -> Result<(), String> {
     // v1 receipts were stamped by a walk that skipped a symlinked spaces
     // root, so they cannot vouch for it; a re-walk is idempotent.
     let marker = root.join("migrations/role-vocabulary-v2.done");
-    if marker.exists() {
+    // The table pass has its own receipt: roots stamped v2 before it existed
+    // still hold crown_* rows in graph.db.
+    let table_marker = root.join("migrations/role-registry-table-v1.done");
+    if marker.exists() && table_marker.exists() {
         return Ok(());
     }
     crate::live_store_fence::refuse_worktree_build_on_operator_store(root)?;
@@ -571,12 +574,15 @@ pub fn run_at(root: &Path) -> Result<(), String> {
         .open(marker.with_extension("lock"))
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
-    if marker.exists() {
-        return Ok(());
+    if !marker.exists() {
+        walk(root, 0)?;
+        atomic_write(&marker, b"1\n")?;
     }
-    walk(root, 0)?;
-    migrate_registry_table(root)?;
-    atomic_write(&marker, b"1\n")
+    if !table_marker.exists() {
+        migrate_registry_table(root)?;
+        atomic_write(&table_marker, b"1\n")?;
+    }
+    Ok(())
 }
 
 /// The roots one migration run walks. Readers find spaces at
