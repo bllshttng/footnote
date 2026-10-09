@@ -63,6 +63,7 @@ fn golden_handle_agent(case: &str) -> Option<String> {
 fn stores() -> Stores {
     Stores {
         projects_root: fixtures_dir().join("no-projects"),
+        account_projects_roots: Vec::new(),
         codex_sessions_dir: None,
         opencode_db: fixtures_dir().join("opencode.db"),
     }

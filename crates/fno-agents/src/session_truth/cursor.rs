@@ -38,6 +38,11 @@ const PRUNE_EVERY: Duration = Duration::from_secs(60);
 /// transcript path stands before the store is listed again.
 pub(crate) const MISS_BEAT: Duration = Duration::from_secs(60);
 
+/// A lookup that misses in a store listing older than this lists the store
+/// again once: a session born after the beat's listing resolves in seconds,
+/// not a minute later.
+pub(crate) const RELIST_AFTER: Duration = Duration::from_secs(5);
+
 /// How long a row's falsifier verdict (pid, pane, exit record, claude holder)
 /// stands before the next ask probes again.
 const FALSIFIER_BEAT: Duration = Duration::from_secs(15);
@@ -112,7 +117,11 @@ pub struct TruthCursors {
     verdicts: HashMap<String, (Option<&'static str>, Instant)>,
     // One listing of each harness store per beat, shared by every lookup in
     // it: a rebuild of N rows lists the store once, not N times.
-    claude_hits: Option<(PathBuf, Vec<crate::claude_transcript_paths::Hit>, Instant)>,
+    claude_hits: Option<(
+        Vec<PathBuf>,
+        Vec<crate::claude_transcript_paths::Hit>,
+        Instant,
+    )>,
     codex_files: Option<(Option<PathBuf>, Vec<(String, PathBuf)>, Instant)>,
     last_bytes_read: u64,
     last_prune: Option<Instant>,
@@ -193,32 +202,46 @@ impl TruthCursors {
         self.misses.insert(handle.to_string(), Instant::now());
     }
 
+    /// End the beat: misses and store listings both expire.
     #[cfg(test)]
-    pub(crate) fn expire_misses_for_test(&mut self) {
+    pub(crate) fn expire_beat_for_test(&mut self) {
         self.misses.clear();
+        self.claude_hits = None;
+        self.codex_files = None;
     }
 
-    /// The claude projects store listing, read at most once a beat.
-    pub(crate) fn claude_hits(&mut self, root: &Path) -> &[crate::claude_transcript_paths::Hit] {
-        let fresh =
-            matches!(&self.claude_hits, Some((r, _, at)) if r == root && at.elapsed() < MISS_BEAT);
+    /// The claude projects listing over every root, read again only once it
+    /// is older than `max_age`.
+    pub(crate) fn claude_hits(
+        &mut self,
+        roots: &[PathBuf],
+        max_age: Duration,
+    ) -> &[crate::claude_transcript_paths::Hit] {
+        let fresh = matches!(&self.claude_hits, Some((r, _, at)) if r.as_slice() == roots && at.elapsed() < max_age);
         if !fresh {
-            let hits = crate::claude_transcript_paths::store_listing(root);
-            self.claude_hits = Some((root.to_path_buf(), hits, Instant::now()));
+            let hits = roots
+                .iter()
+                .flat_map(|root| crate::claude_transcript_paths::store_listing(root))
+                .collect();
+            self.claude_hits = Some((roots.to_vec(), hits, Instant::now()));
         }
         self.claude_hits
             .as_ref()
             .map_or(&[], |(_, hits, _)| hits.as_slice())
     }
 
-    /// The codex sessions tree index, read at most once a beat. `None` reads
-    /// the ambient `$CODEX_HOME/sessions`.
-    pub(crate) fn codex_files(&mut self, root: Option<&Path>) -> &[(String, PathBuf)] {
+    /// The codex sessions tree index, read again only once it is older than
+    /// `max_age`. `None` reads the ambient `$CODEX_HOME/sessions`.
+    pub(crate) fn codex_files(
+        &mut self,
+        root: Option<&Path>,
+        max_age: Duration,
+    ) -> &[(String, PathBuf)] {
         let root = root
             .map(Path::to_path_buf)
             .or_else(|| crate::codex_store::codex_home().map(|home| home.join("sessions")));
         let fresh =
-            matches!(&self.codex_files, Some((r, _, at)) if *r == root && at.elapsed() < MISS_BEAT);
+            matches!(&self.codex_files, Some((r, _, at)) if *r == root && at.elapsed() < max_age);
         if !fresh {
             let files = root
                 .as_deref()

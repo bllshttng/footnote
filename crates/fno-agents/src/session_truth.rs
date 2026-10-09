@@ -828,10 +828,14 @@ fn is_session_id_prefix(handle: &str) -> bool {
 
 /// The store paths a truth read resolves against: injected by tests, ambient
 /// everywhere else. opencode's store arrives through `OPENCODE_DB` (the same
-/// seam `opencode_transcript.rs` honors); claude's through
-/// `CLAUDE_CONFIG_DIR` at read time via `claude_roster::config_dir`.
+/// seam `opencode_transcript.rs` honors). claude's comes from
+/// `claude_drive::claude_projects_dir` (`FNO_CLAUDE_PROJECTS_DIR`, then
+/// `CLAUDE_CONFIG_DIR`), plus the projects dir of every isolated account the
+/// config declares. codex's honors `FNO_CODEX_SESSIONS_DIR`, as Python's
+/// reader does.
 pub struct Stores {
     pub projects_root: PathBuf,
+    pub account_projects_roots: Vec<PathBuf>,
     pub codex_sessions_dir: Option<PathBuf>,
     pub opencode_db: PathBuf,
 }
@@ -840,10 +844,20 @@ impl Stores {
     /// The ambient stores the daemon and CLI processes read.
     pub fn ambient() -> Self {
         Self {
-            projects_root: crate::claude_roster::config_dir().join("projects"),
-            codex_sessions_dir: None,
+            projects_root: crate::claude_drive::claude_projects_dir(),
+            account_projects_roots: crate::claude_roster::isolated_account_dirs()
+                .into_iter()
+                .map(|(_, dir)| dir.join("projects"))
+                .collect(),
+            codex_sessions_dir: std::env::var_os("FNO_CODEX_SESSIONS_DIR").map(PathBuf::from),
             opencode_db: ambient_opencode_db(),
         }
+    }
+
+    fn claude_roots(&self) -> Vec<PathBuf> {
+        std::iter::once(self.projects_root.clone())
+            .chain(self.account_projects_roots.iter().cloned())
+            .collect()
     }
 }
 
@@ -1327,16 +1341,19 @@ fn lookup_path<C: CursorAccess>(
     if let Some(path) = cursors.with(|c| c.cached_path(&key)) {
         return Some(path);
     }
-    let found = cursors.with(|c| match agent {
-        "claude" => claude_path_for(session_id, c.claude_hits(&stores.projects_root)),
+    let claude_roots = stores.claude_roots();
+    let find = |c: &mut cursor::TruthCursors, max_age| match agent {
+        "claude" => claude_path_for(session_id, c.claude_hits(&claude_roots, max_age)),
         "codex" => c
-            .codex_files(stores.codex_sessions_dir.as_deref())
+            .codex_files(stores.codex_sessions_dir.as_deref(), max_age)
             .iter()
             .find_map(|(name, path)| {
                 crate::codex_store::codex_rollout_matches(name, session_id).then(|| path.clone())
             }),
         _ => None,
-    })?;
+    };
+    let found =
+        cursors.with(|c| find(c, cursor::MISS_BEAT).or_else(|| find(c, cursor::RELIST_AFTER)))?;
     cursors.with(|c| c.cache_path(&key, &found));
     Some(found)
 }
@@ -1398,6 +1415,7 @@ mod tests {
     fn stores(dir: &Path) -> Stores {
         Stores {
             projects_root: dir.join("no-projects"),
+            account_projects_roots: Vec::new(),
             codex_sessions_dir: Some(dir.join("no-codex")),
             opencode_db: dir.join("no-opencode.db"),
         }
@@ -1479,7 +1497,7 @@ mod tests {
         .unwrap();
         let second = resolve_payload(None, handle, NOW, &stores, &mut cursors);
         assert_eq!(second["reason"], "not-found");
-        cursors.expire_misses_for_test();
+        cursors.expire_beat_for_test();
         let third = resolve_payload(None, handle, NOW, &stores, &mut cursors);
         assert_ne!(
             third["reason"], "not-found",
