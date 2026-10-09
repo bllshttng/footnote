@@ -42,10 +42,11 @@ run_sync() {
 
 # Per-project cache: keyed by the working directory (the session's project),
 # one file per group. FNO_CONTEXT_CACHE_DIR relocates it; the detached pass
-# below writes CACHE plus a CACHE.ts epoch sibling next to it.
+# below writes CACHE plus a CACHE.ts epoch sibling next to it. shasum is not
+# on every Linux (no perl); sha256sum covers that side.
 CACHE_DIR="${FNO_CONTEXT_CACHE_DIR:-${HOME:-/tmp}/.fno/context-cache}"
 mkdir -p "$CACHE_DIR" 2>/dev/null
-KEY="$(pwd -P | shasum -a 256 | cut -c1-16)"
+KEY="$(pwd -P | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)"
 CACHE="$CACHE_DIR/$KEY-$GROUP.json"
 TTL="${FNO_CONTEXT_CACHE_TTL_SECONDS:-86400}"
 
@@ -79,16 +80,22 @@ fi
 
 # Detached refresh. Full stdio redirection so the child never holds the
 # hook's pipes (the harness waits on that stdout), nice'd per d-bad5a42f.
-# The cache is published by atomic mv only on a clean pass, so a failed run
-# leaves the previous cache (or none) rather than a partial one; concurrent
-# starters race to last-writer-wins.
-nohup nice -n 10 bash -c "
-    if '$BIN' context-run --group '$GROUP' --plugin-root '$ROOT' < '$PAYLOAD' > '$CACHE.tmp.$$' 2> '$CACHE_DIR/$KEY-$GROUP.log'; then
-        mv -f '$CACHE.tmp.$$' '$CACHE'
-        date +%s > '$CACHE.ts'
+# The values travel as environment, never interpolated into the child
+# script, so a quote in any path cannot break it. The cache is published by
+# atomic mv only on a clean pass, so a failed run leaves the previous cache
+# (or none) rather than a partial one; concurrent starters race to
+# last-writer-wins.
+nohup nice -n 10 env \
+    FNO_RUNNER="$BIN" FNO_RUN_GROUP="$GROUP" FNO_RUN_ROOT="$ROOT" \
+    FNO_RUN_PAYLOAD="$PAYLOAD" FNO_RUN_CACHE="$CACHE" \
+    FNO_RUN_TMP="$CACHE.tmp.$$" FNO_RUN_LOG="$CACHE_DIR/$KEY-$GROUP.log" \
+    bash -c '
+    if "$FNO_RUNNER" context-run --group "$FNO_RUN_GROUP" --plugin-root "$FNO_RUN_ROOT" < "$FNO_RUN_PAYLOAD" > "$FNO_RUN_TMP" 2> "$FNO_RUN_LOG"; then
+        mv -f "$FNO_RUN_TMP" "$FNO_RUN_CACHE"
+        date +%s > "$FNO_RUN_CACHE.ts"
     else
-        rm -f '$CACHE.tmp.$$'
+        rm -f "$FNO_RUN_TMP"
     fi
-    rm -f '$PAYLOAD'
-" </dev/null >/dev/null 2>&1 &
+    rm -f "$FNO_RUN_PAYLOAD"
+' </dev/null >/dev/null 2>&1 &
 exit 0
