@@ -312,6 +312,15 @@ mod tests {
         dir
     }
 
+    /// The `space_slug` shape: every `/` becomes a `-`, so the leading slash
+    /// mints the leading dash. Built by split-and-join.
+    fn slug_of(path: &Path) -> String {
+        path.to_string_lossy()
+            .split('/')
+            .collect::<Vec<&str>>()
+            .join("-")
+    }
+
     fn age(path: &Path, minutes: u64) {
         let old = SystemTime::now() - Duration::from_secs(minutes * 60);
         let file = std::fs::File::options().read(true).open(path).unwrap();
@@ -348,7 +357,7 @@ mod tests {
 
         let live_src = root.join("live-repo");
         std::fs::create_dir_all(&live_src).unwrap();
-        let live_slug = live_src.to_string_lossy().replace('/', '-');
+        let live_slug = slug_of(&live_src);
         let live_space = root.join(&live_slug);
         std::fs::create_dir_all(&live_space).unwrap();
         std::fs::write(live_space.join("events.db"), b"live").unwrap();
@@ -406,7 +415,7 @@ mod tests {
         // descent must find the live split.
         let src = root.join("my-repo");
         std::fs::create_dir_all(&src).unwrap();
-        let slug = src.to_string_lossy().replace('/', '-');
+        let slug = slug_of(&src);
         let space = root.join(&slug);
         std::fs::create_dir_all(&space).unwrap();
         age(&space, 25 * 60);
