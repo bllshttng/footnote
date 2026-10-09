@@ -1757,7 +1757,10 @@ mod codex_thread_lane;
 mod codex_thread_resume;
 mod convert;
 mod report;
+pub(crate) mod sandbox_host;
+mod status;
 mod thread_row_status;
+mod transcript_push;
 use codex_thread_lane::spawn_codex_thread_lane;
 use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
 pub(crate) use report::{find_uuid_backfill_row, UuidBackfill};
@@ -1960,7 +1963,11 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         Some("watch") => run_blocking(ctx, req, handle_watch).await,
         // status reads the in-memory drive table for the active-drives count, so
         // it stays on the async runtime rather than the blocking pool.
-        Some("status") => handle_status(ctx, req).await,
+        Some("status") => status::handle_status(ctx, req).await,
+        // The sandbox launch plan: mounts + env for one worktree under the
+        // configured provider (`none` answers the empty plan). Lived in
+        // sandbox_host; the dispatch line is paid by the handle_status move.
+        Some("sandbox-plan") => run_blocking(ctx, req, sandbox_host::handle_sandbox_plan).await,
         Some("reconcile") => run_blocking(ctx, req, handle_reconcile).await,
         // Label rename: the registry transaction under the flock, off-loop.
         Some("rename") => run_blocking(ctx, req, convert::handle_rename).await,
@@ -1969,6 +1976,13 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,
+        // The sandboxed-session transcript lane: a turn hook pushes raw
+        // transcript lines; the store is judged and idempotent. Lived in
+        // transcript_push; both dispatch lines are paid by the handle_status
+        // move.
+        Some("transcript-append") => {
+            run_blocking(ctx, req, transcript_push::handle_transcript_append).await
+        }
         // SessionStart report: one thin per-harness hook posts the raw
         // payload; the registry holds id/transcript/source additively.
         Some("session-report") => {
@@ -4398,67 +4412,6 @@ where
 ///
 /// Deliberately NOT renamed to say so: the field name is pinned by the schema
 /// and its CI parity check, and a breaking rename would buy wording alone.
-async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
-    // load_registry does blocking flock I/O; offload it from the async worker
-    // thread (Gemini review). The drive-table read below stays async. A read
-    // failure is an RPC error: `unwrap_or_default()` here published
-    // zero-agent status counts over a broken registry.
-    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
-        Ok(reg) => reg,
-        Err(e) => return registry_read_failed(req.id, e),
-    };
-    let mut by_status: Map<String, Value> = Map::new();
-    let mut restarting: u64 = 0;
-    let mut channels_registered: u64 = 0;
-    for e in &registry.entries {
-        let key = format!("{:?}", e.status).to_lowercase();
-        let n = by_status.get(&key).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-        by_status.insert(key, Value::Number(n.into()));
-        if e.status == AgentStatus::Restarting {
-            restarting += 1;
-        }
-        if e.mcp_channel_id.is_some() {
-            channels_registered += 1;
-        }
-    }
-    Response::ok(
-        req.id,
-        json!({
-            "schema_version": 1,
-            "daemon": {
-                "state": DaemonState::Serving.as_str(),
-                "pid": std::process::id(),
-                "uptime_secs": ctx.started_at.elapsed().as_secs(),
-                "version": env!("CARGO_PKG_VERSION"),
-                // Drift signal, additive. Null when the daemon
-                // could not fingerprint itself; a client then reads Unknown.
-                "exe_path": ctx
-                    .exe_fingerprint
-                    .as_ref()
-                    .map(|f| f.path.to_string_lossy().into_owned()),
-                "exe_mtime": ctx.exe_fingerprint.as_ref().map(|f| f.mtime_nanos),
-                "exe_size": ctx.exe_fingerprint.as_ref().map(|f| f.size),
-                // The daemon's own process start time, for the `restart`
-                // pid-reuse guard.
-                "pid_start_time": ctx.pid_start_time,
-            },
-            "agents": {
-                "total": registry.entries.len(),
-                "by_status": by_status,
-            },
-            "restarts": {
-                // queue_depth tracks agents currently restarting; the full
-                // restart queue + consecutive-failure history is not yet
-                // surfaced in the served status (Wave 5), so the max-seen
-                // counter reports 0 until that subsystem is wired into Ctx.
-                "queue_depth": restarting,
-                "consecutive_failures_max_seen": 0,
-            },
-            "channels": { "registered": channels_registered },
-        }),
-    )
-}
-
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     let mut response = stop_body(ctx, req).await;
     attach_stopped_claims_release(ctx, req, "stop", &mut response).await;
