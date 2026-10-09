@@ -228,9 +228,11 @@ pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
 
 impl Write {
     /// Returns whether the write changed the stored document. A write that
-    /// stores what was already there rolls back: no revision bump, no
-    /// snapshot, no wake for watchers.
+    /// stores what was already there rolls back: no revision bump and no wake
+    /// for watchers. It still snapshots what it read, so the collapse pin
+    /// fires on the first write after a collapse.
     pub(crate) fn commit(self, document: Value) -> Result<bool, StateError> {
+        crate::state::snapshot_registry(&self.path, &self.document);
         save_document(&self.connection, &self.path, document)?;
         if load_document(&self.connection, &self.path)? == self.document {
             self.connection
@@ -238,7 +240,6 @@ impl Write {
                 .map_err(|e| failure(&self.path, e))?;
             return Ok(false);
         }
-        crate::state::snapshot_registry(&self.path, &self.document);
         self.connection
             .execute(
                 "UPDATE registry_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
