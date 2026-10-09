@@ -2082,42 +2082,55 @@ impl BoundedLock {
     }
 }
 
-/// Record this process as the holder: `pid epoch_ms` in the lock file. The
-/// write rides the fd this holder keeps open for its whole hold, so only the
-/// current holder ever writes. Advisory: a crashed writer leaves its record
-/// behind, which is exactly what the next timeout refusal should name.
+/// Record this process as the holder, in the JSON stamp shape
+/// `agent_lock::stamp_holder` writes and Python's `fno.agents.lock` reads.
+/// The write rides the fd this holder keeps open for its whole hold, so only
+/// the current holder ever writes. Advisory: a crashed writer leaves its
+/// record behind, which is exactly what the next timeout refusal should name.
 fn stamp_lock_holder(file: &File) {
-    let pid = std::process::id();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    use std::io::Write as _;
-    if file.set_len(0).is_ok() {
-        let _ = write!(file, "{pid} {now_ms}");
+    use std::io::{Seek, SeekFrom, Write};
+    if file.set_len(0).is_err() {
+        return;
     }
+    let _ = file.seek(SeekFrom::Start(0));
+    let line = serde_json::json!({
+        "pid": std::process::id(),
+        "acquired_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false),
+    });
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
 }
 
-/// The holder line for a timeout refusal: the recorded pid and hold age, or
-/// the absence of one. The age reads as stale when the holder is dead, which
-/// is how a crashed writer shows up here.
+/// The holder line for a timeout refusal: the recorded pid and hold age,
+/// with a dead pid named as dead rather than restated as fact. Same contract
+/// as `agent_lock::holder_note`, pointed at the graph lock.
 fn holder_summary(lock_path: &Path) -> String {
-    let text = std::fs::read_to_string(lock_path).unwrap_or_default();
-    let mut parts = text.split_whitespace();
-    let (Some(pid), Some(started_ms)) = (parts.next(), parts.next()) else {
+    let text = match std::fs::read_to_string(lock_path) {
+        Ok(text) => text,
+        Err(_) => return "no holder recorded in the lock file".to_string(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(text.lines().next().unwrap_or("")) {
+        Ok(value) => value,
+        Err(_) => return "no holder recorded in the lock file".to_string(),
+    };
+    let (Some(pid), Some(at)) = (
+        parsed.get("pid").and_then(serde_json::Value::as_u64),
+        parsed
+            .get("acquired_at")
+            .and_then(serde_json::Value::as_str),
+    ) else {
         return "no holder recorded in the lock file".to_string();
     };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let age = started_ms
-        .parse::<u128>()
+    let age = chrono::DateTime::parse_from_rfc3339(at)
         .ok()
-        .map(|started| now_ms.saturating_sub(started))
-        .map(|ms| format!("held {}s", ms / 1000))
-        .unwrap_or_else(|| "held an unknown age".to_string());
-    format!("recorded holder pid {pid}, {age} (a crashed writer leaves its record)")
+        .map(|started| (chrono::Utc::now() - started).num_seconds().max(0))
+        .map(|secs| format!("held {secs}s since {at}"))
+        .unwrap_or_else(|| format!("held since {at}"));
+    if super::agent_lock::pid_is_alive(pid) {
+        format!("recorded holder pid {pid}, {age}")
+    } else {
+        format!("holder record pid {pid} is dead (a crashed writer), {age}")
+    }
 }
 
 impl Drop for BoundedLock {
@@ -3315,6 +3328,28 @@ mod tests {
                 assert!(
                     detail.contains("recorded holder pid"),
                     "refusal must name the holder: {detail}"
+                );
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
+        // A dead pid reads as dead, not as a live holder: the record below
+        // names a pid past the i32 range, so pid_is_alive answers false
+        // without a syscall.
+        let lock_path = PathBuf::from(format!("{}.lock", graph.display()));
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\n",
+                serde_json::json!({"pid": 4_000_000_000u64, "acquired_at": "2026-10-09T00:00:00+00:00"})
+            ),
+        )
+        .unwrap();
+        let err = BoundedLock::acquire(&graph, Duration::from_millis(150)).unwrap_err();
+        match err {
+            StoreError::LockTimeout(_, _, detail) => {
+                assert!(
+                    detail.contains("is dead"),
+                    "refusal must read a dead holder as dead: {detail}"
                 );
             }
             other => panic!("expected LockTimeout, got {other}"),

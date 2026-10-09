@@ -1174,7 +1174,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
         StoreError::Corrupt(_) => "corrupt",
         StoreError::Unreadable(_, _) => "unreadable",
         StoreError::MalformedRoot(_) => "malformed_root",
-        StoreError::LockTimeout(_, _) => "lock_timeout",
+        StoreError::LockTimeout(..) => "lock_timeout",
         StoreError::Conflict => "conflict",
         StoreError::EmptyFieldUpdate(_) => "empty_field_update",
         StoreError::Invalid(_) => "invalid",
