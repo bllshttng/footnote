@@ -83,7 +83,7 @@ fn record_dir<'a>(dirs: &'a [PathBuf], rec: &ClaimRecord) -> Option<&'a Path> {
         .map(PathBuf::as_path)
 }
 
-/// Compact floored age, matching `top._fmt_age`: 45s / 12m / 3h.
+/// Compact floored age: 45s / 12m / 3h. `fno agents top` renders ages with it.
 pub fn fmt_age_s(seconds: i64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
