@@ -293,13 +293,18 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         // setup-only.
         //
         // The fast path: a store stamped at the current setup version has
-        // run every step below to completion, so skip them. The archive
-        // check stays: `read_connection` re-checks it per read and falls
-        // back to this open expecting the fold, so skipping it here would
-        // strand a freshly dropped archive.
+        // run every step below to completion, so skip them. Two gates stay
+        // inside the skip condition, because outside readers re-check them
+        // and fall back to this open expecting the fold: the archive probe
+        // (`read_connection` re-checks it per read), and the seed COUNT (a
+        // seed can land after the stamp, and only a materialized row count
+        // proves the fold already happened).
         let fast_path =
             meta(&connection, OPEN_FASTPATH_KEY)?.as_deref() == Some(OPEN_SETUP_VERSION);
-        if fast_path && !archive_needs_import(&connection, graph)? {
+        if fast_path
+            && !archive_needs_import(&connection, graph)?
+            && materialized_rows(&connection)? > 0
+        {
             return Ok(connection);
         }
         //
@@ -2082,6 +2087,17 @@ mod tests {
                            \"created_at\": \"2026-09-01T00:00:00+00:00\"}');";
         let via_write = dir.path().join("fold-on-write.json");
         drop(open(&via_write).unwrap());
+        // The fold below runs while the fast-path stamp is current, so the
+        // seed gate inside the skip condition stays load-bearing here.
+        let stamped: String = Connection::open(database_path(&via_write))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'open_fastpath_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamped, OPEN_SETUP_VERSION, "the first open must stamp");
         open(&via_write).unwrap().execute_batch(row_sql).unwrap();
         drop(open(&via_write).unwrap());
         assert_eq!(
