@@ -604,9 +604,7 @@ mod tests {
         for p in [&adapter, &team] {
             std::fs::write(p, "#!/usr/bin/env bash\n").unwrap();
         }
-        let gone = dir
-            .path()
-            .join("archived-worktree/hooks/agy-old-inject.sh");
+        let gone = dir.path().join("archived-worktree/hooks/agy-old-inject.sh");
         let data = json!({
             "other": {"Stop": [{"type": "command", "command": gone.display().to_string()}]},
             "footnote": {
