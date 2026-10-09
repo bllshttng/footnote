@@ -14,7 +14,9 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -818,7 +820,9 @@ def test_restamp_ignores_a_pending_marker_inherited_from_its_parent(
     def _no_sleep(_s: float) -> None:
         raise AssertionError("an inherited marker must not re-enable the wait")
 
-    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    # Only this module's clock: subprocess.run's own wait loop sleeps on the
+    # shared time module, and an event emit must not trip the stub.
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=time.monotonic, sleep=_no_sleep))
     monkeypatch.setattr(rs, "_row_exists", lambda *_a: False)
 
     assert rs._restamp("the-nested-one-shot", "claude", REMINT) == 0
@@ -838,7 +842,9 @@ def test_restamp_never_waits_for_a_row_a_headless_one_shot_will_not_get(
     def _no_sleep(_s: float) -> None:
         raise AssertionError("a rowless substrate must not wait")
 
-    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    # Only this module's clock: subprocess.run's own wait loop sleeps on the
+    # shared time module, and an event emit must not trip the stub.
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=time.monotonic, sleep=_no_sleep))
     monkeypatch.setattr(rs, "_row_exists", lambda *_a: False)
 
     assert rs._restamp("worker-headless", "claude", REMINT) == 0
@@ -857,7 +863,9 @@ def test_restamp_does_not_poll_when_the_row_is_already_current(
     def _no_sleep(_s: float) -> None:
         raise AssertionError("must not sleep when the row already exists")
 
-    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    # Only this module's clock: subprocess.run's own wait loop sleeps on the
+    # shared time module, and an event emit must not trip the stub.
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=time.monotonic, sleep=_no_sleep))
 
     assert rs._restamp("target-x-f0c2", "claude", BIRTH) == 0
 
