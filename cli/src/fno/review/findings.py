@@ -104,7 +104,6 @@ def _record(item: Any) -> FindingRecord:
     """
     if not isinstance(item, dict):
         return FindingRecord(unmappable=True)
-    raw_class = (_clean(item.get("autofix_class")) or "").lower()
     record = FindingRecord(
         category=_clean(item.get("category")),
         verdict=_clean(item.get("verdict")),
@@ -112,7 +111,7 @@ def _record(item: Any) -> FindingRecord:
         line=item.get("line"),
         summary=_clean(item.get("summary")),
         failure_scenario=_clean(item.get("failure_scenario")),
-        autofix_class=raw_class if raw_class in AUTOFIX_CLASSES else None,
+        autofix_class=rc if (rc := (_clean(item.get("autofix_class")) or "").lower()) in AUTOFIX_CLASSES else None,
         owner=_clean(item.get("owner")),
     )
     if all(

@@ -110,9 +110,8 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
                     )
                 if disposition == "declined" and '"' not in reason:
                     raise RecordBuildError(
-                        "a declined disposition's reason must cite the finding: "
-                        'a double-quoted span quoting the proving line at the '
-                        "current head, plus the failure scenario that does not hold"
+                        "a declined disposition's reason must cite the finding: a double-quoted "
+                        "proving line at the current head, plus the failure scenario that does not hold"
                     )
                 dispositions.append(
                     {
