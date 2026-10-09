@@ -951,27 +951,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-q"]);
-        git(&dir, &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "base",
-        ]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
         let base = git(&dir, &["rev-parse", "HEAD"]);
-        git(&dir, &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "child",
-        ]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "child",
+            ],
+        );
         let child = git(&dir, &["rev-parse", "HEAD"]);
         assert_eq!(rev_is_descendant(&base, &child, &dir), Some(true));
         assert_eq!(rev_is_descendant(&child, &base, &dir), Some(false));
@@ -989,27 +995,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-q"]);
-        git(&dir, &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "base",
-        ]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
         let base = git(&dir, &["rev-parse", "HEAD"]);
-        git(&dir, &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "child",
-        ]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "child",
+            ],
+        );
         let child = git(&dir, &["rev-parse", "HEAD"]);
         write_script(&dir, "fno-agents", &version_script(&child, ""));
         write_script(&dir, "fno-agents-daemon", &version_script(&child, ""));
