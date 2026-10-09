@@ -399,8 +399,9 @@ pub struct ArmStatus {
     /// a stale row keeps the STALE verdict.
     pub failing: bool,
     /// Seconds since the newest run that did NOT fail, set only while
-    /// [`ArmStatus::failing`]. `None` while failing means the journal holds
-    /// no non-failure run for the arm at all.
+    /// [`ArmStatus::failing`]. `None` while failing means the read window
+    /// (`ARM_WINDOW_FLOOR_S`, widened by the starvation threshold) holds
+    /// no non-failure run for the arm.
     pub failing_for_s: Option<u64>,
     /// Why a stale row is red, set by [`explain`]. `Some("unexplained")`
     /// means the rules ran and found nothing - a written token, never an
@@ -452,14 +453,34 @@ const ARM_ROW_TYPES: &[&str] = &[EVENT_TYPE, "pr_heal_tick"];
 /// The row types the pr-watch tick trace reads.
 const TICK_TRACE_TYPES: &[&str] = &["pr_watch_tick_attempt", "pr_watch_tick_end"];
 
-/// Every parsed row of `types` the journals hold: the store's committed rows,
-/// then the live file's bytes. Writers commit to the store only, so a fold
-/// over the raw file alone stops at the store cutover.
-fn journal_rows(journals: &[PathBuf], types: &[&str]) -> Vec<Value> {
+/// The recent window every fold reads, in seconds. Staleness is a state
+/// with no upper age bound: an arm whose newest tick sits inside the
+/// window reads STALE, one outside it reads UNOBSERVED, so the window is
+/// the depth the verdicts stay truthful to. It matches the default
+/// starvation lookback (`notify.arm_starved_after_s`, 7 days), the depth
+/// the readout vocabulary already commits to; a configured larger
+/// threshold widens the reads that feed the starvation mark past it.
+const ARM_WINDOW_FLOOR_S: u64 = 7 * 24 * 3600;
+
+/// Every parsed row of `types` the journals hold at or after `since_unix`:
+/// the store's committed rows in the window, then the live file's bytes.
+/// The window rides the `(type, ts_ms)` index, so a fold reads its lookback
+/// instead of every tick ever written. Writers commit to the store only, so
+/// a fold over the raw file alone stops at the store cutover; a journal
+/// with no store reads whole (raw journals are the pre-store tail).
+fn journal_rows(journals: &[PathBuf], types: &[&str], since_unix: u64) -> Vec<Value> {
+    let since_ms = i64::try_from(since_unix)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+    let mut query = crate::event_store::EventQuery::of_types(types);
+    query.since_ms = Some(since_ms);
     journals
         .iter()
         .flat_map(|j| {
-            crate::event_store::journal_text(j, types)
+            crate::event_store::journal_text_checked(j, &query)
+                .unwrap_or_else(|_| {
+                    std::fs::read_to_string(crate::event_store::live_journal(j)).unwrap_or_default()
+                })
                 .lines()
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok())
                 .collect::<Vec<_>>()
@@ -468,14 +489,23 @@ fn journal_rows(journals: &[PathBuf], types: &[&str]) -> Vec<Value> {
 }
 
 /// Fold every journal into one row per known arm, reading each journal's
-/// committed store rows plus its live bytes. Unknown arms seen in the
-/// journals are appended after the known ones, so a new emitter deploys
-/// before its reader does.
+/// committed store rows in the recent window plus its live bytes. Unknown
+/// arms seen in the journals are appended after the known ones, so a new
+/// emitter deploys before its reader does. The window is
+/// [`ARM_WINDOW_FLOOR_S`], the depth the verdicts stay truthful to, so a
+/// bounded read answers in place of the whole-history fold.
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
+    let since = now_unix.saturating_sub(ARM_WINDOW_FLOOR_S);
+    arms_from_rows(&journal_rows(journals, ARM_ROW_TYPES, since), now_unix)
+}
+
+/// The arms fold over rows already collected, so [`read_arms_starved`]
+/// parses each journal once and shares the rows with the starvation mark.
+fn arms_from_rows(values: &[Value], now_unix: u64) -> Vec<ArmStatus> {
     let mut newest: HashMap<String, NewestTick> = HashMap::new();
     let mut newest_ok: HashMap<String, NewestTick> = HashMap::new();
     let mut retries: HashMap<String, NewestTick> = HashMap::new();
-    for value in journal_rows(journals, ARM_ROW_TYPES) {
+    for value in values {
         fold_arm_row(value, &mut newest, &mut newest_ok, &mut retries);
     }
 
@@ -542,15 +572,17 @@ struct NewestTick {
 }
 
 fn fold_arm_row(
-    value: Value,
+    value: &Value,
     newest: &mut HashMap<String, NewestTick>,
     newest_ok: &mut HashMap<String, NewestTick>,
     retries: &mut HashMap<String, NewestTick>,
 ) {
-    // The healer's receipt type folds into the `heal` arm here too, so
+    // The healer's receipt type folds into the `heal` arm semantics, so
     // both journal folds agree on what a heal receipt looks like.
+    let healed;
     let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
-        heal_tick_as_arm_row(value)
+        healed = heal_tick_as_arm_row(value);
+        &healed
     } else {
         value
     };
@@ -616,7 +648,7 @@ fn fresher_than(map: &HashMap<String, NewestTick>, arm: &str, ts_unix: u64) -> b
 /// the drive loop journals to the project it healed, while the arms fold
 /// reads the agents home. acted=1 when the tick changed anything (rebased,
 /// reran, escalated), 0 when it only looked; the counts ride `detail`.
-fn heal_tick_as_arm_row(value: Value) -> Value {
+fn heal_tick_as_arm_row(value: &Value) -> Value {
     let mut data = value.get("data").cloned().unwrap_or(Value::Null);
     if let Some(obj) = data.as_object_mut() {
         let count = |obj: &serde_json::Map<String, Value>, k: &str| {
@@ -652,10 +684,21 @@ fn heal_tick_as_arm_row(value: Value) -> Value {
 /// naming a budget cut and counts toward starvation; and a stale or failing
 /// row keeps its louder verdict. A heuristic with a ceiling - it reads a run
 /// of silent zeroes over time, not the arm's input, so it tunes via the
-/// threshold knob, never via an input probe.
+/// threshold knob, never via an input probe. The history is the read
+/// window, widened to the threshold: any tick the mark cannot see is older
+/// than the lookback it judges.
 pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64, threshold_s: u64) {
+    let since = now_unix.saturating_sub(ARM_WINDOW_FLOOR_S.max(threshold_s));
+    let values = journal_rows(journals, ARM_ROW_TYPES, since);
+    mark_starved_rows(&values, rows, now_unix, threshold_s);
+}
+
+/// The starvation mark over rows already collected, so
+/// [`read_arms_starved`] shares one windowed read between the arms fold
+/// and this mark.
+fn mark_starved_rows(values: &[Value], rows: &mut [ArmStatus], now_unix: u64, threshold_s: u64) {
     let mut history: HashMap<String, Vec<(u64, u64, bool)>> = HashMap::new();
-    collect_tick_history(journal_rows(journals, ARM_ROW_TYPES), &mut history);
+    collect_tick_history(values, &mut history);
     for row in rows.iter_mut() {
         if row_is_unarmed(row)
             || row.producer_evidence == ProducerEvidence::Unobserved
@@ -695,22 +738,29 @@ pub fn fill_arm_values(rows: &mut [ArmStatus], cwd: &Path) {
 /// [`read_arms`] plus the arm values and the starved mark: the one read
 /// every arms readout makes, so the table and the status arms never
 /// disagree about the vocabulary. The threshold comes from
-/// `notify.arm_starved_after_s`.
+/// `notify.arm_starved_after_s`. One windowed journal read feeds both
+/// folds: the arms verdicts and the starvation mark parse each row once,
+/// so the readout folds its lookback once instead of twice over every
+/// tick ever written.
 pub fn read_arms_starved(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
-    let mut rows = read_arms(journals, now_unix);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    fill_arm_values(&mut rows, &cwd);
     let threshold = crate::agents_config::notify_arm_starved_after_s(&cwd);
-    mark_starved(journals, &mut rows, now_unix, threshold);
+    let since = now_unix.saturating_sub(ARM_WINDOW_FLOOR_S.max(threshold));
+    let values = journal_rows(journals, ARM_ROW_TYPES, since);
+    let mut rows = arms_from_rows(&values, now_unix);
+    fill_arm_values(&mut rows, &cwd);
+    mark_starved_rows(&values, &mut rows, now_unix, threshold);
     rows
 }
 
 /// One fold collecting every `(ts, acted, skip_explains)` triple an arm's
 /// rows hold.
-fn collect_tick_history(rows: Vec<Value>, history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
+fn collect_tick_history(rows: &[Value], history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
     for value in rows {
+        let healed;
         let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
-            heal_tick_as_arm_row(value)
+            healed = heal_tick_as_arm_row(value);
+            &healed
         } else {
             value
         };
@@ -932,11 +982,15 @@ pub struct TickTrace {
 }
 
 /// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
-/// of each journal's committed store rows plus its live bytes. Absent
-/// records leave defaults: the trace never invents a tick.
+/// of each journal's committed store rows in the recent window plus its
+/// live bytes. Absent records leave defaults: the trace never invents a
+/// tick. The window is [`ARM_WINDOW_FLOOR_S`], the same depth the arms
+/// fold reads, so a trace and the arm rows it explains answer from the
+/// same recent past.
 pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
     let mut trace = TickTrace::default();
-    for value in journal_rows(journals, TICK_TRACE_TYPES) {
+    let since = now_unix.saturating_sub(ARM_WINDOW_FLOOR_S);
+    for value in journal_rows(journals, TICK_TRACE_TYPES, since) {
         let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
         if typ != "pr_watch_tick_attempt" && typ != "pr_watch_tick_end" {
             continue;
