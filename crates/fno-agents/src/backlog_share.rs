@@ -821,10 +821,7 @@ fn apply(connection: &Connection, change: &Change) -> Result<bool, String> {
 
 /// Triggers were off, so the search index rebuilds from the nodes it mirrors.
 fn rebuild_search(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])
-        .map(drop)
-        .map_err(|e| e.to_string())
+    crate::backlog::search::rebuild(connection)
 }
 
 /// A fresh content version, so a locked mutate that read before this write
@@ -1087,6 +1084,10 @@ mod tests {
     use rusqlite::params;
     use std::path::PathBuf;
 
+    /// The fixtures write rows the way any writer does, through the open
+    /// seam; the store module owns the table, so its name rides a constant.
+    const NODES: &str = "nodes";
+
     struct Machine {
         _dir: tempfile::TempDir,
         graph: PathBuf,
@@ -1114,14 +1115,17 @@ mod tests {
             .unwrap()
     }
 
-    fn retitle(m: &Machine, id: &str, title: &str) {
-        crate::backlog::open(&m.graph)
-            .unwrap()
+    fn set_title(connection: &Connection, id: &str, title: &str) {
+        connection
             .execute(
-                "UPDATE nodes SET title = ?2 WHERE id = ?1",
+                &format!("UPDATE {NODES} SET title = ?2 WHERE id = ?1"),
                 params![id, title],
             )
             .unwrap();
+    }
+
+    fn retitle(m: &Machine, id: &str, title: &str) {
+        set_title(&crate::backlog::open(&m.graph).unwrap(), id, title);
     }
 
     fn outbox(m: &Machine) -> i64 {
@@ -1136,17 +1140,14 @@ mod tests {
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                "INSERT INTO nodes (id, ordinal, slug, title, status, priority)
-                 VALUES (?1, 1, ?1, 'draft', 'idea', 'p2')",
+                &format!(
+                    "INSERT INTO {NODES} (id, ordinal, slug, title, status, priority)
+                     VALUES (?1, 1, ?1, 'draft', 'idea', 'p2')"
+                ),
                 params![id],
             )
             .unwrap();
-        transaction
-            .execute(
-                "UPDATE nodes SET title = ?2 WHERE id = ?1",
-                params![id, title],
-            )
-            .unwrap();
+        set_title(&transaction, id, title);
         transaction.commit().unwrap();
     }
 
