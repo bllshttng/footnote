@@ -25,6 +25,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CLAUDE_CONFIG_DIR` | py+rs | Overrides the Claude config directory for managed provider lookups. |
 | `CLAUDE_DIR_OVERRIDE` | rs | Redirects the Claude config root the corrections-verify reads the rule repo's git log from; mirrors the bash-side override in autocorrect-pack.sh. |
 | `CLAUDE_EFFORT` | py+rs | unclear: cli/src/fno/graph/cli.py:903 |
+| `CLAUDE_JOB_DIR` | rs | Set by Claude Code in a `claude --bg` job. Its `state.json` names the job, and the SessionStart launch claim reads that name to match the launcher's record. |
 | `CLAUDE_PLUGIN_ROOT` | py+rs | unclear: cli/src/fno/doctor.py:3465 |
 | `CLAUDE_SESSION_ID` | rs | unclear: crates/fno-agents/src/claims.rs:3690 |
 | `CLI` | rs | unclear: crates/fno-agents/src/loop_dispatch.rs:198 |
