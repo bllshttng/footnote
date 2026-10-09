@@ -5,6 +5,7 @@
 use super::model::Finding;
 use super::schema_v4::{iso, iso_sql, norm_sql, touch, updated, NOW};
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 
 /// Schema 4. created_at is the finding's own wire time, so the table gains
 /// only updated_at.
@@ -158,6 +159,39 @@ fn row_finding(row: &rusqlite::Row) -> rusqlite::Result<Finding> {
         resolved_at: row.get(8)?,
         resolved_by_session_id: row.get(9)?,
     })
+}
+
+/// Bulk twin of [`load`]: one query per id batch, rows grouped per node in
+/// the same per-node (created_at, finding_id) order `load` produces.
+pub fn load_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Vec<Finding>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<Finding>> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT finding_id, node_id, created_at, body, block_cmd, block_excerpt,
+                    source_session_id, source_harness, resolved_at, resolved_by_session_id, node_id
+             FROM findings WHERE node_id IN ({placeholders})
+             ORDER BY node_id, created_at, finding_id",
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((row_finding(row)?, row.get::<_, String>(10)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.entry(node_id).or_default().push(record);
+        }
+    }
+    Ok(out)
 }
 
 /// True when the id is taken by any finding on any node.

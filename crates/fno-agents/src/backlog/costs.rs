@@ -8,6 +8,7 @@ use super::model::CostRecord;
 use super::schema_v4::{is_utc_iso, iso, iso_sql, norm_sql, stamps, touch, NOW};
 use rusqlite::{params, Connection};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 
 pub fn ddl() -> String {
     format!(
@@ -93,6 +94,17 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 
 /// One node's cost rows in list order. An unparsable extras value reads as
 /// empty.
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CostRecord> {
+    let extras_raw: String = row.get(3)?;
+    let extras: Map<String, Value> = serde_json::from_str(&extras_raw).unwrap_or_default();
+    Ok(CostRecord {
+        session_id: row.get(0)?,
+        cost_usd: row.get(1)?,
+        timestamp: row.get(2)?,
+        extras,
+    })
+}
+
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<CostRecord>, String> {
     let mut statement = connection
         .prepare(
@@ -101,26 +113,42 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<CostRecord>, S
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
+        .query_map(params![node_id], record_from_row)
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (session_id, cost_usd, timestamp, extras_raw) =
-            row.map_err(|error| error.to_string())?;
-        let extras: Map<String, Value> = serde_json::from_str(&extras_raw).unwrap_or_default();
-        out.push(CostRecord {
-            session_id,
-            cost_usd,
-            timestamp,
-            extras,
-        });
+        out.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Bulk twin of [`load`]: one query per id batch, rows grouped per node in
+/// the same per-node seq order `load` produces.
+pub fn load_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Vec<CostRecord>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<CostRecord>> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT session_id, cost_usd, timestamp, extras, node_id FROM node_costs
+                 WHERE node_id IN ({placeholders}) ORDER BY node_id, seq",
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((record_from_row(row)?, row.get::<_, String>(4)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.entry(node_id).or_default().push(record);
+        }
     }
     Ok(out)
 }

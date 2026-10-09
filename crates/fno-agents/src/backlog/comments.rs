@@ -6,6 +6,7 @@ use super::model::Comment;
 use super::schema_v4::{iso, iso_sql, norm_sql, touch, updated, NOW};
 use rusqlite::{params, Connection};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 
 /// Schema 4. created_at is the note's own wire time (`ts`), so the table
 /// gains only updated_at.
@@ -141,6 +142,23 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// One node's comments in list order (seq). Schema 3: the extras column
 /// round-trips the item keys the typed model keeps as `extras`; an
 /// unparsable value reads as empty.
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
+    let extras_raw: String = row.get(9)?;
+    let extras: Map<String, Value> = serde_json::from_str(&extras_raw).unwrap_or_default();
+    Ok(Comment {
+        created_at: row.get(0)?,
+        body: row.get(1)?,
+        kind: row.get(2)?,
+        title: row.get(3)?,
+        details: row.get(4)?,
+        difficulty: row.get(5)?,
+        source: row.get(6)?,
+        source_session_id: row.get(7)?,
+        source_harness: row.get(8)?,
+        extras,
+    })
+}
+
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<Comment>, String> {
     let mut statement = connection
         .prepare(
@@ -150,48 +168,43 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<Comment>, Stri
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-            ))
-        })
+        .query_map(params![node_id], record_from_row)
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (
-            created_at,
-            body,
-            kind,
-            title,
-            details,
-            difficulty,
-            source,
-            source_session_id,
-            source_harness,
-            extras_raw,
-        ) = row.map_err(|error| error.to_string())?;
-        let extras: Map<String, Value> = serde_json::from_str(&extras_raw).unwrap_or_default();
-        out.push(Comment {
-            created_at,
-            body,
-            kind,
-            title,
-            details,
-            difficulty,
-            source,
-            source_session_id,
-            source_harness,
-            extras,
-        });
+        out.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Bulk twin of [`load`]: one query per id batch, rows grouped per node in
+/// the same per-node seq order `load` produces.
+pub fn load_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Vec<Comment>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<Comment>> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT created_at, body, kind, title, details, difficulty, source,
+                    source_session_id, source_harness, extras, node_id
+             FROM comments WHERE node_id IN ({placeholders}) ORDER BY node_id, seq",
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((record_from_row(row)?, row.get::<_, String>(10)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.entry(node_id).or_default().push(record);
+        }
     }
     Ok(out)
 }

@@ -5,6 +5,8 @@
 use super::model::Encounter;
 use super::schema_v4::{iso, norm_sql, touch, updated, NOW};
 use rusqlite::{params, Connection};
+use serde_json::Value;
+use std::collections::HashMap;
 
 /// Schema 4. The vote time is the row's creation time, so the schema-3
 /// `ts` column is `created_at` now (user ruling 2026-09-23).
@@ -141,6 +143,24 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// One node's encounters in list order (seq). The extras column
 /// round-trips the item keys the typed model keeps as `extras`; an
 /// unparsable value reads as empty.
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Encounter> {
+    let extras_raw: String = row.get(9)?;
+    let extras: serde_json::Map<String, Value> =
+        serde_json::from_str(&extras_raw).unwrap_or_default();
+    Ok(Encounter {
+        created_at: row.get(0)?,
+        evidence: row.get(1)?,
+        session_id: row.get(2)?,
+        voter_key: row.get(3)?,
+        voter_kind: row.get(4)?,
+        harness: row.get(5)?,
+        fno_id: row.get(6)?,
+        effort: row.get(7)?,
+        model: row.get(8)?,
+        extras,
+    })
+}
+
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<Encounter>, String> {
     let mut statement = connection
         .prepare(
@@ -150,49 +170,43 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<Encounter>, St
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-            ))
-        })
+        .query_map(params![node_id], record_from_row)
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (
-            created_at,
-            evidence,
-            session_id,
-            voter_key,
-            voter_kind,
-            harness,
-            fno_id,
-            effort,
-            model,
-            extras_raw,
-        ) = row.map_err(|error| error.to_string())?;
-        let extras: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&extras_raw).unwrap_or_default();
-        out.push(Encounter {
-            created_at,
-            evidence,
-            session_id,
-            voter_key,
-            voter_kind,
-            harness,
-            fno_id,
-            effort,
-            model,
-            extras,
-        });
+        out.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Bulk twin of [`load`]: one query per id batch, rows grouped per node in
+/// the same per-node seq order `load` produces.
+pub fn load_many(
+    connection: &Connection,
+    node_ids: &[String],
+) -> Result<HashMap<String, Vec<Encounter>>, String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let mut out: HashMap<String, Vec<Encounter>> = HashMap::new();
+    for batch in node_ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT created_at, evidence, session_id, voter_key, voter_kind, harness, fno_id,
+                    effort, model, extras, node_id
+             FROM encounters WHERE node_id IN ({placeholders}) ORDER BY node_id, seq",
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((record_from_row(row)?, row.get::<_, String>(10)?))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (record, node_id) = row.map_err(|error| error.to_string())?;
+            out.entry(node_id).or_default().push(record);
+        }
     }
     Ok(out)
 }

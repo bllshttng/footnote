@@ -1581,10 +1581,27 @@ fn query_rows(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let mut merged = Vec::new();
+    let load_ids: Vec<String> = ids.iter().map(|(id, _)| id.clone()).collect();
+    let mut parts = nodes::load_parts_many(connection, &load_ids, fields.as_deref())?;
     for (id, ordinal) in ids {
-        let body = load(&id, fields.as_deref())?
-            .ok_or_else(|| format!("node {id} vanished mid-export"))?;
-        merged.push((ordinal, id, body));
+        let claim = node_claims.get(&id).cloned().unwrap_or_default();
+        let mut row = match nodes::load_from_parts(
+            &mut parts,
+            &id,
+            Some(claim.clone()),
+            fields.as_deref(),
+        )? {
+            Some(node) => Some(node.to_json()),
+            None => nodes::raw_rows_where(connection, Some(&[id.to_owned()]))?
+                .into_iter()
+                .find(|(raw_id, _, _)| raw_id == &id)
+                .map(|(_, _, row)| row),
+        };
+        if let Some(row) = &mut row {
+            nodes::project_claim_value(row, claim);
+        }
+        let row = row.ok_or_else(|| format!("node {id} vanished mid-export"))?;
+        merged.push((ordinal, id, row));
     }
     for (id, ordinal, mut body) in nodes::raw_rows_where(connection, filter.id_in.as_deref())? {
         if !query.include_archived
