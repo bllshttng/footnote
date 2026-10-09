@@ -794,6 +794,11 @@ def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
     )
     assert "--dangerously-bypass-hook-trust" in yolo_mode
 
+    bypass_permissions = build_pane_argv(
+        "codex", "", tmp_path, False, None, permission_mode="bypassPermissions"
+    )
+    assert "--dangerously-bypass-hook-trust" in bypass_permissions
+
     sandboxed_default = build_pane_argv("codex", "", tmp_path, False, None)
     assert "--dangerously-bypass-hook-trust" not in sandboxed_default
 

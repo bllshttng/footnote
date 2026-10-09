@@ -1051,7 +1051,7 @@ def build_pane_argv(
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
         argv = [*identity, "-C", str(cwd)]
-        bypass_posture = permission_mode == "yolo" if permission_mode else yolo
+        bypass_posture = permission_mode in ("yolo", "bypassPermissions") if permission_mode else yolo
         if permission_mode:
             argv += permission_pane_tokens("codex", permission_mode)
         else:

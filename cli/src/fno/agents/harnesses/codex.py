@@ -138,8 +138,9 @@ def sandbox_flag(yolo: bool) -> list[str]:
     ``exec`` in the argv. The approval policy is a separate GLOBAL flag emitted
     before ``exec`` - see :func:`approval_flag`.
 
-    - bounded (``yolo=False``, default): ``--sandbox workspace-write`` -
-      workspace sandbox.
+    - bounded (``yolo=False``, default): ``--sandbox workspace-write`` with
+      network on - workspace-write alone denies AF_UNIX, which takes out both
+      ``gh`` and the graph keeper socket. Mirror of ``codex_ask::sandbox_flag``.
     - full yolo (``yolo=True``, explicit opt-in):
       ``--dangerously-bypass-approvals-and-sandbox`` - unsandboxed bypass. The
       two are mutually exclusive; never combine the workspace sandbox with the
@@ -147,7 +148,7 @@ def sandbox_flag(yolo: bool) -> list[str]:
     """
     if yolo:
         return ["--dangerously-bypass-approvals-and-sandbox"]
-    return ["--sandbox", "workspace-write"]
+    return ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
 
 
 def approval_flag(yolo: bool) -> list[str]:
@@ -818,7 +819,15 @@ def create(
     git_args = [] if eff_yolo else git_writable_args(cwd)
     plan_args = [] if eff_yolo else plan_writable_args(cwd)
     from fno.agents.harness_map import render_session_argv
+    from fno.agents.mux_spawn import _CODEX_HOOK_TRUST_FLAG_MIN_VERSION, _codex_cli_version
 
+    # The pane lane's hook-trust rule (bypass postures only): codex 0.148+
+    # skips a new or changed hook until a human trusts it.
+    hook_trust_args = (
+        ["--dangerously-bypass-hook-trust"]
+        if eff_yolo and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION
+        else []
+    )
     identity = render_session_argv("codex", "headless_create")
     argv = [
         identity[0],
@@ -831,6 +840,7 @@ def create(
         *git_args,
         *plan_args,
         *sandbox_flag(eff_yolo),
+        *hook_trust_args,
     ]
     if passthrough:
         from fno.agents.mux_spawn import pane_passthrough_tokens

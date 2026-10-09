@@ -859,6 +859,7 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ]);
         argv.extend(crate::codex_ask::sandbox_flag(ctx.yolo));
+        argv.extend(crate::codex_ask::hook_trust_flag(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_git_writable_args(&ctx.cwd));
             argv.extend(codex_plan_writable_args(&ctx.cwd));
@@ -884,6 +885,7 @@ impl Provider for CodexProvider {
         .expect("embedded codex headless-resume capability");
         argv.extend(["--json".into(), "--skip-git-repo-check".into()]);
         argv.extend(crate::codex_ask::sandbox_flag_resume(ctx.yolo));
+        argv.extend(crate::codex_ask::hook_trust_flag(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_sandbox_config_args_resume(&ctx.cwd));
         }
@@ -2341,6 +2343,20 @@ mod tests {
         let argv = CodexProvider.create_argv(&ctx);
         assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!argv.iter().any(|a| a == "--sandbox"));
+        // Hook trust rides the bypass posture only, and only on a codex that
+        // ships the flag.
+        let trust = ["--dangerously-bypass-hook-trust".to_string()];
+        assert_eq!(
+            crate::codex_ask::hook_trust_tokens(true, Some("0.162.0")),
+            trust
+        );
+        assert_eq!(
+            crate::codex_ask::hook_trust_tokens(true, Some("0.148.0")),
+            trust
+        );
+        assert!(crate::codex_ask::hook_trust_tokens(true, Some("0.147.9")).is_empty());
+        assert!(crate::codex_ask::hook_trust_tokens(true, None).is_empty());
+        assert!(crate::codex_ask::hook_trust_tokens(false, Some("0.162.0")).is_empty());
 
         let mut ctx = create_ctx();
         ctx.reasoning_effort = Some("high".into());

@@ -5,7 +5,7 @@ so a future refactor cannot silently change the codex invocation contract.
 
 Plan ACs covered:
 - 'inject_from_name(prompt, "orchestrator") returns "[from: orchestrator]\\n\\n<prompt>"'
-- 'sandbox_flag(yolo=False) returns ["--sandbox", "workspace-write"]'
+- 'sandbox_flag(yolo=False) returns ["--sandbox", "workspace-write"] plus the network override'
 - 'sandbox_flag(yolo=True) returns ["--dangerously-bypass-approvals-and-sandbox"]'
 - 'Mutually exclusive in any argv builder output'
 - 'from_name validation reuses the US2 validator (no fresh regex)'
@@ -55,7 +55,7 @@ def test_inject_from_name_preserves_multi_line_prompt():
 def test_sandbox_flag_default_is_bounded():
     # Sandbox tokens only (workspace sandbox); approval is a separate global
     # flag emitted before `exec` - see approval_flag.
-    assert codex_mod.sandbox_flag(yolo=False) == ["--sandbox", "workspace-write"]
+    assert codex_mod.sandbox_flag(yolo=False) == ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
 
 
 def test_sandbox_flag_yolo_is_dangerous_bypass():
@@ -106,7 +106,7 @@ def test_approval_flag_yolo_is_empty():
 # ---------------------------------------------------------------------------
 
 # sandbox_flag output (approval is asserted separately via approval_flag).
-_BOUNDED = ["--sandbox", "workspace-write"]
+_BOUNDED = ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
 _FULL_YOLO = ["--dangerously-bypass-approvals-and-sandbox"]
 
 

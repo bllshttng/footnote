@@ -128,6 +128,33 @@ pub fn sandbox_flag_resume(yolo: bool) -> Vec<String> {
     }
 }
 
+/// First codex that ships `--dangerously-bypass-hook-trust`; an older clap
+/// parser rejects the unknown flag and aborts the spawn.
+const HOOK_TRUST_FLAG_MIN_VERSION: &str = "0.148.0";
+
+/// The pane lane's hook-trust rule, for `exec` and `exec resume`: codex 0.148+
+/// skips any new or changed hook until a human trusts it, so a yolo worker
+/// would run without fno's guards and Stop hook. Bypass postures only;
+/// sandboxed postures never opt in. Valid on `exec` and `exec resume` alike.
+pub fn hook_trust_flag(yolo: bool) -> Vec<String> {
+    static INSTALLED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let installed = INSTALLED.get_or_init(crate::codex_daemon_readiness::installed_cli_version);
+    hook_trust_tokens(yolo, installed.as_deref())
+}
+
+pub(crate) fn hook_trust_tokens(yolo: bool, installed: Option<&str>) -> Vec<String> {
+    let supported = installed
+        .and_then(|v| {
+            crate::codex_daemon_readiness::compare_versions(v, HOOK_TRUST_FLAG_MIN_VERSION)
+        })
+        .is_some_and(|order| order != std::cmp::Ordering::Less);
+    if yolo && supported {
+        vec!["--dangerously-bypass-hook-trust".to_string()]
+    } else {
+        vec![]
+    }
+}
+
 /// Build the create argv: `codex exec --json -C <cwd> --skip-git-repo-check <sandbox> <full_prompt>`.
 /// `full_prompt` should already have been built via `inject_from_name`.
 /// The subprocess cwd is NOT set via Popen(cwd=...) on the create path
@@ -189,6 +216,7 @@ pub fn build_argv_create(
         argv.push(format!("model_reasoning_effort={effort}"));
     }
     argv.extend(sandbox_flag(yolo));
+    argv.extend(hook_trust_flag(yolo));
     // Fenced `--` tokens the operator typed (codex maps -c/--config and
     // --add-dir here), before the prompt fence like every other flag.
     argv.extend(harness_args.iter().cloned());
@@ -224,6 +252,7 @@ pub fn build_argv_resume(
         "--skip-git-repo-check".to_string(),
     ]);
     argv.extend(sandbox_flag_resume(yolo));
+    argv.extend(hook_trust_flag(yolo));
     if !yolo {
         argv.extend(crate::provider::codex_sandbox_config_args_resume(cwd));
     }
