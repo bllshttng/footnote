@@ -420,17 +420,11 @@ fn awaiting_operator(
         if sid.is_empty() {
             continue;
         }
-        let Some(age) = transcript_age_s(sid) else {
-            continue;
-        };
-        if age < OPERATOR_WAIT_QUIET_S {
-            continue;
-        }
         let short = sid.get(..8).unwrap_or(sid).to_lowercase();
         // File order is journal order, so the first OPEN ask is the oldest:
         // closed asks are filtered before the find, or a closed first question
         // would hide a newer open one.
-        if let Some((qid, _, _)) = asks
+        let Some((qid, _, _)) = asks
             .iter()
             .filter(|(qid, _, _)| !closed.contains(qid))
             .find(|(_, q_session, q_asker)| match q_session {
@@ -439,7 +433,12 @@ fn awaiting_operator(
                     .as_deref()
                     .is_some_and(|a| a.to_lowercase() == short),
             })
-        {
+        else {
+            continue;
+        };
+        // The transcript lookup scans every project dir, so it runs only for
+        // a row that has an open ask.
+        if transcript_age_s(sid).is_some_and(|age| age >= OPERATOR_WAIT_QUIET_S) {
             waiting.insert(row.name.clone(), qid.clone());
         }
     }

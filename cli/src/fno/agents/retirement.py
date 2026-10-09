@@ -2,7 +2,7 @@
 
 The policy no longer lives here: one decision is computed in the Rust GC
 (``fno-agents reap --dry-run --json``), and this module only MAPS its
-buckets onto the ``Retirement`` verdicts ``fno agents top`` renders. A
+buckets onto the ``Retirement`` verdicts the stale-lane read uses. A
 binary that is missing, slow or unreadable fails CLOSED - every row reads
 not-retirable with the reason named - never as a clean zero.
 """

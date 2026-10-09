@@ -90,6 +90,16 @@ STALE_ATTENTION_S = 600
 _TAIL_N = 40
 
 
+def fmt_age(seconds: float) -> str:
+    """Compact floored age: 45s / 12m / 3h."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
+
 def classify_tail(
     last_role: Optional[str],
     last_text: Optional[str],
