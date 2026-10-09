@@ -952,7 +952,7 @@ fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
 /// uncapped entries, or the built-in table when absent) and every live provider.
 /// `Err` = one lane count faulted, which is the probe's unknown verdict,
 /// never a zero.
-fn lanes_answer(
+pub(crate) fn lanes_answer(
     config_cwd: &std::path::Path,
     registry_path: &std::path::Path,
     redeemer: Option<&str>,

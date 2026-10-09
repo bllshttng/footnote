@@ -151,42 +151,6 @@ def test_census_bg_row_resolves_to_session_pid(tmp_path, monkeypatch):
     assert w.session_pid == 37355  # the process that IS the session
 
 
-def test_top_prices_tree_rss_off_the_resolved_pid(tmp_path, monkeypatch):
-    import fno.agents.session_procs as sp
-    from fno.agents.registry import AgentEntry
-
-    daemon = tmp_path / "daemon"
-    daemon.mkdir()
-    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    monkeypatch.setattr(sp, "bg_socket_pid_map", lambda root=None: {"55f9847a": 37355})
-    monkeypatch.setattr(
-        "fno.agents.top._tree_rss", lambda pids: {37355: 380}
-    )
-    rows = [
-        AgentEntry(
-            name="t-xb57a-glm",
-            harness="claude",
-            provider="anthropic",
-            cwd="/tmp",
-            log_path="/tmp/l",
-            status="live",
-            pid=os.getpid(),  # live host pid; the socket map resolves the session
-            short_id="55f9847a",
-        )
-    ]
-    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
-    from typer.testing import CliRunner
-
-    from fno.agents.cli import agents_app
-
-    result = CliRunner().invoke(agents_app, ["top", "--json"])
-    assert result.exit_code == 0, result.output
-    row = next(w for w in json.loads(result.stdout)["workers"] if w["name"] == "t-xb57a-glm")
-    assert row["pid"] == 37355  # the column shows the session, not its host
-    assert row["rss_mb"] == 380  # and prices its tree
-
-
 def test_roster_sessions_overlays_session_pid(tmp_path, monkeypatch):
     import fno.agents.session_procs as sp
     from fno.agents.harnesses._claude_session_registry import roster_sessions

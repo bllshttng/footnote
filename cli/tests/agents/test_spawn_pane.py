@@ -3219,6 +3219,29 @@ def test_happy_pane_argv_refuses_when_happy_is_absent(monkeypatch) -> None:
         mux_spawn.happy_pane_argv(["claude", "go"], _ROUTE)
 
 
+def test_inject_route_model_argv_pins_the_route_before_the_seed_fence() -> None:
+    """A routed pane pins ANTHROPIC_MODEL on argv, ahead of settings env.
+
+    The user settings env block outranks process env, so env alone let a
+    global model pin win. The token lands flags-first, before the ``--``
+    fence, so it can never become prompt text, and an argv that already names
+    a model is caller intent that wins.
+    """
+    import fno.agents.mux_spawn as mux_spawn
+
+    route = {"ANTHROPIC_MODEL": "glm-5.3-flash[1m]"}
+    pinned = mux_spawn.inject_route_model_argv(["claude", "--name", "w", "go"], route)
+    assert pinned == ["claude", "--model", "glm-5.3-flash[1m]", "--name", "w", "go"]
+    fenced = mux_spawn.inject_route_model_argv(["claude", "go", "--", "--model x"], route)
+    assert fenced == ["claude", "--model", "glm-5.3-flash[1m]", "go", "--", "--model x"]
+    # An existing model token (explicit flag or passthrough) is never doubled.
+    explicit = mux_spawn.inject_route_model_argv(["claude", "--model", "glm-5.2"], route)
+    assert explicit == ["claude", "--model", "glm-5.2"]
+    # No route model, or a non-claude head: byte-identical.
+    assert mux_spawn.inject_route_model_argv(["claude", "go"], {}) == ["claude", "go"]
+    assert mux_spawn.inject_route_model_argv(["codex", "go"], route) == ["codex", "go"]
+
+
 def test_explicit_happy_monitor_refuses_when_happy_is_absent_before_runner(
     tmp_path: Path, monkeypatch
 ) -> None:

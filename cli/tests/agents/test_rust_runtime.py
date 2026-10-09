@@ -38,9 +38,13 @@ def _open_node_row(monkeypatch, tmp_path):
         "cwd": str(tmp_path),
     }
     monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda path, tokens: {"entries": [row], "missing": []})
-    # The seed-word gate reads load_graph(), whose default path an earlier
-    # test in the same worker can bake (see the trap in graph/_constants.py).
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda *a, **k: [row])
+    # resolve_seed_node reads through fno.graph.load.load_graph, a second
+    # reader the stub above does not cover: where a real store answers (CI's
+    # changed-smoke env), the seed lookup missed and refused the spawn before
+    # the behavior under test. Answer the loader with the same row.
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph", lambda *a, **k: [{"id": "x-f370", "slug": "codex-seed"}]
+    )
     # The verb reads the store itself for the nodeless derive: point its
     # FNO_HOME at a fixture graph naming the same row.
     monkeypatch.setenv("FNO_HOME", str(tmp_path))

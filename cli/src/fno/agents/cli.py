@@ -3645,27 +3645,27 @@ def cmd_top(
         False,
         "--pane-stats",
         help="Append per-pane mux server counters, differenced over the last "
-        "two 30s snapshots in the global events journal (bytes_in, "
-        "grid_updates, frames_composited, frames_emitted, cpu_ns).",
+        "two 30s snapshots in the global events journal.",
     ),
 ) -> None:
     """Show every live worker process - fno-spawned and foreign claude bg
-    alike - with pid, RSS (MB), and status.
+    alike - with pid, tree RSS (MB), served status and node.
 
-    The same union the spawn gate counts, so this is the audit surface every
-    gate message points at. Python-only (RSS via psutil; not routed to the
-    Rust client). ``--subagents`` appends a read-only sidechain
-    section; each row also carries its node and whether it shipped.
+    Answered by the Rust census (`fno-agents census --workers`); the `fno`
+    front execs it directly, so this shim only serves a Python-front call.
     """
-    from fno.agents.top import render_top
+    from fno.agents.rust_runtime import route_to_rust
 
-    print(
-        render_top(
-            as_json=as_json,
-            include_subagents=show_subagents,
-            include_pane_stats=show_pane_stats,
+    flags = [
+        flag
+        for flag, on in (
+            ("--json", as_json),
+            ("--subagents", show_subagents),
+            ("--pane-stats", show_pane_stats),
         )
-    )
+        if on
+    ]
+    route_to_rust(["census", "--workers", *flags])
 
 
 @agents_app.command("orphans", hidden=True)

@@ -21,7 +21,7 @@ const SEEN_MS = 5_000
 // person is there. In an fno mux pane the mux names the panes on screen; elsewhere a key typed
 // in this session's prompt box within this window stands in for that.
 const TYPED_MS = 600_000
-// The status line wrapper drops a frame older than 30 s, so an idle frame is rewritten well before that.
+// The status line wrapper drops a frame older than 45 s, so an idle frame is rewritten well before that.
 const FRAME_REFRESH_MS = 25_000
 // Each new frame starts Python in the status line, so the buddy moves only while something
 // happens: for this long after you type, a turn ends, it speaks, or you pet it. Then it holds still.
@@ -428,7 +428,8 @@ async function keepTicking($: EngineInterface, settings: Record<string, unknown>
   const ours = settings.statusLine as any
   if (ours.refreshInterval === 1 && ours.command === wrapperCommand()) return
   const inner = (await readJson($, `${buddyDir()}/inner.json`)) ?? {}
-  if (inner.statusLine && typeof ours.refreshInterval === 'number' && ours.refreshInterval !== 1) {
+  // An interval the user already gave their own line wins over the one on the wrapper.
+  if (inner.statusLine && inner.statusLine.refreshInterval == null && typeof ours.refreshInterval === 'number' && ours.refreshInterval !== 1) {
     inner.statusLine.refreshInterval = ours.refreshInterval
     await $.fs.write(`${buddyDir()}/inner.json`, JSON.stringify(inner, null, 2) + '\n')
   }
@@ -628,8 +629,8 @@ function sprite(c: Companion, now: number): string[] {
 }
 
 // The wrapper stamps a heartbeat each time Python runs, so a status line set in any settings file counts.
-// The shell fast path skips Python, but a new frame lands at least every FRAME_REFRESH_MS and runs it.
-const WRAPPER_SEEN_MS = FRAME_REFRESH_MS + 5_000
+// The shell fast path skips Python, but a new frame or every 25th tick runs it, about every 25 s at most.
+const WRAPPER_SEEN_MS = 45_000
 async function wrapperSeen($: EngineInterface, now: number): Promise<boolean> {
   if (!stateDir) return false
   try {
