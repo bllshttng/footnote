@@ -273,10 +273,12 @@ fn beat_resume_target(
 }
 
 /// One wake: deliver to the lead, tell the rungs, receipt the episode.
+/// `beat_journal` names where the beat was read, riding the receipt.
 fn act_on_plan(
     home: &AgentsHome,
     plan: WakePlan,
     beat_secs: i64,
+    beat_journal: Option<&str>,
     roots: &BTreeMap<String, String>,
 ) -> (u64, String) {
     let told = plan.up.len() + plan.down.len();
@@ -307,11 +309,28 @@ fn act_on_plan(
         acted += 1;
         notes.push("told operator".to_string());
     }
-    emit_receipt(home, plan.lead, plan.idle_secs, beat_secs, acted);
+    emit_receipt(
+        home,
+        plan.lead,
+        plan.idle_secs,
+        beat_secs,
+        beat_journal,
+        acted,
+    );
     (acted, notes.join(", "))
 }
 
-fn emit_receipt(home: &AgentsHome, lead: &Team, idle_secs: i64, beat_secs: i64, acted: u64) {
+/// The durable record of one wake. `beat_journal` is the journal the beat
+/// was read from, so a wake anchored at the shared pair while the team
+/// checks in elsewhere is visible in the receipt alone.
+fn emit_receipt(
+    home: &AgentsHome,
+    lead: &Team,
+    idle_secs: i64,
+    beat_secs: i64,
+    beat_journal: Option<&str>,
+    acted: u64,
+) {
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let payload = serde_json::json!({
         "scope": lead.scope,
@@ -319,6 +338,7 @@ fn emit_receipt(home: &AgentsHome, lead: &Team, idle_secs: i64, beat_secs: i64, 
         "holder_session": lead.holder_session,
         "idle_secs": idle_secs,
         "beat_secs": beat_secs,
+        "beat_journal": beat_journal,
         "acted": acted,
     });
     if let Err(error) = emitter.emit("lead_wake", &payload) {
@@ -342,20 +362,28 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
     }
     let beat_secs = crate::lead_verdict_inputs::checkin_interval_secs(config_cwd);
     let mut beats: BTreeMap<String, Option<i64>> = BTreeMap::new();
+    // scope -> the journal the beat was read from, so the receipt can say
+    // where the beat came from and a miskeyed read is visible in the log.
+    let mut beat_journals: BTreeMap<String, Option<String>> = BTreeMap::new();
     for team in &teams {
-        let row = crate::lead_history::previous_beat(
+        let beat = crate::lead_history::previous_beat_with_source(
             &team_beat_journals(home, &registry, team),
             &team.scope,
             team.holder_session.as_deref(),
             false,
         )
-        .ok()
-        .flatten();
-        let ts = row
+        .ok();
+        let ts = beat
             .as_ref()
+            .and_then(|b| b.row.as_ref())
             .and_then(|r| r.get("ts").and_then(Value::as_str))
             .and_then(parse_ts);
         beats.insert(team.scope.clone(), ts);
+        beat_journals.insert(
+            team.scope.clone(),
+            beat.and_then(|b| b.journal)
+                .map(|journal| journal.display().to_string()),
+        );
     }
     let wakes = wake_receipts(&crate::tick_ledger::journals(home), &teams);
     let projects = junior_projects(config_cwd, &registry);
@@ -393,7 +421,8 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
     let mut acted = 0u64;
     let mut notes: Vec<String> = Vec::new();
     for plan in plans {
-        let (n, note) = act_on_plan(home, plan, beat_secs, &roots);
+        let journal = beat_journals.get(&plan.lead.scope).cloned().flatten();
+        let (n, note) = act_on_plan(home, plan, beat_secs, journal.as_deref(), &roots);
         acted += n;
         if !note.is_empty() {
             notes.push(note);
@@ -418,27 +447,37 @@ fn short(text: &str) -> String {
 /// d-e952ed19). Isolated per team on purpose: `scan_scopes` errors the WHOLE
 /// list when one store cannot be opened, so a shared list would turn one
 /// corrupt project journal into a blind pass for every team; here only that
-/// team's read degrades. An unreadable registry degrades to the shared pair.
+/// team's read degrades. An unreadable registry degrades to the shared
+/// pair and says so on stderr: the receipt's `beat_journal` records the
+/// same fact, but the daemon log is where a broken registry gets noticed.
 fn team_beat_journals(home: &AgentsHome, registry_path: &Path, team: &Team) -> Vec<PathBuf> {
     let mut journals = crate::tick_ledger::journals(home);
-    if let Ok(loaded) = crate::state::load_registry(registry_path) {
-        for entry in &loaded.entries {
-            if entry.harness_session_id.as_deref() != team.holder_session.as_deref() {
-                continue;
+    match crate::state::load_registry(registry_path) {
+        Ok(loaded) => {
+            for entry in &loaded.entries {
+                if entry.harness_session_id.as_deref() != team.holder_session.as_deref() {
+                    continue;
+                }
+                let root = if entry.project_root.is_empty() {
+                    &entry.cwd
+                } else {
+                    &entry.project_root
+                };
+                if root.is_empty() {
+                    continue;
+                }
+                let journal = crate::paths::space_dir(Path::new(root)).join("events.jsonl");
+                if !journals.contains(&journal) {
+                    journals.push(journal);
+                }
+                break;
             }
-            let root = if entry.project_root.is_empty() {
-                &entry.cwd
-            } else {
-                &entry.project_root
-            };
-            if root.is_empty() {
-                continue;
-            }
-            let journal = crate::paths::space_dir(Path::new(root)).join("events.jsonl");
-            if !journals.contains(&journal) {
-                journals.push(journal);
-            }
-            break;
+        }
+        Err(error) => {
+            eprintln!(
+                "lead-wake: beat lookup for {} degrades to the shared pair: {error}",
+                team.scope
+            );
         }
     }
     journals
@@ -599,6 +638,29 @@ mod tests {
             holder: holder.to_string(),
             holder_session: Some(sid.to_string()),
         }
+    }
+
+    #[test]
+    fn the_wake_receipt_names_its_beat_journal() {
+        let base = std::env::temp_dir().join(format!("lead-wake-receipt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("agents")).unwrap();
+        let home = AgentsHome::at(base.join("agents"));
+        let lead = team("fno", 1, "vellum", "sess-head");
+        let journal = base.join("repo").join("events.jsonl");
+        let named = journal.display().to_string();
+        emit_receipt(&home, &lead, 3600, 55 * 60, Some(&named), 1);
+        emit_receipt(&home, &lead, 3600, 55 * 60, None, 0);
+        let rows = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let wakes: Vec<Value> = rows
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|r| r["type"] == json!("lead_wake"))
+            .collect();
+        assert_eq!(wakes.len(), 2, "one receipt per wake: {rows}");
+        assert_eq!(wakes[0]["data"]["beat_journal"], json!(named));
+        assert_eq!(wakes[1]["data"]["beat_journal"], Value::Null);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn projects() -> BTreeMap<String, String> {
