@@ -68,21 +68,38 @@ async fn stream_macmon(
         return false;
     };
     let mut lines = BufReader::new(stdout).lines();
+    // The capacity state file re-reads at the refresh cadence, not per
+    // streamed line: the machine_watch tick writes it far slower than
+    // macmon samples, and a blocking read per second buys nothing.
+    let mut capacity: Option<(std::time::Instant, Option<serde_json::value::Value>)> = None;
+    // Consecutive silent intervals: three in a row means the child is
+    // alive but wedged (EOF would have ended it), so give it back to the
+    // outer loop to respawn - the per-refresh spawn this replaces healed a
+    // wedged child within one interval, and the long-lived shape must not
+    // lose that.
+    let mut silent: u32 = 0;
+    let cadence = std::time::Duration::from_secs(refresh.max(1));
     loop {
         if !gate.load(std::sync::atomic::Ordering::Relaxed) {
             return true;
         }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(refresh.max(1)),
-            lines.next_line(),
-        )
-        .await
-        {
+        match tokio::time::timeout(cadence, lines.next_line()).await {
             Ok(Ok(Some(line))) => {
+                silent = 0;
                 let parsed = parse_macmon_sample(line.as_bytes(), detailed);
                 let text = match parsed {
                     Some(cpu) => {
-                        let state = capacity_state();
+                        let now = std::time::Instant::now();
+                        let state = match &capacity {
+                            Some((at, cached)) if now.duration_since(*at) < cadence => {
+                                cached.clone()
+                            }
+                            _ => {
+                                let fresh = capacity_state();
+                                capacity = Some((now, fresh.clone()));
+                                fresh
+                            }
+                        };
                         let mut text = cpu;
                         text.push_str(&memory_segment(state.as_ref(), detailed));
                         text.push_str(&capacity_segment(state.as_ref()));
@@ -98,7 +115,11 @@ async fn stream_macmon(
             Ok(Ok(None)) => return false, // child exited
             Ok(Err(_)) => return false,   // stdout read error
             Err(_) => {
+                silent += 1;
                 let _ = meter_tx.send("meter: sensor unavailable".into());
+                if silent >= 3 {
+                    return false; // alive but wedged: respawn it
+                }
             }
         }
     }
