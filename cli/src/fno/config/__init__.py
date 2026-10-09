@@ -2048,6 +2048,27 @@ class SidelineBlock(BaseModel):
         return "card"
 
 
+class SplitBlock(BaseModel):
+    """Split placement config (nested under 'config.split')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    # Where the mux row menu's Split Direction toggle starts. Mirrors the Rust
+    # reader's tolerance (crates/fno digest_overlay): an unknown value reads as
+    # the pane default, never an error.
+    opens: Literal["pane", "portal"] = "pane"
+
+    @field_validator("opens", mode="before")
+    @classmethod
+    def _coerce_opens(cls, v: object) -> object:
+        """Unknown or wrong-shaped values degrade to the pane default, never error."""
+        if v is None:
+            return "pane"
+        if isinstance(v, str) and v.strip().lower() == "portal":
+            return "portal"
+        return "pane"
+
+
 class DispatchBlock(BaseModel):
     """Autonomous-dispatch profile (nested under 'config.dispatch').
 
@@ -3938,6 +3959,7 @@ class ConfigBlock(BaseModel):
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     routing: RoutingBlock = Field(default_factory=RoutingBlock)
     sideline: SidelineBlock = Field(default_factory=SidelineBlock)
+    split: SplitBlock = Field(default_factory=SplitBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)

@@ -319,6 +319,10 @@ pub(crate) async fn keys_modal_keys(
                         // a typed chord uses (Locked 3), then the modal closes.
                         ev => {
                             view.keys_modal = None;
+                            // An action ran: the return-to-settings marker is
+                            // spent even though no dismiss fired, so a LATER
+                            // table opened elsewhere closes plain.
+                            view.keys_modal_return = false;
                             // Parity with a typed chord: modal execution arms any
                             // repeatable event too (the scanner never saw this byte).
                             scanner.arm_if_repeat(&ev, Instant::now());
@@ -366,6 +370,9 @@ async fn keys_modal_execute_selected(
     match ev {
         Some(ev) => {
             view.keys_modal = None;
+            // An action ran: spend the return-to-settings marker here too,
+            // so a later table opened outside settings closes plain.
+            view.keys_modal_return = false;
             // Parity with a typed chord: modal execution arms any repeatable
             // event too (the scanner never saw a key here).
             scanner.arm_if_repeat(&ev, Instant::now());

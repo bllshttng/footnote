@@ -214,7 +214,9 @@ pub(super) fn build_row_menu_with(
             PopupRow::Entry {
                 glyph: "⇄".into(),
                 label: format!("split opens: {}", split_opens.word()),
-                hint: crate::keys::menu_key_for("toggle-split-opens").unwrap_or_default(),
+                // The `add` helper stamps the live menu byte on a
+                // single-action entry; an explicit hint here would be dead.
+                hint: String::new(),
                 enabled: true,
             },
             &[MenuAction::ToggleSplitOpens],
