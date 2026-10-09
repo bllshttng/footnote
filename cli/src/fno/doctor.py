@@ -665,9 +665,9 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
 def _human_age(seconds: int) -> str:
     """Compact process-age label. Reuses the fleet's formatter (the same
     cross-module import `mail/receipts.py` makes) rather than a 4th copy."""
-    from fno.agents.top import _fmt_age
+    from fno.agents.session_truth import fmt_age
 
-    return _fmt_age(seconds)
+    return fmt_age(seconds)
 
 
 def _daemon_drift_warning() -> Optional[str]:
