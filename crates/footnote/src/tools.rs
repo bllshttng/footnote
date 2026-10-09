@@ -69,11 +69,9 @@ pub fn schemas() -> Value {
     ])
 }
 
-/// Scrub the spawner's identity and stamp footnote's own on a child.
+/// Stamp footnote's identity on a child. The supervisor already scrubbed
+/// the spawner's identity from this process's env at launch.
 pub fn child_env(cmd: &mut Command, fno_id: &str) {
-    for name in crate::claims::AMBIENT_IDENTITY_NAMES {
-        cmd.env_remove(name);
-    }
     cmd.env("FNO_HARNESS_NAME", "footnote")
         .env("FNO_HARNESS_SESSION_ID", fno_id);
 }
@@ -261,7 +259,7 @@ pub fn run_bounded(
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status.code();
         }
-        if start.elapsed() > limit || crate::subprocess_ask::ask_interrupted() {
+        if start.elapsed() > limit || crate::interrupted() {
             kill_group();
             let _ = child.wait();
             break None;
