@@ -1608,13 +1608,11 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
     records
         .into_iter()
         .zip(states)
-        .map(|(rec, state)| {
-            ClaimAge {
-                key: rec.key,
-                holder: rec.holder,
-                acquired_at_ms: rec.acquired_at,
-                state,
-            }
+        .map(|(rec, state)| ClaimAge {
+            key: rec.key,
+            holder: rec.holder,
+            acquired_at_ms: rec.acquired_at,
+            state,
         })
         .collect()
 }
