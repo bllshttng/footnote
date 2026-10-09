@@ -58,10 +58,8 @@ _FENCE_RE = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 _CONFIRMED = "confirmed"
 
 #: The autofix class a finding carries (CE adoption). ``gated_auto`` is the
-#: one class ``--fix`` applies; any other value (or none) reads as absent,
-#: so nothing off-contract is ever applied by machine.
+#: one class ``--fix`` applies; any other value (or none) reads as absent.
 AUTOFIX_CLASSES: tuple[str, ...] = ("gated_auto", "manual", "advisory")
-AUTO_APPLICABLE = "gated_auto"
 
 
 class FindingsNormalizeError(ValueError):
@@ -83,7 +81,7 @@ class FindingRecord:
     line: Optional[Any] = None
     summary: Optional[str] = None
     failure_scenario: Optional[str] = None
-    #: Who acts on the fix and whether a machine can. Off-enum reads absent.
+    #: Who acts on the fix; off-enum reads absent.
     autofix_class: Optional[str] = None
     owner: Optional[str] = None
     #: The payload carried none of the recognizable field names, or was not
@@ -320,8 +318,7 @@ class FindingPrimitive:
     #: fixing it means knowing what the finding says. The record already
     #: carried the text; only this primitive dropped it.
     summary: Optional[str] = None
-    #: Rides the attestation ledger so a re-review reads fixability, and a
-    #: disposed-by-fix is distinguishable from a disposed-by-decision.
+    #: Rides the attestation ledger so a re-review reads fixability.
     autofix_class: Optional[str] = None
     owner: Optional[str] = None
 

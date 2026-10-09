@@ -2,8 +2,8 @@
 
 Settings are DEEP-MERGED across every candidate file that exists, higher
 priority overriding lower key-by-key (nested dicts merge recursively,
-scalars and lists replace wholesale). The candidate priority list, the
-design decisions, and the cache contract are locked in docs/path-config.md.
+scalars and lists replace wholesale). The candidate priority list and the
+design decisions are locked in docs/path-config.md.
 
 A key absent from a higher-priority file falls through to the next file down,
 so the per-user global holds shared defaults while each project sets only its
@@ -268,12 +268,10 @@ class MaintainBlock(BaseModel):
 
 
 class PlanBlock(BaseModel):
-    """Plan budgets (nested under 'config.plan')."""
+    """Plan budgets (config.plan): default_diff_budget is the commit-time diff-budget ceiling (hooks/diff-budget-commit.sh), 0 is off; a plan's frontmatter diff_budget overrides."""
 
     model_config = ConfigDict(extra="ignore")
 
-    # Commit-time diff-budget ceiling (hooks/diff-budget-commit.sh); a plan's
-    # frontmatter diff_budget overrides it per plan. 0 is off.
     default_diff_budget: int = Field(default=300, ge=0)
 
 
