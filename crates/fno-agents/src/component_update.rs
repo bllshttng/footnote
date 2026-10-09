@@ -516,7 +516,7 @@ fn stamp_newer_descendants(
     if !repo_dir.is_dir() {
         return;
     }
-    let mut cache: std::collections::HashMap<String, Option<bool>> =
+    let mut cache: std::collections::HashMap<(String, String), Option<bool>> =
         std::collections::HashMap::new();
     for probe in components.iter_mut() {
         if probe.component == PYTHON_TOOL {
@@ -533,7 +533,7 @@ fn stamp_newer_descendants(
             continue;
         }
         let answer = *cache
-            .entry(rev.clone())
+            .entry((expected.clone(), rev.clone()))
             .or_insert_with(|| rev_is_descendant(&expected, &rev, repo_dir));
         if answer == Some(true) {
             probe.observed_is_descendant = Some(true);
@@ -924,6 +924,23 @@ mod tests {
         );
     }
 
+    /// Run git in `dir`, asserting success; stdout trimmed. Shared by the
+    /// ancestry tests.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     /// A real temp git repo answers the ancestry question both ways:
     /// child descends from base (Some(true)), base does not descend from
     /// child (Some(false)).
@@ -933,22 +950,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-cu-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| -> String {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .output()
-                .expect("git runs");
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
-        git(&["init", "-q"]);
-        git(&[
+        git(&dir, &["init", "-q"]);
+        git(&dir, &[
             "-c",
             "user.email=t@t",
             "-c",
@@ -958,8 +961,8 @@ mod tests {
             "-m",
             "base",
         ]);
-        let base = git(&["rev-parse", "HEAD"]);
-        git(&[
+        let base = git(&dir, &["rev-parse", "HEAD"]);
+        git(&dir, &[
             "-c",
             "user.email=t@t",
             "-c",
@@ -969,7 +972,7 @@ mod tests {
             "-m",
             "child",
         ]);
-        let child = git(&["rev-parse", "HEAD"]);
+        let child = git(&dir, &["rev-parse", "HEAD"]);
         assert_eq!(rev_is_descendant(&base, &child, &dir), Some(true));
         assert_eq!(rev_is_descendant(&child, &base, &dir), Some(false));
         assert_eq!(rev_is_descendant("nonexistent", &child, &dir), None);
@@ -985,22 +988,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-cu-git2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| -> String {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .output()
-                .expect("git runs");
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
-        git(&["init", "-q"]);
-        git(&[
+        git(&dir, &["init", "-q"]);
+        git(&dir, &[
             "-c",
             "user.email=t@t",
             "-c",
@@ -1010,8 +999,8 @@ mod tests {
             "-m",
             "base",
         ]);
-        let base = git(&["rev-parse", "HEAD"]);
-        git(&[
+        let base = git(&dir, &["rev-parse", "HEAD"]);
+        git(&dir, &[
             "-c",
             "user.email=t@t",
             "-c",
@@ -1021,7 +1010,7 @@ mod tests {
             "-m",
             "child",
         ]);
-        let child = git(&["rev-parse", "HEAD"]);
+        let child = git(&dir, &["rev-parse", "HEAD"]);
         write_script(&dir, "fno-agents", &version_script(&child, ""));
         write_script(&dir, "fno-agents-daemon", &version_script(&child, ""));
         write_script(&dir, "fno-agents-worker", &version_script(&child, ""));
