@@ -63,7 +63,11 @@ fn installed_rev_file() -> PathBuf {
     install_dir().join("installed-rev")
 }
 
-fn rust_marker_file() -> PathBuf {
+/// The retired `installed-rust-rev` marker's path. Nothing has written it for
+/// several releases (the staleness verdict keys on the binary's self-reported
+/// crates/ rev instead), so every surviving copy reads stale forever; each
+/// deploy removes it so the state root stops carrying a lying file.
+fn retired_rust_marker_file() -> PathBuf {
     install_dir().join("installed-rust-rev")
 }
 
@@ -1827,6 +1831,11 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
                 eprintln!("fno doctor update: WARNING: marker write failed: {e}");
             }
         }
+        // Retire the stale `installed-rust-rev` marker: nothing has written
+        // or read it for verdicts in releases (the verdict keys on the
+        // binary's self-report), so every surviving copy reads stale
+        // forever. Best-effort: its absence is the point, not its removal.
+        let _ = std::fs::remove_file(retired_rust_marker_file());
         // A failed pin record is a failed step, never a warning.
         if let Err(e) = record_source_pin(&pin) {
             eprintln!("fno doctor update: ERROR: {e}");
@@ -2316,7 +2325,6 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     };
     let probes = serde_json::json!({
         "installed_rev": installed_rev,
-        "rust_marker": read_marker(&rust_marker_file()),
         "rust_subtree_rev": subtree,
         "source_rev": src_rev,
         "source": resolved_source.as_ref().map(|p| p.to_string_lossy().into_owned()),
