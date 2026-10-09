@@ -59,7 +59,7 @@ pub(super) fn read_prior_fires(
     now: DateTime<Utc>,
     min_gap_secs: i64,
 ) -> (u64, u64, Option<String>, i64) {
-    let content = match event_lines(events_path) {
+    let content = match event_lines_of(events_path, &["loop_check"]) {
         Ok(lines) => lines.join("\n"),
         Err(_) => return (0, 0, None, 0),
     };
@@ -160,7 +160,7 @@ pub(super) fn read_prior_fires(
 /// session: the journal's copy of the last observed world, so a fire that
 /// reads no PR state can still record comparable row fields .
 pub(super) fn read_last_row_fields(events_path: &Path, session_id: &str) -> (String, String) {
-    let content = match event_lines(events_path) {
+    let content = match event_lines_of(events_path, &["loop_check"]) {
         Ok(lines) => lines.join("\n"),
         Err(_) => return ("none".to_string(), "none".to_string()),
     };

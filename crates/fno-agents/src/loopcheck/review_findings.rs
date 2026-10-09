@@ -21,11 +21,18 @@ pub struct UnattestedReviewer {
 /// The committed event lines for one journal family: the store's rows in
 /// commit order, pre-cutover bytes imported first (hash-dedupe free).
 pub(crate) fn event_lines(journal: &Path) -> Result<Vec<String>, String> {
+    event_lines_of(journal, &[])
+}
+
+/// [`event_lines`] narrowed to `types` plus the typeless rows (corrupt lines,
+/// which a scan still counts), read through the type index. A stop-path scan
+/// that matches only these types sees the same lines it would pick out of the
+/// full read: a project store holds over a million rows, and loading them all
+/// on every stop was most of the stop hook's time. Empty `types` reads every
+/// row.
+pub(crate) fn event_lines_of(journal: &Path, types: &[&str]) -> Result<Vec<String>, String> {
     crate::event_store::import_all(journal)?;
-    let q = crate::event_store::EventQuery {
-        include_rejected: true,
-        ..Default::default()
-    };
+    let q = crate::event_store::EventQuery::of_types(types);
     let rows = crate::event_store::query_events(journal, &q)?;
     Ok(rows.into_iter().map(|r| r.line).collect())
 }
@@ -71,7 +78,7 @@ pub fn unattested_reviewers_scan(
 ) -> (Vec<UnattestedReviewer>, usize) {
     // no committed evidence -> gate unmet (fail closed); an unreadable store
     // is the same shape, never an empty-but-satisfied read
-    let content = match event_lines(events_path) {
+    let content = match event_lines_of(events_path, &["review_attestation"]) {
         Ok(lines) => lines.join("\n"),
         Err(_) => {
             let unsatisfied = reviewers

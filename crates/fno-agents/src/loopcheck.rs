@@ -247,13 +247,13 @@ use posture::{
 pub(crate) use pr_read::CiConclusion;
 use pr_read::{read_pr_info, PrInfo, PrState};
 pub use review_coverage_verb::{run_review_coverage, run_review_coverage_capture};
-pub(crate) use review_findings::event_lines;
 #[cfg(test)]
 use review_findings::OpenFinding;
 use review_findings::{
     build_findings_block_reason, demote_unmeasured_coverage, open_findings_from_store,
     review_journal_text,
 };
+pub(crate) use review_findings::{event_lines, event_lines_of};
 pub use review_findings::{unattested_reviewers_scan, UnattestedReviewer};
 pub(crate) use review_inputs::{resolve_review_inputs, ReviewInputs};
 pub(crate) use self_review_floor::is_documentation_path;
