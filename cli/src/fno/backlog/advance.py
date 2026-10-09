@@ -200,6 +200,8 @@ class DispatchClaimObservation:
     action: str
     worker: str = ""
     block_reason: Optional[str] = None
+    # The reader failure behind worked-authority-unavailable, verbatim.
+    worked_error: Optional[str] = None
 
     @property
     def blocks_dispatch(self) -> bool:
@@ -2652,6 +2654,7 @@ def _observe_node_claim(
         action=action,
         worker=worker,
         block_reason=block_reason,
+        worked_error=worked_error,
     )
 
 

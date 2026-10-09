@@ -496,9 +496,20 @@ def _spawn_guard_decision(
                         )
                     ),
                 }, 0
+            # An authority outage is NOT occupancy: rendering it
+            # already-running sent free nodes' leads to a costlier lane.
+            if block_wins:
+                return {
+                    "verdict": "unknown",
+                    "reason": block,
+                    "detail": (
+                        f"could not check whether node:{node_id} is running: "
+                        f"{observation.worked_error or block}; retry"
+                    ),
+                    **common,
+                }, 0
             reason = (
-                block if block_wins
-                else "suspect-claim" if wedged
+                "suspect-claim" if wedged
                 else "live-claim" if common["init_reached"]
                 else "unproven-claim"
             )
@@ -2930,7 +2941,7 @@ def cmd_spawn_guard(
     dispatchable.
 
     Emits ONE verdict on stdout (a ``verdict=<v> key=value`` line, or a ``--json``
-    object) in ``{dispatchable, already-running, refused, corrupted, error}``:
+    object) in ``{dispatchable, already-running, unknown, refused, corrupted, error}``:
 
     \b
     - dispatchable    node free/stale. On a reserving call ``dispatch:<id>`` is
@@ -2951,16 +2962,21 @@ def cmd_spawn_guard(
                       frees nothing), OR a racing dispatcher already holds
                       ``dispatch:<id>`` (reason=reservation-held). No reservation
                       acquired.
+    - unknown         the worked authority could not answer (the roster read
+                      failed), so the guard cannot say whether the node is
+                      running (reason=worked-authority-unavailable; detail
+                      names the reader that failed). This is NOT occupancy:
+                      retry. No reservation acquired.
     - refused        the durable dead-dispatch limit blocked another birth
                       (reason=auto-deferred|defer-failed). No reservation acquired.
     - corrupted       the ``node:<id>`` claim is corrupted; launch nothing.
     - error           the claim probe failed or the reservation could not be
                       acquired (fail-closed); launch nothing.
 
-    Exit 0 for every clean verdict (incl. already-running and corrupted). Exit
-    non-zero ONLY for a usage error or a fail-closed guard error (verdict=error),
-    so a stale ``fno`` without this verb (Typer "No such command") also fails
-    closed in the caller.
+    Exit 0 for every answered verdict (incl. already-running, unknown and
+    corrupted). Exit non-zero ONLY for a usage error or a fail-closed guard
+    error (verdict=error), so a stale ``fno`` without this verb (Typer "No such
+    command") also fails closed in the caller.
     """
     obj, exit_code = _spawn_guard_decision(
         node_id,

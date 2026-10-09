@@ -538,6 +538,7 @@ def test_worked_authority_failure_refuses_dispatch(monkeypatch):
     assert observation.blocks_dispatch is True
     assert observation.refusal_reason == "worked-authority-unavailable"
     assert observation.block_reason == "worked-authority-unavailable"
+    assert observation.worked_error == "roster timeout"
 
 
 def test_dead_dispatch_limit_outranks_worked_error(monkeypatch):
