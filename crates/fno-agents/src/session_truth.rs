@@ -5,16 +5,19 @@
 //! (`cli/src/fno/agents/session_truth.py`), field for field: `handle, state,
 //! reason, last_activity_age_s, last_event_at, last_activity_basis,
 //! last_message, provider_refusal, session_id, observed_model,
-//! harness_title, suggestions`. The daemon's truth probe answers from this
-//! module in process; no `fno agents truth` child ever starts on that path.
+//! harness_title, suggestions`. The daemon answers truth from this module in
+//! process, from one cursor per transcript; no `fno agents truth` child ever
+//! starts on that path.
+//!
+//! A cursor keeps a byte offset and a derived [`TailSummary`], never
+//! transcript text, and drops when its session ends or goes idle. Right
+//! after a daemon restart a session whose cursor is not rebuilt yet answers
+//! `warming`: ask again.
 //!
 //! Liveness is transcript-keyed ONLY, exactly as the Python reader states:
 //! argv, pid, the daemon record, and state.json have each been caught lying
 //! about a live session. Every failure degrades to `unknown` with one of the
-//! Python reasons (`not-found` | `no-records`); the reader never panics and
-//! never raises. `resolver-error` stays a decoder-accepted word for wire
-//! compat, but the native resolver is infallible by construction, so it does
-//! not emit it.
+//! Python reasons (`not-found` | `no-records`); the reader never panics.
 
 pub mod cursor;
 
@@ -27,8 +30,6 @@ use serde_json::Value;
 use crate::claude_transcript_paths::{choose_from, store_listing};
 use crate::state::RegistryEntry;
 use cursor::TruthCursors;
-
-pub(crate) use cursor::global_cursors;
 
 /// Exact tag openers only: `<promise>` / `<promise ...>`, never `<promised>`.
 /// Mirrors the loop runtime's protocol so truth and the runtime agree.
@@ -67,7 +68,8 @@ pub(crate) const STALLED_AFTER_S: f64 = 2.0 * 3600.0;
 /// tool/user rows, bounded so a multi-MB transcript stays cheap.
 pub(crate) const TAIL_N: usize = 40;
 
-/// One rendered transcript turn: a role and its human-readable text.
+/// One rendered transcript turn: a role and its human-readable text. Lives
+/// only while a line folds; a summary keeps derived facts, never the text.
 #[derive(Clone, Debug)]
 pub(crate) struct TruthRecord {
     pub role: String,
@@ -75,50 +77,283 @@ pub(crate) struct TruthRecord {
     pub timestamp: Option<String>,
 }
 
-/// Pure classifier over the LAST transcript turn, moved verbatim from
-/// `worked.rs` (which now calls this one) so one classifier exists in the
-/// repo. Content signals apply only when the last turn is the assistant's; a
-/// trailing user turn clears any stale assistant signal and mtime decides. A
-/// turn stops being news past `stalled_after_s`; `done` is an outcome and
-/// does not go stale.
-pub(crate) fn classify_tail(
-    last_role: Option<&str>,
-    last_text: &str,
-    age_s: Option<f64>,
-    stalled_after_s: f64,
-) -> String {
-    let text = last_text;
-    let stale = age_s.is_some_and(|a| a > stalled_after_s);
-    if last_role == Some("assistant") {
+/// The content signal of one assistant turn, in the classifier's order of
+/// precedence. Computed once when the turn folds, so the summary never holds
+/// the text it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Watching,
+    Promise,
+    ApiError,
+    Question,
+    Plain,
+}
+
+impl Signal {
+    pub(crate) fn of(text: &str) -> Self {
         if watching_re().is_match(text) {
-            return if stale {
-                "stalled".into()
-            } else {
-                "watching".into()
-            };
+            return Signal::Watching;
         }
         if promise_re().is_match(text) {
-            return "done".into();
+            return Signal::Promise;
         }
         if api_error_re().is_match(text.trim_start()) {
-            return "stalled".into();
+            return Signal::ApiError;
         }
         let stripped = text.trim_end();
         if stripped.ends_with('?')
             || help_re().is_match(text)
             || option_prompt_re().is_match(stripped)
         {
-            return if stale {
-                "stalled".into()
-            } else {
-                "your-move".into()
-            };
+            return Signal::Question;
+        }
+        Signal::Plain
+    }
+}
+
+/// Pure classifier over the LAST transcript turn, the one classifier in the
+/// repo (`worked.rs` calls it too). Content signals apply only when the last
+/// turn is the assistant's; a trailing user turn clears any stale assistant
+/// signal and mtime decides. A turn stops being news past `stalled_after_s`;
+/// `done` is an outcome and does not go stale.
+pub(crate) fn classify_tail(
+    last_role: Option<&str>,
+    last_text: &str,
+    age_s: Option<f64>,
+    stalled_after_s: f64,
+) -> String {
+    classify_signal(last_role, Signal::of(last_text), age_s, stalled_after_s)
+}
+
+fn classify_signal(
+    last_role: Option<&str>,
+    signal: Signal,
+    age_s: Option<f64>,
+    stalled_after_s: f64,
+) -> String {
+    let stale = age_s.is_some_and(|a| a > stalled_after_s);
+    let word = match (last_role == Some("assistant"), signal) {
+        (true, Signal::Watching) if !stale => "watching",
+        (true, Signal::Promise) => "done",
+        (true, Signal::ApiError) => "stalled",
+        (true, Signal::Question) if !stale => "your-move",
+        _ if stale => "stalled",
+        _ => "working",
+    };
+    word.to_string()
+}
+
+/// What one turn contributes to truth, derived when it folds.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnFacts {
+    role: String,
+    signal: Signal,
+    api_error: bool,
+    refusal: Option<String>,
+}
+
+impl TurnFacts {
+    fn of(role: String, text: &str) -> Self {
+        Self {
+            signal: Signal::of(text),
+            api_error: api_error_re().is_match(text.trim_start()),
+            refusal: provider_refusal_of(text),
+            role,
         }
     }
-    if stale {
-        return "stalled".into();
+}
+
+/// The derived state of one transcript tail: what the payload needs and
+/// nothing more. The only text it keeps is the 200-char `last_message` the
+/// wire already carries. The `since_*` counters keep the Python reader's
+/// 40-turn window without keeping the 40 turns.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TailSummary {
+    records: usize,
+    last: Option<TurnFacts>,
+    last_message: Option<String>,
+    actor: Option<TurnFacts>,
+    since_actor: usize,
+    stamp: Option<f64>,
+    since_stamp: usize,
+    model: Option<String>,
+    model_samples: usize,
+    // The model record lies past the bounded scan, so its absence is not
+    // proof the session never answered.
+    model_unscanned: bool,
+    title: Option<String>,
+}
+
+impl TailSummary {
+    pub(crate) fn has_record(&self) -> bool {
+        self.records > 0
     }
-    "working".into()
+
+    #[cfg(test)]
+    pub(crate) fn records(&self) -> usize {
+        self.records
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_role(&self) -> Option<&str> {
+        self.last.as_ref().map(|t| t.role.as_str())
+    }
+
+    /// Fold one turn. A user turn that IS a delivered mail turn flips to
+    /// `peer` (peek's `_resolve_peer_roles`), so a relay never reads as the
+    /// operator's move.
+    fn push(&mut self, role: String, text: &str, timestamp: Option<&str>) {
+        let peer = role == "user"
+            && crate::mail_header::classify(text) != crate::mail_header::Framing::Bare;
+        let role = if peer { "peer".to_string() } else { role };
+        let facts = TurnFacts::of(role, text);
+        self.records = self.records.saturating_add(1);
+        self.since_actor = self.since_actor.saturating_add(1);
+        self.since_stamp = self.since_stamp.saturating_add(1);
+        if facts.role != "peer" {
+            self.actor = Some(facts.clone());
+            self.since_actor = 0;
+        }
+        if let Some(epoch) = timestamp.and_then(parse_stamp) {
+            self.stamp = Some(epoch);
+            self.since_stamp = 0;
+        }
+        self.last_message = flatten_200(text);
+        self.last = Some(facts);
+    }
+
+    fn note_model(&mut self, model: String) {
+        self.model = Some(model);
+        self.model_samples = self.model_samples.saturating_add(1);
+        self.model_unscanned = false;
+    }
+
+    /// The newest non-peer turn inside the 40-turn window, else the last
+    /// turn whatever its role.
+    fn last_actor(&self) -> Option<&TurnFacts> {
+        match &self.actor {
+            Some(actor) if self.since_actor < TAIL_N => Some(actor),
+            _ => self.last.as_ref(),
+        }
+    }
+
+    /// The newest parseable stamp inside the 40-turn window.
+    fn newest_stamp(&self) -> Option<f64> {
+        self.stamp.filter(|_| self.since_stamp < TAIL_N)
+    }
+}
+
+fn parse_stamp(ts: &str) -> Option<f64> {
+    chrono::DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00"))
+        .ok()
+        .map(|dt| dt.timestamp() as f64)
+}
+
+// ---------------------------------------------------------------------------
+// Folders: how each harness's lines become a summary
+// ---------------------------------------------------------------------------
+
+/// The provenance scans run past the rebuild window only to find a record
+/// the window did not carry: codex stamps its model once per turn, which a
+/// tool-heavy turn pushes megabytes back.
+const MODEL_SCAN_LIMIT: u64 = 32 << 20;
+const TITLE_SCAN_LIMIT: u64 = 1 << 20;
+
+fn fold_claude(s: &mut TailSummary, line: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if let Some(model) = model_of("claude", &v) {
+        s.note_model(model);
+    }
+    if let Some(title) = title_of(&v) {
+        s.title = Some(title);
+    }
+    if let Some(r) = parse_claude_record(&v) {
+        s.push(r.role, &r.text, r.timestamp.as_deref());
+    }
+}
+
+fn fold_codex(s: &mut TailSummary, line: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if let Some(model) = model_of("codex", &v) {
+        s.note_model(model);
+    }
+    if let Some(r) = parse_codex_record(&v) {
+        s.push(r.role, &r.text, r.timestamp.as_deref());
+    }
+}
+
+/// claude's compact boundary: `{"type":"system","subtype":"compact_boundary"}`.
+/// Only a line carrying the bare token is parsed to confirm it.
+fn claude_boundary(line: &str) -> bool {
+    line.contains("\"compact_boundary\"")
+        && serde_json::from_str::<Value>(line).is_ok_and(|v| {
+            v.get("type").and_then(Value::as_str) == Some("system")
+                && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        })
+}
+
+/// codex's compact record: a top-level `"type":"compacted"` in the line's
+/// head. Its line carries the whole replacement history (hundreds of KB), so
+/// the head test decides without a parse.
+fn codex_boundary(line: &str) -> bool {
+    let head = &line.as_bytes()[..line.len().min(200)];
+    head.windows(18).any(|w| w == b"\"type\":\"compacted\"")
+}
+
+fn backfill_claude(s: &mut TailSummary, path: &Path, before: u64) {
+    if s.model.is_none() {
+        let found = cursor::scan_back(path, before, b"\"model\":\"", MODEL_SCAN_LIMIT, &|l| {
+            serde_json::from_str::<Value>(l)
+                .ok()
+                .and_then(|v| model_of("claude", &v))
+        });
+        backfill_model(s, found, before);
+    }
+    if s.title.is_none() {
+        s.title = cursor::scan_back(path, before, b"\"agent-name\"", TITLE_SCAN_LIMIT, &|l| {
+            serde_json::from_str::<Value>(l)
+                .ok()
+                .and_then(|v| title_of(&v))
+        });
+    }
+}
+
+fn backfill_codex(s: &mut TailSummary, path: &Path, before: u64) {
+    if s.model.is_none() {
+        let found = cursor::scan_back(path, before, b"turn_context", MODEL_SCAN_LIMIT, &|l| {
+            serde_json::from_str::<Value>(l)
+                .ok()
+                .and_then(|v| model_of("codex", &v))
+        });
+        backfill_model(s, found, before);
+    }
+}
+
+fn backfill_model(s: &mut TailSummary, found: Option<String>, before: u64) {
+    match found {
+        Some(model) => s.note_model(model),
+        None => s.model_unscanned = before > MODEL_SCAN_LIMIT,
+    }
+}
+
+/// The folder for a file-backed harness.
+pub(crate) fn folder_for(agent: &str) -> cursor::Folder<'static> {
+    match agent {
+        "codex" => cursor::Folder {
+            fold: &fold_codex,
+            is_boundary: &codex_boundary,
+            backfill: &backfill_codex,
+        },
+        _ => cursor::Folder {
+            fold: &fold_claude,
+            is_boundary: &claude_boundary,
+            backfill: &backfill_claude,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,20 +439,6 @@ fn parse_codex_record(v: &Value) -> Option<TruthRecord> {
     })
 }
 
-/// Flip `user` roles whose text IS a delivered mail turn to `peer`, the port
-/// of peek's `_resolve_peer_roles`: the classifier already lives in this
-/// crate (`mail_header::classify`), so the flip is one call, no subprocess.
-fn resolve_peer_roles(records: &mut Vec<TruthRecord>) {
-    for record in records.iter_mut() {
-        if record.role != "user" {
-            continue;
-        }
-        if crate::mail_header::classify(&record.text) != crate::mail_header::Framing::Bare {
-            record.role = "peer".to_string();
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The opencode arm: the shared SQLite store, read-only
 // ---------------------------------------------------------------------------
@@ -287,6 +508,14 @@ fn opencode_records_db(db: &Path, session_id: &str, n: usize) -> Vec<TruthRecord
         let (mid, raw) = row;
         let msg: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
         let blocks = per_msg_parts(&conn, &mid);
+        // A compaction part opens the post-compact window: nothing older
+        // matters for truth.
+        if blocks
+            .iter()
+            .any(|p| p.get("type").and_then(Value::as_str) == Some("compaction"))
+        {
+            break;
+        }
         let text = join_opencode_parts(&blocks);
         if text.is_empty() {
             continue;
@@ -353,93 +582,41 @@ fn join_opencode_parts(blocks: &[Value]) -> String {
 // observed_model + harness_title: the provenance reads
 // ---------------------------------------------------------------------------
 
-/// Model tail window (256 KiB) and the claude synthetic placeholder, the
-/// port of `observed.py`.
-const MODEL_TAIL_BYTES: u64 = 256 * 1024;
+/// The claude synthetic placeholder, the port of `observed.py`.
 const CLAUDE_SYNTHETIC_MODEL: &str = "<synthetic>";
 
-/// What the session ACTUALLY answered as, read from its own transcript.
-/// Five outcomes, not collapsed: observed / no-transcript / not-file-backed
-/// / no-model-yet / unreadable. Never raises.
-fn observed_model(agent: &str, transcript_path: Option<&Path>) -> Value {
+/// What the session ACTUALLY answered as, read from its summary. Five
+/// outcomes, not collapsed: observed / no-transcript / not-file-backed /
+/// no-model-yet / unreadable. Never raises.
+fn observed_model(agent: &str, path: Option<&Path>, summary: Option<&TailSummary>) -> Value {
     if agent != "claude" && agent != "codex" {
         return json!({"kind": "not-file-backed"});
     }
-    let Some(path) = transcript_path else {
+    let Some(path) = path else {
         return json!({"kind": "no-transcript"});
     };
-    let size = match std::fs::metadata(path) {
-        Ok(meta) => meta.len(),
-        Err(error) => {
-            return if error.kind() == std::io::ErrorKind::NotFound {
-                json!({"kind": "no-transcript"})
-            } else {
-                json!({"kind": "unreadable", "reason": error.to_string()})
-            }
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return json!({"kind": "no-transcript"})
         }
+        Err(error) => return json!({"kind": "unreadable", "reason": error.to_string()}),
+        Ok(meta) if meta.len() == 0 => return json!({"kind": "no-model-yet"}),
+        Ok(_) => {}
+    }
+    let Some(summary) = summary else {
+        return json!({"kind": "unreadable", "reason": "read failed"});
     };
-    if size == 0 {
-        return json!({"kind": "no-model-yet"});
-    }
-    let windowed = size > MODEL_TAIL_BYTES;
-    let start = size.saturating_sub(MODEL_TAIL_BYTES);
-    let bytes = match read_range(path, start, size) {
-        Some(bytes) => bytes,
-        None => return json!({"kind": "unreadable", "reason": "read failed"}),
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    if text.is_empty() {
-        return json!({"kind": "no-model-yet"});
-    }
-    if !text.ends_with('\n') {
-        return json!({"kind": "unreadable", "reason": "torn final line (mid-write)"});
-    }
-    let (last, samples) = models_in(text.split('\n').skip(windowed as usize), |v| {
-        model_of(agent, v)
-    });
-    if last.is_none() && windowed {
-        // The tail was inconclusive; escalate to a full scan before claiming
-        // absence, the escalation `observed.py` documents (codex stamps the
-        // model once per TURN, which a tool-heavy turn pushes out of window).
-        let all = match std::fs::read(path) {
-            Ok(all) => all,
-            Err(error) => return json!({"kind": "unreadable", "reason": error.to_string()}),
-        };
-        let (l2, s2) = models_in(String::from_utf8_lossy(&all).lines(), |v| {
-            model_of(agent, v)
-        });
-        return match l2 {
-            Some(model) => json!({"kind": "observed", "model": model, "samples": s2}),
-            None => json!({"kind": "no-model-yet"}),
-        };
-    }
-    match last {
-        Some(model) => json!({"kind": "observed", "model": model, "samples": samples}),
+    match &summary.model {
+        Some(model) => {
+            json!({"kind": "observed", "model": model, "samples": summary.model_samples})
+        }
+        // Absence past the bounded scan is not a zero: `no-model-yet` would
+        // lower a live session's reachability on no evidence.
+        None if summary.model_unscanned => {
+            json!({"kind": "unreadable", "reason": "model record past the scan window"})
+        }
         None => json!({"kind": "no-model-yet"}),
     }
-}
-
-/// `(most recent model, how many records carried one)` over `lines`.
-fn models_in<'a, I: Iterator<Item = &'a str>>(
-    lines: I,
-    reader: impl Fn(&Value) -> Option<String>,
-) -> (Option<String>, usize) {
-    let mut last: Option<String> = None;
-    let mut samples = 0usize;
-    for line in lines {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(rec) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(model) = reader(&rec) {
-            last = Some(model);
-            samples += 1;
-        }
-    }
-    (last, samples)
 }
 
 fn model_of(agent: &str, rec: &Value) -> Option<String> {
@@ -464,40 +641,14 @@ fn model_of(agent: &str, rec: &Value) -> Option<String> {
     }
 }
 
-/// The title the HARNESS carries for this session (claude only: the last
-/// `agent-name` record), newest-first, stopping at the newest one.
-fn observed_title(agent: &str, transcript_path: Option<&Path>) -> Option<String> {
-    if agent != "claude" {
+/// The title the HARNESS carries for this session: claude's `agent-name`
+/// record, when it names one.
+fn title_of(rec: &Value) -> Option<String> {
+    if rec.get("type").and_then(Value::as_str) != Some("agent-name") {
         return None;
     }
-    let path = transcript_path?;
-    let bytes = std::fs::read(path).ok()?;
-    for line in String::from_utf8_lossy(&bytes).lines().rev() {
-        if !line.contains("agent-name") {
-            continue;
-        }
-        let Ok(rec) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if rec.get("type").and_then(Value::as_str) == Some("agent-name") {
-            if let Some(name) = rec.get("agentName").and_then(Value::as_str) {
-                if !name.trim().is_empty() {
-                    return Some(name.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Read `[start, size)` of a file in one call.
-fn read_range(path: &Path, start: u64, size: u64) -> Option<Vec<u8>> {
-    let mut file = std::fs::File::open(path).ok()?;
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut out = Vec::new();
-    file.take(size - start).read_to_end(&mut out).ok()?;
-    Some(out)
+    let name = rec.get("agentName").and_then(Value::as_str)?;
+    (!name.trim().is_empty()).then(|| name.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -514,14 +665,15 @@ pub(crate) struct TruthSession {
 }
 
 /// Resolve a truth handle: a registry row by name, alias, short id, or
-/// session id; then a session-id-shaped handle through the claude projects
-/// store and the codex sessions tree. Nothing else (Five questions 3). A
-/// handle naming no row and no session-id transcript answers `not-found`
-/// with no suggestions. Never fails hard.
-fn resolve_handle(
+/// session id; then a session-id-shaped handle (a full id or an 8+ char id
+/// prefix) through the claude projects store and the codex sessions tree.
+/// Nothing else (Five questions 3). A handle naming no row and no transcript
+/// answers `not-found` with no suggestions. Never fails hard.
+fn resolve_handle<C: CursorAccess>(
     rows: Option<&[RegistryEntry]>,
     handle: &str,
     stores: &Stores,
+    cursors: &mut C,
 ) -> Option<TruthSession> {
     if let Some(rows) = rows {
         let mut matches: Vec<&RegistryEntry> = Vec::new();
@@ -546,32 +698,24 @@ fn resolve_handle(
         // One row wins; several rows naming one handle is ambiguity, and the
         // native resolver carries no suggestions to offer, so: not-found.
         if matches.len() == 1 {
-            let row = matches.remove(0);
-            return Some(session_from_row(row));
+            return Some(session_from_row(matches[0]));
         }
         if matches.len() > 1 {
             return None;
         }
     }
-    // No registry row named the handle. A claude-UUID-shaped handle resolves
-    // through the projects store; a codex id through the sessions tree.
-    if is_claude_uuid(handle) {
-        if let Some(path) = claude_path_for(handle, stores) {
+    if !is_session_id_prefix(handle) {
+        return None;
+    }
+    for agent in ["claude", "codex"] {
+        if let Some(path) = lookup_path(cursors, stores, agent, handle) {
             return Some(TruthSession {
-                agent: "claude".into(),
+                agent: agent.into(),
                 session_id: handle.to_string(),
                 transcript_path: Some(path),
                 row: None,
             });
         }
-    }
-    if let Some(path) = crate::codex_store::codex_rollout_path(None, handle) {
-        return Some(TruthSession {
-            agent: "codex".into(),
-            session_id: handle.to_string(),
-            transcript_path: Some(path),
-            row: None,
-        });
     }
     None
 }
@@ -597,14 +741,12 @@ fn claude_path_for(handle: &str, stores: &Stores) -> Option<PathBuf> {
     choose_from(&listing, handle)
 }
 
-/// The claude session-id shape (`_CLAUDE_UUID_RE`): 8-4-4-4-12 hex.
-fn is_claude_uuid(handle: &str) -> bool {
-    let parts: Vec<&str> = handle.split('-').collect();
-    let widths = [8, 4, 4, 4, 12];
-    parts.len() == 5
-        && parts.iter().zip(widths.iter()).all(|(part, width)| {
-            part.len() == *width && part.chars().all(|c| c.is_ascii_hexdigit())
-        })
+/// A session id or an id prefix: 8+ hex digits and dashes. The claude
+/// store matches a prefix only when it names one session.
+fn is_session_id_prefix(handle: &str) -> bool {
+    handle.len() >= 8
+        && handle.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && handle.chars().filter(char::is_ascii_hexdigit).count() >= 8
 }
 
 /// The store paths a truth read resolves against: injected by tests, ambient
@@ -788,15 +930,45 @@ fn provider_refusal_of(last_text: &str) -> Option<String> {
 // The one reader: resolve + read + classify + the wire payload
 // ---------------------------------------------------------------------------
 
+/// How a caller reaches the cursor set: a test owns one outright, the daemon
+/// shares the process-global one behind its mutex. The lock is held only
+/// around a cursor operation, never across a falsifier probe.
+pub trait CursorAccess {
+    fn with<R>(&mut self, f: impl FnOnce(&mut TruthCursors) -> R) -> R;
+}
+
+impl CursorAccess for &mut TruthCursors {
+    fn with<R>(&mut self, f: impl FnOnce(&mut TruthCursors) -> R) -> R {
+        f(self)
+    }
+}
+
+impl CursorAccess for &std::sync::Mutex<TruthCursors> {
+    fn with<R>(&mut self, f: impl FnOnce(&mut TruthCursors) -> R) -> R {
+        f(&mut self.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    }
+}
+
+/// `Build` reads a missing cursor on demand. `WarmOnly` is the daemon right
+/// after a restart: a session whose cursor the warm pass has not rebuilt yet
+/// answers `warming`, never a cold guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadMode {
+    Build,
+    WarmOnly,
+}
+
 /// The answer payload for a handle the resolver could not answer, or whose
-/// transcript read empty. `observed` renders absence as the harness's
-/// not-file-backed fact, never as a fabricated variant.
+/// transcript read empty. A registry falsifier still applies, as in Python.
 fn unknown_payload(
     handle: &str,
     reason: &str,
     sid: Option<&str>,
     observed: Option<Value>,
+    falsifier: Option<&'static str>,
 ) -> Value {
+    let (reachability, basis) =
+        classify_reachability(Some("unknown"), None, falsifier, None, &Value::Null);
     json!({
         "handle": handle,
         "state": "unknown",
@@ -810,78 +982,144 @@ fn unknown_payload(
         "observed_model": observed.unwrap_or_else(|| json!({"kind": "no-transcript"})),
         "harness_title": Value::Null,
         "suggestions": [],
-        "reachability": "unknown",
-        "basis": "no-evidence",
+        "reachability": reachability,
+        "basis": basis,
         "falsifier_error": Value::Null,
     })
 }
 
-/// One truth answer: resolve, read the tail through the cursors, classify,
-/// derive reachability from the registry falsifier, and emit the wire
-/// payload `parse_truth_payload` decodes. Never panics; every failure is an
-/// `unknown` payload naming its Python reason.
-pub fn resolve_payload(
+/// The restart answer: the cursor is not rebuilt yet, so ask again. It is
+/// neither dead nor busy: every reaper and liveness reader takes its
+/// inconclusive branch, and the spawn gate refuses with a retry.
+fn warming_payload(handle: &str, sid: &str) -> Value {
+    json!({
+        "handle": handle,
+        "state": "warming",
+        "reason": "warming",
+        "last_activity_age_s": Value::Null,
+        "last_event_at": Value::Null,
+        "last_activity_basis": "warming",
+        "last_message": Value::Null,
+        "provider_refusal": Value::Null,
+        "session_id": sid,
+        "observed_model": {"kind": "unreadable", "reason": "truth warming; retry"},
+        "harness_title": Value::Null,
+        "suggestions": [],
+        "reachability": "unknown",
+        "basis": "warming",
+        "falsifier_error": Value::Null,
+    })
+}
+
+/// One truth answer, building a missing cursor on demand.
+pub fn resolve_payload<C: CursorAccess>(
     rows: Option<&[RegistryEntry]>,
     handle: &str,
     now_s: f64,
     stores: &Stores,
-    cursors: &mut TruthCursors,
+    cursors: C,
 ) -> Value {
-    let Some(session) = resolve_handle(rows, handle, stores) else {
-        return unknown_payload(handle, "not-found", None, None);
+    resolve_payload_with(rows, handle, now_s, stores, cursors, ReadMode::Build)
+}
+
+/// One truth answer: resolve, read the summary through the cursors,
+/// classify, derive reachability from the registry falsifier, and emit the
+/// wire payload `parse_truth_payload` decodes. Never panics; every failure is
+/// an `unknown` payload naming its Python reason. A handle that resolved to
+/// nothing answers `not-found` from memory for one beat, so a caller that
+/// asks every sweep pays one bounded attempt per beat, never a loop.
+pub fn resolve_payload_with<C: CursorAccess>(
+    rows: Option<&[RegistryEntry]>,
+    handle: &str,
+    now_s: f64,
+    stores: &Stores,
+    mut cursors: C,
+    mode: ReadMode,
+) -> Value {
+    if cursors.with(|c| c.recent_miss(handle)) {
+        return unknown_payload(handle, "not-found", None, None, None);
+    }
+    let Some(session) = resolve_handle(rows, handle, stores, &mut cursors) else {
+        cursors.with(|c| c.note_miss(handle));
+        return unknown_payload(handle, "not-found", None, None, None);
     };
-    let path = transcript_for(&session, stores);
-    let observed = observed_model(&session.agent, path.as_deref());
-    let records = read_records(cursors, stores, &session, path.as_deref());
-    if records.is_empty() {
+    let falsifier = session.row.as_ref().and_then(registry_falsifier);
+    // A falsified row is dead on process evidence, not on a guess: read it
+    // now rather than answer warming.
+    let mode = if falsifier.is_some() {
+        ReadMode::Build
+    } else {
+        mode
+    };
+    let path = transcript_for(&session, stores, &mut cursors);
+    let store_key = format!("opencode:{}", session.session_id);
+    let summary = match (session.agent.as_str(), path.as_deref()) {
+        ("claude" | "codex", Some(p)) => {
+            if mode == ReadMode::WarmOnly && !cursors.with(|c| c.has(p)) {
+                return warming_payload(handle, &session.session_id);
+            }
+            let folder = folder_for(&session.agent);
+            cursors.with(|c| c.summary(p, &folder))
+        }
+        ("opencode", _) => {
+            if mode == ReadMode::WarmOnly && !cursors.with(|c| c.has_store(&store_key)) {
+                return warming_payload(handle, &session.session_id);
+            }
+            Some(opencode_summary(
+                &mut cursors,
+                stores,
+                &session.session_id,
+                &store_key,
+            ))
+        }
+        _ => None,
+    };
+    if falsifier.is_some() {
+        // The session ended: its cursor goes, so memory tracks live sessions.
+        cursors.with(|c| {
+            if let Some(p) = path.as_deref() {
+                c.forget(p);
+            }
+            c.forget_store(&store_key);
+        });
+    }
+    let observed = observed_model(&session.agent, path.as_deref(), summary.as_ref());
+    let Some(summary) = summary.filter(TailSummary::has_record) else {
         return unknown_payload(
             handle,
             "no-records",
             Some(&session.session_id),
             Some(observed),
+            falsifier,
         );
-    }
-    let (epoch, basis): (Option<f64>, Option<String>) = match newest_stamp(&records, &session.agent)
-    {
+    };
+    let stamp = match session.agent.as_str() {
+        "claude" | "codex" => summary.newest_stamp(),
+        _ => None,
+    };
+    let (epoch, basis): (Option<f64>, Option<String>) = match stamp {
         Some(stamp) => (Some(stamp), Some("last-entry".to_string())),
-        None => age_fallback(&session, now_s, path.as_deref()),
+        None => age_fallback(&session, path.as_deref()),
     };
     let age: Option<f64> = epoch.map(|stamp| (now_s - stamp).max(0.0));
-    let last = records.last().cloned().unwrap_or_else(|| TruthRecord {
-        role: String::new(),
-        text: String::new(),
-        timestamp: None,
-    });
-    let last_actor = records
-        .iter()
-        .rev()
-        .find(|r| r.role != "peer")
-        .cloned()
-        .unwrap_or_else(|| last.clone());
-    let state = classify_tail(
-        Some(last_actor.role.as_str()),
-        &last_actor.text,
+    let actor = summary.last_actor();
+    let role = actor.map(|a| a.role.as_str());
+    let state = classify_signal(
+        role,
+        actor.map_or(Signal::Plain, |a| a.signal),
         age,
         STALLED_AFTER_S,
     );
-    let reason: Option<&'static str> = if state == "stalled"
-        && last_actor.role == "assistant"
-        && api_error_re().is_match(last_actor.text.trim_start())
-    {
-        Some("api-error-tail")
-    } else {
-        None
-    };
-    let provider_refusal = if last_actor.role == "assistant" && state == "done" {
+    let reason: Option<&'static str> =
+        (state == "stalled" && role == Some("assistant") && actor.is_some_and(|a| a.api_error))
+            .then_some("api-error-tail");
+    let provider_refusal = if role == Some("assistant") && state == "done" {
         None
     } else {
-        provider_refusal_of(&last_actor.text)
+        actor.and_then(|a| a.refusal.clone())
     };
-    let last_event_at = epoch.and_then(render_stamp);
-    let last_message = flatten_200(&last.text);
     let basis_str = basis.as_deref();
     let age_i64 = age.map(|a| a as i64);
-    let falsifier = session.row.as_ref().and_then(registry_falsifier);
     let (reachability, reach_basis) =
         classify_reachability(Some(&state), age_i64, falsifier, basis_str, &observed);
     json!({
@@ -889,12 +1127,13 @@ pub fn resolve_payload(
         "state": state,
         "reason": reason,
         "last_activity_age_s": age_i64,
-        "last_event_at": last_event_at,
+        "last_event_at": epoch.and_then(render_stamp),
         "last_activity_basis": basis_str,
-        "last_message": last_message,
+        "last_message": summary.last_message,
         "provider_refusal": provider_refusal,
         "session_id": session.session_id,
-        "harness_title": observed_title(&session.agent, path.as_deref()),
+        "observed_model": observed,
+        "harness_title": summary.title,
         "suggestions": [],
         "reachability": reachability,
         "basis": reach_basis,
@@ -902,94 +1141,117 @@ pub fn resolve_payload(
     })
 }
 
+/// Build (or reuse) the cursor for one registry row. The daemon's warm pass
+/// calls this per row after a restart; `false` when the row names no
+/// readable transcript.
+pub(crate) fn warm_row<C: CursorAccess>(
+    row: &RegistryEntry,
+    stores: &Stores,
+    mut cursors: C,
+) -> bool {
+    let session = session_from_row(row);
+    match session.agent.as_str() {
+        "claude" | "codex" => {
+            let Some(path) = transcript_for(&session, stores, &mut cursors) else {
+                return false;
+            };
+            let folder = folder_for(&session.agent);
+            cursors.with(|c| c.summary(&path, &folder)).is_some()
+        }
+        "opencode" => {
+            let key = format!("opencode:{}", session.session_id);
+            opencode_summary(&mut cursors, stores, &session.session_id, &key);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The opencode summary, rebuilt only when the session's rows in the store
+/// moved.
+fn opencode_summary<C: CursorAccess>(
+    cursors: &mut C,
+    stores: &Stores,
+    session_id: &str,
+    key: &str,
+) -> TailSummary {
+    if !stores.opencode_db.exists() {
+        return TailSummary::default();
+    }
+    let version = opencode_version(&stores.opencode_db, session_id);
+    cursors.with(|c| {
+        c.store_summary(key, version, || {
+            let mut summary = TailSummary::default();
+            for r in opencode_records_db(&stores.opencode_db, session_id, TAIL_N) {
+                summary.push(r.role, &r.text, None);
+            }
+            summary
+        })
+    })
+}
+
+/// A cheap change marker for one opencode session: newest part write and
+/// part count. `None` when the store cannot answer, which always rebuilds.
+fn opencode_version(db: &Path, session_id: &str) -> Option<i64> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    conn.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
+    let (newest, count): (Option<i64>, i64) = conn
+        .query_row(
+            "SELECT MAX(time_updated), COUNT(*) FROM part WHERE session_id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    Some(newest?.wrapping_mul(1_000_003).wrapping_add(count))
+}
+
 /// The transcript file for a resolved session: the row's own stamp when it
 /// carries one, else the harness lookup (claude projects store; codex
-/// sessions tree). opencode has none.
-fn transcript_for(session: &TruthSession, stores: &Stores) -> Option<PathBuf> {
+/// sessions tree), cached so a sweep lists neither store per row. opencode
+/// has none.
+fn transcript_for<C: CursorAccess>(
+    session: &TruthSession,
+    stores: &Stores,
+    cursors: &mut C,
+) -> Option<PathBuf> {
     if let Some(path) = session.transcript_path.as_ref() {
         return Some(path.clone());
     }
     match session.agent.as_str() {
-        "claude" if !session.session_id.is_empty() => claude_path_for(&session.session_id, stores),
-        "codex" => crate::codex_store::codex_rollout_path(
-            stores.codex_sessions_dir.as_deref(),
-            &session.session_id,
-        ),
+        "claude" | "codex" if !session.session_id.is_empty() => {
+            lookup_path(cursors, stores, &session.agent, &session.session_id)
+        }
         _ => None,
     }
 }
 
-/// The per-harness tail read: claude/codex through the cursors, opencode
-/// from its store, every other harness empty. An unregistered harness reads
-/// `unknown`/`no-records`, matching peek's ObserveUnsupported handling.
-fn read_records(
-    cursors: &mut TruthCursors,
+fn lookup_path<C: CursorAccess>(
+    cursors: &mut C,
     stores: &Stores,
-    session: &TruthSession,
-    path: Option<&Path>,
-) -> Vec<TruthRecord> {
-    let mut records: Vec<TruthRecord> = match (session.agent.as_str(), path) {
-        ("claude", Some(path)) => {
-            cursors
-                .read_tail(path, TAIL_N, &parse_json_line(parse_claude_record))
-                .unwrap_or_default()
-                .0
-        }
-        ("codex", Some(path)) => {
-            cursors
-                .read_tail(path, TAIL_N, &parse_json_line(parse_codex_record))
-                .unwrap_or_default()
-                .0
-        }
-        ("opencode", _) => {
-            if stores.opencode_db.exists() {
-                opencode_records_db(&stores.opencode_db, &session.session_id, TAIL_N)
-            } else {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
-    };
-    resolve_peer_roles(&mut records);
-    records
-}
-
-/// One JSONL line parsed to a `Value`, then to a record.
-fn parse_json_line(
-    inner: fn(&Value) -> Option<TruthRecord>,
-) -> impl Fn(&str) -> Option<TruthRecord> {
-    move |line: &str| {
-        let v: Value = serde_json::from_str(line).ok()?;
-        inner(&v)
+    agent: &str,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let key = format!("{agent}:{session_id}");
+    if let Some(path) = cursors.with(|c| c.cached_path(&key)) {
+        return Some(path);
     }
-}
-
-/// The newest parseable record stamp (epoch seconds), newest-first. claude
-/// and codex only; opencode records carry no stamp.
-fn newest_stamp(records: &[TruthRecord], agent: &str) -> Option<f64> {
-    if agent != "claude" && agent != "codex" {
-        return None;
-    }
-    for record in records.iter().rev() {
-        let Some(ts) = record.timestamp.as_deref() else {
-            continue;
-        };
-        let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00")) else {
-            continue;
-        };
-        return Some(dt.timestamp() as f64);
-    }
-    None
+    let found = match agent {
+        "claude" => claude_path_for(session_id, stores),
+        "codex" => {
+            crate::codex_store::codex_rollout_path(stores.codex_sessions_dir.as_deref(), session_id)
+        }
+        _ => None,
+    }?;
+    cursors.with(|c| c.cache_path(&key, &found));
+    Some(found)
 }
 
 /// The mtime / opencode-db fallback leg of the age read, the port of
-/// `_transcript_age_s`: one read yields BOTH the stamp and the age, so the
-/// pair cannot disagree about one transcript. Returns `(age, basis)`.
-fn age_fallback(
-    session: &TruthSession,
-    now_s: f64,
-    path: Option<&Path>,
-) -> (Option<f64>, Option<String>) {
+/// `_transcript_age_s`. Returns `(epoch, basis)`; the caller derives the
+/// age from the same epoch, so the pair cannot disagree.
+fn age_fallback(session: &TruthSession, path: Option<&Path>) -> (Option<f64>, Option<String>) {
     match session.agent.as_str() {
         "claude" | "codex" => {
             let Some(path) = path else {
@@ -1000,15 +1262,12 @@ fn age_fallback(
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs_f64());
             match epoch {
-                Some(epoch) => (Some((now_s - epoch).max(0.0)), Some("mtime".to_string())),
+                Some(epoch) => (Some(epoch), Some("mtime".to_string())),
                 None => (None, None),
             }
         }
         _ => match opencode_activity_epoch(&ambient_opencode_db(), &session.session_id) {
-            Some(epoch) => (
-                Some((now_s - epoch).max(0.0)),
-                Some("opencode-db".to_string()),
-            ),
+            Some(epoch) => (Some(epoch), Some("opencode-db".to_string())),
             None => (None, None),
         },
     }
@@ -1022,14 +1281,200 @@ fn render_stamp(epoch: f64) -> Option<String> {
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
-/// Collapsed whitespace, capped at 200 chars, empty is null: the
+/// Collapsed whitespace, capped at 200 chars, empty is absent: the
 /// `last_message` wire field.
-fn flatten_200(text: &str) -> Value {
+fn flatten_200(text: &str) -> Option<String> {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let capped: String = collapsed.chars().take(200).collect();
-    if capped.is_empty() {
-        Value::Null
-    } else {
-        Value::String(capped)
+    (!capped.is_empty()).then_some(capped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, agent: &str, path: &Path) -> RegistryEntry {
+        let mut row = RegistryEntry::default();
+        row.name = name.to_string();
+        row.harness = Some(agent.to_string());
+        row.harness_session_id = Some(format!("sid-{name}"));
+        row.transcript_path = Some(path.to_string_lossy().to_string());
+        row
+    }
+
+    fn stores(dir: &Path) -> Stores {
+        Stores {
+            projects_root: dir.join("no-projects"),
+            codex_sessions_dir: Some(dir.join("no-codex")),
+            opencode_db: dir.join("no-opencode.db"),
+        }
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("truth-reader-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const NOW: f64 = 1_791_460_800.0; // 2026-10-08T12:00:00Z
+
+    /// Until the warm pass rebuilds a session, truth answers `warming`, and
+    /// the decoded probe is neither live nor dead. After the rebuild the same
+    /// handle answers its real state.
+    #[test]
+    fn an_unrebuilt_session_answers_warming_until_its_cursor_exists() {
+        let dir = tmp("warming");
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2026-10-08T11:59:00Z","message":{"role":"assistant","content":"reading"}}"#.to_string() + "\n",
+        )
+        .unwrap();
+        let rows = vec![row("w1", "claude", &path)];
+        let stores = stores(&dir);
+        let mut cursors = TruthCursors::new();
+        let early = resolve_payload_with(
+            Some(&rows),
+            "w1",
+            NOW,
+            &stores,
+            &mut cursors,
+            ReadMode::WarmOnly,
+        );
+        assert_eq!(early["state"], "warming");
+        assert_eq!(early["reachability"], "unknown");
+        assert!(warm_row(&rows[0], &stores, &mut cursors));
+        let warm = resolve_payload_with(
+            Some(&rows),
+            "w1",
+            NOW,
+            &stores,
+            &mut cursors,
+            ReadMode::WarmOnly,
+        );
+        assert_eq!(warm["state"], "working");
+        assert_eq!(warm["reachability"], "reachable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unresolvable handle costs one bounded resolve per beat: the second
+    /// ask inside the beat answers `not-found` from memory and touches no
+    /// store.
+    #[test]
+    fn an_unresolvable_session_costs_one_attempt_per_beat() {
+        let dir = tmp("miss");
+        let stores = stores(&dir);
+        let mut cursors = TruthCursors::new();
+        let handle = "e247b6d7";
+        let first = resolve_payload(None, handle, NOW, &stores, &mut cursors);
+        assert_eq!(first["reason"], "not-found");
+        assert!(cursors.recent_miss(handle), "the miss is remembered");
+        // A store that now holds the session is not consulted inside the beat.
+        let project = stores.projects_root.join("-p");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{handle}-0000-0000-0000-000000000000.jsonl")),
+            "",
+        )
+        .unwrap();
+        let second = resolve_payload(None, handle, NOW, &stores, &mut cursors);
+        assert_eq!(second["reason"], "not-found");
+        cursors.expire_misses_for_test();
+        let third = resolve_payload(None, handle, NOW, &stores, &mut cursors);
+        assert_ne!(
+            third["reason"], "not-found",
+            "the next beat resolves again: {third}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn compact_case(agent: &str, before: &str, boundary: &str, after: &str) -> Value {
+        let dir = tmp(&format!("compact-{agent}"));
+        let path = dir.join("t.jsonl");
+        // A long pre-compact history the rebuild must not read.
+        let mut body = String::new();
+        while body.len() < 40 * 1024 {
+            body.push_str(before);
+            body.push('\n');
+        }
+        body.push_str(boundary);
+        body.push('\n');
+        body.push_str(after);
+        body.push('\n');
+        std::fs::write(&path, &body).unwrap();
+        let rows = vec![row("c1", agent, &path)];
+        let stores = stores(&dir);
+        let mut cursors = TruthCursors::new();
+        let payload = resolve_payload(Some(&rows), "c1", NOW, &stores, &mut cursors);
+        assert!(
+            cursors.last_bytes_read() < 4 * 1024,
+            "{agent}: the rebuild stopped at the boundary ({} bytes)",
+            cursors.last_bytes_read()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        payload
+    }
+
+    /// claude: `{"type":"system","subtype":"compact_boundary"}`. Truth comes
+    /// from the turns after it, never from the stale history before it.
+    #[test]
+    fn a_claude_rebuild_stops_at_the_compact_boundary() {
+        let payload = compact_case(
+            "claude",
+            r#"{"type":"assistant","timestamp":"2026-10-08T09:00:00Z","message":{"role":"assistant","model":"claude-opus-5-5","content":"<promise>OLD</promise>"}}"#,
+            r#"{"parentUuid":null,"isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","timestamp":"2026-10-08T11:58:00Z"}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-08T11:59:00Z","message":{"role":"assistant","model":"claude-opus-5-5","content":"Continuing the port."}}"#,
+        );
+        assert_eq!(payload["state"], "working", "{payload}");
+        assert_eq!(payload["observed_model"]["model"], "claude-opus-5-5");
+    }
+
+    /// codex: a top-level `"type":"compacted"` record.
+    #[test]
+    fn a_codex_rebuild_stops_at_the_compacted_record() {
+        let payload = compact_case(
+            "codex",
+            r#"{"timestamp":"2026-10-08T09:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"<promise>OLD</promise>"}]}}"#,
+            r#"{"timestamp":"2026-10-08T11:58:00Z","ordinal":9,"type":"compacted","payload":{"message":"","replacement_history":[]}}"#,
+            r#"{"timestamp":"2026-10-08T11:59:00Z","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
+        );
+        // The turn after the boundary carries no message yet: no records.
+        assert_eq!(payload["state"], "unknown", "{payload}");
+        assert_eq!(payload["reason"], "no-records");
+        assert_eq!(payload["observed_model"]["model"], "gpt-6.1-sol");
+    }
+
+    /// opencode: a `{"type":"compaction"}` part ends the read; older turns
+    /// do not reach truth.
+    #[test]
+    fn an_opencode_read_stops_at_the_compaction_part() {
+        let dir = tmp("compact-opencode");
+        let db = dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             INSERT INTO message VALUES ('m1','ses1',1,1,'{\"role\":\"assistant\"}');
+             INSERT INTO part VALUES ('p1','m1','ses1',1,1,'{\"type\":\"text\",\"text\":\"<promise>OLD</promise>\"}');
+             INSERT INTO message VALUES ('m2','ses1',2,2,'{\"role\":\"user\"}');
+             INSERT INTO part VALUES ('p2','m2','ses1',2,2,'{\"type\":\"compaction\",\"auto\":true}');",
+        )
+        .unwrap();
+        drop(conn);
+        let mut row = RegistryEntry::default();
+        row.name = "o1".into();
+        row.harness = Some("opencode".into());
+        row.harness_session_id = Some("ses1".into());
+        let rows = vec![row];
+        let mut st = stores(&dir);
+        st.opencode_db = db;
+        let mut cursors = TruthCursors::new();
+        let payload = resolve_payload(Some(&rows), "o1", NOW, &st, &mut cursors);
+        assert_eq!(
+            payload["reason"], "no-records",
+            "the pre-compact promise is not read: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
