@@ -35,8 +35,17 @@ pub(super) fn min_fire_gap_secs() -> i64 {
         .unwrap_or(MIN_FIRE_GAP_SECS)
 }
 
-/// Count prior loop_check events for this session_id in the project events file.
-/// Returns (total_fires, consecutive_unchanged_count, last_fingerprint_in_log,
+/// The project log's loop_check rows, committed order, read once per fire
+/// and shared by [`read_prior_fires`] and [`read_last_row_fields`]. None when
+/// the store cannot be read.
+pub(super) fn loop_check_rows(events_path: &Path) -> Option<String> {
+    event_lines_of(events_path, &["loop_check"])
+        .ok()
+        .map(|lines| lines.join("\n"))
+}
+
+/// Count prior loop_check events for this session_id in `rows`
+/// ([`loop_check_rows`]). Returns (total_fires, consecutive_unchanged_count, last_fingerprint_in_log,
 /// streak_window_secs).
 ///
 /// `current_fp` is the fingerprint computed this fire (used for streak matching).
@@ -53,15 +62,14 @@ pub(super) fn min_fire_gap_secs() -> i64 {
 /// progress at any speed -- only the *absence* of change needs time to be
 /// credible.
 pub(super) fn read_prior_fires(
-    events_path: &Path,
+    rows: Option<&str>,
     session_id: &str,
     current_fp: Option<&str>,
     now: DateTime<Utc>,
     min_gap_secs: i64,
 ) -> (u64, u64, Option<String>, i64) {
-    let content = match event_lines_of(events_path, &["loop_check"]) {
-        Ok(lines) => lines.join("\n"),
-        Err(_) => return (0, 0, None, 0),
+    let Some(content) = rows else {
+        return (0, 0, None, 0);
     };
 
     let mut total: u64 = 0;
@@ -159,10 +167,9 @@ pub(super) fn read_prior_fires(
 /// The newest recorded loop_check row's `pr_state`/`ci` components for this
 /// session: the journal's copy of the last observed world, so a fire that
 /// reads no PR state can still record comparable row fields .
-pub(super) fn read_last_row_fields(events_path: &Path, session_id: &str) -> (String, String) {
-    let content = match event_lines_of(events_path, &["loop_check"]) {
-        Ok(lines) => lines.join("\n"),
-        Err(_) => return ("none".to_string(), "none".to_string()),
+pub(super) fn read_last_row_fields(rows: Option<&str>, session_id: &str) -> (String, String) {
+    let Some(content) = rows else {
+        return ("none".to_string(), "none".to_string());
     };
     for line in content.lines().rev() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {

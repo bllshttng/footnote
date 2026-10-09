@@ -212,7 +212,8 @@ use coverage_status::{
 };
 use findings::{blocking_severity, compute_unaddressed_findings, max_ts, ts_after, Finding};
 use fire_history::{
-    append_loop_event, make_fingerprint, min_fire_gap_secs, read_last_row_fields, read_prior_fires,
+    append_loop_event, loop_check_rows, make_fingerprint, min_fire_gap_secs, read_last_row_fields,
+    read_prior_fires,
 };
 pub(crate) use fire_history::{emit_to_both, now_rfc3339_utc, observe_shadow_transition};
 #[cfg(test)]
@@ -792,8 +793,9 @@ pub(crate) fn decide_with_payload(
     let no_pr_fp =
         || generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
     let observed_fp = no_pr_fp();
+    let fire_rows = loop_check_rows(&project_events);
     let (prior_fires, journal_streak, last_recorded_fp, streak_window) = read_prior_fires(
-        &project_events,
+        fire_rows.as_deref(),
         &session_id,
         if generic_observed {
             Some(&observed_fp)
@@ -803,7 +805,7 @@ pub(crate) fn decide_with_payload(
         now,
         min_fire_gap,
     );
-    let (last_pr_state, last_ci) = read_last_row_fields(&project_events, &session_id);
+    let (last_pr_state, last_ci) = read_last_row_fields(fire_rows.as_deref(), &session_id);
     // A fire that does not run done() inherits the last recorded fingerprint,
     // so its row stays comparable with its neighbors; only done() can move it.
     let fingerprint = if generic_observed {
