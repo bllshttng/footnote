@@ -1,8 +1,9 @@
 //! The machine janitor: `fno-agents reclaim`, surfaced as `fno doctor reclaim`.
 //! Removes disk bloat footnote development piles up:
 //! plugin-cache build copies, Codex converge backups, leaked test HOMEs, stale
-//! test scratch, and unregistered worktree targets, then prunes the shared uv
-//! cache under a timeout. Everything removed is rebuilt or downloaded again on demand.
+//! test scratch, unregistered worktree targets, and state-root backup stamps
+//! (report-only until the operator sets a retention), then prunes the shared
+//! uv cache under a timeout. Everything removed is rebuilt or downloaded again on demand.
 //!
 //! Dry run by default; `--apply` removes and rewrites
 //! `<state-root>/reclaim/last-run.json` with the bytes each lane reclaimed.
@@ -27,6 +28,24 @@ const SCRATCH_MINUTES: u64 = 24 * 60;
 const UV_PRUNE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Age at which the daemon's daily gate re-runs the sweep.
 const DAILY_SECS: u64 = 24 * 3600;
+/// Dated stamp dirs under `<state-root>/backups` are report-only by
+/// default: the state-root inventory holds migration and recovery stamps to
+/// the operator's yes, never the janitor's clock. Setting the retention
+/// (env, then `reclaim.backups_retention_days`) IS that yes; the newest
+/// [`BACKUP_KEEP_NEWEST`] stamps per subdir survive regardless.
+const BACKUP_KEEP_NEWEST: usize = 5;
+/// The backup subdirs made of one stamp dir per run, all REPORT-only here.
+/// Only [`BACKUP_PRUNE_SUBDIR`] is ever deletable, and only under the audit
+/// gate; the recovery snapshots can still be referenced by open attention
+/// items, so they are never swept. Rotation-managed trees (graph.db.*,
+/// claims-table) keep their own keep-N and are not stamp dirs.
+const BACKUP_REPORT_SUBDIRS: &[&str] = &[
+    "state-root-migration",
+    "state-root-recovery",
+    "state-recovery",
+];
+/// The one subdir age retention may reap, under the audit gate.
+const BACKUP_PRUNE_SUBDIR: &str = "state-root-migration";
 
 const LEAKED_HOME_MARKERS: &[&str] = &[
     ".fno",
@@ -489,6 +508,148 @@ fn claude_config_tmp_lane(apply: bool) -> Lane {
     lane
 }
 
+/// The operator's retention days for the stamp dirs, `None` when unset: env
+/// override first, then the global `reclaim.backups_retention_days`. Both
+/// read zero as disabled, because a zero-day retention that deleted on the
+/// next sweep is not what anyone setting 0 could mean. Unset reads as
+/// report-only, because the state-root inventory holds these stamps to the
+/// operator's yes, never the janitor's clock.
+fn backups_retention_days() -> Option<u64> {
+    if let Some(days) = std::env::var_os("FNO_RECLAIM_BACKUPS_DAYS") {
+        return days
+            .to_str()
+            .and_then(|d| d.parse().ok())
+            .filter(|v| *v > 0);
+    }
+    crate::agents_config::config_lookup_global(&["reclaim", "backups_retention_days"])
+        .and_then(|v| v.as_integer())
+        .map(|v| v.max(0) as u64)
+        .filter(|v| *v > 0)
+}
+
+/// The audit verdict the inventory doc requires before a migration stamp may
+/// go: `FNO_RECLAIM_BACKUPS_AUDIT` names a file holding the JSON verdict of
+/// the state-recovery audit. The audit has no persisted receipt of its own,
+/// so the operator redirects one there; a file that does not parse, or reads
+/// `zero_missing` false, deletes nothing. Only stamps OLDER than the
+/// verdict's mtime are prunable: the audit saw those and no others.
+fn audit_verdict_mtime() -> Option<SystemTime> {
+    let path = std::env::var_os("FNO_RECLAIM_BACKUPS_AUDIT")?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let modified = meta.modified().ok()?;
+    let verdict: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    verdict.get("zero_missing")?.as_bool()?.then_some(modified)
+}
+
+/// The backups-retention lane: the migration stamp pile under
+/// `<state-root>/backups/state-root-migration`, bounded only when three
+/// gates agree. The operator sets a retention (the inventory doc's "yes"),
+/// supplies a zero-missing audit verdict the stamp predates (the doc's
+/// recovery-receipt requirement), and the [`BACKUP_KEEP_NEWEST`] floor
+/// always holds. A stamp may hold the only copy of a parked conflict, and a
+/// recovery snapshot can still be referenced by open attention items, so
+/// the recovery subdirs (`state-root-recovery`, `state-recovery`) are
+/// report-only forever: they appear in the pile reading and are never
+/// deleted here.
+fn backups_retention_lane(home: &AgentsHome, apply: bool) -> Lane {
+    let mut lane = Lane::new("backups_retention", Vec::new());
+    let days = backups_retention_days();
+    let (count, bytes) = stamp_pile(&reclaim_state_root(home).join("backups"));
+    let Some(days) = days else {
+        lane.note = format!(
+            "report only: {count} stamp dir(s), {:.1} GB; set reclaim.backups_retention_days (or FNO_RECLAIM_BACKUPS_DAYS) and a zero-missing audit verdict (FNO_RECLAIM_BACKUPS_AUDIT) to reap past a retention, newest {BACKUP_KEEP_NEWEST} always kept",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        return lane;
+    };
+    let Some(audited_at) = audit_verdict_mtime() else {
+        lane.note = format!(
+            "report only: {count} stamp dir(s), {:.1} GB; retention {days}d is set but no fresh zero-missing audit verdict (FNO_RECLAIM_BACKUPS_AUDIT) authorizes deletion",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        return lane;
+    };
+    let cutoff = SystemTime::now() - Duration::from_secs(days * 24 * 3600);
+    let kept = reap_stamps(
+        &reclaim_state_root(home).join("backups"),
+        &mut lane,
+        cutoff,
+        audited_at,
+        apply,
+    );
+    lane.note = format!(
+        "kept {kept}, {} past {days}d retention audited at the verdict's stamp (newest {BACKUP_KEEP_NEWEST} always kept)",
+        if apply { "reaped" } else { "would reap" },
+    );
+    lane
+}
+
+/// Every stamp dir in the retention's report scope, with its count and
+/// bytes. Rotation-managed siblings (graph.db.*, claims-table) keep their
+/// own keep-N and are not stamp dirs.
+fn stamp_pile(backups_root: &Path) -> (usize, u64) {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for subdir in BACKUP_REPORT_SUBDIRS {
+        let Ok(entries) = std::fs::read_dir(backups_root.join(subdir)) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+            count += 1;
+            bytes += tree_bytes(&path);
+        }
+    }
+    (count, bytes)
+}
+
+/// The age-plus-audit-plus-keep-floor pass over the migration stamps. A
+/// stamp survives when it is fresh, inside the keep floor, or newer than
+/// the audit verdict; only a stamp the audit actually saw may go. Returns
+/// how many stamps survive, and (on `apply`) pushes every reaped path and
+/// its bytes into `lane`.
+fn reap_stamps(
+    backups_root: &Path,
+    lane: &mut Lane,
+    cutoff: SystemTime,
+    audited_at: SystemTime,
+    apply: bool,
+) -> usize {
+    let mut kept = 0usize;
+    let Ok(entries) = std::fs::read_dir(backups_root.join(BACKUP_PRUNE_SUBDIR)) else {
+        return 0;
+    };
+    let mut stamps: Vec<(PathBuf, SystemTime)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            std::fs::symlink_metadata(&p)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|m| (p, m))
+        })
+        .collect();
+    // Newest first, so the keep floor protects exactly the latest runs.
+    stamps.sort_by(|a, b| b.1.cmp(&a.1));
+    for (rank, (path, modified)) in stamps.into_iter().enumerate() {
+        if modified > cutoff || rank < BACKUP_KEEP_NEWEST || modified > audited_at {
+            kept += 1;
+            continue;
+        }
+        let bytes = tree_bytes(&path);
+        if apply {
+            if std::fs::remove_dir_all(&path).is_err() {
+                kept += 1;
+                continue;
+            }
+        }
+        lane.bytes += bytes;
+        lane.paths.push(path);
+    }
+    kept
+}
+
 /// The state-layout lane: the daemon's migration retry. Plain kinds move,
 /// merge, park or delete-locks per [`crate::state_layout::migrate`]; sqlite
 /// rows read pending until the backup-API protocol lands (change 4.1) and
@@ -592,8 +753,40 @@ pub fn maybe_run_daily(home: &AgentsHome) {
         Err(_) => true,
     };
     if stale {
-        run_reclaim_lanes(home, true, false, false);
+        let (_rc, summary) = run_reclaim_lanes(home, true, false, false);
+        emit_sweep_event(home, &summary);
     }
+}
+
+/// What one sweep did, carried from the lane run to the daemon's event.
+#[derive(Debug, Default)]
+pub(crate) struct ReclaimSummary {
+    pub applied: bool,
+    pub total_bytes: u64,
+    pub lane_count: usize,
+    /// The lane with the largest reading, so one event line answers "what moved".
+    pub top_lane: Option<String>,
+    pub top_lane_bytes: u64,
+}
+
+/// One event per sweep. The receipt file holds the per-lane detail; the event
+/// proves the sweep ran and names the biggest reading, so a quiet machine is
+/// never mistaken for a sweep that did not run.
+fn emit_sweep_event(home: &AgentsHome, summary: &ReclaimSummary) {
+    let journal = crate::loop_runtime::Journal::new_raw(
+        home.events_jsonl(),
+        crate::daemon::global_events_path(home),
+    );
+    let _ = journal.append(
+        "reclaim_sweep",
+        json!({
+            "applied": summary.applied,
+            "total_bytes": summary.total_bytes,
+            "lane_count": summary.lane_count,
+            "top_lane": summary.top_lane,
+            "top_lane_bytes": summary.top_lane_bytes,
+        }),
+    );
 }
 
 pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
@@ -646,14 +839,22 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
     }
     // A hand run: the cwd is wherever the person typing this ran it from, so
     // the cargo-build-dirs lane sweeps that repo too even if unregistered.
-    run_reclaim_lanes(home, apply, verbose, true)
+    // The summary rides the daemon path only; a hand run's record is the
+    // receipt it prints.
+    run_reclaim_lanes(home, apply, verbose, true).0
 }
 
 /// The full lane set (every `run_reclaim` lane but the leading subcommands),
 /// shared by the hand-run CLI path and the daemon's daily tick. Only
 /// `include_cwd_root` differs between the two callers - see
-/// [`cargo_build_dirs_roots`].
-fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_root: bool) -> i32 {
+/// [`cargo_build_dirs_roots`]. Returns the exit code plus the summary the
+/// daemon's sweep event carries.
+fn run_reclaim_lanes(
+    home: &AgentsHome,
+    apply: bool,
+    verbose: bool,
+    include_cwd_root: bool,
+) -> (i32, ReclaimSummary) {
     let mut lanes = vec![
         Lane::new("plugin_cache_build_copies", plugin_cache_copies()),
         Lane::new("leaked_test_homes", leaked_test_homes()),
@@ -679,6 +880,7 @@ fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_
     drop(codex_lock);
     lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     lanes.push(claude_config_tmp_lane(apply));
+    lanes.push(backups_retention_lane(home, apply));
     lanes.push(state_layout_lane(home, apply));
     lanes.push(state_root_drift_lane(home));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
@@ -737,7 +939,19 @@ fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_
     if apply {
         println!("receipt: {}", receipt_path(home).display());
     }
-    0
+    let every = lanes.iter().chain(std::iter::once(&uv)).collect::<Vec<_>>();
+    let top = every
+        .iter()
+        .max_by_key(|lane| lane.bytes)
+        .map(|lane| (lane.name.to_string(), lane.bytes));
+    let summary = ReclaimSummary {
+        applied: apply,
+        total_bytes: every.iter().map(|lane| lane.bytes).sum(),
+        lane_count: every.len(),
+        top_lane: top.as_ref().map(|(name, _)| name.clone()),
+        top_lane_bytes: top.map_or(0, |(_, bytes)| bytes),
+    };
+    (0, summary)
 }
 
 #[cfg(test)]
@@ -786,6 +1000,8 @@ pub(crate) mod tests {
                 "CODEX_HOME",
                 "FNO_RECLAIM_TEMP_ROOT",
                 "FNO_RECLAIM_STATE_ROOT",
+                "FNO_RECLAIM_BACKUPS_DAYS",
+                "FNO_RECLAIM_BACKUPS_AUDIT",
                 "CARGO",
                 "CBD_FNO",
                 "CBD_FB",
@@ -1352,6 +1568,129 @@ pub(crate) mod tests {
                 "a hand run still sweeps its own cwd repo: {hand_roots:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// Every no-deletion gate in one walk: unset retention, a zero-day
+    /// retention, and a positive retention with no zero-missing audit
+    /// verdict all leave the pile untouched, because the inventory doc
+    /// holds these stamps to the operator's yes plus a recovery receipt.
+    #[test]
+    fn backups_retention_without_yes_and_audit_is_report_only() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = temp_lane_root("backups-report");
+        let migration = state.join("backups/state-root-migration");
+        std::fs::create_dir_all(migration.join("20260101T000000Z")).unwrap();
+        std::fs::write(migration.join("20260101T000000Z/payload"), vec![0u8; 512]).unwrap();
+        age(&migration.join("20260101T000000Z"), 40 * 24 * 60);
+        let stamp = migration.join("20260101T000000Z");
+        let home = AgentsHome::at(state.join("agents"));
+
+        for (label, days) in [("unset", None), ("zero", Some("0"))] {
+            std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+            match days {
+                Some(v) => std::env::set_var("FNO_RECLAIM_BACKUPS_DAYS", v),
+                None => std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS"),
+            }
+            std::env::remove_var("FNO_RECLAIM_BACKUPS_AUDIT");
+            let lane = backups_retention_lane(&home, true);
+            std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
+            std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
+
+            assert!(lane.paths.is_empty(), "{label}: nothing is reaped");
+            assert_eq!(lane.bytes, 0, "{label}");
+            assert!(lane.note.contains("report only"), "{label}: {}", lane.note);
+            assert!(stamp.exists(), "{label}: the aged stamp survives");
+        }
+
+        // A positive retention without the audit verdict is still held.
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+        std::env::set_var("FNO_RECLAIM_BACKUPS_DAYS", "7");
+        std::env::remove_var("FNO_RECLAIM_BACKUPS_AUDIT");
+        let lane = backups_retention_lane(&home, true);
+        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
+        std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
+
+        assert!(lane.paths.is_empty(), "no audit, no deletion");
+        assert!(
+            lane.note.contains("zero-missing audit"),
+            "the note names the missing gate: {}",
+            lane.note
+        );
+        assert!(stamp.exists());
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// The keep floor is what bounds a hot pile: a migration that parks a
+    /// full copy every sweep never lets anything age past retention, so the
+    /// newest `BACKUP_KEEP_NEWEST` survive and the rest go, but only stamps
+    /// the zero-missing audit verdict predates. Rotation-managed siblings
+    /// keep their own keep-N and are never touched here.
+    #[test]
+    fn backups_retention_keeps_the_newest_and_reaps_stale_stamps() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = temp_lane_root("backups-retention");
+        let migration = state.join("backups/state-root-migration");
+        std::fs::create_dir_all(&migration).unwrap();
+        // Six aged stamps plus one fresh one, each a full day apart: distinct
+        // mtimes make the newest-first sort total. The fresh dir ranks first,
+        // so the keep floor protects only four of the aged stamps and the
+        // oldest two go.
+        for i in 0..6 {
+            let stamp = migration.join(format!("2026010{i}T000000Z"));
+            std::fs::create_dir_all(&stamp).unwrap();
+            std::fs::write(stamp.join("payload"), vec![0u8; 512]).unwrap();
+            age(&stamp, (40 + i) * 24 * 60);
+        }
+        let doomed = migration.join("20260104T000000Z");
+        let oldest = migration.join("20260105T000000Z");
+        let expected = tree_bytes(&doomed) + tree_bytes(&oldest);
+        let fresh = migration.join("20260201T000000Z");
+        std::fs::create_dir_all(&fresh).unwrap();
+        // A recovery snapshot: in the report scope, never in the prune scope.
+        let snapshot = state.join("backups/state-recovery/preparation-20260101T000000Z");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        age(&snapshot, 60 * 24 * 60);
+        let rotated = state.join("backups/graph.db.20260101T000000000000");
+        std::fs::create_dir_all(&rotated).unwrap();
+        age(&rotated, 60 * 24 * 60);
+        // The operator's audit verdict, written after every stamp existed.
+        let audit_path = state.join("audit-verdict.json");
+        std::fs::write(&audit_path, r#"{"zero_missing": true}"#).unwrap();
+
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+        std::env::set_var("FNO_RECLAIM_BACKUPS_DAYS", "7");
+        std::env::set_var("FNO_RECLAIM_BACKUPS_AUDIT", &audit_path);
+        let home = AgentsHome::at(state.join("agents"));
+        let lane = backups_retention_lane(&home, true);
+        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
+        std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
+        std::env::remove_var("FNO_RECLAIM_BACKUPS_AUDIT");
+
+        assert_eq!(
+            lane.paths,
+            vec![doomed.clone(), oldest.clone()],
+            "everything past the keep floor goes, oldest last"
+        );
+        assert_eq!(
+            lane.bytes, expected,
+            "the receipt carries the reaped stamps' bytes"
+        );
+        assert!(lane.note.contains("newest 5"));
+        for i in 0..4 {
+            assert!(
+                migration.join(format!("2026010{i}T000000Z")).exists(),
+                "keep floor holds stamp {i}"
+            );
+        }
+        assert!(fresh.exists(), "a fresh stamp is never aged out");
+        assert!(snapshot.exists(), "recovery snapshots are never swept");
+        assert!(
+            rotated.exists(),
+            "rotation-managed backups keep their own keep-N"
+        );
+        assert!(!doomed.exists());
+        assert!(!oldest.exists());
         let _ = std::fs::remove_dir_all(&state);
     }
 }

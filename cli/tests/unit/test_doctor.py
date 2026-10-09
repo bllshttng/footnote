@@ -1860,6 +1860,34 @@ def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeyp
     assert doctor._blockers({"plugin_cache": report}) == []
 
 
+def test_disk_free_blocker_fires_under_the_floor_and_names_the_reclaim(monkeypatch):
+    """A free-disk reading under the floor is a blocker naming the reclaim;
+    at or above the floor it is not, and an unreadable volume blocks nothing."""
+    import shutil as real_shutil
+
+    def usage(free_gb):
+        total = 1_000_000_000_000
+        free = int(free_gb * 1_000_000_000)
+        return real_shutil._ntuple_diskusage(total, total - free, free)
+
+    monkeypatch.setattr(doctor.shutil, "disk_usage", lambda path: usage(10.0))
+    report = doctor._disk_free_report()
+    assert report["verdict"] == "low"
+    blockers = doctor._blockers({"disk_free": report})
+    assert any("free disk is 10.0 GB" in b and "reclaim --apply" in b for b in blockers)
+
+    monkeypatch.setattr(doctor.shutil, "disk_usage", lambda path: usage(40.0))
+    assert doctor._disk_free_report()["verdict"] == "ok"
+    assert doctor._blockers({"disk_free": {"verdict": "ok"}}) == []
+
+    def boom(path):
+        raise OSError("no volume")
+
+    monkeypatch.setattr(doctor.shutil, "disk_usage", boom)
+    assert doctor._disk_free_report()["verdict"] == "unreadable"
+    assert doctor._blockers({"disk_free": {"verdict": "unreadable"}}) == []
+
+
 def test_plugin_cache_stage_check_needs_a_cargo_binary(tmp_path, monkeypatch):
     """No cargo fno-agents on the machine -> unknown naming the gap, never a
     false fresh (CI runners carry no ~/.cargo/bin)."""
