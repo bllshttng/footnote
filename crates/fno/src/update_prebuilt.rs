@@ -78,12 +78,21 @@ fn curl_to(url: &str, dest: &Path) -> Result<(), String> {
 
 /// Download, verify and unpack the tarball for `crates_rev` into a fresh dir
 /// under `staging_parent`. Returns the dir holding the four binaries. Every
-/// Err names why, so the caller's compile fallback says what it replaced.
+/// Err names why, so the caller's compile fallback says what it replaced. A
+/// failed fetch removes its staging dir.
 pub(crate) fn fetch(crates_rev: &str, staging_parent: &Path) -> Result<PathBuf, String> {
     let platform = platform().ok_or("CI builds no binary for this platform")?;
     let staging = staging_parent.join(format!("prebuilt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let fetched = fetch_into(crates_rev, platform, &staging);
+    if fetched.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    fetched
+}
+
+fn fetch_into(crates_rev: &str, platform: &str, staging: &Path) -> Result<PathBuf, String> {
     let url = asset_url(crates_rev, platform);
     let tarball = staging.join(asset_name(crates_rev, platform));
     let sha_file = staging.join("tarball.sha256");
@@ -116,7 +125,32 @@ pub(crate) fn fetch(crates_rev: &str, staging_parent: &Path) -> Result<PathBuf, 
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    proves_rev(&unpacked, crates_rev)?;
     Ok(unpacked)
+}
+
+/// The unpacked client must report `crates_rev` from a clean build before
+/// anything is swapped. A tarball that would fail the post-deploy verify is
+/// refused here instead, so the caller compiles rather than wedging on it.
+fn proves_rev(unpacked: &Path, crates_rev: &str) -> Result<(), String> {
+    let out = crate::process_admission::std_command(unpacked.join("fno-agents"))
+        .args(["version", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("the downloaded fno-agents did not run: {e}"))?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("the downloaded fno-agents version --json is not JSON: {e}"))?;
+    let baked = v.get("crates_rev").and_then(serde_json::Value::as_str);
+    let dirty = v.get("dirty").and_then(serde_json::Value::as_bool);
+    if baked == Some(crates_rev) && dirty == Some(false) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the downloaded fno-agents reports crates_rev {} dirty {}, want {crates_rev} clean",
+            baked.unwrap_or("none"),
+            dirty.map_or("unknown".to_string(), |d| d.to_string())
+        ))
+    }
 }
 
 /// Move the four unpacked binaries into `bin_dir`. Every copy lands first as

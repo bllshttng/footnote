@@ -1682,13 +1682,21 @@ pub(crate) fn update_holder_pid(holder: &str) -> Option<u32> {
 /// build-dir lock and never say for whom.
 fn join_running_update(pid: u32) -> i32 {
     const JOIN_BOUND: Duration = Duration::from_secs(30 * 60);
-    println!("fno doctor update: joining the running update (pid {pid}); waiting for it to finish");
     let deadline = Instant::now() + JOIN_BOUND;
     // kill(pid, 0) probes liveness without a signal; EPERM still means alive.
     let alive = || {
         let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
         rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     };
+    // A dead holder ran nothing this joiner can wait on: the journal's last
+    // row belongs to some earlier update, so it proves nothing about now.
+    if !alive() {
+        eprintln!(
+            "fno doctor update: the update claim names pid {pid}, which is gone; the stale claim frees on its TTL. Re-run then."
+        );
+        return 1;
+    }
+    println!("fno doctor update: joining the running update (pid {pid}); waiting for it to finish");
     while alive() {
         if Instant::now() >= deadline {
             eprintln!(
