@@ -99,7 +99,7 @@ fn without_flag(mut argv: Vec<String>, flag: &str) -> Vec<String> {
 /// The strict first-line scan: after a leading verb token, the first
 /// node-shaped token names the spawn's node even past a modifier (`L`).
 /// Reuses `resolve_node`'s scanner so no second spelling rule exists.
-fn scan_seed_node(text: &str) -> Option<String> {
+pub(crate) fn scan_seed_node(text: &str) -> Option<String> {
     let toks: Vec<&str> = text
         .lines()
         .next()
