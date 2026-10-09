@@ -48,7 +48,7 @@ Expected: B exits 1 with `held_by_other` and names A's holder. Then run real tar
 
 Turn off Wi-Fi on machine B during a run. Expected:
 
-1. `fno agents claim acquire` on B exits 3. The message names `store.remote_url` and says nothing was written.
+1. `fno agents claim acquire` on B exits 3. The message names `store.remote_url` and says nothing was written locally.
 2. A worker on B finishes its turn. At its stop, loop-check prints `holding:` and allows the stop.
 3. A takes none of B's claims for the 10-minute lease.
 

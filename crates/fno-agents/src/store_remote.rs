@@ -191,9 +191,18 @@ impl Remote {
     fn pipeline(&self, mut requests: Vec<Value>) -> Result<Vec<Reply>, String> {
         requests.push(json!({"type": "close"}));
         let body = json!({"baton": null, "requests": requests}).to_string();
-        let reply = self
-            .post("/v2/pipeline", &body)
-            .map_err(|error| self.unreachable(&error))?;
+        let reply = self.post("/v2/pipeline", &body).map_err(|error| {
+            // A 4xx is the primary answering, a bad token say: a fault to
+            // name, not an outage to hold through.
+            if error.starts_with("HTTP 4") {
+                format!(
+                    "remote store {} ({KEY}) refused the request: {error}",
+                    self.url
+                )
+            } else {
+                self.unreachable(&error)
+            }
+        })?;
         let reply: Value = serde_json::from_str(&reply)
             .map_err(|error| format!("remote store {}: bad reply: {error}", self.url))?;
         let results = reply
@@ -252,7 +261,8 @@ impl Remote {
 
     fn unreachable(&self, error: &str) -> String {
         format!(
-            "remote store {} ({KEY}) {UNREACHABLE}: {error}. Nothing was written. \
+            "remote store {} ({KEY}) {UNREACHABLE}: {error}. Nothing was written locally. \
+             A request that timed out can still have reached the primary. \
              Unset {KEY} in the global config to use the local store.",
             self.url
         )

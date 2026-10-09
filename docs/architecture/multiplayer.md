@@ -1,6 +1,6 @@
 # Multiplayer: one shared primary for dispatch claims
 
-Two or more machines run one fleet. Each machine dials out to one libSQL server (sqld), the primary. No machine accepts a connection from another, so the machines need no shared file system. The ruling that chose libSQL, its host, and the config key lives in `internal/fno/analysis/20261005-multiplayer-store-spike-x-5a12.md`.
+Two or more machines run one fleet. Each machine dials out to one libSQL server (sqld), the primary. No machine accepts a connection from another, so the machines need no shared file system. The ruling that chose libSQL, its host, and the config key prints with `fno backlog decisions multiplayer-store`.
 
 ## The key
 
@@ -28,7 +28,7 @@ A worker renews its node claim at every stop. One turn can run for hours, and no
 
 ## Failure: the primary is unreachable
 
-A claim verb refuses. The error names the URL and the key, and says nothing was written. `fno backlog next` refuses selection. `fno do target init` writes a cancel signal with `store_unreachable` and owns no node. A running worker finishes its turn: at its stop, loop-check reads the unreachable renewal and allows the stop, so the worker holds. The machine claims no new work until the network returns. To work alone, unset the key.
+A claim verb refuses. The error names the URL and the key, and says nothing was written locally. A request that timed out can still have reached the primary, so a retry by the same holder is the safe next step. A 4xx reply, such as a bad token, is named as a refusal and never read as an outage. `fno backlog next` refuses selection. `fno do target init` writes a cancel signal with `store_unreachable` and owns no node. A running worker finishes its turn: at its stop, loop-check reads the unreachable renewal and allows the stop, so the worker holds. The machine claims no new work until the network returns. To work alone, unset the key.
 
 ## Failure: a peer took the claim
 

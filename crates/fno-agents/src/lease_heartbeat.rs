@@ -137,7 +137,10 @@ mod tests {
                 ..Default::default()
             };
             let outcome = claims::acquire(key, "me", opts);
-            assert!(matches!(outcome, AcquireOutcome::Acquired(_)), "{outcome:?}");
+            assert!(
+                matches!(outcome, AcquireOutcome::Acquired(_)),
+                "{outcome:?}"
+            );
         }
         crate::claim_store::route_to_primary(None);
         let expiry = |key: &str| -> i64 {
@@ -145,15 +148,27 @@ mod tests {
                 .db
                 .lock()
                 .unwrap()
-                .query_row("SELECT expires_at FROM claims WHERE key = ?1", [key], |r| r.get(0))
+                .query_row("SELECT expires_at FROM claims WHERE key = ?1", [key], |r| {
+                    r.get(0)
+                })
                 .unwrap()
         };
         let dead_lease = expiry("node:dead");
         let mut held = BTreeMap::new();
         let first = beat(&primary.remote, &mut held, 600_000).unwrap();
-        assert_eq!(first, Beat { renewed: vec!["node:live".into()], lost: vec![] });
+        assert_eq!(
+            first,
+            Beat {
+                renewed: vec!["node:live".into()],
+                lost: vec![]
+            }
+        );
         assert!(expiry("node:live") >= claims::now_ms() + 590_000);
-        assert_eq!(expiry("node:dead"), dead_lease, "a dead holder's lease lapses");
+        assert_eq!(
+            expiry("node:dead"),
+            dead_lease,
+            "a dead holder's lease lapses"
+        );
 
         let mut offline = held.clone();
         let dead_primary = crate::store_remote::test_primary::dead();
@@ -174,7 +189,10 @@ mod tests {
         let second = beat(&primary.remote, &mut held, 600_000).unwrap();
         assert!(second.renewed.is_empty());
         assert_eq!(second.lost.len(), 1, "{second:?}");
-        assert!(second.lost[0].1.contains("held by peer on imac"), "{second:?}");
+        assert!(
+            second.lost[0].1.contains("held by peer on imac"),
+            "{second:?}"
+        );
         assert!(held.is_empty());
     }
 }

@@ -467,6 +467,14 @@ fn metadata(record: &ClaimRecord) -> Result<SqlValue, String> {
 }
 
 fn decode(row: &[SqlValue]) -> Result<ClaimRecord, String> {
+    let record = parse(row)?;
+    claims::validate_record(&record)?;
+    Ok(record)
+}
+
+/// A row as a record, unvalidated: the board shows a holder even when its
+/// row would fail validation.
+fn parse(row: &[SqlValue]) -> Result<ClaimRecord, String> {
     let at = |i: usize| row.get(i).unwrap_or(&SqlValue::Null);
     let need_text = |i: usize| {
         at(i)
@@ -512,7 +520,6 @@ fn decode(row: &[SqlValue]) -> Result<ClaimRecord, String> {
         pid_provenance: maybe_text(12)?,
         metadata: serde_json::from_str(&need_text(13)?).map_err(|e| e.to_string())?,
     };
-    claims::validate_record(&record)?;
     Ok(record)
 }
 
@@ -592,7 +599,11 @@ pub(crate) fn read_at_path(path: &Path) -> Result<Option<ClaimRecord>, String> {
 /// from it and the local file answers only for machine-local keys. One
 /// unreadable row must not blind the whole scan; `claim status` on its key
 /// still reports it corrupted.
-fn rows_in(dir: &Path, prefix: Option<&str>) -> Result<Vec<ClaimRecord>, String> {
+fn rows_in(
+    dir: &Path,
+    prefix: Option<&str>,
+    reader: fn(&[SqlValue]) -> Result<ClaimRecord, String>,
+) -> Result<Vec<ClaimRecord>, String> {
     let may_share = prefix.is_none_or(|p| {
         SHARED_PREFIXES
             .iter()
@@ -607,7 +618,7 @@ fn rows_in(dir: &Path, prefix: Option<&str>) -> Result<Vec<ClaimRecord>, String>
             local
                 .all(&select, &[])?
                 .iter()
-                .filter_map(|row| decode(row).ok())
+                .filter_map(|row| reader(row).ok())
                 .filter(|r| primary.is_none() || !shared(&r.key)),
         );
     }
@@ -616,7 +627,7 @@ fn rows_in(dir: &Path, prefix: Option<&str>) -> Result<Vec<ClaimRecord>, String>
             Db::Remote(remote)
                 .all(&select, &[])?
                 .iter()
-                .filter_map(|row| decode(row).ok()),
+                .filter_map(|row| reader(row).ok()),
         );
         records.sort_by(|a, b| a.key.cmp(&b.key));
     }
@@ -632,7 +643,7 @@ pub(crate) fn unexpired_node_records() -> Result<Vec<ClaimRecord>, String> {
         return Ok(Vec::new());
     }
     let now = claims::now_ms();
-    Ok(rows_in(&dir, Some("node:"))?
+    Ok(rows_in(&dir, Some("node:"), parse)?
         .into_iter()
         .filter(|r| r.expires_at.is_none_or(|at| at > now))
         .collect())
@@ -643,7 +654,7 @@ pub(crate) fn records_in(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
-    let records = rows_in(dir, prefix)?;
+    let records = rows_in(dir, prefix, decode)?;
     if include_stale {
         return Ok(records);
     }
@@ -1300,18 +1311,31 @@ mod tests {
         let now = claims::now_ms();
         let insert = format!(
             "INSERT INTO claims ({COLUMNS}) VALUES ({})",
-            (1..=14).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
+            (1..=14)
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
         );
-        for (key, expires) in [("node:peer-live", now + 3_600_000), ("node:peer-gone", now - 1)] {
+        for (key, expires) in [
+            ("node:peer-live", now + 3_600_000),
+            ("node:peer-gone", now - 1),
+        ] {
             let mut peer = claims::make_claim(key, "peer", &opts(root.path()));
-            (peer.host, peer.machine_id, peer.pid) = ("imac".into(), Some("imac-id".into()), Some(4242));
+            (peer.host, peer.machine_id, peer.pid) =
+                ("imac".into(), Some("imac-id".into()), Some(4242));
             (peer.acquired_at, peer.expires_at) = (now - 7_200_000, Some(expires));
             Db::Remote(primary.remote.clone())
                 .execute(&insert, &columns_of(&peer).unwrap())
                 .unwrap();
         }
-        assert!(!held("node:peer-live", "b"), "a peer's unexpired lease holds");
-        assert!(held("node:peer-gone", "b"), "a lease past the store clock is taken");
+        assert!(
+            !held("node:peer-live", "b"),
+            "a peer's unexpired lease holds"
+        );
+        assert!(
+            held("node:peer-gone", "b"),
+            "a lease past the store clock is taken"
+        );
 
         primary
             .db

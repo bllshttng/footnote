@@ -171,7 +171,10 @@ mod tests {
             ..Default::default()
         };
         let outcome = crate::claims::acquire("node:kept", "a", opts);
-        assert!(matches!(outcome, crate::claims::AcquireOutcome::Acquired(_)), "{outcome:?}");
+        assert!(
+            matches!(outcome, crate::claims::AcquireOutcome::Acquired(_)),
+            "{outcome:?}"
+        );
         crate::claim_store::route_to_primary(None);
         primary
             .db
@@ -184,13 +187,21 @@ mod tests {
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
         let receipt = export(&primary.remote, &out).unwrap();
         assert_eq!(receipt["rows"]["claims"], 1, "{receipt}");
-        assert!(export(&primary.remote, &out).unwrap_err().contains("exists"));
+        assert!(export(&primary.remote, &out)
+            .unwrap_err()
+            .contains("exists"));
         let body: String = crate::store_conn::open_read(&out)
             .unwrap()
-            .query_row("SELECT body FROM notes WHERE notes MATCH 'primary'", [], |r| r.get(0))
+            .query_row(
+                "SELECT body FROM notes WHERE notes MATCH 'primary'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(body, "hello primary");
-        let kept = crate::claim_store::read("node:kept", Some(root.path())).unwrap().unwrap();
+        let kept = crate::claim_store::read("node:kept", Some(root.path()))
+            .unwrap()
+            .unwrap();
         assert_eq!(kept.holder, "a");
     }
 }
