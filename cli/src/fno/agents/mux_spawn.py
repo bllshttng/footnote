@@ -463,6 +463,30 @@ def happy_pane_argv(
     return ["happy", *claude_env, *argv[1:]]
 
 
+def inject_route_model_argv(
+    argv: list[str],
+    route_env: Optional[Mapping[str, str]],
+) -> list[str]:
+    """Pin a routed claude pane's model on argv, ahead of every settings rung.
+
+    A routed pane carries ANTHROPIC_MODEL as process env, but the user's
+    ``~/.claude/settings.json`` ``env`` block outranks process env, so a global
+    model pin there wins and the worker launches on the wrong vendor's model.
+    ``claude --model`` on argv outranks settings env, so the route's model is
+    pinned the way the thread lane pins it with a ``--settings`` route file.
+    An argv that already names a model is caller intent and wins. The token
+    lands flags-first, where it can never sit inside a ``--`` seed fence.
+    """
+    if not route_env or argv[:1] != ["claude"]:
+        return argv
+    route_model = str(route_env.get("ANTHROPIC_MODEL", "")).strip()
+    if not route_model or any(
+        tok == "--model" or tok == "-m" or tok.startswith("--model=") for tok in argv
+    ):
+        return argv
+    return [argv[0], "--model", route_model, *argv[1:]]
+
+
 def claude_argv_is_interactive(argv: list[str]) -> bool:
     """D2 billing guard predicate (mirrors the daemon's
     ``claude_argv_is_interactive``): a mux-hosted claude must be the
@@ -3691,6 +3715,12 @@ def dispatch_spawn_pane(
     # argv so a passthrough token faces the identical check an fno-emitted one
     # would (a splice inside build_pane_argv, never an append past the guards).
     refuse_pane_headless_form(provider, argv)
+    # A routed claude pane cannot carry its model as env: the user settings
+    # env block outranks process env, so the route's ANTHROPIC_MODEL
+    # is pinned on argv, which outranks settings. Runs before the happy wrap
+    # so happy forwards it like any other claude option.
+    if provider == "claude":
+        argv = inject_route_model_argv(argv, route_env)
     # The outer env wrapper is not merely a scrub: it SETS the whole route in
     # happy's own environment, and happy merges that into its claude child. So
     # the wrapper is what delivers the credential, and --claude-env carries only
