@@ -19,6 +19,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -440,30 +441,51 @@ def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypa
             classify_truth=False,
         )
 
-    # The uncontended baseline: the same scan with the lock free. The bound
-    # below applies to the delta the lock wait adds, never to absolute wall
-    # time, which a loaded CI runner inflates for both passes alike.
-    baseline_started = time.monotonic()
+    # Contrast pass: with the lock free the same scan writes the map, so the
+    # contended pass can attribute its fallback to the lock timeout alone.
     baseline = scan()
-    baseline_elapsed = time.monotonic() - baseline_started
     assert len(baseline) == 1
-    name_map.unlink(missing_ok=True)
+    assert name_map.exists()
+    name_map.unlink()
 
     monkeypatch.setattr(discover, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(discover, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
     lock_path = name_map.with_suffix(name_map.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # The contender consumes its timeout on a controlled clock: monotonic
+    # advances only when the lock loop sleeps, so a paused runner cannot
+    # inflate the contended pass. Wall time is never measured.
+    real_time = discover.time
+    now = 0.0
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(
+        discover,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: now,
+            sleep=fake_sleep,
+            time=lambda: real_time.time(),
+        ),
+    )
+
     with open(lock_path, "w") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        started = time.monotonic()
         sessions = scan()
-        contended = time.monotonic() - started
 
-    # The bounded wait engaged (the contender polled past the knob before
-    # giving up) and the contention overhead stayed inside its budget.
-    assert contended >= 0.05
-    assert contended < baseline_elapsed + 0.5
+    # Gave up at the deadline on the controlled clock, one poll-sized sleep
+    # at a time, then fell back to the canonical handle without the write.
+    budget = discover._ALIAS_LOCK_TIMEOUT_SECONDS
+    poll = discover._ALIAS_LOCK_POLL_SECONDS
+    assert sleeps
+    assert all(d <= poll for d in sleeps)
+    assert now == pytest.approx(budget, abs=poll / 2)
     assert [session.handle for session in sessions] == ["aaaaaaaa"]
     assert not name_map.exists()
 
