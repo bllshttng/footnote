@@ -1,5 +1,4 @@
 use super::*;
-use crate::client::server_spawn::config_says_off;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
@@ -44,18 +43,6 @@ mod rename_tests;
 // refusals, and update correlation.
 #[path = "client/tests/agent_launcher_tests.rs"]
 mod agent_launcher_tests;
-
-#[test]
-fn config_says_off_matches_only_trimmed_off() {
-    // Bridges config.toml -> the env the interactive server latches
-    // (x-6165). Must mirror `pty::integration_disabled`: exactly `off`.
-    assert!(config_says_off("off"));
-    assert!(config_says_off("off\n")); // config get trailing newline
-    assert!(config_says_off("  off  "));
-    assert!(!config_says_off("mux-panes\n")); // the default -> stays on
-    assert!(!config_says_off("OFF")); // case-sensitive, like the Rust side
-    assert!(!config_says_off("")); // unknown key / empty -> default on
-}
 
 #[test]
 fn mail_question_fold_item_renders_squadless_not_dropped() {

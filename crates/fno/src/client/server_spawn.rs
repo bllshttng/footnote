@@ -115,3 +115,22 @@ fn shell_integration_off() -> bool {
 pub(crate) fn config_says_off(stdout: &str) -> bool {
     stdout.trim() == "off"
 }
+
+
+#[cfg(test)]
+mod spawn_config_tests {
+    use super::config_says_off;
+
+    /// The env bridge from config.toml to the interactive server's
+    /// latched env: must mirror `pty::integration_disabled` - exactly
+    /// `off`, never case-loose, never the default.
+    #[test]
+    fn config_says_off_matches_only_trimmed_off() {
+        assert!(config_says_off("off"));
+        assert!(config_says_off("off\n"));
+        assert!(config_says_off("  off  "));
+        assert!(!config_says_off("mux-panes\n"));
+        assert!(!config_says_off("OFF"));
+        assert!(!config_says_off(""));
+    }
+}
