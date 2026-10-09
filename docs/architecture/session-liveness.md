@@ -21,6 +21,8 @@ Graph entries use top-level `locked_at` for the graph lock mirror. At the read s
 The SessionStart peer note uses a worktree-local observation cache, not a third truth family.
 The existing PostToolUse heartbeat touches `<absolute-git-dir>/fno/live/<session_id>` at most every 30 seconds before any target-manifest or claim-holder gate, so a hand-started session contributes activity even when it owns no target claim.
 Git gives each linked worktree its own administrative directory, which keeps this cache local even on the registered Claude WorktreeCreate path that can share the checkout's whole `.fno` directory.
+
+The same hook keeps its pre-init spawn-handover throttle at `<absolute-git-dir>/fno/claim-handover-heartbeat.stamp`, because a linked worktree has no checkout `.fno` to hold it.
 The shared `hooks/helpers/worktree-live-peers.sh` reader emits a note only when another session's stamp is less than 120 seconds old; self-only and stale handoff stamps are silent.
 Claude reaches the reader through `hooks/worktree-peers-session-start.sh`, while Codex reaches the same helper through its existing `hooks/session-start.sh` wrapper because the two harness manifests do not share a SessionStart carrier.
 
