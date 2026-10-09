@@ -1235,9 +1235,9 @@ def discovery_address_matches(
     The sweep takes the resolver-only lane: matching reads identity fields
     alone, so per-session truth classification here is discarded cost.
     """
-    # No falsifier: it spawns a holder probe per claude row this match never reads.
+    # Identity only: no falsifier probe per claude row, no project per cwd.
     sessions = discover_live_sessions(
-        registry_path=registry_path, classify_truth=False, falsify_registry=False
+        registry_path=registry_path, classify_truth=False, identity_only=True
     )
     return _exact_address_matches(token, sessions)
 
@@ -2640,7 +2640,7 @@ def discover_live_sessions(
     truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
     classify_truth: bool = True,
     resolve_metadata: bool = True,
-    falsify_registry: bool = True,
+    identity_only: bool = False,
 ) -> list[DiscoveredSession]:
     """Enumerate host-local session candidates and attach family-1 truth.
 
@@ -2773,7 +2773,7 @@ def discover_live_sessions(
             continue
         candidates.append(r)
     for r in _discover_from_registry(
-        registry_path, exclude_session_ids=excluded_session_ids, falsify=falsify_registry
+        registry_path, exclude_session_ids=excluded_session_ids, falsify=not identity_only
     ):
         if r["short_id"] in exclude:
             continue
@@ -2803,9 +2803,9 @@ def discover_live_sessions(
         projects: dict[str, Optional[str]] = {}
         for r in live:
             cwd = r["cwd"]
-            if cwd and cwd not in projects:
+            if cwd and not identity_only and cwd not in projects:
                 projects[cwd] = resolver(cwd)
-            r["project"] = projects[cwd] if cwd else None
+            r["project"] = projects.get(cwd)
         aliases = _resolve_aliases(live, name_map_path or default_name_map_path())
     else:
         aliases = {}

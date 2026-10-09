@@ -7447,8 +7447,8 @@ def dispatch_send(
 
     registry_path = paths.agents_registry_path()
     requested_name = name
-    # The agent lock guards registry rows, never live sessions: the locked
-    # re-resolution reuses this one discovery sweep instead of a second.
+    # The locked re-resolution reuses this discovery sweep unless the lock
+    # made the send wait, when a new address owner may have appeared.
     discovered: dict[str, list] = {}
 
     def _load_and_resolve_target(
@@ -7544,11 +7544,8 @@ def dispatch_send(
     canonical_identity = _recipient_identity_key(initial)
 
     def _on_wait() -> None:
-        print(
-            f"Waiting for agent {canonical_name!r} lock...",
-            file=sys.stderr,
-            flush=True,
-        )
+        discovered.clear()
+        print(f"Waiting for agent {canonical_name!r} lock...", file=sys.stderr, flush=True)
 
     # 3. Per-agent flock. Confirmed (node, change 6): this `with` block
     # spans the ENTIRE rest of the send, including the live-delivery attempt

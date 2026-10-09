@@ -2013,6 +2013,41 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
     assert by_short is not None
 
 
+def test_identity_only_sweep_skips_falsifier_and_project(tmp_path, monkeypatch):
+    """The address sweep reads identity alone: the falsifier spawns a holder
+    probe per claude row and a project resolve parses every settings file."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-foo",
+                harness="claude",
+                cwd="/Users/x/code/proj",
+                log_path="/tmp/x-foo.log",
+                short_id="9a063cd3",
+                harness_session_id="9a063cd3-69d4-415a-ada5-649b0164189c",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    calls: list[str] = []
+    monkeypatch.setattr(discover, "registry_falsifier", lambda e: calls.append("falsify"))
+    seams = _empty_seams(tmp_path)
+    seams["project_resolver"] = lambda cwd: calls.append("project")
+    sessions = discover.discover_live_sessions(
+        registry_path=reg, classify_truth=False, identity_only=True, **seams
+    )
+    assert [s.name for s in sessions] == ["x-foo"]
+    assert sessions[0].project is None
+    assert calls == []
+    discover.discover_live_sessions(registry_path=reg, classify_truth=False, **seams)
+    assert sorted(calls) == ["falsify", "project"]
+
+
 def test_us2_registry_name_resolves_codex_after_cross_store_uniqueness_check(tmp_path):
     """US2/AC1-HP: truth resolves a live codex pane worker by its registered NAME.
 

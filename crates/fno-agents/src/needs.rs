@@ -1584,11 +1584,31 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
             return Vec::new();
         }
     };
-    records
+    let records: Vec<_> = records
         .into_iter()
         .filter(|r| r.key.starts_with("node:") || r.key.starts_with("dispatch:"))
-        .map(|rec| {
-            let state = crate::claim_verbs::status_verdict(&rec).0;
+        .collect();
+    // One primed witness: a per-row verdict paid a cold truth run per session.
+    let states: Vec<_> = {
+        let (witness, _answer) = crate::claim_verbs::session_witness_primed_for(&records);
+        records
+            .iter()
+            .map(|rec| {
+                crate::claims::classify_with_basis_and_exclusivity(
+                    rec,
+                    None,
+                    &|pid| crate::claims::probe_pid(pid),
+                    None,
+                    Some(&witness),
+                )
+                .0
+            })
+            .collect()
+    };
+    records
+        .into_iter()
+        .zip(states)
+        .map(|(rec, state)| {
             ClaimAge {
                 key: rec.key,
                 holder: rec.holder,
