@@ -446,6 +446,26 @@ impl SandboxUnavailablePolicy {
     }
 }
 
+/// Default added-line budget the commit-time diff-budget guard measures a
+/// target session against when its bound plan declares no frontmatter
+/// `diff_budget`. 0 is off.
+pub const DEFAULT_PLAN_DIFF_BUDGET: u32 = 300;
+
+/// Resolve `plan.default_diff_budget`, same precedence + fail-open degrade
+/// as [`worktree_prune_done`]: a missing or malformed value takes the
+/// default, and 0 disables the guard. `$FNO_PLAN_DEFAULT_DIFF_BUDGET` is a
+/// global test/tuning override.
+pub fn default_diff_budget(cwd: &Path) -> u32 {
+    if let Some(v) = non_empty_env("FNO_PLAN_DEFAULT_DIFF_BUDGET")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u32>().ok()))
+    {
+        return v;
+    }
+    config_lookup(cwd, &["plan", "default_diff_budget"])
+        .and_then(|v| v.as_integer().and_then(|i| u32::try_from(i).ok()))
+        .unwrap_or(DEFAULT_PLAN_DIFF_BUDGET)
+}
+
 /// Apply the shared headless confinement boundary for harnesses whose own argv
 /// has no usable sandbox backend. Explicit bypass remains an operator choice;
 /// otherwise the configured policy decides whether the child may spawn.

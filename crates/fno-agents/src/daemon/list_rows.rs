@@ -131,7 +131,7 @@ pub(super) fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, St
 /// NOT lift an unanswered age to `quiet`: the word is activity, and a process
 /// being up says nothing about when it last wrote - the same row must render
 /// the same word through the Python list lane, which has no pid census.
-pub(super) fn rendered_status_from_truth(
+pub(crate) fn rendered_status_from_truth(
     probe: Option<&crate::truth_probe::TruthProbe>,
 ) -> &'static str {
     if probe.and_then(|p| p.reachability.as_deref()) == Some("unreachable") {
@@ -342,7 +342,7 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// test with Python; the caller supplies all fields before the row is written.
 /// `now` is injected so the fixture's fixed clock and production's wall clock
 /// assert the same rules.
-pub(super) fn apply_row_contradiction(
+pub(crate) fn apply_row_contradiction(
     row: &mut Map<String, Value>,
     exited_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,

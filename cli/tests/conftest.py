@@ -1005,7 +1005,7 @@ def _hermetic_worker_add_dirs(monkeypatch):
 
 # Modules whose journal writes the dispatch-observability plan pins per test.
 # The tree-wide neutralise() above already aims every journal at one shared
-# sandbox; these five get a per-test tmp journal so they cannot even read each
+# sandbox; these modules get a per-test tmp journal so they cannot even read each
 # other's rows. scripts/ci/check-tests-hermetic-events.sh guards the marker
 # on the test-file side; keep the two lists in step.
 _PLAN_JOURNAL_PINNED_MODULES = frozenset(
@@ -1014,7 +1014,6 @@ _PLAN_JOURNAL_PINNED_MODULES = frozenset(
         "test_spawn_defaults",
         "test_rust_runtime",
         "test_advance_explain",
-        "test_agents_top",
         "test_epic_status",
         "test_join_events",
     }
@@ -1023,7 +1022,7 @@ _PLAN_JOURNAL_PINNED_MODULES = frozenset(
 
 @pytest.fixture(autouse=True)
 def _plan_hermetic_events_journal(request, tmp_path, monkeypatch):
-    """Pin FNO_EVENTS_PATH to this test's tmp journal for the five modules.
+    """Pin FNO_EVENTS_PATH to this test's tmp journal for the pinned modules.
 
     The audit measured 224 fixture rows and 212 rows naming a nonexistent node
     in the developer's live global journal - test fixtures a green run had

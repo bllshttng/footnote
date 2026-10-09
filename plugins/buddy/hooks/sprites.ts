@@ -119,8 +119,8 @@ const HAT_LINES: Record<Hat, string> = {
   tinyduck: '    ,>      ',
 }
 
-// The fidget loop: a frame change on most ticks, with a blink (-1) now and then. The status line
-// samples it once a second, so the original's mostly-resting loop looked frozen there.
+// The fidget loop: a frame change on most steps, with a blink (-1) now and then. A mostly-resting
+// loop, like the original's, looked frozen in the status line.
 export const IDLE_SEQUENCE = [0, 1, 0, 2, 3, -1, 0, 4, 1, 2, 0, -1, 3, 4, 2, 1]
 
 export function renderSprite(bones: Bones, frame = 0): string[] {

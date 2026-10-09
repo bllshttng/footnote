@@ -3666,7 +3666,7 @@ pub use release_stopped::{
 
 #[path = "claims_long_holds.rs"]
 mod long_holds;
-pub use long_holds::{long_holds, run_claim_long_holds, LongHoldRow};
+pub use long_holds::{fmt_age_s, long_holds, run_claim_long_holds, LongHoldRow};
 
 #[cfg(test)]
 #[path = "claims_reservation_tests.rs"]

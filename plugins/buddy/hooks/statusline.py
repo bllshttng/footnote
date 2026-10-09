@@ -7,7 +7,6 @@ the copy. It reads only files the mod wrote beside it, so it stays fast.
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import unicodedata
@@ -20,8 +19,9 @@ NARROW = 60
 # The original speech bubble held about 30 columns of text.
 BUBBLE_W = 30
 # A frame older than this belongs to a session that stopped drawing.
-STALE_S = 30
-# The user's own status line reruns at most this often unless its input changes.
+STALE_S = 45
+# The user's own status line reruns at most this often unless its input changes,
+# or at its own refreshInterval when it has one.
 INNER_MAX_AGE_S = 30
 # Claude Code trims a row's leading spaces; a braille blank holds the column.
 LEAD = "⠀"
@@ -124,7 +124,7 @@ def cached_inner_rows(stdin, data, session):
     try:
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
-        if cached.get("key") == key and time.time() - cached.get("at", 0) < INNER_MAX_AGE_S:
+        if cached.get("key") == key and time.time() - cached.get("at", 0) < inner_max_age():
             return cached["rows"]
     except (OSError, ValueError, KeyError):
         pass
@@ -139,15 +139,27 @@ def cached_inner_rows(stdin, data, session):
     return rows
 
 
-def inner_rows(stdin, data):
+def inner_line():
     try:
         with open(os.path.join(HOME, "inner.json"), encoding="utf-8") as f:
-            inner = json.load(f).get("statusLine") or {}
-    except (OSError, ValueError):
-        inner = {}
+            return json.load(f).get("statusLine") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def inner_max_age():
+    every = inner_line().get("refreshInterval")
+    return every if isinstance(every, (int, float)) and every >= 1 else INNER_MAX_AGE_S
+
+
+def inner_rows(stdin, data):
+    inner = inner_line()
     command = inner.get("command") if inner.get("type") == "command" else None
     if command:
         try:
+            # Imported here: most ticks reuse cached rows and never pay for it.
+            import subprocess
+
             out = subprocess.run(command, shell=True, input=stdin, capture_output=True, text=True, timeout=5).stdout
         except Exception:
             out = ""
@@ -275,8 +287,23 @@ def main():
     left = cached_inner_rows(stdin, data, session)
     # Claude Code's usable status width runs a few columns under COLUMNS.
     cols = int(os.environ.get("COLUMNS") or 120) - 4
-    print("\n".join(layout(left, read_frame(session), cols)))
-
+    out = "\n".join(layout(left, read_frame(session), cols))
+    print(out)
+    # statusline.sh prints this again, with no Python, until the input or the width changes or a new frame lands.
+    key = os.environb.get(b"BUDDY_KEY")
+    if session and key is not None:
+        cache = os.path.join(HOME, "frames", f"{session}.cache")
+        tmp = f"{cache}.{os.getpid()}"
+        try:
+            # The key, a NUL, then the output, swapped in whole so a reader never sees half of it.
+            with open(tmp, "wb") as f:
+                f.write(key + b"\0" + (out + "\n").encode("utf-8"))
+            os.replace(tmp, cache)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     main()
