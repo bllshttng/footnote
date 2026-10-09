@@ -29,7 +29,11 @@ admit() {
     elif command -v fno-agents >/dev/null 2>&1; then
         repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
         rc=0
-        fno-agents test-run ${mode}-admit --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
+        # Cargo exports CARGO_MANIFEST_DIR to this wrapper. The live-store
+        # fence reads it as "a cargo-launched build" and refuses the claims
+        # store, so with it set every build ran claimless. Only this call
+        # drops it: the compiler and the test binary keep it.
+        env -u CARGO_MANIFEST_DIR fno-agents test-run "${mode}-admit" --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
         if [[ "$rc" -eq 86 ]]; then
             # Slot-busy is policy, not breakage: the door printed the answer
             # ("commit, push, CI runs it"). Stop the compile or run here;
@@ -48,7 +52,7 @@ admit() {
             # event lands in the journal. The usage output is captured, not
             # piped: the bare call exits nonzero, and pipefail would turn a
             # matched grep into a nonzero pipeline.
-            usage="$(fno-agents test-run ${mode}-admit 2>&1 || true)"
+            usage="$(fno-agents test-run "${mode}-admit" 2>&1 || true)"
             if grep -q -- "--cargo-pid" <<<"$usage"; then
                 reason=error
                 if [[ "$mode" == "build" ]]; then

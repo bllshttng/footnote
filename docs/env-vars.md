@@ -12,7 +12,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CARGO` | rs | Names the cargo binary the `cargo_build_dirs` lane runs `cargo metadata` through; the PATH scan and `$CARGO_HOME/bin/cargo` are the fallbacks. |
 | `CARGO_BUILD_BUILD_DIR` | rs | unclear: crates/fno-agents/src/hook/stop.rs:519 |
 | `CARGO_HOME` | py+rs | Cargo install root; the default is ~/.cargo. |
-| `CARGO_MANIFEST_DIR` | rs | Set by cargo on processes it launches; the live-store fence then refuses to open a store under the operator home `.fno`. |
+| `CARGO_MANIFEST_DIR` | rs | Cargo sets it on each process that it starts. The live-store fence then refuses to open a store under the operator home `.fno`. Only the admission call of the rustc wrapper removes it. |
 | `CENSUS_DEFERRED_FILE` | py | unclear: cli/src/fno/test_cmd.py:2250 |
 | `CENSUS_KILL_BOUND_S` | py | unclear: cli/src/fno/test_cmd.py:2297 |
 | `CI` | py+rs | unclear: cli/src/fno/llm.py:40 |
@@ -73,6 +73,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
 | `FNO_CARGO_FREE_BYTES` | rs | Overrides the free-space read the `cargo_build_dirs` cap lane defends against; test escape hatch. |
+| `FNO_CARGO_MAX_HOLD_SECS` | rs | The longest time in seconds that an agent cargo can hold an admission claim. After this time, the next cargo frees the claim and stops the holder. The default is 3600. A whole-suite run is exempt. |
 | `FNO_CARGO_TARGETS_BASE` | rs | Overrides the managed fno cargo build base the `cargo_build_dirs` lane sweeps and the tree-removal reclaim deletes under; test escape hatch. |
 | `FNO_CC_DAEMON_RV_ROOT` | py | unclear: cli/src/fno/agents/session_procs.py:40 |
 | `FNO_CHROME` | rs | The Chrome or Chromium binary `fno mux serve --snapshot --format png` runs. |
