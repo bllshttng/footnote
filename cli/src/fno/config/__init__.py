@@ -22,12 +22,7 @@ repo root) PLUS a stat fingerprint of every candidate file. A same-key
 settings rewrite changes the fingerprint, so the cache reparses on its
 own; no cache_clear is needed to see an edit in-process.
 
-Design decisions (locked in 2026-05-14-path-config.md):
-  - extra='ignore' for forward compatibility (do NOT change to 'forbid')
-  - Emit a startup WARNING for unknown keys (not an error)
-  - Reject glob chars (*?[) at validation time, not at resolve time
-  - Reject {vault} when obsidian.enabled is False
-  - PATH_MAX = 4096 bytes enforced on state_dir / plans_dir
+The design decisions are locked in docs/path-config.md.
 """
 from __future__ import annotations
 
@@ -285,9 +280,9 @@ class PlanBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    # Added lines a target session's branch may carry before the commit-time
-    # diff-budget guard names the overrun; a plan's frontmatter diff_budget
-    # key overrides it per plan. 0 is off.
+    # Added lines a branch may carry before the commit-time diff-budget guard
+    # (hooks/diff-budget-commit.sh) names the overrun; a plan's frontmatter
+    # diff_budget overrides it per plan. 0 is off.
     default_diff_budget: int = Field(default=300, ge=0)
 
 
