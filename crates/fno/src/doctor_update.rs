@@ -1440,6 +1440,23 @@ fn post_install_steps(resolved: &Path, failed: &mut Vec<String>) {
                 failed.push("post-install codex refresh".into());
             }
         }
+        // The pinned Claude cache re-copies only when the plugin version
+        // changes and the stage serves one version forever, so the restage
+        // above never reaches it. Converge it beside codex; the converge
+        // byte-verifies against source HEAD, and drift after it fails the
+        // update rather than warning.
+        let args: Vec<String> = [
+            "plugin-install".into(),
+            "--converge-claude".into(),
+            "--source".into(),
+            resolved.to_string_lossy().into_owned(),
+        ]
+        .to_vec();
+        let code = run_inherit(&agents_bin, &args);
+        if code != 0 {
+            eprintln!("fno doctor update: claude cache converge exited {code}");
+            failed.push("claude cache converge".into());
+        }
     }
 }
 
