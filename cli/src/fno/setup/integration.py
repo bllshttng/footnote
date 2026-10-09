@@ -308,11 +308,12 @@ def _agy_hooks_json() -> Path:
 
 def _agy_adapter_path() -> "Optional[Path]":
     # The adapter ships in the plugin (hooks/), which the uv/curl wheel does NOT
-    # carry. resolve_plugin_script always returns a path (last fallback may not
-    # exist), so gate on is_file(): None means "not in this install" -> manual.
-    from fno.paths import resolve_plugin_script
+    # carry. The path is persisted in the user's global hooks.json, so resolve it
+    # durably: a worktree path dies when the worktree is archived. The resolver
+    # always returns a path, so gate on is_file(): None means manual.
+    from fno.paths import resolve_plugin_script_durable
 
-    p = resolve_plugin_script("hooks/footnote-agy-target-stop-hook.sh")
+    p = resolve_plugin_script_durable("hooks/footnote-agy-target-stop-hook.sh")
     return p if p.is_file() else None
 
 
@@ -320,18 +321,18 @@ def _agy_role_adapter_path() -> "Optional[Path]":
     # Same load-shape as _agy_adapter_path for the PreInvocation role adapter.
     # agy has no session-start event, so the role line rides PreInvocation
     # gated on invocationNum == 0 (first model call == session start).
-    from fno.paths import resolve_plugin_script
+    from fno.paths import resolve_plugin_script_durable
 
-    p = resolve_plugin_script("hooks/agy-team-inject.sh")
+    p = resolve_plugin_script_durable("hooks/agy-team-inject.sh")
     return p if p.is_file() else None
 
 
 def _agy_guard_adapter_path() -> "Optional[Path]":
     # Same load-shape for the PreToolUse lead guard shim; it translates agy's
     # payload to the shared lead guard through `lead-guard --wire agy`.
-    from fno.paths import resolve_plugin_script
+    from fno.paths import resolve_plugin_script_durable
 
-    p = resolve_plugin_script("hooks/agy-lead-guard.sh")
+    p = resolve_plugin_script_durable("hooks/agy-lead-guard.sh")
     return p if p.is_file() else None
 
 
