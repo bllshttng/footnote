@@ -469,8 +469,8 @@ def inject_route_model_argv(
 ) -> list[str]:
     """Pin a routed claude pane's model on argv, ahead of every settings rung.
 
-    A routed pane carries ANTHROPIC_MODEL as process env, but the user's
-    ``~/.claude/settings.json`` ``env`` block outranks process env, so a global
+    A routed pane carries ANTHROPIC_MODEL as process env, but the user
+    settings file's ``env`` block outranks process env, so a global
     model pin there wins and the worker launches on the wrong vendor's model.
     ``claude --model`` on argv outranks settings env, so the route's model is
     pinned the way the thread lane pins it with a ``--settings`` route file.
