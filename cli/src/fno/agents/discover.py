@@ -1235,8 +1235,7 @@ def discovery_address_matches(
     The sweep takes the resolver-only lane: matching reads identity fields
     alone, so per-session truth classification here is discarded cost.
     """
-    # No falsifier either: it spawns one holder probe per claude row (11
-    # probes, about 8s of a 74s send) for a verdict this match never reads.
+    # No falsifier: it spawns a holder probe per claude row this match never reads.
     sessions = discover_live_sessions(
         registry_path=registry_path, classify_truth=False, falsify_registry=False
     )
@@ -2800,8 +2799,7 @@ def discover_live_sessions(
     live = list(by_sid.values())
 
     if resolve_metadata:
-        # Rows repeat cwds (299 rows, 109 cwds measured); a resolve parses
-        # every settings file, so each cwd resolves once per sweep.
+        # Each resolve parses every settings file; 299 rows shared 109 cwds.
         projects: dict[str, Optional[str]] = {}
         for r in live:
             cwd = r["cwd"]
