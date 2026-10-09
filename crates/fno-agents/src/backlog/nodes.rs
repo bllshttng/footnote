@@ -1515,8 +1515,9 @@ pub(crate) fn load_from_parts(
     let Some((mut node, supersession_extras, child_lists_present)) = parts.bases.remove(id) else {
         return Ok(None);
     };
-    if !parts.costs.remove(id).unwrap_or_default().is_empty() {
-        node.costs = Some(parts.costs.remove(id).unwrap_or_default());
+    let stored_costs = parts.costs.remove(id).unwrap_or_default();
+    if !stored_costs.is_empty() {
+        node.costs = Some(stored_costs);
     }
     let claim = match claim {
         Some(claim) => claim,
