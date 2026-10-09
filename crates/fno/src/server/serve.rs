@@ -92,6 +92,8 @@ pub(super) async fn serve(
         shared_identity_notified: HashSet::new(),
         restored: false,
         restore_pending: false,
+        spawn_flight: Default::default(),
+        restore_hold: Default::default(),
         store_generations: HashMap::new(),
         pre_restore_squads: HashSet::new(),
         topology_dirty: false,
