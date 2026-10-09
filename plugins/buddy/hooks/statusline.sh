@@ -4,6 +4,7 @@
 # Python never starts. It uses only bash built-ins: under load, each extra process costs more
 # than the whole check. Every HITS-th tick still runs Python, which drops a frame from a session
 # that stopped drawing and stamps the heartbeat the mod reads.
+# At one tick a second this must stay well under WRAPPER_SEEN_MS (45 s) in register.ts.
 HITS=25
 IFS= read -r -d '' input
 dir=.
