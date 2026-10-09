@@ -1398,8 +1398,11 @@ pub fn read_resolution_index(graph: &Path) -> Result<Vec<Value>, String> {
         if let Some(slug) = body.get("slug").filter(|value| !value.is_null()) {
             object.insert("slug".into(), slug.clone());
         }
-        if let Some(ts) = body.get("archived_at").filter(|value| !value.is_null()) {
-            object.insert("archived_at".into(), ts.clone());
+        // The raw body rides verbatim, null included: the live/archived
+        // partition reads the key's presence, and an explicit null reads as
+        // archived exactly as it does in the whole export.
+        if let Some(value) = body.get("archived_at") {
+            object.insert("archived_at".into(), value.clone());
         }
         rows.push(Value::Object(object));
     }

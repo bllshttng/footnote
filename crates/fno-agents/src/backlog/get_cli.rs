@@ -173,31 +173,61 @@ fn serve_loaded(
     let node = match super::nodes::node_claims_by_id() {
         Ok(claims) => {
             let claim = claims.get(id).cloned().unwrap_or_default();
-            super::nodes::load_with_claim(&connection, id, Some(claim.clone()), None).map(
-                |loaded| {
-                    loaded.map(|node| {
-                        let mut row = node.to_json();
-                        super::nodes::project_claim_value(&mut row, claim);
-                        row
-                    })
-                },
-            )
-        }
-        Err(err) => Err(err),
-    };
-    let node = match node {
-        Ok(Some(node)) => node,
-        Ok(None) => {
-            // The index saw the id but the loader missed it: a node that
-            // vanished between the two reads, the same race the whole-graph
-            // export named `vanished mid-export` and served as unreadable.
-            eprintln!(
-                "Could not read the graph cleanly, so '{query}' cannot be resolved: node {id} vanished mid-export"
-            );
-            return GRAPH_UNREADABLE_EXIT;
+            let loaded =
+                match super::nodes::load_with_claim(&connection, id, Some(claim.clone()), None) {
+                    Ok(loaded) => loaded,
+                    Err(err) => {
+                        eprintln!(
+                        "Could not read the graph cleanly, so '{query}' cannot be resolved: {err}"
+                    );
+                        return GRAPH_UNREADABLE_EXIT;
+                    }
+                };
+            match loaded {
+                Some(node) => {
+                    let mut row = node.to_json();
+                    super::nodes::project_claim_value(&mut row, claim);
+                    Some(row)
+                }
+                None => {
+                    // A raw-carried resident loads only through raw_rows_where;
+                    // the whole-graph export served it verbatim, so the
+                    // single-node read does too. Still absent after that: a
+                    // node that vanished between the two reads, the same race
+                    // the export named `vanished mid-export`.
+                    let found = match super::nodes::raw_rows_where(
+                        &connection,
+                        Some(&[id.to_string()][..]),
+                    ) {
+                        Ok(found) => found,
+                        Err(err) => {
+                            eprintln!(
+                                "Could not read the graph cleanly, so '{query}' cannot be resolved: {err}"
+                            );
+                            return GRAPH_UNREADABLE_EXIT;
+                        }
+                    };
+                    found
+                        .into_iter()
+                        .find(|(raw_id, _, _)| raw_id == id)
+                        .map(|(_, _, mut row)| {
+                            super::nodes::project_claim_value(&mut row, claim);
+                            row
+                        })
+                }
+            }
         }
         Err(err) => {
             eprintln!("Could not read the graph cleanly, so '{query}' cannot be resolved: {err}");
+            return GRAPH_UNREADABLE_EXIT;
+        }
+    };
+    let node = match node {
+        Some(node) => node,
+        None => {
+            eprintln!(
+                "Could not read the graph cleanly, so '{query}' cannot be resolved: node {id} vanished mid-export"
+            );
             return GRAPH_UNREADABLE_EXIT;
         }
     };
