@@ -110,7 +110,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 3;
             }
             match transaction.commit(value.clone()) {
-                Ok(()) => {
+                Ok(written) => {
                     if let (Ok(before), Ok(after)) = (
                         serde_json::from_value::<crate::state::Registry>(before),
                         serde_json::from_value::<crate::state::Registry>(value),
@@ -121,7 +121,11 @@ pub fn run(args: &[String]) -> i32 {
                             &after.entries,
                         );
                     }
-                    println!("{}", json!({"status":"written","revision":expected+1}));
+                    let revision = expected + i64::from(written);
+                    println!(
+                        "{}",
+                        json!({"status":"written","revision":revision,"changed":written})
+                    );
                     0
                 }
                 Err(error) => {
