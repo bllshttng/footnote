@@ -200,7 +200,6 @@ class DispatchClaimObservation:
     action: str
     worker: str = ""
     block_reason: Optional[str] = None
-    # The reader failure behind worked-authority-unavailable, verbatim.
     worked_error: Optional[str] = None
 
     @property
@@ -2626,6 +2625,8 @@ def _observe_node_claim(
             event_data["worker"] = worker
         if block_reason:
             event_data["block_reason"] = block_reason
+        if worked_error:
+            event_data["worked_error"] = worked_error
         agent_events.emit(EVENT_CLAIM_OBSERVED, **event_data)
     if emit and claim_state in ("stale", "suspect"):
         # Lead with the worker when one is on the node: this line pointed at a

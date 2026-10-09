@@ -345,7 +345,6 @@ def live_worked_node_ids(
         if reading is None:
             reading = read_roster(require_live_probe=False)
         if not reading.consulted:
-            # Name the reader that failed, never imply occupancy.
             raise RuntimeError(
                 f"read_roster: {reading.reason or 'roster not consulted'}"
             )
