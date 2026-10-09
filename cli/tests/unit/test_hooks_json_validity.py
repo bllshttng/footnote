@@ -422,7 +422,7 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
     # does not set the other var. Pins that the probe is not masking a
     # wrong-placeholder manifest into a false green.
     wrong = _launch_plugin_hook(
-        "bash ${CLAUDE_PLUGIN_ROOT}/hooks/graph-write-protect.sh",
+        "bash ${CLAUDE_PLUGIN_ROOT}/hooks/write-gate.sh",
         root_value=str(REPO_ROOT),
         shell=shell,
         root_var="PLUGIN_ROOT",

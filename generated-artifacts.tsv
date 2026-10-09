@@ -1,4 +1,4 @@
-# Generated copies. An Edit or Write to a path here is refused by hooks/generated-write-guard.sh.
+# Generated copies. An Edit or Write to a path here is refused by hooks/write-gate.sh.
 # Columns (tab-separated): path-glob, canonical source, regenerate command. Globs are bash [[ == ]] patterns on the repo-relative path.
 # Skill-bundle copies are not listed here: skill-bundles.yaml owns them.
 cli/src/fno/agents/harness_capabilities.toml	crates/fno-agents/src/harness_capabilities.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
