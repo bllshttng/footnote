@@ -900,30 +900,9 @@ pub async fn census() -> Vec<Value> {
 /// Run the daemon-free census subcommand.  The process walk stays in Rust so
 /// Python callers and the machine sample share one table implementation.
 pub async fn run_verb(args: &[String]) -> i32 {
-    if args.iter().any(|arg| arg == "--tree-rss") {
-        let Some(index) = args.iter().position(|arg| arg == "--tree-rss") else {
-            unreachable!()
-        };
-        let Some(raw) = args.get(index + 1) else {
-            eprintln!("fno-agents census: --tree-rss needs a pid list");
-            return 2;
-        };
-        let mut pids = Vec::new();
-        for token in raw.split(',').filter(|token| !token.is_empty()) {
-            match token.parse::<u32>() {
-                Ok(pid) => pids.push(pid),
-                Err(_) => {
-                    eprintln!("fno-agents census: invalid pid {token}");
-                    return 2;
-                }
-            }
-        }
-        let (rows, _) = process_table_ps();
-        println!(
-            "{}",
-            json!({"rss_mb": crate::session_cost::tree_rss(&rows, &pids)})
-        );
-        return 0;
+    // `fno agents top`: the worker table, the census of live runs.
+    if args.first().map(String::as_str) == Some("--workers") {
+        return crate::agents_top::run(&args[1..]);
     }
     if args.iter().any(|arg| arg == "--ps") {
         let (rows, unreadable) = process_table();

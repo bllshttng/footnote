@@ -84,7 +84,7 @@ fn record_dir<'a>(dirs: &'a [PathBuf], rec: &ClaimRecord) -> Option<&'a Path> {
 }
 
 /// Compact floored age, matching `top._fmt_age`: 45s / 12m / 3h.
-fn fmt_age_s(seconds: i64) -> String {
+pub fn fmt_age_s(seconds: i64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
     } else if seconds < 3600 {

@@ -54,6 +54,7 @@ mod agent_lock;
 pub mod agent_ref;
 pub mod agents_config;
 pub(crate) mod agents_event;
+pub mod agents_top;
 pub mod agy_ask;
 pub mod agy_hooks;
 pub mod agy_launch;

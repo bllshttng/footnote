@@ -365,13 +365,10 @@ pub(crate) fn held_from_pages(pages: &[(String, String)], scope: &str) -> Vec<Va
     rows.into_iter().map(|(_, v)| v).collect()
 }
 
-/// The workers payload, one `fno agents top --json --subagents` call shared
-/// by the workers and quiet readings.
+/// The workers payload, the `fno agents top --json --subagents` answer read
+/// in process, shared by the workers and quiet readings.
 pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
-    let (_, out, err) = crate::lead_checkin::fno_verb(&["agents", "top", "--json", "--subagents"])?;
-    let payload: Value = serde_json::from_str(out.trim())
-        .map_err(|e| format!("top payload did not parse: {e}: {}", err.trim()))?;
-    Ok(payload)
+    Ok(crate::agents_top::payload(true, false))
 }
 
 pub(crate) fn overdue_watches_reading() -> Result<Value, String> {
