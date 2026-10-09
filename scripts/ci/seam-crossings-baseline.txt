@@ -79,8 +79,6 @@ crossing	crates/fno-agents/src/spawn_gate.rs	let _ = std::process::Command::new(
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	let mut cmd = Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/team_alarm.rs	let fno = crate::scrape::fno_bin();
-crossing	crates/fno-agents/src/truth_probe.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
-crossing	crates/fno-agents/src/truth_probe.rs	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno/src/attention_api.rs	crate::server::fno_bin(),
 crossing	crates/fno/src/backlog_write.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client.rs	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());

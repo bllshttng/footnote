@@ -20,7 +20,7 @@ A	; consider splitting the overlap into a shared dependency rather than two para
 A	; this plan covers everything {other_id} touches plus more, so superseding {other_id} is the cleanest path.	py=cli/src/fno/graph/collision.py;rs=crates/fno-agents/src/backlog/collision.rs	# CLASSIFY protocol|msg-twin|data
 A	; {other_id} has wider scope, so absorbing your changes into {other_id} is the cleanest path.	py=cli/src/fno/graph/collision.py;rs=crates/fno-agents/src/backlog/collision.rs	# CLASSIFY protocol|msg-twin|data
 A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# CLASSIFY protocol|msg-twin|data
-A	[(](?:[yy]/[nn]|+(?:/+)+)[)]*$	py=cli/src/fno/agents/session_truth.py;rs=crates/fno-agents/src/backlog/worked.rs	# CLASSIFY protocol|msg-twin|data
+A	[(](?:[yy]/[nn]|+(?:/+)+)[)]*$	py=cli/src/fno/agents/session_truth.py;rs=crates/fno-agents/src/session_truth.rs	# CLASSIFY protocol|msg-twin|data
 A	[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}	py=cli/src/fno/graph/_constants.py|hooks/git-protection.py;rs=crates/fno-agents/src/org_board/queues.rs	# CLASSIFY protocol|msg-twin|data
 A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck/block_reason.rs	# CLASSIFY protocol|msg-twin|data
 A	^[a-za-z][a-za-z0-9+.-]*://	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/pr_link.rs	# CLASSIFY protocol|msg-twin|data
