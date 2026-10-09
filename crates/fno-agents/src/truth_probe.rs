@@ -375,9 +375,15 @@ fn answer_payloads(
 
 static IN_DAEMON: AtomicBool = AtomicBool::new(false);
 static WARM_DONE: AtomicBool = AtomicBool::new(false);
+static DAEMON_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+/// True in the daemon serving the home this call reads. Keyed by home, so
+/// a test binary that runs one in-process daemon does not turn every other
+/// test's probe, on its own temp home, into a daemon read.
 fn in_daemon() -> bool {
-    IN_DAEMON.load(Ordering::Acquire)
+    DAEMON_HOME
+        .get()
+        .is_some_and(|home| home.as_path() == crate::paths::AgentsHome::from_env().root())
 }
 
 /// Mark this process as the daemon and rebuild every registry row's cursor
@@ -390,6 +396,7 @@ pub fn start_daemon_warm(home: &crate::paths::AgentsHome) {
     if IN_DAEMON.swap(true, Ordering::AcqRel) {
         return;
     }
+    let _ = DAEMON_HOME.set(home.root().to_path_buf());
     let home = home.clone();
     let spawned = std::thread::Builder::new()
         .name("truth-warm".into())

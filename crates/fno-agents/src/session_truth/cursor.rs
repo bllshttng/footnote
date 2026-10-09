@@ -53,6 +53,35 @@ pub(crate) struct Folder<'a> {
     pub backfill: &'a dyn Fn(&mut TailSummary, &Path, u64),
 }
 
+/// What the cached half of a read found.
+pub(crate) enum Cached {
+    Ready(TailSummary),
+    Rebuild,
+}
+
+/// One rebuilt cursor, made without the cursor set.
+pub(crate) struct Rebuilt {
+    dev: u64,
+    ino: u64,
+    len_read: u64,
+    summary: TailSummary,
+    bytes: u64,
+}
+
+/// Rebuild one file's cursor from a bounded tail. Pure file I/O: it takes no
+/// cursor set, so a caller runs it outside any lock.
+pub(crate) fn rebuild_file(path: &Path, folder: &Folder) -> Option<Rebuilt> {
+    let (dev, ino, len) = file_identity(path)?;
+    let (summary, len_read, bytes) = rebuild(path, len, folder)?;
+    Some(Rebuilt {
+        dev,
+        ino,
+        len_read,
+        summary,
+        bytes,
+    })
+}
+
 struct CursorEntry {
     dev: u64,
     ino: u64,
@@ -218,7 +247,23 @@ impl TruthCursors {
     /// The file's summary, advanced through every complete line on disk. A
     /// truncated or replaced (new inode) file rebuilds, so the answer always
     /// equals a fresh rebuild. `None` when the file cannot be stat'd or read.
+    /// The reader takes the lock-split path; tests drive this whole one.
+    #[cfg(test)]
     pub(crate) fn summary(&mut self, path: &Path, folder: &Folder) -> Option<TailSummary> {
+        match self.read_cached(path, folder)? {
+            Cached::Ready(summary) => Some(summary),
+            Cached::Rebuild => {
+                let built = rebuild_file(path, folder)?;
+                Some(self.insert_rebuilt(path, built))
+            }
+        }
+    }
+
+    /// The cached half of [`Self::summary`]: advance a live cursor through
+    /// its appended lines, or say the file needs a rebuild. A shared cursor
+    /// set calls this under its lock and rebuilds outside it, so one long
+    /// rebuild never stalls every other ask.
+    pub(crate) fn read_cached(&mut self, path: &Path, folder: &Folder) -> Option<Cached> {
         self.prune_idle();
         let (dev, ino, len) = file_identity(path)?;
         let same = self
@@ -227,25 +272,30 @@ impl TruthCursors {
             .is_some_and(|e| e.dev == dev && e.ino == ino && len >= e.len_read);
         if !same {
             self.entries.remove(path);
-            let (summary, len_read, bytes) = rebuild(path, len, folder)?;
-            self.last_bytes_read = bytes;
-            self.entries.insert(
-                path.to_path_buf(),
-                CursorEntry {
-                    dev,
-                    ino,
-                    len_read,
-                    summary: summary.clone(),
-                    touched: Instant::now(),
-                },
-            );
-            return Some(summary);
+            return Some(Cached::Rebuild);
         }
         let entry = self.entries.get_mut(path)?;
         entry.touched = Instant::now();
         let bytes = advance(entry, path, len, folder)?;
         self.last_bytes_read = bytes;
-        Some(entry.summary.clone())
+        Some(Cached::Ready(entry.summary.clone()))
+    }
+
+    /// Store a rebuild made outside the lock and return its summary.
+    pub(crate) fn insert_rebuilt(&mut self, path: &Path, built: Rebuilt) -> TailSummary {
+        self.last_bytes_read = built.bytes;
+        let summary = built.summary.clone();
+        self.entries.insert(
+            path.to_path_buf(),
+            CursorEntry {
+                dev: built.dev,
+                ino: built.ino,
+                len_read: built.len_read,
+                summary: built.summary,
+                touched: Instant::now(),
+            },
+        );
+        summary
     }
 
     /// A summary for a store-backed session (opencode), rebuilt only when
@@ -327,7 +377,7 @@ fn advance(entry: &mut CursorEntry, path: &Path, len: u64, folder: &Folder) -> O
         // A compact boundary ends the window a rebuild would read, so the
         // turns before it stop counting here too.
         if (folder.is_boundary)(line) {
-            entry.summary = entry.summary.after_boundary();
+            entry.summary = entry.summary.after_boundary(line);
             continue;
         }
         (folder.fold)(&mut entry.summary, line);
@@ -360,7 +410,10 @@ fn rebuild(path: &Path, len: u64, folder: &Folder) -> Option<(TailSummary, u64, 
         let text = String::from_utf8_lossy(&bytes[head..end]);
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         let boundary = lines.iter().rposition(|l| (folder.is_boundary)(l));
-        let mut summary = TailSummary::default();
+        let mut summary = match boundary {
+            Some(i) => TailSummary::default().after_boundary(lines[i]),
+            None => TailSummary::default(),
+        };
         let mut folded = 0u64;
         for line in &lines[boundary.map_or(0, |i| i + 1)..] {
             folded += line.len() as u64 + 1;

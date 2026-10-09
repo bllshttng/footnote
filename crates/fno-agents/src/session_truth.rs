@@ -182,6 +182,9 @@ pub(crate) struct TailSummary {
     // proof the session never answered.
     model_unscanned: bool,
     title: Option<String>,
+    // When the newest compact boundary was written. A compaction is the
+    // session's own activity, so a tail with no turn after it still ages.
+    compacted_at: Option<f64>,
 }
 
 impl TailSummary {
@@ -194,16 +197,24 @@ impl TailSummary {
         self.actor.is_some() && self.since_actor < TAIL_N
     }
 
-    /// The summary a rebuild starting at a compact boundary would hold: no
-    /// turns, the provenance (model, title) kept as its backfill finds it.
-    pub(crate) fn after_boundary(&self) -> Self {
+    /// The summary a rebuild starting at `boundary` would hold: no turns,
+    /// the provenance (model, title) kept as its backfill finds it, and the
+    /// boundary's own stamp as the newest activity.
+    pub(crate) fn after_boundary(&self, boundary: &str) -> Self {
         Self {
             model: self.model.clone(),
             model_samples: self.model_samples,
             model_unscanned: self.model_unscanned,
             title: self.title.clone(),
+            compacted_at: boundary_stamp(boundary),
             ..Self::default()
         }
+    }
+
+    /// True when the tail answers truth: a turn, or a compaction with no
+    /// turn after it yet.
+    fn answers(&self) -> bool {
+        self.has_record() || self.compacted_at.is_some()
     }
 
     #[cfg(test)]
@@ -254,10 +265,34 @@ impl TailSummary {
         }
     }
 
-    /// The newest parseable stamp inside the 40-turn window.
+    /// The newest parseable stamp inside the 40-turn window, else the
+    /// compaction's when no turn followed it.
     fn newest_stamp(&self) -> Option<f64> {
-        self.stamp.filter(|_| self.since_stamp < TAIL_N)
+        self.stamp
+            .filter(|_| self.since_stamp < TAIL_N)
+            .or(self.compacted_at.filter(|_| self.records == 0))
     }
+}
+
+/// A compact boundary's own `timestamp`. A codex compacted line carries the
+/// whole replacement history, so its head is read first and the line is
+/// parsed only when the head holds no stamp and the line is small.
+fn boundary_stamp(line: &str) -> Option<f64> {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r#""timestamp":"([^"]+)""#).unwrap());
+    let mut cut = line.len().min(300);
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &line[..cut];
+    if let Some(ts) = re.captures(head).and_then(|c| c.get(1)) {
+        return parse_stamp(ts.as_str());
+    }
+    if line.len() > 64 * 1024 {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    parse_stamp(v.get("timestamp")?.as_str()?)
 }
 
 fn parse_stamp(ts: &str) -> Option<f64> {
@@ -1104,8 +1139,7 @@ pub fn resolve_payload_with<C: CursorAccess>(
             if mode == ReadMode::WarmOnly && !cursors.with(|c| c.has(p)) {
                 return warming_payload(handle, &session.session_id);
             }
-            let folder = folder_for(&session.agent);
-            cursors.with(|c| c.summary(p, &folder))
+            read_summary(&mut cursors, p, &folder_for(&session.agent))
         }
         ("opencode", _) => {
             if mode == ReadMode::WarmOnly && !cursors.with(|c| c.has_store(&store_key)) {
@@ -1125,7 +1159,7 @@ pub fn resolve_payload_with<C: CursorAccess>(
         .as_ref()
         .and_then(|row| row_falsifier(row, &mut cursors));
     let observed = observed_model(&session.agent, path.as_deref(), summary.as_ref());
-    let Some(summary) = summary.filter(TailSummary::has_record) else {
+    let Some(summary) = summary.filter(TailSummary::answers) else {
         return unknown_payload(
             handle,
             "no-records",
@@ -1196,8 +1230,7 @@ pub(crate) fn warm_row<C: CursorAccess>(
             let Some(path) = transcript_for(&session, stores, &mut cursors) else {
                 return false;
             };
-            let folder = folder_for(&session.agent);
-            cursors.with(|c| c.summary(&path, &folder)).is_some()
+            read_summary(&mut cursors, &path, &folder_for(&session.agent)).is_some()
         }
         "opencode" => {
             let key = format!("opencode:{}", session.session_id);
@@ -1205,6 +1238,22 @@ pub(crate) fn warm_row<C: CursorAccess>(
             true
         }
         _ => false,
+    }
+}
+
+/// One file's summary through the cursors. The lock covers the cached
+/// advance and the insert; a rebuild's file I/O runs outside it.
+fn read_summary<C: CursorAccess>(
+    cursors: &mut C,
+    path: &Path,
+    folder: &cursor::Folder,
+) -> Option<TailSummary> {
+    match cursors.with(|c| c.read_cached(path, folder))? {
+        cursor::Cached::Ready(summary) => Some(summary),
+        cursor::Cached::Rebuild => {
+            let built = cursor::rebuild_file(path, folder)?;
+            Some(cursors.with(|c| c.insert_rebuilt(path, built)))
+        }
     }
 }
 
@@ -1489,9 +1538,12 @@ mod tests {
             r#"{"timestamp":"2026-10-08T11:58:00Z","ordinal":9,"type":"compacted","payload":{"message":"","replacement_history":[]}}"#,
             r#"{"timestamp":"2026-10-08T11:59:00Z","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
         );
-        // The turn after the boundary carries no message yet: no records.
-        assert_eq!(payload["state"], "unknown", "{payload}");
-        assert_eq!(payload["reason"], "no-records");
+        // No message follows the boundary yet; the compaction is the
+        // session's newest activity, so it ages like a turn.
+        assert_eq!(payload["state"], "working", "{payload}");
+        assert_eq!(payload["last_activity_basis"], "last-entry");
+        assert_eq!(payload["last_activity_age_s"], 120);
+        assert_eq!(payload["reachability"], "reachable");
         assert_eq!(payload["observed_model"]["model"], "gpt-6.1-sol");
     }
 
