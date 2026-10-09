@@ -2,14 +2,8 @@
 
 Settings are DEEP-MERGED across every candidate file that exists, higher
 priority overriding lower key-by-key (nested dicts merge recursively,
-scalars and lists replace wholesale). Candidate priority, highest first:
-  1. $FNO_CONFIG env var (explicit path; when set, the ONLY candidate)
-  2. <worktree_root>/.fno/settings.yaml  (project-local to this checkout)
-  3. <canonical_root>/.fno/settings.yaml  (the main checkout's config,
-     reached via the main worktree from `git worktree list`; lets a linked
-     worktree read shared project config with zero per-worktree setup;
-     deduped when 2 == 3)
-  4. ~/.fno/settings.yaml  (per-user global; shared defaults)
+scalars and lists replace wholesale). The candidate priority list, the
+design decisions, and the cache contract are locked in docs/path-config.md.
 
 A key absent from a higher-priority file falls through to the next file down,
 so the per-user global holds shared defaults while each project sets only its
@@ -21,8 +15,6 @@ keyed on the declaration (_settings_key: env overrides + HOME + resolved
 repo root) PLUS a stat fingerprint of every candidate file. A same-key
 settings rewrite changes the fingerprint, so the cache reparses on its
 own; no cache_clear is needed to see an edit in-process.
-
-The design decisions are locked in docs/path-config.md.
 """
 from __future__ import annotations
 
@@ -280,9 +272,8 @@ class PlanBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    # Added lines a branch may carry before the commit-time diff-budget guard
-    # (hooks/diff-budget-commit.sh) names the overrun; a plan's frontmatter
-    # diff_budget overrides it per plan. 0 is off.
+    # Commit-time diff-budget ceiling (hooks/diff-budget-commit.sh); a plan's
+    # frontmatter diff_budget overrides it per plan. 0 is off.
     default_diff_budget: int = Field(default=300, ge=0)
 
 
