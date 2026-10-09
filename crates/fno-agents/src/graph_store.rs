@@ -2087,7 +2087,7 @@ impl BoundedLock {
 /// The write rides the fd this holder keeps open for its whole hold, so only
 /// the current holder ever writes. Advisory: a crashed writer leaves its
 /// record behind, which is exactly what the next timeout refusal should name.
-fn stamp_lock_holder(file: &File) {
+fn stamp_lock_holder(mut file: &File) {
     use std::io::{Seek, SeekFrom, Write};
     if file.set_len(0).is_err() {
         return;
@@ -2123,7 +2123,11 @@ fn holder_summary(lock_path: &Path) -> String {
     };
     let age = chrono::DateTime::parse_from_rfc3339(at)
         .ok()
-        .map(|started| (chrono::Utc::now() - started).num_seconds().max(0))
+        .map(|started| {
+            (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0)
+        })
         .map(|secs| format!("held {secs}s since {at}"))
         .unwrap_or_else(|| format!("held since {at}"));
     if super::agent_lock::pid_is_alive(pid) {
