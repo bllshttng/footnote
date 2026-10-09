@@ -5,11 +5,11 @@
 # session is actively working, gated on being the recorded holder and throttled
 # to at most once per window. It must never block a tool call.
 #
-# Tests (stubbed `fno` on PATH):
-#   T1  AC3-HP    holder == us, aged stamp   -> `fno agents claim refresh` is called
+# Tests (stubbed `fno` and `fno-agents` on PATH):
+#   T1  AC3-HP    holder == us, aged stamp   -> `fno-agents claim refresh` is called
 #   T2  AC3-EDGE  holder == other session    -> refresh NOT called
 #   T3  AC3-ERR   refresh returns non-zero   -> hook still exits 0
-#   T4  AC3-UI    fresh stamp (throttled)    -> exits 0, `fno agents claim status` NOT called
+#   T4  AC3-UI    fresh stamp (throttled)    -> exits 0, `fno-agents claim status` NOT called
 #   T5           no manifest                 -> stamps activity, `fno` never called
 #   T6  AC3-UI    not-holder no-op is silent -> no stdout
 #   T7/T8         Claude owner identity match/mismatch
@@ -28,10 +28,13 @@ fail() { FAIL=$((FAIL+1)); printf '[heartbeat] FAIL: %s\n' "$*" >&2; }
 [[ -f "$HOOK" ]] || { fail "hook not found at $HOOK"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "[heartbeat] SKIP: jq not on PATH"; exit 77; }
 
-# setup_env: build a tmp project with a manifest + a stubbed `fno` on PATH.
-# Env knobs read by the stub: STUB_HOLDER/STATE/STATUS_JSON, STUB_REFRESH_RC,
-# STUB_BIND_RC/OUTPUT. Every `fno` call is
-# appended to $CALLLOG. Sets: TMP_DIR CWD CALLLOG (and prepends the stub to PATH).
+# setup_env: build a tmp project with a manifest + stubbed `fno`/`fno-agents`
+# on PATH. The hook's claim traffic runs through the native `fno-agents` leaf
+# (x-b976); its PR binder still runs through `fno`. Env knobs read by the
+# stubs: STUB_HOLDER/STATE/STATUS_JSON, STUB_REFRESH_RC, STUB_BIND_RC/OUTPUT.
+# Every claim call (either binary) is appended to $CALLLOG; the state-path
+# reads go to $AGENTSLOG. Sets: TMP_DIR CWD CALLLOG (and prepends the stubs
+# to PATH).
 setup_env() {
   TMP_DIR="$(mktemp -d)"
   CWD="${TMP_DIR}/proj"
@@ -58,37 +61,7 @@ EOF
   cat > "${bindir}/fno" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "${CALLLOG}"
-if [[ "\${1:-} \${2:-}" == "agents claim" ]]; then
-  shift
-fi
 case "\$1 \$2" in
-  "claim status")
-    if [[ -n "\${STUB_STATUS_JSON+x}" ]]; then
-      printf '%s' "\$STUB_STATUS_JSON"
-    else
-      if [[ -f "${TMP_DIR}/refresh-observed" ]]; then
-        printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
-          "\${STUB_HOLDER_AFTER:-\${STUB_HOLDER:-}}" \
-          "\${STUB_STATE_AFTER:-\${STUB_STATE:-live}}" \
-          "\${STUB_EXPIRES_AFTER:-200}"
-      else
-        printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
-          "\${STUB_HOLDER:-}" "\${STUB_STATE:-live}" "\${STUB_EXPIRES_BEFORE:-100}"
-      fi
-    fi
-    exit "\${STUB_STATUS_RC:-0}"
-    ;;
-  "claim refresh")
-    if [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]]; then
-      touch "${TMP_DIR}/refresh-observed"
-      if [[ -n "\${STUB_REFRESH_JSON+x}" ]]; then
-        printf '%s\n' "\$STUB_REFRESH_JSON"
-      else
-        printf '{"refreshed": true, "expires_at": %s}\n' "\${STUB_EXPIRES_AFTER:-200}"
-      fi
-    fi
-    exit "\${STUB_REFRESH_RC:-0}"
-    ;;
   "do pr")
     [[ "\${3:-}" == "bind-created" ]] || exit 0
     printf '%s\n' "\${STUB_BIND_OUTPUT:-{\"outcome\":\"bound\"}}"
@@ -104,19 +77,54 @@ exit 0
 EOF
   chmod +x "${bindir}/fno"
 
-  # The heartbeat resolves the manifest through `fno-agents state path
-  # target-state`; stub that binary too so tests never invoke the real one.
+  # The hook resolves the manifest through `fno-agents state path target-state`
+  # and runs its claim traffic through the same binary's `claim status|refresh`
+  # leaf, so stub both shapes here and never invoke the real binary. State-path
+  # calls go to $AGENTSLOG; claim calls go to $CALLLOG (the log every
+  # claim-traffic grep reads), keeping one log per concern.
   # Knobs: STUB_STATE_PATH (path to print; unset prints none), STUB_STATE_PATH_RC
-  # (exit code, default 0). Calls go to $AGENTSLOG so $CALLLOG stays about fno
-  # claim traffic only.
+  # (exit code, default 0), plus the STUB_HOLDER/STATE/STATUS_JSON and
+  # STUB_REFRESH_RC/JSON knobs the claim cases below serve.
   AGENTSLOG="${TMP_DIR}/fno-agents-calls.log"
   : > "$AGENTSLOG"
   cat > "${bindir}/fno-agents" <<EOF
 #!/usr/bin/env bash
-echo "\$*" >> "${AGENTSLOG}"
 if [[ "\${1:-} \${2:-} \${3:-}" == "state path target-state" ]]; then
+  echo "\$*" >> "${AGENTSLOG}"
   [[ -n "\${STUB_STATE_PATH:-}" ]] && printf '%s\n' "\${STUB_STATE_PATH}"
   exit "\${STUB_STATE_PATH_RC:-0}"
+fi
+if [[ "\${1:-} \${2:-}" == "claim status" || "\${1:-} \${2:-}" == "claim refresh" ]]; then
+  echo "\$*" >> "${CALLLOG}"
+  case "\$1 \$2" in
+    "claim status")
+      if [[ -n "\${STUB_STATUS_JSON+x}" ]]; then
+        printf '%s' "\$STUB_STATUS_JSON"
+      else
+        if [[ -f "${TMP_DIR}/refresh-observed" ]]; then
+          printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
+            "\${STUB_HOLDER_AFTER:-\${STUB_HOLDER:-}}" \
+            "\${STUB_STATE_AFTER:-\${STUB_STATE:-live}}" \
+            "\${STUB_EXPIRES_AFTER:-200}"
+        else
+          printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
+            "\${STUB_HOLDER:-}" "\${STUB_STATE:-live}" "\${STUB_EXPIRES_BEFORE:-100}"
+        fi
+      fi
+      exit "\${STUB_STATUS_RC:-0}"
+      ;;
+    "claim refresh")
+      if [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]]; then
+        touch "${TMP_DIR}/refresh-observed"
+        if [[ -n "\${STUB_REFRESH_JSON+x}" ]]; then
+          printf '%s\n' "\$STUB_REFRESH_JSON"
+        else
+          printf '{"refreshed": true, "expires_at": %s}\n' "\${STUB_EXPIRES_AFTER:-200}"
+        fi
+      fi
+      exit "\${STUB_REFRESH_RC:-0}"
+      ;;
+  esac
 fi
 exit 0
 EOF
