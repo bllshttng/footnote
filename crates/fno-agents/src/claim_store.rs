@@ -1,9 +1,124 @@
 //! Claim ownership in graph.db. Legacy files are read only during migration.
+//!
+//! With `store.remote_url` set, the keys in [`SHARED_PREFIXES`] live on the
+//! shared primary instead (`store_remote`). Every statement here runs the
+//! same SQL on either store, so the two cannot drift.
 
 use crate::claims::{self, AcquireOpts, AcquireOutcome, ClaimRecord, ClaimState, SessionWitness};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use crate::store_remote::{Remote, SqlValue};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+
+/// Claim keys that decide dispatch. With `store.remote_url` set they live on
+/// the shared primary, so two machines never hold one node. Every other key
+/// names a machine-local resource (`build:cargo`, `session:`, `worker:`) and
+/// stays in this machine's graph.db.
+pub(crate) const SHARED_PREFIXES: &[&str] = &["node:", "dispatch:", "reconcile:"];
+
+pub(crate) fn shared(key: &str) -> bool {
+    SHARED_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// One claim store: this machine's graph.db, or the shared primary.
+enum Db {
+    Local(Connection),
+    Remote(Remote),
+}
+
+impl Db {
+    fn all(&self, sql: &str, args: &[SqlValue]) -> Result<Vec<Vec<SqlValue>>, String> {
+        match self {
+            Db::Remote(remote) => Ok(remote.execute(sql, args)?.rows),
+            Db::Local(connection) => {
+                let mut statement = connection.prepare(sql).map_err(|e| e.to_string())?;
+                let width = statement.column_count();
+                let mut rows = statement
+                    .query(rusqlite::params_from_iter(args))
+                    .map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                    out.push(
+                        (0..width)
+                            .map(|i| row.get_ref(i).map(SqlValue::from))
+                            .collect::<Result<_, _>>()
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    fn one(&self, sql: &str, args: &[SqlValue]) -> Result<Option<Vec<SqlValue>>, String> {
+        Ok(self.all(sql, args)?.into_iter().next())
+    }
+
+    fn execute(&self, sql: &str, args: &[SqlValue]) -> Result<u64, String> {
+        match self {
+            Db::Remote(remote) => Ok(remote.execute(sql, args)?.affected),
+            Db::Local(connection) => connection
+                .execute(sql, rusqlite::params_from_iter(args))
+                .map(|n| n as u64)
+                .map_err(|e| e.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PRIMARY: std::cell::RefCell<Option<(Remote, PathBuf)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: route the shared keys under `dir` to `remote` on this thread.
+#[cfg(test)]
+pub(crate) fn route_to_primary(route: Option<(Remote, PathBuf)>) {
+    TEST_PRIMARY.with(|p| *p.borrow_mut() = route);
+}
+
+/// The primary that holds the shared claims under `dir`. Only the global
+/// claims directory is shared, so a sandbox or an explicit root never dials
+/// out.
+pub(crate) fn primary_for(dir: &Path) -> Result<Option<Remote>, String> {
+    #[cfg(test)]
+    if let Some((remote, at)) = TEST_PRIMARY.with(|p| p.borrow().clone()) {
+        return Ok((at == dir).then_some(remote));
+    }
+    let Some(remote) = crate::store_remote::configured()? else {
+        return Ok(None);
+    };
+    Ok((directory(None).ok().as_deref() == Some(dir)).then_some(remote))
+}
+
+/// The primary, with the claim tables created there once per process.
+fn ready_primary(dir: &Path) -> Result<Option<Remote>, String> {
+    static READY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Some(remote) = primary_for(dir)? else {
+        return Ok(None);
+    };
+    let mut ready = READY.lock().unwrap_or_else(|e| e.into_inner());
+    if !ready.iter().any(|url| url == remote.url()) {
+        // The primary never held lockfiles: its table is the authority from
+        // birth. The stamp also keeps an exported copy's rows when it opens
+        // as a local store, since the lockfile import clears an unstamped table.
+        remote.script(&format!(
+            "{DDL}\n{}\nINSERT OR IGNORE INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1'), ('table_authority_v1', '1');",
+            history_ddl()
+        ))?;
+        ready.push(remote.url().to_string());
+    }
+    Ok(Some(remote))
+}
+
+fn db_in(dir: &Path, key: &str) -> Result<Db, String> {
+    if shared(key) {
+        if let Some(remote) = ready_primary(dir)? {
+            return Ok(Db::Remote(remote));
+        }
+    }
+    open_directory(dir).map(Db::Local)
+}
 
 pub const DDL: &str = "CREATE TABLE IF NOT EXISTS claims (
   key TEXT PRIMARY KEY,
@@ -49,12 +164,18 @@ pub(crate) fn database_path_from_directory(dir: &Path) -> Result<PathBuf, String
     Ok(crate::state_layout::place(state, "graph.json").with_extension("db"))
 }
 
-pub fn open(root: Option<&Path>) -> Result<Connection, String> {
-    open_directory(&directory(root)?)
+fn open_for_key(key: &str, root: Option<&Path>) -> Result<Db, String> {
+    db_in(&crate::claims_root::claims_dir(key, root)?, key)
 }
 
-fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
-    open_directory(&crate::claims_root::claims_dir(key, root)?)
+fn history_ddl() -> String {
+    // A takeover rewrites the row in place, so a holder change archives the
+    // old row just as a delete does.
+    format!(
+        "CREATE TABLE IF NOT EXISTS claim_history (id INTEGER PRIMARY KEY, retired_at INTEGER NOT NULL, record TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS claims_archive_delete BEFORE DELETE ON claims BEGIN {ARCHIVE_OLD} END;
+        CREATE TRIGGER IF NOT EXISTS claims_archive_takeover BEFORE UPDATE OF holder ON claims WHEN old.holder IS NOT new.holder BEGIN {ARCHIVE_OLD} END;"
+    )
 }
 
 const ARCHIVE_OLD: &str = "INSERT INTO claim_history(retired_at, record) VALUES (CAST((julianday('now')-2440587.5)*86400000 AS INTEGER), json_object('key',old.key,'holder',old.holder,'schema_version',old.schema_version,'acquired_at',old.acquired_at,'expires_at',old.expires_at,'pid',old.pid,'pid_unavailable',json(CASE WHEN old.pid_unavailable THEN 'true' ELSE 'false' END),'host',old.host,'machine_id',old.machine_id,'reason',old.reason,'harness',old.harness,'session_id',old.session_id,'pid_provenance',old.pid_provenance,'metadata',CASE WHEN json_valid(old.metadata) THEN json(old.metadata) ELSE old.metadata END));";
@@ -66,14 +187,8 @@ pub(crate) fn open_directory(dir: &Path) -> Result<Connection, String> {
     connection
         .execute_batch(DDL)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    // A takeover rewrites the row in place, so a holder change archives the
-    // old row just as a delete does.
     connection
-        .execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS claim_history (id INTEGER PRIMARY KEY, retired_at INTEGER NOT NULL, record TEXT NOT NULL);
-        CREATE TRIGGER IF NOT EXISTS claims_archive_delete BEFORE DELETE ON claims BEGIN {ARCHIVE_OLD} END;
-        CREATE TRIGGER IF NOT EXISTS claims_archive_takeover BEFORE UPDATE OF holder ON claims WHEN old.holder IS NOT new.holder BEGIN {ARCHIVE_OLD} END;"
-        ))
+        .execute_batch(&history_ddl())
         .map_err(|e| e.to_string())?;
     import_lockfiles(&mut connection, dir)?;
     Ok(connection)
@@ -329,46 +444,85 @@ pub(crate) fn seed_at_path(path: &Path, record: &ClaimRecord) {
     insert_record(&connection, record).unwrap();
 }
 
-fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimRecord> {
-    let metadata: String = row.get(13)?;
-    let metadata = serde_json::from_str(&metadata).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    let record = ClaimRecord {
-        key: row.get(0)?,
-        holder: row.get(1)?,
-        schema_version: row.get(2)?,
-        acquired_at: row.get(3)?,
-        expires_at: row.get(4)?,
-        pid: row.get(5)?,
-        pid_unavailable: row.get(6)?,
-        host: row.get(7)?,
-        machine_id: row.get(8)?,
-        reason: row.get(9)?,
-        harness: row.get(10)?,
-        session_id: row.get(11)?,
-        pid_provenance: row.get(12)?,
-        metadata,
+fn text(value: &str) -> SqlValue {
+    SqlValue::Text(value.to_string())
+}
+
+fn opt_text(value: Option<&str>) -> SqlValue {
+    value.map_or(SqlValue::Null, text)
+}
+
+fn int(value: impl Into<i64>) -> SqlValue {
+    SqlValue::Integer(value.into())
+}
+
+fn opt_int<T: Into<i64>>(value: Option<T>) -> SqlValue {
+    value.map_or(SqlValue::Null, int)
+}
+
+fn metadata(record: &ClaimRecord) -> Result<SqlValue, String> {
+    serde_json::to_string(&record.metadata)
+        .map(SqlValue::Text)
+        .map_err(|e| e.to_string())
+}
+
+fn decode(row: &[SqlValue]) -> Result<ClaimRecord, String> {
+    let at = |i: usize| row.get(i).unwrap_or(&SqlValue::Null);
+    let need_text = |i: usize| {
+        at(i)
+            .text()
+            .map(str::to_string)
+            .ok_or_else(|| format!("claim column {i} is not text"))
     };
-    claims::validate_record(&record).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error).into(),
-        )
-    })?;
+    let need_int = |i: usize| {
+        at(i)
+            .integer()
+            .ok_or_else(|| format!("claim column {i} is not an integer"))
+    };
+    let maybe_text = |i: usize| match at(i) {
+        SqlValue::Null => Ok(None),
+        value => value
+            .text()
+            .map(|t| Some(t.to_string()))
+            .ok_or_else(|| format!("claim column {i} is not text")),
+    };
+    let maybe_int = |i: usize| match at(i) {
+        SqlValue::Null => Ok(None),
+        value => value
+            .integer()
+            .map(Some)
+            .ok_or_else(|| format!("claim column {i} is not an integer")),
+    };
+    let record = ClaimRecord {
+        key: need_text(0)?,
+        holder: need_text(1)?,
+        schema_version: u32::try_from(need_int(2)?).map_err(|e| e.to_string())?,
+        acquired_at: need_int(3)?,
+        expires_at: maybe_int(4)?,
+        pid: maybe_int(5)?
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|e| e.to_string())?,
+        pid_unavailable: need_int(6)? != 0,
+        host: need_text(7)?,
+        machine_id: maybe_text(8)?,
+        reason: maybe_text(9)?,
+        harness: maybe_text(10)?,
+        session_id: maybe_text(11)?,
+        pid_provenance: maybe_text(12)?,
+        metadata: serde_json::from_str(&need_text(13)?).map_err(|e| e.to_string())?,
+    };
+    claims::validate_record(&record)?;
     Ok(record)
 }
 
-fn record_for(connection: &Connection, key: &str) -> Result<Option<ClaimRecord>, String> {
-    connection
-        .query_row(
-            &format!("SELECT {COLUMNS} FROM claims WHERE key = ?1"),
-            [key],
-            decode,
-        )
-        .optional()
-        .map_err(|e| e.to_string())
+fn record_for(db: &Db, key: &str) -> Result<Option<ClaimRecord>, String> {
+    db.one(
+        &format!("SELECT {COLUMNS} FROM claims WHERE key = ?1"),
+        &[text(key)],
+    )?
+    .map(|row| decode(&row))
+    .transpose()
 }
 
 /// A read must not mint a store: opening one creates `graph.db` and retires
@@ -397,10 +551,10 @@ fn store_absent(dir: &Path) -> bool {
 
 pub(crate) fn read(key: &str, root: Option<&Path>) -> Result<Option<ClaimRecord>, String> {
     let dir = crate::claims_root::claims_dir(key, root)?;
-    if store_absent(&dir) {
+    if !(shared(key) && primary_for(&dir)?.is_some()) && store_absent(&dir) {
         return Ok(None);
     }
-    record_for(&open_directory(&dir)?, key)
+    record_for(&db_in(&dir, key)?, key)
 }
 
 pub(crate) fn read_at_path(path: &Path) -> Result<Option<ClaimRecord>, String> {
@@ -431,7 +585,57 @@ pub(crate) fn read_at_path(path: &Path) -> Result<Option<ClaimRecord>, String> {
     if claims::encode_key(&key) != name {
         return Err("claim locator key is not canonical".into());
     }
-    record_for(&open_directory(dir)?, &key).map_err(|e| format!("Corrupted({e})"))
+    record_for(&db_in(dir, &key)?, &key).map_err(|e| format!("Corrupted({e})"))
+}
+
+/// Every row under `dir`, unclassified. With a primary, the shared keys come
+/// from it and the local file answers only for machine-local keys. One
+/// unreadable row must not blind the whole scan; `claim status` on its key
+/// still reports it corrupted.
+fn rows_in(dir: &Path, prefix: Option<&str>) -> Result<Vec<ClaimRecord>, String> {
+    let may_share = prefix.is_none_or(|p| {
+        SHARED_PREFIXES
+            .iter()
+            .any(|s| s.starts_with(p) || p.starts_with(s))
+    });
+    let primary = if may_share { ready_primary(dir)? } else { None };
+    let select = format!("SELECT {COLUMNS} FROM claims ORDER BY key");
+    let mut records = Vec::new();
+    if !store_absent(dir) {
+        let local = Db::Local(open_directory(dir)?);
+        records.extend(
+            local
+                .all(&select, &[])?
+                .iter()
+                .filter_map(|row| decode(row).ok())
+                .filter(|r| primary.is_none() || !shared(&r.key)),
+        );
+    }
+    if let Some(remote) = primary {
+        records.extend(
+            Db::Remote(remote)
+                .all(&select, &[])?
+                .iter()
+                .filter_map(|row| decode(row).ok()),
+        );
+        records.sort_by(|a, b| a.key.cmp(&b.key));
+    }
+    records.retain(|record| prefix.is_none_or(|p| record.key.starts_with(p)));
+    Ok(records)
+}
+
+/// Node claims whose lease has not run out: the holder projection the
+/// backlog reads. An absent local store is an empty answer, never a creation.
+pub(crate) fn unexpired_node_records() -> Result<Vec<ClaimRecord>, String> {
+    let dir = directory(None)?;
+    if primary_for(&dir)?.is_none() && !database_path_from_directory(&dir)?.exists() {
+        return Ok(Vec::new());
+    }
+    let now = claims::now_ms();
+    Ok(rows_in(&dir, Some("node:"))?
+        .into_iter()
+        .filter(|r| r.expires_at.is_none_or(|at| at > now))
+        .collect())
 }
 
 pub(crate) fn records_in(
@@ -439,20 +643,7 @@ pub(crate) fn records_in(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
-    if store_absent(dir) {
-        return Ok(Vec::new());
-    }
-    let connection = open_directory(dir)?;
-    let mut statement = connection
-        .prepare(&format!("SELECT {COLUMNS} FROM claims ORDER BY key"))
-        .map_err(|e| e.to_string())?;
-    let rows = statement.query_map([], decode).map_err(|e| e.to_string())?;
-    // One unreadable row must not blind the whole scan; `claim status` on its
-    // key still reports it corrupted.
-    let records: Vec<ClaimRecord> = rows
-        .flatten()
-        .filter(|record| prefix.is_none_or(|p| record.key.starts_with(p)))
-        .collect();
+    let records = rows_in(dir, prefix)?;
     if include_stale {
         return Ok(records);
     }
@@ -489,8 +680,8 @@ pub(crate) fn acquire(
         options.pid,
         options.pid_unavailable,
     )?;
-    let connection = open_for_key(key, options.root.as_deref())?;
-    let observed = record_for(&connection, key)?;
+    let db = open_for_key(key, options.root.as_deref())?;
+    let observed = record_for(&db, key)?;
     // Takeover is a compare-and-swap on the row we classified. The clock
     // alone never decides: an expired lease whose pid or session is live stays held.
     let local_dead = observed.as_ref().filter(|r| {
@@ -499,6 +690,11 @@ pub(crate) fn acquire(
             ClaimState::Live | ClaimState::Suspect
         )
     });
+    // Another machine's pid cannot be probed from here, so only its lease
+    // decides, read on the store's clock: two hosts with skewed clocks still
+    // agree on when a lease ran out.
+    let foreign =
+        local_dead.is_some_and(|r| !claims::is_same_machine(&r.host, r.machine_id.as_deref()));
     let record = claims::make_claim(key, holder, options);
     claims::validate_record(&record)?;
     let sql = format!("INSERT INTO claims ({COLUMNS}) VALUES (?1,?2,?3,{CLOCK},CASE WHEN ?4 IS NULL THEN NULL ELSE {CLOCK}+?4 END,?5,?6,?7,?8,?9,?10,?11,?12,?13)
@@ -507,33 +703,29 @@ pub(crate) fn acquire(
         pid=excluded.pid,pid_unavailable=excluded.pid_unavailable,host=excluded.host,machine_id=excluded.machine_id,
         reason=excluded.reason,harness=excluded.harness,session_id=excluded.session_id,pid_provenance=excluded.pid_provenance,metadata=excluded.metadata
         WHERE claims.holder=excluded.holder
-        OR (claims.holder IS ?14 AND claims.acquired_at IS ?15 AND claims.expires_at IS ?16)
+        OR (claims.holder IS ?14 AND claims.acquired_at IS ?15 AND claims.expires_at IS ?16
+            AND (?17 = 0 OR claims.expires_at <= {CLOCK}))
         RETURNING {COLUMNS}");
-    let result = connection
-        .query_row(
-            &sql,
-            params![
-                key,
-                holder,
-                record.schema_version,
-                options.ttl_ms,
-                record.pid,
-                record.pid_unavailable,
-                record.host,
-                record.machine_id,
-                record.reason,
-                record.harness,
-                record.session_id,
-                record.pid_provenance,
-                serde_json::to_string(&record.metadata).map_err(|e| e.to_string())?,
-                local_dead.map(|r| r.holder.as_str()),
-                local_dead.map(|r| r.acquired_at),
-                local_dead.and_then(|r| r.expires_at)
-            ],
-            decode,
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+    let args = [
+        text(key),
+        text(holder),
+        int(record.schema_version),
+        opt_int(options.ttl_ms),
+        opt_int(record.pid),
+        int(record.pid_unavailable),
+        text(&record.host),
+        opt_text(record.machine_id.as_deref()),
+        opt_text(record.reason.as_deref()),
+        opt_text(record.harness.as_deref()),
+        opt_text(record.session_id.as_deref()),
+        opt_text(record.pid_provenance.as_deref()),
+        metadata(&record)?,
+        opt_text(local_dead.map(|r| r.holder.as_str())),
+        opt_int(local_dead.map(|r| r.acquired_at)),
+        opt_int(local_dead.and_then(|r| r.expires_at)),
+        int(foreign),
+    ];
+    let result = db.one(&sql, &args)?.map(|row| decode(&row)).transpose()?;
     match result {
         Some(record) => {
             let mut data = claims::common_event_data(&record);
@@ -556,7 +748,7 @@ pub(crate) fn acquire(
             Ok(AcquireOutcome::Acquired(record))
         }
         None => {
-            let existing = record_for(&connection, key)?
+            let existing = record_for(&db, key)?
                 .ok_or_else(|| "claim changed after refused acquire; retry".to_string())?;
             Ok(AcquireOutcome::HeldByOther {
                 holder: existing.holder,
@@ -567,20 +759,65 @@ pub(crate) fn acquire(
     }
 }
 
+/// Every column of `record` in [`COLUMNS`] order.
+fn columns_of(record: &ClaimRecord) -> Result<Vec<SqlValue>, String> {
+    Ok(vec![
+        text(&record.key),
+        text(&record.holder),
+        int(record.schema_version),
+        int(record.acquired_at),
+        opt_int(record.expires_at),
+        opt_int(record.pid),
+        int(record.pid_unavailable),
+        text(&record.host),
+        opt_text(record.machine_id.as_deref()),
+        opt_text(record.reason.as_deref()),
+        opt_text(record.harness.as_deref()),
+        opt_text(record.session_id.as_deref()),
+        opt_text(record.pid_provenance.as_deref()),
+        metadata(record)?,
+    ])
+}
+
+/// The predicate that matches exactly the row `record`, with its 14 values
+/// bound from `?{first}` on.
+fn exactly(first: usize) -> String {
+    let names = COLUMNS.split(", ");
+    names
+        .enumerate()
+        .map(|(i, name)| format!("{name} IS ?{}", first + i))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
 pub(crate) fn replace_observed_at(
     path: &Path,
     observed: &ClaimRecord,
     next: &ClaimRecord,
 ) -> Result<Option<ClaimRecord>, String> {
     claims::validate_record(next)?;
-    let connection = open_directory(
-        path.parent()
-            .ok_or_else(|| "claim locator has no parent".to_string())?,
-    )?;
-    connection.query_row(&format!("UPDATE claims SET holder=?4,schema_version=?5,acquired_at=?6,expires_at=?7,pid=?8,pid_unavailable=?9,host=?10,machine_id=?11,reason=?12,harness=?13,session_id=?14,pid_provenance=?15,metadata=?16
-        WHERE key=?1 AND holder=?2 AND acquired_at=?3 AND expires_at IS ?17 AND pid IS ?18
-        AND schema_version=?19 AND pid_unavailable=?20 AND host=?21 AND machine_id IS ?22 AND reason IS ?23 AND harness IS ?24 AND session_id IS ?25 AND pid_provenance IS ?26 AND metadata=?27 RETURNING {COLUMNS}"),
-        params![observed.key,observed.holder,observed.acquired_at,next.holder,next.schema_version,next.acquired_at,next.expires_at,next.pid,next.pid_unavailable,next.host,next.machine_id,next.reason,next.harness,next.session_id,next.pid_provenance,serde_json::to_string(&next.metadata).map_err(|e| e.to_string())?,observed.expires_at,observed.pid,observed.schema_version,observed.pid_unavailable,observed.host,observed.machine_id,observed.reason,observed.harness,observed.session_id,observed.pid_provenance,serde_json::to_string(&observed.metadata).map_err(|e| e.to_string())?], decode).optional().map_err(|e| e.to_string())
+    let dir = path
+        .parent()
+        .ok_or_else(|| "claim locator has no parent".to_string())?;
+    let db = db_in(dir, &observed.key)?;
+    let mut args = columns_of(next)?;
+    args.extend(columns_of(observed)?);
+    let set = COLUMNS
+        .split(", ")
+        .skip(1)
+        .enumerate()
+        .map(|(i, name)| format!("{name}=?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    db.one(
+        &format!(
+            "UPDATE claims SET {set} WHERE key=?1 AND {} RETURNING {COLUMNS}",
+            exactly(15)
+        ),
+        &args,
+    )?
+    .map(|row| decode(&row))
+    .transpose()
 }
 
 pub(crate) fn release(
@@ -589,15 +826,14 @@ pub(crate) fn release(
     root: Option<&Path>,
     events: Option<&Path>,
 ) -> Result<Option<ClaimRecord>, String> {
-    let connection = open_for_key(key, root)?;
-    let removed = connection
-        .query_row(
+    let db = open_for_key(key, root)?;
+    let removed = db
+        .one(
             &format!("DELETE FROM claims WHERE key=?1 AND holder=?2 RETURNING {COLUMNS}"),
-            params![key, holder],
-            decode,
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+            &[text(key), text(holder)],
+        )?
+        .map(|row| decode(&row))
+        .transpose()?;
     if let Some(record) = &removed {
         let mut data = claims::common_event_data(record);
         data.insert(
@@ -610,8 +846,12 @@ pub(crate) fn release(
 }
 
 pub(crate) fn delete_observed(dir: &Path, record: &ClaimRecord) -> Result<bool, String> {
-    open_directory(dir)?.execute("DELETE FROM claims WHERE key=?1 AND holder=?2 AND acquired_at=?3 AND expires_at IS ?4 AND pid IS ?5 AND schema_version=?6 AND pid_unavailable=?7 AND host=?8 AND machine_id IS ?9 AND reason IS ?10 AND harness IS ?11 AND session_id IS ?12 AND pid_provenance IS ?13 AND metadata=?14",
-        params![record.key,record.holder,record.acquired_at,record.expires_at,record.pid,record.schema_version,record.pid_unavailable,record.host,record.machine_id,record.reason,record.harness,record.session_id,record.pid_provenance,serde_json::to_string(&record.metadata).map_err(|e| e.to_string())?]).map(|n| n==1).map_err(|e| e.to_string())
+    db_in(dir, &record.key)?
+        .execute(
+            &format!("DELETE FROM claims WHERE {}", exactly(1)),
+            &columns_of(record)?,
+        )
+        .map(|n| n == 1)
 }
 
 pub(crate) fn renew(
@@ -623,8 +863,8 @@ pub(crate) fn renew(
     if key.is_empty() || holder.is_empty() || ttl <= 0 {
         return Err("key, holder and positive ttl_ms are required".into());
     }
-    let connection = open_for_key(key, root)?;
-    let Some(observed) = record_for(&connection, key)? else {
+    let db = open_for_key(key, root)?;
+    let Some(observed) = record_for(&db, key)? else {
         return Ok(false);
     };
     if observed.holder != holder || observed.expires_at.is_none() {
@@ -640,24 +880,102 @@ pub(crate) fn renew(
     }
     let next = claims::renewed_record(&observed, ttl);
     let sql = format!("UPDATE claims SET expires_at={CLOCK}+?4,pid=?6,host=?7,machine_id=?8,session_id=?9 WHERE key=?1 AND holder=?2 AND acquired_at=?3 AND expires_at IS ?5 AND pid IS ?10");
-    Ok(connection
-        .execute(
-            &sql,
-            params![
-                key,
-                holder,
-                observed.acquired_at,
-                ttl,
-                observed.expires_at,
-                next.pid,
-                next.host,
-                next.machine_id,
-                next.session_id,
-                observed.pid
-            ],
-        )
-        .map_err(|e| e.to_string())?
-        == 1)
+    let args = [
+        text(key),
+        text(holder),
+        int(observed.acquired_at),
+        int(ttl),
+        opt_int(observed.expires_at),
+        opt_int(next.pid),
+        text(&next.host),
+        opt_text(next.machine_id.as_deref()),
+        opt_text(next.session_id.as_deref()),
+        opt_int(observed.pid),
+    ];
+    Ok(db.execute(&sql, &args)? == 1)
+}
+
+/// Why `holder` no longer holds `key`, when another machine took it: the
+/// notice a worker reads at its next stop. `None` when the holder still
+/// holds it, the row is gone (a release), or the taker is this machine (a
+/// handover between holders of one session).
+pub(crate) fn lost_to_peer(key: &str, holder: &str) -> Option<String> {
+    taker(read(key, None).ok()??, key, holder)
+}
+
+fn taker(current: ClaimRecord, key: &str, holder: &str) -> Option<String> {
+    if current.holder == holder
+        || claims::is_same_machine(&current.host, current.machine_id.as_deref())
+    {
+        return None;
+    }
+    Some(format!(
+        "{key} is now held by {} on {} since {}: this machine's lease ran out on the store clock",
+        current.holder,
+        current.host,
+        chrono::DateTime::from_timestamp_millis(current.acquired_at)
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| current.acquired_at.to_string())
+    ))
+}
+
+/// The shared claims the primary records for `machine`, leased ones only.
+pub(crate) fn leased_on(remote: &Remote, machine: &str) -> Result<Vec<ClaimRecord>, String> {
+    Ok(Db::Remote(remote.clone())
+        .all(
+            &format!(
+                "SELECT {COLUMNS} FROM claims WHERE machine_id = ?1 AND expires_at IS NOT NULL"
+            ),
+            &[text(machine)],
+        )?
+        .iter()
+        .filter_map(|row| decode(row).ok())
+        .filter(|record| shared(&record.key))
+        .collect())
+}
+
+/// Move every lease in `held` to at least `lease_ms` past the store clock,
+/// in one statement. Each row must still carry the holder and acquired_at
+/// it was read with, so a row a peer took is never extended. Returns the
+/// keys it renewed.
+pub(crate) fn extend_leases(
+    remote: &Remote,
+    machine: &str,
+    held: &[ClaimRecord],
+    lease_ms: i64,
+) -> Result<Vec<String>, String> {
+    if held.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec![int(lease_ms), text(machine)];
+    let mut rows = Vec::new();
+    for record in held {
+        let at = args.len();
+        rows.push(format!("(?{},?{},?{})", at + 1, at + 2, at + 3));
+        args.extend([
+            text(&record.key),
+            text(&record.holder),
+            int(record.acquired_at),
+        ]);
+    }
+    let sql = format!(
+        "UPDATE claims SET expires_at = MAX(expires_at, {CLOCK} + ?1)
+         WHERE machine_id = ?2 AND expires_at IS NOT NULL
+           AND (key, holder, acquired_at) IN (VALUES {})
+         RETURNING key",
+        rows.join(",")
+    );
+    Ok(remote
+        .execute(&sql, &args)?
+        .rows
+        .iter()
+        .filter_map(|row| row.first().and_then(SqlValue::text).map(str::to_string))
+        .collect())
+}
+
+/// [`lost_to_peer`] read on one primary.
+pub(crate) fn lost_on(remote: &Remote, key: &str, holder: &str) -> Result<Option<String>, String> {
+    Ok(record_for(&Db::Remote(remote.clone()), key)?.and_then(|c| taker(c, key, holder)))
 }
 
 pub fn list_db(
@@ -688,17 +1006,20 @@ pub fn force_release(
     if key.is_empty() || reason.trim().is_empty() {
         return Err("key and override reason must be non-empty".into());
     }
-    let connection = open_for_key(key, root)?;
+    let db = open_for_key(key, root)?;
     // Raw columns, not a decoded record: the force path is the one way out
     // for a row that no longer validates.
-    let removed: Option<(Option<String>, Option<i64>)> = connection
-        .query_row(
+    let removed: Option<(Option<String>, Option<i64>)> = db
+        .one(
             "DELETE FROM claims WHERE key=?1 RETURNING holder, pid",
-            [key],
-            |r| Ok((r.get(0).ok(), r.get(1).ok().flatten())),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+            &[text(key)],
+        )?
+        .map(|row| {
+            (
+                row.first().and_then(|v| v.text()).map(str::to_string),
+                row.get(1).and_then(SqlValue::integer),
+            )
+        });
     let (holder, pid) = removed.clone().unwrap_or_default();
     let mut data = serde_json::Map::new();
     data.insert("key".into(), json!(key));
@@ -929,6 +1250,105 @@ mod tests {
         assert_eq!(released["reaped"], 1);
         assert!(read(key, Some(root.path())).unwrap().is_none());
         assert_eq!(record.holder, "owner");
+    }
+
+    /// A shared key decides on the primary while a machine-local key stays
+    /// in graph.db. A peer's lease is taken only past the store clock, a
+    /// holder whose lease a peer took learns who took it, and a dead primary
+    /// refuses with nothing written locally.
+    #[test]
+    fn store_conn_remote_shared_claims_decide_on_the_primary() {
+        if claims::machine_id().is_empty() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let dir = directory(Some(root.path())).unwrap();
+        let primary = crate::store_remote::test_primary::start();
+        route_to_primary(Some((primary.remote.clone(), dir.clone())));
+        let opts = |root: &Path| AcquireOpts {
+            root: Some(root.to_path_buf()),
+            pid: Some(std::process::id()),
+            ttl_ms: Some(60_000),
+            ..Default::default()
+        };
+        let held = |key: &str, holder: &str| {
+            matches!(
+                claims::acquire(key, holder, opts(root.path())),
+                AcquireOutcome::Acquired(_)
+            )
+        };
+        assert!(held("node:mine", "a") && held("build:cargo", "a"));
+        assert!(!held("node:mine", "b"), "a live holder keeps its node");
+        let on_primary: Vec<String> = primary
+            .db
+            .lock()
+            .unwrap()
+            .prepare("SELECT key FROM claims")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(on_primary, ["node:mine"]);
+        let keys: Vec<String> = records_in(&dir, None, true)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(keys, ["build:cargo", "node:mine"]);
+
+        let now = claims::now_ms();
+        let insert = format!(
+            "INSERT INTO claims ({COLUMNS}) VALUES ({})",
+            (1..=14).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
+        );
+        for (key, expires) in [("node:peer-live", now + 3_600_000), ("node:peer-gone", now - 1)] {
+            let mut peer = claims::make_claim(key, "peer", &opts(root.path()));
+            (peer.host, peer.machine_id, peer.pid) = ("imac".into(), Some("imac-id".into()), Some(4242));
+            (peer.acquired_at, peer.expires_at) = (now - 7_200_000, Some(expires));
+            Db::Remote(primary.remote.clone())
+                .execute(&insert, &columns_of(&peer).unwrap())
+                .unwrap();
+        }
+        assert!(!held("node:peer-live", "b"), "a peer's unexpired lease holds");
+        assert!(held("node:peer-gone", "b"), "a lease past the store clock is taken");
+
+        primary
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE claims SET holder = 'peer', host = 'imac', machine_id = 'imac-id', \
+                 acquired_at = acquired_at + 1 WHERE key = 'node:mine'",
+                [],
+            )
+            .unwrap();
+        assert!(!claims::renew("node:mine", "a", 60_000, Some(root.path())).unwrap());
+        let reason = lost_on(&primary.remote, "node:mine", "a").unwrap().unwrap();
+        assert!(reason.contains("held by peer on imac"), "{reason}");
+
+        let offline = tempfile::tempdir().unwrap();
+        let offline_dir = directory(Some(offline.path())).unwrap();
+        let dead = crate::store_remote::test_primary::dead();
+        route_to_primary(Some((dead.clone(), offline_dir.clone())));
+        let refused = claims::acquire("node:x", "a", opts(offline.path()));
+        let AcquireOutcome::Error(error) = refused else {
+            panic!("{refused:?}")
+        };
+        assert!(
+            crate::store_remote::is_unreachable(&error)
+                && error.contains(dead.url())
+                && error.contains("store.remote_url"),
+            "{error}"
+        );
+        assert!(!database_path_from_directory(&offline_dir).unwrap().exists());
+
+        route_to_primary(None);
+        assert!(matches!(
+            claims::acquire("node:x", "a", opts(offline.path())),
+            AcquireOutcome::Acquired(_)
+        ));
+        assert!(database_path_from_directory(&offline_dir).unwrap().exists());
     }
 
     /// A spent budget defers every row it did not reach and deletes nothing;
