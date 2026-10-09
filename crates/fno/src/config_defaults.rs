@@ -222,24 +222,14 @@ pub fn key_set(global: Option<&Path>, project: Option<&Path>, key: &str) -> bool
 /// per-render caller may pay; the split-brain risk is bounded by the
 /// migrated single-file reality (a legacy settings.yaml is converted to a
 /// flat config.toml exactly once, then every reader sees config.toml).
-pub fn lookup(global: Option<&Path>, project: Option<&Path>, key: &str) -> Option<String> {
+pub fn lookup_key(key: &str) -> Option<String> {
     fn file_value(path: &Path, key: &str) -> Option<String> {
         match read_flat(path) {
             Ok(Some(map)) => map.get(key).and_then(|v| v.as_str()).map(str::to_string),
             _ => None,
         }
     }
-    project
-        .and_then(|p| file_value(p, key))
-        .or_else(|| global.and_then(|g| file_value(g, key)))
-}
-
-pub fn lookup_key(key: &str) -> Option<String> {
-    lookup(
-        Some(&global_config_path()),
-        Some(&project_config_path()),
-        key,
-    )
+    file_value(&project_config_path(), key).or_else(|| file_value(&global_config_path(), key))
 }
 
 /// The global config file, beside the state root's other durable files.
