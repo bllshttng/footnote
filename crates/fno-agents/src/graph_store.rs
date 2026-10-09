@@ -2316,12 +2316,19 @@ pub fn locked_mutate_with_hook(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The expensive pre-image read runs OUTSIDE the lock. Every content
+    // writer stamps a fresh content version (authoritative_sync,
+    // mutate_single_row_once), so the under-lock version re-check below
+    // proves `raw` current; a write landing between the two reads surfaces
+    // as Conflict and the caller retries, the same surface a stale
+    // base_version already produced.
+    let begin_version = crate::backlog::version(path).map_err(StoreError::Sqlite)?;
+    let raw = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
     let _lock = BoundedLock::acquire(path, timeout)?;
     let current = crate::backlog::version(path).map_err(StoreError::Sqlite)?;
-    if current != input.base_version {
+    if current != begin_version || current != input.base_version {
         return Err(StoreError::Conflict);
     }
-    let raw = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
 
     // Pre-image defaults for the curation snapshot, re-derived through the
     // same pipeline (store.py's _status_normalized + _pre_curation).
