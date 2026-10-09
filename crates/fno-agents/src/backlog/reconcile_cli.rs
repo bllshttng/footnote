@@ -58,8 +58,8 @@ auto-creates inbox lines or backlog nodes, never auto-resumes work, and
 never clobbers a node that is already done.
 
 Side effect: also runs claim GC, retiring dead claims from graph.db
-into claim_history, oldest first, for at most 20s. Claims it did not
-reach are reported as deferred and go first on the next run. --dry-run
+into claim_history for at most 20s. Claims it did not reach are
+reported as deferred and wait for a later run. --dry-run
 propagates to it (no retiring). This fires on every throttled
 auto-reconcile, including the SessionStart hook - not just a manual
 invocation.

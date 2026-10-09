@@ -768,24 +768,24 @@ pub(crate) fn boxed<'a>(witness: SessionWitness<'a>) -> BoxedWitness<'a> {
 
 pub(crate) type BoxedWitness<'a> = Box<dyn Fn(&ClaimRecord) -> claims::SessionLiveness + 'a>;
 
-/// Rows one reap chunk classifies together: one truth batch page.
-const REAP_CHUNK: usize = 24;
+/// Rows one reap chunk classifies together. Small, so one chunk's truth
+/// batch can finish inside a reconcile beat's budget on a loaded machine.
+const REAP_CHUNK: usize = 8;
 
 /// Retire every same-machine claim that classifies Stale.
 ///
-/// Rows go oldest first, because a dead claim is mostly an old one, in
-/// chunks of [`REAP_CHUNK`]. Each chunk is classified with the witness
-/// `scan_for` builds over that chunk, so a caller answers a chunk's sessions
-/// in one batch. The apply step asks again with the witness `recheck_for`
-/// builds over the chunk's candidates and deletes exactly the observed row,
-/// so a claim that came back to life or changed hands since the scan stays.
+/// Rows go in chunks of [`REAP_CHUNK`]. Each chunk is classified with the
+/// witness `scan_for` builds over that chunk, so a caller answers a chunk's
+/// sessions in one batch. The apply step asks again, with the witness
+/// `recheck_for` builds over the chunk's candidates or else the scan's own,
+/// and deletes exactly the observed row, so a claim that changed hands since
+/// the scan stays.
 ///
-/// `deadline` bounds the pass. A truth probe costs about half a second per
-/// session, so priming every row first would spend the whole budget before
-/// one delete; chunking lands each chunk's reaps before the next chunk
-/// starts. The rows a spent deadline never reached are `deferred`, never
-/// kept, and the next pass reads them first. One row that fails to delete is
-/// named in `reap_failed`, and the pass goes on.
+/// `deadline` bounds the pass, checked before every chunk and every delete.
+/// The rows a spent deadline never settled are `deferred`. A bounded pass starts at a clock-chosen row and wraps, so live
+/// rows that cost a probe cannot hold the same dead rows out of reach on every
+/// pass. One row that fails to delete is named in `reap_failed`, and the pass
+/// goes on.
 pub(crate) fn reap_in_directory<'w>(
     dir: &Path,
     apply: bool,
@@ -800,31 +800,43 @@ pub(crate) fn reap_in_directory<'w>(
         .filter(|r| key.is_none_or(|k| r.key == k))
         .filter(|r| claims::is_same_machine(&r.host, r.machine_id.as_deref()))
         .collect::<Vec<_>>();
-    records.sort_by_key(|r| r.acquired_at);
-    let (mut would_reap, mut reaped, mut deferred) = (0, 0, 0);
+    if deadline.is_some() && !records.is_empty() {
+        let start = (claims::now_ms().max(0) / 1000) as usize % records.len();
+        records.rotate_left(start);
+    }
+    let (mut would_reap, mut reaped, mut settled) = (0, 0, 0);
     let mut failures = Vec::new();
-    for (index, chunk) in records.chunks(REAP_CHUNK).enumerate() {
+    'pass: for chunk in records.chunks(REAP_CHUNK) {
         if spent() {
-            deferred = records.len() - index * REAP_CHUNK;
             break;
         }
         let witness = scan_for(chunk);
-        let candidates: Vec<ClaimRecord> = chunk
-            .iter()
-            .filter(|r| {
-                claims::classify_with_session_witness(r, witness.as_deref()) == ClaimState::Stale
-            })
-            .cloned()
-            .collect();
+        let mut candidates = Vec::new();
+        for record in chunk {
+            if claims::classify_with_session_witness(record, witness.as_deref())
+                == ClaimState::Stale
+            {
+                candidates.push(record.clone());
+            } else {
+                settled += 1;
+            }
+        }
         would_reap += candidates.len();
-        if !apply || candidates.is_empty() {
+        if !apply {
+            settled += candidates.len();
+            continue;
+        }
+        if candidates.is_empty() {
             continue;
         }
         let recheck = recheck_for(&candidates);
+        let recheck = recheck.as_deref().or(witness.as_deref());
         for record in &candidates {
-            if claims::classify_with_session_witness(record, recheck.as_deref())
-                != ClaimState::Stale
-            {
+            if spent() {
+                break 'pass;
+            }
+            settled += 1;
+            if claims::classify_with_session_witness(record, recheck) != ClaimState::Stale {
                 continue;
             }
             match delete_observed(dir, record) {
@@ -834,6 +846,7 @@ pub(crate) fn reap_in_directory<'w>(
             }
         }
     }
+    let deferred = records.len() - settled;
     Ok(
         json!({"apply":apply,"scanned":records.len(),"would_reap":would_reap,"reaped":reaped,"deferred":deferred,"reap_failed":failures,"root":dir}),
     )

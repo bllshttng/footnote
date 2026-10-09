@@ -402,10 +402,52 @@ fn run_claim_reap(args: &[String]) -> i32 {
     )
 }
 
+/// Free the build and run-slot claims a dead cargo left behind. A worker's
+/// cargo holds `build:cargo` and a `test:cargo-run:<i>` slot under its own pid
+/// with no TTL, so a reaped worker whose cargo died leaves both held until a
+/// sweep reads the pid. The pid alone decides these keys and no session probe
+/// runs, so every worker reap can afford this pass. Returns the count freed.
+pub(crate) fn reap_dead_cargo_claims() -> u64 {
+    // The same test fence as `claims::build_waiters_dir`: a daemon test with
+    // no declared claims root must not resolve the machine's own.
+    let pinned = std::env::var_os("FNO_CLAIMS_ROOT").is_some_and(|v| !v.is_empty());
+    if cfg!(test) && !pinned && !crate::paths::test_root_declared() {
+        return 0;
+    }
+    let Ok(dir) = crate::claims_root::claims_dir("build:cargo", None) else {
+        return 0;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut keys = vec!["build:cargo".to_string()];
+    keys.extend(
+        crate::claim_store::records_in(&dir, Some("test:cargo-run:"), true)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| record.key),
+    );
+    keys.iter()
+        .filter_map(|key| {
+            crate::claim_store::reap_in_directory(
+                &dir,
+                true,
+                |_: &[crate::claims::ClaimRecord]| None,
+                |_: &[crate::claims::ClaimRecord]| None,
+                Some(key),
+                Some(deadline),
+            )
+            .ok()
+        })
+        .map(|result| result["reaped"].as_u64().unwrap_or(0))
+        .sum()
+}
+
+/// The witness basis for a session the reap's deadline left unread.
+const REAP_DEADLINE_KEPT: &str = "reap-deadline-kept";
+
 /// How long one reap pass may run. The reconcile beat runs the reap inside
 /// its own bound, and a pass past that bound was killed before it printed,
-/// so nothing was ever reaped. Rows the bound leaves unread are `deferred`,
-/// and the next pass reads the oldest rows first.
+/// so nothing was ever reaped. Rows the bound leaves unread are `deferred`
+/// to a later pass.
 pub(crate) const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Reap every claims root in `dirs` (the global and repo-local roots when it
@@ -430,17 +472,40 @@ pub(crate) fn reap_roots(
     let deadline = std::time::Instant::now() + budget;
     let mut summary = serde_json::json!({"apply":apply,"scanned":0,"would_reap":0,"reaped":0,"deferred":0,"reap_failed":[],"root_errors":[],"roots":dirs});
     for dir in &dirs {
-        // One batch answers a chunk's sessions, and a second batch over the
-        // chunk's candidates is the fresh look before a delete. A lazy
-        // witness spawned one truth probe per session, which made a 400-row
-        // pass run for minutes.
-        let primed = |records: &[crate::claims::ClaimRecord]| {
+        // One batch answers a chunk's sessions. A lazy witness spawned one
+        // truth probe per session, which made a 400-row pass run for minutes.
+        // A session the batch did not answer before the deadline reads live,
+        // so its claim is kept and counted as deferred, never reaped.
+        let kept_by_deadline = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let scan = |records: &[crate::claims::ClaimRecord]| {
             let records: Vec<&crate::claims::ClaimRecord> = records.iter().collect();
             let (witness, _) = session_witness_primed_within(&records, Some(deadline));
-            Some(Box::new(witness) as crate::claim_store::BoxedWitness<'static>)
+            let kept = kept_by_deadline.clone();
+            Some(Box::new(move |record: &crate::claims::ClaimRecord| {
+                let answer = witness(record);
+                if matches!(
+                    answer,
+                    crate::claims::SessionLiveness::Live(REAP_DEADLINE_KEPT)
+                ) {
+                    kept.set(kept.get() + 1);
+                }
+                answer
+            }) as crate::claim_store::BoxedWitness<'static>)
         };
-        match crate::claim_store::reap_in_directory(dir, apply, primed, primed, key, Some(deadline))
-        {
+        let reaped = crate::claim_store::reap_in_directory(
+            dir,
+            apply,
+            scan,
+            |_: &[crate::claims::ClaimRecord]| None,
+            key,
+            Some(deadline),
+        )
+        .map(|mut result| {
+            let deferred = result["deferred"].as_u64().unwrap_or(0) + kept_by_deadline.get();
+            result["deferred"] = serde_json::json!(deferred);
+            result
+        });
+        match reaped {
             Ok(result) => {
                 for field in ["scanned", "would_reap", "reaped", "deferred"] {
                     summary[field] = serde_json::json!(
@@ -830,6 +895,7 @@ pub(crate) fn default_session_witness() -> (
     memoized_session_witness(
         std::cell::RefCell::new(None),
         std::cell::RefCell::new(std::collections::HashMap::new()),
+        None,
     )
 }
 
@@ -843,6 +909,7 @@ pub(crate) fn default_session_witness() -> (
 fn memoized_session_witness(
     index: std::cell::RefCell<Option<SessionRegistryIndex>>,
     memo: std::cell::RefCell<std::collections::HashMap<String, crate::claims::SessionLiveness>>,
+    lazy_until: Option<std::time::Instant>,
 ) -> (
     impl Fn(&crate::claims::ClaimRecord) -> crate::claims::SessionLiveness,
     std::rc::Rc<std::cell::RefCell<Option<&'static str>>>,
@@ -851,7 +918,7 @@ fn memoized_session_witness(
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let cell = last_answer.clone();
     let witness = move |rec: &crate::claims::ClaimRecord| -> crate::claims::SessionLiveness {
-        let answer = session_liveness_answer(rec, &index, &memo);
+        let answer = session_liveness_answer(rec, &index, &memo, lazy_until);
         *last_answer.borrow_mut() = Some(match &answer {
             crate::claims::SessionLiveness::Live(basis) => *basis,
             crate::claims::SessionLiveness::Absent => crate::claims::basis::SESSION_ABSENT,
@@ -909,6 +976,7 @@ pub(crate) fn session_witness_primed_within(
         return memoized_session_witness(
             std::cell::RefCell::new(None),
             std::cell::RefCell::new(std::collections::HashMap::new()),
+            deadline,
         );
     }
     let index: std::cell::RefCell<Option<SessionRegistryIndex>> = std::cell::RefCell::new(None);
@@ -948,7 +1016,7 @@ pub(crate) fn session_witness_primed_within(
             memo.borrow_mut().insert(session.clone(), answer);
         }
     }
-    memoized_session_witness(index, memo)
+    memoized_session_witness(index, memo, deadline)
 }
 
 /// The worker name a dispatcher-minted holder names, or `None` when the
@@ -1044,6 +1112,7 @@ fn session_liveness_answer(
     rec: &crate::claims::ClaimRecord,
     index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
     memo: &std::cell::RefCell<std::collections::HashMap<String, crate::claims::SessionLiveness>>,
+    lazy_until: Option<std::time::Instant>,
 ) -> crate::claims::SessionLiveness {
     let Some(session) = resolve_subject_session(rec, index) else {
         return crate::claims::SessionLiveness::Unresolved;
@@ -1051,7 +1120,7 @@ fn session_liveness_answer(
     if let Some(answer) = memo.borrow().get(&session) {
         return answer.clone();
     }
-    let answer = session_liveness_answer_uncached(&session, index);
+    let answer = session_liveness_answer_uncached(&session, index, lazy_until);
     memo.borrow_mut().insert(session, answer.clone());
     answer
 }
@@ -1224,6 +1293,7 @@ fn row_verdict_live(registry: &SessionRegistryIndex, session: &str) -> bool {
 fn session_liveness_answer_uncached(
     session: &str,
     index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
+    lazy_until: Option<std::time::Instant>,
 ) -> crate::claims::SessionLiveness {
     load_session_registry_index(index);
     let (registry_known, registry_live) = {
@@ -1248,6 +1318,11 @@ fn session_liveness_answer_uncached(
         if row_verdict_live(registry, session) {
             return crate::claims::SessionLiveness::Live(ROW_VERDICT_LIVE);
         }
+    }
+    // Past a caller's deadline no transcript probe runs: the session reads
+    // live, so the claim is kept, never reaped on evidence nobody read.
+    if lazy_until.is_some_and(|d| std::time::Instant::now() >= d) {
+        return crate::claims::SessionLiveness::Live(REAP_DEADLINE_KEPT);
     }
     // The row is missing or its pid is stale (a resume leaves rows behind) -
     // the transcript still answers. Reachability is the liveness reading;
