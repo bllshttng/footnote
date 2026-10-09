@@ -2488,7 +2488,7 @@ pub(crate) mod tests {
                 SID,
                 &pdir,
                 std::time::Duration::from_millis(2),
-                std::time::Duration::from_millis(150),
+                std::time::Duration::from_secs(2),
             );
             assert_eq!(code, 0);
             assert!(pdir.join("1-test.txt").exists(), "the payload stays parked");

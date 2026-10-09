@@ -348,7 +348,7 @@ mod tests {
 
         let live_src = root.join("live-repo");
         std::fs::create_dir_all(&live_src).unwrap();
-        let live_slug = format!("-{}", live_src.to_string_lossy().replace('/', "-"));
+        let live_slug = live_src.to_string_lossy().replace('/', '-');
         let live_space = root.join(&live_slug);
         std::fs::create_dir_all(&live_space).unwrap();
         std::fs::write(live_space.join("events.db"), b"live").unwrap();
@@ -356,6 +356,9 @@ mod tests {
         let dead = root.join("-tmp-fno-stale-spaces-test-7q3z-dead");
         std::fs::create_dir_all(&dead).unwrap();
         std::fs::write(dead.join("events.db"), b"dead").unwrap();
+        // Age the file first, then the dir: writing the file would refresh
+        // the dir's mtime and the quiet window reads the newest entry.
+        age(&dead.join("events.db"), 25 * 60);
         age(&dead, 25 * 60);
 
         let fresh = root.join("-tmp-fno-stale-spaces-test-7q3z-fresh");
@@ -403,7 +406,7 @@ mod tests {
         // descent must find the live split.
         let src = root.join("my-repo");
         std::fs::create_dir_all(&src).unwrap();
-        let slug = format!("-{}", src.to_string_lossy().replace('/', "-"));
+        let slug = src.to_string_lossy().replace('/', '-');
         let space = root.join(&slug);
         std::fs::create_dir_all(&space).unwrap();
         age(&space, 25 * 60);
