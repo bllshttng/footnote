@@ -92,7 +92,7 @@ fn capture_target(
     // alone, the cargo runs on under pid 1 and keeps its admission slot.
     // Deeper descendants join the set. One that exits between the table
     // read and its start-time read is skipped, not refused.
-    let deeper: Vec<u32> = crate::cargo_orphans::descendants(table, pid)
+    let deeper: Vec<u32> = crate::census::descendants(table, pid)
         .into_iter()
         .filter(|member| !members.contains(member))
         .collect();

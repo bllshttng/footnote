@@ -90,7 +90,7 @@ fn agent_cargo() -> bool {
 
 /// The sanctioned queue lane: a whole-suite run (FNO_TEST_FULL=1) may queue,
 /// backgrounded, exactly as the test-run guard's refusal text documents.
-fn full_suite_lane() -> bool {
+pub(crate) fn full_suite_lane() -> bool {
     std::env::var_os("FNO_TEST_FULL").is_some_and(|v| v == "1")
 }
 
@@ -1275,6 +1275,7 @@ fn admit_build_holder_free_slot(
     if rec.holder != holder {
         return None;
     }
+    let owner = crate::cargo_orphans::owner_metadata(cargo_pid);
     for key in keys {
         if let crate::claims::AcquireOutcome::Acquired(_) = crate::claims::acquire(
             key,
@@ -1282,7 +1283,7 @@ fn admit_build_holder_free_slot(
             crate::claims::AcquireOpts {
                 pid: Some(cargo_pid),
                 reason: Some("cargo run slot; build:cargo holder".to_string()),
-                metadata: crate::cargo_orphans::owner_metadata(cargo_pid),
+                metadata: owner.clone(),
                 events_dir: Some(worktree.to_path_buf()),
                 root: root.map(Path::to_path_buf),
                 ..Default::default()

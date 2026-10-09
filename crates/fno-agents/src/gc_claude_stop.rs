@@ -42,8 +42,21 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
     // in its own process group and outlives it under pid 1, a cargo among
     // them still holding its admission slot. Name them while the session
     // still parents them.
+    // The root pid must be this session's live process: the same session id
+    // when both sides name one, and the roster's recorded start time, so a
+    // stale or recycled pid never roots the walk at an unrelated tree.
     let leftovers = agents_roster_row(&short)
+        .filter(|row| match (row.session_id.as_deref(), sid) {
+            (Some(listed), Some(wanted)) => listed == wanted,
+            _ => true,
+        })
         .and_then(|row| row.pid)
+        .filter(|&pid| {
+            pid > 1
+                && roster_proc_start(&short, pid).is_some_and(|recorded| {
+                    crate::daemon::process_start_time(pid) == Some(recorded)
+                })
+        })
         .map(session_descendants)
         .unwrap_or_default();
     let stopped = {
@@ -99,7 +112,7 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
 /// Every process under the session, each with its start time.
 fn session_descendants(pid: u32) -> Vec<(u32, u64)> {
     let (table, _) = crate::census::process_table();
-    crate::cargo_orphans::descendants(&table, pid)
+    crate::census::descendants(&table, pid)
         .into_iter()
         .filter(|member| *member > 1)
         .filter_map(|member| crate::daemon::process_start_time(member).map(|start| (member, start)))
