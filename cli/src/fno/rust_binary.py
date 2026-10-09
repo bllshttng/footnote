@@ -424,10 +424,29 @@ class FrontTimeout(VerbUnavailable):
     """The law door gave no answer in time. A retry meets the same wait."""
 
 
-def call_front_json(payload: dict, *, timeout: float = 60) -> dict:
+#: The law door's default bound. The read is machine-relative: measured 18s
+#: wall for 2.7s user at load 176 (2026-10-06) and 61s at load 80
+#: (2026-10-09), so the old fixed 60s wedged blueprint validation on a loaded
+#: machine. Raise the knob there; an explicit ``timeout=`` argument outranks
+#: it, and junk falls back to 60.
+LAW_DOOR_TIMEOUT_ENV = "FNO_LAW_DOOR_TIMEOUT_SECONDS"
+
+
+def _law_door_timeout() -> float:
+    raw = os.environ.get(LAW_DOOR_TIMEOUT_ENV, "").strip()
+    try:
+        return float(raw) if raw else 60.0
+    except ValueError:
+        return 60.0
+
+
+def call_front_json(payload: dict, *, timeout: Optional[float] = None) -> dict:
     """One round-trip with the front's law door, fail-closed like verb_call."""
     import json
     import subprocess
+
+    if timeout is None:
+        timeout = _law_door_timeout()
 
     binary = resolve_front_binary()
     if binary is None:

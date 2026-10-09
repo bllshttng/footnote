@@ -401,3 +401,41 @@ def test_a_silent_law_door_raises_a_named_timeout_not_a_raw_one(monkeypatch):
         rust_binary.call_front_json({"mode": "decisions"}, timeout=60)
     assert isinstance(caught.value, rust_binary.VerbUnavailable)
     assert "gave no answer in 60s (machine load" in str(caught.value)
+
+
+def test_law_door_timeout_knob_feeds_the_default_bound_only(monkeypatch):
+    """FNO_LAW_DOOR_TIMEOUT_SECONDS raises the DEFAULT bound; an explicit
+    timeout= argument outranks it, and junk falls back to 60.
+
+    The validator's law read measured 61s wall at load 80 against the fixed
+    60s bound, wedging every blueprint on a loaded machine.
+    """
+    import subprocess
+
+    seen = {}
+    proc = subprocess.CompletedProcess(
+        ["fno", "inbox", "law", "match"], returncode=0, stdout='{"ok":true}', stderr=""
+    )
+
+    def run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return proc
+
+    monkeypatch.setattr(rust_binary, "resolve_front_binary", lambda: "/bin/fno")
+    monkeypatch.setattr(subprocess, "run", run)
+
+    monkeypatch.delenv(rust_binary.LAW_DOOR_TIMEOUT_ENV, raising=False)
+    rust_binary.call_front_json({})
+    assert seen["timeout"] == 60.0
+
+    monkeypatch.setenv(rust_binary.LAW_DOOR_TIMEOUT_ENV, "240")
+    rust_binary.call_front_json({})
+    assert seen["timeout"] == 240.0
+
+    rust_binary.call_front_json({}, timeout=5)
+    assert seen["timeout"] == 5
+
+    for bad in ("", "   ", "abc"):
+        monkeypatch.setenv(rust_binary.LAW_DOOR_TIMEOUT_ENV, bad)
+        rust_binary.call_front_json({})
+        assert seen["timeout"] == 60.0, f"junk knob {bad!r} did not fall back"
