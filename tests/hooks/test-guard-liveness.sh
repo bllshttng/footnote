@@ -10,6 +10,13 @@
 # join-partition-write-guard the deny half needs the uv-hosted helper and a
 # joined partition, so it is exercised on its allow path only; the marker
 # contract (one row per run) is what this file pins.
+#
+# One store-side exception, deliberate: the observation policy folds a
+# repeated identical ALLOW (same guard, same tool) inside its heartbeat
+# window into a pending occurrence, not a new row. Since the write gate
+# collapsed three guards into one process, every fire carries every
+# guard's allow row, so each allow case here uses a guard+tool fingerprint
+# the run has not fired before and still asserts exactly one row.
 
 set -uo pipefail
 
@@ -128,7 +135,7 @@ expect_row "wwp blocks a canonical-checkout edit" worktree-write-protect block \
 
 # ── generated-write-guard (Edit|Write) ────────────────────────────────────────
 expect_row "gwg allows an ordinary edit" generated-write-guard allow \
-    '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/notes.md"}}' bash write-gate.sh
+    '{"cwd":"'"$TMP"'","tool_name":"Write","tool_input":{"file_path":"'"$TMP"'/notes.md","content":"x"}}' bash write-gate.sh
 expect_row "gwg blocks an installed plugin copy" generated-write-guard block \
     '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/.fno/plugin-stage/fno/hooks/a.sh"}}' bash write-gate.sh
 
