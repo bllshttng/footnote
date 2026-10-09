@@ -1063,18 +1063,13 @@ def build_pane_argv(
                 # disagree about what "bounded" means.
                 else permission_pane_tokens("codex", "workspace-write:never")
             )
-        if bypass_posture and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
-            # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
-            # whenever a hook is new or changed, and the approvals bypass
-            # above does not clear it. Answering it by keystroke would need a
-            # modal-specific response mapping, which no harness declares - the
-            # `submit_keys` contract submits a composed turn and says nothing
-            # about a modal. So this flag is the only lever. Sandboxed
-            # postures never opt in. Gated on
-            # the installed version: an older codex's clap parser rejects an
-            # unrecognized flag outright, and an older codex predates the
-            # modal anyway, so omitting the flag there costs nothing.
-            argv += ["--dangerously-bypass-hook-trust"]
+        # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
+        # whenever a hook is new or changed, and no posture's flags clear it.
+        # fno trusts the hooks of every worker it launches; sandbox and
+        # approval stay as the posture set them. See codex_hook_trust_args.
+        from fno.agents.harnesses.codex import codex_hook_trust_args
+
+        argv += codex_hook_trust_args()
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
         # cannot commit without the grant. Only the two bypass postures skip it.

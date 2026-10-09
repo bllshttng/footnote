@@ -151,6 +151,23 @@ def sandbox_flag(yolo: bool) -> list[str]:
     return ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
 
 
+def codex_hook_trust_args() -> list[str]:
+    """``--dangerously-bypass-hook-trust`` for every fno-launched codex worker.
+
+    Codex 0.148+ skips a new or changed hook until a human trusts it, and a
+    plugin install never trusts. Without the flag a worker either parks on the
+    `Hooks need review` modal (pane) or runs without fno's guards and Stop
+    hook (exec). Only hook review is skipped: sandbox and approval stay as the
+    posture set them. Empty on a codex too old to parse the flag. Mirror of
+    ``codex_ask::hook_trust_flag``.
+    """
+    from fno.agents.mux_spawn import _CODEX_HOOK_TRUST_FLAG_MIN_VERSION, _codex_cli_version
+
+    if (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
+        return ["--dangerously-bypass-hook-trust"]
+    return []
+
+
 def approval_flag(yolo: bool) -> list[str]:
     """Return the argv tokens selecting codex's create-path APPROVAL policy.
 
@@ -819,15 +836,7 @@ def create(
     git_args = [] if eff_yolo else git_writable_args(cwd)
     plan_args = [] if eff_yolo else plan_writable_args(cwd)
     from fno.agents.harness_map import render_session_argv
-    from fno.agents.mux_spawn import _CODEX_HOOK_TRUST_FLAG_MIN_VERSION, _codex_cli_version
 
-    # The pane lane's hook-trust rule (bypass postures only): codex 0.148+
-    # skips a new or changed hook until a human trusts it.
-    hook_trust_args = (
-        ["--dangerously-bypass-hook-trust"]
-        if eff_yolo and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION
-        else []
-    )
     identity = render_session_argv("codex", "headless_create")
     argv = [
         identity[0],
@@ -840,7 +849,7 @@ def create(
         *git_args,
         *plan_args,
         *sandbox_flag(eff_yolo),
-        *hook_trust_args,
+        *codex_hook_trust_args(),
     ]
     if passthrough:
         from fno.agents.mux_spawn import pane_passthrough_tokens
