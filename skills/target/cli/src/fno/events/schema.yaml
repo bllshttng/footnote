@@ -3939,6 +3939,19 @@ event_types:
         sessions_error: { type: [string, "null"] }
     consumers: [operator]
 
+  - name: reclaim_sweep
+    description: "The daemon's daily reclaim sweep ran its lanes and wrote the receipt. The receipt file holds the per-lane detail; this event proves the sweep ran and names the largest reading, so a quiet machine is never mistaken for a sweep that did not run. Emitted only when the gate fires, never for a gate that held."
+    sources: [loop, test]
+    data:
+      required: [applied]
+      properties:
+        applied: { type: boolean }
+        total_bytes: { type: integer }
+        lane_count: { type: integer }
+        top_lane: { type: [string, "null"] }
+        top_lane_bytes: { type: integer }
+    consumers: [operator]
+
   - name: stop_decision
     description: "The Stop hook's single correlated ownership decision for one harness fire. The control_plane_tick remains the aggregate projection; this row preserves the identity and output contract needed to audit who owned continuation."
     sources: [hook]

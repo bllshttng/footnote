@@ -1569,17 +1569,19 @@ pub(crate) mod tests {
         let state = temp_lane_root("backups-retention");
         let migration = state.join("backups/state-root-migration");
         std::fs::create_dir_all(&migration).unwrap();
-        // Six stamps, each a full day older than the one before it and all
-        // far past retention: distinct mtimes make the newest-first sort
-        // total, so the keep floor protects exactly five.
+        // Six aged stamps plus one fresh one, each a full day apart: distinct
+        // mtimes make the newest-first sort total. The fresh dir ranks first,
+        // so the keep floor protects only four of the aged stamps and the
+        // oldest two go.
         for i in 0..6 {
             let stamp = migration.join(format!("2026010{i}T000000Z"));
             std::fs::create_dir_all(&stamp).unwrap();
             std::fs::write(stamp.join("payload"), vec![0u8; 512]).unwrap();
             age(&stamp, (40 + i) * 24 * 60);
         }
-        let doomed = migration.join("20260105T000000Z");
-        let expected = tree_bytes(&doomed);
+        let doomed = migration.join("20260104T000000Z");
+        let oldest = migration.join("20260105T000000Z");
+        let expected = tree_bytes(&doomed) + tree_bytes(&oldest);
         let fresh = migration.join("20260201T000000Z");
         std::fs::create_dir_all(&fresh).unwrap();
         let rotated = state.join("backups/graph.db.20260101T000000000000");
@@ -1593,13 +1595,17 @@ pub(crate) mod tests {
         std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
         std::env::remove_var("FNO_RECLAIM_BACKUPS_DAYS");
 
-        assert_eq!(lane.paths, vec![doomed.clone()], "only the oldest goes");
+        assert_eq!(
+            lane.paths,
+            vec![doomed.clone(), oldest.clone()],
+            "everything past the keep floor goes, oldest last"
+        );
         assert_eq!(
             lane.bytes, expected,
-            "the receipt carries the stamp's bytes"
+            "the receipt carries the reaped stamps' bytes"
         );
         assert!(lane.note.contains("newest 5"));
-        for i in 0..5 {
+        for i in 0..4 {
             assert!(
                 migration.join(format!("2026010{i}T000000Z")).exists(),
                 "keep floor holds stamp {i}"
@@ -1611,6 +1617,7 @@ pub(crate) mod tests {
             "rotation-managed backups keep their own keep-N"
         );
         assert!(!doomed.exists());
+        assert!(!oldest.exists());
         let _ = std::fs::remove_dir_all(&state);
     }
 }
