@@ -259,16 +259,26 @@ config_dir = "{}"
     fn fresh_transcript(&self, sid: &str) {
         let proj = self.home().join(".claude").join("projects").join("proj");
         std::fs::create_dir_all(&proj).unwrap();
-        std::fs::write(proj.join(format!("{sid}.jsonl")), "{\"message\":{}}\n").unwrap();
+        std::fs::write(proj.join(format!("{sid}.jsonl")), assistant_turn(0)).unwrap();
     }
 
     fn quiet_transcript_at(&self, root: &Path, sid: &str) {
         let proj = root.join("projects").join("proj");
         std::fs::create_dir_all(&proj).unwrap();
         let path = proj.join(format!("{sid}.jsonl"));
-        std::fs::write(&path, "{\"message\":{}}\n").unwrap();
+        std::fs::write(&path, assistant_turn(100_000)).unwrap();
         old_mtime(&path);
     }
+}
+
+/// One stamped claude assistant turn `age_s` seconds old: the record the
+/// truth reader ages a session by.
+fn assistant_turn(age_s: i64) -> String {
+    let stamp =
+        (chrono::Utc::now() - chrono::Duration::seconds(age_s)).format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    format!(
+        "{{\"type\":\"assistant\",\"timestamp\":\"{stamp}\",\"message\":{{\"role\":\"assistant\",\"content\":\"reading the ledger\"}}}}\n"
+    )
 }
 
 fn old_mtime(path: &Path) {
@@ -401,46 +411,18 @@ fn every_removal_door_leaves_the_row_absent_from_all_three_stores() {
     let shim_dir = fleet.dir.join("shims");
     std::fs::create_dir_all(&shim_dir).unwrap();
     write_claude_shim(&fleet.dir, &shim_dir);
-    // A `fno` shim: the prune's pane probe answers no panes, and the
-    // reaper's truth probe answers the wire the Rust reader parses (a
-    // keyed map for `--handles`, a bare payload for one handle): quiet
-    // rows report old ages, the live row a young one. It must speak only
-    // when addressed, so an unexpected call is loud.
+    // A `fno` shim: the prune's pane probe answers no panes. The reaper's
+    // truth reads the fleet's own transcripts in process. The shim must
+    // speak only when addressed, so an unexpected call is loud.
     write_executable(
         &shim_dir.join("fno"),
-        format!(
-            r#"#!/bin/sh
-if [ "$1" = "agents" ] && [ "$2" = "truth" ]; then
-  if [ "$3" = "--handles" ]; then
-    printf '{{'
-    first=1
-    for h in $(printf '%s' "$4" | /usr/bin/tr ',' ' '); do
-      if [ "$h" = "{S4}" ] || [ "$h" = "{U4}" ]; then
-        row='{{"state":"working","last_activity_age_s":2}}'
-      else
-        row='{{"state":"stalled","last_activity_age_s":100000}}'
-      fi
-      if [ "$first" -eq 1 ]; then first=0; else printf ','; fi
-      printf '"%s":%s' "$h" "$row"
-    done
-    printf '}}\n'
-  elif [ "$3" = "{S4}" ] || [ "$3" = "{U4}" ]; then
-    printf '{{"state":"working","last_activity_age_s":2}}\n'
-  else
-    printf '{{"state":"stalled","last_activity_age_s":100000}}\n'
-  fi
-  exit 0
-fi
+        r#"#!/bin/sh
 if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "ls" ]; then
   printf '[]\n'
   exit 0
 fi
 exit 2
 "#,
-            S4 = S4,
-            U4 = U4,
-        )
-        .as_str(),
     );
     BUILD.call_once(|| {
         let status = Command::new("cargo")

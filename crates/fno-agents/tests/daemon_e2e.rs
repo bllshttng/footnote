@@ -396,6 +396,8 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // RPC no longer implies it has landed. This test is about WHAT the sweep
     // settles, not when, so wait for the sweep's own event before reading.
     common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
+    // Until the truth warm pass ends, every row reads `warming`.
+    common::wait_for_event(&home, "truth_warm_done", common::RECONCILE_BUDGET);
 
     let resp = call(
         &home,
@@ -410,8 +412,10 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
         .iter()
         .find(|a| a["name"] == "stale-ask")
         .expect("stale-ask row present");
+    // The rendered word comes from truth, never the stored status: the
+    // recorded exit falsifies the row, so it reads unreachable.
     assert_eq!(
-        row["status"], "unknown",
+        row["status"], "orphaned",
         "rendered liveness must not inherit the stored lifecycle status"
     );
     // Resumability (session_id) is independent of liveness (status) -- AC3-EDGE.
