@@ -135,11 +135,16 @@ fn newest_age(path: &Path, now: SystemTime) -> Option<Duration> {
     now.duration_since(newest).ok()
 }
 
-/// The registered worktree basenames of the first repo in `repos` that
-/// answers `git worktree list --porcelain`. `None` when no repo answers: git
-/// is the one authority on where a worktree lives, and an unreadable
-/// authority keeps every slice.
+/// The worktree basenames registered by EVERY repo in `repos` that answers
+/// `git worktree list --porcelain`, unioned. A slug with a dash segment can
+/// decode to more than one live dir, and a slice is only spared when NO
+/// answered repo registers its name, so trusting one repo's registry could
+/// judge another's live slice dead. `None` when no repo answers: git is the
+/// one authority on where a worktree lives, and an unreadable authority
+/// keeps every slice.
 fn registered_worktree_names(repos: &[PathBuf]) -> Option<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    let mut answered = false;
     for repo in repos {
         let Ok(out) = std::process::Command::new("git")
             .arg("-C")
@@ -152,18 +157,23 @@ fn registered_worktree_names(repos: &[PathBuf]) -> Option<Vec<String>> {
         if !out.status.success() {
             continue;
         }
-        let names = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .filter_map(|p| {
-                Path::new(p)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-            })
-            .collect();
-        return Some(names);
+        answered = true;
+        names.extend(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .filter_map(|p| {
+                    Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                }),
+        );
     }
-    None
+    if answered {
+        Some(names)
+    } else {
+        None
+    }
 }
 
 fn past_grace(path: &Path, now: SystemTime) -> bool {
