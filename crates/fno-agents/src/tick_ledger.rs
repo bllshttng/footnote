@@ -452,14 +452,14 @@ const ARM_ROW_TYPES: &[&str] = &[EVENT_TYPE, "pr_heal_tick"];
 /// The row types the pr-watch tick trace reads.
 const TICK_TRACE_TYPES: &[&str] = &["pr_watch_tick_attempt", "pr_watch_tick_end"];
 
-/// The recent window every fold reads, in seconds. It must cover every
-/// verdict lookback the folds apply outside starvation with slack: stale is
-/// 2x the tick's own interval (x3 for the fleet-tail cadence) and the retry
-/// window is 2x `auto_continue`'s interval, both about an hour against the
-/// `KNOWN_ARMS` table. Starvation looks back deeper, so its threshold
-/// (`notify.arm_starved_after_s`, 7 days by default) widens the window for
-/// the reads that feed it.
-const ARM_WINDOW_FLOOR_S: u64 = 6 * 3600;
+/// The recent window every fold reads, in seconds. Staleness is a state
+/// with no upper age bound: an arm whose newest tick sits inside the
+/// window reads STALE, one outside it reads UNOBSERVED, so the window is
+/// the depth the verdicts stay truthful to. It matches the default
+/// starvation lookback (`notify.arm_starved_after_s`, 7 days), the depth
+/// the readout vocabulary already commits to; a configured larger
+/// threshold widens the reads that feed the starvation mark past it.
+const ARM_WINDOW_FLOOR_S: u64 = 7 * 24 * 3600;
 
 /// Every parsed row of `types` the journals hold at or after `since_unix`:
 /// the store's committed rows in the window, then the live file's bytes.
@@ -491,9 +491,8 @@ fn journal_rows(journals: &[PathBuf], types: &[&str], since_unix: u64) -> Vec<Va
 /// committed store rows in the recent window plus its live bytes. Unknown
 /// arms seen in the journals are appended after the known ones, so a new
 /// emitter deploys before its reader does. The window is
-/// [`ARM_WINDOW_FLOOR_S`]: the verdicts this fold feeds (staleness,
-/// failure age, retries) look back at most hours, so a bounded read answers
-/// in place of the whole-history fold.
+/// [`ARM_WINDOW_FLOOR_S`], the depth the verdicts stay truthful to, so a
+/// bounded read answers in place of the whole-history fold.
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let since = now_unix.saturating_sub(ARM_WINDOW_FLOOR_S);
     arms_from_rows(&journal_rows(journals, ARM_ROW_TYPES, since), now_unix)
@@ -984,9 +983,9 @@ pub struct TickTrace {
 /// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
 /// of each journal's committed store rows in the recent window plus its
 /// live bytes. Absent records leave defaults: the trace never invents a
-/// tick. The window is [`ARM_WINDOW_FLOOR_S`]: the trace judges a stale
-/// pr-watch tier, whose own lookback is hours, so a tick older than the
-/// window reads as the silence it already is for every verdict this feeds.
+/// tick. The window is [`ARM_WINDOW_FLOOR_S`], the same depth the arms
+/// fold reads, so a trace and the arm rows it explains answer from the
+/// same recent past.
 pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
     let mut trace = TickTrace::default();
     let since = now_unix.saturating_sub(ARM_WINDOW_FLOOR_S);
