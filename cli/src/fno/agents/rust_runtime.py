@@ -373,10 +373,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # `--watch` worker-binary surface noted in client.rs is a separate lane), so
     # it must never auto-route to the daemon.
     "watch",
-    # The newest-assistant transcript read the loopcheck distress leg shells.
-    # Pure Python (fno.agents.peek reads the JSONL directly); no Rust port, so
-    # it must never auto-route to the daemon.
-    "newest-assistant-text",
     "distress-verdicts", #: blocked_child's verdict lookup; no Rust port.
     # The stop hook's read-only spawn-gate capacity probe. Pure Python (the
     # gate lives in fno.agents.spawn_gate); no Rust port, so it must never

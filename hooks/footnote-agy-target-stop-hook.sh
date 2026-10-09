@@ -377,8 +377,8 @@ CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2
 TRANSCRIPT_PATH="$EARLY_TRANSCRIPT_PATH"
 
 # ── 4. Synthesize a claude-shaped transcript loop-check can read ───────────────
-# loop-check reads transcripts through the shared Python reader (fno agents
-# newest-assistant-text), whose claude arm filters lines on type in
+# loop-check reads transcripts in process (newest_assistant_text in
+# crates/fno-agents/src/distress.rs), whose claude arm filters lines on type in
 # (user, assistant) and reads text from /message/content (string | block
 # array). agy's transcript.jsonl uses Gemini-family conventions (likely
 # role:"model" + parts:[{text}]), which that arm would skip. Normalize the

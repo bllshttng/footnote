@@ -43,7 +43,13 @@ pub(crate) fn scan_unrecorded_decisions(
         std::collections::HashSet::new();
     let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
+        let types = [
+            "operator_question",
+            "operator_question_closed",
+            "operator_decision",
+        ];
+        let Ok(content) = crate::loopcheck::event_lines_of(path, &types).map(|l| l.join("\n"))
+        else {
             continue;
         }; // committed rows, commit order
         for line in content.lines() {
@@ -130,7 +136,13 @@ pub(crate) fn scan_open_holds(
     let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut blocked_once: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
+        let types = [
+            "operator_question",
+            "operator_question_closed",
+            "loop_check",
+        ];
+        let Ok(content) = crate::loopcheck::event_lines_of(path, &types).map(|l| l.join("\n"))
+        else {
             continue;
         }; // committed rows, commit order
         for line in content.lines() {

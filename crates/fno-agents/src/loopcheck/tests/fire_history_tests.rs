@@ -213,7 +213,8 @@ fn streak_ago(secs_before_now: &[i64], gap: i64) -> (u64, i64) {
     let dir = tempfile::TempDir::new().unwrap();
     let p = dir.path().join("events.jsonl");
     write_fire_log(&p, &fires);
-    let (_, streak, _, window) = read_prior_fires(&p, "sess", Some(FP), now, gap);
+    let (_, streak, _, window) =
+        read_prior_fires(loop_check_rows(&p).as_deref(), "sess", Some(FP), now, gap);
     (streak, window)
 }
 
@@ -265,7 +266,8 @@ fn debounce_changed_fingerprint_breaks_streak_at_any_speed() {
             ("2026-06-05T11:59:58Z".to_string(), "DIFFERENT"),
         ],
     );
-    let (_, streak, _, _) = read_prior_fires(&p, "sess", Some(FP), now, 300);
+    let (_, streak, _, _) =
+        read_prior_fires(loop_check_rows(&p).as_deref(), "sess", Some(FP), now, 300);
     assert_eq!(streak, 0, "a 2-second-old change still resets the streak");
 }
 
@@ -283,7 +285,13 @@ fn debounce_untimestamped_fire_is_transparent() {
     ];
     std::fs::write(&p, lines.join("\n") + "\n").unwrap();
 
-    let (_, streak, last_fp, _) = read_prior_fires(&p, "sess", Some(FP), at(NOW), 300);
+    let (_, streak, last_fp, _) = read_prior_fires(
+        loop_check_rows(&p).as_deref(),
+        "sess",
+        Some(FP),
+        at(NOW),
+        300,
+    );
     assert_eq!(
         streak, 1,
         "unplaceable fires skip; the good one still counts"

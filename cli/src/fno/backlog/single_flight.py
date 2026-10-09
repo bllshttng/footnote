@@ -18,14 +18,13 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Iterator, Optional
 
 import typer
 
 from fno.claims.core import native_claims_root
-from fno.claims.io import claim_path
 from fno.rust_binary import resolve_binary
 
 # Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
@@ -64,8 +63,12 @@ class Flight:
     requests: int = 0
     root: Optional[Path] = None
     expires: Optional[str] = None
+    # Set on release so the watchdog stops. Claims live in a table now, so
+    # there is no lock file left for the watchdog to watch.
+    released: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
     def release(self) -> None:
+        self.released.set()
         try:
             argv = [
                 "claim", "flight-release", self.key,
@@ -179,7 +182,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     """Bound a live holder (: LIVE at 0.0 pct CPU, invisible to a pid
     probe): a SIGUSR1 stack file plus a thread that releases the flight and
     exits 129 when an opted-in parent dies, 124 when the budget trips. The
-    thread stops once the claim file is gone; os._exit is safe because graph
+    thread stops once the flight is released; os._exit is safe because graph
     writes commit server-side and reconcile is idempotent."""
     try:
         root = flight.root or native_claims_root(flight.key) or Path.home()
@@ -202,10 +205,9 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     if parent_pid is not None and os.getppid() not in (parent_pid, 1):
         parent_pid = None  # an ancestor's pid, not an opt-in by this parent
     start = time.monotonic()
-    claim_file = claim_path(flight.key, root=root)
 
     def _watch() -> None:
-        while claim_file.exists():
+        while not flight.released.is_set():
             elapsed = time.monotonic() - start
             gone = parent_pid is not None and os.getppid() != parent_pid
             if not gone and elapsed < budget_s:
