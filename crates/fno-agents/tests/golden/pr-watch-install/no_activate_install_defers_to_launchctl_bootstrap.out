@@ -34,7 +34,7 @@
 
   <!-- Poll every N seconds.  Default 600 (10 min). -->
   <key>StartInterval</key>
-  <integer>0</integer>
+  <integer>600</integer>
 
   <!-- Do NOT fire on agent load; wait for the first StartInterval. -->
   <key>RunAtLoad</key>

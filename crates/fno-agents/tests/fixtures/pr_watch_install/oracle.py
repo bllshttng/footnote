@@ -28,12 +28,21 @@ def main() -> int:
     agents_dir = Path(os.environ["FNO_TEST_PR_WATCH_LAUNCH_AGENTS_DIR"])
     fno_binary = os.environ.get("FNO_TEST_FNO_BINARY", "fno-py")
 
+    # The typer leaf resolved the config interval before calling the module
+    # leg; the oracle composes the same way, so the frozen bytes are the
+    # verb's observable contract and not the module default.
+    interval = args.interval
+    if interval <= 0:
+        from fno.config import load_settings
+
+        interval = load_settings().pr_watch.interval_seconds
+
     if args.mode == "ensure":
         print(
             m.ensure_activated(
                 launch_agents_dir=agents_dir,
                 fno_binary=fno_binary,
-                interval=args.interval,
+                interval=interval,
             )
         )
         return 0
@@ -41,7 +50,7 @@ def main() -> int:
     m.install(
         launch_agents_dir=agents_dir,
         fno_binary=fno_binary,
-        interval=args.interval,
+        interval=interval,
         dry_run=args.dry_run,
         activate=not args.no_activate,
     )
