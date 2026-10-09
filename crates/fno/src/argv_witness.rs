@@ -297,8 +297,16 @@ mod tests {
                  "short_id":"eeee0000","pid":{ghost_pid},"pid_start_time":99887766,
                  "claude_session_uuid":"{uuid}"}}]}}"#
         );
+        // The witness may not have exec'd yet on a loaded runner: poll, bounded.
+        let rescued = (0..50).any(|_| {
+            let ok = !stale_live_attach_ids(&rescued_row).contains("eeee0000");
+            if !ok {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            ok
+        });
         assert!(
-            !stale_live_attach_ids(&rescued_row).contains("eeee0000"),
+            rescued,
             "a live argv naming the session uuid rescues the row"
         );
         let stranded_row = format!(

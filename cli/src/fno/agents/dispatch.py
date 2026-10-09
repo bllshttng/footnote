@@ -7447,6 +7447,8 @@ def dispatch_send(
 
     registry_path = paths.agents_registry_path()
     requested_name = name
+    # One discovery sweep per send; a lock wait clears it (a new owner may appear).
+    discovered: dict[str, list] = {}
 
     def _load_and_resolve_target(
         expected_identity: Optional[RecipientIdentity] = None,
@@ -7483,16 +7485,14 @@ def dispatch_send(
 
             registry_id = resolved_identity[2]
             registry_key = (resolved_identity[1], registry_id)
-            live_foreign = {
-                (session.agent, session_identity_key(session.session_id)): session
-                for session in discovery_address_matches(
+            if "matches" not in discovered:
+                discovered["matches"] = discovery_address_matches(
                     requested_name, registry_path=registry_path
                 )
-                if (
-                    session.agent,
-                    session_identity_key(session.session_id),
-                )
-                != registry_key
+            live_foreign = {
+                (session.agent, session_identity_key(session.session_id)): session
+                for session in discovered["matches"]
+                if (session.agent, session_identity_key(session.session_id)) != registry_key
             }
             if live_foreign:
                 candidates = [
@@ -7543,11 +7543,8 @@ def dispatch_send(
     canonical_identity = _recipient_identity_key(initial)
 
     def _on_wait() -> None:
-        print(
-            f"Waiting for agent {canonical_name!r} lock...",
-            file=sys.stderr,
-            flush=True,
-        )
+        discovered.clear()
+        print(f"Waiting for agent {canonical_name!r} lock...", file=sys.stderr, flush=True)
 
     # 3. Per-agent flock. Confirmed (node, change 6): this `with` block
     # spans the ENTIRE rest of the send, including the live-delivery attempt
@@ -7560,10 +7557,7 @@ def dispatch_send(
     # whole first attempt rather than just the identity check -- the specimen
     # measured delivering this plan's own report ("Waiting for agent
     # 'lead-footnote-g3' lock..." with no progress until killed). Narrowing
-    # this to cover only the registry mutation is a real fix but a nontrivial
-    # restructuring of a concurrency-sensitive 300-line function under time
-    # pressure is the wrong place to guess; filed as a carveout rather than
-    # rushed here.
+    # it to the registry mutation alone is a separate, larger restructuring.
     try:
         with hold_agent_lock(
             canonical_name,
