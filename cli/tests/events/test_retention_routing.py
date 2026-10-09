@@ -67,11 +67,7 @@ def test_durable_event_lands_in_main_no_sibling(tmp_path: Path) -> None:
 def test_unset_and_gate_classes_stay_durable_and_gate(tmp_path: Path) -> None:
     main = tmp_path / "events.jsonl"
     append_event(
-        _build(
-            "control_plane_tick",
-            "test",
-            {"arm": True, "scheduler": "test", "acted": 0, "interval_s": 30},
-        ),
+        _build("lead_checkin", "loop", {"scope": "x-aaaa", "change": "none"}),
         events_path=main,
     )
     append_event(
@@ -84,9 +80,9 @@ def test_unset_and_gate_classes_stay_durable_and_gate(tmp_path: Path) -> None:
     )
 
     types = [r["type"] for r in _rows(main)]
-    assert types == ["control_plane_tick", "review_coverage"]
+    assert types == ["lead_checkin", "review_coverage"]
     classes = _classes(main)
-    assert classes["control_plane_tick"] == "durable"
+    assert classes["lead_checkin"] == "durable"
     assert classes["review_coverage"] == "gate"
     assert not (tmp_path / ("events.jsonl" + EPHEMERAL_SUFFIX)).exists()
 

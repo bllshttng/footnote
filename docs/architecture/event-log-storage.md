@@ -12,7 +12,7 @@ The `events` table is the ordered record:
 | `event_id` | stable identity. Producer-supplied ids win; otherwise `evt:<sha256(line)>`, so a byte-identical retry reads back as an idempotent hit |
 | `row_hash` | sha256 of the canonical line; the legacy-import dedupe key |
 | `ts_ms`, `type`, `source`, `scope` | parsed envelope fields |
-| `retention_class` | `durable` (default), `gate`, or `ephemeral`, from the schema's per-type retention |
+| `retention_class` | `durable` (default), `gate`, `telemetry`, or `ephemeral`, from the schema's per-type retention |
 | `session_id`, `node_id`, `pr_number`, `head_sha`, `repo` | identity columns extracted from `data` for gate queries (`node` and `pr` spellings accepted) |
 | `reject_reason` | why an imported line failed validation; the line stays queryable verbatim |
 | `line` | the canonical envelope, byte-for-byte |
@@ -33,16 +33,24 @@ collision. A failed commit never falls back to a file write.
 
 ## Retention
 
-`durable` and `gate` rows never auto-expire. `ephemeral` rows leave at the
-schema floor (`retention.minimum_ephemeral_ttl_hours`, currently 672) in
-bounded deletes. Rejected and migration rows never expire; an explicit
-operator deletion is the only other removal.
+`durable` and `gate` rows never auto-expire. `ephemeral` rows leave at the schema floor (`retention.minimum_ephemeral_ttl_hours`, currently 672) in bounded deletes. Rejected and migration rows never expire. An explicit operator deletion is the only other removal.
+
+`telemetry` rows leave after `retention.telemetry_ttl_hours` (168). These are the high-volume readouts: `control_plane_tick`, `guard_decision`, `inside_leg_report`, `codex_thread_inside_leg`, and the two store-sweep unlink kinds. One of these rows is noise. The shape of many is the signal, and a week keeps enough to read it. The daily prune claims its pass under the write lock, so two syncs never prune at once. It deletes telemetry in 1,000-row batches for at most 3 seconds. The match is by kind, so rows stored as `durable` before a kind joined the class expire too. A pass that leaves a backlog runs again in 5 minutes. `guard_decision` allow rows keep only 24 hours (`GUARD_ALLOW_TTL_HOURS`). An allow row only proves that a guard still runs, so a day is enough. Block rows keep the full week.
+
+`fno doctor event signals [--events <journal>] [--window-hours 24] [--check]` reads those shapes. It is read-only and flags four of them:
+
+- `burst`: one type wrote 1,000 rows in one minute.
+- `spike`: one type is at 5 times its prior daily average.
+- `arm_errors`: an arm's tick detail reported a failure 10 times.
+- `daemon_restarts`: the daemon started more than 12 times.
+
+If any signal fires, `--check` exits 3.
 
 ## Poll coalescing and the coverage epoch
 
 Declared poll kinds coalesce at both insert paths (`append_envelope` and `import_file`). `OBSERVATION_HEARTBEATS` declares `(guard_decision, 300s)` and `(advance_skipped, 1800s)`. A healthy poll is one whose subject, fingerprint, and heartbeat window match the last stored observation. It is counted pending in `event_observation_pending` instead of stored. A block, a malformed payload, an undeclared kind, and every heartbeat expiry store ordinary rows. When the window closes, one summary row carries the total as an explicit `occurrence_count` in its payload. The window closes on a fingerprint change, a heartbeat expiry, or the end-of-sync sweep. Readers sum `occurrence_count` (default 1) across matched rows to recover represented totals. Stored rows and represented occurrences are two counts, never merged.
 
-Every open stamps `events_meta.coverage_complete_since_ms` once: the first moment this build observed the store. History proven complete starts there, never at `MIN(ts_ms)`. `coverage(journal, since_ms, types)` returns a receipt with a status. `unreadable` means a missing or unopenable store. `unknown` means no stamp, a store opened only by pre-epoch builds. `partial` means the requested `since` reaches before the proven start. `complete` means the `since` sits at or after it. The proven start is the epoch for durable and gate kinds. For ephemeral kinds it is the later of the epoch and the last prune's retention cutoff. A missing row before the proven start never reads as a confident zero.
+Every open stamps `events_meta.coverage_complete_since_ms` once: the first moment this build observed the store. History proven complete starts there, never at `MIN(ts_ms)`. `coverage(journal, since_ms, types)` returns a receipt with a status. `unreadable` means a missing or unopenable store. `unknown` means no stamp, a store opened only by pre-epoch builds. `partial` means the requested `since` reaches before the proven start. `complete` means the `since` sits at or after it. The proven start is the epoch for durable and gate kinds. For ephemeral and telemetry kinds it is the later of the epoch and the last prune's cutoff for that class. `guard_decision` proves back only 24 hours, the horizon of its allow rows. A missing row before the proven start never reads as a confident zero.
 
 ## Ownership boundaries
 

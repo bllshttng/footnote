@@ -77,7 +77,7 @@ def _load_schema() -> dict[str, Any]:
         raise SchemaUnavailableError(f"failed to parse {path}: {exc}") from exc
 
 
-_RETENTION_CLASSES = frozenset({"ephemeral", "gate", "durable"})
+_RETENTION_CLASSES = frozenset({"ephemeral", "gate", "telemetry", "durable"})
 
 
 def validate_retention_schema(schema: dict[str, Any]) -> None:

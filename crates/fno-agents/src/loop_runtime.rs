@@ -410,6 +410,16 @@ impl LoopBudget {
 
 // ── journal ───────────────────────────────────────────────────────────────────
 
+/// The loop-stream envelope every [`Journal`] write carries.
+fn loop_envelope(event_type: &str, data: Value) -> Value {
+    json!({
+        "ts": Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        "type": event_type,
+        "source": "loop",
+        "data": data,
+    })
+}
+
 /// Append-only event log with a project-authoritative path and a best-effort
 /// global mirror.
 pub struct Journal {
@@ -452,13 +462,7 @@ impl Journal {
     /// does not require these kinds to be registered in KNOWN_EVENT_KINDS.
     /// These are loop-stream events, not daemon-stream events.
     pub fn append(&self, event_type: &str, data: Value) -> Result<(), LoopError> {
-        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let env = json!({
-            "ts": ts,
-            "type": event_type,
-            "source": "loop",
-            "data": data,
-        });
+        let env = loop_envelope(event_type, data);
         // Write to project file - FATAL on failure.
         self.append_to_file(&self.project_path, &env, true)?;
 
@@ -474,6 +478,24 @@ impl Journal {
         }
 
         Ok(())
+    }
+
+    /// [`Journal::append`] for a row the arms readout folds from both
+    /// journals. When the mirror is the agents journal's own twin
+    /// (`<root>/agents/events.jsonl` beside `<root>/events.jsonl`), the readout
+    /// reads both, so one write lands instead of two. Any other pair, such as
+    /// a repo journal the readout never reads, keeps its mirror.
+    pub fn append_readout_row(&self, event_type: &str, data: Value) -> Result<(), LoopError> {
+        let twin = self
+            .project_path
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("events.jsonl"));
+        if twin.as_deref() == Some(self.global_path.as_path()) {
+            self.append_to_file(&self.project_path, &loop_envelope(event_type, data), true)
+        } else {
+            self.append(event_type, data)
+        }
     }
 
     /// Append through the same bounded mkdir mutex as canonical Python and Rust claims writers.

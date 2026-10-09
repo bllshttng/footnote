@@ -2209,6 +2209,9 @@ fn source_root_for_exe_returns_none_for_a_deployed_binary() {
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
 
     assert_eq!(source_root_for_exe(&exe, None), None);
+    // An install built in the shared build base keeps a detached OUT_DIR and
+    // a live manifest dir; outside a build tree it is still deployed.
+    assert_eq!(source_root_for_detached_build(&exe), None);
     std::fs::remove_dir_all(&root).ok();
 }
 

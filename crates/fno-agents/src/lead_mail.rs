@@ -125,6 +125,31 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    /// The chats index resolves from the env, not from the passed dirs, so
+    /// an unpinned test opens the shared runner chats.db and races its
+    /// siblings on it. Fields drop in order: the env comes back before the
+    /// lock is released.
+    struct Pinned {
+        _home: crate::claims::EnvVarGuard,
+        _state: crate::claims::EnvVarGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn pin_home(tmp: &Path) -> Pinned {
+        let lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dot_fno = tmp.join(".fno");
+        let home = dot_fno.join("agents");
+        Pinned {
+            _home: crate::claims::EnvVarGuard::set("FNO_AGENTS_HOME", &home.to_string_lossy()),
+            // The index and the bus the chats import reads both resolve
+            // through the state dir, so it is pinned beside the home.
+            _state: crate::claims::EnvVarGuard::set("FNO_STATE_DIR", &dot_fno.to_string_lossy()),
+            _lock: lock,
+        }
+    }
+
     fn registry_path(tmp: &Path) -> PathBuf {
         tmp.join("registry.json")
     }
@@ -175,6 +200,7 @@ mod tests {
     #[test]
     fn one_live_holder_gets_one_durable_envelope_addressed_to_its_name() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _pin = pin_home(tmp.path());
         write_registry(
             tmp.path(),
             json!([
@@ -215,11 +241,16 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("chat-"))
             .count();
         assert!(chat_dirs >= 1, "mirror landed in the passed chats dir");
+        assert!(
+            tmp.path().join(".fno/db/chats.db").exists(),
+            "the index lives in the test's own home, not the runner's"
+        );
     }
 
     #[test]
     fn a_vacant_team_refuses_and_writes_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _pin = pin_home(tmp.path());
         write_registry(tmp.path(), json!([worker_row("worker-1")]));
         let err = send_at(
             &registry_path(tmp.path()),
@@ -237,6 +268,7 @@ mod tests {
     #[test]
     fn a_split_team_refuses_instead_of_mailing_two_holders() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _pin = pin_home(tmp.path());
         write_registry(
             tmp.path(),
             json!([
@@ -260,6 +292,7 @@ mod tests {
     #[test]
     fn terminal_and_unpromoted_rows_never_address() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _pin = pin_home(tmp.path());
         write_registry(
             tmp.path(),
             json!([
