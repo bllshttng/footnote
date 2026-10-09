@@ -173,6 +173,8 @@ enum Role {
     AgentsHistory(Vec<OsString>),
     /// `fno agents transcript ...`: the native session-bundle transfer.
     AgentsTranscript(Vec<OsString>),
+    /// `fno agents claim backlog|export ...`: the shared-store verbs, run
+    /// by `fno-agents claim`.
     ClaimStore(Vec<OsString>),
     /// `fno agents mail show ...`: the native one-message reader, lexically
     /// classified beside agents_history. The Python CLI keeps the rest of

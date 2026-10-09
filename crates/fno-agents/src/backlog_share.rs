@@ -261,6 +261,9 @@ pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String
     let origin = crate::claims::machine_id();
     connection
         .commit_hook(Some(move || {
+            // A refusal belongs to this commit only: an earlier one left
+            // unread must not explain a later, unrelated failure.
+            REFUSAL.with(|r| r.borrow_mut().take());
             let changes = net(std::mem::take(
                 &mut *send.lock().unwrap_or_else(|e| e.into_inner()),
             ));
@@ -493,7 +496,7 @@ fn publish(remote: &Remote, origin: &str, changes: &[Change]) -> Result<(), Stri
         } else {
             match step.and_then(|s| owner.get(s).copied().flatten()) {
                 Some(i) => format!(
-                    " The {} row {CHANGED}; the replica syncs, then retry.",
+                    " The {} row {CHANGED}. Run `fno agents claim backlog sync` (the daemon does it every 5 s), then retry.",
                     changes[i].table
                 ),
                 None => String::new(),

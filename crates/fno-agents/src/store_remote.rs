@@ -468,9 +468,13 @@ pub fn share_backlog() -> Result<Option<Remote>, String> {
     }
     #[cfg(not(test))]
     {
-        let on = crate::agents_config::config_lookup_global(&["store", "share_backlog"])
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // Read once per process: every backlog open asks, key on or off.
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let on = *ON.get_or_init(|| {
+            crate::agents_config::config_lookup_global(&["store", "share_backlog"])
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
         if on {
             configured()
         } else {
