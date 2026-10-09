@@ -516,9 +516,10 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
     }
 }
 
-/// Resolve the canonical (main checkout) repo root from `cwd` via
-/// `git worktree list --porcelain`, returning the first real working tree (the
-/// main checkout; git lists it first). This is robust across the layouts the
+/// Resolve the canonical (main checkout) repo root from `cwd`. A main checkout
+/// and a linked worktree answer from the `.git` markers alone, with no fork;
+/// every other layout asks `git worktree list --porcelain` and takes the first
+/// real working tree (the main checkout; git lists it first). This is robust across the layouts the
 /// `--git-common-dir` parent gets wrong: a bare repo (no working tree) and a
 /// `--separate-git-dir` mis-report both resolve to None here, so callers fall
 /// back to the caller cwd -- the safe side (Failure Modes > Boundaries). From a
@@ -531,8 +532,9 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
 /// A THIRD implementation of this question lives in `fno::digest_overlay`, which
 /// crate `fno` needs because it does not depend on `fno-agents`. It parses the
 /// linked worktree's `.git` file instead of shelling out, so it costs no
-/// subprocess on the mux attach path and, unlike this one, cannot see a repo
-/// whose git dir lives outside the checkout. Change one and check the other.
+/// subprocess on the mux attach path and, unlike the git fallback here, cannot
+/// see a repo whose git dir lives outside the checkout. The marker fast path in
+/// this file reads the same `.git` file. Change one and check the other.
 pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
     // Production shape: the memo + the git resolver. The resolver is a fn
     // parameter on the memo body so the fork-once contract is assertable
@@ -662,23 +664,45 @@ enum DotGit {
     File(PathBuf),
 }
 
-/// Walk up from `cwd` the way git's discovery does, reading only markers.
-/// This is the hook allow path: every guard row resolves the events space, and
-/// a fork per resolve stalled each Bash call for seconds once the fleet
-/// saturated the per-user process table.
-fn probe_repo(cwd: &Path) -> RepoProbe {
-    let redirected = [
+#[cfg(unix)]
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+#[cfg(not(unix))]
+fn device_of(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// True when the environment moves git's own discovery, so the markers alone
+/// would answer a different question than `git` does.
+fn git_discovery_redirected() -> bool {
+    [
         "GIT_DIR",
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     ]
     .iter()
-    .any(|k| std::env::var_os(k).is_some());
-    if redirected || !cwd.is_absolute() || !cwd.is_dir() {
+    .any(|k| std::env::var_os(k).is_some())
+}
+
+/// Walk up from `cwd` the way git's discovery does, reading only markers.
+/// This is the hook allow path: every guard row resolves the events space, and
+/// a fork per resolve stalled each Bash call for seconds once the fleet
+/// saturated the per-user process table. Git stops at a filesystem boundary by
+/// default; so does this walk, handing the question back to git there.
+fn probe_repo(cwd: &Path) -> RepoProbe {
+    if !cwd.is_absolute() || !cwd.is_dir() {
         return RepoProbe::Unsure;
     }
+    let start_dev = device_of(cwd);
     for dir in cwd.ancestors() {
+        if device_of(dir) != start_dev {
+            return RepoProbe::Unsure;
+        }
         let dot = dir.join(".git");
         let Ok(meta) = std::fs::metadata(&dot) else {
             continue;
@@ -707,7 +731,14 @@ fn probe_repo(cwd: &Path) -> RepoProbe {
 /// common dir is `<root>/.git`. A bare repo, a `--separate-git-dir` layout and
 /// a submodule return `None` so git's rules stay the authority there.
 fn canonical_root_from_markers(cwd: &Path) -> Option<Option<PathBuf>> {
-    match probe_repo(cwd) {
+    if git_discovery_redirected() {
+        return None;
+    }
+    canonical_root_of(probe_repo(cwd))
+}
+
+fn canonical_root_of(probe: RepoProbe) -> Option<Option<PathBuf>> {
+    match probe {
         RepoProbe::Unsure => None,
         RepoProbe::NoRepo => Some(None),
         RepoProbe::Found(top, DotGit::Dir) => {
@@ -728,10 +759,12 @@ fn canonical_root_from_markers(cwd: &Path) -> Option<Option<PathBuf>> {
 /// The work tree root containing `cwd`, `None` outside any work tree. Markers
 /// first; git only when they cannot settle it.
 pub fn worktree_toplevel(cwd: &Path) -> Option<PathBuf> {
-    match probe_repo(cwd) {
-        RepoProbe::Found(top, _) => return Some(std::fs::canonicalize(&top).unwrap_or(top)),
-        RepoProbe::NoRepo => return None,
-        RepoProbe::Unsure => {}
+    if !git_discovery_redirected() {
+        match probe_repo(cwd) {
+            RepoProbe::Found(top, _) => return Some(std::fs::canonicalize(&top).unwrap_or(top)),
+            RepoProbe::NoRepo => return None,
+            RepoProbe::Unsure => {}
+        }
     }
     std::process::Command::new("git")
         .arg("-C")
@@ -1519,6 +1552,10 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    fn canonical_root_of_probe(cwd: &Path) -> Option<Option<PathBuf>> {
+        canonical_root_of(probe_repo(cwd))
+    }
+
     #[test]
     fn markers_resolve_main_and_linked_worktree_without_spawning_git() {
         // Hand-built layout, so a pass proves the answer came from the
@@ -1540,16 +1577,16 @@ mod tests {
 
         let want = std::fs::canonicalize(&main).unwrap();
         assert_eq!(
-            canonical_root_from_markers(&linked.join("sub")),
+            canonical_root_of_probe(&linked.join("sub")),
             Some(Some(want.clone()))
         );
         assert_eq!(
-            canonical_root_from_markers(&main.join("deep")),
+            canonical_root_of_probe(&main.join("deep")),
             Some(Some(want))
         );
-        assert_eq!(
-            worktree_toplevel(&linked.join("sub")),
-            Some(std::fs::canonicalize(&linked).unwrap())
+        assert!(
+            matches!(probe_repo(&linked.join("sub")), RepoProbe::Found(top, _) if top == linked),
+            "the walk stops at the linked worktree, not the main checkout"
         );
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1563,15 +1600,15 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::create_dir_all(&modules).unwrap();
         std::fs::write(sub.join(".git"), format!("gitdir: {}\n", modules.display())).unwrap();
-        assert_eq!(canonical_root_from_markers(&sub), None);
+        assert_eq!(canonical_root_of_probe(&sub), None);
         // An empty `.git` dir is not a repo marker git would accept.
         let hollow = base.join("hollow");
         std::fs::create_dir_all(hollow.join(".git")).unwrap();
-        assert_eq!(canonical_root_from_markers(&hollow), None);
+        assert_eq!(canonical_root_of_probe(&hollow), None);
         // No marker anywhere above: git would find nothing either.
         let bare = base.join("plain");
         std::fs::create_dir_all(&bare).unwrap();
-        assert_eq!(canonical_root_from_markers(&bare), Some(None));
+        assert_eq!(canonical_root_of_probe(&bare), Some(None));
         std::fs::remove_dir_all(&base).ok();
     }
 
