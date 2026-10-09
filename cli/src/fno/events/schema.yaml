@@ -7228,6 +7228,19 @@ event_types:
         superseded:
           type: integer
 
+  - name: truth_warm_done
+    description: "The daemon's truth warm pass finished after a restart: every registry row's transcript cursor is rebuilt from a bounded tail, so no session answers warming past this point."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        rows:
+          type: integer
+        warmed:
+          type: integer
+        ms:
+          type: integer
+
   - name: keeper_row_superseded
     description: "A sweep verdict was discarded at write time: the registry row under that name changed identity between probe and write, so the probed verdict belongs to a row that no longer exists."
     sources: [daemon]

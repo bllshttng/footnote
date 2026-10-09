@@ -3,6 +3,9 @@
 //! daemon sweep parses only the bytes appended since the last read and the
 //! daemon's memory stays bounded by the roster, not by transcript size.
 //!
+//! A session that ends leaves the roster, nobody asks for it again, and its
+//! entry drops after the idle TTL.
+//!
 //! A rebuild (first sight of a file, a truncation, or a new inode) reads back
 //! from EOF and stops at the newest compact boundary or at [`REBUILD_CAP`],
 //! whichever comes first. It never replays a transcript from the start.
@@ -33,6 +36,10 @@ const PRUNE_EVERY: Duration = Duration::from_secs(60);
 /// One beat: how long a handle that resolved to nothing answers `not-found`
 /// from memory before the resolver tries it again.
 pub(crate) const MISS_BEAT: Duration = Duration::from_secs(60);
+
+/// How long a row's falsifier verdict (pid, pane, exit record, claude holder)
+/// stands before the next ask probes again.
+const FALSIFIER_BEAT: Duration = Duration::from_secs(15);
 
 /// How one harness's lines fold into a summary.
 pub(crate) struct Folder<'a> {
@@ -71,6 +78,8 @@ pub struct TruthCursors {
     // Handles that resolved to nothing, so an unresolvable session costs one
     // bounded attempt per beat however often a caller asks.
     misses: HashMap<String, Instant>,
+    // Registry falsifier verdicts by row identity, for one short beat.
+    verdicts: HashMap<String, (Option<&'static str>, Instant)>,
     last_bytes_read: u64,
     last_prune: Option<Instant>,
 }
@@ -155,13 +164,17 @@ impl TruthCursors {
         }
     }
 
-    /// Drop a file's cursor. Called when the session behind it ended.
-    pub(crate) fn forget(&mut self, path: &Path) {
-        self.entries.remove(path);
+    /// A row's falsifier verdict from the last beat, if one is fresh.
+    pub(crate) fn cached_verdict(&mut self, key: &str) -> Option<Option<&'static str>> {
+        match self.verdicts.get(key) {
+            Some((verdict, at)) if at.elapsed() < FALSIFIER_BEAT => Some(*verdict),
+            _ => None,
+        }
     }
 
-    pub(crate) fn forget_store(&mut self, key: &str) {
-        self.stores.remove(key);
+    pub(crate) fn cache_verdict(&mut self, key: &str, verdict: Option<&'static str>) {
+        self.verdicts
+            .insert(key.to_string(), (verdict, Instant::now()));
     }
 
     /// The file's summary, advanced through every complete line on disk. A
@@ -241,6 +254,8 @@ impl TruthCursors {
             .retain(|_, (_, touched)| now.duration_since(*touched) < IDLE_TTL);
         self.misses
             .retain(|_, at| now.duration_since(*at) < MISS_BEAT);
+        self.verdicts
+            .retain(|_, (_, at)| now.duration_since(*at) < FALSIFIER_BEAT);
     }
 
     #[cfg(test)]
@@ -515,10 +530,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Eviction: an entry idle past the TTL drops on the next read, and
-    /// `forget` drops one at once.
+    /// Eviction: a session that ended leaves the roster and nobody asks for
+    /// it again, so its entry drops on the first read past the idle TTL.
     #[test]
-    fn idle_and_forgotten_cursors_drop() {
+    fn idle_cursors_drop() {
         let dir = dir("evict");
         let a = dir.join("a.jsonl");
         let b = dir.join("b.jsonl");
@@ -528,8 +543,6 @@ mod tests {
         summary(&mut cursors, &a);
         summary(&mut cursors, &b);
         assert_eq!(cursors.len(), 2);
-        cursors.forget(&a);
-        assert_eq!(cursors.len(), 1);
         cursors.age_all_for_test(IDLE_TTL + Duration::from_secs(1));
         summary(&mut cursors, &a);
         assert!(

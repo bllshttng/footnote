@@ -256,7 +256,8 @@ fn parse_stamp(ts: &str) -> Option<f64> {
 /// The provenance scans run past the rebuild window only to find a record
 /// the window did not carry: codex stamps its model once per turn, which a
 /// tool-heavy turn pushes megabytes back.
-const MODEL_SCAN_LIMIT: u64 = 32 << 20;
+const CLAUDE_MODEL_SCAN_LIMIT: u64 = 4 << 20;
+const CODEX_MODEL_SCAN_LIMIT: u64 = 32 << 20;
 const TITLE_SCAN_LIMIT: u64 = 1 << 20;
 
 fn fold_claude(s: &mut TailSummary, line: &str) {
@@ -306,12 +307,13 @@ fn codex_boundary(line: &str) -> bool {
 
 fn backfill_claude(s: &mut TailSummary, path: &Path, before: u64) {
     if s.model.is_none() {
-        let found = cursor::scan_back(path, before, b"\"model\":\"", MODEL_SCAN_LIMIT, &|l| {
+        let limit = CLAUDE_MODEL_SCAN_LIMIT;
+        let found = cursor::scan_back(path, before, b"\"model\":\"", limit, &|l| {
             serde_json::from_str::<Value>(l)
                 .ok()
                 .and_then(|v| model_of("claude", &v))
         });
-        backfill_model(s, found, before);
+        backfill_model(s, found, before, limit);
     }
     if s.title.is_none() {
         s.title = cursor::scan_back(path, before, b"\"agent-name\"", TITLE_SCAN_LIMIT, &|l| {
@@ -324,19 +326,20 @@ fn backfill_claude(s: &mut TailSummary, path: &Path, before: u64) {
 
 fn backfill_codex(s: &mut TailSummary, path: &Path, before: u64) {
     if s.model.is_none() {
-        let found = cursor::scan_back(path, before, b"turn_context", MODEL_SCAN_LIMIT, &|l| {
+        let limit = CODEX_MODEL_SCAN_LIMIT;
+        let found = cursor::scan_back(path, before, b"turn_context", limit, &|l| {
             serde_json::from_str::<Value>(l)
                 .ok()
                 .and_then(|v| model_of("codex", &v))
         });
-        backfill_model(s, found, before);
+        backfill_model(s, found, before, limit);
     }
 }
 
-fn backfill_model(s: &mut TailSummary, found: Option<String>, before: u64) {
+fn backfill_model(s: &mut TailSummary, found: Option<String>, before: u64, limit: u64) {
     match found {
         Some(model) => s.note_model(model),
-        None => s.model_unscanned = before > MODEL_SCAN_LIMIT,
+        None => s.model_unscanned = before > limit,
     }
 }
 
@@ -832,6 +835,25 @@ fn inference_samples(observed: &Value) -> Option<usize> {
         .map(|s| s as usize)
 }
 
+/// [`registry_falsifier`] with a one-beat memo per row: the pane probe spawns
+/// `fno mux` and the claude holder proof lists claude's session records, so a
+/// sweep that asks every few seconds pays for each at most once a beat.
+fn row_falsifier<C: CursorAccess>(row: &RegistryEntry, cursors: &mut C) -> Option<&'static str> {
+    let key = format!(
+        "{}|{:?}|{:?}|{:?}",
+        row.name,
+        row.pid,
+        row.status,
+        row.mux.as_ref().map(|m| (&m.session, m.pane_id))
+    );
+    if let Some(verdict) = cursors.with(|c| c.cached_verdict(&key)) {
+        return verdict;
+    }
+    let verdict = registry_falsifier(row);
+    cursors.with(|c| c.cache_verdict(&key, verdict));
+    verdict
+}
+
 /// The falsifier a registry row carries, the port of `registry_falsifier`:
 /// a mux-pane row is falsified by its PANE, never by its recorded pid; a
 /// non-pane row by its pid or its exit tombstone; a claude row's negative
@@ -1043,7 +1065,10 @@ pub fn resolve_payload_with<C: CursorAccess>(
         cursors.with(|c| c.note_miss(handle));
         return unknown_payload(handle, "not-found", None, None, None);
     };
-    let falsifier = session.row.as_ref().and_then(registry_falsifier);
+    let falsifier = session
+        .row
+        .as_ref()
+        .and_then(|row| row_falsifier(row, &mut cursors));
     // A falsified row is dead on process evidence, not on a guess: read it
     // now rather than answer warming.
     let mode = if falsifier.is_some() {
@@ -1074,15 +1099,6 @@ pub fn resolve_payload_with<C: CursorAccess>(
         }
         _ => None,
     };
-    if falsifier.is_some() {
-        // The session ended: its cursor goes, so memory tracks live sessions.
-        cursors.with(|c| {
-            if let Some(p) = path.as_deref() {
-                c.forget(p);
-            }
-            c.forget_store(&store_key);
-        });
-    }
     let observed = observed_model(&session.agent, path.as_deref(), summary.as_ref());
     let Some(summary) = summary.filter(TailSummary::has_record) else {
         return unknown_payload(
