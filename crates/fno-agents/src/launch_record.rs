@@ -82,7 +82,7 @@ fn segments(cmd: &str) -> Vec<Vec<String>> {
     let mut word = String::new();
     let mut in_word = false;
     let mut chars = cmd.chars().peekable();
-    let mut end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
+    let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
         if *in_word {
             words.push(std::mem::take(word));
             *in_word = false;
