@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// (v48) How often the off-loop task re-probes the fleet's reachability
-/// evidence. Each interval is one whole-fleet CLI process, about eight
-/// seconds of Python over the full roster, so the cadence must stay well
-/// clear of that wall time: at 10s the probe child was alive in 14 of 25
-/// process samples, effectively always running. 60s keeps the refresh an
-/// order of magnitude below the 600s attention threshold the ages feed;
-/// it cannot change a row's tier, only polish its displayed age, which
-/// lags by at most this interval.
+/// evidence. One `agent.list` RPC per interval (the Python
+/// CLI it replaced spent its wall time cold-starting an interpreter inside
+/// the mux server's own child set), so the cost of the cadence is the
+/// daemon's server-side truth batch, amortized across every client of the
+/// daemon. 60s keeps the refresh an order of magnitude below the 600s
+/// attention threshold the ages feed; it cannot change a row's tier, only
+/// polish its displayed age, which lags by at most this interval.
 pub(crate) const TRUTH_PROBE_EVERY: Duration = Duration::from_secs(60);
 
 /// The single-flight latch for one truth probe: `begin` wins exactly once
@@ -39,23 +39,28 @@ impl Drop for TruthProbeLatch {
     }
 }
 
-/// (v48) One whole-fleet reachability probe: `fno agents list --json`, the
-/// surface whose row shape already pins the triple. Join key is the registry
-/// name, the same field both list lanes and this server's registry rows
-/// carry. `None` on any failure (no binary, unparseable output) so the caller
-/// can keep the last good map rather than blanking every row on one miss.
-/// Rows whose probe fields are null still enter the map: a probe that did not
-/// answer for one row is that row's absence, not the fleet's.
-pub(crate) fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
-    let mut command = crate::process_admission::std_command("fno");
-    command.args(["agents", "list", "--json"]);
-    let out = crate::process_admission::std_output(&mut command).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+/// (v48) One whole-fleet reachability probe: the daemon's `agent.list` RPC,
+/// the same answer `fno agents list --json` prints after its Python cold
+/// start (no interpreter is ever a mux child for this). Join
+/// key is the registry name, the same field both list lanes and this
+/// server's registry rows carry. `None` on any failure (no daemon,
+/// transport fault, unparseable answer) so the caller can keep the last
+/// good map rather than blanking every row on one miss. Rows whose probe
+/// fields are null still enter the map: a probe that did not answer for one
+/// row is that row's absence, not the fleet's.
+pub(crate) async fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
+    let result = crate::agents_view::agent_list_rpc(&crate::agents_view::supervisor_sock_path())
+        .await
+        .ok()?;
+    truth_map_from_list(&result)
+}
+
+/// The pure half of the probe: the `agent.list` result's rows into the
+/// truth map. Split from the transport so the row contract has a unit test
+/// that needs no socket.
+fn truth_map_from_list(result: &serde_json::Value) -> Option<HashMap<String, TruthReading>> {
     let mut map = HashMap::new();
-    for row in parsed.get("agents")?.as_array()? {
+    for row in result.get("agents")?.as_array()? {
         // A malformed row is skipped, not fatal: one bad entry must not cost
         // the whole fleet its readings.
         let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
@@ -148,6 +153,41 @@ mod truth_probe_cadence {
         assert!(
             TRUTH_PROBE_EVERY * 10 <= Duration::from_secs(600),
             "the refresh must stay an order of magnitude below the 600s attention threshold its ages feed"
+        );
+    }
+
+    /// the probe reads the daemon's `agent.list` RPC, never
+    /// a spawned `fno agents list` interpreter. The pure half carries the
+    /// row contract: identity-first join, the four readings, malformed rows
+    /// skipped, no `agents` key refused.
+    #[test]
+    fn truth_rows_join_identity_first_and_skip_malformed() {
+        let result: serde_json::Value = serde_json::from_str(
+            r#"{"agents": [
+                {"name": "row-a", "harness_session_id": "sess-1",
+                 "basis": "transcript", "last_activity_age_s": 12.0,
+                 "session_cost_cents": 7, "session_tokens": 9001,
+                 "compaction_count": 2},
+                {"name": "row-b", "basis": "process-gone"},
+                "junk",
+                {"basis": "silent"}
+            ]}"#,
+        )
+        .unwrap();
+        let map = super::truth_map_from_list(&result).expect("parses");
+        assert_eq!(map.len(), 2, "malformed rows are skipped, not fatal");
+        let a = map.get("sess-1").expect("identity-first key");
+        assert_eq!(a.basis.as_deref(), Some("transcript"));
+        assert_eq!(a.age_s, Some(12));
+        assert_eq!(a.cost_cents, Some(7));
+        assert_eq!(a.tokens, Some(9001));
+        assert_eq!(a.compaction_count, Some(2));
+        let b = map.get("row-b").expect("label key for a legacy row");
+        assert_eq!(b.basis.as_deref(), Some("process-gone"));
+        assert_eq!(b.age_s, None, "nulls are absence, not zeros");
+        assert!(
+            super::truth_map_from_list(&serde_json::json!({})).is_none(),
+            "no agents key is a refused answer, not an empty map"
         );
     }
 
