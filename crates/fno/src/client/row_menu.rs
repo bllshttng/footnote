@@ -83,18 +83,17 @@ pub(super) async fn toggle_split_opens(view: &mut View) {
     view.set_notice(notice);
 }
 
-/// Rewrite the open menu's toggle row label to the live state. `rows` and
-/// `actions` are parallel, so the action index finds the row.
+/// Rewrite the open menu's toggle row label to the live state. Found by its
+/// label prefix, not an action index: grid rows carry TWO actions for ONE
+/// row, so the action position is not a row index.
 fn relabel_split_toggle(view: &mut View) {
     let word = view.split_opens.word();
     if let Some(m) = view.row_menu.as_mut() {
-        let i = m
-            .actions
-            .iter()
-            .position(|a| matches!(a, MenuAction::ToggleSplitOpens));
-        if let Some(i) = i {
-            if let Some(PopupRow::Entry { label, .. }) = m.popup.rows.get_mut(i) {
-                *label = format!("split opens: {word}");
+        for row in &mut m.popup.rows {
+            if let PopupRow::Entry { label, .. } = row {
+                if label.starts_with("split opens:") {
+                    *label = format!("split opens: {word}");
+                }
             }
         }
     }
