@@ -1284,7 +1284,7 @@ fn clear_dead_confirm(
 /// lingers after execute (AC1-FR). The split-opens toggle is the exception: it
 /// flips in place and the menu stays open, so the arrow is pressed against the
 /// flipped target.
-async fn row_menu_execute_selected(
+pub(super) async fn row_menu_execute_selected(
     view: &mut View,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {

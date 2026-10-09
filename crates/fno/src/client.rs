@@ -48,9 +48,9 @@ use wire_version::{server_has_splitdir, split_skew_notice};
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
-#[cfg(test)]
-use row_menu::build_row_menu;
 pub use row_menu::SplitOpens;
+#[cfg(test)]
+use row_menu::{build_row_menu, row_menu_execute_selected};
 use row_menu::{build_row_menu_with, build_tab_menu, row_menu_keys, row_menu_mouse};
 
 // Pickers, the launch moment and the snapshot action live in their own
