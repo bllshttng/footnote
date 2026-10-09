@@ -47,7 +47,7 @@ impl SqlValue {
         }
     }
 
-    fn to_hrana(&self) -> Value {
+    pub(crate) fn to_hrana(&self) -> Value {
         match self {
             SqlValue::Null => json!({"type": "null"}),
             SqlValue::Integer(v) => json!({"type": "integer", "value": v.to_string()}),
@@ -60,7 +60,7 @@ impl SqlValue {
         }
     }
 
-    fn from_hrana(value: &Value) -> Result<Self, String> {
+    pub(crate) fn from_hrana(value: &Value) -> Result<Self, String> {
         let field = |name: &str| value.get(name);
         Ok(match field("type").and_then(Value::as_str) {
             Some("null") => SqlValue::Null,
@@ -188,7 +188,78 @@ impl Remote {
             .map(drop)
     }
 
-    fn pipeline(&self, mut requests: Vec<Value>) -> Result<Vec<Reply>, String> {
+    /// Run `steps` as one transaction in one request. Each step runs only
+    /// when the step before it succeeded, and a failed step rolls the batch
+    /// back, so the primary keeps all of the steps or none. A refusal
+    /// carries the index of the step that failed, or `None` when the
+    /// request itself failed.
+    pub fn transaction(
+        &self,
+        steps: &[(String, Vec<SqlValue>)],
+    ) -> Result<Vec<Reply>, (Option<usize>, String)> {
+        let stmt = |sql: &str, args: &[SqlValue]| json!({"sql": sql, "args": args.iter().map(SqlValue::to_hrana).collect::<Vec<_>>()});
+        let commit = steps.len() + 1;
+        let mut batch = vec![json!({"stmt": stmt("BEGIN IMMEDIATE", &[])})];
+        for (i, (sql, args)) in steps.iter().enumerate() {
+            batch.push(json!({"stmt": stmt(sql, args), "condition": {"type": "ok", "step": i}}));
+        }
+        batch.push(
+            json!({"stmt": stmt("COMMIT", &[]), "condition": {"type": "ok", "step": commit - 1}}),
+        );
+        batch.push(json!({
+            "stmt": stmt("ROLLBACK", &[]),
+            "condition": {"type": "not", "cond": {"type": "ok", "step": commit}},
+        }));
+        let response = self
+            .responses(vec![json!({"type": "batch", "batch": {"steps": batch}})])
+            .map_err(|error| (None, error))?
+            .pop()
+            .unwrap_or_default();
+        let result = response.get("result").cloned().unwrap_or_default();
+        let errors = result.get("step_errors").and_then(Value::as_array);
+        for index in 0..=commit {
+            let Some(error) = errors.and_then(|e| e.get(index)).filter(|e| !e.is_null()) else {
+                continue;
+            };
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("statement failed");
+            let step = (1..commit).contains(&index).then(|| index - 1);
+            return Err((step, format!("remote store {}: {message}", self.url)));
+        }
+        let results = result.get("step_results").and_then(Value::as_array);
+        if results
+            .and_then(|r| r.get(commit))
+            .is_none_or(Value::is_null)
+        {
+            return Err((
+                None,
+                format!("remote store {}: the batch did not commit", self.url),
+            ));
+        }
+        (1..commit)
+            .map(|index| {
+                let step = results
+                    .and_then(|r| r.get(index))
+                    .cloned()
+                    .unwrap_or_default();
+                self.reply(&step).map_err(|error| (Some(index - 1), error))
+            })
+            .collect()
+    }
+
+    fn pipeline(&self, requests: Vec<Value>) -> Result<Vec<Reply>, String> {
+        self.responses(requests)?
+            .iter()
+            .filter_map(|response| response.get("result"))
+            .map(|rows| self.reply(rows))
+            .collect()
+    }
+
+    /// Send one pipeline and return each request's `response`. The first
+    /// request that failed fails the call.
+    fn responses(&self, mut requests: Vec<Value>) -> Result<Vec<Value>, String> {
         requests.push(json!({"type": "close"}));
         let body = json!({"baton": null, "requests": requests}).to_string();
         let reply = self.post("/v2/pipeline", &body).map_err(|error| {
@@ -218,45 +289,49 @@ impl Remote {
                     .unwrap_or("statement failed");
                 return Err(format!("remote store {}: {message}", self.url));
             }
-            let Some(rows) = result.pointer("/response/result") else {
-                continue;
-            };
-            let columns = rows
-                .get("cols")
-                .and_then(Value::as_array)
-                .map(|cols| {
-                    cols.iter()
-                        .map(|c| c.get("name").and_then(Value::as_str).unwrap_or("").into())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let rows_out = rows
-                .get("rows")
-                .and_then(Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|row| {
-                            row.as_array()
-                                .into_iter()
-                                .flatten()
-                                .map(SqlValue::from_hrana)
-                                .collect::<Result<Vec<_>, _>>()
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()
-                .map_err(|error| format!("remote store {}: {error}", self.url))?
-                .unwrap_or_default();
-            out.push(Reply {
-                columns,
-                rows: rows_out,
-                affected: rows
-                    .get("affected_row_count")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            });
+            if let Some(response) = result.get("response") {
+                out.push(response.clone());
+            }
         }
         Ok(out)
+    }
+
+    /// One statement result: its columns, rows and change count.
+    fn reply(&self, rows: &Value) -> Result<Reply, String> {
+        let columns = rows
+            .get("cols")
+            .and_then(Value::as_array)
+            .map(|cols| {
+                cols.iter()
+                    .map(|c| c.get("name").and_then(Value::as_str).unwrap_or("").into())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rows_out = rows
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        row.as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(SqlValue::from_hrana)
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(|error| format!("remote store {}: {error}", self.url))?
+            .unwrap_or_default();
+        Ok(Reply {
+            columns,
+            rows: rows_out,
+            affected: rows
+                .get("affected_row_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        })
     }
 
     fn unreachable(&self, error: &str) -> String {
@@ -382,6 +457,28 @@ pub fn configured() -> Result<Option<Remote>, String> {
     }
 }
 
+/// The primary that holds the shared backlog. Both `store.remote_url` and
+/// `store.share_backlog = true` must be set; either one unset is the stock
+/// install, where every backlog write stays in the local file and no
+/// process opens a socket for it.
+pub fn share_backlog() -> Result<Option<Remote>, String> {
+    #[cfg(test)]
+    {
+        Ok(None)
+    }
+    #[cfg(not(test))]
+    {
+        let on = crate::agents_config::config_lookup_global(&["store", "share_backlog"])
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if on {
+            configured()
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_primary {
     //! A sqld stand-in for tests: the Hrana pipeline over HTTP, answered by
@@ -461,51 +558,105 @@ pub(crate) mod test_primary {
         .unwrap();
     }
 
+    /// A Hrana batch: steps run in order, each only when its condition
+    /// holds, and every step reports a result or an error.
+    fn batch(connection: &rusqlite::Connection, steps: &[Value]) -> Value {
+        let mut outcomes: Vec<Option<bool>> = Vec::new();
+        let (mut results, mut errors) = (Vec::new(), Vec::new());
+        for step in steps {
+            if !step["condition"].is_null() && !holds(&step["condition"], &outcomes) {
+                outcomes.push(None);
+                results.push(Value::Null);
+                errors.push(Value::Null);
+                continue;
+            }
+            match statement(connection, &step["stmt"]) {
+                Ok(result) => {
+                    outcomes.push(Some(true));
+                    results.push(result);
+                    errors.push(Value::Null);
+                }
+                Err(e) => {
+                    outcomes.push(Some(false));
+                    results.push(Value::Null);
+                    errors.push(json!({"message": e.to_string()}));
+                }
+            }
+        }
+        json!({"type": "ok", "response": {"type": "batch", "result": {
+            "step_results": results, "step_errors": errors,
+        }}})
+    }
+
+    fn holds(condition: &Value, outcomes: &[Option<bool>]) -> bool {
+        let step = |c: &Value| {
+            outcomes
+                .get(c["step"].as_u64().unwrap() as usize)
+                .copied()
+                .flatten()
+        };
+        match condition["type"].as_str() {
+            Some("ok") => step(condition) == Some(true),
+            Some("error") => step(condition) == Some(false),
+            Some("not") => !holds(&condition["cond"], outcomes),
+            Some("and") => condition["conds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| holds(c, outcomes)),
+            Some("or") => condition["conds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| holds(c, outcomes)),
+            other => panic!("unknown condition {other:?}"),
+        }
+    }
+
+    fn statement(connection: &rusqlite::Connection, stmt: &Value) -> rusqlite::Result<Value> {
+        let args: Vec<SqlValue> = stmt["args"]
+            .as_array()
+            .map(|args| {
+                args.iter()
+                    .map(|v| SqlValue::from_hrana(v).unwrap())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut statement = connection.prepare(stmt["sql"].as_str().unwrap())?;
+        let cols: Vec<Value> = statement
+            .column_names()
+            .iter()
+            .map(|n| json!({"name": n}))
+            .collect();
+        let width = cols.len();
+        let mut rows = statement.query(rusqlite::params_from_iter(args.iter()))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(
+                (0..width)
+                    .map(|i| Ok(SqlValue::from(row.get_ref(i)?).to_hrana()))
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        drop(rows);
+        Ok(json!({"cols": cols, "rows": out, "affected_row_count": connection.changes()}))
+    }
+
     fn answer(connection: &rusqlite::Connection, request: &Value) -> Value {
         let failed =
             |e: rusqlite::Error| json!({"type": "error", "error": {"message": e.to_string()}});
         match request["type"].as_str() {
+            Some("batch") => batch(connection, request["batch"]["steps"].as_array().unwrap()),
             Some("sequence") => match connection.execute_batch(request["sql"].as_str().unwrap()) {
                 Ok(()) => json!({"type": "ok", "response": {"type": "sequence"}}),
                 Err(e) => failed(e),
             },
-            Some("execute") => {
-                let args: Vec<SqlValue> = request["stmt"]["args"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| SqlValue::from_hrana(v).unwrap())
-                    .collect();
-                let run = || -> rusqlite::Result<Value> {
-                    let mut statement =
-                        connection.prepare(request["stmt"]["sql"].as_str().unwrap())?;
-                    let cols: Vec<Value> = statement
-                        .column_names()
-                        .iter()
-                        .map(|n| json!({"name": n}))
-                        .collect();
-                    let width = cols.len();
-                    let mut rows = statement.query(rusqlite::params_from_iter(args.iter()))?;
-                    let mut out = Vec::new();
-                    while let Some(row) = rows.next()? {
-                        out.push(
-                            (0..width)
-                                .map(|i| Ok(SqlValue::from(row.get_ref(i)?).to_hrana()))
-                                .collect::<rusqlite::Result<Vec<_>>>()?,
-                        );
-                    }
-                    drop(rows);
-                    Ok(
-                        json!({"cols": cols, "rows": out, "affected_row_count": connection.changes()}),
-                    )
-                };
-                match run() {
-                    Ok(result) => {
-                        json!({"type": "ok", "response": {"type": "execute", "result": result}})
-                    }
-                    Err(e) => failed(e),
+            Some("execute") => match statement(connection, &request["stmt"]) {
+                Ok(result) => {
+                    json!({"type": "ok", "response": {"type": "execute", "result": result}})
                 }
-            }
+                Err(e) => failed(e),
+            },
             _ => json!({"type": "ok", "response": {"type": "close"}}),
         }
     }
