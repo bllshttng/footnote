@@ -891,8 +891,11 @@ mod tests {
         );
 
         panel.toggle();
+        assert!(
+            panel.refresh_deadline().is_some(),
+            "expanding arms the timer"
+        );
         assert!(panel.take_want(), "expanding arms the first fold");
-        assert!(panel.refresh_deadline().is_some());
 
         panel.apply(Some(live()));
         panel.fold_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(1));
@@ -1077,6 +1080,7 @@ mod tests {
         assert_eq!(lines[2], "  memory    ▄ 37% used, 64.9 GB free");
 
         let mut panel = Panel::with_detail(true);
+        panel.toggle();
         assert!(panel.take_want());
         panel.apply(Some(live()));
         panel.apply(Some(live()));
@@ -1097,7 +1101,10 @@ mod tests {
         let lines = panel.minimized_lines(&[]);
 
         assert_eq!(lines.len(), MINIMIZED_ROWS, "{lines:?}");
-        assert!(lines[0].contains("reading the machine"), "{lines:?}");
+        assert!(
+            lines[0].contains("expand for a machine reading"),
+            "{lines:?}"
+        );
         assert!(
             !lines[0].contains('0'),
             "a pending fold must show no counts"
@@ -1105,21 +1112,32 @@ mod tests {
         assert!(lines[1].is_empty() && lines[2].is_empty(), "{lines:?}");
 
         let mut panel = Panel::default();
+        panel.toggle();
         assert!(panel.take_want());
         panel.apply(None);
 
+        // Minimized, a failure reads as the same honest pointer (nothing is
+        // retrying while minimized); the fold-failed words live in the
+        // expanded view, where the retry actually runs.
         let lines = panel.minimized_lines(&[]);
 
-        assert!(lines[0].contains("fold failed - retrying"), "{lines:?}");
+        assert!(
+            lines[0].contains("expand for a machine reading"),
+            "{lines:?}"
+        );
+        let expanded = panel.expanded_lines(&[]).join("\n");
+
+        assert!(expanded.contains("fold failed"), "{expanded:?}");
     }
 
     #[test]
     fn panel_lifecycle_rows() {
         let mut panel = opened(live());
-        panel.toggle();
-        assert!(panel.is_expanded());
+        assert!(panel.is_expanded(), "a landed reading implies expanded");
         panel.toggle();
         assert!(!panel.is_expanded());
+        panel.toggle();
+        assert!(panel.is_expanded());
         // Expanding never spawns a fold and never drops the cached reading.
         assert!(!panel.take_want(), "inside the TTL no refetch");
         assert!(panel
@@ -1128,6 +1146,7 @@ mod tests {
             .contains("5 leads"));
 
         let mut panel = Panel::default();
+        panel.toggle();
 
         assert!(panel.take_want());
         assert!(
@@ -1195,6 +1214,7 @@ mod tests {
     #[test]
     fn fold_failure_rows() {
         let mut panel = Panel::default();
+        panel.toggle();
         assert!(panel.take_want());
         panel.apply(None);
 
@@ -1205,6 +1225,7 @@ mod tests {
         assert!(lines[0].contains("10s"), "{lines:?}");
 
         let mut panel = Panel::default();
+        panel.toggle();
         assert!(panel.take_want());
         panel.apply(None);
 
