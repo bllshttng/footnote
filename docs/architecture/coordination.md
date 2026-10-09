@@ -112,9 +112,7 @@ id, never a snapshot.
 
 **The reservation is taken after the launch is proven.** `cmd_spawn` runs its node guard below the resume-provider resolution. An exit on that stretch now strands neither `dispatch:<id>` nor the handover `node:<id>`. Below it the only exit is `run_gate`, whose `except BaseException` releases both. On the way out, the reservation is released whenever the substrate is a one-shot (`--once` or `--substrate headless`), as well as on a failed spawn. When the call returns, a one-shot's worker has already exited, so nobody is left to inherit it. `pane` and `bg` keep it, because their worker outlives the caller.
 
-`is_live` returns False for cross-machine claims. The design explicitly does
-not support multi-host coordination - operators running two hosts on the same
-shared filesystem will see both claims as "opaque, not mine to release."
+`is_live` returns False for cross-machine claims. A shared file system is not a way to run two hosts: each host reads the other's claims as opaque, not its own to release. More than one host shares dispatch through one opt-in primary instead. Set `store.remote_url`, and the node, dispatch and reconcile claims live there. A peer's lease is then read on the store clock. The design is in [multiplayer.md](multiplayer.md).
 
 "Same machine" is decided by `claims/hostid.py` (`is_same_machine`), NOT by a
 raw `gethostname()` compare. Identity scopes PID-reuse detection, so it has to
@@ -455,7 +453,6 @@ Deferred for separate plans:
 - Per-project claims (`project:<mission>:<project>`) inside megatron's
   per-project dispatcher - the commander-level `fleet:` claim is the
   load-bearing race prevention.
-- Cross-host claim coordination - intentionally out of scope.
 - Web UI / TUI for claim inspection - `fno agents claim list` covers it.
 
 ## Agent primitives: citizens and limbs

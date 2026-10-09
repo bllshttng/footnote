@@ -13,7 +13,7 @@ A mod is the right way to do this. A mod runs inside Claude Code, with no fork a
 ## Start
 
 1. Install the plugin: `/plugin install buddy@footnote`. The buddy hatches at the next session start.
-2. Type `/buddy` to see its card. The first time, you watch it hatch from an egg. Press any key to close the card.
+2. Type `/buddy` to see its card. The first time, you watch it hatch from an egg. In a wide fullscreen terminal, and in Desktop, the card opens in a pane on the right. Press any key to close it. In other terminals, Claude Code would put that pane above the prompt, so the card shows in the transcript instead.
 3. Type `/buddy statusline` to put it beside your status line. This is the best place for the buddy.
 4. If you want the buddy in a side pane, type `/buddy pane`.
 
@@ -52,6 +52,8 @@ The length of your status line does not move the buddy. The buddy always aligns 
 ### Your status line, and how to undo it
 
 `/buddy statusline` saves your current `statusLine` setting. Then it points `statusLine` at a small wrapper. The wrapper runs your status line first, then draws the buddy beside it. If you have no status line, the left side shows the model, the folder, the context use, and the cost.
+
+The wrapper reruns every second, so the buddy animates. Most of those runs cost almost nothing: a small bash script prints the last output again when the session, the width, and the buddy's frame have not changed, and Python starts only when one of them has. The buddy moves only for 1 minute after something happens: you type, a turn ends, it speaks, or you pet it. Then it holds still until the next thing, so an idle session stays on that cheap path. While it moves, it changes pose every 2 seconds. In the fno mux, a pane that is not on screen never moves. Your own status line does not rerun every second. It reruns when the session changes, or every 30 seconds at most. To choose that time, give your status line its own `refreshInterval`. If you set `refreshInterval` on the wrapper itself, the next session moves that number to your status line and sets the wrapper back to 1 second.
 
 `/buddy pane` puts your saved setting back, exactly as it was, and moves the buddy to the side pane. `/buddy restore` does the same thing. If the buddy cannot read the saved copy, it does not change your settings.
 

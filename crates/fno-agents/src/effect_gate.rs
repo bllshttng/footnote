@@ -193,7 +193,9 @@ pub fn map_tool_call(tool_name: &str, tool_input: &Value) -> Option<MappedEffect
 pub fn map_bash_command(command: &str) -> Option<MappedEffect> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let input = json!({ "command": command });
-    // Merge effects belong to the merge gate and git-protection.
+    // Merge effects belong to the merge gate and git-protection. A PR or
+    // issue comment is part of the review loop, like `gh pr create` and the
+    // `gh api` review comments: no person outside the repo receives it.
     if matches!(tokens.as_slice(), ["gh", "pr", "merge", ..])
         || matches!(tokens.as_slice(), ["git", "push", ..])
     {
@@ -214,12 +216,6 @@ pub fn map_bash_command(command: &str) -> Option<MappedEffect> {
                 &input,
             ))
         }
-        ["gh", "issue", "comment", ..] | ["gh", "pr", "comment", ..] => Some(mapped(
-            "external.communication",
-            "github".to_string(),
-            "Bash",
-            &input,
-        )),
         ["gh", "repo", "delete", ..]
         | ["gh", "release", "delete", ..]
         | ["aws", "s3", "rm", ..] => Some(mapped(
