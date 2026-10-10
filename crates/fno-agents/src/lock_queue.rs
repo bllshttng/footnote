@@ -6,15 +6,17 @@
 //! waiter writes one ticket file beside the lock and only the oldest live
 //! ticket may run `try_lock`. flock stays the source of truth - a ticketless
 //! writer can still take the lock out of order - so this is fairness, not
-//! correctness. A dead waiter's ticket is pruned by any scan (the same
-//! dead-pid contract the lock stamp's holder summary uses); a stalled head
-//! is bounded by its own deadline, and withdrawing it serves the next.
+//! correctness. A waiter's ticket whose holder is gone is pruned by any scan:
+//! the holder is a dead pid, a zombie (a SIGKILLed-but-unreaped holder still
+//! answers kill(pid,0)), or a recycled pid (the pid + start incarnation
+//! contract the lockfile stamp uses). A stalled head is bounded by its own
+//! deadline, and withdrawing it serves the next.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::agent_lock::pid_is_alive;
+use crate::agent_lock::pid_is_gone;
 
 /// Disambiguates same-nano registrations within one process; nanos already
 /// separate processes (a name carries a pid).
@@ -44,6 +46,15 @@ pub fn register(lock_path: &Path) -> std::io::Result<PathBuf> {
     );
     let path = dir.join(name);
     fs::File::create_new(&path)?;
+    // The ticket carries its holder's incarnation (pid + start time, the
+    // lockfile stamp's contract) so a scan can tell a zombie or a recycled
+    // pid from a live waiter. Best effort: an empty ticket counts live, so a
+    // scan racing this write never prunes a fresh waiter.
+    let stamp = serde_json::json!({
+        "pid": std::process::id(),
+        "start": crate::process_probe::process_bsd(std::process::id()).map(|(start, _)| start),
+    });
+    let _ = fs::write(&path, format!("{stamp}"));
     Ok(path)
 }
 
@@ -56,8 +67,9 @@ pub fn withdraw(ticket: Option<&Path>) {
 }
 
 /// Whether `ticket` is the oldest live ticket in its queue. Scans prune
-/// tickets whose parseable pid is dead; a ticket that does not parse (a
-/// create still landing) counts as live, never as absent.
+/// tickets whose holder is gone (dead pid, zombie, or recycled pid per the
+/// stamped start time); a ticket that does not parse (a create still
+/// landing) counts as live, never as absent.
 pub fn am_head(ticket: &Path) -> bool {
     let Some(dir) = ticket.parent() else {
         return true;
@@ -77,7 +89,7 @@ pub fn am_head(ticket: &Path) -> bool {
             continue;
         }
         if let Some(pid) = ticket_pid(&name) {
-            if !pid_is_alive(pid) {
+            if pid_is_gone(pid, ticket_start(&entry.path())) {
                 let _ = fs::remove_file(entry.path());
                 continue;
             }
@@ -107,6 +119,15 @@ fn ticket_pid(name: &str) -> Option<u64> {
     name.split('-').nth(1)?.parse().ok()
 }
 
+/// The start time stamped in a ticket's body; `None` when the ticket is
+/// empty or unparsable (a create still landing), so the probe runs on pid
+/// death and zombie state alone.
+fn ticket_start(path: &Path) -> Option<u64> {
+    let text = fs::read_to_string(path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(text.lines().next()?).ok()?;
+    parsed.get("start")?.as_u64()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +148,104 @@ mod tests {
         assert!(!am_head(&second), "second waits behind the live first");
         assert!(am_head(&first), "first is head once the dead one is gone");
         assert!(!dead.exists(), "the scan pruned the dead ticket");
+    }
+
+    /// Spawn a child that becomes a zombie: SIGKILLed but never waited. A
+    /// zombie answers kill(pid,0) with 0, so pid_is_alive calls it alive
+    /// while it can hold neither an fd nor a flock.
+    fn zombie_child() -> std::process::Child {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep spawns");
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
+        child
+    }
+
+    #[test]
+    fn zombie_ticket_is_pruned_and_serves_the_next_waiter() {
+        let mut child = zombie_child();
+        // The trap: the zombie still answers kill(pid,0), so the old
+        // pid-death prune called its ticket live forever.
+        assert!(
+            crate::agent_lock::pid_is_alive(child.id() as u64),
+            "the zombie still answers kill(pid,0)"
+        );
+        let start = crate::process_probe::process_bsd(child.id())
+            .expect("zombie start readable")
+            .0;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("graph.json.lock");
+        std::fs::create_dir_all(queue_dir(&lock)).unwrap();
+        let dead = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
+        std::fs::write(
+            &dead,
+            format!("{{\"pid\":{},\"start\":{start}}}", child.id()),
+        )
+        .unwrap();
+        let second = register(&lock).unwrap();
+        assert!(am_head(&second), "the zombie ticket pins no one");
+        assert!(!dead.exists(), "the scan pruned the zombie ticket");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn recycled_pid_ticket_is_pruned_by_start_mismatch() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep spawns");
+        let real_start = crate::process_probe::process_bsd(child.id())
+            .expect("live child start readable")
+            .0;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("graph.json.lock");
+        std::fs::create_dir_all(queue_dir(&lock)).unwrap();
+        let stale = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
+        std::fs::write(
+            &stale,
+            format!(
+                "{{\"pid\":{},\"start\":{}}}",
+                child.id(),
+                real_start.wrapping_add(1)
+            ),
+        )
+        .unwrap();
+        let second = register(&lock).unwrap();
+        assert!(
+            am_head(&second),
+            "a recycled pid's stale ticket pins no one"
+        );
+        assert!(!stale.exists(), "the scan pruned the recycled-pid ticket");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn live_holder_ticket_with_matching_start_is_never_pruned() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep spawns");
+        let start = crate::process_probe::process_bsd(child.id())
+            .expect("live child start readable")
+            .0;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("graph.json.lock");
+        std::fs::create_dir_all(queue_dir(&lock)).unwrap();
+        let live = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
+        std::fs::write(
+            &live,
+            format!("{{\"pid\":{},\"start\":{start}}}", child.id()),
+        )
+        .unwrap();
+        let second = register(&lock).unwrap();
+        assert!(
+            !am_head(&second),
+            "later waiter still waits behind a live head"
+        );
+        assert!(live.exists(), "the live holder ticket stays");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

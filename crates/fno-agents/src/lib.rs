@@ -351,6 +351,7 @@ pub mod pr_status_facts;
 pub mod pr_watch;
 pub mod pr_worktree;
 pub mod process_owner;
+pub mod process_probe;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provenance;

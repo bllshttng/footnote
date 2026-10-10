@@ -485,53 +485,15 @@ fn recover_with_policy(
 /// units across platforms (Linux ticks vs macOS microseconds) do not matter.
 ///
 /// DO NOT read this as a wall clock. At least three writers fill the column it
-/// lands in, in at least three conventions: this function (Linux ticks / macOS
+/// lands in, in at least three conventions: the probe (Linux ticks / macOS
 /// micros), `_process_start_time` in cli/src/fno/agents/spawn_gate.py, and
 /// `claude_adopt.rs`, which passes through whatever claude's own roster wrote.
 /// Converting one of them to epoch time makes the equality comparisons in
 /// `pid_is_ours` and `_pid_alive` fail across writers, which reaps live workers.
 /// A consumer that needs a real start time needs its own field, not this token.
-#[cfg(target_os = "linux")]
-pub fn process_start_time(pid: u32) -> Option<u64> {
-    // /proc/<pid>/stat field 22 (1-based) is `starttime` in clock ticks since
-    // boot. The comm field (2) can contain spaces and parens, so split on the
-    // LAST ')' and index from there. After "comm)" the space-separated fields are
-    // [state, ppid, ...], with starttime the 20th (0-based index 19).
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = stat.rsplit_once(')')?.1;
-    after.split_whitespace().nth(19)?.parse::<u64>().ok()
-}
-
-/// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)` fills a `proc_bsdinfo` whose
-/// `pbi_start_tvsec`/`pbi_start_tvusec` is the process start time; fold to
-/// microseconds. (`kinfo_proc` is not exposed by the libc crate.)
-#[cfg(target_os = "macos")]
-pub fn process_start_time(pid: u32) -> Option<u64> {
-    use std::mem;
-    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
-    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    // SAFETY: buffer is a zeroed proc_bsdinfo of exactly `size` bytes.
-    // proc_pidinfo returns the number of bytes written; anything other than a
-    // full struct means the process is gone / not introspectable -> None.
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    if written != size {
-        return None;
-    }
-    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn process_start_time(_pid: u32) -> Option<u64> {
-    None
-}
+///
+/// Re-exported from [`crate::process_probe`], which owns the probe.
+pub use crate::process_probe::process_start_time;
 
 pub(crate) use crate::gc_inventory::index_tree;
 // the pane kill and its absence vocabulary moved to pane_stop.rs
