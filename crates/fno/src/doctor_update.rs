@@ -2018,6 +2018,20 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     let mut rust_outcome: Option<String> = None;
     if !flags.no_rust {
         rust_outcome = Some(refresh_rust_bins(&resolved, flags.rust, false, &mut failed));
+        // These outcomes left the rust bins uninstalled: the leg named its
+        // reason on stderr, and the update must not pass as healthy on top
+        // of it. "fresh" proved the bins current and
+        // "installed-newest-published" installed something; these three
+        // installed nothing.
+        if matches!(
+            rust_outcome.as_deref(),
+            Some("waiting-ci") | Some("skipped-no-origin") | Some("skipped-no-cargo")
+        ) {
+            failed.push(format!(
+                "rust bins installed nothing ({})",
+                rust_outcome.as_deref().unwrap_or_default()
+            ));
+        }
         let built_fields: Vec<(&str, String)> = {
             let mut f: Vec<(&str, String)> = Vec::new();
             if let Some(r) = rust_subtree_rev(&resolved) {
