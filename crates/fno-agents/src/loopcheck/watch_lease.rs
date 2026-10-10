@@ -35,12 +35,10 @@ pub(super) fn record_build_park(parsed: &super::LoopCheckArgs) {
         .events_path
         .clone()
         .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
-    let global_events = parsed.global_events_path.clone().unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-            .join(".fno/events.jsonl")
-    });
+    let global_events = parsed
+        .global_events_path
+        .clone()
+        .unwrap_or_else(super::default_global_events_path);
     let row = serde_json::json!({
         "session_id": session_id,
         "pr": null,
