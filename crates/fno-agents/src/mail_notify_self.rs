@@ -325,7 +325,7 @@ mod tests {
         // Busy: a live idle hold on the clock key means the turn is busy,
         // so neither render nor ack runs.
         crate::mail_hold::tests::with_hold_env(|home| {
-            let (dir, bus) = bus_fixture("busy");
+            let (_dir, bus) = bus_fixture("busy");
             append(&bus, "lead", &handle, "hello");
             let clock_dir = home.join("mail-hold");
             std::fs::create_dir_all(&clock_dir).unwrap();
@@ -345,7 +345,7 @@ mod tests {
         // Delivery: with no hold, unread mail renders, then the cursor
         // lands on the last drained id and each id gets a receipt.
         crate::mail_hold::tests::with_hold_env(|_home| {
-            let (dir, bus) = bus_fixture("deliver");
+            let (_dir, bus) = bus_fixture("deliver");
             append(&bus, "lead", &handle, "first");
             append(&bus, "lead", &handle, "second");
             assert_eq!(notify(&bus, session), 0);
