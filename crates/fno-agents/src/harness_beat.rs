@@ -74,11 +74,19 @@ mod tests {
 
     #[test]
     fn auto_reads_the_row_and_a_beat_word_overrides_it() {
-        let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.beat("claude"), Some("loop"));
-        assert_eq!(contract.beat("codex"), Some("goal"));
-        assert_eq!(contract.beat("pi"), Some("daemon"));
+        use crate::harness_capabilities::CAPABILITY_TOML;
+
+        // A row with no `beat` reads daemon; a row naming a non-member is refused.
+        let bare: Vec<&str> = CAPABILITY_TOML
+            .lines()
+            .filter(|l| !l.starts_with("beat = "))
+            .collect();
+        let contract = HarnessContract::parse(&bare.join("\n")).unwrap();
+        assert_eq!(contract.beat("claude"), Some("daemon"));
         assert_eq!(contract.beat("nonesuch"), None);
+        let typo_row = CAPABILITY_TOML.replacen("\nbeat = \"", "\nbeat = \"x", 1);
+        let err = HarnessContract::parse(&typo_row).unwrap_err().to_string();
+        assert!(err.contains("\"beat\""), "{err}");
 
         assert_eq!(resolve_with(None, "loop").source, "capability row");
         assert_eq!(resolve_with(Some("auto"), "loop").beat, "loop");
