@@ -951,6 +951,9 @@ def _codex_cli_version() -> Optional[tuple]:
     matter how many panes this process spawns. None on any miss (missing
     binary, timeout, unparseable output) - treated as "assume incompatible"
     by every caller, never as "assume compatible"."""
+    if (pinned := os.environ.get("FNO_CODEX_VERSION")) is not None:
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", pinned)
+        return tuple(int(part) for part in found.groups()) if found else None
     try:
         proc = subprocess.run(
             ["codex", "--version"], capture_output=True, text=True, timeout=5
@@ -963,6 +966,12 @@ def _codex_cli_version() -> Optional[tuple]:
     if not match:
         return None
     return tuple(int(part) for part in match.groups())
+
+
+def codex_hook_trust_args() -> list[str]:
+    """Trust fno's own plugin hooks on every launched codex; empty on an old codex."""
+    too_old = (_codex_cli_version() or (0, 0, 0)) < _CODEX_HOOK_TRUST_FLAG_MIN_VERSION
+    return [] if too_old else ["--dangerously-bypass-hook-trust"]
 
 
 def build_pane_argv(
@@ -1075,7 +1084,7 @@ def build_pane_argv(
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
         argv = [*identity, "-C", str(cwd)]
-        bypass_posture = permission_mode == "yolo" if permission_mode else yolo
+        bypass_posture = permission_mode in ("yolo", "bypassPermissions") if permission_mode else yolo
         if permission_mode:
             argv += permission_pane_tokens("codex", permission_mode)
         else:
@@ -1087,18 +1096,9 @@ def build_pane_argv(
                 # disagree about what "bounded" means.
                 else permission_pane_tokens("codex", "workspace-write:never")
             )
-        if bypass_posture and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
-            # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
-            # whenever a hook is new or changed, and the approvals bypass
-            # above does not clear it. Answering it by keystroke would need a
-            # modal-specific response mapping, which no harness declares - the
-            # `submit_keys` contract submits a composed turn and says nothing
-            # about a modal. So this flag is the only lever. Sandboxed
-            # postures never opt in. Gated on
-            # the installed version: an older codex's clap parser rejects an
-            # unrecognized flag outright, and an older codex predates the
-            # modal anyway, so omitting the flag there costs nothing.
-            argv += ["--dangerously-bypass-hook-trust"]
+        # Codex 0.148 parks a pane on a `Hooks need review` modal for a new or
+        # changed hook, and no posture clears it. Sandbox and approval stay.
+        argv += codex_hook_trust_args()
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
         # cannot commit without the grant. Only the two bypass postures skip it.

@@ -35,6 +35,16 @@ def _deny_all_path(_bin: str) -> bool:
 def _no_exec(*_args, **_kwargs) -> None:
     """Test stand-in for os.execvp; just records that it would have run."""
 
+
+@pytest.fixture(autouse=True)
+def _no_installed_codex(monkeypatch):
+    """Pin the codex version probe so exact argvs do not depend on the codex
+    installed on the machine running the suite."""
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: None)
+    monkeypatch.setenv("FNO_CODEX_VERSION", "")
+
 # ---------------------------------------------------------------------------
 # AC2-HP — codex resume happy path
 # ---------------------------------------------------------------------------
@@ -678,7 +688,7 @@ def test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13() -> None:
 # code-review high --comment --fix findings on the claude wake path
 # ---------------------------------------------------------------------------
 
-def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass() -> None:
+def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass(monkeypatch) -> None:
     """A codex resume must land in the row's own tree.
 
     Codex asks session-directory vs current-directory and defaults to the
@@ -701,8 +711,10 @@ def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass() -> None:
     Neither is the behavior itself. Closing that needs a recorded session
     resumed against a real tty, which no unit test can host.
     """
+    from fno.agents import mux_spawn
     from fno.agents.resume_cli import _build_resume_argv
 
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 162, 0))
     argv = _build_resume_argv("codex", "01a03f51-4704-7f33-942a-e4e773d81cfd",
                               cwd="/tmp/wt/x-04b0")
     assert argv is not None
@@ -712,9 +724,10 @@ def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass() -> None:
     # A global belongs before the subcommand, where the -c grant already sits.
     assert argv.index("--cd") < argv.index("resume")
     # No permission bypass: the row records no sandbox posture, so this lane
-    # cannot tell a bounded worker from a yolo one.
+    # cannot tell a bounded worker from a yolo one. Hook trust is
+    # posture-free and rides first, a global like the grant.
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
-    assert "--dangerously-bypass-hook-trust" not in argv
+    assert argv[1] == "--dangerously-bypass-hook-trust"
     # Identity still comes from the contract.
     assert argv[0] == "codex"
     assert "01a03f51-4704-7f33-942a-e4e773d81cfd" in argv

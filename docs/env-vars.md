@@ -87,6 +87,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CODEX_ASK_WAIT_MS` | rs | unclear: crates/fno-agents/src/codex_thread.rs:56 |
 | `FNO_CODEX_BIN` | rs | Overrides the codex CLI the readiness and upgrade paths resolve, for private roots and tests; PATH order otherwise. |
 | `FNO_CODEX_INTERRUPT_BOUND_MS` | rs | unclear: crates/fno-agents/src/codex_thread.rs:80 |
+| `FNO_CODEX_VERSION` | py+rs | Pins the codex version the hook-trust gate reads, so tests and private roots skip the `codex --version` probe. |
 | `FNO_CODEX_SESSIONS_DIR` | rs | Overrides the codex sessions root the announce status scan reads. |
 | `FNO_CONFIG` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:436 |
 | `FNO_CONFIG_SEARCH_ROOT` | py | unclear: cli/src/fno/config_io.py:66 |
