@@ -223,9 +223,9 @@ pub(crate) fn done_not_merged_report(entries: &[Value], roots: &[PathBuf]) -> Va
         let Some(completed) = e.get("completed_at").and_then(Value::as_str) else {
             continue;
         };
-        let Some(pr_number) = e.get("pr_number").and_then(Value::as_i64) else {
+        if e.get("pr_number").and_then(Value::as_i64).is_none() {
             continue;
-        };
+        }
         let Some(closed_ms) = crate::event_store::parse_rfc3339_ms(completed) else {
             continue;
         };
