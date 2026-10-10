@@ -44,14 +44,14 @@ pub(crate) fn route(class: HelpClass, rung: u64) -> Route {
         HelpClass::Stuck => in_or_escalate(rung, STUCK_TEXT),
         HelpClass::Held => Route::OffSession { to: Recipient::Holder, text: format!("A claim on this node is held while the holder is unreachable (help {rung}). Mail the holder or release the claim.") },
         HelpClass::Wait => Route::Timer { backoff_secs: match rung { 0 => 300, 1 => 600, _ => 900 } },
-        HelpClass::EnvDenied | HelpClass::GateUnsatisfiable => Route::OffSession { to: Recipient::Lead, text: format!("The run hit an environment or gate refusal it cannot clear (help {rung}). Evidence carries the receipt; a lead decides.") },
-        HelpClass::GateDeadlock => Route::OffSession { to: Recipient::EvidenceHolder, text: format!("Two gates wait on each other (help {rung}). The evidence names the holder to break the deadlock; the stop allows as Interrupted.") },
-        HelpClass::Question => Route::OffSession { to: Recipient::Ladder, text: format!("A session asks a question (help {rung}). Answer by mail or record a ruling with fno inbox decide; 10 minutes without a read climbs the ladder.") },
+        HelpClass::EnvDenied | HelpClass::GateUnsatisfiable => Route::OffSession { to: Recipient::Lead, text: format!("The run hit an environment or gate refusal it cannot clear (help {rung}). Evidence carries the receipt. A lead decides.") },
+        HelpClass::GateDeadlock => Route::OffSession { to: Recipient::EvidenceHolder, text: format!("Two gates wait on each other (help {rung}). The evidence names the holder to break the deadlock. The stop allows as Interrupted.") },
+        HelpClass::Question => Route::OffSession { to: Recipient::Ladder, text: format!("A session asks a question (help {rung}). Answer by mail or record a ruling with fno inbox decide. 10 minutes without a read climbs the ladder.") },
         HelpClass::Budget => match rung {
             0 => Route::Timer { backoff_secs: 300 },
-            _ => Route::OffSession { to: Recipient::Lead, text: format!("Budget hit twice in one run (help {rung}). The evidence names the cap axis and value; a lead re-scopes or raises it.") },
+            _ => Route::OffSession { to: Recipient::Lead, text: format!("Budget hit twice in one run (help {rung}). The evidence names the cap axis and value. A lead re-scopes or raises it.") },
         },
-        HelpClass::Unclassified => Route::OffSession { to: Recipient::Lead, text: format!("An unclassified help (help {rung}). No route matched; a lead triages it, else it climbs the question ladder.") },
+        HelpClass::Unclassified => Route::OffSession { to: Recipient::Lead, text: format!("An unclassified help (help {rung}). No route matched. A lead triages it, else it climbs the question ladder.") },
         }
 }
 
@@ -63,7 +63,7 @@ fn in_or_escalate(rung: u64, text: &'static str) -> Route {
     } else {
         Route::OffSession {
             to: Recipient::Lead,
-            text: format!("{text} The in-session route is spent at rung {rung}; a lead decides."),
+            text: format!("{text} The in-session route is spent at rung {rung}. A lead decides."),
         }
     }
 }
@@ -725,7 +725,7 @@ pub(crate) fn render_routing_page() -> String {
         HelpClass::Unclassified,
     ];
     let mut out = String::from(
-        "<!-- generated: crates/fno-agents/src/help_router.rs renders this; HELP_ROUTING_BLESS=1 rewrites it. Edits are refused by generated-write-guard. -->\n\n# Help routing\n\nEvery `<help class=... reason=... evidence=...>` routes to its next step. The run takes that step in the same session or by mail to the rung that owns it; the chain ends only at a guard that names its owner.\n\n| Class | First route (rung 0) | Escalation |\n|---|---|---|\n",
+        "<!-- generated: crates/fno-agents/src/help_router.rs renders this; HELP_ROUTING_BLESS=1 rewrites it. Edits are refused by generated-write-guard. -->\n\n# Help routing\n\nEvery `<help class=... reason=... evidence=...>` routes to its next step. The run takes that step in the same session or by mail to the rung that owns it. The chain ends only at a guard that names its owner.\n\n| Class | First route (rung 0) | Escalation |\n|---|---|---|\n",
     );
     for class in all {
         let first = route(class, 0);
@@ -739,7 +739,7 @@ pub(crate) fn render_routing_page() -> String {
             route_cell(&next, next_kind),
         ));
     }
-    out.push_str("\n## Flow\n\n```mermaid\nflowchart TD\n    help[\"<help class=...>\"] --> scan[\"stop-hook scan writes the blocked row\"]\n    scan --> route{\"route(class, rung)\"}\n    route -->|in-session| block[\"stop hook blocks with the route text (2-cap)\"]\n    route -->|off-session| mail[\"fno/help-router mail to the owner rung\"]\n    route -->|timer| wait[\"daemon arm fires the wake after the backoff\"]\n    mail -->|unread 10 min| climb[\"climb worker, lead, king, user page\"]\n    climb --> page[\"fno inbox outstanding ask files on the user page\"]\n```\n\n## Emission rule\n\nEmit the tag, then take the routed step. STOP only for irreversible, money, public surface, or taste. The in-session classes block at most twice per run and class (the third help mails the lead); question climbs worker, lead, king, user page on a 10 minute lease from READ.\n\n## Delivery legs and the lease\n\nOff-session routes deliver through `burn_watch::wake_with_text`: mail from `fno/help-router` first, resume fallback when a durable receipt answers. The route row records the leg that landed (queued, handed). The lease runs from READ, proven in the recipient transcript at the sweep; a delivery that hands and is never read climbs one rung after 10 minutes, ending on the user page (`fno inbox outstanding ask`).\n");
+    out.push_str("\n## Flow\n\n```mermaid\nflowchart TD\n    help[\"<help class=...>\"] --> scan[\"stop-hook scan writes the blocked row\"]\n    scan --> route{\"route(class, rung)\"}\n    route -->|in-session| block[\"stop hook blocks with the route text (2-cap)\"]\n    route -->|off-session| mail[\"fno/help-router mail to the owner rung\"]\n    route -->|timer| wait[\"daemon arm fires the wake after the backoff\"]\n    mail -->|unread 10 min| climb[\"climb worker, lead, king, user page\"]\n    climb --> page[\"fno inbox outstanding ask files on the user page\"]\n```\n\n## Emission rule\n\nEmit the tag, then take the routed step. STOP only for irreversible, money, public surface, or taste. The in-session classes block at most twice per run and class (the third help mails the lead). Question climbs worker, lead, king, user page on a 10 minute lease from READ.\n\n## Delivery legs and the lease\n\nOff-session routes deliver through `burn_watch::wake_with_text`: mail from `fno/help-router` first. A durable receipt triggers the resume fallback. The route row records the leg that landed (queued, handed). The lease runs from READ, proven in the recipient transcript at the sweep. A delivery that hands and is never read climbs one rung after 10 minutes, ending on the user page (`fno inbox outstanding ask`).\n");
     out
 }
 
