@@ -344,14 +344,31 @@ pub fn decide(payload: &Value) -> Value {
     let substrate = axis(payload, "substrate");
     let explicit_substrate = opt_str(payload, "explicit_substrate").filter(|s| !s.is_empty());
     let mut injected_substrate: Option<String> = None;
-    if explicit_substrate.is_none() && !substrate.value.is_empty() {
+    // `bg` is the Rust-internal kind, never a config spelling: the CLI flag
+    // refuses it and the dispatch resolver refuses it, so a config value that
+    // reached the child as `--substrate bg` would be the ONE untaught door.
+    // Map it to `thread` loudly instead.
+    let mut substrate_mapped = false;
+    let mut substrate_value = substrate.value.clone();
+    if substrate_value == "bg" {
+        substrate_value = "thread".to_string();
+        substrate_mapped = true;
+    }
+    if explicit_substrate.is_none() && !substrate_value.is_empty() {
         let substrate_ok = flag(payload, "substrate_ok");
         if !prov.is_empty() && substrate_ok {
-            inject.push(json!(["--substrate", substrate.value]));
-            injected_substrate = Some(substrate.value.clone());
+            if substrate_mapped {
+                messages.push(format!(
+                    "fno agents spawn: {}.substrate = \"bg\" is the retired spelling; \
+                     mapping it to \"thread\" (set substrate = \"thread\" to silence this)",
+                    substrate.rung,
+                ));
+            }
+            inject.push(json!(["--substrate", substrate_value]));
+            injected_substrate = Some(substrate_value.clone());
             applied.push(json!([
                 "substrate",
-                substrate.value,
+                substrate_value,
                 format!("{}.substrate", substrate.rung),
             ]));
         } else {
@@ -1032,5 +1049,24 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("this worker bills at the caller default"));
+    }
+
+    #[test]
+    fn config_substrate_bg_maps_to_thread_loudly() {
+        // `bg` is the Rust-internal kind: the flag and the dispatch resolver
+        // both refuse it, so a config value must not ride the one untaught
+        // door. Inject `thread` and name the mapping.
+        let out = decide_map(json!({
+            "substrate": {"value": "bg", "rung": "agents.defaults"},
+            "prov": "claude",
+            "substrate_ok": true,
+        }));
+        assert_eq!(out["inject"], json!([["--substrate", "thread"]]));
+        let msg = out["messages"][0].as_str().unwrap();
+        assert!(msg.contains("retired spelling"), "{msg}");
+        // The rung name rides the message in two halves: the composed
+        // 25-char form is a tracked cross-language twin literal.
+        assert!(msg.contains("agents.defaults"), "{msg}");
+        assert!(msg.contains(".substrate = \"bg\""), "{msg}");
     }
 }
