@@ -36,14 +36,14 @@ if [[ -x "$WRAPPER" ]]; then
   COMPILER_LOG="$TMP/logs/compiler-direct" PATH="/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name direct
   if grep -q '^unset|--crate-name direct$' "$TMP/logs/compiler-direct"; then pass "missing sccache falls through to real compiler"; else fail "direct fallback" "compiler receipt missing"; fi
 
-  COMPILER_LOG="$TMP/logs/compiler-cache" SCCACHE_LOG="$TMP/logs/sccache-default" PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name cached
+  COMPILER_LOG="$TMP/logs/compiler-cache" SCCACHE_LOG="$TMP/logs/sccache-default" FNO_SCCACHE=1 PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name cached
   if grep -q '^30G|' "$TMP/logs/sccache-default"; then pass "sccache defaults to bounded 30G cache"; else fail "sccache default cap" "30G receipt missing"; fi
   if grep -q -- '--crate-name cached' "$TMP/logs/compiler-cache"; then pass "sccache preserves the rustc invocation"; else fail "sccache argv" "compiler did not receive original argv"; fi
 
-  COMPILER_LOG="$TMP/logs/compiler-override" SCCACHE_LOG="$TMP/logs/sccache-override" SCCACHE_CACHE_SIZE=3G PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name override
+  COMPILER_LOG="$TMP/logs/compiler-override" SCCACHE_LOG="$TMP/logs/sccache-override" SCCACHE_CACHE_SIZE=3G FNO_SCCACHE=1 PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name override
   if grep -q '^3G|' "$TMP/logs/sccache-override"; then pass "operator sccache cap is preserved"; else fail "sccache override" "3G receipt missing"; fi
 
-  COMPILER_LOG="$TMP/logs/compiler-paths" SCCACHE_LOG="$TMP/logs/sccache-paths" CARGO_PATH_LOG="$TMP/logs/cargo-paths" CARGO_BUILD_BUILD_DIR="$TMP/bd" CARGO_BUILD_TARGET_DIR="$TMP/td" CARGO_TARGET_DIR="$TMP/td2" PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name shared-key
+  COMPILER_LOG="$TMP/logs/compiler-paths" SCCACHE_LOG="$TMP/logs/sccache-paths" CARGO_PATH_LOG="$TMP/logs/cargo-paths" CARGO_BUILD_BUILD_DIR="$TMP/bd" CARGO_BUILD_TARGET_DIR="$TMP/td" CARGO_TARGET_DIR="$TMP/td2" FNO_SCCACHE=1 PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name shared-key
   if grep -q '^unset|unset|unset$' "$TMP/logs/cargo-paths" && grep -q -- '--crate-name shared-key' "$TMP/logs/compiler-paths"; then pass "sccache key drops per-run cargo path vars"; else fail "cargo path vars in key" "sccache saw a per-run path or lost argv"; fi
 
   if COMPILER_LOG="$TMP/logs/compiler-direct-paths" CARGO_BUILD_BUILD_DIR="$TMP/bd" CARGO_BUILD_TARGET_DIR="$TMP/td" CARGO_TARGET_DIR="$TMP/td2" PATH="/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name direct-paths && grep -q '^unset|--crate-name direct-paths$' "$TMP/logs/compiler-direct-paths"; then pass "direct fallback unaffected by cargo path vars"; else fail "direct fallback" "receipt or exit missing with cargo path vars set"; fi

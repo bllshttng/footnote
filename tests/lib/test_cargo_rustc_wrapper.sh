@@ -13,6 +13,10 @@
 #   T17-T19 - the sccache client watcher: a server that runs no compile is
 #             stopped and the compile falls back; the bound spares a running
 #             compile; a compile whose cargo is gone is reaped
+#   T20     - sccache is opt-in: the default compile is bare rustc, a
+#             project `build.sccache = true` opts it in
+#   T21     - opt-in precedence: config false keeps bare, FNO_SCCACHE=1
+#             overrides it, SCCACHE_DISABLE=1 wins over the env
 #
 # All use PATH-shadowing stubs in place of the real sccache/fno-agents/fno.
 #
@@ -35,7 +39,7 @@ fail() { echo "FAIL: $*" >&2; FAILURES=$((FAILURES + 1)); }
 [[ -x "$WRAPPER" ]] || { echo "FAIL: cargo-rustc-wrapper.sh not executable at $WRAPPER" >&2; exit 1; }
 bash -n "$WRAPPER" || { echo "FAIL: cargo-rustc-wrapper.sh failed bash -n" >&2; exit 1; }
 
-t01_sccache_present_announces_on_probe() {
+t01_probe_announces_per_opt_in() {
   local stub_dir out_file err_file rc
   stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
   cat > "$stub_dir/sccache" <<'STUB'
@@ -46,17 +50,31 @@ STUB
   out_file="$stub_dir/out.txt"
   err_file="$stub_dir/err.txt"
 
-  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  # Default: sccache installed but not opted in, so the probe names bare
+  # rustc and the remedy, and the bare compiler really runs. SCCACHE_DISABLE
+  # is pinned off so a machine that exports it still exercises the gate.
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" "$BASH_BIN" "$WRAPPER" /bin/echo -vV >"$out_file" 2>"$err_file"
   rc=$?
 
   [[ "$rc" -eq 0 ]] || { fail "T01: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
-  grep -q "cargo-rustc-wrapper:.*sccache" "$err_file" \
-    || { fail "T01: stderr does not name sccache: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  grep -q "bare rustc (sccache is opt-in" "$err_file" \
+    || { fail "T01: the default probe does not name the opt-in remedy: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  grep -q -- "-vV" "$out_file" \
+    || fail "T01: the bare compiler did not run: $(cat "$out_file")"
+
+  # Opted in through the env, the probe names sccache and stdout stays the
+  # compiler's own.
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" FNO_SCCACHE=1 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  rc=$?
+
+  [[ "$rc" -eq 0 ]] || { fail "T01: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
+  grep -q "cargo-rustc-wrapper: sccache (shared cache)" "$err_file" \
+    || { fail "T01: the opted-in probe does not name sccache: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   grep -q "cargo-rustc-wrapper" "$out_file" \
     && { fail "T01: the announcement leaked onto stdout: $(cat "$out_file")"; rm -rf "$stub_dir"; return; }
   grep -q "stub-sccache-stdout" "$out_file" \
     || fail "T01: stdout does not carry the compiler's own output: $(cat "$out_file")"
-  pass "T01 sccache on PATH: -vV probe announces sccache on stderr, stdout untouched"
+  pass "T01 -vV probe: bare rustc plus remedy by default, sccache under FNO_SCCACHE=1"
   rm -rf "$stub_dir"
 }
 
@@ -440,7 +458,7 @@ STUB
   out_file="$stub_dir/out.txt"
   err_file="$stub_dir/err.txt"
 
-  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" FNO_SCCACHE=1 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
   rc=$?
   idle="$(cat "$out_file")"
 
@@ -448,11 +466,96 @@ STUB
   [[ "$idle" == "0" ]] \
     || { fail "T16: the compiler saw SCCACHE_IDLE_TIMEOUT=$idle, expected 0"; rm -rf "$stub_dir"; return; }
 
-  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" SCCACHE_IDLE_TIMEOUT=3 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" FNO_SCCACHE=1 SCCACHE_IDLE_TIMEOUT=3 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
   idle="$(cat "$out_file")"
   [[ "$idle" == "3" ]] \
     || fail "T16: an operator override SCCACHE_IDLE_TIMEOUT=3 became $idle; it must survive"
   pass "T16 the wrapper exports the never-stop idle timeout and keeps an override"
+  rm -rf "$stub_dir"
+}
+
+# T20: the compile door under the opt-in gate. With sccache installed and
+# nothing opting in, the compile reaches the real compiler and sccache never
+# runs. A project `.fno/config.toml` carrying `build.sccache = true` opts
+# the same argv in through sccache.
+t20_config_key_opts_the_compile_in() {
+  local stub_dir out_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  cat > "$stub_dir/sccache" <<STUB
+#!/usr/bin/env bash
+echo "sccache \$*" >> "$stub_dir/sccache.log"
+exec "\$@"
+STUB
+  cat > "$stub_dir/compiler" <<STUB
+#!/usr/bin/env bash
+echo "compiler \$*" >> "$stub_dir/compiler.log"
+STUB
+  chmod +x "$stub_dir/sccache" "$stub_dir/compiler"
+  mkdir -p "$stub_dir/.fno" "$stub_dir/home" "$stub_dir/scripts/lib"
+  # The preset REPO_ROOT points the wrapper's two sources at the stub, so
+  # both libs ship with it.
+  cp "$REPO_ROOT/scripts/lib/paths.sh" "$REPO_ROOT/scripts/lib/with-timeout.sh" "$stub_dir/scripts/lib/"
+  out_file="$stub_dir/out.txt"
+
+  # Default: bare rustc, sccache untouched.
+  TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" SCCACHE_DISABLE=0 \
+    PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name cold >"$out_file" 2>/dev/null
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T20: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q -- "--crate-name cold" "$stub_dir/compiler.log" \
+    || { fail "T20: the default compile did not reach the compiler"; rm -rf "$stub_dir"; return; }
+  [[ -e "$stub_dir/sccache.log" ]] \
+    && { fail "T20: sccache ran without an opt-in: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
+
+  # The project file opts in: the same argv now routes through sccache.
+  printf '[build]\nsccache = true\n' > "$stub_dir/.fno/config.toml"
+  TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" SCCACHE_DISABLE=0 \
+    PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name warm >"$out_file" 2>/dev/null
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T20: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q -- "--crate-name warm" "$stub_dir/sccache.log" \
+    || { fail "T20: build.sccache = true did not route the compile through sccache: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
+  pass "T20 the default compile is bare rustc; a project build.sccache = true opts it in"
+  rm -rf "$stub_dir"
+}
+
+# T21: precedence. A project `build.sccache = false` keeps the compile bare,
+# FNO_SCCACHE=1 overrides that false, and SCCACHE_DISABLE=1 wins over the
+# env opt-in.
+t21_opt_in_precedence() {
+  local stub_dir rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  cat > "$stub_dir/sccache" <<STUB
+#!/usr/bin/env bash
+echo "sccache \$*" >> "$stub_dir/sccache.log"
+exec "\$@"
+STUB
+  cat > "$stub_dir/compiler" <<STUB
+#!/usr/bin/env bash
+echo "compiler \$*" >> "$stub_dir/compiler.log"
+STUB
+  chmod +x "$stub_dir/sccache" "$stub_dir/compiler"
+  mkdir -p "$stub_dir/.fno" "$stub_dir/home" "$stub_dir/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/paths.sh" "$REPO_ROOT/scripts/lib/with-timeout.sh" "$stub_dir/scripts/lib/"
+  printf '[build]\nsccache = false\n' > "$stub_dir/.fno/config.toml"
+
+  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" SCCACHE_DISABLE=0 PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name off >/dev/null 2>&1
+  grep -q -- "--crate-name off" "$stub_dir/compiler.log" \
+    || { fail "T21: a false config did not keep the compile bare"; rm -rf "$stub_dir"; return; }
+  [[ -e "$stub_dir/sccache.log" ]] \
+    && { fail "T21: sccache ran under a false config: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
+
+  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 SCCACHE_DISABLE=0 PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name envin >/dev/null 2>&1
+  grep -q -- "--crate-name envin" "$stub_dir/sccache.log" \
+    || { fail "T21: FNO_SCCACHE=1 did not override the false config: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
+
+  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 SCCACHE_DISABLE=1 PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name disabled >/dev/null 2>&1
+  grep -q -- "--crate-name disabled" "$stub_dir/compiler.log" \
+    || { fail "T21: SCCACHE_DISABLE=1 did not win over the env opt-in"; rm -rf "$stub_dir"; return; }
+  pass "T21 config false keeps bare, FNO_SCCACHE=1 overrides it, SCCACHE_DISABLE=1 wins"
   rm -rf "$stub_dir"
 }
 
@@ -493,7 +596,7 @@ t17_quiet_server_is_stopped_and_compile_falls_back() {
   err_file="$stub_dir/err.txt"
 
   start=$SECONDS
-  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE_STALL_SECS=2 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_STALL_SECS=2 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>"$err_file"
   rc=$?
   [[ "$rc" -eq 0 ]] || { fail "T17: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; kill "$server" 2>/dev/null; rm -rf "$stub_dir"; return; }
@@ -515,7 +618,7 @@ t18_bound_spares_a_running_compile_only() {
   printf '7001 1 /opt/bin/sccache\n7002 7001 rustc --crate-name other -C extra-filename=-other\n' > "$stub_dir/table.txt"
   out_file="$stub_dir/out.txt"
   err_file="$stub_dir/err.txt"
-  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE_CLIENT_TIMEOUT_SECS=2 FNO_SCCACHE_STALL_SECS=0 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_CLIENT_TIMEOUT_SECS=2 FNO_SCCACHE_STALL_SECS=0 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" /bin/echo compiling -C extra-filename=-mine >"$out_file" 2>"$err_file"
   rc=$?
   [[ "$rc" -eq 0 ]] || { fail "T18: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
@@ -526,7 +629,7 @@ t18_bound_spares_a_running_compile_only() {
   # Now the server runs this crate's rustc: the compile is live, so the bound
   # leaves it to finish.
   printf '7001 1 /opt/bin/sccache\n7002 7001 rustc --crate-name mine -C extra-filename=-mine\n' > "$stub_dir/table.txt"
-  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE_CLIENT_TIMEOUT_SECS=2 FNO_SCCACHE_STALL_SECS=0 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_CLIENT_TIMEOUT_SECS=2 FNO_SCCACHE_STALL_SECS=0 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" /bin/echo compiling -C extra-filename=-mine >"$out_file" 2>"$err_file"
   rc=$?
   [[ "$rc" -eq 0 ]] || { fail "T18: expected rc=0 for the running compile, got $rc"; rm -rf "$stub_dir"; return; }
@@ -545,7 +648,7 @@ t19_compile_whose_cargo_is_gone_is_reaped() {
 
   # The middle shell stands in for cargo and exits at once, so the wrapper is
   # orphaned before its first poll.
-  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE_STALL_SECS=2 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_STALL_SECS=2 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" -c '"$0" "$1" /bin/echo compiling -C extra-filename=-mine >"$2/out.txt" 2>&1 & echo $! > "$2/wrapper.pid"' \
     "$BASH_BIN" "$WRAPPER" "$stub_dir"
   wrapper_pid="$(cat "$stub_dir/wrapper.pid")"
@@ -583,6 +686,8 @@ t16_wrapper_exports_never_stop_idle_timeout
 t17_quiet_server_is_stopped_and_compile_falls_back
 t18_bound_spares_a_running_compile_only
 t19_compile_whose_cargo_is_gone_is_reaped
+t20_config_key_opts_the_compile_in
+t21_opt_in_precedence
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
