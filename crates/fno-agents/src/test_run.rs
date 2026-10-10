@@ -194,6 +194,35 @@ fn agent_cargo() -> bool {
             && std::env::var_os("CLAUDE_CODE_SESSION_ATTENDED").is_some_and(|v| v == "0"))
 }
 
+/// The build-freeze refusal: the config key is set, so an agent session
+/// builds nothing here; CI is the gate.
+const AGENT_FREEZE_LINE: &str = "[cargo freeze] build.agent_freeze is set: an agent session builds and tests nothing on this machine. Commit, push with `fno do pr push`, and CI builds and tests it. The user's cargo and `fno doctor update` still compile.";
+
+/// Whether the config freeze key is set for this checkout. The candidates
+/// read the worktree, then the canonical checkout, then global, so one line
+/// in `~/.fno/config.toml` freezes every worktree's agent cargo at once.
+fn agent_freeze_set(worktree: &Path) -> bool {
+    crate::agents_config::config_lookup(worktree, &["build", "agent_freeze"])
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Whether the freeze refuses this door call: `build.agent_freeze` is set
+/// and the cargo is an agent's. The user's cargo is never gated (law
+/// d-705a00a3), `fno doctor update`'s install build is the user's fno
+/// loading (law d-829648bb), and CI reads no config from this machine. The
+/// freeze is plain config, so neither the test-hold all-clear nor a
+/// `test:priority` grant lifts it.
+fn refuses_frozen_build(worktree: &Path) -> bool {
+    if !agent_freeze_set(worktree) || install_build() {
+        return false;
+    }
+    if std::env::var_os("CI").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    agent_cargo()
+}
+
 /// The sanctioned queue lane: a whole-suite run (FNO_TEST_FULL=1) may queue,
 /// backgrounded, exactly as the test-run guard's refusal text documents.
 pub(crate) fn full_suite_lane() -> bool {
@@ -1168,6 +1197,13 @@ fn run_build_admit(args: &[String]) -> i32 {
         }
     };
     let worktree = std::fs::canonicalize(&worktree).unwrap_or(worktree);
+    // The freeze outranks the held-slot fast path: a cargo already
+    // compiling meets it at its next crate, so setting the key stops a
+    // build in progress instead of letting it run to completion.
+    if refuses_frozen_build(&worktree) {
+        eprintln!("{AGENT_FREEZE_LINE}");
+        return SLOT_BUSY;
+    }
     let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
 
     // Cargo calls the wrapper once per crate. Once admitted, a read answers
@@ -1710,6 +1746,14 @@ fn run_run_admit(args: &[String]) -> i32 {
     // in FNO_CARGO_RUN_PROGRAM; an older wrapper names none, and the door
     // then admits as before.
     let program = std::env::var("FNO_CARGO_RUN_PROGRAM").unwrap_or_default();
+    // The freeze outranks the test refusal and its test:priority lift: a
+    // grant for local tests does not unfreeze builds, so a lead's checkout
+    // tests only once the freeze is lifted too. An older wrapper names no
+    // program, and the door then admits as before.
+    if is_test_program(&program) && refuses_frozen_build(&worktree) {
+        eprintln!("{AGENT_FREEZE_LINE}");
+        return SLOT_BUSY;
+    }
     if refuses_agent_tests(&program, &worktree) {
         eprintln!("{TESTS_REFUSED_LINE}");
         return SLOT_BUSY;
@@ -3535,5 +3579,128 @@ mod tests {
             Some(v) => std::env::set_var("FNO_TEST_FULL", v),
             None => std::env::remove_var("FNO_TEST_FULL"),
         }
+    }
+
+    /// The freeze gates an agent's cargo while the key is set and spares
+    /// the user's cargo, an install build, and CI. A malformed or absent
+    /// key reads off, like every other gate on this wrapper.
+    #[test]
+    fn build_freeze_gates_agent_cargo_only() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved: [(&str, Option<std::ffi::OsString>); 7] = [
+            ("FNO_CONFIG", std::env::var_os("FNO_CONFIG")),
+            (
+                "FNO_GLOBAL_SETTINGS_PATH",
+                std::env::var_os("FNO_GLOBAL_SETTINGS_PATH"),
+            ),
+            ("FNO_AGENT_SELF", std::env::var_os("FNO_AGENT_SELF")),
+            ("CLAUDECODE", std::env::var_os("CLAUDECODE")),
+            (
+                "CLAUDE_CODE_SESSION_ATTENDED",
+                std::env::var_os("CLAUDE_CODE_SESSION_ATTENDED"),
+            ),
+            ("FNO_INSTALL_BUILD", std::env::var_os("FNO_INSTALL_BUILD")),
+            ("CI", std::env::var_os("CI")),
+        ];
+        let restore = || {
+            for (key, value) in saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        };
+        let root = std::env::temp_dir().join(format!("fno-freeze-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".fno")).unwrap();
+        // The global tier points at an unwritten file in the test root: an
+        // unset FNO_GLOBAL_SETTINGS_PATH falls back to the real $HOME/.fno
+        // config, so an absent-key read would answer from it on a
+        // configured machine.
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", root.join("settings.json"));
+        std::env::remove_var("FNO_CONFIG");
+        let write_body = |body: &str| std::fs::write(root.join(".fno/config.toml"), body).unwrap();
+        let pin = |lanes: [(&str, Option<&std::ffi::OsStr>); 5]| {
+            for (key, value) in lanes {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        };
+        let agent: Option<&std::ffi::OsStr> = Some("w1".as_ref());
+        let set: Option<&std::ffi::OsStr> = Some("1".as_ref());
+
+        write_body("[build]\nagent_freeze = true\n");
+        pin([
+            ("FNO_AGENT_SELF", agent),
+            ("CLAUDECODE", None),
+            ("CLAUDE_CODE_SESSION_ATTENDED", None),
+            ("FNO_INSTALL_BUILD", None),
+            ("CI", None),
+        ]);
+        assert!(
+            refuses_frozen_build(&root),
+            "the key set freezes an agent's cargo"
+        );
+        pin([
+            ("FNO_AGENT_SELF", None),
+            ("CLAUDECODE", set),
+            ("CLAUDE_CODE_SESSION_ATTENDED", set),
+            ("FNO_INSTALL_BUILD", None),
+            ("CI", None),
+        ]);
+        assert!(
+            !refuses_frozen_build(&root),
+            "an attended session is the user's cargo (law d-705a00a3)"
+        );
+        pin([
+            ("FNO_AGENT_SELF", agent),
+            ("CLAUDECODE", None),
+            ("CLAUDE_CODE_SESSION_ATTENDED", None),
+            ("FNO_INSTALL_BUILD", Some("1".as_ref())),
+            ("CI", None),
+        ]);
+        assert!(
+            !refuses_frozen_build(&root),
+            "an install build is the user's fno loading (law d-829648bb)"
+        );
+        pin([
+            ("FNO_AGENT_SELF", agent),
+            ("CLAUDECODE", None),
+            ("CLAUDE_CODE_SESSION_ATTENDED", None),
+            ("FNO_INSTALL_BUILD", None),
+            ("CI", set),
+        ]);
+        assert!(!refuses_frozen_build(&root), "CI builds");
+        pin([
+            ("FNO_AGENT_SELF", agent),
+            ("CLAUDECODE", None),
+            ("CLAUDE_CODE_SESSION_ATTENDED", None),
+            ("FNO_INSTALL_BUILD", None),
+            ("CI", Some("".as_ref())),
+        ]);
+        assert!(refuses_frozen_build(&root), "an empty CI is no CI");
+        pin([
+            ("FNO_AGENT_SELF", agent),
+            ("CLAUDECODE", None),
+            ("CLAUDE_CODE_SESSION_ATTENDED", None),
+            ("FNO_INSTALL_BUILD", None),
+            ("CI", None),
+        ]);
+        for (body, name) in [
+            ("schema_version = 1\n", "absent"),
+            ("[build]\nagent_freeze = false\n", "false"),
+            ("[build]\nagent_freeze = \"yes\"\n", "not a bool"),
+        ] {
+            write_body(body);
+            assert!(
+                !refuses_frozen_build(&root),
+                "{name} reads off: the wrapper fails open"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        restore();
     }
 }

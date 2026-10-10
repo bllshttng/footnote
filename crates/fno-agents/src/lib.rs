@@ -254,6 +254,7 @@ mod lifecycle_child;
 pub mod list_row;
 pub mod live_store_fence;
 pub mod liveness_sweep;
+pub mod lock_queue;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;

@@ -2035,6 +2035,7 @@ pub fn graph_lock_path(path: &Path) -> PathBuf {
 pub struct BoundedLock {
     file: File,
     path: PathBuf,
+    ticket: Option<PathBuf>,
 }
 
 impl BoundedLock {
@@ -2054,27 +2055,46 @@ impl BoundedLock {
             .write(true)
             .open(&lock_path)?;
         let deadline = Instant::now() + timeout;
+        let ticket = crate::lock_queue::register(&lock_path).ok();
+        // The head scan walks the ticket directory, so it runs every fifth
+        // poll while try_lock keeps the 20 ms cycle once this waiter is
+        // head (a ticket only leaves the queue by withdrawal or death, so
+        // the head verdict never flips back).
+        const QUEUE_SCAN_EVERY: u32 = 5;
+        let mut since_scan = QUEUE_SCAN_EVERY;
+        let mut my_turn = ticket.is_none();
         loop {
-            match file.try_lock() {
-                Ok(()) => {
-                    stamp_lock_holder(&file);
-                    return Ok(BoundedLock {
-                        file,
-                        path: lock_path,
-                    });
-                }
-                Err(_) => {
-                    if Instant::now() >= deadline {
-                        return Err(StoreError::LockTimeout(
-                            lock_path.display().to_string(),
-                            timeout,
-                            holder_summary(&lock_path),
-                        ));
-                    }
-                    std::thread::sleep(LOCK_POLL);
+            since_scan += 1;
+            if since_scan >= QUEUE_SCAN_EVERY {
+                since_scan = 0;
+                if let Some(t) = ticket.as_deref() {
+                    my_turn = crate::lock_queue::am_head(t);
                 }
             }
+            if my_turn {
+                match file.try_lock() {
+                    Ok(()) => {
+                        stamp_lock_holder(&file);
+                        return Ok(BoundedLock {
+                            file,
+                            path: lock_path,
+                            ticket,
+                        });
+                    }
+                    Err(_) if Instant::now() >= deadline => break,
+                    Err(_) => {}
+                }
+            } else if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(LOCK_POLL);
         }
+        crate::lock_queue::withdraw(ticket.as_deref());
+        Err(StoreError::LockTimeout(
+            lock_path.display().to_string(),
+            timeout,
+            holder_summary(&lock_path),
+        ))
     }
 
     pub fn lock_path(&self) -> &Path {
@@ -2139,6 +2159,7 @@ fn holder_summary(lock_path: &Path) -> String {
 
 impl Drop for BoundedLock {
     fn drop(&mut self) {
+        crate::lock_queue::withdraw(self.ticket.as_deref());
         let _ = self.file.set_len(0);
         let _ = self.file.unlock();
     }
@@ -2624,6 +2645,28 @@ pub fn read_rows_where_strict(
     query: &crate::backlog::RowQuery,
 ) -> Result<Vec<Value>, StoreError> {
     crate::backlog::read_entries_where_defaulted(path, query, true).map_err(StoreError::Sqlite)
+}
+
+/// One row by exact id or slug (the same tiers `find_entry` applies), read
+/// from the rows store without loading every row. None when nothing matches,
+/// so the caller keeps its whole-graph fallback.
+pub fn read_one(path: &Path, token: &str) -> Result<Option<Value>, StoreError> {
+    let query = crate::backlog::RowQuery {
+        filter: crate::backlog::api::NodeFilter {
+            id_in: Some(vec![token.to_string()]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut rows = read_rows_where(path, &query)?;
+    match rows.len() {
+        0 => Ok(None),
+        // find_entry prefers the id tier over the slug tier.
+        1 => Ok(rows.pop()),
+        _ => Ok(rows
+            .into_iter()
+            .find(|row| crate::graph_get::field_eq(row, "id", token))),
+    }
 }
 
 #[doc(hidden)]
