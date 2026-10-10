@@ -999,6 +999,7 @@ def test_health_evals_line_carries_age_and_stale(tmp_graph, monkeypatch):
 
 def test_health_evals_line_fresh_has_no_stale_marker(tmp_graph, monkeypatch):
     hist = tmp_graph / "evals-history.jsonl"
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     now = datetime.now(timezone.utc)
     _append_eval_row(hist, {
         "ts": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),

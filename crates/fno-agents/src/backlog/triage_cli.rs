@@ -860,6 +860,7 @@ fn mutate_locked_entries(
         };
         let node = &mut entries[ti];
         let obj = node.as_object_mut().unwrap();
+        obj.insert("status".to_string(), Value::String("deferred".to_string()));
         obj.insert("completed_at".to_string(), Value::Null);
         obj.insert("deferred_at".to_string(), Value::String(now_iso_utc()));
         obj.insert(

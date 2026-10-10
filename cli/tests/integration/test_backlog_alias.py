@@ -229,21 +229,23 @@ def test_ac2_edge_triage_in_backlog_help():
     assert "triage" in r.output
 
 
-def test_ac1_hp_triage_context_emits_candidates(tmp_graph):
+def test_ac1_hp_triage_context_emits_candidates(tmp_graph, monkeypatch):
     """`fno backlog triage context` emits JSON with a `candidates` key."""
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     r = _invoke("backlog", "triage", "context", "--all")
     assert r.exit_code == 0, r.output
     data = json.loads(r.stdout)
     assert "candidates" in data, f"expected 'candidates' key, got {list(data.keys())}"
 
 
-def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
+def test_ac1_hp_triage_projects_empty_graph(tmp_graph, monkeypatch):
     """`fno backlog triage projects` on an empty graph returns an empty projects list.
 
     Shape must be ``{"projects": [{"name", "pending_count"}, ...]}`` so the
     /triage skill's ``each`` iterator can read counts for its banner — a
     flat list would strip that context.
     """
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     r = _invoke("backlog", "triage", "projects")
     assert r.exit_code == 0, r.output
     data = json.loads(r.stdout)

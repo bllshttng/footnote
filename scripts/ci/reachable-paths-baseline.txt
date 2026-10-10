@@ -3,6 +3,7 @@ A	(?:~/(?:[^]+)|/(?:users|home)/[^/]+(?:/[^]+)?)	py=cli/src/fno/graph/roadmap_pu
 A	(`fno agents spawn --provider <vendor> --model <m>`).	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# CLASSIFY protocol|msg-twin|data
 A	(it landed via merged pr #{merged})	py=cli/src/fno/pr/_base_lineage.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
 A	(not yet implemented; planned for a future story)	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
+A	--- source-transcript tail ({harness} {short}, near created_at) ---	py=cli/src/fno/provenance/autobrief.py;rs=crates/fno-agents/src/backlog/autobrief.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	--at applies only to --substrate pane (a thread has no calling pane)	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs	# CLASSIFY protocol|msg-twin|data
 A	--audit-worktree-touched	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/bin/client.rs|crates/fno-agents/src/client_tests.rs	# CLASSIFY protocol|msg-twin|data
 A	--dangerously-bypass-approvals-and-sandbox	py=cli/src/fno/agents/harnesses/codex.py|cli/src/fno/agents/mux_spawn.py|cli/src/fno/agents/reachability.py|cli/src/fno/agents/rust_runtime.py|scripts/diagnostics/codex-lead-continuation-smoke.py;rs=crates/fno-agents/src/codex_ask.rs|crates/fno-agents/src/codex_posture.rs|crates/fno-agents/src/provider.rs	# CLASSIFY protocol|msg-twin|data
@@ -41,6 +42,7 @@ A	advance: warning: {message}	py=cli/src/fno/backlog/advance.py;rs=crates/fno-ag
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 A	agent_session_id_uncaptured	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/removals.rs	# CLASSIFY protocol|msg-twin|data
 A	agents.max_fleet_cpu_share	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/spawn_gate_verb.rs	# CLASSIFY protocol|msg-twin|data
+A	alternate-account-available	py=cli/src/fno/agents/autonomous_route.py;rs=crates/fno-agents/src/backlog/quota_route.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	an unsupported submit contract cannot carry a nonzero delay	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
 A	anthropic_default_fable_model	py=evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
 A	anthropic_default_haiku_model	py=cli/src/fno/route_cli.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
@@ -48,6 +50,7 @@ A	anthropic_default_opus_model	py=evals/harness-fit/run/launch.py;rs=crates/fno-
 A	anthropic_default_sonnet_model	py=evals/harness-fit/run/launch.py;rs=crates/fno-agents/src/model_env_scrub.rs	# CLASSIFY protocol|msg-twin|data
 A	auto-closed: all children complete	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
 A	auto-closed: all children complete; own plan deliverables unverified (plan_path set, no pr)	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/workflows.rs	# CLASSIFY protocol|msg-twin|data
+A	auto-continue dispatch for {node_id}	py=cli/src/fno/backlog/advance.py;rs=crates/fno-agents/src/backlog/advance.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	auto-failure: {streak} consecutive dead dispatches (worker reaped without termination)	py=cli/src/fno/backlog/advance.py;rs=crates/fno-agents/src/backlog/advance.rs	# CLASSIFY protocol|msg-twin|data
 A	auto_merge.require_checks_pass	py=cli/src/fno/config/optouts.py|cli/src/fno/config/registry.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/finalize.rs	# CLASSIFY protocol|msg-twin|data
 A	backlog.epic_max_open_children	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/backlog/epic_cap.rs|crates/fno-agents/src/graph_store.rs	# CLASSIFY protocol|msg-twin|data
@@ -55,6 +58,7 @@ A	backlog_done_operator_initiated	py=cli/src/fno/done/cli.py;rs=crates/fno-agent
 A	base directory for this skill:	py=scripts/save-session.py;rs=crates/fno-agents/src/skill_drift.rs	# CLASSIFY protocol|msg-twin|data
 A	bootstrapped {target}; first run at its scheduled time	py=cli/src/fno/pr_watch/_install.py;rs=crates/fno-agents/src/pr_watch/refresh.rs	# CLASSIFY protocol|msg-twin|data
 A	bounced {target}; awaiting first tick	py=cli/src/fno/pr_watch/_install.py;rs=crates/fno-agents/src/pr_watch/install.rs|crates/fno-agents/src/pr_watch/refresh.rs	# CLASSIFY protocol|msg-twin|data
+A	brief={n_bytes}b->target_brief	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	cache_creation_input_tokens	py=cli/src/fno/cost/_session_cost.py|scripts/metrics/prompt_prefix_cache_probe.py;rs=crates/fno-agents/src/context_window.rs|crates/fno-agents/src/eval_attempt/tests_observe.rs|crates/fno-agents/src/model_price.rs|crates/fno-agents/src/session_activity.rs|crates/fno/src/context_used.rs	# CLASSIFY protocol|msg-twin|data
 A	cache_write_input_tokens	py=scripts/metrics/prompt_prefix_cache_probe.py;rs=crates/fno-agents/src/session_activity.rs	# CLASSIFY protocol|msg-twin|data
 A	caller-assigned-cwd-scoped	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
@@ -70,7 +74,13 @@ A	closed over an unmerged pr	py=cli/src/fno/health_monitor.py;rs=crates/fno-agen
 A	codex_companion_session_id	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/claude_supervisor.rs|crates/fno/src/client/server_spawn.rs	# CLASSIFY protocol|msg-twin|data
 A	codex_companion_transcript_path	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/claude_supervisor.rs	# CLASSIFY protocol|msg-twin|data
 A	codex_internal_originator_override	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
+A	command=legacy-no-merge->--no-merge	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	command=normalized({chosen_harness})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	command=substituted({resolved_command})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	command=template({resolved_command})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	command=verb({chosen_verb})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	completed_window_seconds	py=scripts/analysis/graph-write-gate-audit.py;rs=crates/fno-agents/src/backlog/mod.rs|crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
+A	config.dispatch.verb_registry	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	context_snapshot session_id cannot be empty	py=cli/src/fno/events/__init__.py;rs=crates/fno-agents/src/event_store/validate.rs|crates/fno/src/event_store/validate.rs	# CLASSIFY protocol|msg-twin|data
 A	could not fetch base branch '{base}'	py=cli/src/fno/pr/_merge_result.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
 A	could not read the repository default branch (rest read failed)	py=cli/src/fno/pr/_base_lineage.py;rs=crates/fno-agents/src/gate_probes.rs	# CLASSIFY protocol|msg-twin|data
@@ -79,6 +89,7 @@ A	could not resolve owner/repo from the origin remote	py=cli/src/fno/pr/_base_li
 A	could not resolve to a pullrequest	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	could not resolve to a repository	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	cpu_instrument_unreadable	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs|crates/fno-agents/src/spawn_gate_blind_tests.rs|crates/fno-agents/src/spawn_gate_verb.rs	# CLASSIFY protocol|msg-twin|data
+A	cutover_low_after_minutes	py=cli/src/fno/config/__init__.py;rs=crates/fno-agents/src/backlog/quota_route.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	decision probe: conflicting law rows for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# CLASSIFY protocol|msg-twin|data
 A	decision probe: single law row carries no decision for {subject}	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/pr_draft_ready.rs	# CLASSIFY protocol|msg-twin|data
 A	delete from outbox where seq = ?	py=cli/src/fno/approvals/store.py;rs=crates/fno-agents/src/effect_gate.rs	# CLASSIFY protocol|msg-twin|data
@@ -108,6 +119,9 @@ A	error: {flag} '{token}' does not resolve to a node	py=cli/src/fno/graph/cli.py
 A	error: {flag} cannot reference the node itself ({self_id})	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/node_ref.rs	# CLASSIFY protocol|msg-twin|data
 A	excluded {nid}: {reason}	py=cli/src/fno/graph/cli.py;rs=crates/fno-agents/src/backlog/next.rs	# CLASSIFY protocol|msg-twin|data
 A	expired_claims_retain_days	py=cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# CLASSIFY protocol|msg-twin|data
+A	explicit --harness must not be empty	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	explicit --substrate must not be empty	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	explicit dispatch verb must not be empty	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-agents/src/client_verbs.rs	# CLASSIFY protocol|msg-twin|data
 A	falling back to registry-only view	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/claims/roster.py;rs=crates/fno-agents/src/backlog/worked.rs|crates/fno-agents/src/claude_roster.rs	# CLASSIFY protocol|msg-twin|data
 A	flight:backlog-reconcile	py=cli/src/fno/backlog/single_flight.py;rs=crates/fno-agents/src/backlog/reconcile_cli.rs	# CLASSIFY protocol|msg-twin|data
@@ -123,12 +137,13 @@ A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-ag
 A	fno_agents_idle_exit_secs	py=cli/scripts/smoke/cursor-agent-keeper-journey.py;rs=crates/fno-agents/src/bin/daemon.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_agents_response_deadline_ms	py=scripts/diagnostics/codex-lead-continuation-smoke.py;rs=crates/fno-agents/src/client.rs|crates/fno/src/mux_cli/harness_command.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_bus_lock_timeout_secs	py=cli/src/fno/bus/log.py;rs=crates/fno-agents/src/announce.rs	# CLASSIFY protocol|msg-twin|data
-A	fno_control_plane_scheduler	py=cli/src/fno/control_plane.py;rs=crates/fno-agents/src/backlog/reconcile_cli.rs	# CLASSIFY protocol|msg-twin|data
+A	fno_control_plane_scheduler	py=cli/src/fno/control_plane.py;rs=crates/fno-agents/src/backlog/advance.rs|crates/fno-agents/src/backlog/reconcile_cli.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	fno_cursor_agent_provider	py=cli/src/fno/agents/harnesses/cursor_agent.py;rs=crates/fno-agents/src/cursor_agent.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno-agents/src/backlog/advance_settings.rs|crates/fno-agents/src/backlog/settings.rs|crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/claude_roster.rs|crates/fno-agents/src/claude_supervisor.rs|crates/fno-agents/src/law_match.rs|crates/fno-agents/src/pr_draft_ready.rs|crates/fno-agents/src/route_gather.rs|crates/fno-agents/src/route_slot.rs|crates/fno-agents/src/slot_cutover.rs|crates/fno-agents/src/test_run.rs|crates/fno-agents/src/tick_ledger.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs|crates/fno/src/sideline_color.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_launch_account_source	py=cli/src/fno/agents/launch_provenance.py;rs=crates/fno-agents/src/state.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_lead_walk_session_key	py=scripts/diagnostics/codex-lead-continuation-smoke.py;rs=crates/fno-agents/src/loop_lead.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client/server_spawn.rs|crates/fno/src/pty.rs	# CLASSIFY protocol|msg-twin|data
+A	fno_opencode_storage_dir	py=cli/src/fno/agents/discover.py;rs=crates/fno-agents/src/backlog/autobrief.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	fno_operator_capture_dir	py=cli/src/fno/inbox/operator_turns.py;rs=crates/fno-agents/src/claude_supervisor.rs|crates/fno-agents/src/operator_turns.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_process_admission_max	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/bootstrap.rs|crates/fno/src/process_admission.rs	# CLASSIFY protocol|msg-twin|data
 A	fno_registry_allow_row_loss	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/claude_supervisor.rs|crates/fno-agents/src/registry_guard.rs	# CLASSIFY protocol|msg-twin|data
@@ -152,6 +167,8 @@ A	gh cli not found on path	py=cli/src/fno/graph/_reconcile.py|cli/src/fno/pr/clo
 A	gh pr view #{pr_number} returned no output (exit 0)	py=cli/src/fno/pr/closure.py;rs=crates/fno-agents/src/backlog/merge_state.rs	# CLASSIFY protocol|msg-twin|data
 A	github_approval_satisfies	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck/settings.rs	# CLASSIFY protocol|msg-twin|data
 A	graph unreadable: entry id is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/undispatched.rs	# CLASSIFY protocol|msg-twin|data
+A	harness=config({chosen_harness})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	harness=explicit({chosen_harness})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# CLASSIFY protocol|msg-twin|data
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# CLASSIFY protocol|msg-twin|data
 A	hooks/worktree-remove.sh	py=cli/src/fno/setup/cli_hooks.py|cli/src/fno/setup_cli.py;rs=crates/fno/src/uninstall.rs	# CLASSIFY protocol|msg-twin|data
@@ -173,6 +190,7 @@ A	launchd:sh.fno.pr-watcher	py=cli/src/fno/pr_watch/cli.py;rs=crates/fno-agents/
 A	locked_by_harness_session	py=cli/src/fno/backlog/note_notify.py;rs=crates/fno-agents/src/backlog/find_cli.rs|crates/fno-agents/src/backlog/mod.rs|crates/fno-agents/src/backlog/model.rs|crates/fno-agents/src/backlog/nodes.rs|crates/fno-agents/src/backlog/patch.rs|crates/fno-agents/src/backlog/render.rs|crates/fno-agents/src/backlog/update_cli.rs|crates/fno-agents/src/graph_keeper.rs|crates/fno-agents/src/graph_store.rs|crates/fno-agents/src/org_fold.rs|crates/fno/src/backlog_model.rs|crates/fno/src/backlog_view.rs|crates/fno/src/board_reader.rs	# CLASSIFY protocol|msg-twin|data
 A	matched worktree; no readable target manifest	py=cli/src/fno/pr/_review_hold.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
 A	menu_walk needs ordered model and effort targets	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
+A	merge-posture=no-merge(injected)	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	merge_grant must be a mapping when provided	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
 A	merge_grant.approved must be a boolean	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
 A	merge_grant.{key} must be a non-empty string	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# CLASSIFY protocol|msg-twin|data
@@ -191,6 +209,9 @@ A	no node resolves to '{node_id}'	py=cli/src/fno/graph/store.py;rs=crates/fno-ag
 A	no provable session identity	py=cli/src/fno/claims/self_identity.py;rs=crates/fno-agents/src/backlog/create_cli.rs	# CLASSIFY protocol|msg-twin|data
 A	no unique codex rollout for this cwd after spawn	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/feed.rs|crates/fno-agents/src/removals.rs	# CLASSIFY protocol|msg-twin|data
 A	no url, back-pointer not read	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/org_board/prs.rs	# CLASSIFY protocol|msg-twin|data
+A	no-merge->target_no_merge	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	node={node_id} error={error}	py=cli/src/fno/backlog/advance.py;rs=crates/fno-agents/src/backlog/advance.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	node={node_id} worker={short_id}	py=cli/src/fno/backlog/advance.py;rs=crates/fno-agents/src/backlog/advance.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	not asked: pr is terminal (merged or closed); this says nothing about coverage at merge time	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/authorized_merge/tests.rs|crates/fno-agents/src/pr_status.rs|crates/fno-agents/src/pr_status/compose.rs	# CLASSIFY protocol|msg-twin|data
 A	number,body,url,state,mergedat,files	py=cli/src/fno/pr/closure.py;rs=crates/fno-agents/src/backlog/merge_state.rs	# CLASSIFY protocol|msg-twin|data
 A	observer_entries_scanned	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/backlog/next.rs	# CLASSIFY protocol|msg-twin|data
@@ -230,6 +251,7 @@ A	refused: {task_id} cross-check failed: {message}	py=cli/src/fno/graph/_reconci
 A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/attach.rs	# CLASSIFY protocol|msg-twin|data
 A	repos/:owner/:repo/statuses/{head}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck/coverage_status.rs	# CLASSIFY protocol|msg-twin|data
 A	repos/{slug}/pulls/{pr}/files?per_page=100&page={page}	py=cli/src/fno/pr/_rest.py;rs=crates/fno-agents/src/pr_status/reviews.rs	# CLASSIFY protocol|msg-twin|data
+A	resolved command is empty	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	resource_meter.notifications.throttle_minutes	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/machine_watch.rs	# CLASSIFY protocol|msg-twin|data
 A	resource_meter.thresholds.cpu_busy_fraction	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/machine_watch.rs	# CLASSIFY protocol|msg-twin|data
 A	rest pr info reader omitted required pr number or state	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs|crates/fno-agents/src/backlog/merge_state.rs	# CLASSIFY protocol|msg-twin|data
@@ -242,6 +264,7 @@ A	review.self_review_required	py=cli/src/fno/config/optouts.py|cli/src/fno/confi
 A	role_manifest_arm_failed	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/lib.rs|crates/fno-agents/src/session_report.rs	# CLASSIFY protocol|msg-twin|data
 A	roster-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# CLASSIFY protocol|msg-twin|data
 A	route settings file {path} has no env mapping	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/reentry.rs	# CLASSIFY protocol|msg-twin|data
+A	route=config({route_value})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	route_provider,route_model	py=cli/src/fno/config/__init__.py;rs=crates/fno-agents/src/loopcheck/posture.rs|crates/fno-agents/src/loopcheck/settings.rs	# CLASSIFY protocol|msg-twin|data
 A	run `gh auth login`; authentication failures are not retryable.	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/merge_evidence.rs	# CLASSIFY protocol|msg-twin|data
 A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/loopcheck/block_reason.rs|crates/fno-agents/src/loopcheck/coverage_receipt.rs	# CLASSIFY protocol|msg-twin|data
@@ -262,7 +285,10 @@ A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crat
 A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# CLASSIFY protocol|msg-twin|data
 A	stub-manifest-{node_id}.json	py=cli/src/fno/stub_manifest.py;rs=crates/fno-agents/src/merge_gates.rs	# CLASSIFY protocol|msg-twin|data
+A	substrate 'bg' was retired; set substrate = thread	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	substrate 'bg' was retired; use --substrate thread	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs	# CLASSIFY protocol|msg-twin|data
+A	substrate=config({chosen_substrate})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
+A	substrate=explicit({chosen_substrate})	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	supersession_evidence_truncated	py=cli/src/fno/graph/_reconcile.py;rs=crates/fno-agents/src/backlog/supersession.rs	# CLASSIFY protocol|msg-twin|data
 A	target-session:{session_id}	py=cli/src/fno/target_cli.py;rs=crates/fno-agents/src/resume_gate.rs	# CLASSIFY protocol|msg-twin|data
 A	target-state.md.archived.*.md	py=cli/src/fno/pr/_review_hold.py;rs=crates/fno-agents/src/merge_grant.rs	# CLASSIFY protocol|msg-twin|data
