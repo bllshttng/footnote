@@ -409,7 +409,7 @@ def _seed_registry(registry_path: Path) -> None:
 def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """One conflict, then the retry lands with every row still present."""
+    """A busy lock, then a conflict, then the retry lands with every row present."""
     use_tmpdir(monkeypatch, tmp_path)
 
     import fno.rust_binary as rb
@@ -426,6 +426,11 @@ def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
         if verb == "registry-commit" and "revision" in payload:
             commits["n"] += 1
             if commits["n"] == 1:
+                raise rb.VerbUnavailable(
+                    "registry-commit: lock at /x/graph.json.lock stayed busy past the 10s "
+                    "deadline; no holder recorded in the lock file"
+                )
+            if commits["n"] == 2:
                 raise rb.VerbUnavailable(_CONFLICT_JSON)
         return real_verb_call(verb, payload, **kwargs)
 
@@ -440,8 +445,8 @@ def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
     update_registry(_append_spawned, path=registry_path)
 
     assert [e.name for e in load_registry(path=registry_path)] == ["resident", "spawned"]
-    assert commits["n"] == 2
-    assert commits["applies"] == 2
+    assert commits["n"] == 3
+    assert commits["applies"] == 3
 
 
 def test_update_registry_reapplies_when_a_writer_lands_between_load_and_commit(

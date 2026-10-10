@@ -1359,7 +1359,7 @@ def write_registry(
     except RegistryDoorError as exc:
         raise RegistryVersionError(str(exc)) from exc
     if revision is not None and revision != current:
-        raise RegistryRevisionConflict(f"registry {target} moved past revision {revision}")
+        raise RegistryRevisionConflict(f"revision_conflict: {target} moved past {revision}")
     revision = current
     _refuse_source_ahead_schema_bump(raw, target)
     _refuse_probe_or_row_loss_write(target, raw, entries)
@@ -1714,7 +1714,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
 
     target = _registry_path(path)
     try:
-        raw, revision = read_registry_document(target)
+        raw, rev = read_registry_document(target)
     except RegistryDoorError as exc:
         raise RegistryVersionError(f"registry at {target} is unreadable: {exc}") from exc
 
@@ -1947,9 +1947,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             "are invisible to this process until it is upgraded.",
             file=sys.stderr,
         )
-    return LoadedRegistry(
-        entries, complete=not read_forward and not skipped_rows, revision=revision
-    )
+    return LoadedRegistry(entries, complete=not read_forward and not skipped_rows, revision=rev)
 
 
 def register_existing_session(
@@ -2883,10 +2881,10 @@ def update_registry(
     target = _registry_path(path)
     with _hold_registry_lock(target, timeout=lock_timeout):
         # A non-flock writer (the Rust side skips this lock) can land in the
-        # read-to-commit window; reload and re-apply so its row survives. A
-        # conflict means another writer made progress, so retry on a deadline,
-        # not a count: a spawn that already launched must not lose a burst.
-        deadline = time.monotonic() + _CONFLICT_RETRY_SECONDS
+        # read-to-commit window; reload and re-apply on a deadline, not a count,
+        # so a spawn that already launched outlasts a burst of writers.
+        budget = _CONFLICT_RETRY_SECONDS if lock_timeout is None else lock_timeout
+        deadline = time.monotonic() + budget
         while True:
             current = load_registry(path=target)
             before = {entry.name: _identity_signature(entry) for entry in current}
