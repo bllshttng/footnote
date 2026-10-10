@@ -1903,8 +1903,9 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     journal_call("started", &started_fields, None);
     std::env::set_var("FNO_INSTALL_BUILD", "1");
 
+    let mut rust_outcome: Option<String> = None;
     if !flags.no_rust {
-        refresh_rust_bins(&resolved, flags.rust, false, &mut failed);
+        rust_outcome = Some(refresh_rust_bins(&resolved, flags.rust, false, &mut failed));
         let built_fields: Vec<(&str, String)> = {
             let mut f: Vec<(&str, String)> = Vec::new();
             if let Some(r) = rust_subtree_rev(&resolved) {
@@ -1954,13 +1955,34 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         run_inherit(Path::new(&cmd[0]), &cmd[1..]) == 0
     };
     if uv_ok {
-        // The marker records the rev we are about to have installed, so
-        // `fno doctor` can detect installed-vs-source skew; written only on
-        // a successful install.
-        if let Some(rev) = &rev {
-            if let Err(e) = write_marker(&installed_rev_file(), rev) {
-                eprintln!("fno doctor update: WARNING: marker write failed: {e}");
+        // The marker records the rev the binaries now carry, so `fno
+        // doctor` can detect installed-vs-source skew. Written only once
+        // every binary install proved out: a rust leg that failed, did not
+        // converge, or was skipped mid-refresh leaves the marker at the old
+        // rev, so the skew stays visible and the next update re-runs.
+        let rust_bins_proved = match rust_outcome.as_deref() {
+            None => true,
+            Some(outcome) => matches!(
+                outcome,
+                "refreshed"
+                    | "fresh"
+                    | "refreshed-no-marker"
+                    | "skipped-no-crate"
+                    | "skipped-no-binary"
+                    | "skipped-no-rev"
+            ),
+        };
+        if rust_bins_proved {
+            if let Some(rev) = &rev {
+                if let Err(e) = write_marker(&installed_rev_file(), rev) {
+                    eprintln!("fno doctor update: WARNING: marker write failed: {e}");
+                }
             }
+        } else {
+            eprintln!(
+                "fno doctor update: marker not written: rust bins did not prove current ({})",
+                rust_outcome.as_deref().unwrap_or_default()
+            );
         }
         // Retire the stale `installed-rust-rev` marker: nothing has written
         // or read it for verdicts in releases (the verdict keys on the
@@ -2144,6 +2166,22 @@ fn changelog_subjects(installed_rev: &str, source: &Path) -> Vec<String> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// Merged PRs between the installed rev and source HEAD (first-parent
+/// merges, the release-notes window); None falls back to the sha pair.
+fn source_prs_ahead(installed_rev: &str, source: &Path) -> Option<u64> {
+    git_in(
+        source,
+        &[
+            "rev-list",
+            "--count",
+            "--first-parent",
+            "--merges",
+            &format!("{installed_rev}..HEAD"),
+        ],
+    )
+    .and_then(|out| out.trim().parse().ok())
 }
 
 /// Release notes for the update modal, built by the native leg through the
@@ -2373,6 +2411,7 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     let shells_ended: u64 = if wire_bump { shells } else { 0 };
     let mut changelog: Vec<String> = Vec::new();
     let mut release_notes: Option<Value> = None;
+    let mut prs_ahead: Option<u64> = None;
     if let (Some(installed), Some(src), Some(rev)) = (
         installed_rev.as_deref(),
         resolved_source.as_ref(),
@@ -2380,6 +2419,7 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     ) {
         changelog = changelog_subjects(installed, src);
         release_notes = release_notes_payload(installed, src);
+        prs_ahead = source_prs_ahead(installed, src);
         let _ = rev;
     }
     let census = running_components();
@@ -2479,6 +2519,8 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
         "source_pin": pin,
         "last_update_event": last_update_event(),
         "installed_rev": installed_rev,
+        "installed_version": env!("CARGO_PKG_VERSION"),
+        "source_prs_ahead": prs_ahead,
         "source_rev": src_rev,
         "python_tool": {
             "script": script_str,

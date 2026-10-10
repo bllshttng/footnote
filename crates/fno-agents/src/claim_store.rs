@@ -311,6 +311,14 @@ fn retire_directory(dir: &Path) -> Result<Option<PathBuf>, String> {
             std::fs::rename(&temporary, dir).map_err(|e| e.to_string())?;
             return Ok(Some(source));
         }
+        // A fresh root has no legacy directory to retire and no legacy
+        // reader to fence. Publishing the marker here would occupy the
+        // claims path itself, and every legacy lockfile write into that
+        // path dies with ENOTDIR (the marker is a file where the lock
+        // needs a directory). A later legacy writer just creates the
+        // directory, and the next open imports it exactly like an
+        // existing root.
+        return Ok(None);
     }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1225,6 +1233,28 @@ pub(crate) fn reap_in_directory<'w>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh root has no claims directory, and the migration must leave it
+    /// that way: the marker is a FILE at the claims path, and a legacy
+    /// lockfile write into that path dies with ENOTDIR. After the open, the
+    /// path is still free, so a legacy writer can create the directory and
+    /// the next open imports it like an existing root.
+    #[test]
+    fn a_fresh_root_leaves_the_claims_path_free_of_the_migration_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = directory(Some(root.path())).unwrap();
+        open_directory(&dir).unwrap();
+        // Absent is fine (a legacy writer creates it); a FILE is the
+        // regression - the marker occupying the lock's directory path.
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) => assert!(
+                m.is_dir(),
+                "the claims path must stay a directory, not a marker file"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
 
     #[test]
     fn reap_observes_codex_sessions_and_preserves_a_replaced_generation() {

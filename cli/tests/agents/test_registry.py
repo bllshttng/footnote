@@ -385,6 +385,112 @@ def test_write_registry_failure_surfaces_and_keeps_the_table(tmp_path: Path, mon
 
 
 # ---------------------------------------------------------------------------
+# revision_conflict retry: a non-flock writer lands in the read-to-commit
+# window, the door refuses once, update_registry reloads and re-applies.
+# ---------------------------------------------------------------------------
+
+
+_CONFLICT_JSON = (
+    '{"status":"refused","reason":"revision_conflict",'
+    '"message":"registry changed since read. Reload before applying the mutation again."}'
+)
+
+
+def _seed_registry(registry_path: Path) -> None:
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry(
+        [AgentEntry(name="resident", harness="claude", cwd="/tmp", log_path="/tmp/r.log")],
+        path=registry_path,
+    )
+
+
+def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One conflict, then the retry lands with every row still present."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    import fno.rust_binary as rb
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    _seed_registry(registry_path)
+
+    real_verb_call = rb.verb_call
+    commits = {"n": 0, "applies": 0}
+
+    def _conflict_once(verb, payload, **kwargs):
+        if verb == "registry-commit" and "revision" in payload:
+            commits["n"] += 1
+            if commits["n"] == 1:
+                raise rb.VerbUnavailable(_CONFLICT_JSON)
+        return real_verb_call(verb, payload, **kwargs)
+
+    monkeypatch.setattr(rb, "verb_call", _conflict_once)
+
+    def _append_spawned(entries):
+        commits["applies"] += 1
+        return entries + [
+            AgentEntry(name="spawned", harness="codex", cwd="/tmp", log_path="/tmp/s.log")
+        ]
+
+    update_registry(_append_spawned, path=registry_path)
+
+    assert [e.name for e in load_registry(path=registry_path)] == ["resident", "spawned"]
+    assert commits["n"] == 2
+    assert commits["applies"] == 2
+
+
+def test_update_registry_conflict_exhaustion_and_non_conflict_single_shot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Exhaustion keeps RegistryVersionError; a non-conflict refusal never retries."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    import fno.rust_binary as rb
+    from fno.agents.registry import AgentEntry, RegistryVersionError, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    _seed_registry(registry_path)
+
+    real_verb_call = rb.verb_call
+    commits = {"n": 0}
+
+    def _always_conflict(verb, payload, **kwargs):
+        if verb == "registry-commit" and "revision" in payload:
+            commits["n"] += 1
+            raise rb.VerbUnavailable(_CONFLICT_JSON)
+        return real_verb_call(verb, payload, **kwargs)
+
+    monkeypatch.setattr(rb, "verb_call", _always_conflict)
+
+    def _append(entries):
+        return entries + [
+            AgentEntry(name="spawned", harness="codex", cwd="/tmp", log_path="/tmp/s.log")
+        ]
+
+    with pytest.raises(RegistryVersionError, match="revision_conflict"):
+        update_registry(_append, path=registry_path)
+    assert commits["n"] == 3
+
+    commits["n"] = 0
+
+    def _schema_refused(verb, payload, **kwargs):
+        if verb == "registry-commit" and "revision" in payload:
+            commits["n"] += 1
+            raise rb.VerbUnavailable('{"status":"refused","reason":"schema_refused"}')
+        return real_verb_call(verb, payload, **kwargs)
+
+    monkeypatch.setattr(rb, "verb_call", _schema_refused)
+    with pytest.raises(RegistryVersionError, match="schema_refused"):
+        update_registry(_append, path=registry_path)
+    assert commits["n"] == 1
+
+
+# ---------------------------------------------------------------------------
 # AC3-HP: per-agent flock serializes concurrent writes
 # ---------------------------------------------------------------------------
 

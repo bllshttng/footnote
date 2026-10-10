@@ -2623,6 +2623,9 @@ mod row_count_tests;
 #[path = "x43ce_provenance_repair.rs"]
 mod provenance_repair_tests;
 
+#[path = "registry_lock_queue.rs"]
+mod registry_lock_queue_tests;
+
 #[test]
 fn update_registry_mints_a_row_its_own_fno_id() {
     // The row-birth fill: a new row leaves the write with a v4 fno_id that

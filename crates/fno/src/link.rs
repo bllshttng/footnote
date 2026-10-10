@@ -322,17 +322,25 @@ pub fn file_uri(path: &Path, line: Option<u32>) -> String {
     uri
 }
 
-/// True when `s` is exactly the sender pseudo URI for a `fmail-` id: scheme
-/// plus `fmail-` plus 12 hex, nothing else. A legacy `msg-` header has no
-/// sender session to find, so it resolves no span and no URI.
+/// True when `s` is exactly the sender pseudo URI for a `@handle`: scheme
+/// plus a handle-shaped name, nothing else. The handle names the sender row
+/// to open; the `fmail-` id travels on the message URI instead.
 pub fn is_sender_uri(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix(SENDER_SCHEME) else {
-        return false;
-    };
-    let Some(hex) = rest.strip_prefix("fmail-") else {
-        return false;
-    };
-    hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    s.strip_prefix(SENDER_SCHEME).is_some_and(is_handle_name)
+}
+
+/// The name grammar every `@handle`-shaped URI payload follows: a short run
+/// of letters, digits, `_` and `-`, led by a letter or digit. Shared by the
+/// handle and sender validators so neither can smuggle a path or whitespace
+/// into a later opener. A header token the grammar rejects (a retired
+/// `a/b` name, say) spans no sender URI.
+pub fn is_handle_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// The message id carried by an exact `fno-message:` pseudo URI.
@@ -346,18 +354,10 @@ pub fn is_message_uri(s: &str) -> bool {
     message_id_from_uri(s).is_some()
 }
 
-/// The bare handle carried by an exact `fno-handle:` pseudo URI. A handle is
-/// a short run of letters, digits, `_` and `-`, so the scheme can never smuggle
-/// a path or whitespace into a later opener.
+/// The bare handle carried by an exact `fno-handle:` pseudo URI.
 pub fn handle_from_uri(s: &str) -> Option<&str> {
     let name = s.strip_prefix(HANDLE_SCHEME)?;
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    ok.then_some(name)
+    is_handle_name(name).then_some(name)
 }
 
 pub fn is_handle_uri(s: &str) -> bool {
@@ -373,15 +373,17 @@ pub fn is_fno_uri(s: &str) -> bool {
 }
 
 /// The `@name` span of a delivered-mail header line in pane text, as a
-/// half-open CHAR range plus the `fmail-<12 hex>` id.
+/// half-open CHAR range plus the bare handle and the `fmail-<12 hex>` id.
 ///
 /// The header the mail transport types into the pane reads
 /// `` `@name · fmail-<12hex> · summary` `` — a harness prompt prefix and the
 /// wrapping backticks may sit around it, so the scan anchors on the id token
 /// and tolerates whatever precedes the `@`. A spaced name, a non-hex or
 /// over-long id, or a missing summary resolves nothing, and a legacy `msg-`
-/// id resolves no span: there is no sender session to find.
-pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String)> {
+/// id resolves no span: there is no sender session to find. The handle
+/// excludes the leading `@`, so it is the URI payload that opens the
+/// handle's session.
+pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String, String)> {
     let chars: Vec<char> = text.chars().collect();
     let hex12 = |cs: &[char]| cs.len() == 12 && cs.iter().all(|c| c.is_ascii_hexdigit());
     for i in 0..chars.len() {
@@ -423,8 +425,9 @@ pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String)> {
         if name_start + 1 >= name_end {
             continue;
         }
+        let handle: String = chars[name_start + 1..name_end].iter().collect();
         let id: String = chars[hex_start..id_end].iter().collect();
-        return Some((name_start, name_end, format!("fmail-{id}")));
+        return Some((name_start, name_end, handle, format!("fmail-{id}")));
     }
     None
 }
@@ -433,7 +436,7 @@ pub fn find_mail_sender(text: &str) -> Option<(usize, usize, String)> {
 /// sender parser as the header validator so a coincidental id in body text
 /// does not become a message link.
 pub fn find_mail_message(text: &str) -> Option<(usize, usize, String)> {
-    let (_, sender_end, id) = find_mail_sender(text)?;
+    let (_, sender_end, _, id) = find_mail_sender(text)?;
     let byte_start = text.char_indices().nth(sender_end)?.0;
     let id_byte = byte_start + text[byte_start..].find(&id)?;
     let start = text[..id_byte].chars().count();

@@ -1523,11 +1523,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // when it is still FRESH: the request activity it ran under is unchanged
     // (a served request resets the idle clock) AND the registry it read has
     // not been written since (a pane-substrate worker spawns by writing the
-    // registry directly, with no daemon contact - the mtime is the one
+    // registry directly, with no daemon contact - its stamp is the one
     // positive marker of that). Anything stale is discarded unread.
     let idle_probe_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let idle_probe_verdict: Arc<
-        std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
+        std::sync::Mutex<Option<(bool, Instant, Option<serde_json::Value>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
     let mut drift_flag = crate::quiet_retire::DriftFlag::new();
     // The periodic fleet arms, extracted to daemon/fleet_arms.rs (this file
@@ -1634,9 +1634,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             let no_worker = crate::quiet_retire::no_live_worker(&home);
                             // mtime AFTER the reads: a registry write that
                             // raced the probe is caught by the change.
-                            let mtime = std::fs::metadata(home.registry_json())
-                                .ok()
-                                .and_then(|m| m.modified().ok());
+                            let mtime = crate::quiet_retire::registry_stamp(&home);
                             *verdict.lock().unwrap() = Some((no_worker, probe_activity, mtime));
                         });
                     }
@@ -1647,9 +1645,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             probe_activity,
                             last_activity,
                             probe_mtime,
-                            std::fs::metadata(ctx.home.registry_json())
-                                .ok()
-                                .and_then(|m| m.modified().ok()),
+                            crate::quiet_retire::registry_stamp(&ctx.home),
                         )
                     });
                     if fresh {

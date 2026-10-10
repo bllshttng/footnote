@@ -128,6 +128,65 @@ pub fn sandbox_flag_resume(yolo: bool) -> Vec<String> {
     }
 }
 
+/// First codex that ships `--dangerously-bypass-hook-trust`; an older clap
+/// parser rejects the unknown flag and aborts the spawn.
+const HOOK_TRUST_FLAG_MIN_VERSION: &str = "0.148.0";
+
+/// `--dangerously-bypass-hook-trust` for every fno-launched codex worker:
+/// codex 0.148+ skips a new or changed hook until a human trusts it, and a
+/// plugin install never trusts, so a worker would run without fno's guards and
+/// Stop hook. Only hook review is skipped; sandbox and approval stay as the
+/// posture set them. Valid on `codex`, `exec`, `exec resume` and `resume`.
+/// Mirror of `codex.py::codex_hook_trust_args`.
+pub fn hook_trust_flag() -> Vec<String> {
+    // `FNO_CODEX_VERSION` pins the answer, and the Python twin reads the same
+    // key, so a run that sets it gets one argv from both runtimes. Empty
+    // means unknown, so the flag is omitted.
+    if let Ok(pinned) = std::env::var("FNO_CODEX_VERSION") {
+        return hook_trust_tokens(pinned_version(&pinned).as_deref());
+    }
+    // Unit tests swap fake codex binaries onto PATH, and the probe below is
+    // cached once per process, so a probe here would make exact-argv tests
+    // depend on test order. `hook_trust_tokens` carries the logic under test.
+    if cfg!(test) {
+        return Vec::new();
+    }
+    // The bare PATH `codex` is what every argv here launches, not
+    // `FNO_CODEX_BIN`. Only an answer is cached: a probe that timed out on a
+    // loaded machine must not strip the flag for the life of the daemon.
+    static INSTALLED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let installed = match INSTALLED.get() {
+        Some(version) => Some(version.clone()),
+        None => crate::codex_daemon_readiness::cli_version_of("codex")
+            .map(|version| INSTALLED.get_or_init(|| version).clone()),
+    };
+    hook_trust_tokens(installed.as_deref())
+}
+
+/// The first `major.minor.patch` run in a `FNO_CODEX_VERSION` pin, the same
+/// match the Python twin's regex makes, so both runtimes read one pin alike.
+pub(crate) fn pinned_version(raw: &str) -> Option<String> {
+    raw.split(|c: char| !c.is_ascii_digit() && c != '.')
+        .find_map(|token| {
+            let parts: Vec<&str> = token.split('.').collect();
+            (parts.len() >= 3 && parts[..3].iter().all(|p| !p.is_empty()))
+                .then(|| parts[..3].join("."))
+        })
+}
+
+pub(crate) fn hook_trust_tokens(installed: Option<&str>) -> Vec<String> {
+    let supported = installed
+        .and_then(|v| {
+            crate::codex_daemon_readiness::compare_versions(v, HOOK_TRUST_FLAG_MIN_VERSION)
+        })
+        .is_some_and(|order| order != std::cmp::Ordering::Less);
+    if supported {
+        vec!["--dangerously-bypass-hook-trust".to_string()]
+    } else {
+        vec![]
+    }
+}
+
 /// Build the create argv: `codex exec --json -C <cwd> --skip-git-repo-check <sandbox> <full_prompt>`.
 /// `full_prompt` should already have been built via `inject_from_name`.
 /// The subprocess cwd is NOT set via Popen(cwd=...) on the create path
@@ -189,6 +248,7 @@ pub fn build_argv_create(
         argv.push(format!("model_reasoning_effort={effort}"));
     }
     argv.extend(sandbox_flag(yolo));
+    argv.extend(hook_trust_flag());
     // Fenced `--` tokens the operator typed (codex maps -c/--config and
     // --add-dir here), before the prompt fence like every other flag.
     argv.extend(harness_args.iter().cloned());
@@ -224,6 +284,7 @@ pub fn build_argv_resume(
         "--skip-git-repo-check".to_string(),
     ]);
     argv.extend(sandbox_flag_resume(yolo));
+    argv.extend(hook_trust_flag());
     if !yolo {
         argv.extend(crate::provider::codex_sandbox_config_args_resume(cwd));
     }

@@ -42,8 +42,33 @@ const FIRST_EDIT_DEFAULT_MIN: i64 = 20;
 const SENDER: &str = "fno/burn-watch";
 const SENDER_LINE: &str = "Automatic notice from the fno daemon burn-watch arm, not a person. Your operator's hold outranks it.";
 
+/// The bounded subprocess budget for a status read or an ask.
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The resume argv's own bound. The parked revive waits inside the verb
+/// (roster polls plus content confirms) before the respawn returns, so the
+/// 30 s budget would cut it short by construction; 180 s is the bound
+/// `fno agents watchdog` gives the same verb.
 const RESUME_RUN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// A mail send's bound. A send can try two live rungs (the socket inject,
+/// then the pane), each waiting up to [`crate::mail_inject::LIVE_RUNG_WORST_S`].
+/// A kill inside a confirm skips the withdraw and can leave the typed line
+/// in the recipient's composer.
+const MAIL_SEND_RUN_TIMEOUT: Duration =
+    Duration::from_secs(2 * crate::mail_inject::LIVE_RUNG_WORST_S + 30);
+
+/// The bound for one daemon subprocess, by verb.
+pub(crate) fn run_timeout(argv: &[String]) -> Duration {
+    match (
+        argv.get(2).map(String::as_str),
+        argv.get(3).map(String::as_str),
+    ) {
+        (Some("resume"), _) => RESUME_RUN_TIMEOUT,
+        (Some("mail"), Some("send")) => MAIL_SEND_RUN_TIMEOUT,
+        _ => RUN_TIMEOUT,
+    }
+}
 
 pub struct Arm {
     last_tick: Mutex<Option<Instant>>,
@@ -409,12 +434,7 @@ pub(crate) fn run_command(argv: &[String], cwd: &str) -> (i32, String, String) {
     } else {
         std::path::PathBuf::from(cwd)
     };
-    let timeout = if argv.len() > 2 && argv[2] == "resume" {
-        RESUME_RUN_TIMEOUT
-    } else {
-        RUN_TIMEOUT
-    };
-    match crate::loopcheck::bounded_read(bin.as_ref(), &refs, &dir, SENDER, timeout) {
+    match crate::loopcheck::bounded_read(bin.as_ref(), &refs, &dir, SENDER, run_timeout(argv)) {
         Ok(out) => (
             if out.status.success() {
                 0
@@ -1395,6 +1415,18 @@ fn read_thresholds(cwd: &Path) -> Thresholds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mail_send_outlives_two_live_rungs() {
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let send = run_timeout(&argv(&["fno", "agents", "mail", "send", "sid", "hi"]));
+        assert!(send > Duration::from_secs(2 * crate::mail_inject::LIVE_RUNG_WORST_S));
+        assert_eq!(
+            run_timeout(&argv(&["fno", "agents", "resume", "sid"])),
+            RESUME_RUN_TIMEOUT
+        );
+        assert_eq!(run_timeout(&argv(&["git", "log", "-1"])), RUN_TIMEOUT);
+    }
     use serde_json::json;
 
     fn sample(cost: Option<f64>, head: Option<&str>, touched: Option<i64>) -> Sample {
@@ -1738,6 +1770,38 @@ mod tests {
             &[receipt.clone()]
         ));
         assert!(!crate::watch_expiry::should_wake(&watch, 103, &[receipt]));
+
+        // A build park wakes before its deadline once its parked cargo is
+        // gone, and never while that cargo still runs.
+        let mut park = watch.clone();
+        park.event_id = "park-1".into();
+        park.blocker = "build".into();
+        let park_row = |cargo_pid: u32| crate::watch_expiry::Evidence {
+            event_id: "park-1".into(),
+            seq: 1,
+            ts_ms: 50,
+            kind: "loop_check_watch_idle".into(),
+            session_id: Some("s-1".into()),
+            data: serde_json::json!({
+                "blocker": "build",
+                "build_cargo_pid": cargo_pid,
+                "build_since_ms": crate::claims::now_ms(),
+            }),
+        };
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        assert!(crate::watch_expiry::should_wake(
+            &park,
+            10,
+            &[park_row(gone_pid)]
+        ));
+        assert!(!crate::watch_expiry::should_wake(
+            &park,
+            10,
+            &[park_row(std::process::id())]
+        ));
+        assert!(crate::watch_expiry::message(&park).contains("cargo build this session parked on"));
 
         let mut review_watch = watch.clone();
         review_watch.reason = Some("review".into());

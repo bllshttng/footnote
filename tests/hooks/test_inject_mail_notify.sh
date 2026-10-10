@@ -1,280 +1,321 @@
 #!/usr/bin/env bash
-# test_inject_mail_notify.sh
+# Contract tests for hooks/inject-mail-notify.sh (native mail-notify-self path).
 #
-# Contract and installed-hook journeys for active-turn durable mail delivery.
-# Verifies direct relay of the CLI-owned UserPromptSubmit JSON, silence and
-# failure paths, the portable timeout, manifest installation, and shared-cursor
-# delivery under representative Claude and Codex identities.
+# Two layers:
+#   stub cases - the shell gate logic: identity + bus + binary gates, the
+#                byte-for-byte fd-3 relay, the budget-bounded hang, and miss
+#                rows. A stub `fno-agents` answers; no build needed.
+#   journeys   - the real binary end to end: envelope shape, defang, cursor
+#                acknowledgement, second-boundary silence, the busy hold
+#                short-circuit, and drained receipts. Skipped (77) when no
+#                binary exists; the runner that greps this file for
+#                target/debug/fno-agents owes the build step and re-runs it.
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 HOOK="$REPO_ROOT/hooks/inject-mail-notify.sh"
+[[ -f "$HOOK" ]] || { echo "FAIL: hook missing at $HOOK"; exit 1; }
 
-[[ -f "$HOOK" ]] || { echo "FAIL: hook not found at $HOOK" >&2; exit 1; }
-
-PASS=0
-FAIL=0
-pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
-
-TMP="$(mktemp -d -t inject-mail-notify-XXXXXX)"
+TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# The overload skip must never fire in a suite: the stub verb must run on
-# every boundary, and a loaded runner must not read as overload. Pin past
-# any runner load (the skip tier's own contract in hook-budget.sh). The
-# journeys pin a generous read budget inside run_journey (they boot real fno
-# through uv, so host load must not decide the budget); the timeout cases
-# keep the live tier on purpose.
-export FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000
+SID="ses_0123456789abcdef0123456789abcdef"   # full harness session id
+HANDLE="ses_0123"                              # canonical first-eight handle
+PASS=0
+FAIL=0
 
-# A fake `fno` on PATH controls boundary behavior. $FNO_STUB_OUT is what the
-# atomic verb prints, while failure and sleep knobs exercise error posture.
-mkdir -p "$TMP/bin"
-cat > "$TMP/bin/fno" <<'STUB'
-#!/usr/bin/env bash
-[[ -n "${FNO_STUB_ARGS_LOG:-}" ]] && printf '%s\n' "$*" >> "$FNO_STUB_ARGS_LOG"
-[[ -n "${FNO_STUB_ERR:-}" ]] && printf '%s\n' "$FNO_STUB_ERR" >&2
-[[ -n "${FNO_STUB_FAIL:-}" ]] && exit 7
-[[ -n "${FNO_STUB_SLEEP:-}" ]] && sleep "$FNO_STUB_SLEEP"
-[[ -n "${FNO_STUB_OUT:-}" ]] && printf '%s\n' "$FNO_STUB_OUT"
-[[ -n "${FNO_STUB_RC:-}" ]] && exit "$FNO_STUB_RC"
-exit 0
-STUB
-chmod +x "$TMP/bin/fno"
+ok()  { PASS=$((PASS + 1)); echo "ok: $1"; }
+bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
 
-EVENTS="$TMP/events.jsonl"
+STATE="$TMP/state"          # FNO_STATE_DIR (hook bus) and FNO_HOME (hold root)
+EVENTS="$TMP/events.jsonl"  # events.sh journal for miss rows
+ARGS_LOG="$TMP/stub-args.log"
 
-# The real fno for the event-store read/write paths: the stub below shadows
-# `fno` on the hook's PATH, and the store commit inside the hook's event
-# emission must reach the REAL store, not an exit-0 stub. events.sh honors
-# FNO_BIN ahead of PATH (checkout build outranks an install, matching
-# store_client's policy).
+# Real fno, for reading recorded miss rows back via doctor event rows.
 REAL_FNO=""
-for profile in debug release; do
-  if [[ -x "$REPO_ROOT/crates/fno/target/$profile/fno" ]]; then
-    REAL_FNO="$REPO_ROOT/crates/fno/target/$profile/fno"
-    break
-  fi
+for c in "$REPO_ROOT/crates/fno/target/debug/fno" "$REPO_ROOT/crates/fno/target/release/fno"; do
+    [[ -x "$c" ]] && { REAL_FNO="$c"; break; }
 done
-[[ -z "$REAL_FNO" ]] && REAL_FNO="$(command -v fno 2>/dev/null)"
-if [[ -z "$REAL_FNO" ]]; then
-  echo "FAIL: no real fno binary found for the event-store paths" >&2
-  exit 1
-fi
+[[ -n "$REAL_FNO" ]] || REAL_FNO="$(command -v fno 2>/dev/null || true)"
+[[ -n "$REAL_FNO" ]] || { echo "FAIL: no fno binary (needed to read miss rows)"; exit 1; }
 
-run_hook() { PATH="$TMP/bin:$PATH" EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" bash "$HOOK" </dev/null; }
-
-# A PATH carrying the stub plus only what the hook genuinely needs (jq, and bash
-# + sleep for the stub), and NO timeout(1)/gtimeout(1) on any host. /usr/bin
-# ships timeout on Linux, so "strip the PATH" alone would leave CI measuring the
-# coreutils path. Omitting jq instead would be worse than useless: the hook
-# exits 0 the moment jq is missing, so a hang case would pass in 5ms having
-# tested nothing.
-mkdir -p "$TMP/nocu"
-for b in bash sleep jq dirname; do
-  # fail, do not skip: a binary silently missing from this dir makes the hook
-  # bail early, and the timing case below would then report a holding cap while
-  # having run nothing at all.
-  p="$(command -v "$b" 2>/dev/null)" || { fail "cannot build a coreutils-free PATH: $b not found"; continue; }
-  ln -sf "$p" "$TMP/nocu/$b"
-done
-NOCU_PATH="$TMP/bin:$TMP/nocu"
-run_hook_nocoreutils() { PATH="$NOCU_PATH" EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" bash "$HOOK" </dev/null; }
-
-# 1. The CLI-owned hook JSON is relayed byte-for-byte with one CLI invocation.
-EXPECTED='{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<system-reminder>\\n<fno_mail>complete body</fno_mail>\\n</system-reminder>"}}'
-ARGS_LOG="$TMP/args.log"
-OUT="$(FNO_STUB_ARGS_LOG="$ARGS_LOG" FNO_STUB_OUT="$EXPECTED" run_hook 2>/dev/null)"; RC=$?
-[[ $RC -eq 0 ]] && pass "unread: exit 0" || fail "unread rc=$RC"
-[[ "$OUT" == "$EXPECTED" ]] \
-  && pass "unread: relays CLI-owned hook JSON unchanged" || fail "unread: output was rewrapped: $OUT"
-[[ "$(cat "$ARGS_LOG")" == "agents mail notify-self" ]] \
-  && pass "unread: invokes the atomic delivery verb once" || fail "unread: unexpected argv: $(cat "$ARGS_LOG")"
-echo "$OUT" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1 \
-  && pass "unread: emits UserPromptSubmit hookSpecificOutput" || fail "unread: bad envelope: $OUT"
-# grep, not grep -q: under `set -o pipefail` grep -q exits on first match and
-# SIGPIPEs upstream jq (exit 141), which would flake the pipeline. Redirecting
-# to /dev/null consumes the whole stream.
-echo "$OUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep "complete body" >/dev/null \
-  && pass "unread: additionalContext carries the body" || fail "unread: body missing: $OUT"
-echo "$OUT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep "system-reminder" >/dev/null \
-  && pass "unread: wrapped in a system-reminder" || fail "unread: no wrapper: $OUT"
-
-# 2. Empty notify-self -> nothing injected (no blank <system-reminder>).
-OUT="$(FNO_STUB_OUT='' run_hook 2>/dev/null)"; RC=$?
-[[ $RC -eq 0 ]] && pass "empty: exit 0" || fail "empty rc=$RC"
-[[ -z "$OUT" ]] && pass "empty: injects nothing" || fail "empty: unexpected output: $OUT"
-
-# 3. Missing fno -> silent no-op, turn proceeds (exit 0, no output).
-OUT="$(PATH="/usr/bin:/bin" bash "$HOOK" </dev/null 2>/dev/null)"; RC=$?
-[[ $RC -eq 0 ]] && pass "no-fno: exit 0" || fail "no-fno rc=$RC"
-[[ -z "$OUT" ]] && pass "no-fno: injects nothing" || fail "no-fno: unexpected output: $OUT"
-
-# 4. A CLI failure before output is silent and a later boundary can retry.
-OUT="$(FNO_STUB_FAIL=1 run_hook 2>/dev/null)"; RC=$?
-[[ $RC -eq 0 && -z "$OUT" ]] \
-  && pass "pre-output failure: turn proceeds without a partial payload" \
-  || fail "pre-output failure: rc=$RC output=$OUT"
-OUT="$(FNO_STUB_OUT="$EXPECTED" run_hook 2>/dev/null)"
-[[ "$OUT" == "$EXPECTED" ]] \
-  && pass "pre-output failure: the next boundary can retry delivery" \
-  || fail "pre-output failure: retry did not relay payload: $OUT"
-
-# 5. Hung binary -> the 2s cap bounds it; the hook still exits 0 quickly. Run on
-#    a PATH with no timeout(1) at all: this is a UserPromptSubmit hook, so an
-#    uncapped hang costs 10s on EVERY prompt, and stock macOS is that host.
-if ( PATH="$NOCU_PATH"; command -v timeout || command -v gtimeout ) >/dev/null 2>&1; then
-  fail "timeout: the coreutils-free PATH still resolves a timeout binary; the bound below asserts nothing"
-elif [[ ! -x "$TMP/nocu/jq" ]]; then
-  fail "timeout: jq missing from the coreutils-free PATH; the hook would exit 0 before reaching the cap"
-else
-  # Positive control first: the hook must still WORK on this PATH. Otherwise any
-  # missing dependency makes it exit 0 in milliseconds and the timing assertion
-  # below reports a holding cap while nothing ran.
-  OUT="$(FNO_STUB_OUT="$EXPECTED" run_hook_nocoreutils 2>/dev/null)"
-  echo "$OUT" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1 \
-    && pass "timeout control: hook works on the coreutils-free PATH" \
-    || fail "timeout control: hook produced no envelope on the coreutils-free PATH, so the bound below proves nothing: $OUT"
-
-  START=$(date +%s)
-  OUT="$(FNO_STUB_SLEEP=10 FNO_STUB_OUT='late' run_hook_nocoreutils 2>/dev/null)"; RC=$?
-  END=$(date +%s)
-  [[ $RC -eq 0 ]] && pass "timeout: exit 0" || fail "timeout rc=$RC"
-  # Ceiling AND floor. `< 8` alone is satisfied by a hook that never reached the
-  # stub, which is how a cap assertion reports success having tested nothing.
-  (( END - START < 8 )) && pass "timeout: bounded without coreutils (<8s, not 10s)" || fail "timeout: not bounded ($((END - START))s)"
-  (( END - START >= 1 )) && pass "timeout: actually waited for the cap (not an early exit)" || fail "timeout: returned in $((END - START))s, too fast to have run the 10s stub - it exited early and this case tested nothing"
-  [[ -z "$OUT" ]] && pass "timeout: injects nothing when capped" || fail "timeout: unexpected output: $OUT"
-fi
-
-# 5b/5c/5d. Miss-event recording (AC6-HP, AC7-ERR, AC8-ERR). The event store
-# commits rows beside the journal path, never into the .jsonl itself, so rows
-# come back through the native reader against a FRESH journal per case (a
-# reused path would carry the previous case's store).
-read_miss_events() {
-  "$REAL_FNO" doctor event rows --events "$EVENTS" --type mail_notify_self_missed 2>/dev/null
-}
-# Rows come back as a JSON array of envelope STRINGS (inner quotes escaped),
-# so assertions parse instead of substring-grepping.
-miss_row_holding() {
-  read_miss_events | jq -e "any(.[]; (fromjson | .data | $1))" >/dev/null 2>&1
-}
-
-# 5b. AC6-HP: a delivered boundary records no miss event.
-EVENTS="$TMP/events-miss-ok.jsonl"
-OUT="$(FNO_STUB_OUT="$EXPECTED" run_hook 2>/dev/null)"; RC=$?
-[[ $RC -eq 0 && "$OUT" == "$EXPECTED" ]] \
-  && pass "miss-event: success relays the payload" || fail "miss-event: success rc=$RC"
-[[ "$(read_miss_events)" == "[]" ]] \
-  && pass "miss-event: success wrote no miss event" \
-  || fail "miss-event: success wrote rows: $(read_miss_events)"
-
-# 5c. AC7-ERR: a hung verb (the 2s bound fires, rc 124) is recorded, and the
-#    turn still proceeds promptly.
-EVENTS="$TMP/events-miss-timeout.jsonl"
-START=$(date +%s)
-OUT="$(FNO_STUB_SLEEP=5 run_hook 2>/dev/null)"; RC=$?
-END=$(date +%s)
-[[ $RC -eq 0 ]] && pass "miss-event: timeout exit 0" || fail "miss-event: timeout rc=$RC"
-(( END - START < 5 )) && pass "miss-event: timeout still bounded" || fail "miss-event: not bounded ($((END - START))s)"
-miss_row_holding '.rc == 124' \
-  && pass "miss-event: timeout recorded the rc-124 miss" \
-  || fail "miss-event: no rc-124 row: $(read_miss_events)"
-
-# 5d. AC8-ERR: a refusal (nonzero + stderr) records the rc and the stderr tail.
-EVENTS="$TMP/events-miss-refusal.jsonl"
-OUT="$(FNO_STUB_RC=1 FNO_STUB_ERR='error: notify-self: ambiguous' run_hook 2>/dev/null)"; RC=$?
-[[ $RC -eq 0 && -z "$OUT" ]] \
-  && pass "miss-event: refusal exit 0, no payload" || fail "miss-event: refusal rc=$RC out=$OUT"
-miss_row_holding '.rc == 1' \
-  && pass "miss-event: refusal recorded rc 1" \
-  || fail "miss-event: no rc-1 row: $(read_miss_events)"
-miss_row_holding '.stderr_tail == "error: notify-self: ambiguous"' \
-  && pass "miss-event: refusal records the stderr tail" \
-  || fail "miss-event: stderr tail missing: $(read_miss_events)"
-
-# 6. Installed-hook journey: both harness manifests select this exact script;
-# real durable mail is delivered at UserPromptSubmit and consumed for the
-# shared SessionStart boundary. The source CLI is wrapped as `fno` so this test
-# exercises the worktree code rather than whichever binary is globally installed.
-for manifest in "$REPO_ROOT/hooks/hooks.json" "$REPO_ROOT/hooks/codex-hooks.json"; do
-  if jq -e '[.hooks.UserPromptSubmit[].hooks[].command] | any(endswith("/hooks/inject-mail-notify.sh"))' "$manifest" >/dev/null 2>&1; then
-    pass "manifest: $(basename "$manifest") installs the active-turn mail hook"
-  else
-    fail "manifest: $(basename "$manifest") does not install $HOOK"
-  fi
-done
-
-UV_BIN="$(command -v uv 2>/dev/null || true)"
-if [[ -z "$UV_BIN" ]]; then
-  fail "journey: uv is required to exercise the source CLI"
-else
-  mkdir -p "$TMP/real-bin"
-  cat > "$TMP/real-bin/fno" <<'REAL_FNO'
+# Stub fno-agents: logs argv, optional sleep/output/failure knobs.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/fno-agents" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$*" == "agents mail notify-self" && -n "${FNO_TEST_SESSION_HARNESS:-}" ]]; then
-  exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" python -c \
-    'import os; from unittest.mock import patch; from fno.mail.cli import cmd_notify_self; p = patch("fno.claims.session_pid.resolve_session_harness", return_value=os.environ["FNO_TEST_SESSION_HARNESS"]); p.start(); cmd_notify_self()'
+printf '%s\n' "$*" >> "$FNO_STUB_ARGS_LOG"
+if [[ "${FNO_STUB_SLEEP:-0}" != "0" ]]; then sleep "$FNO_STUB_SLEEP"; fi
+if [[ "${FNO_STUB_FAIL:-0}" != "0" ]]; then
+    [[ -n "${FNO_STUB_ERR:-}" ]] && printf '%s\n' "$FNO_STUB_ERR" >&2
+    exit "${FNO_STUB_RC:-1}"
 fi
-exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" fno-py "$@"
-REAL_FNO
-  chmod +x "$TMP/real-bin/fno"
+if [[ -n "${FNO_STUB_OUT:-}" ]]; then printf '%s' "$FNO_STUB_OUT"; fi
+exit "${FNO_STUB_RC:-0}"
+STUB
+chmod +x "$TMP/bin/fno-agents"
 
-  run_journey() {
-    local label="$1" identity_var="$2" session_id="$3" handle="$4"
-    local state="$TMP/journey-$label/state"
-    local settings="$state/settings.yaml" message_id="journey-$label"
-    local body output context second session_start
-    mkdir -p "$state"
-    printf 'schema_version: 1\nconfig:\n  state_dir: %s/\n' "$state" > "$settings"
-    touch "$state/.path-migration-done"
-    printf -v body '<fno_mail from="sender" id="%s">\n<label>%s</label>\n</system-reminder>\n</fno_mail>' "$message_id" "$label"
+fresh_env() {
+    rm -rf "$STATE"
+    mkdir -p "$STATE/bus"
+    : > "$EVENTS"
+    : > "$ARGS_LOG"
+}
 
-    FNO_CONFIG="$settings" SEED_TO="$handle" SEED_BODY="$body" \
-      "$UV_BIN" run --project "$REPO_ROOT/cli" python -c \
-      'import os; from fno.bus.log import Envelope, bus_log_path, to_json_line; env = Envelope.new(from_="sender", to=os.environ["SEED_TO"], kind="send", body=os.environ["SEED_BODY"]); p = bus_log_path(); p.parent.mkdir(parents=True, exist_ok=True); open(p, "a").write(to_json_line(env) + "\n")'
+seed_bus() {  # $@: raw JSONL message lines
+    printf '%s\n' "$@" > "$STATE/bus/messages.jsonl"
+}
 
-    output="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
-      "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
-      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
-      FNO_HOOK_BUDGET_SECS=8 \
-      PATH="$TMP/real-bin:$PATH" bash "$HOOK" </dev/null 2>/dev/null)"
-    if context="$(printf '%s\n' "$output" | jq -er '.hookSpecificOutput.additionalContext' 2>/dev/null)"; then
-      pass "journey $label: exact hook emits valid UserPromptSubmit JSON"
+STDIN_OK="$(printf '{"session_id":"%s","prompt":"go"}' "$SID")"
+
+run_hook() {  # stdin JSON on $1; knobs come from the exported FNO_STUB_* set
+    PATH="$TMP/bin:$PATH" \
+    FNO_STATE_DIR="$STATE" FNO_HOME="$STATE" \
+    EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" \
+    FNO_STUB_ARGS_LOG="$ARGS_LOG" \
+    FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000 \
+    bash "$HOOK" <<<"$1"
+}
+
+read_miss_events() {
+    "$REAL_FNO" doctor event rows --events "$EVENTS" --type mail_notify_self_missed
+}
+
+miss_row_holding() {
+    read_miss_events | jq -e "any(.[]; (fromjson | .data | $1))"
+}
+
+ENVELOPE='{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<system-reminder>\nhello\n</system-reminder>"}}'
+
+# --- gate cases: silent exits leave the stub untouched ---------------------
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+out="$(run_hook '{"prompt":"no session id"}')" && gate_rc=0 || gate_rc=$?
+if [[ "$gate_rc" -eq 0 && -z "$out" && ! -s "$ARGS_LOG" ]]; then
+    ok "no session_id: silent exit, stub not called"
+else
+    bad "no session_id: rc=$gate_rc out=${#out} args=$(cat "$ARGS_LOG" 2>/dev/null)"
+fi
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"shortid1234567","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+out="$(run_hook '{"session_id":"shortid1234567","prompt":"go"}')" && gate_rc=0 || gate_rc=$?
+if [[ "$gate_rc" -eq 0 && -z "$out" && ! -s "$ARGS_LOG" ]]; then
+    ok "short session_id: silent exit, stub not called"
+else
+    bad "short session_id: rc=$gate_rc out=${#out} args=$(cat "$ARGS_LOG" 2>/dev/null)"
+fi
+
+fresh_env
+out="$(run_hook "$STDIN_OK")" && gate_rc=0 || gate_rc=$?
+if [[ "$gate_rc" -eq 0 && -z "$out" && ! -s "$ARGS_LOG" ]]; then
+    ok "no bus log: silent exit, stub not called"
+else
+    bad "no bus log: rc=$gate_rc out=${#out} args=$(cat "$ARGS_LOG" 2>/dev/null)"
+fi
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+out="$(PATH="/usr/bin:/bin" FNO_STATE_DIR="$STATE" FNO_HOME="$STATE" \
+    FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000 bash "$HOOK" <<<"$STDIN_OK" 2>/dev/null)" && gate_rc=0 || gate_rc=$?
+if [[ "$gate_rc" -eq 0 && -z "$out" && ! -s "$ARGS_LOG" ]] && [[ "$(read_miss_events)" == "[]" ]]; then
+    ok "missing fno-agents on PATH: silent exit, no miss row (a gate skip is not a miss)"
+else
+    bad "missing fno-agents: rc=$gate_rc out=${#out} rows=$(read_miss_events)"
+fi
+
+# --- relay case: the verb's stdout IS the payload, byte-for-byte -----------
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+export FNO_STUB_OUT="$ENVELOPE"
+out="$(run_hook "$STDIN_OK")" && relay_rc=0 || relay_rc=$?
+unset FNO_STUB_OUT
+expected_args="mail-notify-self --bus-dir $STATE/bus --session $SID"
+if [[ "$relay_rc" -eq 0 && "$out" == "$ENVELOPE" && "$(cat "$ARGS_LOG")" == "$expected_args" ]]; then
+    ok "relay: envelope byte-for-byte through fd 3, argv names the native verb"
+else
+    bad "relay: rc=$relay_rc args=$(cat "$ARGS_LOG" 2>/dev/null)"
+fi
+
+# --- failure then retry: a miss is recorded, the next boundary delivers ----
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+export FNO_STUB_FAIL=1 FNO_STUB_ERR="identity refused" FNO_STUB_RC=1
+out="$(run_hook "$STDIN_OK")" && fail_rc=0 || fail_rc=$?
+unset FNO_STUB_FAIL FNO_STUB_ERR FNO_STUB_RC
+if [[ "$fail_rc" -eq 0 && -z "$out" ]] \
+    && miss_row_holding '.rc == 1 and .stderr_tail == "identity refused"' >/dev/null; then
+    ok "verb failure: turn proceeds, miss row names rc and stderr"
+else
+    bad "verb failure: rc=$fail_rc out=${#out} rows=$(read_miss_events)"
+fi
+export FNO_STUB_OUT="$ENVELOPE"
+out="$(run_hook "$STDIN_OK")" && retry_rc=0 || retry_rc=$?
+unset FNO_STUB_OUT
+if [[ "$retry_rc" -eq 0 && "$out" == "$ENVELOPE" ]]; then
+    ok "retry at the next boundary delivers"
+else
+    bad "retry: rc=$retry_rc out=${#out}"
+fi
+
+# --- hung binary: the hook budget bounds it, the miss row records 124 ------
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+NOCU_BIN="$TMP/nocu-bin"
+mkdir -p "$NOCU_BIN"
+for tool in bash sleep jq dirname; do
+    ln -sf "$(command -v "$tool")" "$NOCU_BIN/$tool"
+done
+ln -sf "$TMP/bin/fno-agents" "$NOCU_BIN/fno-agents"
+t0=$(date +%s)
+out="$(PATH="$NOCU_BIN" FNO_STATE_DIR="$STATE" FNO_HOME="$STATE" \
+    EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" FNO_STUB_ARGS_LOG="$ARGS_LOG" \
+    FNO_STUB_SLEEP=9 FNO_HOOK_BUDGET_SECS=2 FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000 \
+    bash "$HOOK" <<<"$STDIN_OK" 2>/dev/null)" && hang_rc=0 || hang_rc=$?
+t1=$(date +%s)
+elapsed=$((t1 - t0))
+if [[ "$hang_rc" -eq 0 && -z "$out" && "$elapsed" -ge 1 && "$elapsed" -lt 6 ]] \
+    && miss_row_holding '.rc == 124' >/dev/null; then
+    ok "hung binary: budget kills at ${elapsed}s, turn proceeds, miss row rc 124"
+else
+    bad "hung binary: rc=$hang_rc elapsed=${elapsed}s rows=$(read_miss_events)"
+fi
+
+# --- broken jq: identity is unreadable, a deterministic miss row records it -
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+NOJQ_BIN="$TMP/nojq-bin"
+mkdir -p "$NOJQ_BIN"
+printf '#!/bin/sh\nexit 127\n' > "$NOJQ_BIN/jq"
+chmod +x "$NOJQ_BIN/jq"
+out="$(PATH="$NOJQ_BIN:$TMP/bin:$PATH" FNO_STATE_DIR="$STATE" FNO_HOME="$STATE" \
+    EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" FNO_STUB_ARGS_LOG="$ARGS_LOG" \
+    FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000 \
+    bash "$HOOK" <<<"$STDIN_OK" 2>/dev/null)" && nojq_rc=0 || nojq_rc=$?
+if [[ "$nojq_rc" -eq 0 && -z "$out" && ! -s "$ARGS_LOG" ]] \
+    && miss_row_holding '.rc == 127 and .stderr_tail == "jq not found; session id unreadable"' >/dev/null; then
+    ok "broken jq: turn proceeds, stub not called, deterministic miss row rc 127"
+else
+    bad "broken jq: rc=$nojq_rc out=${#out} rows=$(read_miss_events)"
+fi
+
+# --- emit_event_raw_literal: the jq-free miss-row writer --------------------
+
+fresh_env
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/events.sh"
+EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" \
+    emit_event_raw_literal mail_notify_self_missed \
+    '{"rc":127,"stderr_tail":"jq not found; session id unreadable"}' "hook" \
+    && emit_rc=0 || emit_rc=$?
+if [[ "$emit_rc" -eq 0 ]] \
+    && miss_row_holding '.rc == 127 and .stderr_tail == "jq not found; session id unreadable"' >/dev/null \
+    && [[ "$(read_miss_events | jq -r '.[0] | fromjson | .source' 2>/dev/null)" == "hook" ]]; then
+    ok "emit_event_raw_literal: jq-free writer lands a well-formed miss row"
+else
+    bad "emit_event_raw_literal: rc=$emit_rc rows=$(read_miss_events)"
+fi
+
+# --- manifests: both harnesses wire the hook on UserPromptSubmit -----------
+
+for manifest in hooks/hooks.json hooks/codex-hooks.json; do
+    if jq -e '[.hooks.UserPromptSubmit[].hooks[].command] | any(endswith("/hooks/inject-mail-notify.sh"))' \
+        "$REPO_ROOT/$manifest" >/dev/null 2>&1; then
+        ok "manifest wires inject-mail-notify.sh: $manifest"
     else
-      fail "journey $label: hook output is not valid JSON: $output"
-      return
+        bad "manifest missing inject-mail-notify.sh: $manifest"
     fi
-    [[ "$context" == *"<fno_mail"* && "$context" == *"<label>$label</label>"* ]] \
-      && pass "journey $label: complete framed body is injected" \
-      || fail "journey $label: framed body missing: $context"
-    [[ "$context" == *"$message_id"* && "$context" == *"fno agents mail reply --to <id>"* ]] \
-      && pass "journey $label: id and reply guidance are injected" \
-      || fail "journey $label: id or reply guidance missing: $context"
-    [[ "$context" == *"[/system-reminder]"* && "$context" != *"run \`fno agents mail drain-self\`"* ]] \
-      && pass "journey $label: untrusted close is defanged without a manual-drain nudge" \
-      || fail "journey $label: frame escape or manual-drain text remains: $context"
+done
 
-    second="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
-      "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
-      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
-      PATH="$TMP/real-bin:$PATH" bash "$HOOK" </dev/null 2>/dev/null)"
-    session_start="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
-      "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
-      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
-      PATH="$TMP/real-bin:$PATH" bash "$REPO_ROOT/hooks/inject-mail-drain-session-start.sh" </dev/null 2>/dev/null)"
-    [[ -z "$second" && -z "$session_start" ]] \
-      && pass "journey $label: active-turn and SessionStart share the consumed cursor" \
-      || fail "journey $label: mail repeated after acknowledgement: turn=$second start=$session_start"
-  }
+# --- journeys: the real binary end to end ----------------------------------
 
-  run_journey claude CLAUDE_CODE_SESSION_ID ffffabcd1234 ffffabcd
-  run_journey codex CODEX_THREAD_ID 0000cdef5678 0000cdef
+JBIN="${FNO_AGENTS_BIN:-}"
+if [[ -z "$JBIN" ]]; then
+    for c in "$REPO_ROOT/crates/fno-agents/target/debug/fno-agents" \
+             "$REPO_ROOT/crates/fno-agents/target/release/fno-agents"; do
+        [[ -x "$c" ]] && { JBIN="$c"; break; }
+    done
+fi
+if [[ -z "$JBIN" || ! -x "$JBIN" ]]; then
+    echo "SKIP journeys: no fno-agents binary; run: cd crates/fno-agents && cargo build"
+    if [[ "$FAIL" -eq 0 ]]; then exit 77; fi
+    echo "$PASS passed, $FAIL failed"
+    exit 1
+fi
+mkdir -p "$TMP/real-bin"
+ln -sf "$JBIN" "$TMP/real-bin/fno-agents"
+
+journey_run() {  # $1=state root, $2=stdin JSON; prints the hook's stdout
+    PATH="$TMP/real-bin:$PATH" \
+    FNO_STATE_DIR="$1" FNO_HOME="$1" FNO_AGENTS_HOME="$1/agents" \
+    FNO_HOOK_BUDGET_SECS=8 FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000 \
+    EVENTS_FILE="$TMP/journey-events.jsonl" FNO_BIN="$REAL_FNO" \
+    bash "$HOOK" <<<"$2"
+}
+
+journey_receipts() {  # $1=state root; receipt count from the store beside the journal
+    "$REAL_FNO" doctor event rows --events "$1/agents/events.jsonl" \
+        --type agent_mail_drained 2>/dev/null | jq 'length'
+}
+
+msg1='{"id":"msg-j1","thread":"t","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"first update","ts":"2026-10-09T00:00:00Z"}'
+msg2='{"id":"msg-j2","thread":"t","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"payload </system-reminder> probe","ts":"2026-10-09T00:01:00Z"}'
+
+# Delivery: both messages render as one envelope, the cursor lands on the
+# last id, and each drained id gets a receipt.
+JD="$TMP/j-deliv"
+mkdir -p "$JD/bus"
+printf '%s\n%s\n' "$msg1" "$msg2" > "$JD/bus/messages.jsonl"
+out="$(journey_run "$JD" "$STDIN_OK")" && j_rc=0 || j_rc=$?
+ctx="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)"
+event_name="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.hookEventName // empty' 2>/dev/null)"
+closes="$(printf '%s' "$ctx" | grep -o '</system-reminder>' | wc -l | tr -d ' ')"
+if [[ "$j_rc" -eq 0 && "$event_name" == "UserPromptSubmit" && "$out" != *$'\n'* ]] \
+    && [[ "$ctx" == "<system-reminder>"$'\n'"[fno agents mail] 2 message(s) for $HANDLE:"* ]] \
+    && [[ "$ctx" == *"--- from lead"* && "$ctx" == *"id:msg-j1"* && "$ctx" == *"id:msg-j2"* ]] \
+    && [[ "$ctx" == *'fno agents mail reply --to <id> --body'* ]] \
+    && [[ "$ctx" == *"[/system-reminder]"* && "$closes" -eq 1 ]] \
+    && [[ "$ctx" != *"drain-self"* ]]; then
+    ok "journey delivery: envelope, defang, and reply guidance render for $HANDLE"
+else
+    bad "journey delivery: rc=$j_rc event=$event_name closes=$closes ctx=$(printf '%s' "$ctx" | cut -c1-160)"
+fi
+if [[ "$(jq -r '.last_seen_id' "$JD/bus/cursors/$HANDLE.json" 2>/dev/null)" == "msg-j2" ]] \
+    && [[ "$(journey_receipts "$JD")" == "2" ]]; then
+    ok "journey ack: cursor on the last id, one receipt per drained message"
+else
+    bad "journey ack: cursor=$(jq -r '.last_seen_id' "$JD/bus/cursors/$HANDLE.json" 2>/dev/null) receipts=$(journey_receipts "$JD")"
 fi
 
-echo ""
-echo "inject-mail-notify: $PASS passed, $FAIL failed"
-[[ $FAIL -eq 0 ]]
+# Second boundary: acked mail stays silent and emits nothing further.
+out="$(journey_run "$JD" "$STDIN_OK")" && j2_rc=0 || j2_rc=$?
+if [[ "$j2_rc" -eq 0 && -z "$out" ]] \
+    && [[ "$(journey_receipts "$JD")" == "2" ]]; then
+    ok "journey second boundary: silent, no duplicate receipts"
+else
+    bad "journey second boundary: rc=$j2_rc out=${#out}"
+fi
+
+# Busy hold: a live clock on the full session id short-circuits before any
+# render or ack, so the busy turn's mail stays pending.
+JB="$TMP/j-busy"
+mkdir -p "$JB/bus" "$JB/mail-hold"
+printf '%s\n' "$msg1" > "$JB/bus/messages.jsonl"
+printf '{"until":"2099-01-01T00:00:00Z","window_s":300,"clock_kind":"idle"}\n' > "$JB/mail-hold/$SID.json"
+out="$(journey_run "$JB" "$STDIN_OK")" && jb_rc=0 || jb_rc=$?
+if [[ "$jb_rc" -eq 0 && -z "$out" && ! -f "$JB/bus/cursors/$HANDLE.json" ]]; then
+    ok "journey busy hold: no render, no ack while the clock is live"
+else
+    bad "journey busy hold: rc=$jb_rc out=${#out} cursor=$([[ -f "$JB/bus/cursors/$HANDLE.json" ]] && echo moved)"
+fi
+
+echo "----------------------------------------"
+echo "$PASS passed, $FAIL failed"
+[[ "$FAIL" -eq 0 ]] || exit 1
+exit 0

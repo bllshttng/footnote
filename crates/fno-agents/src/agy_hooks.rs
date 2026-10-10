@@ -30,6 +30,11 @@ pub struct HookStatus {
     pub team: String,
     /// "matches" | "missing" | "not_shipped"
     pub guard: String,
+    /// footnote handlers whose script is gone; any one blocks `installed`.
+    pub dead: usize,
+    /// live footnote handlers from an older checkout beside the current
+    /// script; agy runs both, so any one blocks `installed`.
+    pub superseded: usize,
     pub loaded: &'static str,
     pub runtime: &'static str,
     pub installed: bool,
@@ -81,6 +86,87 @@ fn group_has_handler(list: Option<&Value>, command: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A handler whose absolute script no longer exists (an archived worktree, a
+/// renamed adapter); agy runs it on every event and it fails. Install writes
+/// the bare path unquoted, so the whole command is checked before its first
+/// token: a path with a space is one script, not a script plus arguments.
+fn is_dead(handler: &Value) -> bool {
+    let Some(command) = handler.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    let whole = Path::new(command.trim());
+    let first = command.split_whitespace().next().map(Path::new);
+    whole.is_absolute() && !whole.exists() && !first.is_some_and(Path::exists)
+}
+
+/// Another copy of `script`: same file name, different path. A footnote
+/// handler left by an older checkout is replaced, never run beside the new
+/// one.
+fn other_copy_of(handler: &Value, script: &Path) -> bool {
+    handler
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|c| {
+            let path = Path::new(c.trim());
+            path != script && path.file_name().is_some() && path.file_name() == script.file_name()
+        })
+}
+
+/// Every handler in one event list, flat or grouped under `hooks`.
+fn handlers(list: &[Value]) -> Vec<&Value> {
+    list.iter()
+        .flat_map(|entry| match entry.get("hooks").and_then(Value::as_array) {
+            Some(hooks) => hooks.iter().collect(),
+            None => vec![entry],
+        })
+        .collect()
+}
+
+/// Handlers `pick` selects across the footnote namespace. Only footnote's
+/// own namespace is read here; foreign namespaces stay untouched even when
+/// dead.
+fn count_handlers(fn_map: &Map<String, Value>, pick: impl Fn(&Value) -> bool) -> usize {
+    fn_map
+        .values()
+        .filter_map(Value::as_array)
+        .map(|list| handlers(list).into_iter().filter(|h| pick(h)).count())
+        .sum()
+}
+
+/// The session-state reporter ships beside the stop adapter in the same
+/// plugin stage; `None` when this stage carries none.
+fn report_script(adapter: &Path) -> Option<std::path::PathBuf> {
+    adapter
+        .parent()
+        .map(|dir| dir.join("agy-session-report.sh"))
+        .filter(|path| path.is_file())
+}
+
+/// Remove the handlers `gone` selects from every footnote event list. A group
+/// this removal empties goes too; a group that was already empty stays.
+/// Returns how many handlers went.
+fn remove_handlers(fn_map: &mut Map<String, Value>, gone: impl Fn(&Value) -> bool) -> usize {
+    let mut removed = 0;
+    for list in fn_map.values_mut().filter_map(Value::as_array_mut) {
+        list.retain_mut(
+            |entry| match entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                Some(hooks) => {
+                    let before = hooks.len();
+                    hooks.retain(|h| !gone(h));
+                    removed += before - hooks.len();
+                    before == hooks.len() || !hooks.is_empty()
+                }
+                None => {
+                    let drop = gone(entry);
+                    removed += usize::from(drop);
+                    !drop
+                }
+            },
+        );
+    }
+    removed
+}
+
 /// The footnote namespace as an object, or a word for why not.
 fn footnote_namespace(
     root: &Map<String, Value>,
@@ -105,14 +191,22 @@ impl HookStatus {
                 self.file_error.clone().unwrap_or_default()
             ),
         };
+        let mut dead = String::new();
+        if self.dead > 0 {
+            dead.push_str(&format!(" dead={}", self.dead));
+        }
+        if self.superseded > 0 {
+            dead.push_str(&format!(" superseded={}", self.superseded));
+        }
         format!(
-            "file={} footnote={} {} stop={} team={} guard={} -> {}",
+            "file={} footnote={} {} stop={} team={} guard={}{} -> {}",
             file,
             self.footnote,
             enabled,
             self.stop,
             self.team,
             self.guard,
+            dead,
             if self.installed {
                 "installed"
             } else {
@@ -142,6 +236,8 @@ pub fn status(
         stop: "unverifiable".to_string(),
         team: "not_shipped".to_string(),
         guard: "not_shipped".to_string(),
+        dead: 0,
+        superseded: 0,
         loaded: "unverified",
         runtime: "unverified",
         installed: false,
@@ -172,6 +268,15 @@ pub fn status(
     s.footnote = footnote_word.to_string();
     if let Some(fn_map) = fn_map {
         s.enabled = !matches!(fn_map.get("enabled"), Some(Value::Bool(false)));
+        s.dead = count_handlers(fn_map, is_dead);
+        let report = adapter.and_then(report_script);
+        let current: Vec<&Path> = [team, guard, report.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        s.superseded = count_handlers(fn_map, |h| {
+            !is_dead(h) && current.iter().any(|script| other_copy_of(h, script))
+        });
     }
     s.stop = match (adapter, fn_map) {
         (None, _) => "unverifiable",
@@ -212,7 +317,9 @@ pub fn status(
     s.installed = s.footnote == "configured"
         && s.stop == "matches"
         && s.team != "missing"
-        && s.guard != "missing";
+        && s.guard != "missing"
+        && s.dead == 0
+        && s.superseded == 0;
     s
 }
 
@@ -261,6 +368,14 @@ pub fn install(
         }
     };
     let enabled = !matches!(fn_map.get("enabled"), Some(Value::Bool(false)));
+    // When the session-state reporter exists on disk, register it under
+    // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
+    // event's decision contract). Append-once like the team.
+    let report = report_script(adapter);
+    let mut pruned = remove_handlers(fn_map, is_dead);
+    for script in [team, guard, report.as_deref()].into_iter().flatten() {
+        pruned += remove_handlers(fn_map, |h| other_copy_of(h, script));
+    }
     fn_map.insert(
         "Stop".to_string(),
         json!([{"type": "command", "command": adapter.display().to_string(), "timeout": 60}]),
@@ -317,14 +432,6 @@ pub fn install(
             }));
         }
     }
-    // The session-state reporter ships beside the stop adapter in the same
-    // plugin stage; when the sibling exists on disk, register it under
-    // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
-    // event's decision contract). Append-once like the team.
-    let report = adapter
-        .parent()
-        .map(|dir| dir.join("agy-session-report.sh"))
-        .filter(|path| path.is_file());
     if let Some(report) = report {
         match fn_map.get("PreInvocation") {
             Some(Value::Array(_)) => {}
@@ -378,6 +485,11 @@ pub fn install(
     std::fs::rename(&tmp, hooks_file)
         .map_err(|e| format!("{}: could not replace: {e}", hooks_file.display()))?;
     let mut note = format!("Stop hook -> {}", hooks_file.display());
+    if pruned > 0 {
+        note.push_str(&format!(
+            "; pruned {pruned} dead or superseded footnote handler(s)"
+        ));
+    }
     if !enabled {
         note.push_str(
             "; configured but disabled (footnote.enabled = false); agy will \
@@ -421,7 +533,10 @@ mod tests {
     /// reads installed (enabled is not part of installed()).
     #[test]
     fn ac2_hp_disabled_and_foreign_survive() {
-        let (_dir, path) = tmp("ac2");
+        let (dir, path) = tmp("ac2");
+        let adapter = dir.path().join("footnote-agy-target-stop-hook.sh");
+        std::fs::write(&adapter, "#!/usr/bin/env bash\n").unwrap();
+        let adapter = adapter.as_path();
         std::fs::write(
             &path,
             r#"{
@@ -433,7 +548,6 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let adapter = Path::new("/plugin/hooks/footnote-agy-target-stop-hook.sh");
         let receipt = install(&path, adapter, None, None).expect("install succeeds");
         assert!(!receipt.enabled, "receipt carries disabled state");
         let text = std::fs::read_to_string(&path).unwrap();
@@ -533,6 +647,64 @@ mod tests {
             "foreign PreToolUse unchanged"
         );
         assert_eq!(data["footnote"]["note"], "keep me");
+    }
+
+    /// A footnote handler whose script is gone (an archived worktree) blocks
+    /// `installed`, and the next install drops it and replaces a live copy of
+    /// the same script from an older checkout. Live handlers on a path with a
+    /// space survive, and so does a dead foreign one.
+    #[test]
+    fn dead_footnote_handlers_block_installed_and_are_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        let hooks = dir.path().join("Jane Doe/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let adapter = hooks.join("footnote-agy-target-stop-hook.sh");
+        let team = hooks.join("agy-team-inject.sh");
+        let older = dir.path().join("older-tree/hooks/agy-team-inject.sh");
+        std::fs::create_dir_all(older.parent().unwrap()).unwrap();
+        for p in [&adapter, &team, &older] {
+            std::fs::write(p, "#!/usr/bin/env bash\n").unwrap();
+        }
+        let gone = dir.path().join("archived-worktree/hooks/agy-old-inject.sh");
+        let data = json!({
+            "other": {"Stop": [{"type": "command", "command": gone.display().to_string()}]},
+            "footnote": {
+                "Stop": [{"type": "command", "command": adapter.display().to_string()}],
+                "PreInvocation": [
+                    {"type": "command", "command": gone.display().to_string()},
+                    {"type": "command", "command": older.display().to_string()},
+                    {"type": "command", "command": team.display().to_string()}
+                ],
+                "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": gone.display().to_string()}]}]
+            }
+        });
+        std::fs::write(&path, data.to_string()).unwrap();
+        let before = status(&path, Some(&adapter), Some(&team), None);
+        assert_eq!(before.dead, 2);
+        assert_eq!(
+            before.superseded, 1,
+            "the older live copy runs beside the new one"
+        );
+        assert!(!before.installed, "a dead handler is not installed");
+        let receipt = install(&path, &adapter, Some(&team), None).expect("install");
+        assert!(receipt.note.contains("pruned 3"), "{}", receipt.note);
+        let after = status(&path, Some(&adapter), Some(&team), None);
+        assert_eq!((after.dead, after.superseded), (0, 0));
+        assert!(after.installed);
+        let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = data["footnote"]["PreInvocation"].as_array().unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["command"], team.display().to_string());
+        assert!(data["footnote"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            data["other"]["Stop"][0]["command"],
+            gone.display().to_string(),
+            "foreign namespace untouched"
+        );
     }
 
     /// A footnote namespace that is not an object refuses without writing.

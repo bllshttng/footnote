@@ -27,6 +27,7 @@ use crate::agents_config;
 use crate::claims;
 use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
+use crate::footprint_cache::{footprint_cause_cached, FOOTPRINT_CACHE_FRESH};
 use crate::spawn_gate_lanes;
 use crate::spawn_gate_lanes::{
     check_account_login, check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
@@ -2428,12 +2429,13 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
 }
 
 /// The status footer's reading and the store keeper's path note, from ONE
-/// footprint probe: `(machine line, keeper note)`. Both best-effort
+/// footprint answer, a live probe or a fresh persisted one: `(machine line,
+/// keeper note)`. Both best-effort
 /// - a machine whose footprint cannot be read yields `(None, None)`, never a
 /// stale or fabricated line.
 pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
     // ONE parse serves both notes; the raw string is never read twice.
-    let payload: Option<FootprintCausePayload> = footprint_cause_raw()
+    let payload: Option<FootprintCausePayload> = footprint_cause_cached(FOOTPRINT_CACHE_FRESH)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
     let home = crate::paths::AgentsHome::from_env();
@@ -2497,7 +2499,9 @@ pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     let argv = footprint_probe_argv().ok_or_else(|| {
         "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
     })?;
-    footprint_cause_raw_with(&argv, FOOTPRINT_PROBE_BUDGET)
+    let raw = footprint_cause_raw_with(&argv, FOOTPRINT_PROBE_BUDGET)?;
+    crate::footprint_cache::persist_footprint_cache(&raw);
+    Ok(raw)
 }
 
 /// The transport, split from [`footprint_cause_raw`] so tests can pass a

@@ -228,11 +228,26 @@ def cmd_note(
     from fno.graph._archive_lookup import refuse_update_if_archived
     from fno.graph._intake import _find_node
     from fno.graph.api import wire_rows
+    from fno.graph.store import read_nodes_by_ids
 
-    try:
-        live = _find_node(wire_rows(path=graph_path), task_id)
-    except Exception:  # noqa: BLE001 - an unreadable store is the write path's error to report
-        live = None
+    # The by-id read answers the hot path (one live row, no full-graph
+    # read); the full read stays the seam's authority whenever the keeper
+    # does not positively answer a live row, so a live row still outranks
+    # an archive answer in every shape.
+    live = None
+    answer = read_nodes_by_ids(graph_path, [task_id])
+    if answer is not None:
+        found = answer.get("entries") or []
+        if found:
+            # The live view never serves an archived row: an archived hit
+            # stays not-live, and the refusal below names it.
+            row = found[0]
+            live = None if row.get("archived_at") is not None else row
+    if live is None:
+        try:
+            live = _find_node(wire_rows(path=graph_path), task_id)
+        except Exception:  # noqa: BLE001 - an unreadable store is the write path's error to report
+            live = None
     if live is None and refuse_update_if_archived(task_id):
         raise typer.Exit(code=1)
 

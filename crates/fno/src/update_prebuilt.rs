@@ -15,17 +15,24 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const BIN_CACHE_TAG: &str = "bin-cache";
 const DEFAULT_REPO: &str = "bllshttng/footnote";
+
+/// The GitHub `owner/repo` releases publish to; the env override keeps a
+/// fork's install testable.
+pub(crate) fn release_repo() -> String {
+    std::env::var("FNO_RELEASE_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string())
+}
 /// One curl bound per file. The tarball is about 30 MB; a link that cannot
 /// move it in this window loses to the compile fallback anyway.
 const FETCH_SECS: &str = "45";
 
-/// The four binaries every tarball carries: the fno-agents triad plus the
-/// `fno` front door.
-pub(crate) const BINARIES: [&str; 4] = [
+/// The five binaries every tarball carries: the fno-agents triad, the `fno`
+/// front door, and the `footnote` harness.
+pub(crate) const BINARIES: [&str; 5] = [
     "fno-agents",
     "fno-agents-daemon",
     "fno-agents-worker",
     "fno",
+    "footnote",
 ];
 
 /// The CI matrix name for this host, or None where CI builds no tarball.
@@ -44,7 +51,7 @@ pub(crate) fn asset_name(crates_rev: &str, platform: &str) -> String {
 }
 
 pub(crate) fn asset_url(crates_rev: &str, platform: &str) -> String {
-    let repo = std::env::var("FNO_RELEASE_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string());
+    let repo = release_repo();
     format!(
         "https://github.com/{repo}/releases/download/{BIN_CACHE_TAG}/{}",
         asset_name(crates_rev, platform)
@@ -77,7 +84,7 @@ fn curl_to(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 /// Download, verify and unpack the tarball for `crates_rev` into a fresh dir
-/// under `staging_parent`. Returns the dir holding the four binaries. Every
+/// under `staging_parent`. Returns the dir holding the five binaries. Every
 /// Err names why, so the caller's compile fallback says what it replaced. A
 /// failed fetch removes its staging dir.
 pub(crate) fn fetch(crates_rev: &str, staging_parent: &Path) -> Result<PathBuf, String> {
@@ -153,7 +160,7 @@ fn proves_rev(unpacked: &Path, crates_rev: &str) -> Result<(), String> {
     }
 }
 
-/// Move the four unpacked binaries into `bin_dir`. Every copy lands first as
+/// Move the five unpacked binaries into `bin_dir`. Every copy lands first as
 /// a temp file beside its target, and only then do the renames run, so a
 /// failed copy leaves the old set whole. A rename over a running binary is
 /// safe on unix: the live process keeps its old inode.
@@ -207,21 +214,21 @@ mod tests {
     }
 
     #[test]
-    fn swap_moves_all_four_or_none() {
+    fn swap_moves_all_five_or_none() {
         let src = tempfile::tempdir().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        for name in &BINARIES[..3] {
+        for name in &BINARIES[..4] {
             std::fs::write(src.path().join(name), b"new").unwrap();
         }
         std::fs::write(dest.path().join("fno-agents"), b"old").unwrap();
         let err = swap_into(src.path(), dest.path()).unwrap_err();
-        assert!(err.contains("lacks fno"), "{err}");
+        assert!(err.contains("lacks footnote"), "{err}");
         assert_eq!(
             std::fs::read(dest.path().join("fno-agents")).unwrap(),
             b"old"
         );
 
-        std::fs::write(src.path().join("fno"), b"new").unwrap();
+        std::fs::write(src.path().join("footnote"), b"new").unwrap();
         swap_into(src.path(), dest.path()).unwrap();
         for name in BINARIES {
             assert_eq!(std::fs::read(dest.path().join(name)).unwrap(), b"new");

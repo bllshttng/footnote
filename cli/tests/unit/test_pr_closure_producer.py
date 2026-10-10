@@ -1378,6 +1378,9 @@ def _native_supersede(graph, *args: str):
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         _pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    # The child's cwd is the store dir; a caller that never seeded still needs
+    # it to exist, or the exec fails ENOENT against the cwd itself.
+    graph.parent.mkdir(parents=True, exist_ok=True)
     proc = _sp.run(
         [str(binary), "backlog", "supersede", *args],
         capture_output=True,

@@ -100,7 +100,7 @@ The buddy asks for the `haiku` model through the API client of your session. On 
 ## Storage
 
 - The soul of the buddy (seed, name, personality) and the reroll bank are in the mod store under `~/.claude/plugins/store/`.
-- The status line files are in `state/buddy/` in the fno state folder (`~/.fno/` by default). Without fno, they are in `~/.local/state/buddy/`. They are the wrapper, your saved `statusLine`, and one frame file for each session. The wrapper erases a frame file one day after its last write.
+- The status line files are in `state/buddy/` in the fno state folder (`~/.fno/` by default). Without fno, they are in `~/.local/state/buddy/`. Once the wrapper is in your settings, every session uses the folder that wrapper is in. They are the wrapper, your saved `statusLine`, and one frame file for each session. The wrapper erases a frame file one day after its last write.
 
 ## Where the code is
 

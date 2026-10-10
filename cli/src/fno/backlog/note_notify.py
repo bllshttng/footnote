@@ -219,13 +219,25 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
     from fno.agents.registry import load_registry
     from fno.graph._intake import _find_node
     from fno.graph.api import wire_rows
+    from fno.graph.store import read_nodes_by_ids
 
     try:
-        rows = wire_rows(path=graph_path)
-        entry = _find_node(rows, task_id) or next(  # the write path takes slugs too
-            (e for e in rows if str(e.get("slug") or "").lower() == task_id.strip().lower()),
-            None,
-        )
+        # The by-id seam answers the exact id/slug tiers without the whole
+        # read; the full read stays for a keeper that cannot answer.
+        fast = read_nodes_by_ids(Path(graph_path), [task_id])
+        rows: list[dict] | None = None
+        entry: dict | None = None
+        if fast and (fast.get("entries") or []) and not (fast.get("missing") or []):
+            entry = fast["entries"][0]
+            # The by-id read includes archived rows the full read excludes.
+            if entry.get("archived_at"):
+                entry = None  # fall through to the archived refusal
+        if entry is None:
+            rows = wire_rows(path=graph_path)
+            entry = _find_node(rows, task_id) or next(  # the write path takes slugs too
+                (e for e in rows if str(e.get("slug") or "").lower() == task_id.strip().lower()),
+                None,
+            )
         if entry is None:
             from fno.graph._archive_lookup import archived_entry
 
@@ -238,7 +250,19 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
                     1,
                 )
             return Refused(f"Error: no node resolves to '{task_id}'", 1)
-        index = {str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)}
+        if rows is not None:
+            index = {str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)}
+        else:
+            # The walk needs one more node: the contained_in owner chain
+            # (note_readers reads only index.get(contained_in) and
+            # index.get(owner_id)). By-id reads cover it.
+            index = {}
+            contained_in = entry.get("contained_in")
+            if isinstance(contained_in, str) and contained_in:
+                owner = read_nodes_by_ids(Path(graph_path), [contained_in])
+                for e in (owner or {}).get("entries") or []:
+                    if isinstance(e.get("id"), str):
+                        index[e["id"]] = e
         readers = note_readers(
             entry, index=index, rows=load_registry(), holder_of=claim_holder,
             leads_of=promoted_over, self_session=own_session(),

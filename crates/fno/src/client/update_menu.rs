@@ -17,6 +17,15 @@ pub(crate) struct UpdateReadiness {
     pub(crate) update_ready: bool,
     pub(crate) installed_rev: Option<String>,
     pub(crate) source_rev: Option<String>,
+    /// The installed binary's package version ("0.4.1"), from the same
+    /// binary that produced the payload. Tolerated absent: an older check
+    /// still renders the bare sha pair.
+    #[serde(default)]
+    pub(crate) installed_version: Option<String>,
+    /// Merged PRs between the installed rev and source HEAD. Tolerated
+    /// absent; None or a 0 both fall back to the bare sha pair.
+    #[serde(default)]
+    pub(crate) source_prs_ahead: Option<u64>,
     #[serde(default)]
     pub(crate) changelog: Vec<String>,
     /// Release notes Python shaped for the modal (one line per merged PR,
@@ -289,20 +298,37 @@ pub(crate) fn build_sideline_menu(
 /// `build_sideline_menu` never offers as a way in.
 pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
     let outcome = probe.map(|p| &p.readiness);
-    let mut rows = vec![PopupRow::Header("update".into()), PopupRow::Rule];
+    let mut rows = vec![];
     let mut actions = Vec::new();
     match probe.map(|p| &p.release) {
         Some(ReleaseOutcome::Newer {
             channel,
             installed,
             latest,
+            notes,
         }) => {
             rows.push(PopupRow::Header(format!(
                 "release {installed} -> {latest} ({})",
                 channel.name()
             )));
-            rows.push(PopupRow::Header(
-                "upgrades the fno wheel; restart afterwards to run it".into(),
+            // Notes from the GitHub release body: area headings and bullets
+            // render as Headers - a release body carries no PR urls, so
+            // nothing here is a dead selectable row.
+            if !notes.is_empty() {
+                rows.push(PopupRow::Rule);
+                for section in notes {
+                    if !section.area.is_empty() {
+                        rows.push(PopupRow::Header(section.area.clone()));
+                    }
+                    for bullet in &section.bullets {
+                        rows.push(PopupRow::Text(format!("- {bullet}")));
+                    }
+                    rows.push(PopupRow::Header(String::new()));
+                }
+                rows.pop();
+            }
+            rows.push(PopupRow::Text(
+                "the upgrade replaces the wheel. restart afterwards to run it.".into(),
             ));
             rows.push(PopupRow::Entry {
                 glyph: "⬆".into(),
@@ -331,11 +357,24 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
             let short = |rev: Option<&str>| -> String {
                 rev.unwrap_or("unknown").chars().take(10).collect()
             };
-            rows.push(PopupRow::Header(format!(
-                "{} -> {}",
-                short(r.installed_rev.as_deref()),
-                short(r.source_rev.as_deref())
-            )));
+            // Version + distance answer "how far behind am I". A missing
+            // rev means the source story cannot render: no line at all, not
+            // an "unknown" pair.
+            if r.installed_rev.is_some() && r.source_rev.is_some() {
+                let ahead = r.source_prs_ahead.filter(|n| *n > 0);
+                match (r.installed_version.as_deref(), ahead) {
+                    (Some(version), Some(ahead)) => rows.push(PopupRow::Header(format!(
+                        "fno {version} at {}, main is {ahead} PR{} ahead",
+                        short(r.installed_rev.as_deref()),
+                        if ahead == 1 { "" } else { "s" }
+                    ))),
+                    _ => rows.push(PopupRow::Header(format!(
+                        "{} -> {}",
+                        short(r.installed_rev.as_deref()),
+                        short(r.source_rev.as_deref())
+                    ))),
+                }
+            }
             // Shaped notes win; the raw changelog stays the fallback for an
             // older Python payload. A tappable line is an Entry (its action
             // pairs by selectable-row index); a line without a URL renders as
@@ -363,7 +402,7 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                             });
                             actions.push(AuxAction::OpenPr(url.clone()));
                         }
-                        None => rows.push(PopupRow::Header(label)),
+                        None => rows.push(PopupRow::Text(label)),
                     }
                 };
                 for line in &notes.highlights {
@@ -379,16 +418,23 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                     }
                 }
                 if let Some(hidden) = &notes.hidden_line {
-                    rows.push(PopupRow::Header(hidden.clone()));
+                    rows.push(PopupRow::Text(hidden.clone()));
                 }
             } else if !r.changelog.is_empty() {
                 rows.push(PopupRow::Rule);
                 for subject in &r.changelog {
-                    rows.push(PopupRow::Header(subject.clone()));
+                    rows.push(PopupRow::Text(subject.clone()));
                 }
             }
-            rows.push(PopupRow::Rule);
-            rows.push(PopupRow::Header(r.guidance.clone()));
+            // The release section carries the one action already; a second
+            // guidance line only repeats it.
+            if !matches!(
+                probe.map(|p| &p.release),
+                Some(ReleaseOutcome::Newer { .. })
+            ) {
+                rows.push(PopupRow::Rule);
+                rows.push(PopupRow::Text(r.guidance.clone()));
+            }
             // change 7: one row per stale process naming what a
             // restart does and what survives, then the fixed promise. The
             // tap is the confirmation, because the modal named every effect.
@@ -407,25 +453,25 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                     .count();
                 for row in stale.iter().filter(|r| r.component != "pane-keeper") {
                     let name = row.name.as_deref().unwrap_or("unnamed");
-                    rows.push(PopupRow::Header(format!(
+                    rows.push(PopupRow::Text(format!(
                         "{} {}: {}; keeps {}",
                         row.component, name, row.on_restart, row.survives
                     )));
                 }
                 if keepers > 0 {
-                    rows.push(PopupRow::Header(format!(
+                    rows.push(PopupRow::Text(format!(
                         "{keepers} pane keeper{} on the old build",
                         if keepers == 1 { "" } else { "s" }
                     )));
                 }
-                rows.push(PopupRow::Header(
-                    "restart keeps every pane. pane keepers stay on the old build \
-                     until their pane ends."
+                rows.push(PopupRow::Text(
+                    "restart keeps panes. keepers stay on the old build until \
+                     their pane ends."
                         .into(),
                 ));
-                rows.push(PopupRow::Header(
+                rows.push(PopupRow::Text(
                     "restart detaches, runs `fno agents restart --mux` in the \
-                     foreground, then reattaches."
+                     foreground, reattaches."
                         .into(),
                 ));
                 rows.push(PopupRow::Rule);

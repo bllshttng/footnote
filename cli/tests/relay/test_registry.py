@@ -8,6 +8,7 @@ claude sessions in, and let a persisted peer win a session-id clash.
 from __future__ import annotations
 
 from fno.agents.discover import DiscoveredSession
+from fno.agents.registry import SCHEMA_VERSION
 from fno.relay import registry as reg
 from fno.relay.registry import RegistryEntry
 
@@ -166,7 +167,9 @@ def test_unknown_persisted_peer_keeps_confirmable_inject_handle(
 
 def _write_agents_registry(home, rows):
     home.mkdir(parents=True, exist_ok=True)
-    (home / "registry.json").write_text(__import__("json").dumps({"agents": rows}))
+    (home / "registry.json").write_text(
+        __import__("json").dumps({"schema_version": SCHEMA_VERSION, "agents": rows})
+    )
 
 
 def _no_discovery(monkeypatch):
@@ -284,7 +287,9 @@ def test_index_bridge_tolerates_missing_or_corrupt_agents_registry(tmp_path, mon
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))  # no registry.json written
     idx = reg.index(path=tmp_path / "registry.json")
     assert "live-1" in idx  # discovery still works
-    # corrupt (valid JSON, not an object)
-    (tmp_path / "agents").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "agents" / "registry.json").write_text("[]")
+    # corrupt (valid JSON, not an object), in a fresh home: the read above
+    # already put the table fence where the missing file was
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "corrupt" / "agents"))
+    (tmp_path / "corrupt" / "agents").mkdir(parents=True)
+    (tmp_path / "corrupt" / "agents" / "registry.json").write_text("[]")
     assert "live-1" in reg.index(path=tmp_path / "registry.json")

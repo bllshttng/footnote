@@ -6,30 +6,36 @@ This makes delivery push instead of pull, and closes the matching sender-side ho
 
 ## Two changes, one node
 
-**Receive (push).** The `UserPromptSubmit` hook, `hooks/inject-mail-notify.sh`, runs `fno agents mail notify-self` every turn and relays the complete framed durable messages as `additionalContext`.
+**Receive (push).** The `UserPromptSubmit` hook, `hooks/inject-mail-notify.sh`, gates cheaply (session identity, bus-log stat, binary on PATH, the one load-aware hook budget) and then relays the envelope the native verb `fno-agents mail-notify-self --bus-dir <bus> --session <sid>` prints, through fd 3 and byte-for-byte, as `additionalContext`.
 The payload includes each message id and `fno agents mail reply --to <id>` guidance, so the recipient sees the mail without discovering or running a drain command.
 `UserPromptSubmit` already fires every turn, so delivery uses an active boundary that already exists and adds no daemon or poll loop.
 
-**Send (honesty).** The same `notify-self` invocation also surfaces the session's *own* sent mail that no recipient has claimed past a TTL, both as a turn-boundary line and as `sent unclaimed: N` in `fno agents mail status`.
-Before this, `queued (durable)` was the last thing a sender ever heard, so silence read as delivered.
+**Send (honesty).** The turn-boundary render no longer computes the sent-unclaimed nag: the cancelled Python run never reached that scan once, so the native port drops it and `fno agents mail status` keeps the signal (`sent unclaimed: N`).
+Before the push boundary existed, `queued (durable)` was the last thing a sender ever heard, so silence read as delivered; the turn-boundary delivery is what closed that, not the nag line.
 
-## `fno agents mail notify-self` (hidden hook-output verb)
+## `fno-agents mail-notify-self` (native hook-output verb)
 
-The verb reuses `drain-self`'s identity path (`resolve_harness_identity` -> `canonical_handle` -> `scan_unread`) and the same forward-only consume cursor.
-It renders the complete `UserPromptSubmit` JSON envelope in the CLI, writes and flushes that envelope, and only then advances the cursor through the last rendered message.
+The first implementation shelled from the hook to the Python `fno agents mail notify-self`.
+The interpreter start alone outran the hook budget on a loaded box: 46 of 46 recorded runs were cancelled at the budget and nothing ever delivered.
+The verb is native Rust now (`crates/fno-agents/src/mail_notify_self.rs`), dispatched from `client.rs` before the tokio runtime builds, so a fire answers in microseconds; the shell layer is a cheap gate around it.
+The Python leg is deleted with the boundary it served: `fno agents mail notify-self` is no longer a verb, so the Rust verb is the only renderer for this payload and the two can no longer drift.
+
+The verb reuses `drain-self`'s identity path (`canonical_handle` -> unread scan) and the same forward-only consume cursor.
+It renders the complete `UserPromptSubmit` JSON envelope in Rust, writes and flushes that envelope, and only then advances the cursor through the last rendered message.
 The shell hook relays the already-valid JSON directly, so no command substitution or second serializer can acknowledge mail before the final hook payload exists.
+A live hold (idle or wall) short-circuits before any render or ack, so a busy turn's mail stays pending for the next boundary.
 There is no notify cursor: `SessionStart` and `UserPromptSubmit` race on the one canonical cursor, and whichever successfully drains first makes the other silent.
 
 - **Inbound:** unread envelopes addressed to the canonical session handle -> complete bodies, ids, and reply guidance inside a hook-owned `<system-reminder>` frame, followed by acknowledgement after flush.
-- **Sent-unclaimed:** hosted and durable sends (not `typed`), scoped to rows not yet proven `landed` in the recipient's own transcript. A durable row counts while its recipient's consume cursor is still behind it, whatever the landed verdict says. A hosted row counts only on a proven miss. To prove a miss, the scan must have read the recipient's transcript and found no id. Unknown is never reported lost. Unknown covers: no recipient session, a self-send, a raw payload with no envelope id. Unknown also covers an unreadable transcript, or a store past the scan's 0.5s read budget. The turn-boundary hook bounds the whole render at 2s. Both kinds need age past `config.inbox.unclaimed_ttl` (default 1800s). The line: `N message(s) to <recipients> handed <age>m ago, not in transcript - ESC to steer`. Computed live every call, so a just-landed message clears immediately. A message past `config.inbox.landed_abandon_ttl` drops off entirely.
-
-Sent-unclaimed reporting remains stat-only and advances no recipient cursor.
+- **Sent-unclaimed:** no longer part of the boundary path. The status verb still computes it (hosted and durable sends not yet proven `landed`, aged past `config.inbox.unclaimed_ttl`, default 1800s) and reports `sent unclaimed: N`. Stat-only; advances no recipient cursor. Porting the scan back into the boundary render is open follow-up work.
 
 ## Failure posture
 
-Every path degrades to silence, never to a blocked turn: no harness identity -> no-op; `fno` missing -> hook no-op; a recipient name rejected by the cursor path guard is skipped instead of crashing the verb.
+Every path degrades to silence, never to a blocked turn: no harness identity -> no-op; `fno-agents` missing -> hook no-op; a recipient name rejected by the cursor path guard is skipped instead of crashing the verb.
 The `</system-reminder>` delimiter is defanged across the complete untrusted mail render before embedding.
-The hook carries a portable 2s timeout and always exits 0.
+The hook bounds the verb at the one load-aware hook budget (`scripts/lib/hook-budget.sh`): the normal tier, shortened to 1s under fleet load, and past the load threshold the run is skipped entirely so a killed mid-ack render cannot lose mail; skipped mail stays pending.
+The hook always exits 0.
+A miss (timeout 124, identity refusal, crash, or rc 127: jq missing, so the session id was unreadable) records a `mail_notify_self_missed` event row naming the rc and stderr tail, so a delivery gap is diagnosable instead of silent; the other gate skips (no identity, no bus log, no binary) record nothing, because there was nothing to deliver.
 A rendering, serialization, write, flush, or process failure before acknowledgement leaves the cursor unchanged, so the next active-turn or SessionStart boundary can repeat the message instead of losing it.
 The achievable guarantee is therefore at-least-once display around process failure: a crash may repeat mail, but successful output-before-ack prevents permanent loss.
 
@@ -40,7 +46,7 @@ Live injection is a bracketed paste into the recipient's input buffer. For a wor
 The fix is a recipient-level delivery policy, not a heuristic: `delivery_policy: bus-only` on the agents registry row.
 
 - **Who sets it:** the session itself, once: `fno agents register --delivery-policy bus-only` (in the human-attended session). `--delivery-policy off` clears it. A later flagless re-register preserves the stamp. The re-firing SessionStart hook cannot silently revert the recipient to injectable.
-- **What senders see:** `queued (durable) for <handle> [DND (bus-only): recipient polls the bus at each turn boundary]` on the name, job, and registered-agent lanes. No recovery warning, no send-time escalation. The queue is designed, not stranded, and it drains through this doc's own `notify-self` push at each turn boundary.
+- **What senders see:** `queued (durable) for <handle> [DND (bus-only): recipient polls the bus at each turn boundary]` on the name, job, and registered-agent lanes. No recovery warning, no send-time escalation. The queue is designed, not stranded, and it drains through this doc's own turn-boundary push (`fno-agents mail-notify-self`).
 - **What never happens:** a prompt-line paste, on any lane. The gate lives inside the three shared injectors (`_mail_inject_claude`, `_mail_inject_codex`, `_mux_pane_send` in `cli/src/fno/agents/dispatch.py`). Name, reply, job, project, raw, dispatch, ask, and annotate lanes inherit it rather than remembering to check.
 - **The raw lane:** `--raw` never queues durable, so a raw send to a bus-only recipient refuses non-zero (`refused: ... is DND (delivery-policy bus-only)`). `--check` answers `not-injectable` naming the policy.
 - **The naming rule:** bus-only is a DELIVERY-POLICY fact, never a liveness verdict. A bus-only session can be alive and mid-turn. It just belongs on the bus. This is the same distinction that renamed `NOT_INJECTABLE` off "not-live" (see `mail_inject.rs`).

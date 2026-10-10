@@ -260,7 +260,7 @@ fn is_footnote_hook(hook: &Value) -> bool {
             && (cmd.contains("FNO_PLATFORM=") || cmd.contains("/footnote/")))
 }
 
-/// Remove footnote's hook entries and its build-dir env export from one
+/// Remove footnote's hook entries and its build-dir and sccache env exports from one
 /// harness settings document. A group or event array is dropped only when
 /// this pass emptied it; everything else stays. Returns the count removed.
 pub(crate) fn strip_json(doc: &mut Value) -> usize {
@@ -284,13 +284,15 @@ pub(crate) fn strip_json(doc: &mut Value) -> usize {
         });
     }
     if let Some(env) = doc.get_mut("env").and_then(Value::as_object_mut) {
-        let ours = env
-            .get(BUILD_DIR_KEY)
-            .and_then(Value::as_str)
-            .is_some_and(|v| v.contains(".fno"));
-        if ours {
-            env.remove(BUILD_DIR_KEY);
-            removed += 1;
+        for key in [BUILD_DIR_KEY, SCCACHE_DIR_KEY] {
+            let ours = env
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| v.contains(".fno"));
+            if ours {
+                env.remove(key);
+                removed += 1;
+            }
         }
     }
     removed
@@ -304,7 +306,7 @@ fn join_lines(lines: &[&str]) -> String {
 
 /// Line-based, so a codex config keeps its comments and layout. Drops the
 /// marked SessionStart block, the `fno@footnote` hook trust tables and the
-/// build-dir export. `None` when nothing matched.
+/// build-dir and sccache exports. `None` when nothing matched.
 pub(crate) fn strip_codex_toml(text: &str) -> Option<String> {
     let mut out = Vec::new();
     let mut in_block = false;
@@ -336,7 +338,10 @@ pub(crate) fn strip_codex_toml(text: &str) -> Option<String> {
         if t.starts_with('[') && t.ends_with(']') {
             in_trust_table = t.starts_with("[hooks.state.\"fno@footnote:");
         }
-        if in_trust_table || (t.starts_with(BUILD_DIR_KEY) && t.contains(".fno")) {
+        let env_export = [BUILD_DIR_KEY, SCCACHE_DIR_KEY]
+            .iter()
+            .any(|key| t.starts_with(key) && t.contains(".fno"));
+        if in_trust_table || env_export {
             continue;
         }
         out.push(line);
@@ -854,7 +859,7 @@ mod tests {
     #[test]
     fn strippers_remove_only_footnote_entries() {
         let mut doc = json!({
-            "env": {"CARGO_BUILD_BUILD_DIR": "/u/.fno/cargo-build", "KEEP": "1"},
+            "env": {"CARGO_BUILD_BUILD_DIR": "/u/.fno/cargo-build", "SCCACHE_DIR": "/u/.fno/cargo-build/sccache", "KEEP": "1"},
             "hooks": {
                 "WorktreeRemove": [{"hooks": [{"type": "command", "command": "bash '/p/footnote/hooks/worktree-remove.sh'"}]}],
                 "SessionStart": [
@@ -866,7 +871,7 @@ mod tests {
                 ]
             }
         });
-        assert_eq!(strip_json(&mut doc), 3);
+        assert_eq!(strip_json(&mut doc), 4);
         assert_eq!(
             doc,
             json!({
@@ -878,10 +883,10 @@ mod tests {
             })
         );
 
-        let codex = "model = \"x\"\n\n# Added by `fno config setup cli-hooks` - footnote SessionStart context injection.\n# Codex treats this as an UNMANAGED hook: approve/trust it in Codex before it\n# runs. Remove this block to uninstall.\n[[hooks.SessionStart]]\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"env FNO_PLATFORM=codex /p/hooks/session-start.sh\"\n[hooks.state.\"fno@footnote:hooks/codex-hooks.json:pre_tool_use:0:0\"]\ntrusted_hash = \"abc\"\n[plugins.\"other@x\"]\nenabled = true\n";
+        let codex = "model = \"x\"\n\n# Added by `fno config setup cli-hooks` - footnote SessionStart context injection.\n# Codex treats this as an UNMANAGED hook: approve/trust it in Codex before it\n# runs. Remove this block to uninstall.\n[[hooks.SessionStart]]\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"env FNO_PLATFORM=codex /p/hooks/session-start.sh\"\n[shell_environment_policy.set]\nSCCACHE_DIR = \"/u/.fno/b/sccache\"\n[hooks.state.\"fno@footnote:hooks/codex-hooks.json:pre_tool_use:0:0\"]\ntrusted_hash = \"abc\"\n[plugins.\"other@x\"]\nenabled = true\n";
         assert_eq!(
             strip_codex_toml(codex).as_deref(),
-            Some("model = \"x\"\n\n[plugins.\"other@x\"]\nenabled = true\n")
+            Some("model = \"x\"\n\n[shell_environment_policy.set]\n[plugins.\"other@x\"]\nenabled = true\n")
         );
         assert_eq!(strip_codex_toml("model = \"x\"\n"), None);
         // A block that lost its command line ends at the first line the

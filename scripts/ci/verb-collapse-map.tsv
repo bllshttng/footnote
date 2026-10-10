@@ -69,7 +69,6 @@ agents mail lint	T1	agents mail lint	1
 agents mail list	T1	agents mail list	15
 agents mail-teach	T1	agents mail-teach	0
 agents mail migrate-bus	T1	agents mail migrate-bus	0
-agents mail notify-self	T1	agents mail notify-self	4
 agents mail pane-prepare	T1	agents mail pane-prepare	0
 agents mail rebuild-render	T1	agents mail rebuild-render	1
 agents mail reply	T1	agents mail reply	18
@@ -431,7 +430,6 @@ mail hold-release	T1	mail hold-release	1
 mail lint	T1	mail lint	1
 mail list	T1	mail list	15
 mail migrate-bus	T1	mail migrate-bus	0
-mail notify-self	T1	mail notify-self	4
 mail pane-prepare	T1	mail pane-prepare	0
 mail rebuild-render	T1	mail rebuild-render	1
 mail reply	T1	mail reply	18

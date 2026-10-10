@@ -45,8 +45,11 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// and exits 130. It emits a session + reply, then sleeps long enough that the
 /// test's forwarded signal lands mid-turn (before turn.completed).
 fn install_fake_codex_sigint(bin_dir: &Path) {
+    // Answers the spawn's version probe at once, as the real CLI does; only a
+    // turn sleeps into the forwarded signal.
     let script = r#"#!/bin/sh
 set -e
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.0"; exit 0; fi
 trap 'printf caught > "$FAKE_CODEX_SIGINT_SENTINEL"; exit 130' INT TERM
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$FAKE_CODEX_SESSION_ID"
 printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' "$FAKE_CODEX_REPLY"

@@ -443,7 +443,8 @@ def test_create_unrouted_leaves_argv_and_env_default(tmp_path, fake_popen, monke
     )
     call_args = fake_popen.call_args
     argv = call_args.args[0]
-    assert "-c" not in argv
+    config_values = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+    assert config_values == ["sandbox_workspace_write.network_access=true"]
     assert argv[:2] == ["codex", "--ask-for-approval"]
     assert call_args.kwargs["env"]["PATH"].startswith("/proxy:")
     assert "FNO_REAL_GH" not in call_args.kwargs["env"]

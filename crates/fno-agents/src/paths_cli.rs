@@ -210,6 +210,30 @@ fn repo_root() -> Option<PathBuf> {
     }
 }
 
+/// The configured plans dir resolved for mint-time id exclusion: config
+/// `plans_dir` (default `.fno/plans/`), project-relative against the repo
+/// root, `~` expanded. None on a template shape or an unresolvable root:
+/// the caller then skips the scan, the same best-effort contract as the
+/// legacy archive pool.
+pub(crate) fn plans_dir_for(cwd: &Path) -> Option<PathBuf> {
+    let raw = cfg_str(cwd, &["plans_dir"]).unwrap_or_else(|| ".fno/plans/".to_string());
+    let trimmed = raw.trim_end_matches('/');
+    if has_template(trimmed) {
+        return None;
+    }
+    if is_project_relative(trimmed) {
+        return Some(
+            repo_root()
+                .unwrap_or_else(|| cwd.to_path_buf())
+                .join(trimmed),
+        );
+    }
+    if trimmed.starts_with('~') {
+        return Some(crate::paths::resolve_loose(&expanduser(trimmed)));
+    }
+    Some(PathBuf::from(trimmed))
+}
+
 /// `emit-shell [--output P]`: write the stub atomically (temp sibling +
 /// rename, the shape fno.state.io.atomic_write uses) and print
 /// `wrote N bytes to P`. Default output is `<repo>/scripts/lib/paths.sh`.
