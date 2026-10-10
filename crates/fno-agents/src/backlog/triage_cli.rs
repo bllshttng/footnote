@@ -141,7 +141,7 @@ pub fn run_rank(args: &[String]) -> i32 {
     let raw = match raw {
         Ok(text) => text,
         Err(e) => {
-            eprintln!("Error: could not read verdicts: {e}");
+            eprintln!("Error: verdicts unreadable ({e})");
             return 2;
         }
     };

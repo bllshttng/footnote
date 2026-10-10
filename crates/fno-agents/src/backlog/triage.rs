@@ -631,7 +631,7 @@ fn category_agreement<V: PartialEq>(per_run_maps: Vec<BTreeMap<String, V>>) -> V
     let mut agree = 0i64;
     let mut disagreeing: Vec<String> = Vec::new();
     for k in &universe {
-        let vals: Vec<Option<&Value>> = per_run_maps.iter().map(|m| m.get(k)).collect();
+        let vals: Vec<Option<&V>> = per_run_maps.iter().map(|m| m.get(k)).collect();
         let first = vals[0];
         if vals.iter().all(|v| *v == first) {
             agree += 1;

@@ -1524,7 +1524,7 @@ pub fn converge_one(
         source,
         ev_path,
     );
-    let (short_id, spawn_receipt, spawn_failure) = match spawn_outcome {
+    let (short_id, spawn_receipt) = match spawn_outcome {
         Ok(v) => v,
         Err(super::advance_dispatch::SpawnOutcome::AlreadyRunning(msg)) => {
             safe_release(&dispatch_key, &holder);
