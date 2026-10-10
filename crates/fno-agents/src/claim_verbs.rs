@@ -406,7 +406,8 @@ fn run_claim_reap(args: &[String]) -> i32 {
 }
 
 /// Free the build and run-slot claims a dead cargo left behind. A worker's
-/// cargo holds `build:cargo` and a `test:cargo-run:<i>` slot under its own pid
+/// cargo holds a compile slot (`build:cargo`, `build:cargo:1`,
+/// `build:cargo:2`) and a `test:cargo-run:<i>` slot under its own pid
 /// with no TTL, so a reaped worker whose cargo died leaves both held until a
 /// sweep reads the pid. The pid alone decides these keys and no session probe
 /// runs, so every worker reap can afford this pass. Returns the count freed.
@@ -421,7 +422,10 @@ pub(crate) fn reap_dead_cargo_claims() -> u64 {
         return 0;
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut keys = vec!["build:cargo".to_string()];
+    let mut keys: Vec<String> = crate::test_run::BUILD_SLOT_KEYS
+        .iter()
+        .map(|key| key.to_string())
+        .collect();
     keys.extend(
         crate::claim_store::records_in(&dir, Some("test:cargo-run:"), true)
             .unwrap_or_default()

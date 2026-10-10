@@ -176,6 +176,9 @@ enum Role {
     /// `fno agents top ...`: the native worker table (`fno-agents census
     /// --workers`), claimed here because the Python front alone cost seconds.
     AgentsTop(Vec<OsString>),
+    /// `fno doctor builds [--json]`: every cargo job at the admission doors
+    /// (`fno-agents test-run builds`). Native, because the doors are.
+    DoctorBuilds(Vec<OsString>),
     /// `fno agents mail show ...`: the native one-message reader, lexically
     /// classified beside agents_history. The Python CLI keeps the rest of
     /// the mail tree; the carried tail runs `fno-agents chats show`.
@@ -284,7 +287,11 @@ fn classify_agents_transcript(args: &[OsString]) -> Option<Vec<OsString>> {
 }
 
 fn classify_agents_verb(args: &[OsString], verb: &str) -> Option<Vec<OsString>> {
-    if args.len() < 2 || args[0].to_str()? != "agents" || args[1].to_str()? != verb {
+    classify_group_verb(args, "agents", verb)
+}
+
+fn classify_group_verb(args: &[OsString], group: &str, verb: &str) -> Option<Vec<OsString>> {
+    if args.len() < 2 || args[0].to_str()? != group || args[1].to_str()? != verb {
         return None;
     }
     Some(args[2..].to_vec())
@@ -330,6 +337,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::doctor_update::classify(args) {
         return Role::DoctorUpdate(rest);
+    }
+    if let Some(rest) = classify_group_verb(args, "doctor", "builds") {
+        return Role::DoctorBuilds(rest);
     }
     if let Some(rest) = fno::agents_history::classify(args) {
         return Role::AgentsHistory(rest);
@@ -587,6 +597,11 @@ fn main() {
         Role::AgentsTop(rest) => std::process::exit(fno_agents_exec(
             "fno agents top",
             &["census", "--workers"],
+            &rest,
+        )),
+        Role::DoctorBuilds(rest) => std::process::exit(fno_agents_exec(
+            "fno doctor builds",
+            &["test-run", "builds"],
             &rest,
         )),
         Role::MailViewRenamed => {
