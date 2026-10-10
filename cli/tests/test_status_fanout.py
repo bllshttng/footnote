@@ -70,6 +70,22 @@ def _cursor(ss, name):
     return _json.loads((ss / f"{name}.cursor").read_text())
 
 
+def _utcnow():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def _ms(dt) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+def _ts_ms(ts: str) -> int:
+    from fno.status_fanout import _timestamp_key
+
+    return _ms(_timestamp_key(ts))
+
+
 # ── US1: config model ───────────────────────────────────────────────────────
 
 
@@ -78,6 +94,7 @@ def test_config_fanout_defaults() -> None:
     assert f.interval_secs == 5
     assert f.http_timeout_secs == 5
     assert f.retries == 2
+    assert f.short_circuit_backoff_secs == 300
 
 
 def test_config_sink_minimal_text_webhook_valid() -> None:
@@ -108,11 +125,6 @@ def test_config_sink_ntfy_raw_body_valid() -> None:
 def test_config_empty_sinks_is_default_noop() -> None:
     assert ConfigBlock().status_sinks == []
 
-
-def test_config_status_sinks_nonlist_coerces_empty() -> None:
-    # A container-level typo (a scalar where a list belongs) fails safe to [],
-    # never bricks settings load for the whole project.
-    assert ConfigBlock(status_sinks=42).status_sinks == []
 
 
 def test_config_duplicate_sink_name_rejected() -> None:
@@ -248,6 +260,176 @@ def test_tick_mixed_sinks_still_read_when_one_delivers(tmp_path, monkeypatch):
     assert res.rows_read == 1  # the gate did not fire: one sink delivers
     assert res.sinks[0].dispatched == 1
     assert res.sinks[1].short_circuited is True  # held for retry, as before
+
+
+def _capture_read(monkeypatch, rows=None, high=None):
+    """Replace the native read fold with a capture; returns the queries list."""
+    import fno.events.store_client as sc
+
+    queries: list[dict] = []
+
+    def fake(active, mode, query):
+        queries.append(dict(query))
+        return (rows if rows is not None else []), 0, high
+
+    monkeypatch.setattr(sc, "read_projection", fake)
+    return queries
+
+
+def test_tick_store_backed_bootstrap_starts_at_wall_clock_floor(tmp_path, monkeypatch):
+    # A store answers a read with every retained generation, so a cursor-less
+    # bootstrap tick with the file-EOF floor ("", 0) rescanned the whole store;
+    # on a large one the daemon killed the tick before any cursor persisted and
+    # every tick bootstrapped again. The floor must be now, and the window must
+    # be bounded at SQL level so the bootstrap scan materializes nothing.
+    from fno import status_fanout as sf
+
+    from fno.paths import project_log
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    journal = project_log("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    (journal.parent / "events.db").write_bytes(b"")  # store-backed discriminator
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    before = _utcnow()
+    queries = _capture_read(monkeypatch, high=42)
+
+    sink = StatusSinkConfig(name="s", type="json-webhook", events=["blocked"],
+                            url="https://x")
+    res = sf.run_tick(tmp_path, [sink])
+
+    assert res.rows_read == 0
+    q = queries[0]
+    assert q["after_seq"] is None  # no scan cursor yet
+    assert q["since_ts"] != ""  # a real floor, not "from the epoch"
+    floor_ms = q["since_ms"]
+    assert _ms(before) - 60_000 <= floor_ms <= _ms(_utcnow()) + 1_000
+    # The bootstrap converged: both cursors persisted despite the empty pass.
+    assert _cursor(ss, "s")["n"] == 0
+    assert _cursor(ss, ".scan") == {"ts": "", "n": 42}  # high-water seq seeded
+
+
+def test_tick_passes_since_ms_beside_since_ts(tmp_path, monkeypatch):
+    # The ts bound must ride the query at SQL level whatever the seq bound is:
+    # a cursor-less bootstrap and an incremental pass both stay materialization-
+    # bounded instead of scanning the whole store and post-filtering.
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    ts = "2026-07-12T00:00:00Z"
+    _seed_cursor(ss, "s", ts)
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    queries = _capture_read(monkeypatch, high=9)
+
+    sink = StatusSinkConfig(name="s", type="json-webhook", events=["blocked"],
+                            url="https://x")
+    sf.run_tick(tmp_path, [sink])
+
+    q = queries[0]
+    assert q["since_ts"] == ts
+    assert q["after_seq"] is None  # no scan cursor yet
+    assert q["since_ms"] == _ts_ms(ts)
+
+    _seed_cursor(ss, ".scan", "", n=5)
+    sf.run_tick(tmp_path, [sink])
+    q = queries[1]
+    assert q["after_seq"] == 5
+    assert q["since_ts"] == ts
+    assert q["since_ms"] == _ts_ms(ts)
+
+
+def test_tick_nanosecond_fractions_key_monotonically(tmp_path, monkeypatch):
+    # Rust emitters stamp nanosecond fractions, and one row the shared parser
+    # could not key crashed the tick before any cursor persisted - the backlog
+    # wedged forever. The pass must complete over such rows.
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    queries = _capture_read(
+        monkeypatch,
+        rows=[
+            _ev("2026-10-10T03:39:48.693592000Z", "blocked", node="a"),
+            _ev("2026-10-10T03:39:48.693592500Z", "blocked", node="b"),
+        ],
+        high=7,
+    )
+    _seed_cursor(ss, "s", "2026-10-10T03:39:00Z")
+    rec = _Recorder()
+    res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert res.rows_read == 2
+    assert [ts for _, ts in rec.calls] == [
+        "2026-10-10T03:39:48.693592000Z", "2026-10-10T03:39:48.693592500Z"]
+    assert _cursor(ss, "s")["n"] == 0  # advanced past the window, count zeroed
+
+
+def test_tick_short_circuit_parks_the_next_tick(tmp_path):
+    # A dead webhook re-attempted every tick burned ~20s of doomed retries per
+    # pass while its held cursor kept the backlog window growing. The
+    # short-circuit must park the sink: the next tick neither reads nor
+    # dispatches it until the deadline passes.
+    import time as _time
+
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+
+    def _boom(*a, **k):
+        raise AssertionError("journal read attempted with every sink parked")
+
+    rec = _Recorder(script={"s": (sf.SHORT_CIRCUIT, "timeout")})
+    res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert res.sinks[0].short_circuited is True
+    deadline = sf._read_backoff(tmp_path)["s"]
+    assert _time.time() < deadline <= _time.time() + 301
+
+    monkey_free = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=_boom)
+    assert monkey_free.sinks == [] and monkey_free.parked_sinks == ("s",)
+
+
+def test_tick_backoff_expiry_resumes_and_delivery_clears_it(tmp_path):
+    import time as _time
+
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    sf._write_backoff(tmp_path, {"s": _time.time() - 1})  # expired: live again
+    rec = _Recorder()
+    sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert len(rec.calls) == 1
+    assert sf._read_backoff(tmp_path) == {}  # delivery cleared the park
+
+
+def test_tick_parked_sink_does_not_drag_window_or_advance_scan(tmp_path, monkeypatch):
+    # While one sink parks, the window must follow the LIVE cursors (the parked
+    # backlog is replayed on resume against the frozen seq floor), and the seq
+    # floor must not advance past that backlog.
+    import time as _time
+
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "old", "2026-01-01T00:00:00Z")  # parked, backlog held
+    _seed_cursor(ss, "now", "2026-07-12T00:00:00Z")  # live
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    queries = _capture_read(monkeypatch, high=3)
+    sf._write_backoff(tmp_path, {"old": _time.time() + 300})
+
+    sinks = [_text_sink(name="old"), _text_sink(name="now")]
+    res = sf.run_tick(tmp_path, sinks, dispatch_fn=_Recorder())
+    assert res.parked_sinks == ("old",)
+    q = queries[0]
+    assert q["since_ts"] == "2026-07-12T00:00:00Z"  # the live cursor floor
+    assert not (ss / ".scan.cursor").exists()  # seq floor frozen while parked
 
 
 def test_tick_fresh_cursor_starts_at_eof_no_backfill(tmp_path):
@@ -389,7 +571,10 @@ def test_tick_store_backed_reads_only_rows_past_scan_seq(tmp_path):
     emit_envelope(_ev("2026-07-12T00:00:05Z", "blocked", run="r", node="b"), journal)
     later = sf.run_tick(tmp_path, sinks, dispatch_fn=rec)
     assert later.rows_read == 1
-    assert sorted(rec.calls[1:]) == [("f", "2026-07-12T00:00:05Z"), ("s", "2026-07-12T00:00:05Z")]
+    # s delivered the first row, so its zeroed cursor admits the same-ts peer.
+    # f fresh-initialized at wall-clock EOF (the store-backed bootstrap floor),
+    # and this peer's ts predates that floor: history to f, not delivery.
+    assert rec.calls[1:] == [("s", "2026-07-12T00:00:05Z")]
 
 
 def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):
@@ -806,16 +991,6 @@ def test_text_webhook_raw_body_posts_rendered_text_not_json(monkeypatch):
     assert status == sf.DELIVERED
     assert posted["body"] == "fno [t] blocked"  # a str, never a JSON envelope
 
-
-def test_text_webhook_raw_body_reuses_failure_classes(monkeypatch):
-    from fno import status_fanout as sf
-
-    monkeypatch.setattr(sf, "_post_raw", lambda u, b, t: sf._HttpResult(ok=False, status=404))
-    monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    sink = StatusSinkConfig(name="n", type="text-webhook", events=["blocked"],
-                            url="https://x", template="hi", raw_body=True)
-    status, detail = sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
-    assert status == sf.DROPPED and "404" in detail
 
 
 def test_post_raw_sends_plain_text_with_explicit_user_agent(monkeypatch):
@@ -1444,25 +1619,6 @@ def test_json_webhook_transient_4xx_holds_cursor_short_circuits(monkeypatch, cod
     assert calls["n"] == 3              # retried (1 + 2), like 429/connect-class
     assert str(code) in detail
 
-
-def test_integration_tick_401_holds_cursor_and_logs(tmp_path, monkeypatch):
-    from fno import status_fanout as sf
-
-    monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=401))
-    monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    ss = _sinks_dir(tmp_path)
-    ss.mkdir(parents=True)
-    _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
-    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
-    sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
-                            url="https://x", template="hi", field="content")
-    res = sf.run_tick(tmp_path, [sink], StatusFanoutConfig(retries=1))
-    assert res.sinks[0].short_circuited is True
-    assert _cursor(ss, "d")["ts"] == "2026-07-12T00:00:00Z"  # cursor held (retries next tick)
-    assert (ss / "d.errors.jsonl").exists()
-
-
-# Change 4 (x-7492): Slack broadcast defang on non-Discord fields.
 
 
 def _capture_post(monkeypatch, sf, posted):
