@@ -77,15 +77,41 @@ fn parse_file(path: &Path) -> Option<serde_json::Value> {
     } else {
         serde_yaml_ng::from_str(&text).ok()?
     };
-    // The Python loader unwraps a top-level `config:` dict before validating,
-    // so `config:` keys and bare keys read the same.
+    // A parsed non-table contributes nothing (config_io._load_raw), and a
+    // parse failure warns once and skips the layer - the Python loader never
+    // fails the whole read over one file. The `config:` unwrap happens ONCE,
+    // after the merge (see unwrap_config_dict), not per file.
     match value {
-        serde_json::Value::Object(map) => match map.get("config") {
-            Some(inner @ serde_json::Value::Object(_)) => Some(inner.clone()),
-            _ => Some(serde_json::Value::Object(map)),
-        },
+        serde_json::Value::Object(_) => Some(value),
         _ => None,
     }
+}
+
+/// Normalize the merged doc to the FLAT shape (config_io._unwrap_config_dict):
+/// a legacy top-level `config:` block lifts to the top level and its leaves
+/// WIN over stray same-named top-level keys (canonical beats legacy). No-op
+/// without a `config:` object.
+fn unwrap_config_dict(raw: serde_json::Value) -> serde_json::Value {
+    let mut map = match raw {
+        serde_json::Value::Object(map) => map,
+        other => return other,
+    };
+    let cfg = match map.remove("config") {
+        Some(cfg @ serde_json::Value::Object(_)) => cfg,
+        other => {
+            if let Some(cfg) = other {
+                map.insert("config".to_string(), cfg);
+            }
+            return serde_json::Value::Object(map);
+        }
+    };
+    let rest = serde_json::Value::Object(map);
+    let mut base = match rest {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    deep_merge(&mut base, cfg);
+    serde_json::Value::Object(base)
 }
 
 /// Deep-merge `over` into `base` (over wins per leaf), Python `_deep_merge`.
@@ -108,31 +134,28 @@ fn deep_merge(base: &mut serde_json::Map<String, serde_json::Value>, over: serde
 }
 
 /// The merged settings document: highest-priority candidate wins per leaf.
-/// Err names the parse failure of the first candidate that failed to parse
-/// AFTER at least one candidate existed (the fail-safe contract names the
-/// cause; an empty candidate list is a normal default read).
-pub fn load_merged(project_root: Option<&Path>) -> Result<serde_json::Value, String> {
+/// The chain reads LOWEST-priority first, merging each layer over the last
+/// (Python `reversed(layers)`), so the first candidate's leaves survive. A
+/// broken layer warns and contributes nothing - the Python loader never
+/// fails a settings read over one bad file, so this read is infallible and
+/// the model defaults govern absent keys.
+pub fn load_merged(project_root: Option<&Path>) -> serde_json::Value {
     let mut merged = serde_json::Map::new();
-    let mut any_parse_fail: Option<String> = None;
-    for path in settings_candidates(project_root) {
+    for path in settings_candidates(project_root).iter().rev() {
         if !path.is_file() {
             continue;
         }
-        match parse_file(&path) {
+        match parse_file(path) {
             Some(doc) => deep_merge(&mut merged, doc),
             None => {
-                if any_parse_fail.is_none() {
-                    any_parse_fail = Some(format!("unparseable settings file: {}", path.display()));
-                }
+                eprintln!(
+                    "fno: warning: settings file at {} failed to parse; using defaults",
+                    path.display()
+                );
             }
         }
     }
-    if merged.is_empty() {
-        if let Some(err) = any_parse_fail {
-            return Err(err);
-        }
-    }
-    Ok(serde_json::Value::Object(merged))
+    unwrap_config_dict(serde_json::Value::Object(merged))
 }
 
 fn coerce_bool(value: Option<&serde_json::Value>, default: bool) -> bool {
@@ -148,21 +171,32 @@ fn coerce_bool(value: Option<&serde_json::Value>, default: bool) -> bool {
     }
 }
 
-/// `config.autonomy.enabled`, default TRUE. Fail-safe False on a read
-/// failure: an unreadable config resolves every gate to off, never to on.
+/// `config.autonomy.enabled`, default TRUE (the AutonomyBlock default: the
+/// switch arms off only when named). A NON-MAPPING autonomy block is the
+/// Python validation failure and fails safe to FALSE, the one read that
+/// resolves every gate off.
 pub fn autonomy_master_enabled(project_root: Option<&Path>) -> bool {
-    match load_merged(project_root) {
-        Ok(doc) => coerce_bool(doc.get("autonomy").and_then(|a| a.get("enabled")), true),
-        Err(_) => false,
+    let doc = load_merged(project_root);
+    match doc.get("autonomy") {
+        Some(serde_json::Value::Object(_)) => {
+            coerce_bool(doc.get("autonomy").and_then(|a| a.get("enabled")), true)
+        }
+        Some(_) => false,
+        None => true,
     }
 }
 
-/// `config.auto_continue.enabled`, default FALSE. Err on a read failure so
-/// the caller stamps rank "default" (fail-safe disabled).
-pub fn auto_continue_enabled_setting(project_root: Option<&Path>) -> Result<bool, String> {
-    let doc = load_merged(project_root)?;
-    Ok(coerce_bool(
-        doc.get("auto_continue").and_then(|a| a.get("enabled")),
-        false,
-    ))
+/// `config.auto_continue.enabled`, default FALSE (the AutoContinueBlock
+/// default; a non-mapping block degrades to it the same way). Infallible:
+/// the Python rank arm that names a raised read ("default") has no analog
+/// here because the loader degrades in place.
+pub fn auto_continue_enabled_setting(project_root: Option<&Path>) -> bool {
+    let doc = load_merged(project_root);
+    match doc.get("auto_continue") {
+        Some(serde_json::Value::Object(_)) => coerce_bool(
+            doc.get("auto_continue").and_then(|a| a.get("enabled")),
+            false,
+        ),
+        _ => false,
+    }
 }

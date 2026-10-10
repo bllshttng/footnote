@@ -372,8 +372,8 @@ pub fn slot_queue_retry_at(stdout: &str) -> Option<f64> {
 /// The rank is stamped onto every dispatch decision event so "what armed
 /// this" is answerable from the log instead of by inference.
 ///
-/// Fail-safe: ANY exception reading settings degrades to (false, "default")
-/// rather than raising into the merge ritual.
+/// The read is infallible (the loader degrades in place), so the two
+/// lower ranks answer from the merged doc exactly as Python's do.
 pub fn auto_continue_resolve(project_root: Option<&Path>) -> (bool, &'static str) {
     if !crate::backlog::advance_settings::autonomy_master_enabled(project_root) {
         return (false, "autonomy");
@@ -384,12 +384,14 @@ pub fn auto_continue_resolve(project_root: Option<&Path>) -> (bool, &'static str
         let value = env.trim().to_ascii_lowercase();
         return (TRUTHY.contains(&value.as_str()), "env");
     }
-    match crate::backlog::advance_settings::auto_continue_enabled_setting(project_root) {
-        Ok(enabled) => (enabled, "config"),
-        Err(_) => (false, "default"),
-    }
+    // The Python exception arm (rank "default") has no Rust analog: the
+    // settings loader degrades in place, so a completed read always
+    // answers rank "config".
+    (
+        crate::backlog::advance_settings::auto_continue_enabled_setting(project_root),
+        "config",
+    )
 }
-
 /// Resolve whether auto-continue is armed for this project. Drops the rank
 /// for callers that only need the boolean.
 pub fn auto_continue_enabled(project_root: Option<&Path>) -> bool {
@@ -476,16 +478,14 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// `config.backlog.staleness_days` (default 21), fail-open to the default.
+/// `config.backlog.staleness_days` (default 21), fail-open to the default
+/// (the Python model default governs absent keys the same way).
 pub fn guard_staleness_days(project_root: Option<&Path>) -> i64 {
-    match crate::backlog::advance_settings::load_merged(project_root) {
-        Ok(doc) => doc
-            .get("backlog")
-            .and_then(|b| b.get("staleness_days"))
-            .and_then(Value::as_i64)
-            .unwrap_or(21),
-        Err(_) => 21,
-    }
+    let doc = crate::backlog::advance_settings::load_merged(project_root);
+    doc.get("backlog")
+        .and_then(|b| b.get("staleness_days"))
+        .and_then(Value::as_i64)
+        .unwrap_or(21)
 }
 
 /// One bounded child run's captured output.
@@ -1037,18 +1037,17 @@ pub fn safe_release(key: &str, holder: &str) {
 
 /// Auto-defer at the durable failure limit; return the refusal action
 /// ("auto-deferred" | "defer-failed"). Reads the failure streak from the
-/// journal pair (state root + the node's own project journal), defers via
-/// `fno backlog defer` past the limit, and notifies.
+/// merged journals (state root, agents-home mirror, and the node's own
+/// project journal), defers via `fno backlog defer` past the limit, and
+/// notifies.
 pub fn refuse_repeated_dead_dispatch(node_id: &str, node_cwd: Option<&str>) -> Option<String> {
-    let failure_limit =
-        crate::backlog::advance_settings::load_merged(node_cwd.map(std::path::Path::new))
-            .ok()
-            .and_then(|doc| {
-                doc.get("active_backlog")
-                    .and_then(|a| a.get("failure_limit"))
-                    .and_then(Value::as_i64)
-            })
-            .unwrap_or(3);
+    let failure_limit = crate::backlog::advance_settings::load_merged(
+        node_cwd.map(std::path::Path::new),
+    )
+    .get("active_backlog")
+    .and_then(|a| a.get("failure_limit"))
+    .and_then(Value::as_i64)
+    .unwrap_or(3);
     let events = read_failure_events(node_cwd);
     let streak = consecutive_failures(node_id, &events);
     if streak < failure_limit {
@@ -1114,66 +1113,151 @@ pub fn refuse_repeated_dead_dispatch(node_id: &str, node_cwd: Option<&str>) -> O
 }
 
 /// The failure-event types the dead-dispatch streak reads. Mirrors
-/// fno.graph.failure.FAILURE_EVENT_TYPES.
-pub(crate) const FAILURE_EVENT_TYPES: &[&str] = &["dispatch_spawned", "dispatch_claim_observed"];
+/// fno.graph.failure.FAILURE_EVENT_TYPES (the walker's `node_*` envelopes
+/// plus `advance_failed`, which rides through unclassified).
+pub(crate) const FAILURE_EVENT_TYPES: &[&str] = &[
+    "node_failed",
+    "node_undeferred",
+    "node_closed",
+    "advance_failed",
+];
 
-fn read_failure_events(node_cwd: Option<&str>) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
-    if let Some(pin) = std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
-        append_journal_rows(Path::new(&pin), FAILURE_EVENT_TYPES, &mut out);
-        return out;
+/// The store-side typed read (fno.graph.failure.read_events's
+/// `query_rows(target, types=...)` leg): the SQL store beside the journal
+/// answers in commit order; when no store exists yet the journal lines
+/// themselves are the same rows, oldest first.
+fn read_events_types(journal: &Path, types: &[&str]) -> Vec<Value> {
+    let query = crate::event_store::EventQuery::of_types(types);
+    if let Ok(rows) = crate::event_store::query_events(journal, &query) {
+        return rows
+            .iter()
+            .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
+            .collect();
     }
-    let cwd = std::env::current_dir().ok();
-    if let Some(space) = cwd.as_deref().and_then(crate::paths::space_dir_opt) {
-        append_journal_rows(&space.join("events.jsonl"), FAILURE_EVENT_TYPES, &mut out);
-    }
-    if let Some(cwd) = node_cwd {
-        let path = Path::new(cwd).join(".fno").join("events.jsonl");
-        if path.is_file() {
-            append_journal_rows(&path, FAILURE_EVENT_TYPES, &mut out);
-        }
-    }
-    out
-}
-
-fn append_journal_rows(path: &Path, types: &[&str], out: &mut Vec<Value>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+    let Ok(text) = std::fs::read_to_string(journal) else {
+        return Vec::new();
     };
-    for line in text.lines().rev() {
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
-        if types.contains(&kind) {
-            out.push(row);
-        }
-    }
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
 }
 
-/// Consecutive dead dispatches for THIS node, newest first. A spawned row,
-/// or a claim observation naming a live worker on the node, breaks the
-/// streak; rows for other nodes never enter it.
+/// Union mirrored histories by occurrence count and timestamp order
+/// (fno.graph.failure.merge_event_histories): a row already seen at its
+/// highest multiplicity in an earlier history is not repeated, and the merge
+/// sorts by (ts, insertion) so the window walk reads newest first.
+fn merge_event_histories(histories: Vec<Vec<Value>>) -> Vec<Value> {
+    let mut merged: Vec<(usize, Value)> = Vec::new();
+    let mut max_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for history in &histories {
+        let mut local_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for rec in history {
+            let key = serde_json::to_string(rec).unwrap_or_default();
+            let count = local_counts.entry(key.clone()).or_insert(0);
+            *count += 1;
+            if *count > max_counts.get(&key).copied().unwrap_or(0) {
+                merged.push((merged.len(), rec.clone()));
+            }
+        }
+        for (key, count) in local_counts {
+            let max = max_counts.entry(key).or_insert(0);
+            if count > *max {
+                *max = count;
+            }
+        }
+    }
+    merged.sort_by(|a, b| {
+        let ts_a = a.1.get("ts").and_then(Value::as_str).unwrap_or("");
+        let ts_b = b.1.get("ts").and_then(Value::as_str).unwrap_or("");
+        (ts_a, a.0).cmp(&(ts_b, b.0))
+    });
+    merged.into_iter().map(|(_, rec)| rec).collect()
+}
+
+/// The journal set the Python refuse leg reads: the state-root journal and
+/// the Rust agents-home mirror (fno.graph.failure._default_event_paths,
+/// deduped preserving order), then the node's own project journal when it
+/// exists.
+fn read_failure_events(node_cwd: Option<&str>) -> Vec<Value> {
+    let mut journals: Vec<PathBuf> = Vec::new();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(root) = crate::agents_config::state_dir(&cwd) {
+        journals.push(root.join("events.jsonl"));
+    }
+    if let Some(parent) = crate::paths::AgentsHome::from_env_opt().and_then(|h| {
+        h.root().parent().map(std::path::Path::to_path_buf)
+    }) {
+        journals.push(parent.join("events.jsonl"));
+    }
+    journals.dedup();
+    if let Some(cwd) = node_cwd {
+        let project = Path::new(cwd).join(".fno").join("events.jsonl");
+        if project.is_file() {
+            journals.push(project);
+        }
+    }
+    let histories = journals
+        .iter()
+        .map(|j| read_events_types(j, FAILURE_EVENT_TYPES))
+        .collect();
+    merge_event_histories(histories)
+}
+
+/// One classified streak signal (fno.graph.failure._classify): the walker's
+/// `node_*` envelopes and the flat agents shape both carry the node id under
+/// `unit_id` / `node_id` / `graph_node_id`.
+#[derive(Clone, Copy, PartialEq)]
+enum StreakSignal {
+    Fail,
+    Reset,
+}
+
+fn classify_streak_row(raw: &Value) -> Option<(String, StreakSignal)> {
+    let etype = raw
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .or_else(|| raw.get("kind").and_then(Value::as_str))
+        .unwrap_or("");
+    let data = match raw.get("data") {
+        Some(d) if d.is_object() => d,
+        _ => raw,
+    };
+    let node_id = ["unit_id", "node_id", "graph_node_id"]
+        .iter()
+        .find_map(|k| {
+            data.get(*k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })?;
+    let signal = match etype {
+        "node_failed" => StreakSignal::Fail,
+        "node_undeferred" => StreakSignal::Reset,
+        "node_closed" => match data.get("close").and_then(Value::as_str) {
+            Some("parked") => StreakSignal::Fail,
+            Some("closed") => StreakSignal::Reset,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((node_id.to_string(), signal))
+}
+
+/// Consecutive failure events for THIS node since the most recent reset
+/// boundary (a success close or an undefer), scanning newest -> oldest
+/// (fno.graph.failure.consecutive_failures). Unclassified rows and other
+/// nodes' rows neither inflate nor reset the streak.
 fn consecutive_failures(node_id: &str, events: &[Value]) -> i64 {
     let mut streak: i64 = 0;
-    for row in events {
-        let data = row.get("data").cloned().unwrap_or(Value::Null);
-        if data.get("node_id").and_then(Value::as_str) != Some(node_id) {
-            continue;
-        }
-        let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
-        match kind {
-            "dispatch_spawned" => break,
-            "dispatch_claim_observed" => {
-                let action = data.get("action").and_then(Value::as_str).unwrap_or("");
-                if action == "dispatch" {
-                    break;
-                }
-                if action == "redispatch" {
-                    streak += 1;
-                }
+    for raw in events.iter().rev() {
+        if let Some((event_node, signal)) = classify_streak_row(raw) {
+            if event_node != node_id {
+                continue;
             }
-            _ => {}
+            match signal {
+                StreakSignal::Reset => break,
+                StreakSignal::Fail => streak += 1,
+            }
         }
     }
     streak
