@@ -9,6 +9,7 @@
 //! grouped CLI door does not route `advance`/`join`/`dispatch-lanes` natively
 //! until the leg lands, so the shipped surface is unchanged.
 
+use crate::backlog::dispatch_resolve::grid_lane_for;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -391,21 +392,22 @@ pub fn spawn_worker(
         verb,
         brief,
         source,
-    )?;
+    )
+    .map_err(SpawnOutcome::Failed)?;
     // The one launch row, proof of a launch that happened; built before the
     // reuse arm so a retasked dispatch emits the same row with reuse keys.
     let mut row = json!({
         "node_id": node_id,
         "short_id": "",
-        "agent_name": args.agent_name,
-        "harness": args.harness,
+        "agent_name": args.agent_name.clone(),
+        "harness": args.harness.clone(),
         "vendor": "",
         "model": args.model.clone().unwrap_or_default(),
         "account": "",
-        "substrate": args.substrate,
-        "command": args.command,
-        "verb": args.verb,
-        "verb_source": args.verb_source,
+        "substrate": args.substrate.clone(),
+        "command": args.command.clone(),
+        "verb": args.verb.clone(),
+        "verb_source": args.verb_source.clone(),
         "cwd": args.node_cwd.clone().unwrap_or_default(),
         "grid": args.grid_reason.clone().unwrap_or_default(),
         "decision": args.decision.join("; "),
@@ -599,21 +601,8 @@ pub fn spawn_worker(
         });
         let _ = crate::dispatch_credit::launch_credit_mail(&ask);
     }
-    Ok((
-        row.get("short_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        row,
-    ))
-    .map(|(short_id, row)| {
-        let short = finish_spawn(&row, events_path, None, &notes);
-        if short.is_empty() {
-            short_id
-        } else {
-            short
-        }
-    })
+    let short = finish_spawn(&row, events_path, None, &notes);
+    Ok((short, row))
 }
 
 /// The spawn-seam failure vocabulary shared with the Python owner.
@@ -702,7 +691,7 @@ fn finished_planner(
     let project_id = base_project_id(&anchor_root);
     let mut best: Option<(String, RetaskCandidate)> = None;
     for entry in &registry.entries {
-        if !matches!(entry.status, crate::state::AgentStatus::Live) {
+        if !matches!(entry.status, crate::AgentStatus::Live) {
             continue;
         }
         let substrate = entry.substrate.as_deref().unwrap_or("");
