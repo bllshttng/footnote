@@ -223,28 +223,10 @@ pub fn run_note(args: &[String]) -> i32 {
     };
     // Backend-aware read: entry resolution must see post-flip nodes,
     // which exist only in graph.db; the frozen json keeper does not know
-    // them. read_rows switches on graph_meta.backend. read_one answers the
-    // id/slug tiers with a single-row read; the whole-graph read stays as
-    // the fallback for an external tracker backend, where a server-side
-    // id filter is not available.
+    // them. read_one answers the id/slug tiers with a single-row read; the
+    // whole-graph read_rows stays only as the miss-path error source.
     let entry = match graph_store::read_one(&graph, &parsed.node) {
         Ok(Some(entry)) => entry,
-        Ok(None) if crate::graph_get::external_backend_selected() => {
-            let entries = match graph_store::read_rows(&graph) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("fno-agents backlog-note: graph read failed: {e}");
-                    return 5;
-                }
-            };
-            match crate::graph_get::find_entry(&entries, &parsed.node) {
-                Some(entry) => entry,
-                None => {
-                    eprintln!("Error: no node resolves to '{}'", parsed.node);
-                    return 1;
-                }
-            }
-        }
         Ok(None) => {
             eprintln!("Error: no node resolves to '{}'", parsed.node);
             return 1;

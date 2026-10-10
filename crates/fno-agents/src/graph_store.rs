@@ -2635,13 +2635,9 @@ pub fn read_rows_where_strict(
 }
 
 /// One row by exact id or slug (the same tiers `find_entry` applies), read
-/// from the rows store without loading every row. None when nothing matches
-/// or the store is on an external tracker backend (read_rows's switch), so
-/// the caller keeps its whole-graph fallback.
+/// from the rows store without loading every row. None when nothing matches,
+/// so the caller keeps its whole-graph fallback.
 pub fn read_one(path: &Path, token: &str) -> Result<Option<Value>, StoreError> {
-    if crate::graph_get::external_backend_selected() {
-        return Ok(None);
-    }
     let query = crate::backlog::RowQuery {
         filter: crate::backlog::api::NodeFilter {
             id_in: Some(vec![token.to_string()]),
