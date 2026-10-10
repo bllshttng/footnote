@@ -232,8 +232,8 @@ def cmd_note(
 
     # The by-id read answers the hot path (one live row, no full-graph
     # read); the full read stays the seam's authority whenever the keeper
-    # does not positively answer a live row, so live still outranks the
-    # archive in every shape (the x-12d1 ordering).
+    # does not positively answer a live row, so a live row still outranks
+    # an archive answer in every shape.
     live = None
     answer = read_nodes_by_ids(graph_path, [task_id])
     if answer is not None:
