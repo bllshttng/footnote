@@ -815,12 +815,8 @@ mod tests {
     }
 
     /// The checked-in page matches the rendered page; HELP_ROUTING_BLESS=1
-    /// rewrites it instead. Ignored until one bless run lands the page: the
-    /// page's only sanctioned writer is this test, and the run that added
-    /// the router was dispatch-bound to CI-only cargo. Un-ignore when the
-    /// page lands.
+    /// rewrites it instead.
     #[test]
-    #[ignore = "needs one HELP_ROUTING_BLESS=1 cargo test run to land docs/architecture/help-routing.md; the page's only sanctioned writer is this bless path"]
     fn checked_in_routing_page_matches_the_renderer() {
         let page_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/architecture/help-routing.md");
