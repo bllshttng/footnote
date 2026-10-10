@@ -31,3 +31,4 @@ crates/fno/src/otel_read.rs	crates/fno-agents/src/otel_read.rs	cargo build --man
 crates/fno/src/registry_read.rs	crates/fno-agents/src/registry_read.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
 docs/reference/otel-schema.md	crates/fno-agents/src/otel_schema.sql	python3 scripts/docs/generate-otel-schema.py
 crates/fno/src/role_migration.rs	crates/fno-agents/src/role_migration.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
+docs/architecture/help-routing.md	crates/fno-agents/src/help_router.rs	cargo test -p fno-agents help_router -- --ignored bless_help_routing

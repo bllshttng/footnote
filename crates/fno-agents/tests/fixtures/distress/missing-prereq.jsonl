@@ -1,0 +1,2 @@
+{"message": {"role": "user", "content": "go"}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "<help class=\"missing-prereq\" reason=\"the plan needs a helper module that was never filed\" evidence=\"fixture\">routed</help>"}]}, "uuid": "fixture-missing-prereq-1"}

@@ -174,7 +174,9 @@ fn restored_shell_tab_lands_in_its_captured_cwd() {
 
     client2.input(b"pwd\r");
     let marker_str = marker_dir.to_string_lossy().to_string();
-    client2.wait_pane_text(15, pane2, |t| screen_has_line(t, &marker_str));
+    // 60s: a loaded runner measures process spawns at 30s and more, and the
+    // pane round-trip rides server restart plus shell start on top of that.
+    client2.wait_pane_text(60, pane2, |t| screen_has_line(t, &marker_str));
 }
 
 #[test]
@@ -214,9 +216,10 @@ fn restored_shell_tab_falls_back_and_notices_a_vanished_cwd() {
 
     client2.input(b"pwd\r");
     let origin_str = origin.to_string_lossy().to_string();
-    client2.wait_pane_text(15, pane2, |t| screen_has_line(t, &origin_str));
+    // Same 60s load bound as the marker-cwd test above.
+    client2.wait_pane_text(60, pane2, |t| screen_has_line(t, &origin_str));
     let marker_str = marker_dir.to_string_lossy().to_string();
-    client2.wait(15, "the vanished-path notice", |c| {
+    client2.wait(60, "the vanished-path notice", |c| {
         c.notices
             .iter()
             .any(|n| n.contains(&marker_str) && n.contains("gone"))

@@ -39,6 +39,7 @@ pub(super) struct FleetArms {
     lead_wake: crate::lead_wake::Arm,
     worker_wake: crate::worker_wake::Arm,
     notice_route: crate::notice_route::Arm,
+    help_router: crate::help_router::Arm,
     first_check: crate::first_check::Arm,
     lease_heartbeat: crate::lease_heartbeat::Arm,
     backlog_share: crate::backlog_share::Arm,
@@ -90,6 +91,7 @@ impl FleetArms {
             lead_wake: crate::lead_wake::Arm::new(opts.agents_config_cwd.clone()),
             worker_wake: crate::worker_wake::Arm::default(),
             notice_route: crate::notice_route::Arm::new(opts.agents_config_cwd.clone()),
+            help_router: crate::help_router::Arm::new(opts.agents_config_cwd.clone()),
             first_check: crate::first_check::Arm::default(),
             lease_heartbeat: crate::lease_heartbeat::Arm::default(),
             backlog_share: crate::backlog_share::Arm::default(),
@@ -226,6 +228,10 @@ impl FleetArms {
         // deduped mail to the owning lead; the hourly fold turns repeated
         // failures and banners into one owned node.
         crate::notice_route::maybe_tick(&self.notice_route, ctx.home.clone());
+        // The help-router sweep: fires wait/budget timers past their
+        // backoff and climbs question deliveries that handed without a
+        // read inside the 10 minute lease (the help-router sweep).
+        crate::help_router::maybe_tick(&self.help_router, ctx.home.clone());
         self.first_check.tick(ctx.home.clone());
         // With a shared primary set, renew this machine's dispatch leases.
         crate::lease_heartbeat::maybe_tick(&self.lease_heartbeat);

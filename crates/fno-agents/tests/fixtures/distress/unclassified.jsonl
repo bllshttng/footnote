@@ -1,0 +1,2 @@
+{"message": {"role": "user", "content": "go"}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "<help class=\"unclassified\" reason=\"something else entirely\" evidence=\"fixture\">routed</help>"}]}, "uuid": "fixture-unclassified-1"}

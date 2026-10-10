@@ -46,7 +46,10 @@ if [[ -f "$MANIFEST" ]]; then
     # stop. We deliberately keep the state file. The payload names the author
     # and reason so the resulting Interrupted line explains the cancel; a bare
     # `touch` stays valid and reads as unattributed.
-    printf 'author: operator\nreason: cancelled via /fno:cancel-target\n' > "$SENTINEL"
+    # The author names the writing session when the env marks one, so a
+    # SELF-cancel (F6) is detectable; the loop check re-derives user vs
+    # assistant from the transcript at honor time, which is the truth.
+    printf 'author: %s\nreason: cancelled via /fno:cancel-target\n' "${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-operator}}" > "$SENTINEL"
     _EVENT_DATA="$(python3 -c 'import json,sys; print(json.dumps({"lane":"target","path":sys.argv[1],"reason":"operator"}))' "$SENTINEL" 2>/dev/null || true)"
     if [[ -n "$_EVENT_DATA" ]]; then
       fno doctor event emit -t cancel_signal_set -s target -d "$_EVENT_DATA" >/dev/null 2>&1 || \
