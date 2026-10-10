@@ -4198,6 +4198,15 @@ event_types:
         cancel_reason:
           type: string
           description: "Reason read from the cancel sentinel payload; absent when the sentinel carried none."
+        pr_state:
+          type: [string, "null"]
+          description: "The fire's last PR state (OPEN, CLOSED, MERGED, unknown). Present on NoProgress rows."
+        ci:
+          type: [string, "null"]
+          description: "The fire's last CI conclusion (SUCCESS, FAILURE:<check>, PENDING, none, unknown). Present on NoProgress rows."
+        red_check:
+          type: [string, "null"]
+          description: "The first failing check name when CI is red, else null. Present on NoProgress rows."
         driver:
           type: string
           enum: [target, lead]
@@ -5046,6 +5055,13 @@ event_types:
         stderr_tail:
           type: string
           description: "Last few lines of gh stderr, or empty string if unavailable."
+        elapsed_s:
+          type: [number, "null"]
+          description: "Seconds the read ran before it failed; null when unmeasured. A bounded-read timeout always carries it."
+        waited_on:
+          type: string
+          enum: [budget_lock, network, github, unknown]
+          description: "What the failed call waited on, from row evidence only: the local fleet budget gate (its own refusal text), GitHub's refusal wording, the network's resolve/connect/TLS markers, or unknown when no evidence exists. The stall report groups on this and never guesses past it."
     consumers: [operator]
 
   - name: loop_check_config

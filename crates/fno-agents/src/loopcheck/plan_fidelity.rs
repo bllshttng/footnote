@@ -62,7 +62,7 @@ pub(super) fn evaluate_plan_fidelity(
         BoundedRun::SpawnFailed(_) | BoundedRun::WaitFailed | BoundedRun::Refused => {
             FidelityGate::Absent
         }
-        BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
+        BoundedRun::TimedOut(elapsed, _) => FidelityGate::Degraded {
             reason: format!(
                 "plan fidelity check timed out after {:.1}s running `{} do plan fidelity {} --json` \
                  and was killed; degraded, not a pass - the fno CLI itself is hanging, \

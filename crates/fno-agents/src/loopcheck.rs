@@ -1079,6 +1079,19 @@ pub(crate) fn decide_with_payload(
             serde_json::json!({"session_id": session_id, "reason": reason, "message": message}),
         );
     };
+    // Same row with structured cause fields merged in. NoProgress carries
+    // the fire's last PR state, CI conclusion and red check name, so the
+    // stall report reads them off the row instead of re-joining the
+    // previous loop_check row by hand.
+    let term_row_extra = |reason: &str, message: &str, extra: serde_json::Value| {
+        let mut row = serde_json::json!({
+            "session_id": session_id, "reason": reason, "message": message
+        });
+        if let (Some(row), serde_json::Value::Object(extra)) = (row.as_object_mut(), extra) {
+            row.extend(extra);
+        }
+        emit("termination", serde_json::Value::Object(row));
+    };
     let fire_row = |dec: &str, name: &str, fp_bad: bool, extra: serde_json::Value| {
         let mut row = serde_json::json!({
             "session_id": session_id, "fingerprint": fingerprint,
@@ -1960,7 +1973,15 @@ pub(crate) fn decide_with_payload(
                         );
                     }
                     // Backstop tripped + done() false -> NoProgress
-                    term_row("NoProgress", &noprogress_msg);
+                    term_row_extra(
+                        "NoProgress",
+                        &noprogress_msg,
+                        serde_json::json!({
+                            "pr_state": pr_info.state.as_str(),
+                            "ci": pr_info.ci_conclusion.render(),
+                            "red_check": pr_info.failing_checks.first(),
+                        }),
+                    );
                     fire_row(
                         "allow",
                         "backstop",
@@ -2105,6 +2126,7 @@ pub(crate) fn decide_with_payload(
                             "read": failed_read,
                             "outcome": read_err.outcome(),
                             "stderr_tail": failed_stderr,
+                            "waited_on": read_err.waited_on(),
                             "parked": true
                         }),
                     );
@@ -2192,6 +2214,7 @@ pub(crate) fn decide_with_payload(
                         "read": failed_read,
                         "outcome": read_err.outcome(),
                         "stderr_tail": failed_stderr,
+                        "waited_on": read_err.waited_on(),
                         "elapsed_s": read_err.elapsed.map(|d| d.as_secs_f64()),
                         "graphql_remaining": quota.as_ref().map(|q| q.remaining),
                         "graphql_reset": quota.as_ref().map(|q| q.reset_epoch),
