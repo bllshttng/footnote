@@ -102,7 +102,7 @@ fn decide(f: &TerminalRouteFacts<'_>, ledger: &[Value]) -> Option<(HelpClass, u6
     let count = |reasons: &[&str]| -> u64 {
         priors
             .iter()
-            .filter(|(_, reason)| reasons.contains(reason))
+            .filter(|(_, reason)| reasons.contains(&reason.as_str()))
             .count() as u64
     };
 
