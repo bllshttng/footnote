@@ -14,7 +14,6 @@
 //! defer and never a reroute off an unread observation.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 /// `config.accounts.quota` (the quota-aware dispatch block). Both flags
@@ -472,9 +471,8 @@ pub fn select_destination(
         .and_then(|v| v.as_str().map(str::to_string))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
-    let combo = crate::agents_config::config_lookup(cwd, &["providers", "combos"])?
-        .get(combo_name.as_str())?
-        .as_table()?;
+    let combos = crate::agents_config::config_lookup(cwd, &["providers", "combos"])?;
+    let combo = combos.get(combo_name.as_str())?.as_table()?;
     let members = combo.get("providers")?.as_array()?;
     let records = crate::agents_config::config_lookup(cwd, &["providers", "records"])?;
     for member in members {
@@ -561,7 +559,7 @@ pub fn select_autonomous_route(
     priority: Option<&str>,
     pinned: bool,
     node_cwd: Option<&str>,
-    node_id: Option<&str>,
+    _node_id: Option<&str>,
     now: f64,
 ) -> AutonomousRoute {
     let cfg = load_quota_config(node_cwd);
