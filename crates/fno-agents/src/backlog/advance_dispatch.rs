@@ -46,12 +46,10 @@ pub struct NodeSpawnArgs {
     pub grid_reason: Option<String>,
     pub decision: Vec<String>,
     pub is_reconcile: bool,
-    pub env: BTreeMapGlobal,
+    /// The subprocess env: the resolver's answer plus the caller's extras,
+    /// keyed by name. The launch leg owns merging the base env beneath it.
+    pub env: std::collections::BTreeMap<String, String>,
 }
-
-/// Placeholder alias so the struct compiles before the env composition port
-/// lands; the launch leg replaces it with HashMap<String, String>.
-pub type BTreeMapGlobal = std::collections::BTreeMap<String, String>;
 
 /// The resolved spawn outcome: Ok carries the launch identity and the
 /// receipt rows the event emission reads.

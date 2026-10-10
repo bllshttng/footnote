@@ -497,7 +497,8 @@ pub(crate) struct BoundedOutput {
 
 /// Run a child to completion with a hard wall-clock bound, capturing text
 /// stdout/stderr. On timeout the child is killed and an error names the
-/// bound.
+/// bound. Rides the crate's bounded runner (process group, pipe capping)
+/// rather than its own poll loop.
 pub(crate) fn bounded_command_env(
     exe: &Path,
     argv: &[String],
@@ -513,38 +514,13 @@ pub(crate) fn bounded_command_env(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(bound_s);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = out.read_to_string(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = err.read_to_string(&mut stderr);
-                }
-                return Ok(BoundedOutput {
-                    stdout,
-                    stderr,
-                    code: status.code().unwrap_or(1),
-                });
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("exceeded {bound_s}s bound; killed"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    }
+    let out =
+        crate::bounded_cmd::output_with_timeout_result(cmd, bound_s).map_err(|e| e.to_string())?;
+    Ok(BoundedOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: out.status.code().unwrap_or(1),
+    })
 }
 
 /// The select-read door: one bounded exec of this binary's `select-read`
