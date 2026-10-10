@@ -73,7 +73,9 @@ export FNO_CONFIG="$ROOT/config.toml" FNO_MUX_DIR="$ROOT/mux" FNO_AGENTS_HOME="$
 # graph.db migration tombstone at .fno/claims, which is not a directory and
 # crashes the lock. Give the demo's claims their own directory.
 export FNO_CLAIMS_ROOT="$ROOT/claimroot"
-mkdir -p "$ROOT/claimroot"
+# The lock nests .fno/claims under the claims root and needs the full path
+# to exist before its tempfile lands there.
+mkdir -p "$ROOT/claimroot/.fno/claims"
 # HOME too, for every process: the server reads harness rosters under it,
 # and a real home would list real sessions in the sideline.
 export HOME="$ROOT"

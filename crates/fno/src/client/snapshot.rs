@@ -22,7 +22,7 @@ const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
 [--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
 [--font <family>] [--message <fmail-id>] \
-[--view bell|row-menu|tab-menu|sideline-menu|composer|split-menu|settings|keys]";
+[--view bell|feed|row-menu|tab-menu|sideline-menu|composer|split-menu|settings|keys]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
@@ -39,6 +39,9 @@ pub enum ViewKind {
     /// The notifications bell panel, with one synchronous gather like the
     /// live panel's `maybe_kick`.
     Bell,
+    /// The activity feed panel, with one synchronous page fold like the
+    /// live panel's run-loop kick.
+    Feed,
     /// The sideline row context menu on the first agent row.
     RowMenu,
     /// The tab-strip context menu on the first tab.
@@ -63,6 +66,7 @@ pub enum ViewKind {
 fn parse_view(v: &str) -> Option<ViewKind> {
     match v {
         "bell" => Some(ViewKind::Bell),
+        "feed" => Some(ViewKind::Feed),
         "row-menu" => Some(ViewKind::RowMenu),
         "tab-menu" => Some(ViewKind::TabMenu),
         "sideline-menu" => Some(ViewKind::SidelineMenu),
@@ -142,7 +146,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
             "--view" => {
                 let v = value()?;
                 view = Some(parse_view(&v).ok_or_else(|| {
-                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, row-menu, tab-menu, sideline-menu, composer, split-menu, settings or keys")
+                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, feed, row-menu, tab-menu, sideline-menu, composer, split-menu, settings or keys")
                 })?)
             }
             tok @ ("--server" | "--session") => {
@@ -417,6 +421,19 @@ fn live_frame(
             let projection = runtime.block_on(crate::messages_model::gather());
             crate::client::bell::apply(&mut view, gen, projection);
         }
+        Some(ViewKind::Feed) => {
+            // The `e` key's state flip plus the fold the live panel's run
+            // loop kicks, run inline: one Head page lands, newest first.
+            view.feed = Some(super::feed_view::open_overlay(None, 0));
+            if let Some(f) = view.feed.as_mut() {
+                f.want = true;
+            }
+            let outcome = runtime.block_on(crate::feed_overlay::fetch_page(
+                crate::feed_overlay::PageReq::Head,
+                None,
+            ));
+            super::feed_view::apply_fold(&mut view, 0, outcome);
+        }
         Some(ViewKind::RowMenu) => {
             let i = view
                 .display_rows()
@@ -581,6 +598,7 @@ mod tests {
     fn view_flag_names_every_kind_and_refuses_the_rest() {
         for (name, kind) in [
             ("bell", ViewKind::Bell),
+            ("feed", ViewKind::Feed),
             ("row-menu", ViewKind::RowMenu),
             ("tab-menu", ViewKind::TabMenu),
             ("sideline-menu", ViewKind::SidelineMenu),
@@ -592,10 +610,10 @@ mod tests {
             let args = parse_extra(&["--view", name]).expect(name);
             assert_eq!(args.view, Some(kind), "{name}");
         }
-        let e = parse_extra(&["--view", "feed"]).expect_err("unknown view names the options");
+        let e = parse_extra(&["--view", "nonesuch"]).expect_err("unknown view names the options");
         assert!(
             e.contains(
-                "bell, row-menu, tab-menu, sideline-menu, composer, split-menu, settings or keys"
+                "bell, feed, row-menu, tab-menu, sideline-menu, composer, split-menu, settings or keys"
             ),
             "{e}"
         );
