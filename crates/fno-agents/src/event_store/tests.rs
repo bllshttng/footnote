@@ -150,6 +150,48 @@ fn store_path_strips_generation_suffix() {
 }
 
 #[test]
+fn store_path_refuses_empty_journal_path() {
+    // 2026-10-05: an empty journal derived `.db` relative to the caller's
+    // cwd. The refusal must fire before any path is derived, and no file
+    // may appear.
+    let cwd = std::env::current_dir().unwrap();
+    let had_dot_db = cwd.join(".db").exists();
+    assert!(try_store_path(Path::new("")).is_err());
+    assert!(try_store_path(Path::new("/")).is_err());
+    let err = try_store_path(Path::new("")).unwrap_err();
+    assert!(err.contains("empty or name-less journal path"), "{err}");
+    assert_eq!(
+        cwd.join(".db").exists(),
+        had_dot_db,
+        "a refused path must not materialize a store"
+    );
+}
+
+#[test]
+#[should_panic(expected = "empty or name-less journal path")]
+fn store_path_panics_on_empty_journal() {
+    let _ = store_path(Path::new(""));
+}
+
+#[test]
+fn append_envelope_refuses_empty_journal_without_creating_a_store() {
+    let cwd = std::env::current_dir().unwrap();
+    let had_dot_db = cwd.join(".db").exists();
+    let result = append_envelope(Path::new(""), "{}", None);
+    assert!(
+        result
+            .unwrap_err()
+            .contains("empty or name-less journal path"),
+        "the refusal must surface through the emit chain"
+    );
+    assert_eq!(
+        cwd.join(".db").exists(),
+        had_dot_db,
+        "a refused append must not create a store"
+    );
+}
+
+#[test]
 fn sync_ingests_both_generations_and_second_sync_is_zero() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
