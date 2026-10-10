@@ -160,13 +160,13 @@ fn is_compile_leg(leg: &str) -> bool {
 /// runnable remainder (possibly empty) and what was dropped, so the caller
 /// names each loss.
 fn strip_compile_legs(cmd: &str) -> (String, Vec<String>) {
-    let mut kept: Vec<&str> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
     let mut dropped: Vec<String> = Vec::new();
     for leg in cmd.split("&&") {
         if is_compile_leg(leg) {
             dropped.push(leg.trim().to_string());
         } else {
-            kept.push(leg);
+            kept.push(leg.trim().to_string());
         }
     }
     (kept.join(" && "), dropped)
