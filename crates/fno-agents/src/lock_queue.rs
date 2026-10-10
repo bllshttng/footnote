@@ -99,19 +99,6 @@ fn ticket_pid(name: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// An exited child's pid, for a ticket that must read as dead. Skips
-    /// when the pid was recycled before the check (rare; the assert on a
-    /// recycled pid would flake).
-    fn dead_pid() -> Option<u64> {
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn true");
-        let status = child.wait().expect("wait true");
-        assert!(status.success());
-        let pid = child.id() as u64;
-        (!pid_is_alive(pid)).then_some(pid)
-    }
-
     #[test]
     fn head_is_served_in_ticket_order_and_dead_tickets_are_pruned() {
         let dir = tempfile::tempdir().unwrap();
@@ -121,11 +108,9 @@ mod tests {
         assert!(am_head(&first), "earliest ticket is head");
         assert!(!am_head(&second), "later ticket waits behind the head");
         // A dead waiter that registered first must not block the queue: the
-        // scan that answers am_head also prunes it.
-        let Some(pid) = dead_pid() else {
-            return;
-        };
-        let dead = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, pid));
+        // scan that answers am_head also prunes it. No real process can hold
+        // i32::MAX as a pid, so the ticket reads as dead deterministically.
+        let dead = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, i32::MAX as u64));
         std::fs::File::create_new(&dead).unwrap();
         assert!(
             !am_head(&second),
