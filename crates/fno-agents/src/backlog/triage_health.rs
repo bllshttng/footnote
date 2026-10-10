@@ -564,7 +564,6 @@ pub(crate) fn evals_summary() -> Option<Value> {
 
 /// The evals history file (fno.paths.evals_history).
 fn evals_history_path() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
     if let Some(pin) = std::env::var_os("FNO_EVALS_HISTORY").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(pin));
     }
