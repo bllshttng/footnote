@@ -215,16 +215,19 @@ def test_resolve_attached_matches_live_adopted_session(tmp_path, monkeypatch):
 
 def test_resolve_attached_skips_interactive_and_exec(tmp_path, monkeypatch):
     # Only host_mode=attached resolves on the adopt lane; interactive/exec do not.
+    # One session per row: the registry table keys a row by harness and session.
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
     _write_registry(tmp_path, [
-        {"name": "i", "short_id": "wkI", "provider": "claude", "claude_session_uuid": "u",
+        {"name": "i", "short_id": "aa00bb11", "provider": "claude", "claude_session_uuid": "ui",
          "host_mode": "interactive"},
-        {"name": "e", "short_id": "wkE", "provider": "claude", "claude_session_uuid": "u",
+        {"name": "e", "short_id": "aa00bb22", "provider": "claude", "claude_session_uuid": "ue",
          "host_mode": "exec"},
-        {"name": "a", "short_id": "cc77dd88", "provider": "claude", "claude_session_uuid": "u",
+        {"name": "a", "short_id": "cc77dd88", "provider": "claude", "claude_session_uuid": "ua",
          "host_mode": "attached"},
     ])
-    assert rt_mod.resolve_attached_short_id("u") == "cc77dd88"
+    assert rt_mod.resolve_attached_short_id("ua") == "cc77dd88"
+    assert rt_mod.resolve_attached_short_id("ui") is None
+    assert rt_mod.resolve_attached_short_id("ue") is None
 
 
 def test_resolve_attached_skips_dead_and_rejects_unsafe(tmp_path, monkeypatch):
