@@ -500,18 +500,28 @@ pub(crate) fn session_provenance(
     )
 }
 
-/// Mint a fresh, collision-free node id against the snapshot's ids and the
-/// legacy archive pool. Must run inside the locked write.
+/// Mint a fresh, collision-free node id against the snapshot's ids, the
+/// legacy archive pool, the mint tombstones, and every id a plan
+/// frontmatter names. Must run inside the locked write.
 fn mint_node_id(existing: &std::collections::BTreeSet<String>) -> Result<String, String> {
     let prefix = super::settings::node_id_prefix();
     let width = super::settings::node_id_hex_width();
     let archive_ids = archived_id_pool();
-    mint_node_id_with_prefix(existing, &archive_ids, &prefix, width)
+    let tombstones = load_id_tombstones();
+    let plan_ids = plan_frontmatter_ids();
+    let minted = mint_node_id_with_prefix(
+        existing,
+        &[&archive_ids, &tombstones, &plan_ids],
+        &prefix,
+        width,
+    )?;
+    record_id_tombstone(&minted);
+    Ok(minted)
 }
 
 fn mint_node_id_with_prefix(
     existing: &std::collections::BTreeSet<String>,
-    archive_ids: &std::collections::BTreeSet<String>,
+    excluded: &[&std::collections::BTreeSet<String>],
     prefix: &str,
     width: usize,
 ) -> Result<String, String> {
@@ -524,7 +534,7 @@ fn mint_node_id_with_prefix(
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).map_err(|e| format!("mint entropy failed: {e}"))?;
         let candidate = format!("{prefix}{}", &hex_lower(&bytes)[..width]);
-        if !existing.contains(&candidate) && !archive_ids.contains(&candidate) {
+        if !existing.contains(&candidate) && excluded.iter().all(|set| !set.contains(&candidate)) {
             return Ok(candidate);
         }
     }
@@ -553,6 +563,124 @@ fn archived_id_pool() -> std::collections::BTreeSet<String> {
         for e in entries {
             if let Some(id) = e.get("id").and_then(Value::as_str) {
                 out.insert(id.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// <state_dir>/id-tombstones.json: every id this binary ever minted. A node
+/// removed from the store leaves its tombstone, so a removed node's id is
+/// never minted again while old plans may still name it.
+fn load_id_tombstones() -> std::collections::BTreeSet<String> {
+    match super::settings::state_dir() {
+        Some(dir) => load_id_tombstones_in(&dir),
+        None => Default::default(),
+    }
+}
+
+fn load_id_tombstones_in(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok(text) = std::fs::read_to_string(dir.join("id-tombstones.json")) else {
+        return out;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return out;
+    };
+    if let Some(ids) = value.as_array() {
+        for v in ids {
+            if let Some(id) = v.as_str() {
+                out.insert(id.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Append one id to the tombstone file, best-effort: a failed write is
+/// reported on stderr and the mint proceeds, so an install with no
+/// writable state dir can still create nodes.
+fn record_id_tombstone(id: &str) {
+    let Some(dir) = super::settings::state_dir() else {
+        return;
+    };
+    record_id_tombstone_in(&dir, id);
+}
+
+fn record_id_tombstone_in(dir: &Path, id: &str) {
+    let mut ids = load_id_tombstones_in(dir);
+    if !ids.insert(id.to_string()) {
+        return;
+    }
+    let Ok(body) = serde_json::to_string(&ids) else {
+        eprintln!("fno-agents: id-tombstone serialize failed for {id}");
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        eprintln!("fno-agents: id-tombstone dir missing for {id}");
+        return;
+    }
+    let path = dir.join("id-tombstones.json");
+    // Write-then-rename so a crash mid-write never truncates the pool.
+    let tmp = dir.join("id-tombstones.json.tmp");
+    if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        return;
+    }
+    let _ = std::fs::write(&path, &body);
+}
+
+/// Every id a plan frontmatter names in the configured plans dir:
+/// `claims:` and `node:` scalars, plus inline `[a, b]` lists. Best-effort
+/// per file: no frontmatter, an unreadable file, or a missing dir all
+/// contribute nothing.
+fn plan_frontmatter_ids() -> std::collections::BTreeSet<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::paths_cli::plans_dir_for(&cwd) {
+        Some(dir) => plan_frontmatter_ids_in(&dir),
+        None => Default::default(),
+    }
+}
+
+fn plan_frontmatter_ids_in(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut lines = text.lines();
+        if lines.next().map(str::trim) != Some("---") {
+            continue;
+        }
+        for line in lines {
+            if line.trim() == "---" {
+                break;
+            }
+            let Some((key, val)) = line.split_once(':') else {
+                continue;
+            };
+            if key.trim() != "claims" && key.trim() != "node" {
+                continue;
+            }
+            let val = val.trim();
+            if val.starts_with('[') {
+                for part in val.trim_start_matches('[').trim_end_matches(']').split(',') {
+                    let id = part.trim().trim_matches(['\'', '"']);
+                    if !id.is_empty() {
+                        out.insert(id.to_string());
+                    }
+                }
+            } else {
+                let id = val.trim_matches(['\'', '"']);
+                if !id.is_empty() {
+                    out.insert(id.to_string());
+                }
             }
         }
     }
@@ -1303,17 +1431,53 @@ mod tests {
 
     #[test]
     fn bare_id_prefix_mints_dash_before_hex() {
-        let minted = mint_node_id_with_prefix(
-            &std::collections::BTreeSet::new(),
-            &std::collections::BTreeSet::new(),
-            "x",
-            4,
-        )
-        .expect("minted id");
+        let minted = mint_node_id_with_prefix(&std::collections::BTreeSet::new(), &[], "x", 4)
+            .expect("minted id");
 
         assert!(minted.starts_with("x-"));
         assert_eq!(minted.len(), 6);
         assert!(minted[2..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn plan_frontmatter_ids_reads_claims_node_and_skips_plain_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans = dir.path().join("plans");
+        std::fs::create_dir(&plans).unwrap();
+        std::fs::write(
+            plans.join("a.md"),
+            "---\nclaims: x-1111\nnode: x-2222\ncreated: 2026-10-01\nstatus: done\n---\n\n# plan\n",
+        )
+        .unwrap();
+        std::fs::write(plans.join("b.md"), "# no frontmatter\n").unwrap();
+        std::fs::write(plans.join("c.txt"), "---\nclaims: x-3333\n---\n").unwrap();
+        std::fs::write(plans.join("d.md"), "---\nclaims: [x-4444, 'x-5555']\n---\n").unwrap();
+        let ids = plan_frontmatter_ids_in(&plans);
+        assert!(ids.contains("x-1111") && ids.contains("x-2222"));
+        assert!(ids.contains("x-4444") && ids.contains("x-5555"));
+        assert!(!ids.contains("x-3333"), "non-md file skipped");
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn tombstone_round_trip_and_mint_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        record_id_tombstone_in(dir.path(), "x-6666");
+        record_id_tombstone_in(dir.path(), "x-6666");
+        record_id_tombstone_in(dir.path(), "x-7777");
+        let loaded = load_id_tombstones_in(dir.path());
+        assert_eq!(
+            loaded,
+            std::collections::BTreeSet::from(["x-6666".to_string(), "x-7777".to_string()])
+        );
+        // The exclusion gate is deterministic only at saturation: with every
+        // id of the width excluded, the mint must refuse rather than emit a
+        // colliding id.
+        let all: std::collections::BTreeSet<String> =
+            (0..=0xffff).map(|i| format!("x-{i:04x}")).collect();
+        let err = mint_node_id_with_prefix(&std::collections::BTreeSet::new(), &[&all], "x", 4)
+            .unwrap_err();
+        assert!(err.contains("exhaustion"), "mint refused: {err}");
     }
 
     #[test]
