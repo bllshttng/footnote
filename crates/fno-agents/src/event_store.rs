@@ -2143,6 +2143,9 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         if line_bytes.is_empty() {
             continue;
         }
+        if !tail_line_wanted(line_bytes, &q.types) {
+            continue;
+        }
         let hash = Sha256::digest(line_bytes).to_vec();
         let not_held: bool = held
             .query_row(params![hash], |r| r.get::<_, i64>(0))
@@ -2182,6 +2185,86 @@ fn read_range(path: &Path, start: u64) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     fh.read_to_end(&mut out)?;
     Ok(out)
+}
+
+/// True when an uncommitted tail line can matter to the query. The store half
+/// of this read filters `type IN (...)`; the tail half hashed and store-probed
+/// every line, so a cursor-less journal put its whole file through sha256 plus
+/// two EXISTS probes per status read even when the fold wanted none of it. The
+/// tail now runs the store's own filter: no `types` filter keeps everything;
+/// otherwise a line survives when any `"type"` key in it carries one of the
+/// query's expanded types, and a line with no findable type rides the empty
+/// type entry exactly as a store row would. The scan is bytes, not a parse: a
+/// false keep only costs what the unfiltered path paid.
+fn tail_line_wanted(line: &[u8], types: &[String]) -> bool {
+    if types.is_empty() {
+        return true;
+    }
+    let allowed = query_types_with_aliases(types);
+    let mut rest = line;
+    loop {
+        let Some(pos) = find_bytes(rest, b"\"type\"") else {
+            return types.iter().any(|t| t.is_empty());
+        };
+        rest = &rest[pos + b"\"type\"".len()..];
+        if let Some(value) = json_string_value_after_key(rest) {
+            if allowed.iter().any(|t| t.as_bytes() == value) {
+                return true;
+            }
+        }
+    }
+}
+
+/// First-byte-anchored needle search. Tail lines can be hundreds of KB and a
+/// windows-per-offset scan compares at every position, so advance on the
+/// needle's first byte instead.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let last = haystack.len().checked_sub(needle.len())?;
+    let first = needle[0];
+    let mut at = 0;
+    loop {
+        while at <= last && haystack[at] != first {
+            at += 1;
+        }
+        if at > last {
+            return None;
+        }
+        if &haystack[at..at + needle.len()] == needle {
+            return Some(at);
+        }
+        at += 1;
+    }
+}
+
+/// The byte value of the JSON string literal that begins after an
+/// optional-space colon at `rest`, or None. Escapes pass through byte-wise:
+/// the comparison targets are plain type identifiers, so an escaped byte
+/// simply fails the equality.
+fn json_string_value_after_key(rest: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    if rest.get(i) != Some(&b':') {
+        return None;
+    }
+    i += 1;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    if rest.get(i) != Some(&b'"') {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < rest.len() {
+        match rest[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(&rest[start..i]),
+            _ => i += 1,
+        }
+    }
+    None
 }
 /// Write every committed row, in commit order, to `out` as JSONL - atomically
 /// (tmp file + rename), labeled by the caller as the snapshot it is. Returns
