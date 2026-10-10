@@ -491,22 +491,31 @@ fn recover_with_policy(
 /// Converting one of them to epoch time makes the equality comparisons in
 /// `pid_is_ours` and `_pid_alive` fail across writers, which reaps live workers.
 /// A consumer that needs a real start time needs its own field, not this token.
+///
+/// The zombie flag is ticket-liveness vocabulary: a zombie reads
+/// alive to `pid_is_alive` (kill(pid,0) answers 0) but closed its fds at
+/// exit, so it can hold neither a flock nor a lock ticket.
 #[cfg(target_os = "linux")]
-pub fn process_start_time(pid: u32) -> Option<u64> {
+pub fn process_bsd(pid: u32) -> Option<(u64, bool)> {
     // /proc/<pid>/stat field 22 (1-based) is `starttime` in clock ticks since
     // boot. The comm field (2) can contain spaces and parens, so split on the
-    // LAST ')' and index from there. After "comm)" the space-separated fields are
-    // [state, ppid, ...], with starttime the 20th (0-based index 19).
+    // LAST ')' and index from there. After "comm)" the space-separated fields
+    // are [state, ppid, ...]: state (zombie = 'Z') is index 0, starttime the
+    // 20th (0-based index 19).
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after = stat.rsplit_once(')')?.1;
-    after.split_whitespace().nth(19)?.parse::<u64>().ok()
+    let mut fields = after.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let start = fields.nth(18)?.parse::<u64>().ok()?;
+    Some((start, state == 'Z'))
 }
 
 /// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)` fills a `proc_bsdinfo` whose
-/// `pbi_start_tvsec`/`pbi_start_tvusec` is the process start time; fold to
-/// microseconds. (`kinfo_proc` is not exposed by the libc crate.)
+/// `pbi_start_tvsec`/`pbi_start_tvusec` is the process start time (folded to
+/// microseconds) and whose `pbi_status == SZOMB` marks a zombie.
+/// (`kinfo_proc` is not exposed by the libc crate.)
 #[cfg(target_os = "macos")]
-pub fn process_start_time(pid: u32) -> Option<u64> {
+pub fn process_bsd(pid: u32) -> Option<(u64, bool)> {
     use std::mem;
     let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
     let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
@@ -525,12 +534,21 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
     if written != size {
         return None;
     }
-    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    Some((
+        info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        info.pbi_status == libc::SZOMB,
+    ))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn process_start_time(_pid: u32) -> Option<u64> {
+pub fn process_bsd(_pid: u32) -> Option<(u64, bool)> {
     None
+}
+
+/// The start-time token [`process_bsd`] reads: per-host, per-boot, compared
+/// only for equality (never a wall clock - see that function's contract).
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    process_bsd(pid).map(|(start, _)| start)
 }
 
 pub(crate) use crate::gc_inventory::index_tree;
