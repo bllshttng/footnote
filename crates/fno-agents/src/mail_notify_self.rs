@@ -350,9 +350,11 @@ mod tests {
             append(&bus, "lead", &handle, "second");
             assert_eq!(notify(&bus, session), 0);
             assert_eq!(last_seen(&bus, &handle), msg_id("lead", &handle, "second"));
-            let events =
-                std::fs::read_to_string(crate::paths::AgentsHome::from_env().events_jsonl())
-                    .unwrap();
+            // The store commit is the write boundary (events.rs write_line):
+            // rows come back through the store, never the journal file.
+            let events = crate::events::committed_journal_text(
+                &crate::paths::AgentsHome::from_env().events_jsonl(),
+            );
             assert_eq!(events.matches("agent_mail_drained").count(), 2);
             assert!(events.contains("\"reason\":\"printed\""));
             assert!(events.contains(&format!(
