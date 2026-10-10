@@ -123,6 +123,12 @@ pub fn keeper_lane_harness(name: &str) -> bool {
 /// age out, short enough that Python still answers its live-lane timeout.
 const QUIET_WAIT_S: u64 = 30;
 
+/// One live rung's worst case in seconds: the quiet gate's full wait plus
+/// the default confirm budget. A runner that kills a send sooner can cut it
+/// inside the confirm and skip the withdraw.
+pub const LIVE_RUNG_WORST_S: u64 =
+    QUIET_WAIT_S + DEFAULT_ATTEMPTS as u64 * DEFAULT_INTERVAL_MS / 1000;
+
 /// How long a claude row reported Done may hold delivery as "in Stop hooks"
 /// with no `turn_duration` row after it. The Done report fires when the Stop
 /// hooks START, and a CR typed while they run lands as a newline in the
