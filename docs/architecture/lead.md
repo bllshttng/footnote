@@ -7,7 +7,7 @@ A pass encodes a wave and steps_down (`/fno:lead <scope> --once`). A lead withou
 Three facts fix the design, all measured against the harness internals:
 
 - The in-session lead arm reads BOARD truth. It blocks exit while actionable rows exist, and exits `NoWork` on a clean board or while it waits only on the user, CI or a worker. `NoProgress` remains the bounded fail-closed path.
-- Claude can inject the native `/loop` with `fno agents mail send '<command>' --to-self --raw`. The daemon's `lead_settle` arm mails every role on every harness, so quiet polling invokes no model anywhere. Other harnesses use the heartbeat or external wake documented in the beat table.
+- The beat is data. `agents.<harness>.beat` defaults to `auto`, which reads the harness capability row's `beat` (`daemon`, `loop`, `goal` or `schedule`), and `fno-agents harness-beat` prints the result. On `loop` the lead injects the native `/loop` with `fno agents mail send '<command>' --to-self --raw`. The daemon's `lead_settle` arm mails every role on every harness, so quiet polling invokes no model anywhere.
 - `lead.checkin_interval` is a 55-minute heartbeat under the one-hour prompt cache.
 
 ## The one arm, and the demand reads

@@ -48,19 +48,24 @@ With `--once` the role rules one wave and expires. Run Who runs this and On titl
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, never raw prompt-line `/goal` or `/loop`. Read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
+Read the beat before arming anything: `fno-agents harness-beat` prints `beat: <beat> (<source>)`. The key `agents.<harness>.beat` defaults to `auto`, which reads this harness's capability row. A user sets the key only to override the row. Arm what the line names, and never branch on the harness name:
 
-The daemon mails the settle push on every harness:
+- `loop`: inject the native `/loop` as the cheap heartbeat (below).
+- `goal`: use provider-backed goal actions, never raw prompt-line `/goal` or `/loop`. Read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every goal wake runs the check-in body below.
+- `schedule`: use the harness's own recurring schedule tool, as [the beat table](references/beat-by-harness.md) names it.
+- `daemon`: arm nothing. The daemon's lead-wake mail is the beat.
 
-1. **Settle mail, 300s.** The daemon's `lead_settle` arm mails the lead once per covered PR that settles green. It mails again once per covered node that merges and closes. The lead arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks. Codex arms nothing native: its provider goal and Stop receipts are the beat.
+The daemon mails the settle push on every beat:
 
-On Claude, inject the loop as the cheap heartbeat:
+1. **Settle mail, 300s.** The daemon's `lead_settle` arm mails the lead once per covered PR that settles green. It mails again once per covered node that merges and closes. The lead arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks.
+
+On `loop`, inject the loop:
 
 ```
 fno agents mail send "/loop ${lead.checkin_interval} ${lead.checkin_text}" --to-self --raw
 ```
 
-Confirm the loop receipt, journal `lead_armed` (`fno doctor event emit`) with it. For Codex, record its positive provider-goal and separate Stop receipts with `lead_armed`. Use the beat table for every other harness. Only an event, mail or the heartbeat wakes the lead.
+Journal `lead_armed` (`fno doctor event emit`) with the beat line and its receipt: the loop receipt on `loop`, the positive provider-goal and separate Stop receipts on `goal`. Only an event, mail or the heartbeat wakes the lead.
 
 ## The check-in body
 
