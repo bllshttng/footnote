@@ -1007,14 +1007,15 @@ fn retract_env_exports() -> (Vec<PathBuf>, Vec<String>) {
     if let Ok(text) = std::fs::read_to_string(&claude) {
         // Unparseable: leave it. The file is the user's.
         match serde_json::from_str::<serde_json::Map<String, Value>>(&text) {
-            Ok(mut data) if strip_claude_env(&mut data, fno_env_value) > 0 => {
-                let text = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
-                match std::fs::write(&claude, text) {
-                    Ok(()) => changed.push(claude),
-                    Err(e) => errors.push(format!("claude env: {e}")),
+            Ok(mut data) => {
+                if strip_claude_env(&mut data, fno_env_value) > 0 {
+                    let text = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
+                    match std::fs::write(&claude, text) {
+                        Ok(()) => changed.push(claude),
+                        Err(e) => errors.push(format!("claude env: {e}")),
+                    }
                 }
             }
-            Ok(_) => {}
             Err(e) => errors.push(format!(
                 "claude env: {} is not valid JSON ({e}); left alone",
                 claude.display()
@@ -2557,7 +2558,7 @@ mod tests {
         let sccache = "export SCCACHE_DIR=\"/u/.fno/b/sccache\"\n";
         let keep = "alias ll=ls\nexport KEEP=1\n";
         for block in [[mark, cargo].concat(), [mark, cargo, sccache].concat()] {
-            let rc = ["alias ll=ls\n", &block, "export KEEP=1\n"].concat();
+            let rc = ["alias ll=ls\n", block.as_str(), "export KEEP=1\n"].concat();
             assert_eq!(strip_rc_block(&rc).as_deref(), Some(keep));
         }
         let bare = ["alias ll=ls\n", mark, cargo.trim_end()].concat();
