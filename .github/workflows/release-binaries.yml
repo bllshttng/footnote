@@ -1,7 +1,9 @@
 name: release-binaries
 
 # Build standalone platform binaries (the `fno` front door and all three
-# `fno-agents` binaries) into one tarball per platform. Build-only: this
+# `fno-agents` binaries) into one tarball per platform, plus a no-op
+# `footnote` stub so updaters installed before the required-binary list
+# dropped that name still accept the tarball. Build-only: this
 # workflow publishes nothing. It runs on manual dispatch (an inspection
 # build) or as a reusable workflow called from release.yml, which owns every
 # publish leg behind the `release` environment approval, and from
@@ -89,10 +91,23 @@ jobs:
           # the first, so the fno leg chdir'd into
           # crates/fno-agents/target/.../crates/fno/target/... and failed to
           # open. Anchor both dirs at the workspace.
+          #
+          # Compat stub: an updater installed before the required-binary list
+          # dropped `footnote` refuses any tarball without it and so can never
+          # reach the fixed updater. Pack a no-op script in its place so those
+          # clients accept the swap; the `fno` they land on no longer requires
+          # the name.
+          cat > "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release/footnote" <<'STUB'
+          #!/bin/sh
+          # Compat stub: the standalone footnote harness is retired. Use fno.
+          echo "footnote is retired; use fno" >&2
+          exit 1
+          STUB
+          chmod 755 "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release/footnote"
           tar -czf "fno-agents-${{ matrix.target.name }}.tar.gz" \
             -C "$PWD/crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
               "fno-agents" "fno-agents-daemon" "fno-agents-worker" \
-            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno"
+            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "footnote" "fno"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
