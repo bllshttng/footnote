@@ -3,9 +3,8 @@
 #
 # The harness fails Agent dispatches with isolation: worktree when the hook
 # exits 0 without emitting the absolute worktree path on stdout
-# ("WorktreeCreate hook failed: no successful output"). These tests run both
-# copies of the hook (the plugin-level copy and the /speculate skill's
-# portable duplicate) in a sandboxed temp git repo and assert:
+# ("WorktreeCreate hook failed: no successful output"). These tests run the
+# plugin hook in a sandboxed temp git repo and assert:
 #
 #   1. stdout is exactly one line.
 #   2. That line is an absolute path that exists on disk.
@@ -26,7 +25,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HOOKS=(
     "$REPO_ROOT/hooks/worktree-setup.sh"
-    "$REPO_ROOT/skills/speculate/scripts/worktree-setup.sh"
 )
 
 PASS=0
@@ -249,6 +247,70 @@ SH
     fi
     rm -f "$stdout_file" "$stderr_file"
     rm -rf "$sandbox" "$never_bindir"
+
+    # Case 7: the hook runs the checkout's linker, so shared state is linked on
+    # this creation path too. Before, the hook linked nothing and internal/
+    # landed as a real directory that swallowed plan writes.
+    sandbox=$(setup_sandbox)
+    worktree="$sandbox/test-wt"
+    mkdir -p "$sandbox/.claude/agents" "$worktree/scripts/setup"
+    cp "$REPO_ROOT/scripts/setup/setup-worktree.sh" "$worktree/scripts/setup/"
+    stdin_json=$(printf '{"session_id":"s1","name":"test-wt","path":"%s","hook_event_name":"WorktreeCreate"}' "$worktree")
+    assert_contract "$name :: linker run keeps the stdout contract" "$hook" "$stdin_json" "$worktree" "$worktree"
+    if [[ -L "$worktree/.claude/agents" ]]; then
+        pass "$name :: shared state linked through setup-worktree.sh"
+    else
+        fail "$name :: shared state linked through setup-worktree.sh" ".claude/agents is not a symlink in $worktree"
+    fi
+    rm -rf "$sandbox"
+
+    # Case 8: no linker in the checkout. Creation still succeeds and stderr
+    # names the gap.
+    sandbox=$(setup_sandbox)
+    worktree="$sandbox/test-wt"
+    stdin_json=$(printf '{"session_id":"s1","name":"test-wt","path":"%s","hook_event_name":"WorktreeCreate"}' "$worktree")
+    output=$(run_hook "$worktree" "$hook" "$stdin_json")
+    rc=$(echo "$output" | sed -n '1p')
+    stdout_file=$(echo "$output" | sed -n '2p')
+    stderr_file=$(echo "$output" | sed -n '3p')
+    if [[ "$rc" -eq 0 && "$(cat "$stdout_file")" == "$worktree" ]] \
+        && grep -q "no scripts/setup/setup-worktree.sh" "$stderr_file"; then
+        pass "$name :: missing linker warns and still creates"
+    else
+        fail "$name :: missing linker warns and still creates" "rc=$rc stderr: $(cat "$stderr_file")"
+    fi
+    rm -f "$stdout_file" "$stderr_file"
+    rm -rf "$sandbox"
+
+    # Case 9: worktree.auto_install = false reaches the hook as false. yq's //
+    # used to turn boolean false into the default, so installs always ran.
+    sandbox=$(setup_sandbox)
+    worktree="$sandbox/test-wt"
+    echo '{}' > "$worktree/package-lock.json"
+    cfg_bindir=$(mktemp -d)
+    cat > "$cfg_bindir/fno" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+    *worktree*policy*) echo "harness-native"; exit 0 ;;
+    "config get worktree.auto_install") echo "False"; exit 0 ;;
+    *) exit 1 ;;
+esac
+SH
+    chmod +x "$cfg_bindir/fno"
+    stdin_json=$(printf '{"session_id":"s1","name":"test-wt","path":"%s","hook_event_name":"WorktreeCreate"}' "$worktree")
+    _saved_path="$PATH"
+    export PATH="$cfg_bindir:$PATH"
+    output=$(run_hook "$worktree" "$hook" "$stdin_json")
+    export PATH="$_saved_path"
+    stdout_file=$(echo "$output" | sed -n '2p')
+    stderr_file=$(echo "$output" | sed -n '3p')
+    if grep -q "Skipping dep install (worktree.auto_install: false)" "$stderr_file"; then
+        pass "$name :: auto_install = false skips the install"
+    else
+        fail "$name :: auto_install = false skips the install" "stderr: $(cat "$stderr_file")"
+    fi
+    rm -f "$stdout_file" "$stderr_file"
+    rm -rf "$sandbox" "$cfg_bindir"
 done
 
 echo
