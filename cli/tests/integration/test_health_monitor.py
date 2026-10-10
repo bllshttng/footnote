@@ -982,7 +982,9 @@ def _append_eval_row(path, row):
 def test_health_evals_line_carries_age_and_stale(tmp_graph, monkeypatch):
     """A 9-day-old newest regression run reads 'age 9d STALE', not a healthy
     100%: the line demands a fresh run instead of only displaying history."""
-    hist = tmp_graph / "evals-history.jsonl"
+    hist = tmp_graph / "history" / "evals-history.jsonl"
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     now = datetime.now(timezone.utc)
     _append_eval_row(hist, {
         "ts": (now - timedelta(days=9)).isoformat().replace("+00:00", "Z"),
@@ -998,7 +1000,8 @@ def test_health_evals_line_carries_age_and_stale(tmp_graph, monkeypatch):
 
 
 def test_health_evals_line_fresh_has_no_stale_marker(tmp_graph, monkeypatch):
-    hist = tmp_graph / "evals-history.jsonl"
+    hist = tmp_graph / "history" / "evals-history.jsonl"
+    hist.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     now = datetime.now(timezone.utc)
     _append_eval_row(hist, {
