@@ -62,15 +62,19 @@ fn emit_tick(payload: &Value, lines: &[String], calls: usize, ticks: usize) -> (
     (stdout, stderr)
 }
 
-/// The settled/green loop. `poll` is one cache-coalesced tick returning
-/// (code, payload, stderr lines, this tick's gh calls); `sleeper` and `now`
-/// are injectable so tests stage the clock. Only the final tick re-emits.
+/// The settled/red/green loop. `poll` is one cache-coalesced tick returning
+/// (code, payload, stderr lines, this tick's gh calls); `on_red` cancels
+/// the red head's runs still in flight and returns one line per run;
+/// `sleeper` and `now` are injectable so tests stage the clock. Only the
+/// final tick re-emits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wait_status(
     pr: u64,
     until: &str,
     timeout: f64,
     interval: f64,
     mut poll: impl FnMut() -> (i32, Value, Vec<String>, usize),
+    mut on_red: impl FnMut(&Value) -> Vec<String>,
     mut sleeper: impl FnMut(f64),
     now: impl Fn() -> f64,
 ) -> (i32, String, String) {
@@ -107,6 +111,21 @@ pub(crate) fn wait_status(
             "green" => payload.get("green").and_then(Value::as_bool),
             _ => payload.get("settled").and_then(Value::as_bool),
         };
+        // One failed check already decides this head: cancel its runs still
+        // in flight and wake now, so the fix starts and the CI slots free.
+        // `green` waits for every check instead. A degraded serve cannot
+        // prove the failure belongs to the current head, so it rides out.
+        let red = until != "green"
+            && payload.get("verdict").and_then(Value::as_str) == Some("red")
+            && payload.get("stale_reason").is_none();
+        if red {
+            let (stdout, mut stderr) = emit_tick(&payload, &lines, calls, ticks);
+            for line in on_red(&payload) {
+                stderr.push_str(&line);
+                stderr.push('\n');
+            }
+            return (rc, stdout, stderr);
+        }
         if done == Some(true) {
             let (stdout, stderr) = emit_tick(&payload, &lines, calls, ticks);
             return (rc, stdout, stderr);
@@ -202,11 +221,11 @@ pub(crate) fn run_wait(payload: &Value) -> (i32, String, String) {
         .get("until")
         .and_then(Value::as_str)
         .unwrap_or("settled");
-    if !matches!(until, "settled" | "green" | "review") {
+    if !matches!(until, "settled" | "red" | "green" | "review") {
         return (
             2,
             String::new(),
-            "fno do pr wait: --until must be one of settled/green/review\n".into(),
+            "fno do pr wait: --until must be one of settled/red/green/review\n".into(),
         );
     }
     let cwd = Path::new(cwd_str);
@@ -238,7 +257,55 @@ pub(crate) fn run_wait(payload: &Value) -> (i32, String, String) {
         let (code, payload, lines, tick_calls) = super::cache::cached_status(cwd_str, pr, false);
         (code, payload, lines, tick_calls)
     };
-    wait_status(pr, until, timeout, interval, &mut poll, sleeper, clock)
+    let on_red = |payload: &Value| {
+        let head = payload.get("head").and_then(Value::as_str).unwrap_or("");
+        cancel_in_flight("gh", cwd, head)
+    };
+    wait_status(
+        pr, until, timeout, interval, &mut poll, on_red, sleeper, clock,
+    )
+}
+
+/// Cancel the Actions runs still testing a red `head`, one line per run.
+/// A failed read or cancel is printed, never hidden.
+fn cancel_in_flight(gh_bin: &str, cwd: &Path, head: &str) -> Vec<String> {
+    let short: String = head.chars().take(8).collect();
+    if head.is_empty() {
+        return vec!["wait: red, but the status names no head; no run cancelled".into()];
+    }
+    let rows = match crate::pr_push::read_checks_rows(gh_bin, cwd, head) {
+        Ok(rows) => rows,
+        Err(e) => {
+            return vec![format!(
+                "wait: cancel FAILED: cannot read the runs on {short}: {e}"
+            )]
+        }
+    };
+    let latest = crate::check_supersession::latest_per_name(&Value::Array(rows));
+    let pending: Vec<&Value> = latest
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            !matches!(
+                row.get("bucket").and_then(Value::as_str).unwrap_or(""),
+                "pass" | "fail" | "skipping" | "cancel"
+            )
+        })
+        .collect();
+    let runs = crate::pr_push::pending_run_ids(&pending);
+    if runs.is_empty() {
+        return vec![format!("wait: red at {short}; no run in flight to cancel")];
+    }
+    runs.iter()
+        .map(|id| {
+            let path = format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/cancel");
+            match crate::pr_push::gh_api(gh_bin, cwd, &path, &["-X", "POST"]) {
+                Ok(_) => format!("wait: red at {short}; cancelled run {id}"),
+                Err(e) => format!("wait: red at {short}; cancel of run {id} FAILED: {e}"),
+            }
+        })
+        .collect()
 }
 
 /// Reviews on `pr` via one REST read; None when the read fails (no-answer,
@@ -301,6 +368,7 @@ mod tests {
             1800.0,
             60.0,
             staged_poll(payloads),
+            |_| Vec::new(),
             |s| slept += s,
             || 0.0,
         );
@@ -331,6 +399,7 @@ mod tests {
             1800.0,
             60.0,
             staged_poll(payloads),
+            |_| Vec::new(),
             |_| {},
             || 0.0,
         );
@@ -340,10 +409,64 @@ mod tests {
     }
 
     #[test]
-    fn a_timeout_exits_with_the_last_code_and_the_still_note() {
+    fn a_red_verdict_cancels_the_head_runs_and_wakes_at_once() {
+        for until in ["settled", "red"] {
+            let t = Cell::new(0.0);
+            let heads = std::cell::RefCell::new(Vec::new());
+            let payloads: Vec<(i32, Value)> = (0..100)
+                .map(|_| {
+                    (
+                        1,
+                        json!({"verdict": "red", "settled": false, "head": "abcdef1234"}),
+                    )
+                })
+                .collect();
+            let (code, stdout, stderr) = wait_status(
+                9,
+                until,
+                1800.0,
+                10.0,
+                staged_poll(payloads),
+                |p| {
+                    heads.borrow_mut().push(p["head"].clone());
+                    vec!["wait: red at abcdef12; cancel of run 7 FAILED: 403".into()]
+                },
+                |s| t.set(t.get() + s),
+                || t.get(),
+            );
+            assert_eq!(code, 1, "{until}: the red verdict's code");
+            assert!(stdout.contains("\"verdict\":\"red\""), "{stdout}");
+            assert_eq!(t.get(), 0.0, "{until}: the first red tick wakes");
+            assert_eq!(*heads.borrow(), vec![json!("abcdef1234")]);
+            assert!(stderr.contains("cancel of run 7 FAILED: 403"), "{stderr}");
+        }
+    }
+
+    #[test]
+    fn green_waits_out_a_red_head_and_cancels_nothing() {
         let t = Cell::new(0.0);
         let payloads: Vec<(i32, Value)> = (0..100)
             .map(|_| (1, json!({"verdict": "red", "settled": false})))
+            .collect();
+        let (code, _stdout, stderr) = wait_status(
+            9,
+            "green",
+            30.0,
+            10.0,
+            staged_poll(payloads),
+            |_| panic!("green never cancels"),
+            |s| t.set(t.get() + s),
+            || t.get(),
+        );
+        assert_eq!(code, 1, "the LAST observed code");
+        assert!(stderr.contains("still not green after 30s"), "{stderr}");
+    }
+
+    #[test]
+    fn a_timeout_exits_with_the_last_code_and_the_still_note() {
+        let t = Cell::new(0.0);
+        let payloads: Vec<(i32, Value)> = (0..100)
+            .map(|_| (2, json!({"verdict": "pending", "settled": false})))
             .collect();
         let (code, _stdout, stderr) = wait_status(
             9,
@@ -351,12 +474,13 @@ mod tests {
             30.0,
             10.0,
             staged_poll(payloads),
+            |_| Vec::new(),
             |s| t.set(t.get() + s),
             || t.get(),
         );
-        assert_eq!(code, 1, "the LAST observed code");
+        assert_eq!(code, 2, "the LAST observed code");
         assert!(
-            stderr.contains("still not settled after 30s; last verdict red"),
+            stderr.contains("still not settled after 30s; last verdict pending"),
             "{stderr}"
         );
     }

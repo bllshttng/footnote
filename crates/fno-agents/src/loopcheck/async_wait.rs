@@ -168,7 +168,7 @@ pub(super) fn merge_slot_reason(
 /// The bound uses shell builtins, never `timeout(1)`: the plugin must work on
 /// hosts where that binary (and `gtimeout`) is absent, so naming it makes the
 /// watcher no-op and the session idle forever on a wait that never started.
-/// The watchdog is reaped once the wait returns - left alive, it wakes 30m
+/// The watchdog is reaped once the wait returns - left alive, it wakes 15m
 /// later and kills whatever now holds that recycled pid (codex P1).
 pub(super) fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker (codex P2): a review wait
@@ -185,25 +185,25 @@ pub(super) fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // wedged the very turn this hint was trying to unblock.
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `fno do pr wait {pr_number} --until review --timeout=30m` (wakes when a new review posts, or after ~30m)"
+            "background Bash `fno do pr wait {pr_number} --until review --timeout=15m` (wakes when a new review posts, or after ~15m)"
         )
     } else if blocker == "merge_slot" {
         // No checks are pending on THIS PR, so a settled watcher would exit
         // instantly and the session would just re-block (codex P2, the same
         // trap the review arm dodges). The slot frees OUTSIDE this PR - the
         // holder merges, closes, goes red, or its lease ends - so the review
-        // watcher's 30m bound is the honest heartbeat: each wake re-evaluates
+        // watcher's 15m bound is the honest heartbeat: each wake re-evaluates
         // the hold and re-arms while it lasts.
         format!(
-            "background Bash `fno do pr wait {pr_number} --until review --timeout=30m` (wakes when a new review posts, or after ~30m; the slot frees outside this PR, so the bound is the heartbeat)"
+            "background Bash `fno do pr wait {pr_number} --until review --timeout=15m` (wakes when a new review posts, or after ~15m; the slot frees outside this PR, so the bound is the heartbeat)"
         )
     } else {
         format!(
-            "background Bash `fno do pr wait {pr_number} --until settled --timeout=30m` (wakes when CI settles - green or red - or after ~30m)"
+            "background Bash `fno do pr wait {pr_number} --until settled --timeout=15m` (wakes when CI settles - green or red - or after ~15m)"
         )
     };
     format!(
-        "{ARM_HINT_LEAD} with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
+        "{ARM_HINT_LEAD} with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"15m\">` and nothing else - the session then idles until the watcher exits."
     )
 }
 

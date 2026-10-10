@@ -139,8 +139,11 @@ def _stream_pass(
     seq and is read whole."""
     from fno.events.store_client import read_projection
 
-    rows, skipped, *high = read_projection(
-        active, "--status-stream", {"since_ts": since_ts, "after_seq": after_seq})
+    query: "dict[str, Any]" = {"since_ts": since_ts, "after_seq": after_seq}
+    if since_ts:
+        # SQL-level window bound; the fold applies since_ts only post-read.
+        query["since_ms"] = int(_timestamp_key(since_ts).timestamp() * 1000)
+    rows, skipped, *high = read_projection(active, "--status-stream", query)
     return rows, skipped, (high[0] if high else None)
 
 
@@ -168,6 +171,15 @@ def _eof_cursor(active: Path) -> "tuple[str, int]":
     except FileNotFoundError:
         pass
     return last_ts, count
+
+
+def _fresh_floor(active: Path) -> "tuple[str, int]":
+    """Fresh-sink floor on a store-backed journal: wall-clock now. A store
+    answers with every retained generation, so the file-EOF floor ("", 0)
+    reads as "from the epoch" over the store. Store-less keeps the read."""
+    if (active.parent / "events.db").exists():
+        return (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), 0)
+    return _eof_cursor(active)
 
 
 # ── cursor io (atomic) ──────────────────────────────────────────────────────
@@ -301,7 +313,7 @@ def _run_locked(
     if scan is not None:
         eof = (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), 0)
     elif any(fresh.values()):
-        eof = _eof_cursor(active)  # (ts, count_at_ts) - the fresh-sink floor
+        eof = _fresh_floor(active)  # (ts, count_at_ts) - the fresh-sink floor
     start = {name: cur if cur is not None else eof for name, cur in cursors.items()}
 
     # Read from the oldest cursor ts INCLUSIVE so every sink sees its own same-ts

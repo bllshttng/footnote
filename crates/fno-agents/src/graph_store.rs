@@ -2058,8 +2058,9 @@ impl BoundedLock {
         let ticket = crate::lock_queue::register(&lock_path).ok();
         // The head scan walks the ticket directory, so it runs every fifth
         // poll while try_lock keeps the 20 ms cycle once this waiter is
-        // head (a ticket only leaves the queue by withdrawal or death, so
-        // the head verdict never flips back).
+        // head (a ticket only leaves the queue by withdrawal or holder
+        // death - dead pid, zombie, or recycled pid - so the head verdict
+        // never flips back).
         const QUEUE_SCAN_EVERY: u32 = 5;
         let mut since_scan = QUEUE_SCAN_EVERY;
         let mut my_turn = ticket.is_none();

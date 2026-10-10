@@ -472,7 +472,14 @@ fn journal_rows(journals: &[PathBuf], types: &[&str], since_unix: u64) -> Vec<Va
     let since_ms = i64::try_from(since_unix)
         .unwrap_or(i64::MAX)
         .saturating_mul(1000);
-    let mut query = crate::event_store::EventQuery::of_types(types);
+    // Exact types, not `of_types`: these folds skip typeless rows, so the
+    // empty type entry `of_types` adds would only keep every typeless line
+    // of a cursor-less journal riding through the read.
+    let mut query = crate::event_store::EventQuery {
+        types: types.iter().map(|t| t.to_string()).collect(),
+        include_rejected: true,
+        ..Default::default()
+    };
     query.since_ms = Some(since_ms);
     journals
         .iter()
