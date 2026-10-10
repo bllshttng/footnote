@@ -268,19 +268,24 @@ fn turn_boundary_in_window(lines: &[String]) -> bool {
     })
 }
 
+/// The turn reader's ceiling: a real stopping turn fits far under this, and
+/// a transcript with no user entry inside 8MB has no turn boundary worth
+/// reading for distress - the stop hook p90 the router exists on top of
+/// must not pay a 64MB tail for it.
+const TURN_READ_MAX_WINDOW: u64 = 8 << 20;
+
 /// Read the stopping turn. None when the transcript holds no parseable
 /// lines (absent, empty, or unreadable): the caller keys its dedup on the
 /// payload text alone, the best key a fire without a transcript has.
 pub(crate) fn read_stopping_turn(transcript_path: &Path) -> Option<TurnRead> {
-    // Same growth loop the intent read uses: start at 1MB and grow only
-    // while the window has not yet reached the user boundary, because a
-    // session transcript reaches 135MB and the whole file is churn a stop
-    // fire cannot afford.
+    // Growth loop: start at 1MB and grow only while the window has not yet
+    // reached the user boundary, because a session transcript reaches
+    // 135MB and the whole file is churn a stop fire cannot afford.
     let mut window_bytes: u64 = 1 << 20;
     let window = loop {
         let candidate = crate::loopcheck::read_tail_lines(transcript_path, window_bytes);
         if (candidate.len() >= 2 && turn_boundary_in_window(&candidate))
-            || window_bytes >= (64u64 << 20)
+            || window_bytes >= TURN_READ_MAX_WINDOW
         {
             break candidate;
         }
@@ -492,6 +497,7 @@ pub(crate) fn emit_help_distress_blocked(
         &distress.reason,
         distress.evidence.as_deref(),
         rung,
+        turn_key,
     );
     Some(rung)
 }

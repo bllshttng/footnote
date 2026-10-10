@@ -89,6 +89,7 @@ pub(crate) fn route_emitted_distress(
     reason: &str,
     evidence: Option<&str>,
     rung: u64,
+    turn_key: &str,
 ) {
     let step = route(class, rung);
     match step {
@@ -105,6 +106,7 @@ pub(crate) fn route_emitted_distress(
                 None,
                 None,
                 0,
+                turn_key,
             );
             let _ = text;
         }
@@ -123,10 +125,11 @@ pub(crate) fn route_emitted_distress(
                 None,
                 Some(backoff_secs),
                 0,
+                turn_key,
             );
         }
         Route::OffSession { to, text } => {
-            deliver_off_session(cwd, run, node, class, reason, evidence, rung, to, &text);
+            deliver_off_session(cwd, run, node, class, reason, evidence, rung, to, &text, turn_key);
         }
     }
 }
@@ -147,6 +150,7 @@ fn deliver_off_session(
     rung: u64,
     to: Recipient,
     text: &str,
+    turn_key: &str,
 ) {
     let mut ladder_pos: u64 = 0;
     loop {
@@ -175,11 +179,12 @@ fn deliver_off_session(
                     Some((kind, leg_s)),
                     None,
                     ladder_pos,
+                    turn_key,
                 );
                 return;
             }
             Target::UserPage => {
-                file_user_question(cwd, run, node, class, reason, evidence, rung, ladder_pos);
+                file_user_question(cwd, run, node, class, reason, evidence, rung, ladder_pos, turn_key);
                 return;
             }
             Target::Unresolved => {
@@ -194,6 +199,7 @@ fn deliver_off_session(
                         evidence,
                         rung,
                         LADDER_TOP + 1,
+                        turn_key,
                     );
                     return;
                 }
@@ -340,6 +346,7 @@ fn file_user_question(
     evidence: Option<&str>,
     rung: u64,
     ladder_pos: u64,
+    turn_key: &str,
 ) {
     let mut q = format!("help-router [{}]: {reason}", class.as_str());
     if let Some(ev) = evidence.filter(|e| !e.trim().is_empty()) {
@@ -372,6 +379,7 @@ fn file_user_question(
         None,
         None,
         0,
+        turn_key,
     );
 }
 
@@ -487,7 +495,7 @@ fn climb(home: &crate::paths::AgentsHome, config_cwd: &Path, row: &Value, run: &
         "type": "help_route",
         "source": "help-router",
         "run": run,
-        "data": {"class": class.as_str(), "route": "climbed", "to": to_sid, "ladder": next},
+        "data": {"class": class.as_str(), "route": "climbed", "to": to_sid, "ladder": next, "turn": row.pointer("/data/turn").and_then(Value::as_str).unwrap_or("")},
     });
     let written = crate::claims::append_event_line(
         &home.events_jsonl(),
@@ -543,6 +551,7 @@ fn emit_help_route(
     delivery: Option<(&str, &str)>,
     backoff_secs: Option<u64>,
     ladder_pos: u64,
+    turn_key: &str,
 ) {
     let cap = |s: &str| -> String { s.chars().take(500).collect() };
     let mut data = json!({
@@ -551,6 +560,7 @@ fn emit_help_route(
         "rung": rung,
         "route": route_kind,
         "to": cap(to),
+        "turn": cap(turn_key),
     });
     if let Some((kind, leg)) = delivery {
         data["delivery"] = json!(kind);
@@ -670,10 +680,13 @@ fn sweep(home: &crate::paths::AgentsHome, config_cwd: &Path) {
 
 fn row_key(row: &Value) -> String {
     format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}",
         row.get("run").and_then(Value::as_str).unwrap_or(""),
         row.get("node").and_then(Value::as_str).unwrap_or(""),
         row.pointer("/data/class")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        row.pointer("/data/turn")
             .and_then(Value::as_str)
             .unwrap_or(""),
     )
