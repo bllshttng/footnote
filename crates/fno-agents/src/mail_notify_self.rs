@@ -97,7 +97,7 @@ pub fn notify(bus_dir: &Path, session: &str) -> i32 {
             lines.push(body.trim_end_matches('\n').to_string());
         }
         lines.push(
-            '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
+            "\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body \"...\""
                 .to_string(),
         );
     }
@@ -136,7 +136,11 @@ pub fn notify(bus_dir: &Path, session: &str) -> i32 {
         advance_main_cursor(bus_dir, &msgs, &handle, last);
     }
     for m in &unread {
-        let reason = if dup(m) { "skipped-duplicate" } else { "printed" };
+        let reason = if dup(m) {
+            "skipped-duplicate"
+        } else {
+            "printed"
+        };
         emit_marker(&handle, m, reason);
     }
     0
@@ -264,7 +268,10 @@ mod tests {
         let text =
             std::fs::read_to_string(bus.join("cursors").join(format!("{name}.json"))).unwrap();
         let v: Value = serde_json::from_str(&text).unwrap();
-        v.get("last_seen_id").and_then(Value::as_str).unwrap().to_string()
+        v.get("last_seen_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -276,7 +283,9 @@ mod tests {
         ]);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
-        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
         assert!(ctx.starts_with("<system-reminder>\n"));
         assert!(ctx.ends_with("\n</system-reminder>"));
         assert!(ctx.contains("[/system-reminder]"));
@@ -325,8 +334,11 @@ mod tests {
                 "window_s": 300,
                 "clock_kind": "idle",
             });
-            std::fs::write(clock_dir.join(format!("{session}.json")), format!("{clock}\n"))
-                .unwrap();
+            std::fs::write(
+                clock_dir.join(format!("{session}.json")),
+                format!("{clock}\n"),
+            )
+            .unwrap();
             assert_eq!(notify(&bus, session), 0);
             assert!(!bus.join("cursors").join(format!("{handle}.json")).exists());
         });
@@ -337,17 +349,16 @@ mod tests {
             append(&bus, "lead", &handle, "first");
             append(&bus, "lead", &handle, "second");
             assert_eq!(notify(&bus, session), 0);
-            assert_eq!(
-                last_seen(&bus, &handle),
-                msg_id("lead", &handle, "second")
-            );
-            let events = std::fs::read_to_string(
-                crate::paths::AgentsHome::from_env().events_jsonl(),
-            )
-            .unwrap();
+            assert_eq!(last_seen(&bus, &handle), msg_id("lead", &handle, "second"));
+            let events =
+                std::fs::read_to_string(crate::paths::AgentsHome::from_env().events_jsonl())
+                    .unwrap();
             assert_eq!(events.matches("agent_mail_drained").count(), 2);
             assert!(events.contains("\"reason\":\"printed\""));
-            assert!(events.contains(&format!("\"msg_id\":\"{}\"", msg_id("lead", &handle, "second"))));
+            assert!(events.contains(&format!(
+                "\"msg_id\":\"{}\"",
+                msg_id("lead", &handle, "second")
+            )));
         });
     }
 }
