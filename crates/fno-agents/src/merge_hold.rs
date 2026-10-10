@@ -765,7 +765,7 @@ fn named_question_ids(hold_text: &str) -> Vec<String> {
 /// `decision_index::is_law` test) at the held node or at the question it
 /// names. Measured 2026-09-30: any non-blank text released a user's hold,
 /// and a ruling recorded at a different subject was read as lifting it
-/// (2026-10-09 live case). A crown ruling lifts only a hold it governs; a
+/// (2026-10-09 live case). An operator ruling lifts only a hold it governs; a
 /// team hold naming no question releases as before. The decisions path is a
 /// parameter, never a payload key: the caller must not name the store that
 /// proves the release. `Some` carries the refusal receipt.
@@ -840,7 +840,7 @@ fn release_evidence_refusal(
             3,
             format!(
                 "decision {evidence} sits at subject '{subject}', which governs nothing \
-                 here: a crown ruling lifts only a hold at {where_a_ruling_lifts}"
+                 here: an operator ruling lifts only a hold at {where_a_ruling_lifts}"
             ),
         ));
     }
