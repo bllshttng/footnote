@@ -1168,11 +1168,14 @@ mod tests {
         assert_eq!(r["outcome"], "refused", "{r}");
         assert!(r["detail"].as_str().unwrap().contains("not superuser lane"));
 
-        // A store that cannot be read never answers "no rulings exist".
+        // A store that cannot be read never answers "no rulings exist". The
+        // stem must stay outside the state-root route table (events,
+        // decisions, questions) or the read resolves to the machine's real
+        // decisions store instead of this missing path.
         let r = release_with_decisions(
             &fx.graph,
             "d-anything",
-            std::path::Path::new("/nonexistent/hold-guard/decisions.jsonl"),
+            std::path::Path::new("/nonexistent/hold-guard/no-store.jsonl"),
         );
         assert_eq!(r["outcome"], "refused", "{r}");
         assert_eq!(r["exit_code"], 5);
