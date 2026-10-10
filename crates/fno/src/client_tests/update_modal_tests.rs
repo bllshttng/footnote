@@ -849,15 +849,6 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         source_pin: None,
     });
     let modal = build_update_modal(Some(&empty.clone().into()));
-    let headers: Vec<&str> = modal
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Header(h) => Some(h.as_str()),
-            _ => None,
-        })
-        .collect();
     assert!(row_labels(&modal).contains(&"fix(x): raw subject".to_string()));
 }
 
