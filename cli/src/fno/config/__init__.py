@@ -57,6 +57,7 @@ from fno.config.source_attribution import resolve_source as resolve_source
 from fno.config._loader import _settings_key as _settings_key
 from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, StateReapBlock, SweepKeys
 from fno.config._guards import GuardsBlock
+from fno.config._store import StoreBlock
 from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
@@ -2976,7 +2977,6 @@ class AutoMergeBlock(BaseModel):
         return "attempt"
 
 
-
 class PrWatchBlock(BaseModel):
     """PR-state watcher settings (nested under 'config.pr_watch').
 
@@ -3927,13 +3927,13 @@ class ConfigBlock(BaseModel):
     preflight: PreflightBlock = Field(default_factory=PreflightBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
-    # Repo-wide ship-gate probes join plan `done_probes`; both must pass. A
-    # probe is an OBSERVATION running `sh -c` in the session cwd, so the list
-    # stays gitignored and superuser-authored: a tracked one runs code on clone.
+    # Repo-wide ship-gate probes join plan `done_probes`; both must pass. Each runs `sh -c`
+    # in the session cwd, so the list stays gitignored: a tracked one runs code on clone.
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     test: TestBlock = Field(default_factory=TestBlock)
     guards: GuardsBlock = Field(default_factory=GuardsBlock)
+    store: StoreBlock = Field(default_factory=StoreBlock)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     process_admission: ProcessAdmissionBlock = Field(default_factory=ProcessAdmissionBlock)
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)

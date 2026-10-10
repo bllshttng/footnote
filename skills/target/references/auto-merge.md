@@ -10,14 +10,12 @@ Automatically merge a PR after external review passes. Off by default. Identical
 
 ## Enable via Settings
 
-Add to `.fno/config.toml` (project-scoped) or `~/.fno/config.toml` (global):
+Set the keys with `fno config set` (global by default, `--local` for this repo's `.fno/config.toml`). A hand edit of either file is refused:
 
-```yaml
-config:
-  auto_merge:
-    enabled: true
-    strategy: merge          # merge | squash | rebase (default: merge)
-    delete_branch: true      # delete branch after merge (default: true)
+```bash
+fno config set auto_merge.enabled true
+fno config set auto_merge.merge_strategy merge        # merge | squash | rebase (default: merge)
+fno config set auto_merge.delete_branch_on_merge true # delete branch after merge
 ```
 
 Auto-merge is gated by `enabled` alone (plus the merge command's own CI-green /
@@ -26,7 +24,7 @@ external-review / stub-manifest guards). The who-may-merge gate
 true` means any surface that reaches the merge command may auto-merge, so treat
 it as a project-wide opt-in, not a per-invoker allowlist.
 
-The `strategy: merge` default preserves full commit history, which is important for
+The `merge_strategy = "merge"` default preserves full commit history, which is important for
 `git bisect` and forensic analysis. Squash collapses context; only use it if your
 team policy requires it.
 

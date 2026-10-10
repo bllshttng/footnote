@@ -317,7 +317,14 @@ If user picks a "Change" option -> ask the specific follow-up, then re-show summ
 
 **5. Write to config.toml & confirm:**
 
-Append to the target workspace's projects list and report:
+Append to the target workspace's projects list through `fno config set`, never a hand edit (the write gate refuses one). The verb replaces the whole list, so read it, add the row, and write it back:
+
+```bash
+fno config get work.workspaces.{WORKSPACE_NAME}.projects
+fno config set work.workspaces.{WORKSPACE_NAME}.projects '[<existing rows>, {"name": "{PROJECT_NAME}", "path": "{PROJECT_PATH}", "type": "{TYPE}"}]'
+```
+
+Then report:
 
 ```
 Added {PROJECT_NAME} ({TYPE}) to workspace '{WORKSPACE_NAME}'

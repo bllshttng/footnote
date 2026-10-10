@@ -29,6 +29,7 @@ const GRAPH_REASON: &str =
     "graph.json is retired; do not recreate it. Mutate the graph.db store via `fno backlog` commands.";
 const DB_REASON: &str = "graph.db is the authoritative store; direct writes to it or its WAL files are blocked. Mutate via `fno backlog` commands.";
 const MANIFEST_REASON: &str = "target-state.md is an immutable session manifest; direct Edit/Write is blocked. The only legal post-init write is first-fill of an empty plan_path via `fno do state set --field plan_path`. Use `fno do state` / `fno do target` verbs, not a hand edit.";
+const CONFIG_REASON: &str = "Do not edit an fno config.toml by hand. Run `fno config set <key> <value>` (add `--local` for a repo file). It checks the key against the schema. A hand-added key that is not in the schema prints a warning on every fno call. If `fno config set` refuses the key, the key is not modeled yet: file a node with `fno backlog idea`.";
 const BASH_BLOCK_SUFFIX: &str =
     " (this Bash write to a protected state file is blocked; use `fno backlog` / `fno do state`).";
 const FAILCLOSED_MALFORMED: &str =
@@ -236,6 +237,9 @@ fn raw_tokens_hint_config(raw: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn graph_section(p: &Payload, cwd: &Path) -> Sec {
+    if config_toml_write(p) {
+        return Sec::Block(CONFIG_REASON.to_string());
+    }
     if !raw_tokens_hint_graph(&p.raw) {
         return Sec::Allow;
     }
@@ -257,10 +261,42 @@ fn graph_section(p: &Payload, cwd: &Path) -> Sec {
     }
 }
 
+/// Fixture/test scaffolding may hold a protected file under a test dir.
+fn under_test_dir(fp: &str) -> bool {
+    fp.contains("/test/") || fp.contains("/tests/") || fp.contains("/fixtures/")
+}
+
+/// A tool write to an fno config file. It stays outside the graph pre-filter
+/// on purpose: a malformed payload naming config.toml fails open, as the
+/// config guard does, not closed like the state files.
+fn config_toml_write(p: &Payload) -> bool {
+    const TAIL: &str = ".fno/config.toml";
+    let is_config = |path: &str| {
+        let path = norm(path);
+        path.ends_with(TAIL) && !under_test_dir(&path)
+    };
+    // Every Bash call reaches this gate: compile no regex for a command that
+    // never names the file.
+    if !p.fp_norm.contains(TAIL) && !p.cmd_norm.contains(TAIL) {
+        return false;
+    }
+    if p.command.contains("*** Begin Patch") {
+        return write_targets("", &p.command).iter().any(|t| is_config(t));
+    }
+    match p.tool.as_str() {
+        "Edit" | "Write" => is_config(&p.file_path),
+        "Bash" => bash_writes(
+            &p.cmd_norm,
+            r"[^[:space:];|&<>]*\.fno/config\.toml",
+            r"\.fno/config\.toml",
+        ),
+        _ => false,
+    }
+}
+
 fn graph_edit_write(p: &Payload, cwd: &Path) -> Sec {
     let fp = &p.fp_norm;
-    // Fixture/test scaffolding may hold a protected file under a test dir.
-    if fp.contains("/test/") || fp.contains("/tests/") || fp.contains("/fixtures/") {
+    if under_test_dir(fp) {
         return Sec::Allow;
     }
     if fp.ends_with(".fno/graph.json") {
@@ -310,6 +346,16 @@ fn graph_edit_write(p: &Payload, cwd: &Path) -> Sec {
 /// `=~` was leftmost-longest; these patterns have no alternation whose capture
 /// spans disagree between the two, so the decisions are identical.
 fn bash_targets_protected(cmd: &str) -> bool {
+    bash_writes(
+        cmd,
+        r"[^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md",
+        r"\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|/spaces/[^;|&]*target-state\.md",
+    )
+}
+
+/// The write-operator arms over one protected path: `path` matches a whole
+/// path token, `clause_path` the tail an in-place editor's clause must reach.
+fn bash_writes(cmd: &str, path: &str, clause_path: &str) -> bool {
     // A protected-path token. The prefix (leading dir/`~`/`$HOME`/quote chars
     // up to `.fno/`) excludes only whitespace and command separators/redirects,
     // NOT quotes: a quoted path (`> "$HOME/.fno/graph.json"`) is normal shell
@@ -318,9 +364,9 @@ fn bash_targets_protected(cmd: &str) -> bool {
     // into the repo's space (`~/.fno/spaces/<slug>[/worktrees/<name>]/
     // target-state.md`); the old checkout path stays matched so an edit to a
     // stale copy is still refused.
-    let pp = r#"([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>)`"']|$)"#;
+    let pp = format!(r#"({path})([[:space:];|&<>)`"']|$)"#);
     // Clause tails end at a protected path within one command clause.
-    let path_in_clause = r#"(\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|/spaces/[^;|&]*target-state\.md)"#;
+    let path_in_clause = format!("({clause_path})");
     let nosep = "[^;|&]*";
     let lead = r"(^|[^[:alnum:]_])";
     let op = r"([>]{1,2}|&[>]|[>]&|[>][|]|[>]!)";
@@ -1141,6 +1187,43 @@ mod tests {
         assert!(!bash_targets_protected(
             "cp ~/.fno/graph.json /tmp/backup.json"
         ));
+    }
+
+    #[test]
+    fn config_toml_hand_writes_refuse_and_reads_pass() {
+        let call = |tool: &str, file_path: &str, command: &str| Payload {
+            raw: String::new(),
+            tool: tool.to_string(),
+            file_path: file_path.to_string(),
+            command: command.to_string(),
+            cwd: String::new(),
+            session_id: String::new(),
+            fp_norm: norm(file_path),
+            cmd_norm: norm(command),
+        };
+        // (tool, file_path, command, refused). Fixtures, reads, other config
+        // files and the verb itself stay allowed.
+        let cases = [
+            ("Edit", "/Users/x/.fno/config.toml", "", true),
+            ("Write", "/repo/.fno//config.toml", "", true),
+            ("Bash", "", "echo '[store]' >> ~/.fno/config.toml", true),
+            ("Bash", "", "sed -i s/a/b/ \"$HOME/.fno/config.toml\"", true),
+            ("Write", "/repo/tests/x/.fno/config.toml", "", false),
+            ("Edit", "/repo/.cargo/config.toml", "", false),
+            ("Bash", "", "cat ~/.fno/config.toml", false),
+            ("Bash", "", "fno config set store.share_backlog true", false),
+            ("apply_patch", "", "*** Begin Patch\n*** Update File: .fno/config.toml\n@@\n+x = 1\n*** End Patch", true),
+            ("apply_patch", "", "*** Begin Patch\n*** Update File: docs/a.md\n@@\n+see .fno/config.toml\n*** End Patch", false),
+        ];
+        for (tool, file_path, command, refused) in cases {
+            let got = config_toml_write(&call(tool, file_path, command));
+            assert_eq!(got, refused, "{tool} {file_path}{command}");
+        }
+        // The state-file arm reads the same as before the matcher took a path.
+        assert!(bash_targets_protected(
+            "echo x > ~/.fno/spaces/s/worktrees/w/target-state.md"
+        ));
+        assert!(!bash_targets_protected("echo x > ~/.fno/config.toml"));
     }
 
     #[test]
