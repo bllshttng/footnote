@@ -935,8 +935,8 @@ prior holder={holder}, truth_status={truth_status}"
 /// verdict is authority; truth is diagnostic. Native derivation over the
 /// node claim + the newest loop_check fire per session (30-minute recency).
 fn resolve_truth_status_word(node_id: &str) -> String {
-    let key = format!("node:{node_id}");
-    let (state, record) = crate::claims::status(&key, None);
+    let claim_key = format!("node:{node_id}");
+    let (state, record) = crate::claims::status(&claim_key, None);
     let holder = record
         .as_ref()
         .map(|r| r.holder.clone())

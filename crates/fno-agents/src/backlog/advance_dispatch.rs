@@ -18,13 +18,6 @@ use super::advance::{
     SpawnFailureKind, EVENT_SOURCE,
 };
 
-/// The discriminator `fno agents spawn` prints on a name collision (exit 2).
-const SPAWN_ALREADY_EXISTS: &str = "already exists";
-
-/// The seam's stderr receipt prefix, shared vocabulary with spawn_axes.rs.
-const SPAWN_NOTE_PREFIX: &str = "fno agents spawn: ";
-const SPAWN_NOTE_CAP: usize = 20;
-
 /// The sandbox probe's exit code (byte-parity with the Python runtime).
 const EXIT_SANDBOX_UNREACHABLE: i32 = 85;
 

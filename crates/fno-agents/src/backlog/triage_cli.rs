@@ -19,6 +19,19 @@ fn usage() -> i32 {
     2
 }
 
+/// The grouped door's entry: dispatch on the action token; an unknown or
+/// missing action prints the usage line and exits 2.
+pub fn run(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("context") => run_context(&args[1..]),
+        Some("propose") => run_propose(&args[1..]),
+        Some("rank") => run_rank(&args[1..]),
+        Some("validate") => run_validate(&args[1..]),
+        Some("projects") => run_projects(&args[1..]),
+        _ => usage(),
+    }
+}
+
 /// The guarded store read the diagnostic surfaces share: an external
 /// selection or an unreadable graph refuses with exit 2, never stale rows.
 fn triage_entries_or_exit() -> Result<Vec<Value>, i32> {
