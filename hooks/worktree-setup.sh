@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fno hook: WorktreeCreate - worktree setup
-# WorktreeCreate hook: install deps, copy env, symlink .fno/, verify baseline
+# WorktreeCreate hook: relocate, copy env, link shared state, install deps
 #
 # CC fires this INSTEAD of its default git worktree behavior.
 # The hook receives JSON on stdin with the worktree name and (usually) path.
@@ -15,19 +15,9 @@
 #             any Agent dispatch using isolation: worktree.
 #   - exit:   0 on success; non-zero falls back to CC's default worktree flow.
 #
-# NOTE: The /speculate skill calls this script manually (not via CC hook)
-# because it creates multiple worktrees in parallel via git directly.
-# If this hook's behavior changes, update the copy at
-# skills/speculate/scripts/worktree-setup.sh to match - the two files are
-# intentional duplicates for portability.
-#
-# DIVERGENCE (worktrees_base migration): the relocation decision in
-# block 0 below (defer to the resolved worktree policy; relocate only when
-# it reads external) is intentionally HOOK-ONLY and must NOT be copied to the
-# /speculate duplicate. /speculate deliberately materializes its parallel
-# variations at .claude/worktrees/<name> (a sanctioned exception, like the
-# cross-project pipeline); relocating those to a configured base would break
-# it. The rest of the two files stay in sync.
+# Relocation is hook-only. Linking and the worktree.* config reads go through
+# scripts/lib/worktree-config.sh, the same lib `worktree-manager.sh setup`
+# (/speculate) uses, so every creation path gets one link set.
 set -euo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
@@ -167,35 +157,15 @@ MAIN_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | 
 # If we can't find the main repo, let CC handle it
 [[ -n "$MAIN_REPO" ]] || exit 1
 
-# Read config from settings.yaml if available.
-# Source paths.sh for typed path vars; the global tier is the per-user file, never CONFIG_FILE.
-if command -v fno >/dev/null 2>&1; then
-    PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
-    [[ -f "$PATHS_SH" ]] && source "$PATHS_SH" 2>/dev/null || true
+# One worktree.* reader and one linker, shared with worktree-manager.sh.
+_WT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/lib/worktree-config.sh"
+if [[ -f "$_WT_LIB" ]]; then
+    # shellcheck source=../scripts/lib/worktree-config.sh
+    source "$_WT_LIB"
+else
+    wt_config() { echo "$2"; }
+    wt_link() { echo "Note: $_WT_LIB missing; shared state not linked" >&2; }
 fi
-SETTINGS=""
-for cfg in "$MAIN_REPO/.fno/config.toml" "${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}"; do
-    if [[ -f "$cfg" ]]; then
-        SETTINGS="$cfg"
-        break
-    fi
-done
-
-# Helper: read a worktree config value from settings
-wt_config() {
-    local key="$1"
-    local default="$2"
-    local val=""
-    if [[ -n "$SETTINGS" ]] && command -v yq >/dev/null 2>&1; then
-        # Flat config.toml: worktree keys live under the [worktree] table.
-        val=$(yq -p toml -r ".worktree.${key} // \"\"" "$SETTINGS" 2>/dev/null)
-    fi
-    if [[ -n "$val" && "$val" != "null" ]]; then
-        echo "$val"
-    else
-        echo "$default"
-    fi
-}
 
 # 0. Worktree relocation: the RESOLVED policy decides, never a raw config
 # read. `fno agents workspace worktree policy` - the same resolver
@@ -293,13 +263,11 @@ for envfile in "${ENV_FILES[@]}"; do
     fi
 done
 
-# 2. (retired) .fno/ used to be symlinked from the main repo for shared state.
-# Project state moved into the repo's space under ~/.fno/spaces/ (keyed on the
-# canonical root), which every worktree resolves identically - there is nothing
-# left to link, and the checkout keeps only .fno/config.toml.
+# 2. Link shared state (vault, .claude agents/commands/skills, harness dirs).
+wt_link "$WORKTREE_PATH" "$MAIN_REPO"
 
 # 3. Auto-detect and install deps (skip if already present)
-# Set worktree.auto_install: false in .fno/settings.yaml to skip dep
+# Set worktree.auto_install = false in .fno/config.toml to skip dep
 # installation entirely. Useful when target creates many worktrees of the same
 # project — each fresh .venv otherwise materializes its own resolved deps in
 # the uv cache (45GB+ bloat at scale).
