@@ -400,6 +400,10 @@ pub(crate) fn decide_with_payload(
     );
     let subject = pause_subject(parsed);
     if let Some(message) = crate::loops_pause::pause_message(&subject) {
+        // A cargo parked at an admission door: the session stops here and
+        // spends no turns; the park row lets the daemon wake it when that
+        // cargo exits.
+        watch_lease::record_build_park(parsed);
         return (0, paused_output(&parsed.driver, &message));
     }
     // The lead uses a separate manifest and decision path.

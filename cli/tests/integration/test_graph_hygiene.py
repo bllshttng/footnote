@@ -91,7 +91,7 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
 # PreToolUse hook
 # ---------------------------------------------------------------------------
 
-HOOK_SCRIPT = Path(__file__).parent.parent.parent.parent / "hooks" / "graph-write-protect.sh"
+HOOK_SCRIPT = Path(__file__).parent.parent.parent.parent / "hooks" / "write-gate.sh"
 
 
 def _invoke_hook(payload: dict) -> dict:
@@ -108,7 +108,7 @@ def _invoke_hook(payload: dict) -> dict:
 def test_hook_blocks_edit_to_graph():
     """Hook returns decision:block for Edit targeting ~/.fno/graph.json."""
     if not HOOK_SCRIPT.exists():
-        pytest.skip("graph-write-protect.sh not yet created")
+        pytest.skip("write-gate.sh not yet created")
 
     payload = {
         "tool_name": "Edit",
@@ -122,7 +122,7 @@ def test_hook_blocks_edit_to_graph():
 def test_hook_allows_edit_to_unrelated_file():
     """Hook returns an empty allow response for an unrelated file."""
     if not HOOK_SCRIPT.exists():
-        pytest.skip("graph-write-protect.sh not yet created")
+        pytest.skip("write-gate.sh not yet created")
 
     payload = {
         "tool_name": "Edit",
@@ -135,7 +135,7 @@ def test_hook_allows_edit_to_unrelated_file():
 def test_hook_allows_test_fixture_paths():
     """Hook returns an empty allow response for test graph fixtures."""
     if not HOOK_SCRIPT.exists():
-        pytest.skip("graph-write-protect.sh not yet created")
+        pytest.skip("write-gate.sh not yet created")
 
     payload = {
         "tool_name": "Edit",

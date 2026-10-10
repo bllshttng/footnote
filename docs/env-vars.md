@@ -25,6 +25,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CLAUDE_CONFIG_DIR` | py+rs | Overrides the Claude config directory for managed provider lookups. |
 | `CLAUDE_DIR_OVERRIDE` | rs | Redirects the Claude config root the corrections-verify reads the rule repo's git log from; mirrors the bash-side override in autocorrect-pack.sh. |
 | `CLAUDE_EFFORT` | py+rs | unclear: cli/src/fno/graph/cli.py:903 |
+| `CLAUDE_JOB_DIR` | rs | Set by Claude Code in a `claude --bg` job. Its `state.json` names the job, and the SessionStart launch claim reads that name to match the launcher's record. The write gate also falls back to its tmp dir in a refusal when the payload carries no session id; the payload's session wins when present. |
 | `CLAUDE_PLUGIN_ROOT` | py+rs | unclear: cli/src/fno/doctor.py:3465 |
 | `CLAUDE_SESSION_ID` | rs | unclear: crates/fno-agents/src/claims.rs:3690 |
 | `CLI` | rs | unclear: crates/fno-agents/src/loop_dispatch.rs:198 |
@@ -51,6 +52,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENTS_RESPONSE_DEADLINE_MS` | rs | unclear: crates/fno-agents/src/client.rs:68 |
 | `FNO_AGENTS_RUNNER_BIN` | rs | Overrides the binary the detached `mail-hold --run-parked` runner execs (mail_hold.rs runner_bin); empty falls through to the process's own executable. A test suite that parks through the real gate pins a stub here so no detached runner escapes the sandbox. |
 | `FNO_AGENTS_RUNTIME` | py+rs | unclear: cli/src/fno/doctor.py:564 |
+| `FNO_AGENTS_SELF_SHORT_ID` | rs | The driven agent's short id, stamped by the PTY worker; the write gate matches it against open drive-authority windows so an operator drive scopes to that one session. |
 | `FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS` | rs | unclear: crates/fno-agents/src/daemon.rs:2082 |
 | `FNO_AGENTS_WORKER` | py+rs | Marks the process as a footnote worker. |
 | `FNO_AGENTS_WORKER_BIN` | py+rs | unclear: cli/src/fno/agents/dispatch.py:888 |
@@ -72,8 +74,10 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CALLER_KIND` | rs | The surface that shelled this fno-agents verb; `mux` stamps `caller_kind` on its events. |
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
+| `FNO_CARGO_CLASS` | rs | The lane an agent cargo asks for at the cargo admission doors: `repair` for a red PR or a main repair, `prepush` for the compile a push waits on. Unset is the normal lane. Both lanes queue ahead of normal, and a normal try-lock never takes a slot they wait for. |
 | `FNO_CARGO_FREE_BYTES` | rs | Overrides the free-space read the `cargo_build_dirs` cap lane defends against; test escape hatch. |
 | `FNO_CARGO_MAX_HOLD_SECS` | rs | The longest time in seconds that an agent cargo can hold an admission claim. After this time, the next cargo frees the claim and stops the holder. The default is 3600. A whole-suite run is exempt. |
+| `FNO_CARGO_RUN_PROGRAM` | rs | The program cargo is about to start, which the rustc wrapper passes to the run door only. The door refuses an agent session's test binary or doctest with exit 86. The program itself never sees the variable. |
 | `FNO_CARGO_TARGETS_BASE` | rs | Overrides the managed fno cargo build base the `cargo_build_dirs` lane sweeps and the tree-removal reclaim deletes under; test escape hatch. |
 | `FNO_CC_DAEMON_RV_ROOT` | py | unclear: cli/src/fno/agents/session_procs.py:40 |
 | `FNO_CHROME` | rs | The Chrome or Chromium binary `fno mux serve --snapshot --format png` runs. |
@@ -83,6 +87,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CODEX_ASK_WAIT_MS` | rs | unclear: crates/fno-agents/src/codex_thread.rs:56 |
 | `FNO_CODEX_BIN` | rs | Overrides the codex CLI the readiness and upgrade paths resolve, for private roots and tests; PATH order otherwise. |
 | `FNO_CODEX_INTERRUPT_BOUND_MS` | rs | unclear: crates/fno-agents/src/codex_thread.rs:80 |
+| `FNO_CODEX_VERSION` | py+rs | Pins the codex version the hook-trust gate reads, so tests and private roots skip the `codex --version` probe. |
 | `FNO_CODEX_SESSIONS_DIR` | rs | Overrides the codex sessions root the announce status scan reads. |
 | `FNO_CONFIG` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:436 |
 | `FNO_CONFIG_SEARCH_ROOT` | py | unclear: cli/src/fno/config_io.py:66 |
@@ -101,6 +106,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_E2E_DROP_RESIZE_FRAME` | rs | E2E fault seam: with `FNO_E2E` set, drops the first n (default 1) keeper resize frames the server sends, holding panes at their pre-change sizes the way a full keeper frame queue or a pre-ResizeAck keeper build would; the 1s grid reconciliation pass then converges the diff. |
 | `FNO_E2E_PTY_OUTPUT_DELAY_MS` | rs | unclear: crates/fno/src/pty.rs:1873 |
 | `FNO_EVENTS_PATH` | py+rs | Redirects the agents journal (events.jsonl) to one file; the hermetic guard honors it on both legs. |
+| `FNO_FOOTNOTE_BIN` | rs | The `footnote` harness binary `-H footnote` launches; unset, fno-agents looks beside its own executable, then on PATH. |
 | `FNO_FLIGHT_BUDGET_S` | py | Overrides the seconds a live single-flight holder tolerates before its watchdog releases the flight and exits 124; the default trips a minute before the 30-minute TTL. |
 | `FNO_GH_BUDGET_POINTS_PER_MIN` | rs | Overrides the fleet GitHub request budget cap in points per 60s window (default 450). |
 | `FNO_GH_FACTS_DIR` | rs | Overrides the directory the `gh-cache` verb reads and writes its permanent fact rows from; default `<state_dir>/cache/gh-facts`. |
@@ -218,6 +224,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_SYNC_EVENTS_SCHEMA` | rs | Regenerate-on-build escape for the tracked events-schema copies: unset or any value but `1` keeps the build checking them (drift fails the build); `1` restores writing so a drift can be regenerated and committed. |
 | `FNO_TASK_CONTEXT_FILE` | py | Absolute path to the executing attempt's bound task-context binding; a declared value gates `fno do target init`, embeds into written handoff receipts, and rides spawn payloads (rendered natively). |
 | `FNO_TEST_BUILD_IDLE_SECS` | rs | Test seam: seconds a build-admit waiter lets the `build:cargo` holder run no compile before it takes the slot (default 30), so admission tests need not wait out the real window. |
+| `FNO_TEST_BUILD_SLOTS` | rs | Test seam: pins how many agent cargos may compile at once (0 to 3) in place of the load read, so admission tests do not depend on the load of the machine that runs them. |
 | `FNO_TEST_CLAUDE_CONFIG_LOG` | rs | Test seam: records the config root passed to `claude agents --json --all` while testing a pinned account root. |
 | `FNO_TEST_FOOTPRINT_PAYLOAD` | rs | Test seam: when set, the spawn gate's footprint probe returns this payload verbatim, so gate tests pin the CPU axis instead of reading the live machine. |
 | `FNO_TEST_FOOTPRINT_PAYLOAD_SEQ` | rs | Test seam: newline-separated footprint probe results consumed once per read; `ERR <message>` simulates probe failure, and the last line sticks so gate tests can verify retries and sample counts. |
@@ -226,7 +233,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_TEST_LIVE_CARGO_CWDS` | rs | Test seam: colon-separated cwd paths that stand in for a live `lsof` scan of running cargo processes, so cargo_build_dirs tests can drive the tree-to-shard mapping without a real cargo process. |
 | `FNO_TEST_MARKER_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:97 |
 | `FNO_TEST_MODE` | py | unclear: cli/src/fno/setup/doctor.py:229 |
-| `FNO_TEST_NEVER_WAIT_AFTER_SECS` | rs | Test seam: seconds a cargo admission waiter uses before printing the CI-first push reminder (default 180), so lifecycle tests assert the nudge without waiting three minutes. |
+| `FNO_TEST_NEVER_WAIT_AFTER_SECS` | rs | Test seam: seconds a cargo admission waiter waits before printing the CI-first push reminder. The default is 0, so a waiting agent hears "push now" from its first line. |
 | `FNO_TEST_OWNED_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:109 |
 | `FNO_TEST_OWNER_BIRTH` | rs | unclear: crates/fno-agents/src/test_run.rs:145 |
 | `FNO_TEST_OWNER_PID` | rs | unclear: crates/fno-agents/src/test_run.rs:144 |

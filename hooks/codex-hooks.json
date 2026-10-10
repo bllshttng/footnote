@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/graph-write-protect.sh",
-            "statusMessage": "checking fno do state surfaces"
+            "command": "bash ${PLUGIN_ROOT}/hooks/write-gate.sh",
+            "statusMessage": "checking protected write surfaces"
           }
         ]
       },
@@ -19,16 +19,6 @@
             "type": "command",
             "command": "bash ${PLUGIN_ROOT}/hooks/worktree-write-protect.sh",
             "statusMessage": "checking worktree location"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${PLUGIN_ROOT}/hooks/generated-write-guard.sh",
-            "statusMessage": "checking generated copies"
           }
         ]
       },

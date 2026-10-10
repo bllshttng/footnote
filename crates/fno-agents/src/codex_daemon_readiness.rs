@@ -90,12 +90,18 @@ pub fn codex_cli_path() -> Option<std::path::PathBuf> {
 }
 
 /// The installed CLI's own version: `codex --version`, parsed from its last
-/// whitespace-separated token. `None` = the CLI is absent or unreadable.
+/// whitespace-separated token. `None` = the CLI is absent, unreadable, or
+/// silent past 5 s: spawn argv builders call this, and a wedged or fake
+/// `codex` must not hang the spawn.
 pub fn installed_cli_version() -> Option<String> {
-    let out = std::process::Command::new(codex_cli_path()?)
-        .arg("--version")
-        .output()
-        .ok()?;
+    cli_version_of(codex_cli_path()?)
+}
+
+/// `<bin> --version` under the same parse and 5 s bound.
+pub fn cli_version_of(bin: impl AsRef<std::ffi::OsStr>) -> Option<String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("--version").stdin(std::process::Stdio::null());
+    let out = crate::bounded_cmd::output_with_timeout(cmd, 5)?;
     if !out.status.success() {
         return None;
     }

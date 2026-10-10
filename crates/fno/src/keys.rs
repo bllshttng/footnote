@@ -75,8 +75,10 @@ pub struct KeymapWarning(pub String);
 
 /// Parse a key spec into the byte a terminal sends for it.
 ///
-/// Accepted: `C-a` / `Ctrl-a` / `^a` for a control byte, or a single printable
-/// ASCII character for itself. Deliberately narrow: a spec vocabulary wider than
+/// Accepted: `ctrl+a` / `C-a` / `Ctrl-a` / `^a` for a control byte, or a single
+/// printable ASCII character for itself. `ctrl+` is the printed form
+/// ([`key_disp`]), so a label copied into config round-trips; the older dash
+/// spellings stay accepted. Deliberately narrow: a spec vocabulary wider than
 /// the scanner (which dispatches on ONE post-prefix byte) would advertise binds
 /// that could never fire.
 pub fn parse_key(spec: &str) -> Option<u8> {
@@ -92,19 +94,24 @@ pub fn parse_key(spec: &str) -> Option<u8> {
         _ => {
             let lower = s.to_ascii_lowercase();
             let rest = lower
-                .strip_prefix("ctrl-")
+                .strip_prefix("ctrl+")
+                .or_else(|| lower.strip_prefix("ctrl-"))
                 .or_else(|| lower.strip_prefix("c-"))?;
             (rest.chars().count() == 1).then(|| ctrl_letter(rest.chars().next()?))?
         }
     }
 }
 
-/// How a byte prints in the which-key modal: `ctrl-b` for a control byte, the
+/// How a byte prints in the which-key modal: `ctrl+b` for a control byte, the
 /// character itself otherwise. Lowercase: `C` does not read as ctrl and a
-/// capital `B` reads as the uppercase key.
+/// capital `B` reads as the uppercase key. A plus, never a dash: a dash reads
+/// as negative (user ruling 2026-10-09), and this one printer owns every
+/// rendered key label - the which-key table, menu hints, and the rebind
+/// warnings all draw from it, so none can drift back to a dash. The printed
+/// form parses ([`parse_key`]), so a label copied into config still works.
 pub fn key_disp(b: u8) -> String {
     match b {
-        1..=26 => format!("ctrl-{}", (b - 1 + b'a') as char),
+        1..=26 => format!("ctrl+{}", (b - 1 + b'a') as char),
         _ => (b as char).to_string(),
     }
 }
@@ -1592,6 +1599,14 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "release-hold",
         key: b'h',
     },
+    // `t` flips the row menu's Split Direction group between pane and
+    // portal (the split.opens start, flipped in-menu before the arrow is
+    // pressed). Free in menu scope: the placement picker's `t` (new tab)
+    // is a different scope, and `t` is no other menu byte.
+    MenuKeyBinding {
+        action: "toggle-split-opens",
+        key: b't',
+    },
 ];
 
 /// The one resolver both menu-scope projections read: the binding registered
@@ -2283,6 +2298,8 @@ mod tests {
         assert_eq!(parse_key("C-a"), Some(0x01));
         assert_eq!(parse_key("Ctrl-a"), Some(0x01));
         assert_eq!(parse_key("^a"), Some(0x01));
+        assert_eq!(parse_key("ctrl+a"), Some(0x01), "the printed form parses");
+        assert_eq!(parse_key("Ctrl+Q"), Some(0x11), "case-insensitive plus");
         assert_eq!(parse_key("c-B"), Some(0x02), "case-insensitive");
         assert_eq!(parse_key(" C-b "), Some(0x02), "trimmed");
         assert_eq!(parse_key("q"), Some(b'q'));
@@ -2555,7 +2572,7 @@ mod tests {
         }
         let detach = rows.iter().find(|kb| kb.action == "detach").unwrap();
         assert_eq!(detach.key, 0x11);
-        assert_eq!(detach.disp, "ctrl-q", "the key table prints the NEW key");
+        assert_eq!(detach.disp, "ctrl+q", "the key table prints the NEW key");
         assert_eq!(detach.event, Event::Detach);
 
         // The two no-default split actions live in the table as sentinel

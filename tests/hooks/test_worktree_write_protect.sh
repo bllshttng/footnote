@@ -259,7 +259,7 @@ STATE_PAYLOAD="$(jq -nc --arg p "$GUARDED/.fno/target-state.md" '{
     tool_name: "Edit",
     tool_input: {file_path: $p, old_string: "a", new_string: "b"}
 }')"
-if printf '%s' "$STATE_PAYLOAD" | bash "$REPO_ROOT/hooks/graph-write-protect.sh" \
+if printf '%s' "$STATE_PAYLOAD" | bash "$REPO_ROOT/hooks/write-gate.sh" \
     | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1; then
     pass "state guard still denies the manifest the location guard allowed"
 else

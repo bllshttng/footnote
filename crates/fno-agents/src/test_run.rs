@@ -27,6 +27,76 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SUITE_CLAIM_KEY: &str = "test:suite";
 const BUILD_CLAIM_KEY: &str = "build:cargo";
+/// The agent compile slots. Slot 0 keeps the one-slot key, so every reader
+/// that names `build:cargo` still sees the first holder.
+pub(crate) const BUILD_SLOT_KEYS: [&str; 3] = [BUILD_CLAIM_KEY, "build:cargo:1", "build:cargo:2"];
+
+fn build_slot_keys() -> Vec<String> {
+    BUILD_SLOT_KEYS.iter().map(|k| k.to_string()).collect()
+}
+
+/// How many agent cargos may compile at once at this 1-minute load: 3 under
+/// 30, 2 up to 60, 1 up to 150, and none above, where only the user's cargo
+/// compiles. An unreadable load admits one, the old one-at-a-time door.
+/// `FNO_TEST_BUILD_SLOTS` pins the count so admission tests do not depend on
+/// the load of the machine that runs them.
+pub(crate) fn build_slot_cap(load: Option<f64>) -> usize {
+    if let Some(pinned) = std::env::var("FNO_TEST_BUILD_SLOTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        return pinned.min(BUILD_SLOT_KEYS.len());
+    }
+    match load {
+        None => 1,
+        Some(l) if l < 30.0 => 3,
+        Some(l) if l <= 60.0 => 2,
+        Some(l) if l <= 150.0 => 1,
+        Some(_) => 0,
+    }
+}
+
+/// What a waiter names when no cargo holds the slot it waits for: the load
+/// cap alone keeps it out.
+const NO_HOLDER: &str = "no holder; the load caps the compile slots";
+
+fn build_slot_cap_now() -> usize {
+    build_slot_cap(crate::machine_sample::load_average().map(|(one, _, _)| one))
+}
+
+/// Whether `holder` holds a Live compile slot.
+fn holds_build_slot(holder: &str, root: Option<&Path>) -> bool {
+    BUILD_SLOT_KEYS.iter().any(|key| {
+        matches!(
+            crate::claims::status(key, root),
+            (crate::claims::ClaimState::Live, Some(rec)) if rec.holder == holder
+        )
+    })
+}
+
+/// The program cargo asked the run door to start, from the wrapper. A test
+/// harness lives under `deps/`; a doctest runs from a `rustdoctest` temp dir.
+/// A `cargo run` program or an example is neither.
+fn is_test_program(program: &str) -> bool {
+    Path::new(program)
+        .components()
+        .any(|c| c.as_os_str() == "deps")
+        || program.contains("rustdoctest")
+}
+
+/// Whether the run door refuses this program: a test harness or doctest that
+/// an agent session started. The user's cargo and `fno doctor update`'s
+/// install build run their tests, and a checkout holding a live
+/// `test:priority` grant does too.
+fn refuses_agent_tests(program: &str, worktree: &Path) -> bool {
+    if program.is_empty() || !is_test_program(program) || install_build() || !agent_cargo() {
+        return false;
+    }
+    let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    !priority_lane(None).is_some_and(|p| p.worktree == worktree)
+}
+
+const TESTS_REFUSED_LINE: &str = "[cargo test] an agent session runs no tests on this machine: commit, push with `fno do pr push`, and CI runs the tests. A lead can grant one checkout local tests for a while: fno agents claim acquire test:priority --holder worktree:<checkout> --ttl 30m --pid-unavailable -R \"<why>\"";
 /// How often a held build or a queued suite run repeats its waiting line on
 /// stderr.
 const BUILD_HOLD_NOTICE: Duration = Duration::from_secs(30);
@@ -61,17 +131,53 @@ fn first_beside_notice(cargo_pid: u32) -> bool {
         .open(dir.join(cargo_pid.to_string()))
         .is_ok();
     if first {
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let pid = entry
-                .file_name()
-                .to_str()
-                .and_then(|n| n.parse::<u32>().ok());
-            if pid.is_some_and(|p| !crate::claude_config_tmp::pid_alive(p)) {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+        sweep_dead_cargo_markers(&dir);
     }
     first
+}
+
+/// Remove the per-cargo marker files of cargos that exited, so a marker
+/// directory stays small and a recycled pid speaks again.
+fn sweep_dead_cargo_markers(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let pid = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok());
+        if pid.is_some_and(|p| !crate::claude_config_tmp::pid_alive(p)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether a cargo's waiting line prints now, and `Some(true)` when it is
+/// that cargo's first. Cargo runs one door process per parallel rustc, so
+/// the throttle lives in a temp-dir file keyed by the cargo pid: the waiters
+/// of one cargo print one line when the line changes, and repeat it every
+/// [`BUILD_HOLD_NOTICE`], instead of one line each.
+fn readout_due(cargo_pid: u32, line: &str) -> Option<bool> {
+    let dir = std::env::temp_dir().join("fno-cargo-readout");
+    let path = dir.join(cargo_pid.to_string());
+    let first = match std::fs::read_to_string(&path) {
+        Ok(prev) => {
+            let fresh = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|age| age < BUILD_HOLD_NOTICE);
+            if prev == line && fresh {
+                return None;
+            }
+            false
+        }
+        Err(_) => true,
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    if first {
+        sweep_dead_cargo_markers(&dir);
+    }
+    let _ = std::fs::write(&path, line);
+    Some(first)
 }
 
 /// True when this cargo runs inside an unattended agent session. FNO_AGENT_SELF
@@ -596,6 +702,10 @@ enum OnHeld {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Lane {
     Priority,
+    /// A red PR or a main repair (`FNO_CARGO_CLASS=repair`).
+    Repair,
+    /// The compile a push waits on (`FNO_CARGO_CLASS=prepush`).
+    Prepush,
     Normal,
     Full,
 }
@@ -605,6 +715,8 @@ impl Lane {
     fn name(self) -> &'static str {
         match self {
             Lane::Priority => "priority",
+            Lane::Repair => "repair",
+            Lane::Prepush => "prepush",
             Lane::Normal => "normal",
             Lane::Full => "full",
         }
@@ -613,6 +725,8 @@ impl Lane {
     fn dir_suffix(self) -> &'static str {
         match self {
             Lane::Priority => "priority",
+            Lane::Repair => "repair",
+            Lane::Prepush => "prepush",
             Lane::Normal => "queue",
             Lane::Full => "full",
         }
@@ -623,10 +737,37 @@ impl Lane {
     fn better(self) -> &'static [Lane] {
         match self {
             Lane::Priority => &[],
-            Lane::Normal => &[Lane::Priority],
-            Lane::Full => &[Lane::Priority, Lane::Normal],
+            Lane::Repair => &[Lane::Priority],
+            Lane::Prepush => &[Lane::Priority, Lane::Repair],
+            Lane::Normal => &[Lane::Priority, Lane::Repair, Lane::Prepush],
+            Lane::Full => &[Lane::Priority, Lane::Repair, Lane::Prepush, Lane::Normal],
         }
     }
+}
+
+/// The lane an agent cargo asks for at the cargo doors: a live
+/// `test:priority` claim on its checkout first, then `FNO_CARGO_CLASS`
+/// (`repair` for a red PR or a main repair, `prepush` for the compile a push
+/// waits on), else normal. The user's own cargo never queues, so it needs no
+/// lane.
+fn cargo_lane(worktree: &Path) -> Lane {
+    if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
+        return Lane::Priority;
+    }
+    match std::env::var("FNO_CARGO_CLASS").as_deref() {
+        Ok("repair") => Lane::Repair,
+        Ok("prepush") => Lane::Prepush,
+        _ => Lane::Normal,
+    }
+}
+
+/// The best lane ahead of `lane` that holds a live waiter at the door whose
+/// first key is `key`.
+fn better_lane_waiting(key: &str, lane: Lane, root: Option<&Path>) -> Option<Lane> {
+    let lock = crate::claims::claim_path(key, root).ok()?;
+    lane.better().iter().copied().find(|b| {
+        crate::claim_queue::depth(&crate::claim_queue::lane_dir_for(&lock, b.dir_suffix())) > 0
+    })
 }
 
 /// What a held poll hands its caller: this waiter's own lane, and the better
@@ -683,11 +824,12 @@ fn acquire_claim_blocking(
     lane_of: impl FnMut() -> Lane,
     on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>, Wait) -> OnHeld,
 ) -> Result<(), i32> {
-    acquire_claim_blocking_guarded(keys, holder, opts, lane_of, on_held, || true)
+    acquire_claim_blocking_guarded(keys, holder, opts, lane_of, on_held, |_| true)
 }
 
 /// [`acquire_claim_blocking`] with an admission precondition polled once per
-/// wait turn, before the acquire attempt. When it turns false the attempt is
+/// wait turn, before the acquire attempt. It sees this waiter's index in its
+/// lane, when the lane is readable. When it turns false the attempt is
 /// skipped and `on_held` decides, exactly as for a gated lane: the caller
 /// that needs it (the build door) stops, re-queues, and returns with its
 /// precondition re-established instead of taking the claim in a forbidden
@@ -698,7 +840,7 @@ fn acquire_claim_blocking_guarded(
     opts: impl Fn(usize) -> crate::claims::AcquireOpts,
     mut lane_of: impl FnMut() -> Lane,
     mut on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>, Wait) -> OnHeld,
-    mut may_acquire: impl FnMut() -> bool,
+    mut may_acquire: impl FnMut(Option<usize>) -> bool,
 ) -> Result<(), i32> {
     let admit_width = keys.len();
     let opts0 = opts(0);
@@ -808,7 +950,7 @@ fn acquire_claim_blocking_guarded(
                 }
             }
         }
-        if !may_acquire() {
+        if !may_acquire(pos_out.map(|(index, _)| index)) {
             match on_held(
                 &holder_rows(keys, opts0.root.as_deref()),
                 pos_out,
@@ -1030,12 +1172,8 @@ fn run_build_admit(args: &[String]) -> i32 {
 
     // Cargo calls the wrapper once per crate. Once admitted, a read answers
     // every later call without a claim write or an audit event.
-    if let (crate::claims::ClaimState::Live, Some(rec)) =
-        crate::claims::status(BUILD_CLAIM_KEY, None)
-    {
-        if rec.holder == holder {
-            return 0;
-        }
+    if holds_build_slot(&holder, None) {
+        return 0;
     }
 
     // Lock order: a run slot first, then build:cargo, so no cargo ever waits
@@ -1064,6 +1202,10 @@ fn run_build_admit(args: &[String]) -> i32 {
         // takes this lane too: queued behind agent builds, `fno update` sat
         // 999s twice and blew the post-merge sync's 600s bound.
         if install_build() || !agent_cargo() {
+            // The user's build takes slot 0 when it is free, so agent waiters
+            // count it. It never takes slots 1 and 2: those are the agents'
+            // load-scaled extra seats. When slot 0 is held it compiles beside
+            // the holder, claimless.
             match crate::claims::acquire(
                 BUILD_CLAIM_KEY,
                 &holder,
@@ -1111,16 +1253,18 @@ fn run_build_admit(args: &[String]) -> i32 {
             events_dir: Some(worktree.clone()),
             ..Default::default()
         };
-        let lane_of = || {
-            if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
-                Lane::Priority
-            } else {
-                Lane::Normal
-            }
-        };
+        let lane_of = || cargo_lane(&worktree);
         let still_slotted = || holds_run_slot(cargo_pid, &holder, &slot_keys, None);
+        let build_keys = build_slot_keys();
+        // The load decides how many compile slots agents share right now; a
+        // waiter takes one only while the live holders leave a seat under
+        // that count for its queue position.
+        let under_load_cap = |index: Option<usize>| {
+            let held = holder_rows(&build_keys, None).len();
+            held + index.unwrap_or(0) < build_slot_cap_now()
+        };
         let result = acquire_claim_blocking_guarded(
-            &[BUILD_CLAIM_KEY.to_string()],
+            &build_keys,
             &holder,
             opts,
             lane_of,
@@ -1138,19 +1282,28 @@ fn run_build_admit(args: &[String]) -> i32 {
                  -> Option<OnHeld> {
                     // A holder whose owner session died frees the door now,
                     // compiling or not; the next poll acquires.
-                    crate::cargo_orphans::release_orphan_holders(
-                        &[BUILD_CLAIM_KEY.to_string()],
-                        &worktree,
-                    );
-                    let (h, pid, _) = rows.first()?;
-                    let holder_pid = (*pid).filter(|p| *p > 0)?;
+                    crate::cargo_orphans::release_orphan_holders(&build_keys, &worktree);
                     // A holder that has stopped compiling keeps the slot for no
                     // one. Feed the idle clock on the scan poll_held already makes;
                     // when the window is out, release the holder's claim by its
                     // exact holder string (a holder mismatch is a silent no-op,
                     // which is how two waiters racing stay safe) and let the next
-                    // poll acquire.
-                    let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+                    // poll acquire. With several compile slots the clock watches
+                    // the first holder that is not compiling, so an idle holder
+                    // on any slot is found, not only the one on slot 0.
+                    let readings: Vec<(&String, i32, bool)> = rows
+                        .iter()
+                        .filter_map(|(h, pid, _)| {
+                            let holder_pid = (*pid).filter(|p| *p > 0)?;
+                            let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+                            Some((h, holder_pid, compiling))
+                        })
+                        .collect();
+                    let (h, holder_pid, compiling) = readings
+                        .iter()
+                        .find(|(_, _, compiling)| !compiling)
+                        .or_else(|| readings.first())
+                        .copied()?;
                     // A takeover reason names the holder it displaced. When the
                     // claim passes to a different holder, the guard resets, so this
                     // waiter can still take over the new holder when it idles.
@@ -1163,16 +1316,24 @@ fn run_build_admit(args: &[String]) -> i32 {
                         eprintln!(
                     "cargo admission: taking over; {h} (pid {holder_pid}) ran no compile for {waited}s"
                 );
-                        let _ = crate::claims::release(BUILD_CLAIM_KEY, h, None, Some(&worktree));
+                        for key in BUILD_SLOT_KEYS {
+                            let _ = crate::claims::release(key, h, None, Some(&worktree));
+                        }
                         *takeover_reason.borrow_mut() = Some(format!(
                             "cargo build; took over from {h}, no compile for {waited}s"
                         ));
                     }
                     None
                 };
-                wait.poll_held(rows, None, pos.map(|(_, total)| total), Some(&mut scan), w)
+                wait.poll_held(
+                    rows,
+                    Some((build_slot_cap_now(), "compile slots at this load")),
+                    pos,
+                    Some(&mut scan),
+                    w,
+                )
             },
-            still_slotted,
+            |index| still_slotted() && under_load_cap(index),
         );
         wait.clear_marker();
         match result {
@@ -1194,7 +1355,9 @@ const FLEET_HOLD_POLL: Duration = Duration::from_secs(5);
 /// Re-print the holding line about every minute, so a long wait is never
 /// silent in a log.
 const FLEET_HOLD_REPRINT_POLLS: u32 = 12;
-const NEVER_WAIT_NUDGE_AFTER: Duration = Duration::from_secs(180);
+/// A waiting agent hears "push now" from its first line: the queue is the
+/// slow path, CI the fast one.
+const NEVER_WAIT_NUDGE_AFTER: Duration = Duration::ZERO;
 
 fn never_wait_nudge_after() -> Duration {
     std::env::var("FNO_TEST_NEVER_WAIT_AFTER_SECS")
@@ -1266,13 +1429,7 @@ fn admit_build_holder_free_slot(
     keys: &[String],
     root: Option<&Path>,
 ) -> Option<()> {
-    let (state, rec) = crate::claims::status(BUILD_CLAIM_KEY, root);
-    let rec = if matches!(state, crate::claims::ClaimState::Live) {
-        rec
-    } else {
-        None
-    }?;
-    if rec.holder != holder {
+    if !holds_build_slot(holder, root) {
         return None;
     }
     let owner = crate::cargo_orphans::owner_metadata(cargo_pid);
@@ -1386,7 +1543,7 @@ fn steal_parked_slot(
 
 /// The run-slot keys of one checkout: one per seat of the machine's cargo
 /// concurrency cap.
-fn cargo_slot_keys(worktree: &Path) -> Vec<String> {
+pub(crate) fn cargo_slot_keys(worktree: &Path) -> Vec<String> {
     let cap = crate::agents_config::max_cargo_runs(worktree) as usize;
     (0..cap).map(|i| format!("test:cargo-run:{i}")).collect()
 }
@@ -1449,7 +1606,7 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<
     // try-lock reads them: two such orphans fill the default pool, and every
     // agent build then refuses for as long as they live.
     let mut swept = keys.clone();
-    swept.push(BUILD_CLAIM_KEY.to_string());
+    swept.extend(build_slot_keys());
     crate::cargo_orphans::release_orphan_holders(&swept, &worktree);
 
     if admit_build_holder_free_slot(cargo_pid, &worktree, &holder, &keys, None).is_some() {
@@ -1479,13 +1636,22 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<
     // doors reorder (the same pass the build door grants at its claim). A
     // mid-build re-entry after a slot theft (`reentry`) also queues: the
     // cargo already compiled crates, and dying here abandons the build the
-    // takeover machinery exists to complete.
-    if !reentry
-        && try_lock_admission(
-            agent_cargo(),
-            full_suite_lane() || priority_lane(None).is_some_and(|p| p.worktree == worktree),
-        )
-    {
+    // takeover machinery exists to complete. A repair or prepush cargo
+    // queues too, ahead of the rest: its place in the order is the point, and
+    // its session parks on the wait instead of spending turns.
+    let lane = cargo_lane(&worktree);
+    if !reentry && try_lock_admission(agent_cargo(), full_suite_lane() || lane != Lane::Normal) {
+        // A try-lock never takes a slot a better lane is queued for.
+        if let Some(ahead) = keys
+            .first()
+            .and_then(|key| better_lane_waiting(key, Lane::Normal, None))
+        {
+            eprintln!(
+                "{SLOT_BUSY_LINE} A {} lane cargo is queued ahead of this one.",
+                ahead.name()
+            );
+            return Err(SLOT_BUSY);
+        }
         for (i, key) in keys.iter().enumerate() {
             match crate::claims::acquire(key, &holder, opts(i)) {
                 crate::claims::AcquireOutcome::Acquired(_) => return Ok(()),
@@ -1507,35 +1673,24 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<
     }
 
     let mut wait = CargoWait::new(cargo_pid, &worktree);
-    let lane_of = || {
-        if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
-            Lane::Priority
-        } else {
-            Lane::Normal
-        }
-    };
+    let lane_of = || cargo_lane(&worktree);
     let result = acquire_claim_blocking(&keys, &holder, opts, lane_of, |rows, pos, w| {
-        // While this asker holds build:cargo, a slot holder parked at the
+        // While this asker holds a compile slot, a slot holder parked at the
         // build door waits on the claim this asker holds; take its slot in
         // the same poll. A build holder never stays parked behind the cap
         // (the 2026-09-29 admission deadlock, twice).
-        if crate::claims::status(BUILD_CLAIM_KEY, None)
-            .1
-            .is_some_and(|rec| rec.holder == holder)
-        {
+        if BUILD_SLOT_KEYS.iter().any(|key| {
+            crate::claims::status(key, None)
+                .1
+                .is_some_and(|rec| rec.holder == holder)
+        }) {
             if let Some(dir) = crate::claims::build_waiters_dir() {
                 if steal_parked_slot(&keys, &holder, cargo_pid, &worktree, &dir, None) {
                     return OnHeld::Admit;
                 }
             }
         }
-        wait.poll_held(
-            rows,
-            Some((cap, "cargo run slots")),
-            pos.map(|(_, total)| total),
-            None,
-            w,
-        )
+        wait.poll_held(rows, Some((cap, "cargo run slots")), pos, None, w)
     });
     wait.clear_marker();
     result
@@ -1551,6 +1706,14 @@ fn run_run_admit(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // CI runs the tests. The wrapper names the program cargo is about to run
+    // in FNO_CARGO_RUN_PROGRAM; an older wrapper names none, and the door
+    // then admits as before.
+    let program = std::env::var("FNO_CARGO_RUN_PROGRAM").unwrap_or_default();
+    if refuses_agent_tests(&program, &worktree) {
+        eprintln!("{TESTS_REFUSED_LINE}");
+        return SLOT_BUSY;
+    }
     match admit_run_slot(cargo_pid, &worktree, false) {
         Ok(()) => 0,
         Err(code) => code,
@@ -1598,13 +1761,14 @@ impl CargoWait {
     /// hand `scan_hook` the same process-table read (the build door's idle
     /// takeover rides it); stop with `128 + signal` on SIGINT or SIGTERM;
     /// write the waiter marker once; name every holder at most every
-    /// [`BUILD_HOLD_NOTICE`]. `slot_context` is `Some((cap, label))` for the
-    /// run-slot pool, `None` for the build claim.
+    /// [`BUILD_HOLD_NOTICE`]. `slot_context` is `Some((cap, label))`: the
+    /// run-slot pool, or the compile slots the load allows. `pos` is this
+    /// waiter's `(index, total)` in its lane, when the lane is readable.
     fn poll_held(
         &mut self,
         rows: &[(String, Option<i32>, String)],
         slot_context: Option<(usize, &'static str)>,
-        queue_depth: Option<usize>,
+        pos: Option<(usize, usize)>,
         scan_hook: Option<&mut dyn FnMut(&[crate::census::ProcRow], &ParentMap) -> Option<OnHeld>>,
         w: Wait,
     ) -> OnHeld {
@@ -1637,8 +1801,14 @@ impl CargoWait {
             return OnHeld::Stop(128 + sig);
         }
         if !self.marked {
-            if let (Some(path), Some((holder, _, _))) = (&self.marker, rows.first()) {
-                write_waiter_marker(path, self.cargo_pid, &self.worktree, holder);
+            // A waiter the load cap holds can face an empty door; it still
+            // writes its marker, so the stop hook parks it and the builds
+            // view lists it.
+            if let Some(path) = &self.marker {
+                let holder = rows
+                    .first()
+                    .map_or(NO_HOLDER, |(holder, _, _)| holder.as_str());
+                write_waiter_marker(path, self.cargo_pid, &self.worktree, holder, w.lane);
             }
             self.marked = true;
         }
@@ -1650,7 +1820,8 @@ impl CargoWait {
                 .is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE)
         {
             self.last_readout = Some(readout);
-            let held = rows
+            self.last_notice = Some(Instant::now());
+            let mut held = rows
                 .iter()
                 .map(|(h, pid, _)| {
                     format!(
@@ -1660,16 +1831,27 @@ impl CargoWait {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            if held.is_empty() {
+                held = NO_HOLDER.to_string();
+            }
             let context = slot_context
-                .map(|(cap, label)| format!("{} of {cap} {label} held by ", rows.len()))
+                .map(|(cap, label)| {
+                    if cap == 0 {
+                        "load is over 150, so only the user's cargo compiles; holders: ".to_string()
+                    } else {
+                        format!("{} of {cap} {label} held by ", rows.len())
+                    }
+                })
                 .unwrap_or_default();
-            let queue = queue_depth.map_or_else(
+            // No build durations are recorded, so the line names the place
+            // in line and no wait estimate.
+            let queue = pos.map_or_else(
                 || "; queue depth unavailable".to_string(),
-                |depth| format!("; queue depth {depth}"),
+                |(index, total)| format!("; queue depth {total}, position {}", index + 1),
             );
             let waited = self.started.elapsed().as_secs();
             let nudge = if Duration::from_secs(waited) >= never_wait_nudge_after() {
-                "; push now: CI is the gate (law d-50986bf8)"
+                "; push now: CI is the gate (law d-50986bf8). Commit, push with `fno do pr push`, and CI builds and tests it"
             } else {
                 ""
             };
@@ -1687,20 +1869,32 @@ impl CargoWait {
                         secs
                     )
                 }
-                _ => "holding; ".to_string(),
+                (lane, Some(better)) => format!(
+                    "holding ({} lane), yielding to the {} lane; ",
+                    lane.name(),
+                    better.name()
+                ),
+                (Lane::Normal, None) => "holding; ".to_string(),
+                (lane, None) => format!("holding ({} lane); ", lane.name()),
             };
-            eprintln!("cargo admission: {prefix}{context}{held}; waited {waited}s{queue}{nudge}");
-            // The priority lever, taught once per wait: a person (or a
-            // lead) can give this checkout the next slot with one acquire.
-            if self.last_notice.is_none() {
+            let line = format!("{prefix}{context}{held}{queue}");
+            if let Some(first) = readout_due(self.cargo_pid, &line) {
                 eprintln!(
-                    "cargo admission: to give {wt} the next slot (user or lead): \
-                     fno agents claim acquire test:priority --holder worktree:{wt} \
-                     --ttl 30m --pid-unavailable -R \"<why>\"",
-                    wt = self.worktree.display()
-                )
+                    "cargo admission: {prefix}{context}{held}; waited {waited}s{queue}{nudge}"
+                );
+                // The levers, taught once per cargo: a person (or a lead) can
+                // give this checkout the next slot with one acquire, and the
+                // builds view shows every cargo job in its place.
+                if first {
+                    eprintln!(
+                        "cargo admission: to give {wt} the next slot (user or lead): \
+                         fno agents claim acquire test:priority --holder worktree:{wt} \
+                         --ttl 30m --pid-unavailable -R \"<why>\". Every cargo job and its \
+                         place in line: fno doctor builds",
+                        wt = self.worktree.display()
+                    )
+                }
             }
-            self.last_notice = Some(Instant::now());
         }
         OnHeld::Wait
     }
@@ -1742,12 +1936,13 @@ fn parse_cargo_admit_args(args: &[String]) -> Result<(u32, PathBuf), String> {
     ))
 }
 
-fn write_waiter_marker(path: &Path, cargo_pid: u32, worktree: &Path, holder: &str) {
+fn write_waiter_marker(path: &Path, cargo_pid: u32, worktree: &Path, holder: &str, lane: Lane) {
     let body = serde_json::json!({
         "pid": std::process::id(),
         "cargo_pid": cargo_pid,
         "worktree": worktree,
         "holder": holder,
+        "lane": lane.name(),
         "since_ms": crate::claims::now_ms(),
     });
     let Some(dir) = path.parent() else { return };
@@ -1778,10 +1973,32 @@ pub(crate) fn build_wait_since_ms(cwd: &Path) -> Option<i64> {
 /// Testable form: the marker's `since_ms` for the first live hold on `cwd`
 /// or an ancestor checkout. Same walk `build_hold_message_in` does.
 fn build_wait_since_ms_in(dir: &Path, cwd: &Path) -> Option<i64> {
+    build_wait_in(dir, cwd).map(|wait| wait.since_ms)
+}
+
+/// A cargo parked at an admission door for one checkout, from its live
+/// waiter marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuildWait {
+    pub cargo_pid: u32,
+    pub holder: String,
+    pub since_ms: i64,
+}
+
+/// The stop hook's park read: the cargo the checkout holding `cwd` has
+/// parked at a cargo admission door, so the park can name it and the daemon
+/// can wake the session when that cargo exits.
+pub(crate) fn build_wait(cwd: &Path) -> Option<BuildWait> {
+    build_wait_in(&crate::claims::build_waiters_dir()?, cwd)
+}
+
+/// The first live hold on `cwd` or an ancestor checkout. The walk stops at
+/// the first `.git`.
+fn build_wait_in(dir: &Path, cwd: &Path) -> Option<BuildWait> {
     let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     for path in start.ancestors() {
-        if let Some((_, since_ms)) = live_waiter(dir, path) {
-            return Some(since_ms);
+        if let Some(wait) = live_waiter(dir, path) {
+            return Some(wait);
         }
         if path.join(".git").exists() {
             break;
@@ -1791,19 +2008,19 @@ fn build_wait_since_ms_in(dir: &Path, cwd: &Path) -> Option<i64> {
 }
 
 fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
-    let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    for path in start.ancestors() {
-        if let Some(message) = live_waiter_hold(dir, path) {
-            return Some(message);
+    build_wait_in(dir, cwd).map(|wait| {
+        if wait.holder == NO_HOLDER {
+            format!("held for cargo build admission: {NO_HOLDER}")
+        } else {
+            format!(
+                "held for cargo build admission: {} is building",
+                wait.holder
+            )
         }
-        if path.join(".git").exists() {
-            break;
-        }
-    }
-    None
+    })
 }
 
-fn live_waiter(dir: &Path, checkout: &Path) -> Option<(String, i64)> {
+pub(crate) fn live_waiter(dir: &Path, checkout: &Path) -> Option<BuildWait> {
     let marker = dir.join(format!(
         "{}.json",
         crate::claims::encode_key(&checkout.to_string_lossy())
@@ -1822,15 +2039,14 @@ fn live_waiter(dir: &Path, checkout: &Path) -> Option<(String, i64)> {
         let _ = std::fs::remove_file(&marker);
         return None;
     }
-    let holder = value["holder"].as_str().unwrap_or("another cargo");
-    Some((holder.to_string(), since_ms))
-}
-
-fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
-    let (holder, _) = live_waiter(dir, checkout)?;
-    Some(format!(
-        "held for cargo build admission: {holder} is building"
-    ))
+    Some(BuildWait {
+        cargo_pid: value["cargo_pid"].as_u64().unwrap_or(0) as u32,
+        holder: value["holder"]
+            .as_str()
+            .unwrap_or("another cargo")
+            .to_string(),
+        since_ms,
+    })
 }
 
 /// The pid->ppid map over one process-table read, shared by every predicate
@@ -2200,6 +2416,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("build-admit") => return run_build_admit(&args[1..]),
         Some("run-admit") => return run_run_admit(&args[1..]),
+        Some("builds") => return crate::cargo_builds::run(&args[1..]),
         _ => {}
     }
     install_signal_handlers();
@@ -2780,6 +2997,31 @@ mod tests {
             Some(written["since_ms"].as_i64().unwrap()),
             "the burn counter reads the marker's since_ms from the nested path"
         );
+        // The park names the parked cargo, so the daemon can wake on its exit.
+        let wait = build_wait_in(&dir, &nested).expect("the park reads the same marker");
+        assert_eq!(wait.cargo_pid, std::process::id());
+        assert_eq!(wait.holder, "cargo:/other:42");
+    }
+
+    /// The compile slots follow the load, the doors order the lanes best
+    /// first, and the run door tells a test binary from a program.
+    #[test]
+    fn compile_slots_follow_load_and_lanes_order_best_first() {
+        assert_eq!(build_slot_cap(Some(12.0)), 3);
+        assert_eq!(build_slot_cap(Some(45.0)), 2);
+        assert_eq!(build_slot_cap(Some(60.0)), 2);
+        assert_eq!(build_slot_cap(Some(120.0)), 1);
+        assert_eq!(build_slot_cap(Some(280.0)), 0);
+        assert_eq!(build_slot_cap(None), 1);
+        assert_eq!(
+            Lane::Normal.better(),
+            &[Lane::Priority, Lane::Repair, Lane::Prepush]
+        );
+        assert!(Lane::Full.better().contains(&Lane::Normal));
+        assert!(is_test_program("/w/target/debug/deps/fno_agents-0123abcd"));
+        assert!(is_test_program("/tmp/rustdoctestAbc/rust_out"));
+        assert!(!is_test_program("/w/target/debug/fno-agents"));
+        assert!(!is_test_program("/w/target/debug/examples/demo"));
     }
 
     #[test]
@@ -3052,7 +3294,7 @@ mod tests {
                             let _ = ptx.send(());
                             OnHeld::Wait
                         },
-                        || holds_run_slot(200, &v3, &k3, Some(&r3)),
+                        |_: Option<usize>| holds_run_slot(200, &v3, &k3, Some(&r3)),
                     );
                     tx.send(guarded).expect("send build-wait result");
                 }

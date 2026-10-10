@@ -15,14 +15,17 @@ pub(crate) enum SettingsTab {
 }
 
 impl SettingsTab {
-    /// Tab's section cycle: General -> Theme -> Colors -> General. `Keys` is
-    /// not in the cycle: its tab is a launcher that opens the which-key
-    /// table (reached by click, not by tabbing past it).
+    /// Tab's section cycle: General -> Theme -> Keys -> Colors -> General,
+    /// the order the tab strip draws (user ruling 2026-10-09: tab reaches
+    /// every section the header lists). `Keys` is a launcher: landing on it
+    /// opens the which-key table, and a later dismiss returns to the settings
+    /// modal on the section the user came from ([`switch_tab`]).
     pub(crate) fn next(self) -> Self {
         match self {
             SettingsTab::General => SettingsTab::Theme,
-            SettingsTab::Theme => SettingsTab::Colors,
-            SettingsTab::Colors | SettingsTab::Keys => SettingsTab::General,
+            SettingsTab::Theme => SettingsTab::Keys,
+            SettingsTab::Keys => SettingsTab::Colors,
+            SettingsTab::Colors => SettingsTab::General,
         }
     }
 }
@@ -191,9 +194,12 @@ fn is_settings(view: &View) -> bool {
 
 /// Put `tab` in front at its top level. The keybindings tab is a launcher:
 /// it opens the SAME which-key table the menu's keybindings row opens, so
-/// the two surfaces cannot drift again (US1).
+/// the two surfaces cannot drift again (US1). Reached by tab as well as
+/// click, so the marker is set and a later dismiss walks the user back here
+/// instead of dropping them on the board ([`dismiss_keys_modal`]).
 pub(super) fn switch_tab(view: &mut View, tab: SettingsTab) {
     if tab == SettingsTab::Keys {
+        view.keys_modal_return = true;
         view.aux = None;
         view.open_keys_modal();
         return;
@@ -202,6 +208,18 @@ pub(super) fn switch_tab(view: &mut View, tab: SettingsTab) {
     view.lane.reset();
     theme_import_ui::reset(view);
     view.reopen_settings_keeping_sel();
+}
+
+/// Close the which-key modal. When it was opened FROM the settings modal,
+/// reopen the settings modal on the section the user came from; otherwise
+/// this is the plain close. A run of an actual chord closes for real (the
+/// action ran; the user moved on) - only the pure-dismiss paths come here.
+pub(super) fn dismiss_keys_modal(view: &mut View) {
+    view.keys_modal = None;
+    if view.keys_modal_return {
+        view.keys_modal_return = false;
+        view.reopen_settings_keeping_sel();
+    }
 }
 
 /// A left press on a settings tab switches to it. True when the press hit

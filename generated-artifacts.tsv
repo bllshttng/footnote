@@ -1,4 +1,4 @@
-# Generated copies. An Edit or Write to a path here is refused by hooks/generated-write-guard.sh.
+# Generated copies. An Edit or Write to a path here is refused by hooks/write-gate.sh.
 # Columns (tab-separated): path-glob, canonical source, regenerate command. Globs are bash [[ == ]] patterns on the repo-relative path.
 # Skill-bundle copies are not listed here: skill-bundles.yaml owns them.
 cli/src/fno/agents/harness_capabilities.toml	crates/fno-agents/src/harness_capabilities.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
@@ -11,6 +11,8 @@ crates/fno/src/event_store/events_schema.json	crates/fno-agents/src/event_store/
 crates/fno/src/live_store_fence.rs	crates/fno-agents/src/live_store_fence.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
 crates/fno/src/store_conn.rs	crates/fno-agents/src/store_conn.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
 crates/fno/src/provider_key.rs	crates/fno-agents/src/provider_key.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
+crates/fno/src/effect_map.rs	crates/fno-agents/src/effect_map.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
+crates/fno/src/footnote_transcript.rs	crates/fno-agents/src/footnote_transcript.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/merge_posture.toml	crates/fno-agents/src/merge_posture.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/spawn_phase.toml	crates/fno-agents/src/spawn_phase.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/model_tiers.toml	crates/fno-agents/src/model_tiers.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml

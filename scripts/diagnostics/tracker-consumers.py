@@ -81,9 +81,10 @@ READ_ALLOWLIST = (
     # swapped to its db sibling; the read is of the registry table only.
     "crates/fno-agents/src/registry_read.rs",
     "crates/fno/src/registry_read.rs",  # the generated copy of the same door
-    # Unit-test fixture module, included cfg(test) from spawn_gate.rs: its
-    # graph.json literals write hermetic tempdir fixtures, never store reads.
-    "crates/fno-agents/src/spawn_gate_territory_tests.rs",
+    # The PreToolUse write gate (the collapsed shell guards): it
+    # pattern-matches protected filenames in hook payloads to refuse
+    # writes; it never opens the store.
+    "crates/fno-agents/src/hook/write_gate.rs",
 )
 
 # Known-positive controls (task 4.2 / AC9): verbs the census must FIND in the
@@ -381,13 +382,14 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
     for path in sorted(rust_root.rglob("*.rs")):
         rel_parts = path.relative_to(rust_root).parts
         # Production sources only: target/ is build output; a tests/ or
-        # *_tests/ segment is a unit-test dir; a tests.rs file is a
-        # `#[cfg(test)] mod tests;` pulled in by its parent (fixtures point
-        # at fixture stores by design, and none of it is a consumer).
+        # *_tests/ segment is a unit-test dir; a tests.rs or *_tests.rs file
+        # is a `#[cfg(test)] mod tests;` pulled in by its parent (fixtures
+        # point at fixture stores by design, and none of it is a consumer).
         if (
             "src" not in rel_parts
             or "target" in rel_parts
             or path.name == "tests.rs"
+            or path.stem.endswith("_tests")
             or any(p == "tests" or p.endswith("_tests") for p in rel_parts)
         ):
             continue

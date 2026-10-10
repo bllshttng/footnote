@@ -10,6 +10,13 @@
 # join-partition-write-guard the deny half needs the uv-hosted helper and a
 # joined partition, so it is exercised on its allow path only; the marker
 # contract (one row per run) is what this file pins.
+#
+# One store-side exception, deliberate: the observation policy folds a
+# repeated identical ALLOW (same guard, same tool) inside its heartbeat
+# window into a pending occurrence, not a new row. Since the write gate
+# collapsed three guards into one process, every fire carries every
+# guard's allow row, so each allow case here uses a guard+tool fingerprint
+# the run has not fired before and still asserts exactly one row.
 
 set -uo pipefail
 
@@ -105,9 +112,9 @@ fi
 
 # ── graph-write-protect (Edit|Write|Bash) ─────────────────────────────────────
 expect_row "gwp allows an ordinary edit" graph-write-protect allow \
-    '{"tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/src/notes.txt","new_string":"x"}}'
+    '{"tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/src/notes.txt","new_string":"x"}}' bash write-gate.sh
 expect_row "gwp blocks a graph.json write" graph-write-protect block \
-    '{"tool_name":"Write","tool_input":{"file_path":"'"$TMP"'/src/.fno/graph.json","content":"{}"}}'
+    '{"tool_name":"Write","tool_input":{"file_path":"'"$TMP"'/src/.fno/graph.json","content":"{}"}}' bash write-gate.sh
 
 # ── worktree-write-protect (Edit|Write) ───────────────────────────────────────
 # Block needs a real git repo on its protected branch (same technique as
@@ -128,9 +135,9 @@ expect_row "wwp blocks a canonical-checkout edit" worktree-write-protect block \
 
 # ── generated-write-guard (Edit|Write) ────────────────────────────────────────
 expect_row "gwg allows an ordinary edit" generated-write-guard allow \
-    '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/notes.md"}}'
+    '{"cwd":"'"$TMP"'","tool_name":"Write","tool_input":{"file_path":"'"$TMP"'/notes.md","content":"x"}}' bash write-gate.sh
 expect_row "gwg blocks an installed plugin copy" generated-write-guard block \
-    '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/.fno/plugin-stage/fno/hooks/a.sh"}}'
+    '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/.fno/plugin-stage/fno/hooks/a.sh"}}' bash write-gate.sh
 
 # ── join-partition-write-guard (Edit|Write, allow path only) ──────────────────
 expect_row "jpw allows a non-joined write" join-partition-write-guard allow \

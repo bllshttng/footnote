@@ -45,6 +45,7 @@ pub mod orphan_plans;
 pub mod patch;
 pub mod pr_link;
 pub(crate) mod promise;
+pub mod provenance_cli;
 pub mod pull_requests;
 pub mod rank_cli;
 pub mod receipt;
@@ -77,6 +78,12 @@ pub const SCHEMA_VERSION: &str = "4";
 const SCHEMA_VERSION_NUMBER: u32 = 4;
 const OPEN_SETUP_VERSION: &str = "2";
 const OPEN_SETUP_VERSION_NUMBER: u32 = 2;
+/// Fast-path stamp: when `graph_meta` carries this key with the CURRENT
+/// setup version, every open-setup step below has already run to completion
+/// on this store, so opens skip them. The value ties to `OPEN_SETUP_VERSION`
+/// so any future setup change (new migration, new column) invalidates the
+/// stamp by bumping that constant alone.
+const OPEN_FASTPATH_KEY: &str = "open_fastpath_v1";
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -271,11 +278,20 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
     open_connection(graph)
 }
 
+/// Every write connection leaves through here, so the shared-backlog write
+/// path attaches once, after setup, whichever way the setup returned.
 fn open_connection(graph: &Path) -> Result<Connection, String> {
+    let connection = open_connection_inner(graph)?;
+    crate::backlog_share::attach(&connection, graph)?;
+    Ok(connection)
+}
+
+fn open_connection_inner(graph: &Path) -> Result<Connection, String> {
     // A migration publishing under this root parks the legacy inode we
     // would otherwise open; the bounded fence wait orders us after it.
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let mut connection = crate::store_conn::open_write(&database_path(graph))?;
+    crate::backlog_share::register_writer(&connection)?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(|error| error.to_string())?;
@@ -285,6 +301,22 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         // rows, so a healthy store pays one COUNT here and a parked store
         // folds. The DDL, migrations and one-shot imports below stay
         // setup-only.
+        //
+        // The fast path: a store stamped at the current setup version has
+        // run every step below to completion, so skip them. Two gates stay
+        // inside the skip condition, because outside readers re-check them
+        // and fall back to this open expecting the fold: the archive probe
+        // (`read_connection` re-checks it per read), and the seed COUNT (a
+        // seed can land after the stamp, and only a materialized row count
+        // proves the fold already happened).
+        let fast_path =
+            meta(&connection, OPEN_FASTPATH_KEY)?.as_deref() == Some(OPEN_SETUP_VERSION);
+        if fast_path
+            && !archive_needs_import(&connection, graph)?
+            && materialized_rows(&connection)? > 0
+        {
+            return Ok(connection);
+        }
         //
         // A store stamped before the identity columns landed carries no
         // stamp gap, so the ensure path below never runs for it and only
@@ -296,6 +328,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
             archive_import_if_needed(&mut connection, graph)?;
         }
         migrate_role_provenance(&mut connection)?;
+        stamp_meta(&connection, OPEN_FASTPATH_KEY, OPEN_SETUP_VERSION)?;
         return Ok(connection);
     }
     connection
@@ -322,6 +355,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     archive_import_if_needed(&mut connection, graph)?;
     stamp_meta(&connection, "open_setup_version", OPEN_SETUP_VERSION)?;
     migrate_role_provenance(&mut connection)?;
+    stamp_meta(&connection, OPEN_FASTPATH_KEY, OPEN_SETUP_VERSION)?;
     Ok(connection)
 }
 
@@ -1051,8 +1085,10 @@ fn mutate_single_row_once(
     }
     write_changed(&transaction, &rows, &working, true)?;
     nodes::recompute_status(&transaction)?;
-    let rows_after = export_rows(&transaction)?;
-    let version = content_version(&rows_after);
+    // The version hashes the rows in hand (pre-image plus this mutation's
+    // delta), not a post-write re-export of every row. authoritative_sync
+    // makes the same in-memory choice.
+    let version = content_version(&working);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(true)
@@ -1856,7 +1892,9 @@ mod tests {
     /// path runs the identity migration, so the first reader of
     /// agent_sessions.fno_id meets the column instead of dying on it (the
     /// merge-refusal shape the fleet hit on stores minted before the
-    /// identity columns landed).
+    /// identity columns landed). Such a store predates the fast-path stamp
+    /// too, so the test clears it with the columns: a store whose stamp is
+    /// current skips the migration by design.
     #[test]
     fn a_stamped_store_without_identity_columns_opens_and_gains_them() {
         let (_dir, graph) = fixture("identity-stamped.json");
@@ -1868,7 +1906,8 @@ mod tests {
                 "DROP INDEX IF EXISTS agent_sessions_fno_id;
                  ALTER TABLE agent_sessions DROP COLUMN fno_id;
                  ALTER TABLE agent_sessions DROP COLUMN display_name;
-                 ALTER TABLE agent_sessions DROP COLUMN links;",
+                 ALTER TABLE agent_sessions DROP COLUMN links;
+                 DELETE FROM graph_meta WHERE key = 'open_fastpath_v1';",
             )
             .unwrap();
         }
@@ -1888,6 +1927,32 @@ mod tests {
                 "the stamped store opened without {column}"
             );
         }
+    }
+
+    /// A freshly dropped archive folds even when the fast-path stamp is
+    /// current: the read path re-checks `archive_needs_import` per read and
+    /// falls back to this open expecting the fold, so the stamp must not
+    /// strand it.
+    #[test]
+    fn a_fresh_archive_folds_through_the_fast_path_stamp() {
+        let (_dir, graph) = fixture("fastpath-archive.json");
+        open(&graph).unwrap();
+        std::fs::write(
+            graph.with_file_name("graph-archive.json"),
+            r#"{"entries":[{"id":"x-arch1","title":"archived","status":"intake"}]}"#,
+        )
+        .unwrap();
+        open(&graph).unwrap();
+        let conn = Connection::open(database_path(&graph)).unwrap();
+        let folded: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM nodes WHERE id = 'x-arch1')
+                      + (SELECT COUNT(*) FROM nodes_raw WHERE id = 'x-arch1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(folded, 1, "the fast-path stamp folded over a fresh archive");
     }
 
     /// A first write that lands between an opener's unlocked row count and
@@ -2034,6 +2099,17 @@ mod tests {
                            \"created_at\": \"2026-09-01T00:00:00+00:00\"}');";
         let via_write = dir.path().join("fold-on-write.json");
         drop(open(&via_write).unwrap());
+        // The fold below runs while the fast-path stamp is current, so the
+        // seed gate inside the skip condition stays load-bearing here.
+        let stamped: String = Connection::open(database_path(&via_write))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'open_fastpath_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamped, OPEN_SETUP_VERSION, "the first open must stamp");
         open(&via_write).unwrap().execute_batch(row_sql).unwrap();
         drop(open(&via_write).unwrap());
         assert_eq!(

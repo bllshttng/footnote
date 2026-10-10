@@ -952,6 +952,9 @@ fn build_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Pat
         .arg("--worktree")
         .arg(worktree)
         .env("FNO_TEST_NEVER_WAIT_AFTER_SECS", "0")
+        // One compile slot, whatever the load of the machine running this:
+        // these contracts are the one-at-a-time door.
+        .env("FNO_TEST_BUILD_SLOTS", "1")
         .env("FNO_CLAIMS_ROOT", root)
         .env("TMPDIR", root)
         // Every queue contract at these doors is agent-origin (law
@@ -1289,6 +1292,7 @@ fn run_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path)
         .arg("--worktree")
         .arg(worktree)
         .env("FNO_TEST_NEVER_WAIT_AFTER_SECS", "0")
+        .env("FNO_TEST_BUILD_SLOTS", "1")
         .env("FNO_CLAIMS_ROOT", root)
         .env("TMPDIR", root)
         .env("FNO_CONFIG", root.join("config.toml"))

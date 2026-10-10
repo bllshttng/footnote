@@ -10,7 +10,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-GUARD="${REPO_ROOT}/hooks/graph-write-protect.sh"
+GUARD="${REPO_ROOT}/hooks/write-gate.sh"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); printf '[gwp] PASS: %s\n' "$*"; }
@@ -140,24 +140,22 @@ expect "unrelated Edit approved" approve \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/src/main.py","old_string":"a","new_string":"b"}}'
 
 # An artifact edit during this agent's drive window is allowed and emits the
-# canonical operator audit event rather than the legacy event shape.
+# canonical operator audit event rather than the legacy event shape. The gate
+# reads drive windows from the native agents store, so the fixture plants one
+# agent whose state.json holds an open interactive window for this session's
+# short id.
 _DRIVE_STUB=$(mktemp -d)
-_DRIVE_EVENTS="$_DRIVE_STUB/events.jsonl"
-export _DRIVE_EVENTS
-# The store commit is the acknowledgement, so the audited envelope never
-# lands in journal bytes: the stub captures the payload the guard hands the
-# native binary, and the assert below reads exactly that line back.
-cat > "$_DRIVE_STUB/fno" <<'SH'
-#!/usr/bin/env bash
-if [[ "$1:$2" == "doctor:event" && "$3" == "emit-envelope" ]]; then
-  cat >> "$_DRIVE_EVENTS"
-  exit 0
-fi
-printf '%s\n' '{"sessions":[{"short_id":"drive-test"}]}'
-SH
-chmod +x "$_DRIVE_STUB/fno"
+_DRIVE_EVENTS="$_DRIVE_STUB/journal/events.jsonl"
+# The journal lives under its own directory, disjoint from the agents-home
+# parent: the store routes to the state root only when the journal sits in
+# the agents-home's parent, and this read must answer the same rows on a
+# reader that predates the routing.
+mkdir -p "$_DRIVE_STUB/journal" "$_DRIVE_STUB/agents/drive-agent"
+printf '%s\n' '{"short_id":"drive-test","pty":{"drive_active":true,"drive_mode":"interactive","drive_session_id":"s-drive"}}' \
+  > "$_DRIVE_STUB/agents/drive-agent/state.json"
 _DRIVE_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/artifacts/proof.md","old_string":"a","new_string":"b"}}' \
-  | PATH="$_DRIVE_STUB:$PATH" FNO_AGENTS_SELF_SHORT_ID=drive-test EVENTS_FILE="$_DRIVE_EVENTS" bash "$GUARD" 2>/dev/null)
+  | FNO_AGENTS_HOME="$_DRIVE_STUB/agents" FNO_AGENTS_SELF_SHORT_ID=drive-test \
+    FNO_EVENTS_PATH="$_DRIVE_EVENTS" bash "$GUARD" 2>/dev/null)
 if [[ "$_DRIVE_OUT" == "{}" ]] \
   && _ROWS_BIN="${FNO_ROWS_BIN:-${FNO_BIN:-${REPO_ROOT}/crates/fno/target/debug/fno}}" \
   && [[ -x "$_ROWS_BIN" ]] \

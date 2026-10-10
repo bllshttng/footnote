@@ -38,6 +38,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.agents.harnesses.base import ReachabilityProbeError
 
+BOUNDED_NETWORK_OVERRIDE = "sandbox_workspace_write.network_access=true"  # codex_posture twin
 
 # Pinned from a real codex 0.130.0 capture (scripts/smoke/capture-codex-jsonl.sh).
 # DO NOT reference these literal string values outside this constants block;
@@ -139,7 +140,7 @@ def sandbox_flag(yolo: bool) -> list[str]:
     before ``exec`` - see :func:`approval_flag`.
 
     - bounded (``yolo=False``, default): ``--sandbox workspace-write`` -
-      workspace sandbox.
+      workspace sandbox with network on, so ``gh`` and the keeper socket work.
     - full yolo (``yolo=True``, explicit opt-in):
       ``--dangerously-bypass-approvals-and-sandbox`` - unsandboxed bypass. The
       two are mutually exclusive; never combine the workspace sandbox with the
@@ -147,7 +148,7 @@ def sandbox_flag(yolo: bool) -> list[str]:
     """
     if yolo:
         return ["--dangerously-bypass-approvals-and-sandbox"]
-    return ["--sandbox", "workspace-write"]
+    return ["--sandbox", "workspace-write", "-c", BOUNDED_NETWORK_OVERRIDE]
 
 
 def approval_flag(yolo: bool) -> list[str]:
@@ -820,6 +821,7 @@ def create(
     from fno.agents.harness_map import render_session_argv
 
     identity = render_session_argv("codex", "headless_create")
+    from fno.agents.mux_spawn import codex_hook_trust_args
     argv = [
         identity[0],
         *config_args,
@@ -831,6 +833,7 @@ def create(
         *git_args,
         *plan_args,
         *sandbox_flag(eff_yolo),
+        *codex_hook_trust_args(),
     ]
     if passthrough:
         from fno.agents.mux_spawn import pane_passthrough_tokens
