@@ -227,7 +227,7 @@ fn count_retraction(
             let mut h = DefaultHasher::new();
             line_no.hash(&mut h);
             line.hash(&mut h);
-            format!("line-{h:016x}")
+            format!("line-{:016x}", h.finish())
         }
     };
     let Some(blocks) = msg.and_then(|m| m.get("content")).and_then(Value::as_array) else {
@@ -309,13 +309,14 @@ pub(crate) fn r_correction_meter() -> Result<Value, String> {
             ..
         }) => {
             let mut value = correction_meter_text(&text)?;
-            if let Some(last) = value
+            let flat: Option<(Value, Value)> = value
                 .get("recent")
                 .and_then(Value::as_array)
                 .and_then(|a| a.last())
-            {
-                value["self_caught_window"] = last["self_caught"].clone();
-                value["operator_caught_window"] = last["operator_caught"].clone();
+                .map(|last| (last["self_caught"].clone(), last["operator_caught"].clone()));
+            if let Some((self_caught, operator_caught)) = flat {
+                value["self_caught_window"] = self_caught;
+                value["operator_caught_window"] = operator_caught;
             }
             Ok(value)
         }
