@@ -211,6 +211,56 @@ fn partition_held(
     (SourceRead::ok(Value::Array(kept)), held_rows)
 }
 
+/// Split dispatch-held nodes out of the undispatched feed: an active
+/// `dispatch_hold` (plan frontmatter or the node row's own field, walked
+/// through parents and contained owners) parks the node the same way an open
+/// question does, so it never renders as the next undispatched actionable
+/// row; it is named under `held` with its hold reason. The verdict is the
+/// same one `undriven_pr` reads, so one hold answers every queue alike. A
+/// feed that never answered passes through untouched, like `partition_held`.
+fn partition_dispatch_held(
+    undispatched: SourceRead,
+    entries: Option<&[Value]>,
+) -> (SourceRead, Vec<Value>) {
+    if !undispatched.is_ok() {
+        return (undispatched, Vec::new());
+    }
+    let by_id: std::collections::BTreeMap<String, Value> = entries
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|e| {
+            e.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), e.clone()))
+        })
+        .collect();
+    let (mut kept, mut held_rows) = (Vec::new(), Vec::new());
+    for mut row in undispatched.rows() {
+        let hold_entry = row
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| by_id.get(id))
+            .unwrap_or(&row);
+        let receipt = crate::backlog_ready::hold_verdict_receipt(hold_entry, &by_id);
+        if receipt.as_ref().is_some_and(|v| v.held) {
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert(
+                    "hold_reason".to_string(),
+                    json!(receipt
+                        .as_ref()
+                        .map(|v| v.reason.as_str())
+                        .unwrap_or_default()),
+                );
+                obj.insert("held_by".to_string(), json!("dispatch_hold"));
+            }
+            held_rows.push(row);
+        } else {
+            kept.push(row);
+        }
+    }
+    (SourceRead::ok(Value::Array(kept)), held_rows)
+}
+
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
 // ---------------------------------------------------------------------------
@@ -892,21 +942,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .join()
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
         };
-        // An open question whose blocks names the node holds it out of ready
-        //; the held rows land under a `held` source beside `ready`.
-        let (ready, held_rows) = partition_held(ready, &held_map);
-        if !held_rows.is_empty() {
-            sources.insert(
-                "held".to_string(),
-                json!({
-                    "ok": true,
-                    "truncated": false,
-                    "error": "",
-                    "count": held_rows.len(),
-                    "rows": held_rows,
-                }),
-            );
-        }
         let outstanding = match t_outstanding {
             None => budget.spent_read(),
             Some(h) => h
@@ -973,6 +1008,28 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             Some(rows) => SourceRead::ok(Value::Array(rows)),
             None => undispatched,
         };
+        // An open question whose blocks names the node holds it out of ready
+        //; the held rows land under a `held` source beside `ready`.
+        let (ready, mut held_rows) = partition_held(ready, &held_map);
+        // A ruling dispatch_hold parks a node the same way: it leaves the
+        // undispatched queue (never again the next actionable row) and is
+        // named under held with its hold reason. The split runs after the
+        // shape re-wrap above, on the canonical array payload rows() reads.
+        let (undispatched, dispatch_held_rows) =
+            partition_dispatch_held(undispatched, entries.as_deref());
+        held_rows.extend(dispatch_held_rows);
+        if !held_rows.is_empty() {
+            sources.insert(
+                "held".to_string(),
+                json!({
+                    "ok": true,
+                    "truncated": false,
+                    "error": "",
+                    "count": held_rows.len(),
+                    "rows": held_rows,
+                }),
+            );
+        }
         (
             undispatched,
             prs,
@@ -1620,6 +1677,47 @@ mod tests {
                 .collect();
         let (ready, held_rows) = partition_held(ready, &held);
         assert!(!ready.is_ok());
+        assert!(held_rows.is_empty());
+    }
+
+    #[test]
+    fn dispatch_hold_partition_moves_the_row_and_names_the_reason() {
+        // An active dispatch_hold parks the node: it leaves the undispatched
+        // feed and is named under held with its hold reason.
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = write_hold_plan(
+            dir.path(),
+            "dispatch_hold:\n  reason: waiting on legal\n  release_when: legal clears\n  review_on: 2099-01-01\n  set_by: operator\n",
+        );
+        let entries = vec![json!({
+            "id": "x-hold1",
+            "priority": "p1",
+            "status": "ready",
+            "plan_path": plan_path,
+        })];
+        let feed = ok_read(json!([
+            {"id": "x-free", "priority": "p1", "title": "free"},
+            {"id": "x-hold1", "priority": "p1", "title": "held dispatch"}
+        ]));
+        let (kept, held_rows) = partition_dispatch_held(feed, Some(&entries));
+        let ids: Vec<String> = kept
+            .rows()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(ids, vec!["x-free".to_string()]);
+        assert_eq!(held_rows.len(), 1);
+        assert_eq!(held_rows[0]["id"], json!("x-hold1"));
+        assert_eq!(held_rows[0]["held_by"], json!("dispatch_hold"));
+        assert_eq!(held_rows[0]["hold_reason"], json!("waiting on legal"));
+    }
+
+    #[test]
+    fn dispatch_hold_partition_never_reads_an_unreadable_feed_as_held_free() {
+        let feed = SourceRead::err("undispatched: reader panicked");
+        let (kept, held_rows) = partition_dispatch_held(feed, None);
+        assert!(!kept.is_ok());
         assert!(held_rows.is_empty());
     }
 
