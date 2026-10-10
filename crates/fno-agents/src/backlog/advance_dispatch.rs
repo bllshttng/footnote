@@ -377,7 +377,7 @@ pub fn spawn_worker(
     brief: Option<&str>,
     _dispatch_account: Option<&str>,
     dispatch_reservation: Option<(&str, &str)>,
-    _caller: &str,
+    caller: &str,
     source: Option<&str>,
     events_path: Option<&Path>,
 ) -> Result<SpawnOk, SpawnOutcome> {
@@ -409,6 +409,7 @@ pub fn spawn_worker(
         "verb": args.verb.clone(),
         "verb_source": args.verb_source.clone(),
         "cwd": args.node_cwd.clone().unwrap_or_default(),
+        "caller": caller,
         "grid": args.grid_reason.clone().unwrap_or_default(),
         "decision": args.decision.join("; "),
     });
@@ -600,6 +601,9 @@ pub fn spawn_worker(
             }
         });
         let _ = crate::dispatch_credit::launch_credit_mail(&ask);
+    }
+    if let Some(obj) = row.as_object_mut() {
+        obj.insert("notes".to_string(), json!(notes));
     }
     let short = finish_spawn(&row, events_path, None, &notes);
     Ok((short, row))

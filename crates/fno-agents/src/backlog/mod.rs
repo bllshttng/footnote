@@ -52,6 +52,7 @@ pub mod pr_link;
 pub(crate) mod promise;
 pub mod provenance_cli;
 pub mod pull_requests;
+pub mod quota_route;
 pub mod rank_cli;
 pub mod receipt;
 pub(crate) mod reconcile_cli;

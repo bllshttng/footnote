@@ -1848,3 +1848,469 @@ pub fn advance_dependents(
         })
         .collect()
 }
+
+/// One advance() call's inputs: the closed node (merge-triggered), the
+/// project scope, and the operator's in-the-moment pins.
+#[derive(Debug, Clone, Default)]
+pub struct AdvanceInput<'a> {
+    pub closed_node_id: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub project_root: Option<&'a Path>,
+    pub events_path: Option<&'a Path>,
+    pub verbose: bool,
+    pub model: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub source: Option<&'a str>,
+}
+
+/// The control-plane tick row: one auto-continue arm line in the loop
+/// journal the readouts fold. Best-effort; the emitter bounds one row.
+fn control_plane_tick(arm: &str, acted: u64, skip_reason: Option<&str>, detail: Option<&str>) {
+    let scheduler = std::env::var("FNO_CONTROL_PLANE_SCHEDULER")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "session".to_string());
+    let mut data = json!({
+        "arm": arm,
+        "scheduler": scheduler,
+        "acted": acted,
+        "interval_s": 1800,
+    });
+    if let Some(obj) = data.as_object_mut() {
+        match skip_reason {
+            Some(reason) => {
+                obj.insert("skip_reason".to_string(), Value::from(reason));
+            }
+            None => {
+                obj.insert("skip_reason".to_string(), Value::Null);
+            }
+        }
+        match detail {
+            Some(text) => {
+                obj.insert(
+                    "detail".to_string(),
+                    Value::from(text.chars().take(4000).collect::<String>()),
+                );
+            }
+            None => {
+                obj.insert("detail".to_string(), Value::Null);
+            }
+        }
+    }
+    let path = match std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
+        Some(pin) => PathBuf::from(pin),
+        None => {
+            let Some(dir) = crate::backlog::settings::state_dir() else {
+                return;
+            };
+            dir.join("events.jsonl")
+        }
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let row = json!({
+        "ts": crate::provider_cap::epoch_to_rfc3339(now_ms_i64() / 1000),
+        "type": "control_plane_tick",
+        "source": "daemon",
+        "data": data,
+    });
+    let mut line = row.to_string();
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Best-effort touch of the daemon's wake nudge sentinel: a successor may
+/// now be unblocked. The poll floor is the guarantee; this is latency only.
+fn touch_nudge() {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let path = home.join(".fno").join("state").join("active-backlog-nudge");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
+}
+
+/// Dispatch the next now-unblocked node, if armed and unclaimed.
+///
+/// A dispatch-time model/provider is the operator's in-the-moment word and
+/// outranks the node's own annotation. `source` stamps the worker's name:
+/// the merge-triggered continuation passes "ac"; a bare attended call
+/// passes nothing. Invoked only after the node-close write commits, so the
+/// closed node is already reflected before next is read. Emits exactly one
+/// decision event and is strictly non-fatal: any failure resolves to a
+/// skipped or failed result and the host op continues.
+pub fn advance(input: &AdvanceInput) -> AdvanceResult {
+    let ev_path_owned = advance_events_path(input.project_root);
+    let ev_path = input.events_path.or(ev_path_owned.as_deref());
+    // Resolved ONCE (armed AND rank together): two independent calls could
+    // observe different env/config state between them, stamping a rank that
+    // does not describe the armed value it is attached to.
+    let (armed, rank) = auto_continue_resolve(input.project_root);
+    let closed_node_id = input.closed_node_id;
+
+    let tick = |acted: u64, skip_reason: Option<&str>, detail: &str| {
+        let detail = if detail.is_empty() {
+            format!("closed={}", closed_node_id.unwrap_or("-"))
+        } else {
+            format!("closed={} {detail}", closed_node_id.unwrap_or("-"))
+        };
+        control_plane_tick("auto_continue", acted, skip_reason, Some(&detail));
+    };
+
+    let skip = |reason: &str,
+                node_id: Option<&str>,
+                detail: Option<&str>,
+                provider: Option<&str>,
+                retry_at: Option<f64>,
+                exit_code: Option<i32>|
+     -> AdvanceResult {
+        let mut data = json!({ "reason": reason, "rank": rank });
+        if let Some(obj) = data.as_object_mut() {
+            if let Some(c) = closed_node_id {
+                obj.insert("closed_node_id".to_string(), Value::from(c));
+            }
+            if let Some(n) = node_id {
+                obj.insert("node_id".to_string(), Value::from(n));
+            }
+            if let Some(p) = provider {
+                obj.insert("provider".to_string(), Value::from(p));
+            }
+            if let Some(r) = retry_at {
+                obj.insert("retry_at".to_string(), json!(r));
+            }
+            if let Some(c) = exit_code {
+                obj.insert("exit_code".to_string(), json!(c));
+            }
+            if let Some(d) = detail {
+                obj.insert(
+                    "detail".to_string(),
+                    Value::from(d.chars().take(200).collect::<String>()),
+                );
+            }
+        }
+        advance_emit(EVENT_SKIPPED, data, ev_path);
+        let mut tick_detail = format!("node={} reason={reason}", node_id.unwrap_or("-"));
+        if let Some(d) = detail {
+            tick_detail.push_str(&format!(" detail={d}"));
+        }
+        tick(0, Some(reason), &tick_detail);
+        AdvanceResult {
+            decision: "skipped".to_string(),
+            event: EVENT_SKIPPED,
+            reason: Some(reason.to_string()),
+            node_id: node_id.map(str::to_string),
+            short_id: None,
+            detail: detail.map(str::to_string),
+            exit_code,
+            substrate: None,
+            notes: Vec::new(),
+        }
+    };
+
+    let failed = |node_id: &str, error: &str| -> AdvanceResult {
+        let mut data = json!({
+            "node_id": node_id,
+            "error": error.chars().take(400).collect::<String>(),
+            "rank": rank,
+        });
+        if let (Some(obj), Some(c)) = (data.as_object_mut(), closed_node_id) {
+            obj.insert("closed_node_id".to_string(), Value::from(c));
+        }
+        advance_emit(EVENT_FAILED, data, ev_path);
+        tick(
+            0,
+            Some("spawn-failed"),
+            &format!("node={node_id} error={error}"),
+        );
+        AdvanceResult {
+            decision: "failed".to_string(),
+            event: EVENT_FAILED,
+            reason: Some("spawn-failed".to_string()),
+            node_id: Some(node_id.to_string()),
+            short_id: None,
+            detail: Some(error.to_string()),
+            exit_code: None,
+            substrate: None,
+            notes: Vec::new(),
+        }
+    };
+
+    // 1. Armed?
+    if !armed {
+        return skip("disabled", None, None, None, None, None);
+    }
+
+    // 2. A live walk already owns this project -> let it pick the node up.
+    if walker_key().map(|k| claim_is_live(&k)).unwrap_or(false) {
+        return skip("walker-live", None, None, None, None, None);
+    }
+
+    // 3. Next ready node (project-scoped). Never guess on error.
+    let node = match next_node(input.project) {
+        Err(e) => {
+            if e.contains("unmeasured") {
+                return skip("select-unmeasured", None, Some(&e), None, None, None);
+            }
+            return skip("next-error", None, Some(&e), None, None, None);
+        }
+        Ok(None) => return skip("no-work", None, None, None, None, None),
+        Ok(Some(n)) => n,
+    };
+    let Some(node_id) = node.get("id").and_then(Value::as_str).map(str::to_string) else {
+        return skip("no-work", None, None, None, None, None);
+    };
+    let node_cwd = node
+        .get("_resolved_cwd")
+        .and_then(Value::as_str)
+        .or_else(|| node.get("cwd").and_then(Value::as_str))
+        .map(str::to_string);
+
+    // 4. Already being worked? A live node claim means a worker is running;
+    //    a live dispatch reservation means a peer advance is mid-flight.
+    if let Some(reason) = node_dispatch_block_reason(&node_id, node_cwd.as_deref()) {
+        return skip(&reason, Some(&node_id), None, None, None, None);
+    }
+
+    // 4b. Quota-aware defer. advance IS an autonomous path, so it may defer
+    //     when the resolved provider has no headroom and defer_dispatch is
+    //     on. Fail-open + opt-in: off by default, p0 never defers. The
+    //     route decision shares the spawn door's provider precedence so the
+    //     quota decision evaluates the provider the worker will actually
+    //     run on.
+    let mut failover_record: Option<String> = None;
+    let mut failover_harness: Option<String> = None;
+    let mut failover_from: Option<String> = None;
+    let mut failover_window: Option<String> = None;
+    let mut failover_reason: Option<String> = None;
+    {
+        let provider_id = input
+            .provider
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                node.get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                let cwd = node_cwd.as_deref().unwrap_or(".");
+                crate::agents_config::config_lookup(Path::new(cwd), &["providers", "active"])
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_default();
+        let pinned = super::quota_route::launch_is_pinned(
+            &node,
+            input.provider,
+            input.model,
+            node_cwd.as_deref(),
+        );
+        let route = super::quota_route::select_autonomous_route(
+            &provider_id,
+            node.get("priority").and_then(Value::as_str),
+            pinned,
+            node_cwd.as_deref(),
+            Some(&node_id),
+            super::quota_route::now_secs(),
+        );
+        if route.action == "defer" {
+            return skip(
+                "quota-deferred",
+                Some(&node_id),
+                None,
+                Some(&route.source_record),
+                route.retry_at,
+                None,
+            );
+        }
+        if route.action == "cutover" {
+            failover_record = route.record_id.clone();
+            failover_harness = route.harness.clone();
+            failover_from = Some(route.source_record.clone());
+            failover_window = route.window.clone();
+            failover_reason = Some(route.reason.clone());
+        }
+    }
+
+    // 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
+    let dispatch_key = format!("dispatch:{node_id}");
+    let holder = format!("advance:{}", std::process::id());
+    match crate::claims::acquire(
+        &dispatch_key,
+        &holder,
+        crate::claims::AcquireOpts {
+            ttl_ms: Some(DISPATCH_TTL_MS as i64),
+            reason: Some(format!("auto-continue dispatch for {node_id}")),
+            ..Default::default()
+        },
+    ) {
+        crate::claims::AcquireOutcome::Acquired(_) => {}
+        crate::claims::AcquireOutcome::Error(e) => {
+            return skip("claim-error", Some(&node_id), Some(&e), None, None, None);
+        }
+        _ => return skip("already-claimed", Some(&node_id), None, None, None, None),
+    }
+
+    // 6. Spawn the worker. On any failure, release the reservation so the
+    //    node stays re-dispatchable. The release is non-raising so the
+    //    decision event below always lands.
+    let eff_provider: Option<&str> = if failover_record.is_some() {
+        // --provider is the HARNESS (a record id would be rejected by the
+        // spawn front door's known-provider gate); the account rides
+        // --dispatch-account, which the front door resolves and applies
+        // where the harness is exec'd.
+        failover_harness.as_deref()
+    } else {
+        input
+            .provider
+            .or_else(|| node.get("provider").and_then(Value::as_str))
+    };
+    let brief = super::autobrief::resolve_dispatch_brief(&node);
+    let model = super::advance_dispatch::node_model(&node, input.model, eff_provider, false);
+    let spawn_outcome = super::advance_dispatch::spawn_worker(
+        &node_id,
+        node_cwd.as_deref().unwrap_or("."),
+        node.get("slug")
+            .or_else(|| node.get("title"))
+            .and_then(Value::as_str),
+        &node,
+        model.as_deref(),
+        eff_provider,
+        failover_harness.as_deref(),
+        node.get("dispatch_verb").and_then(Value::as_str),
+        brief.text.as_deref(),
+        failover_record.as_deref(),
+        Some((dispatch_key.as_str(), holder.as_str())),
+        "advance",
+        input.source,
+        ev_path,
+    );
+    let spawn_row = match spawn_outcome {
+        Ok(v) => v,
+        Err(super::advance_dispatch::SpawnOutcome::AlreadyRunning(msg)) => {
+            safe_release(&dispatch_key, &holder);
+            return skip(
+                "already-claimed",
+                Some(&node_id),
+                Some(&msg),
+                None,
+                None,
+                None,
+            );
+        }
+        Err(super::advance_dispatch::SpawnOutcome::Failed(err)) => {
+            safe_release(&dispatch_key, &holder);
+            if let Some(refusal) = err.gate_refusal() {
+                return skip(
+                    &refusal.reason,
+                    Some(&node_id),
+                    Some(&refusal.detail),
+                    None,
+                    refusal.retry_at,
+                    Some(refusal.exit_code),
+                );
+            }
+            return failed(&node_id, &err.message);
+        }
+    };
+    let (short_id, spawn_receipt) = spawn_row;
+
+    // 7. Dispatched. Leave dispatch:<id> to expire by TTL: the worker now
+    //    owns (or is acquiring) node:<id>, which guards later dispatches.
+    if let Some(record) = &failover_record {
+        // The cutover receipt (from -> to), emitted only now that a worker
+        // actually launched. Paired with the advance_dispatched below, not
+        // a competing decision.
+        advance_emit(
+            EVENT_FAILOVER,
+            json!({
+                "node_id": node_id,
+                "from": failover_from.clone().unwrap_or_default(),
+                "to": record,
+                "harness_to": failover_harness.clone().unwrap_or_default(),
+                "window": failover_window.clone().unwrap_or_default(),
+                "reason": failover_reason.clone().unwrap_or_default(),
+            }),
+            ev_path,
+        );
+    }
+    let mut dispatched = json!({
+        "node_id": node_id,
+        "short_id": short_id,
+        "agent_name": spawn_receipt.get("agent_name").cloned().unwrap_or_default(),
+        "verb": spawn_receipt.get("verb").cloned().unwrap_or(Value::from("builtin")),
+        "verb_source": spawn_receipt
+            .get("verb_source")
+            .cloned()
+            .unwrap_or(Value::from("field-absent")),
+        "brief": brief.tag.clone(),
+        "rank": rank,
+        "notes": spawn_receipt.get("notes").cloned().unwrap_or(json!([])),
+    });
+    if let (Some(obj), Some(c)) = (dispatched.as_object_mut(), closed_node_id) {
+        obj.insert("closed_node_id".to_string(), Value::from(c));
+    }
+    advance_emit(EVENT_DISPATCHED, dispatched, ev_path);
+    if input.verbose {
+        eprintln!(
+            "advance: dispatched {node_id} -> target worker {short_id} (verb={} source={} brief={})",
+            spawn_receipt
+                .get("verb")
+                .and_then(Value::as_str)
+                .unwrap_or("builtin"),
+            spawn_receipt
+                .get("verb_source")
+                .and_then(Value::as_str)
+                .unwrap_or("field-absent"),
+            brief.tag,
+        );
+    }
+    // The same word the drain readout renders: a dispatch into a kingless
+    // territory names it on the arm line an operator reads.
+    let mut tick_detail = format!("node={node_id} worker={short_id}");
+    if spawn_receipt.get("kingless").and_then(Value::as_bool) == Some(true) {
+        tick_detail.push_str(" kingless");
+    }
+    tick(1, None, &tick_detail);
+    touch_nudge();
+    AdvanceResult {
+        decision: "dispatched".to_string(),
+        event: EVENT_DISPATCHED,
+        reason: None,
+        node_id: Some(node_id),
+        short_id: Some(short_id),
+        detail: None,
+        exit_code: None,
+        substrate: spawn_receipt
+            .get("substrate")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        notes: spawn_receipt
+            .get("notes")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
