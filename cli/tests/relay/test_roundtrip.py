@@ -23,6 +23,7 @@ import pwd
 
 import pytest
 
+from fno.agents.registry import SCHEMA_VERSION
 from fno.relay import roundtrip as rt_mod
 
 
@@ -128,7 +129,7 @@ def test_transcript_replies_honors_config_dir(tmp_path):
 
 def _write_registry(home, rows):
     home.mkdir(parents=True, exist_ok=True)
-    (home / "registry.json").write_text(json.dumps({"agents": rows}))
+    (home / "registry.json").write_text(json.dumps({"schema_version": SCHEMA_VERSION, "agents": rows}))
 
 
 def test_resolve_worker_matches_live_interactive_claude(tmp_path, monkeypatch):

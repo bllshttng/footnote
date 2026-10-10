@@ -84,11 +84,24 @@ pub(crate) fn quiet_retire_reason(
 }
 
 /// The registry's write stamp for the probe race: the table revision once
-/// imported (no file stat moves then), the file stamp before.
+/// imported (no file stat moves then), the file stamp before. The table read
+/// is a read-only open, which never waits on a writer under WAL, because the
+/// daemon's select loop calls this.
 pub(crate) fn registry_stamp(home: &AgentsHome) -> Option<serde_json::Value> {
-    crate::registry_store::watch_version(&home.registry_json())
+    let path = home.registry_json();
+    if !crate::registry_read::table_owns(&path) {
+        return crate::registry_store::watch_version(&path).ok().flatten();
+    }
+    let database = crate::registry_read::database_path(&path)?;
+    crate::store_conn::open_read(&database)
+        .ok()?
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM registry_meta WHERE key='revision'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
         .ok()
-        .flatten()
+        .map(serde_json::Value::from)
 }
 
 /// The freshness gate a probe verdict must pass before it may retire the

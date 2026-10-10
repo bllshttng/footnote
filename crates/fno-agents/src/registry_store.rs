@@ -89,13 +89,17 @@ fn refence_stray_file(path: &Path) -> Result<(), StateError> {
     let snapshots = parent.join("registry-snapshots");
     std::fs::create_dir_all(&snapshots)?;
     match std::fs::create_dir(&pending) {
-        Ok(()) => {
-            let marker =
-                json!({"storage":"graph.db", "remedy":"upgrade fno to read the registry table"});
-            std::fs::write(pending.join("migration.json"), serde_json::to_vec(&marker)?)?;
-        }
+        Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
+    }
+    // A pending dir an earlier attempt left may lack its marker; a fence
+    // without one fails every later import.
+    let marker_path = pending.join("migration.json");
+    if !marker_path.is_file() {
+        let marker =
+            json!({"storage":"graph.db", "remedy":"upgrade fno to read the registry table"});
+        std::fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
     }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

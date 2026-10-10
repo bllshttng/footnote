@@ -8,6 +8,7 @@ claude sessions in, and let a persisted peer win a session-id clash.
 from __future__ import annotations
 
 from fno.agents.discover import DiscoveredSession
+from fno.agents.registry import SCHEMA_VERSION
 from fno.relay import registry as reg
 from fno.relay.registry import RegistryEntry
 
@@ -166,7 +167,9 @@ def test_unknown_persisted_peer_keeps_confirmable_inject_handle(
 
 def _write_agents_registry(home, rows):
     home.mkdir(parents=True, exist_ok=True)
-    (home / "registry.json").write_text(__import__("json").dumps({"agents": rows}))
+    (home / "registry.json").write_text(
+        __import__("json").dumps({"schema_version": SCHEMA_VERSION, "agents": rows})
+    )
 
 
 def _no_discovery(monkeypatch):
