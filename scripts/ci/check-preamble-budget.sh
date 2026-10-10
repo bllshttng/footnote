@@ -207,7 +207,7 @@ set -euo pipefail
 # own hook, not the CLI), so the installing-vs-failed states, the log path and
 # the locked fix have to live there. The ceiling follows the measurement up,
 # zero spare (the baseline sat 2 under the old ceiling, so 40298 + 510).
-CEILING_BYTES=40808
+CEILING_BYTES=41128
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

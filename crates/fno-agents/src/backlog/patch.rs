@@ -657,6 +657,25 @@ fn stamp_deferred(
     id: &str,
     changes: &mut Vec<Change>,
 ) -> Result<(), PatchRefusal> {
+    // F7: a session may not defer the node it holds. The holder deferring
+    // its own node is exactly the self-cleanup that once left a stale-plan
+    // node ownerless; the refusal names the routed step instead. A
+    // lead (any other session, or an unattributed ambient) defers as
+    // today.
+    let (_, my_session) = crate::claims::resolve_identity();
+    let holder_ids = [
+        entry
+            .get("locked_by_harness_session")
+            .and_then(Value::as_str),
+        entry.get("locked_by").and_then(Value::as_str),
+    ];
+    if let Some(me) = my_session.as_deref().filter(|s| !s.trim().is_empty()) {
+        if holder_ids.iter().any(|h| *h == Some(me)) {
+            return Err(PatchRefusal::refused(format!(
+                "refused: a session may not defer the node it holds ({id}). Emit <help class=... reason=... evidence=...> and take the routed step."
+            )));
+        }
+    }
     let reason_blank = entry
         .get("deferred_reason")
         .map(|v| v.as_str().map(str::trim).unwrap_or("").is_empty() || v.is_null())

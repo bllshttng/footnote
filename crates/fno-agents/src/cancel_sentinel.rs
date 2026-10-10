@@ -31,6 +31,11 @@ pub(crate) struct CancelHit {
     pub path: PathBuf,
     pub author: Option<String>,
     pub reason: Option<String>,
+    /// Who invoked the cancel: `user` when the newest user entry carries
+    /// the cancel verb, `assistant` when the session itself asked (F6: a
+    /// self-cancel is a stuck signal, not a stop). Advisory; the loop
+    /// check re-derives it from the transcript at honor time.
+    pub via: Option<String>,
 }
 
 impl CancelHit {
@@ -66,16 +71,25 @@ impl CancelHit {
     }
 }
 
-/// Parse `author:` / `reason:` lines out of a sentinel payload. First
-/// occurrence wins; unknown lines are ignored; both sides may be None.
-pub(crate) fn parse_cancel_payload(content: &str) -> (Option<String>, Option<String>) {
+/// Parse `author:` / `reason:` / `via:` lines out of a sentinel payload.
+/// First occurrence wins; unknown lines are ignored; all three may be None.
+pub(crate) fn parse_cancel_payload(
+    content: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
     let mut author = None;
     let mut reason = None;
+    let mut via = None;
     for line in content.lines() {
         let line = line.trim();
         if author.is_none() {
             if let Some(value) = line.strip_prefix("author:") {
                 author = Some(value.trim().to_string());
+                continue;
+            }
+        }
+        if via.is_none() {
+            if let Some(value) = line.strip_prefix("via:") {
+                via = Some(value.trim().to_string());
                 continue;
             }
         }
@@ -85,7 +99,7 @@ pub(crate) fn parse_cancel_payload(content: &str) -> (Option<String>, Option<Str
             }
         }
     }
-    (author, reason)
+    (author, reason, via)
 }
 
 pub(crate) fn check_cancel_sentinel(
@@ -133,14 +147,15 @@ pub(crate) fn check_cancel_sentinel(
 }
 
 fn read_hit(path: &Path, kind: CancelKind) -> CancelHit {
-    let (author, reason) = std::fs::read_to_string(path)
+    let (author, reason, via) = std::fs::read_to_string(path)
         .map(|content| parse_cancel_payload(&content))
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
     CancelHit {
         kind,
         path: path.to_path_buf(),
         author,
         reason,
+        via,
     }
 }
 
@@ -150,33 +165,34 @@ mod tests {
 
     #[test]
     fn empty_payload_is_unattributed() {
-        let (author, reason) = parse_cancel_payload("");
+        let (author, reason, via) = parse_cancel_payload("");
         assert_eq!(author, None);
         assert_eq!(reason, None);
+        assert_eq!(via, None);
     }
 
     #[test]
-    fn author_and_reason_lines_parse() {
-        let (author, reason) = parse_cancel_payload("author: operator\nreason: wrong direction\n");
+    fn author_reason_and_via_lines_parse() {
+        let (author, reason, via) =
+            parse_cancel_payload("author: operator\nreason: wrong direction\nvia: user\n");
         assert_eq!(author.as_deref(), Some("operator"));
         assert_eq!(reason.as_deref(), Some("wrong direction"));
+        assert_eq!(via.as_deref(), Some("user"));
+        // First occurrence wins; unknown lines are ignored.
+        let (author, reason, via) = parse_cancel_payload(
+            "note: hello\nauthor: first\nauthor: second\nreason: r1\nreason: r2\nvia: assistant\nvia: user\n",
+        );
+        assert_eq!(author.as_deref(), Some("first"));
+        assert_eq!(reason.as_deref(), Some("r1"));
+        assert_eq!(via.as_deref(), Some("assistant"));
     }
 
     #[test]
     fn reason_value_may_contain_colons_and_blank_lines_are_skipped() {
-        let (author, reason) =
+        let (author, reason, _via) =
             parse_cancel_payload("\nauthor: init\n\nreason: claim held by other: session X\n");
         assert_eq!(author.as_deref(), Some("init"));
         assert_eq!(reason.as_deref(), Some("claim held by other: session X"));
-    }
-
-    #[test]
-    fn first_occurrence_wins_and_unknown_lines_are_ignored() {
-        let (author, reason) = parse_cancel_payload(
-            "note: hello\nauthor: first\nauthor: second\nreason: r1\nreason: r2\n",
-        );
-        assert_eq!(author.as_deref(), Some("first"));
-        assert_eq!(reason.as_deref(), Some("r1"));
     }
 
     #[test]
@@ -186,6 +202,7 @@ mod tests {
             path: PathBuf::from("/tmp/s"),
             author: author.map(str::to_string),
             reason: reason.map(str::to_string),
+            via: None,
         };
         assert_eq!(
             hit(Some("op"), Some("why")).attribution(),

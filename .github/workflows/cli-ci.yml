@@ -28,6 +28,8 @@ on:
       - schemas/**
       # The cargo job diffs this generated document against its source.
       - docs/harnesses/capability-matrix.md
+      # The cargo job diffs this generated page against its renderer.
+      - docs/architecture/help-routing.md
       # The cargo job reads its generated-copy path list from this manifest.
       - generated-artifacts.tsv
       # The cargo job compiles this registry into the supervisor classification test.

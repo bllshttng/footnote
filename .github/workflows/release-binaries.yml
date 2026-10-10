@@ -1,8 +1,7 @@
 name: release-binaries
 
-# Build standalone platform binaries (the `fno` front door, all three
-# `fno-agents` binaries, and the `footnote` harness binary) into one tarball
-# per platform. Build-only: this
+# Build standalone platform binaries (the `fno` front door and all three
+# `fno-agents` binaries) into one tarball per platform. Build-only: this
 # workflow publishes nothing. It runs on manual dispatch (an inspection
 # build) or as a reusable workflow called from release.yml, which owns every
 # publish leg behind the `release` environment approval, and from

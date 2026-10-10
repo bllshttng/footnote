@@ -150,7 +150,7 @@ Preferred (claude): a JSON object in a fenced ```json block (or `<result>{...}</
 
 ### Deviation rules
 
-Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> implement, note it. Architecture decision or missing dependency -> STOP, emit `<help>`. Under a beastmode grant (`authority: full`) that last rule inverts: decide, append to the `## Autonomous Decisions` ledger, continue; genuine blockers still stop. [skills/target/SKILL.md](skills/target/SKILL.md#authority-the-beastmode-grant).
+Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> implement, note it. Architecture decision or missing dependency -> emit `<help class=... reason=... evidence=...>` and take the routed step. The 12 classes route at docs/architecture/help-routing.md. The classes: stale-plan, missing-prereq, ci-red, stuck, held, wait, env-denied, gate-deadlock, gate-unsatisfiable, question, budget, unclassified. STOP only for irreversible, money, public surface, or taste. Under a beastmode grant (`authority: full`) that last rule inverts: decide, append to the `## Autonomous Decisions` ledger, continue. Genuine blockers still stop. [skills/target/SKILL.md](skills/target/SKILL.md#authority-the-beastmode-grant).
 
 ## CLI subsystems (summary + doc)
 

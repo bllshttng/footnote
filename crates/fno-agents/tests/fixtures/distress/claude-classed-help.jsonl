@@ -1,0 +1,3 @@
+{"message":{"role":"user","content":"implement wave 2"},"uuid":"u-0","timestamp":"2026-10-06T10:00:00Z"}
+{"message":{"role":"assistant","content":[{"type":"text","text":"Working on it. <help class=\"stuck\" reason=\"plan names a removed symbol\" evidence=\"claim_store::acquire_db has no callers\">The plan aims at claim_store::acquire_db; nothing calls it since 4cd15ec808.</help>"}]},"uuid":"u-assistant-early"}
+{"message":{"role":"assistant","content":[{"type":"text","text":"Also checked the registry table the plan cites; it does not exist. Reporting the blocker in my final message instead."}]},"uuid":"u-assistant-late"}

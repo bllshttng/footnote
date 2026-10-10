@@ -93,9 +93,9 @@ fn sentinel_cancelled(path: &Path, clear_hint: String) -> Cancelled {
                 .unwrap_or_default()
                 .as_secs()
         });
-    let (author, reason) = fs::read_to_string(path)
+    let (author, reason, _via) = fs::read_to_string(path)
         .map(|content| crate::cancel_sentinel::parse_cancel_payload(&content))
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
     Cancelled {
         cause: "sentinel",
         path: Some(path.to_path_buf()),

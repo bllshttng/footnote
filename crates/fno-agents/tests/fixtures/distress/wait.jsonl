@@ -1,0 +1,2 @@
+{"message": {"role": "user", "content": "go"}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "<help class=\"wait\" reason=\"waiting on a CI settle before the next step\" evidence=\"fixture\">routed</help>"}]}, "uuid": "fixture-wait-1"}
