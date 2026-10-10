@@ -2428,12 +2428,13 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
 }
 
 /// The status footer's reading and the store keeper's path note, from ONE
-/// footprint probe: `(machine line, keeper note)`. Both best-effort
+/// footprint answer, a live probe or a fresh persisted one: `(machine line,
+/// keeper note)`. Both best-effort
 /// - a machine whose footprint cannot be read yields `(None, None)`, never a
 /// stale or fabricated line.
 pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
     // ONE parse serves both notes; the raw string is never read twice.
-    let payload: Option<FootprintCausePayload> = footprint_cause_raw()
+    let payload: Option<FootprintCausePayload> = footprint_cause_cached(FOOTPRINT_CACHE_FRESH)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
     let home = crate::paths::AgentsHome::from_env();
@@ -2497,7 +2498,71 @@ pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     let argv = footprint_probe_argv().ok_or_else(|| {
         "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
     })?;
-    footprint_cause_raw_with(&argv, FOOTPRINT_PROBE_BUDGET)
+    let raw = footprint_cause_raw_with(&argv, FOOTPRINT_PROBE_BUDGET)?;
+    persist_footprint_cache(&raw);
+    Ok(raw)
+}
+
+/// Freshness window for a persisted probe answer reused on the status path:
+/// two daemon ticks. The machine_sample row the same footer renders is
+/// already at most one tick old, so a two-tick-old spare-pool reading stays
+/// in the freshness class that line has always shown.
+const FOOTPRINT_CACHE_FRESH: Duration = Duration::from_secs(600);
+
+/// Persist a parseable probe answer (`paths.footprint_cache_json`) so readers
+/// can serve it without re-paying the probe child's measurement window.
+/// Best-effort: a failed write just leaves the next reader on the live path,
+/// which writes the row again.
+fn persist_footprint_cache(raw: &str) {
+    let payload: Value = match serde_json::from_str(raw) {
+        Ok(payload) => payload,
+        // An unparseable reading is a fact about this run; never cache it.
+        Err(_) => return,
+    };
+    let home = crate::paths::AgentsHome::from_env();
+    let row = serde_json::json!({
+        "written_at": chrono::Utc::now().to_rfc3339(),
+        "payload": payload,
+    });
+    let _ = std::fs::write(home.footprint_cache_json(), row.to_string());
+}
+
+/// The persisted payload string when the cache row is readable and was
+/// written inside `max_age`; `None` on a miss, a stale row, a future-stamped
+/// row, or anything unparseable. Every failure mode degrades to the live
+/// probe.
+fn fresh_footprint_cache(max_age: Duration) -> Option<String> {
+    let home = crate::paths::AgentsHome::from_env();
+    let raw = std::fs::read_to_string(home.footprint_cache_json()).ok()?;
+    let row: Value = serde_json::from_str(&raw).ok()?;
+    let written = chrono::DateTime::parse_from_rfc3339(row.get("written_at")?.as_str()?).ok()?;
+    let age = chrono::Utc::now()
+        .signed_duration_since(written)
+        .to_std()
+        .ok()?;
+    if age > max_age {
+        return None;
+    }
+    let payload = row.get("payload")?;
+    Some(payload.to_string())
+}
+
+/// [`footprint_cause_raw`] with reuse: a probe answer another process paid
+/// for inside `max_age` serves the reader without spawning the probe child.
+/// A miss falls through to the live probe, which refreshes the cache on its
+/// way out. Test seams route to the raw path untouched.
+pub(crate) fn footprint_cause_cached(max_age: Duration) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        let seamed = |var: &str| std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false);
+        if seamed("FNO_TEST_FOOTPRINT_PAYLOAD") || seamed("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ") {
+            return footprint_cause_raw();
+        }
+    }
+    match fresh_footprint_cache(max_age) {
+        Some(raw) => Ok(raw),
+        None => footprint_cause_raw(),
+    }
 }
 
 /// The transport, split from [`footprint_cause_raw`] so tests can pass a

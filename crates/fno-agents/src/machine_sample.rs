@@ -431,8 +431,21 @@ impl MachineSample {
     }
 }
 
+/// How far back the cheap tail read reaches before falling back to the full
+/// journal: machine_sample rows land once per daemon tick (300s), so an 8MB
+/// window holds one unless other events flooded the journal for hours.
+const NEWEST_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+
 pub fn newest(journal: &Path) -> Option<(String, Value)> {
-    let text = std::fs::read_to_string(journal).ok()?;
+    if let Some(text) = newest_tail_text(journal) {
+        if let Some(row) = newest_row(&text) {
+            return Some(row);
+        }
+    }
+    newest_row(&std::fs::read_to_string(journal).ok()?)
+}
+
+fn newest_row(text: &str) -> Option<(String, Value)> {
     text.lines().rev().find_map(|line| {
         let event: Value = serde_json::from_str(line).ok()?;
         (event.get("type")?.as_str()? == "machine_sample").then(|| {
@@ -450,6 +463,22 @@ pub fn newest(journal: &Path) -> Option<(String, Value)> {
             (id, data)
         })
     })
+}
+
+fn newest_tail_text(journal: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = std::fs::metadata(journal).ok()?.len();
+    if len <= NEWEST_TAIL_BYTES {
+        return None;
+    }
+    let mut file = std::fs::File::open(journal).ok()?;
+    file.seek(SeekFrom::Start(len - NEWEST_TAIL_BYTES)).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    match text.find('\n') {
+        Some(pos) => Some(text[pos + 1..].to_string()),
+        None => None,
+    }
 }
 
 fn display(value: Option<&Value>, digits: usize) -> String {
