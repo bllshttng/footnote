@@ -702,7 +702,7 @@ mod tests {
         let plans = plan_wakes(&teams, &projects(), &beats, &BTreeMap::new(), 55 * 60, now);
         assert!(
             plans.is_empty(),
-            "a finished check-in is the beat, not a miss: {plans:?}"
+            "a finished check-in is the beat, not a miss"
         );
     }
 
