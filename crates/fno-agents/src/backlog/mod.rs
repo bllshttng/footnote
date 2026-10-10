@@ -20,6 +20,7 @@ pub mod costs;
 pub mod create_cli;
 pub mod decisions;
 pub mod decisions_cli;
+pub mod dispatch_resolve;
 pub mod done_evidence;
 pub(crate) mod drift_emit;
 pub(crate) mod drift_scan;
