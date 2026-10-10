@@ -58,6 +58,71 @@ pub(crate) fn asset_url(crates_rev: &str, platform: &str) -> String {
     )
 }
 
+/// `fno-bin-<rev>-<platform>.tar.gz` -> Some(rev), else None.
+pub(crate) fn asset_rev(name: &str, platform: &str) -> Option<String> {
+    let rest = name.strip_prefix("fno-bin-")?;
+    let suffix = format!("-{platform}.tar.gz");
+    let rev = rest.strip_suffix(&suffix)?;
+    (!rev.is_empty() && rev.chars().all(|c| c.is_ascii_hexdigit())).then(|| rev.to_string())
+}
+
+/// The crates rev of the newest published tarball for `platform` among a
+/// bin-cache release's assets, or None when none matches. Asset names carry
+/// no order, so the pick reads each asset's upload timestamp.
+pub(crate) fn newest_published_rev(assets: &[serde_json::Value], platform: &str) -> Option<String> {
+    let mut best: Option<(&str, String)> = None;
+    for asset in assets {
+        let (Some(name), Some(created)) = (
+            asset.get("name").and_then(|v| v.as_str()),
+            asset.get("created_at").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let Some(rev) = asset_rev(name, platform) else {
+            continue;
+        };
+        if best.as_ref().map_or(true, |(c, _)| created > *c) {
+            best = Some((created, rev));
+        }
+    }
+    best.map(|(_, rev)| rev)
+}
+
+/// The bin-cache release asset list from the GitHub REST API.
+/// Unauthenticated: one read per update run; a refused read errors by name
+/// and the caller skips rather than compiles.
+pub(crate) fn fetch_release_assets() -> Result<Vec<serde_json::Value>, String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/{}",
+        release_repo(),
+        BIN_CACHE_TAG
+    );
+    let dest =
+        std::env::temp_dir().join(format!("fno-prebuilt-assets-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&dest);
+    let body = {
+        let fetched = curl_to(&url, &dest);
+        let text = std::fs::read_to_string(&dest).unwrap_or_default();
+        let _ = std::fs::remove_file(&dest);
+        fetched?;
+        text
+    };
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("the bin-cache release listing is not JSON: {e}"))?;
+    let assets = v
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or("the bin-cache release listing carries no assets array")?;
+    Ok(assets.clone())
+}
+
+/// The newest published tarball rev for `platform`, or None when the
+/// release lists none for it.
+pub(crate) fn newest_published(platform: &str) -> Result<Option<String>, String> {
+    let assets = fetch_release_assets()?;
+    Ok(newest_published_rev(&assets, platform))
+}
+
 /// The hex digest from a `sha256sum`-format line (`<hex>  <name>`).
 pub(crate) fn parse_sha_line(text: &str) -> Option<String> {
     let hex = text.split_whitespace().next()?.to_ascii_lowercase();
@@ -235,5 +300,40 @@ mod tests {
         }
         let leftovers = std::fs::read_dir(dest.path()).unwrap().count();
         assert_eq!(leftovers, BINARIES.len());
+    }
+
+    #[test]
+    fn newest_published_rev_reads_names_and_timestamps() {
+        let assets: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+            {"name": "fno-bin-aaaa1111-macos-arm64.tar.gz", "created_at": "2026-10-09T10:00:00Z"},
+            {"name": "fno-bin-bbbb2222-macos-arm64.tar.gz", "created_at": "2026-10-10T03:08:00Z"},
+            {"name": "fno-bin-cccc3333-linux-x64.tar.gz", "created_at": "2026-10-10T09:00:00Z"},
+            {"name": "release-notes.md", "created_at": "2026-10-10T09:30:00Z"},
+            {"name": "fno-bin-not-hex-macos-arm64.tar.gz", "created_at": "2026-10-10T09:40:00Z"}
+        ]"#,
+        )
+        .unwrap();
+        let rev = newest_published_rev(&assets, "macos-arm64").expect("a macos-arm64 build exists");
+        assert_eq!(rev, "bbbb2222");
+        // Another platform never wins, junk names never win.
+        assert_eq!(
+            newest_published_rev(&assets, "linux-x64"),
+            Some("cccc3333".to_string())
+        );
+        assert_eq!(newest_published_rev(&assets, "linux-arm64"), None);
+        // The name parser: platform must match exactly, rev must be hex.
+        assert_eq!(
+            asset_rev("fno-bin-bbbb2222-macos-arm64.tar.gz", "macos-arm64"),
+            Some("bbbb2222".to_string())
+        );
+        assert_eq!(
+            asset_rev("fno-bin-bbbb2222-linux-x64.tar.gz", "macos-arm64"),
+            None
+        );
+        assert_eq!(
+            asset_rev("fno-bin-not-hex-macos-arm64.tar.gz", "macos-arm64"),
+            None
+        );
     }
 }

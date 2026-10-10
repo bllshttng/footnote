@@ -311,3 +311,26 @@ fn a_second_update_joins_only_an_update_holder() {
     assert_eq!(update_holder_pid("target-session:abc"), None);
     assert_eq!(update_holder_pid("fno-update-pidX"), None);
 }
+
+#[test]
+fn rev_on_origin_main_reads_merged_local_and_unanswered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("r");
+    let path = repo.to_string_lossy().into_owned();
+    git_ok(tmp.path(), &["init", "-q", "-b", "main", &path]);
+    git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git_ok(&repo, &["rev-parse", "HEAD"]);
+    // A merged rev: origin/main points at it.
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/main", &base]);
+    assert_eq!(rev_on_origin_main(&repo, &base), Some(true));
+
+    // A local-only rev ahead of origin: not CI-buildable.
+    git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "local"]);
+    let local = git_ok(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(rev_on_origin_main(&repo, &local), Some(false));
+
+    // No resolvable origin ref: git cannot answer, refuse to compile.
+    let bare = tempfile::tempdir().unwrap();
+    git_ok(bare.path(), &["init", "-q", "-b", "main"]);
+    assert_eq!(rev_on_origin_main(bare.path(), &base), None);
+}

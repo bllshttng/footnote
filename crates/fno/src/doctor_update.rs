@@ -302,6 +302,94 @@ fn deploy_prebuilt(crates_rev: &str, bin_dir: &Path, dry_run: bool) -> Result<()
     Ok(())
 }
 
+/// The release-path arm when CI has not published the source's crates rev
+/// yet: install the newest tarball CI DID publish, never compile. The bins
+/// then trail the source honestly: the update's rev marker is left
+/// unwritten, so the staleness stays visible and the next update retries
+/// once CI publishes. Only a real deploy defect pushes to `failed`.
+fn install_newest_published_arm(
+    source: &Path,
+    subtree: Option<&str>,
+    install_root: &Path,
+    installed_rev: &str,
+    dry_run: bool,
+    failed: &mut Vec<String>,
+) -> String {
+    let want12: String = subtree
+        .map(|s| s.chars().take(12).collect())
+        .unwrap_or_default();
+    if dry_run {
+        println!(
+            "fno doctor update: would install the newest published build (the source rev {want12} has no tarball yet); never compiles"
+        );
+        return "dry-run".into();
+    }
+    let platform = match crate::update_prebuilt::platform() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "fno doctor update: CI builds no binary for this platform; NOT compiling; the bins stay as installed"
+            );
+            return "waiting-ci".into();
+        }
+    };
+    let newest_rev = match crate::update_prebuilt::newest_published(platform) {
+        Ok(Some(rev)) => rev,
+        Ok(None) => {
+            eprintln!(
+                "fno doctor update: no published build for {platform} at all; the bins stay as installed; the next update retries after CI publishes; NOT compiling"
+            );
+            return "waiting-ci".into();
+        }
+        Err(why) => {
+            eprintln!(
+                "fno doctor update: cannot list the published builds ({why}); the bins stay as installed; the next update retries; NOT compiling"
+            );
+            return "waiting-ci".into();
+        }
+    };
+    let got12: String = newest_rev.chars().take(12).collect();
+    if !installed_rev.is_empty() && installed_rev == newest_rev {
+        eprintln!(
+            "fno doctor update: the newest published build ({got12}) is already installed; waiting for CI to publish {want12}; NOT compiling"
+        );
+        return "waiting-ci".into();
+    }
+    println!(
+        "fno doctor update: the source rev {want12} has no published tarball yet; installing the newest published build {got12}; never compiles"
+    );
+    let unpacked = match crate::update_prebuilt::fetch(&newest_rev, &install_dir()) {
+        Ok(u) => u,
+        Err(why) => {
+            eprintln!(
+                "fno doctor update: the newest published build failed to download ({why}); the bins stay as installed; the next update retries; NOT compiling"
+            );
+            return "waiting-ci".into();
+        }
+    };
+    let bin_dir = install_root.join("bin");
+    let swapped = crate::update_prebuilt::swap_into(&unpacked, &bin_dir);
+    if let Some(staging) = unpacked.parent() {
+        let _ = std::fs::remove_dir_all(staging);
+    }
+    if let Err(why) = swapped {
+        eprintln!(
+            "fno doctor update: the newest published build failed to deploy ({why}); the bins stay as installed; NOT compiling"
+        );
+        return "waiting-ci".into();
+    }
+    if let Err(e) = sync_triad(&bin_dir, false) {
+        eprintln!("{e}");
+        failed.push("triad sync".into());
+        return "failed".into();
+    }
+    chained_restart_if_drifted(&bin_dir.join(triad_names()[0].clone()), false);
+    println!(
+        "fno doctor update: installed the newest published build (rev {got12}); the source rev {want12} is not published yet; the next update retries once CI publishes; NOT compiling"
+    );
+    "installed-newest-published".into()
+}
+
 fn command_for(bin: &Path, args: &[String]) -> std::io::Result<Command> {
     let mut cmd = crate::process_admission::std_command(bin);
     cmd.args(args);
@@ -323,6 +411,27 @@ fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
 
 fn source_rev(source: &Path) -> Option<String> {
     git_in(source, &["rev-parse", "HEAD"])
+}
+
+/// True when `rev` sits on the origin's main line, i.e. a rev CI's
+/// main-binaries workflow builds. None when git cannot answer (no
+/// resolvable origin ref): the caller must then refuse to compile rather
+/// than guess.
+pub(crate) fn rev_on_origin_main(repo: &Path, rev: &str) -> Option<bool> {
+    for name in ["origin/main", "origin/HEAD"] {
+        let out = crate::process_admission::std_command("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["merge-base", "--is-ancestor", rev, name])
+            .output()
+            .ok()?;
+        match out.status.code() {
+            Some(0) => return Some(true),
+            Some(1) => return Some(false),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The last commit that touched crates/ (not HEAD: Python-only commits never
@@ -1187,12 +1296,37 @@ fn refresh_rust_bins(
         None => Err("the crates/ rev is unknown".to_string()),
     };
     if let Err(why) = &prebuilt {
-        println!("fno doctor update: no CI build to install ({why}); compiling from source");
+        println!("fno doctor update: no CI build to install ({why})");
     }
     if dry_run && prebuilt.is_ok() {
         return "dry-run".into();
     }
     if prebuilt.is_err() {
+        let on_main = subtree
+            .as_deref()
+            .and_then(|st| rev_on_origin_main(src_parent, st));
+        // Release/agent path: the rev is merged, so CI builds it and the
+        // missing tarball is publish lag, never a compile trigger (a
+        // post-merge reconcile once burned 7+ minutes on cargo build at
+        // load 311). Take the newest published build or wait, named.
+        if on_main == Some(true) {
+            return install_newest_published_arm(
+                source,
+                subtree.as_deref(),
+                &install_root,
+                &installed_rev,
+                dry_run,
+                failed,
+            );
+        }
+        if on_main.is_none() {
+            eprintln!(
+                "fno doctor update: cannot prove the crates rev is CI-built (origin line unreadable); NOT compiling; the bins stay as installed; force a local build by hand with `cargo install --path <src>/crates/fno-agents`"
+            );
+            render_component_evidence(source, subtree.as_deref(), &install_root);
+            return "skipped-no-origin".into();
+        }
+        // Dev rev (not merged): CI never built it, compile stays the path.
         if which_cargo().is_none() {
             eprintln!(
                 "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping"
