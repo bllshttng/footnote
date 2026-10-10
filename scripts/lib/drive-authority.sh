@@ -12,7 +12,7 @@
 # (Wave 4): `--json` reports every open authority window
 # (interactive/step/paranoid; "watch" is read-only and excluded), reading each
 # agent's daemon-owned state.json. This module is the bash consumption seam the
-# Python-layer stop hook + graph-write-protect hook call.
+# Python-layer stop hook + write-gate hook call.
 #
 # ── Session scoping by per-agent identity (cv-140f09c3) ─────────────────────
 # `fno agents drive-authority` reports windows MACHINE-WIDE: every agent under
@@ -25,7 +25,7 @@
 # <promise> into THIS transcript. We scope to that agent by IDENTITY, not by
 # cwd: the PTY worker stamps the agent's short_id into the child's environment
 # as FNO_AGENTS_SELF_SHORT_ID (crates/fno-agents/src/worker.rs), and the child
-# (claude/codex) plus any Stop / graph-write-protect hook it spawns inherit it.
+# (claude/codex) plus any Stop / write-gate hook it spawns inherit it.
 # The guard fires only when an open authority window targets that same short_id.
 #
 # Identity beats cwd on both correctness fronts that scoped this before:

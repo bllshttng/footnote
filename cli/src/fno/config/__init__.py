@@ -34,6 +34,7 @@ from pydantic import (
 )
 
 from fno.user import UserBlock
+from fno.config.split_block import SplitBlock as SplitBlock
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle and re-exported
 # here; the redundant `X as X` aliases are the explicit-reexport idiom mypy's
@@ -3928,6 +3929,7 @@ class ConfigBlock(BaseModel):
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     routing: RoutingBlock = Field(default_factory=RoutingBlock)
     sideline: SidelineBlock = Field(default_factory=SidelineBlock)
+    split: SplitBlock = Field(default_factory=SplitBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)

@@ -25,6 +25,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CLAUDE_CONFIG_DIR` | py+rs | Overrides the Claude config directory for managed provider lookups. |
 | `CLAUDE_DIR_OVERRIDE` | rs | Redirects the Claude config root the corrections-verify reads the rule repo's git log from; mirrors the bash-side override in autocorrect-pack.sh. |
 | `CLAUDE_EFFORT` | py+rs | unclear: cli/src/fno/graph/cli.py:903 |
+| `CLAUDE_JOB_DIR` | rs | Fallback for the job tmp dir the write gate names in a refusal when the payload carries no session id; the payload's session wins when present. |
 | `CLAUDE_PLUGIN_ROOT` | py+rs | unclear: cli/src/fno/doctor.py:3465 |
 | `CLAUDE_SESSION_ID` | rs | unclear: crates/fno-agents/src/claims.rs:3690 |
 | `CLI` | rs | unclear: crates/fno-agents/src/loop_dispatch.rs:198 |
@@ -51,6 +52,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENTS_RESPONSE_DEADLINE_MS` | rs | unclear: crates/fno-agents/src/client.rs:68 |
 | `FNO_AGENTS_RUNNER_BIN` | rs | Overrides the binary the detached `mail-hold --run-parked` runner execs (mail_hold.rs runner_bin); empty falls through to the process's own executable. A test suite that parks through the real gate pins a stub here so no detached runner escapes the sandbox. |
 | `FNO_AGENTS_RUNTIME` | py+rs | unclear: cli/src/fno/doctor.py:564 |
+| `FNO_AGENTS_SELF_SHORT_ID` | rs | The driven agent's short id, stamped by the PTY worker; the write gate matches it against open drive-authority windows so an operator drive scopes to that one session. |
 | `FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS` | rs | unclear: crates/fno-agents/src/daemon.rs:2082 |
 | `FNO_AGENTS_WORKER` | py+rs | Marks the process as a footnote worker. |
 | `FNO_AGENTS_WORKER_BIN` | py+rs | unclear: cli/src/fno/agents/dispatch.py:888 |
@@ -101,6 +103,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_E2E_DROP_RESIZE_FRAME` | rs | E2E fault seam: with `FNO_E2E` set, drops the first n (default 1) keeper resize frames the server sends, holding panes at their pre-change sizes the way a full keeper frame queue or a pre-ResizeAck keeper build would; the 1s grid reconciliation pass then converges the diff. |
 | `FNO_E2E_PTY_OUTPUT_DELAY_MS` | rs | unclear: crates/fno/src/pty.rs:1873 |
 | `FNO_EVENTS_PATH` | py+rs | Redirects the agents journal (events.jsonl) to one file; the hermetic guard honors it on both legs. |
+| `FNO_FOOTNOTE_BIN` | rs | The `footnote` harness binary `-H footnote` launches; unset, fno-agents looks beside its own executable, then on PATH. |
 | `FNO_FLIGHT_BUDGET_S` | py | Overrides the seconds a live single-flight holder tolerates before its watchdog releases the flight and exits 124; the default trips a minute before the 30-minute TTL. |
 | `FNO_GH_BUDGET_POINTS_PER_MIN` | rs | Overrides the fleet GitHub request budget cap in points per 60s window (default 450). |
 | `FNO_GH_FACTS_DIR` | rs | Overrides the directory the `gh-cache` verb reads and writes its permanent fact rows from; default `<state_dir>/cache/gh-facts`. |

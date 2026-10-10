@@ -32,6 +32,8 @@ fn main() {
     sync_module_copy("store_conn");
     sync_module_copy("otel_read");
     sync_module_copy("registry_read");
+    sync_module_copy("effect_map");
+    sync_module_copy("footnote_transcript");
     sync_merge_posture();
     sync_page_reload();
     sync_spawn_phase();

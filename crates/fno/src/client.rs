@@ -42,13 +42,15 @@ mod row_menu;
 mod sweep_scope;
 mod wire_version;
 use open_chooser::open_for_session;
-use row_menu::execute_row_menu_action;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
-use row_menu::{build_row_menu, build_section_menu, build_tab_menu};
+pub use row_menu::SplitOpens;
+#[cfg(test)]
+use row_menu::{build_row_menu, row_menu_execute_selected};
+use row_menu::{build_tab_menu, row_menu_keys, row_menu_mouse};
 
 // Pickers, the launch moment and the snapshot action live in their own
 // modules: client.rs is shrink-only under the file-budget gate.
@@ -1046,6 +1048,16 @@ pub(crate) struct View {
     experimental_backlog: bool,
     /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
+    /// Whether the which-key modal was opened FROM the settings modal (tab or
+    /// click on its keybindings section). Esc and the other pure-dismiss paths
+    /// return to the settings modal instead of dropping to the board; a run of
+    /// an actual chord closes for real. The keybindings section is a launcher
+    /// with no rows of its own, so `settings_tab` stays on the section the
+    /// user came from.
+    keys_modal_return: bool,
+    /// `config.split.opens`: where the row menu's Split Direction toggle
+    /// starts. Latched once at startup; the in-menu toggle flips and persists.
+    split_opens: SplitOpens,
     /// Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
@@ -1632,6 +1644,11 @@ enum MenuAction {
     PortalAt(Option<Dir>),
     /// Release the row's mail hold; built only on a row wearing a hold mark.
     ReleaseHold,
+    /// Flip the Split Direction group's pane|portal toggle in-menu. Never
+    /// reaches [`execute_row_menu_action`]: the execute path closes the menu,
+    /// and the toggle's whole point is flipping BEFORE the arrow is pressed,
+    /// so [`row_menu_execute_selected`] intercepts it and keeps the menu open.
+    ToggleSplitOpens,
 }
 
 impl MenuAction {
@@ -1667,6 +1684,7 @@ impl MenuAction {
             MenuAction::ClosePortal => Some("close-portal"),
             MenuAction::PortalPicker => Some("open-in-portal"),
             MenuAction::ReleaseHold => Some("release-hold"),
+            MenuAction::ToggleSplitOpens => Some("toggle-split-opens"),
             _ => None,
         }
     }
@@ -2023,6 +2041,8 @@ impl View {
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
+            keys_modal_return: false,
+            split_opens: SplitOpens::Pane,
             lane: LaneColorsUi::default(),
             theme_import: theme_import_ui::ThemeImportUi::Idle,
             theme_import_gen: 0,
@@ -2637,92 +2657,6 @@ impl View {
     /// removed twice. Now there is one.
     fn attach_dst_squads(&self) -> Vec<u64> {
         self.layout.squads.iter().map(|s| s.id).collect()
-    }
-
-    /// Open the row context menu on `display_rows()` index `i`, anchored at
-    /// `anchor` (US2): the agent lifecycle menu, or a section header's
-    /// clear-dead menu (a squad name row or a `~` band). Returns whether it
-    /// opened - `false` for a row with no menu, which the caller turns into
-    /// "close whatever is open".
-    fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
-        enum Pick {
-            Menu(Box<RowMenu>),
-            Section(SectionKey, String, Option<u64>),
-        }
-        // Resolve what the row needs while `display_rows()` holds the borrow, so
-        // the section arm below is free to mutate `self`.
-        let pick = match self.display_rows().get(i) {
-            // A card's detail and metrics lines are the agent row's own
-            // span, so the menu opens from any line of the card.
-            Some(DisplayRow::Agent(a) | DisplayRow::CardDetail(a) | DisplayRow::CardMetrics(a)) => {
-                let mut menu = build_row_menu(a, anchor);
-                // A pane-hosted row can relocate its live pane into another
-                // workspace; a paneless row already gets the `p` placement
-                // picker. Append the entry only when another
-                // workspace exists, so it never offers a move to nowhere. Built
-                // here (where the layout is) rather than in build_row_menu so
-                // the per-state builder stays layout-free and its direct tests
-                // stay untouched.
-                if a.pane_id.is_some() {
-                    let move_dsts = self.move_dst_squads(a.squad);
-                    if !move_dsts.is_empty() {
-                        menu.popup.rows.push(PopupRow::Rule);
-                        menu.popup.rows.push(PopupRow::Entry {
-                            glyph: "↪".into(),
-                            label: "Move to workspace".into(),
-                            hint: String::new(),
-                            enabled: true,
-                        });
-                        menu.actions.push(MenuAction::MoveToWorkspace);
-                    }
-                }
-                Some(Pick::Menu(Box::new(menu)))
-            }
-            Some(DisplayRow::Sel(row)) if row.tab.is_none() => squad_key(&self.layout, row.squad)
-                .map(|key| {
-                    let label = self
-                        .layout
-                        .squads
-                        .iter()
-                        .find(|s| s.id == row.squad)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default();
-                    Pick::Section(key, label, Some(row.squad))
-                }),
-            Some(DisplayRow::Header { key, label, .. }) => {
-                Some(Pick::Section(key.clone(), label.clone(), None))
-            }
-            _ => None,
-        };
-        match pick {
-            Some(Pick::Menu(m)) => {
-                self.clear_peek();
-                self.row_menu = Some(*m);
-                self.row_menu_esc.clear();
-                true
-            }
-            Some(Pick::Section(key, label, squad)) => {
-                // A section with nothing to clear would leave a one-entry menu
-                // whose only entry is a no-op; say so instead (the row menu's
-                // "no dead item ever renders" rule, applied to the whole menu).
-                // "nothing to clear" covers both an all-live section and a key
-                // `section_dead_rows` refused as ambiguous - it never claims
-                // there are no dead rows when the truth is we won't guess which.
-                let dead = self.section_dead_rows(&key, squad).len();
-                // A workspace section always has a menu (it can be renamed). A
-                // non-workspace header (Elsewhere) with nothing to clear
-                // says so rather than opening a one-entry no-op menu.
-                if dead == 0 && squad.is_none() {
-                    self.set_notice(format!("no dead rows in {label}"));
-                    return false;
-                }
-                self.clear_peek();
-                self.row_menu = Some(build_section_menu(key, label, squad, dead, anchor));
-                self.row_menu_esc.clear();
-                true
-            }
-            None => false,
-        }
     }
 
     /// (5.1) Open the tab-strip context menu on the tab cell at
@@ -7246,6 +7180,7 @@ async fn attach_and_run(
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     view.card_graph = crate::digest_overlay::card_graph(Path::new(&cwd));
+    view.split_opens = crate::digest_overlay::split_opens(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
     view.org = crate::org_overlay::Panel::with_detail(
         crate::digest_overlay::load_readout_detailed(Path::new(&cwd)),
@@ -9393,207 +9328,6 @@ async fn confirm_keys(
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
-}
-
-/// Run the row menu's selected entry (Enter/click), then close - the popup never
-/// lingers after execute (AC1-FR).
-async fn row_menu_execute_selected(
-    view: &mut View,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
-    let picked = view.row_menu.as_ref().and_then(|m| {
-        m.actions
-            .get(m.popup.sel)
-            .copied()
-            .map(|a| (a, m.target.clone()))
-    });
-    view.row_menu = None;
-    if let Some((action, target)) = picked {
-        execute_row_menu_action(view, action, target, sock_w).await?;
-    }
-    Ok(())
-}
-
-/// Row-menu keys (US2): arrows walk the entries + 2x2 grid (scrolling to
-/// keep the selection on-screen), pgup/pgdn scroll, Enter runs the selection,
-/// Esc/`q`/any unbound key dismiss (the shared popup contract, codex P2). Esc is
-/// carried across reads like every overlay, so a split arrow never leaks; no key
-/// reaches a pane.
-async fn row_menu_keys(
-    view: &mut View,
-    bytes: &[u8],
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let trows = view.term.0 as usize;
-    let mut esc = std::mem::take(&mut view.row_menu_esc);
-    let toks = fold_modal_keys(&mut esc, bytes);
-    view.row_menu_esc = esc;
-    for tok in toks {
-        if view.row_menu.is_none() {
-            break;
-        }
-        match tok {
-            ModalKey::Esc => view.row_menu = None,
-            ModalKey::Up => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.nav(NavDir::Up);
-                    m.popup.follow_sel(view.term);
-                }
-            }
-            ModalKey::Down => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.nav(NavDir::Down);
-                    m.popup.follow_sel(view.term);
-                }
-            }
-            ModalKey::Left => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.nav(NavDir::Left);
-                }
-            }
-            ModalKey::Right => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.nav(NavDir::Right);
-                }
-            }
-            // The split cells answer shift+arrows; a menu with none
-            // swallows the key, never dismisses (row_menu::run_shift_arrow).
-            ModalKey::ShiftArrow(dir) => {
-                row_menu::run_shift_arrow(view, dir, sock_w).await?;
-            }
-            ModalKey::PageUp => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.scroll_by(-(trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(view.term);
-                }
-            }
-            ModalKey::PageDown => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.scroll_by((trows as isize - 2).max(1));
-                    m.popup.clamp_sel_to_view(view.term);
-                }
-            }
-            ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
-            // A printable byte first resolves against the accelerators
-            // of the actions THIS menu offers: a hit moves the selection to
-            // that entry and runs it through the SAME execute path Enter and a
-            // click use, so keyboard and mouse execution cannot drift. A byte
-            // no selectable entry answers keeps the shared popup contract and
-            // dismisses. Disabled rows contribute no action, so an inert entry
-            // is never accelerated.
-            ModalKey::Byte(b) => {
-                let hit = view.row_menu.as_ref().and_then(|m| {
-                    m.actions.iter().position(|a| {
-                        a.accelerator_id()
-                            .and_then(crate::keys::menu_byte_for)
-                            .is_some_and(|kb| kb == b)
-                    })
-                });
-                match hit {
-                    Some(i) => {
-                        if let Some(m) = view.row_menu.as_mut() {
-                            m.popup.select(i);
-                            m.popup.follow_sel(view.term);
-                        }
-                        row_menu_execute_selected(view, sock_w).await?;
-                    }
-                    None => view.row_menu = None,
-                }
-            }
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// One mouse report while the row menu is open (US2): hover selects, a
-/// left click runs the entry, a right press re-anchors on the row under the
-/// pointer (or dismisses off the sideline), a click off the popup dismisses.
-async fn row_menu_mouse(
-    view: &mut View,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = view.row_menu_hit(rep.row, rep.col) {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            match view.row_menu_hit(rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.row_menu.as_mut() {
-                        m.popup.select(t);
-                    }
-                    row_menu_execute_selected(view, sock_w).await?;
-                }
-                // A click inside the block that hit no target (a Header or Rule, which
-                // contribute none) is swallowed; only a click OFF the menu dismisses.
-                None => {
-                    if !view.row_menu_block_contains(rep.row, rep.col) {
-                        view.row_menu = None;
-                    }
-                }
-            }
-        }
-        MouseKind::Press(MouseButton::Right) => {
-            // The menu's own body swallows the press, never re-anchors and
-            // never dismisses - and it must win over EVERY re-anchor arm
-            // below, not just the pane one: a menu anchored at a sideline row
-            // or the strip extends over those cells too, and a press on its
-            // visible body must not silently re-anchor onto whatever row or
-            // tab cell happens to sit underneath (review finding).
-            if view.row_menu_block_contains(rep.row, rep.col) {
-                return Ok(());
-            }
-            // (5.1) A tab cell re-anchors the tab menu, the same
-            // one-press contract a sideline row gets below; the strip and the
-            // sideline own disjoint columns, so the two cannot contend.
-            if view.tab_cell_at(rep.row, rep.col).is_some() {
-                if !view.open_tab_menu(
-                    rep.row,
-                    rep.col,
-                    Anchor::At {
-                        row: rep.row,
-                        col: rep.col,
-                    },
-                ) {
-                    view.row_menu = None;
-                }
-                return Ok(());
-            }
-            match view.sideline_row_at(rep.row, rep.col) {
-                // Re-anchor on the row under the second right-press (never stack two
-                // menus); a non-agent row leaves nothing open.
-                Some(i) => {
-                    if !view.open_row_menu(
-                        i,
-                        Anchor::At {
-                            row: rep.row,
-                            col: rep.col,
-                        },
-                    ) {
-                        view.row_menu = None;
-                    }
-                }
-                // A pane cell re-anchors too - panes are
-                // menu-bearing now, and a second right-press on another
-                // pane swapping in that pane's agent menu keeps the
-                // one-press contract the tab re-anchor above cites.
-                // hit_test is overlay-blind, but the block-contains check at
-                // the top of this arm has already settled menu-body cells.
-                None => {
-                    if !view.open_pane_menu(rep.row, rep.col) {
-                        view.row_menu = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 /// Run one aux-popup action (US4/US5). Menu entries open a surface or

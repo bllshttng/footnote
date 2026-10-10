@@ -26,7 +26,7 @@ write_targets() {
 }
 
 # bash_write_targets COMMAND -> one path token per line for every write form the
-# command carries. Enumerated floor mirroring graph-write-protect.sh's
+# command carries. Enumerated floor mirroring the write gate's
 # _bash_targets_protected: redirects, tee, sponge, cp/mv/install/truncate (last
 # argument), dd of=, in-place editors. Every matching clause is reported, not
 # just the leftmost, so a second write in a compound command is still seen. A
@@ -86,7 +86,7 @@ _strip_bash_redirects() {
 # claude Edit or Write payload contributes tool_input.file_path; a codex
 # apply_patch payload contributes its header paths from
 # tool_input.command. jq first, python3 fallback, the same NUL-split read
-# hooks/generated-write-guard.sh uses. format-on-edit.sh and
+# hooks/write-gate.sh uses. format-on-edit.sh and
 # edit-integrity.sh consume this adapter, not write_targets directly.
 payload_write_targets() {
     local payload="$1" cwd file_path patch_command path

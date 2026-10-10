@@ -192,8 +192,8 @@ pub enum StoreError {
     Unreadable(String, String),
     #[error("graph at {0} root object has no 'entries' key")]
     MalformedRoot(String),
-    #[error("lock at {0} stayed busy past the {1:?} deadline")]
-    LockTimeout(String, Duration),
+    #[error("lock at {0} stayed busy past the {1:?} deadline; {2}")]
+    LockTimeout(String, Duration, String),
     #[error("version conflict: the graph changed since the caller's snapshot")]
     Conflict,
     #[error("a field update carries no value: {0}")]
@@ -2057,16 +2057,18 @@ impl BoundedLock {
         loop {
             match file.try_lock() {
                 Ok(()) => {
+                    stamp_lock_holder(&file);
                     return Ok(BoundedLock {
                         file,
                         path: lock_path,
-                    })
+                    });
                 }
                 Err(_) => {
                     if Instant::now() >= deadline {
                         return Err(StoreError::LockTimeout(
                             lock_path.display().to_string(),
                             timeout,
+                            holder_summary(&lock_path),
                         ));
                     }
                     std::thread::sleep(LOCK_POLL);
@@ -2080,8 +2082,64 @@ impl BoundedLock {
     }
 }
 
+/// Record this process as the holder, in the JSON stamp shape
+/// `agent_lock::stamp_holder` writes and Python's `fno.agents.lock` reads.
+/// The write rides the fd this holder keeps open for its whole hold, so only
+/// the current holder ever writes. Advisory: a crashed writer leaves its
+/// record behind, which is exactly what the next timeout refusal should name.
+fn stamp_lock_holder(mut file: &File) {
+    use std::io::{Seek, SeekFrom, Write};
+    if file.set_len(0).is_err() {
+        return;
+    }
+    let _ = file.seek(SeekFrom::Start(0));
+    let line = serde_json::json!({
+        "pid": std::process::id(),
+        "acquired_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false),
+    });
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
+/// The holder line for a timeout refusal: the recorded pid and hold age,
+/// with a dead pid named as dead rather than restated as fact. Same contract
+/// as `agent_lock::holder_note`, pointed at the graph lock.
+fn holder_summary(lock_path: &Path) -> String {
+    let text = match std::fs::read_to_string(lock_path) {
+        Ok(text) => text,
+        Err(_) => return "no holder recorded in the lock file".to_string(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(text.lines().next().unwrap_or("")) {
+        Ok(value) => value,
+        Err(_) => return "no holder recorded in the lock file".to_string(),
+    };
+    let (Some(pid), Some(at)) = (
+        parsed.get("pid").and_then(serde_json::Value::as_u64),
+        parsed
+            .get("acquired_at")
+            .and_then(serde_json::Value::as_str),
+    ) else {
+        return "no holder recorded in the lock file".to_string();
+    };
+    let age = chrono::DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|started| {
+            (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0)
+        })
+        .map(|secs| format!("held {secs}s since {at}"))
+        .unwrap_or_else(|| format!("held since {at}"));
+    if super::agent_lock::pid_is_alive(pid) {
+        format!("recorded holder pid {pid}, {age}")
+    } else {
+        format!("holder record pid {pid} is dead (a crashed writer), {age}")
+    }
+}
+
 impl Drop for BoundedLock {
     fn drop(&mut self) {
+        let _ = self.file.set_len(0);
         let _ = self.file.unlock();
     }
 }
@@ -3256,8 +3314,72 @@ mod tests {
         let _holder = BoundedLock::acquire(&graph, Duration::from_secs(1)).unwrap();
         let started = Instant::now();
         let err = BoundedLock::acquire(&graph, Duration::from_millis(150)).unwrap_err();
-        assert!(matches!(err, StoreError::LockTimeout(_, _)));
+        assert!(matches!(err, StoreError::LockTimeout(..)));
         assert!(started.elapsed() < Duration::from_secs(2), "must not block");
+    }
+
+    /// The timeout refusal names the recorded holder: pid and hold age land
+    /// in the third field, so the operator can tell a live holder from a
+    /// crashed one without lsof.
+    #[test]
+    fn a_lock_timeout_names_the_recorded_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let _holder = BoundedLock::acquire(&graph, Duration::from_secs(1)).unwrap();
+        let err = BoundedLock::acquire(&graph, Duration::from_millis(150)).unwrap_err();
+        match err {
+            StoreError::LockTimeout(_, _, detail) => {
+                assert!(
+                    detail.contains("recorded holder pid"),
+                    "refusal must name the holder: {detail}"
+                );
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
+        // A dead pid reads as dead, not as a live holder: the record below
+        // names a pid past the i32 range, so pid_is_alive answers false
+        // without a syscall.
+        let lock_path = PathBuf::from(format!("{}.lock", graph.display()));
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\n",
+                serde_json::json!({"pid": 4_000_000_000u64, "acquired_at": "2026-10-09T00:00:00+00:00"})
+            ),
+        )
+        .unwrap();
+        let err = BoundedLock::acquire(&graph, Duration::from_millis(150)).unwrap_err();
+        match err {
+            StoreError::LockTimeout(_, _, detail) => {
+                assert!(
+                    detail.contains("is dead"),
+                    "refusal must read a dead holder as dead: {detail}"
+                );
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
+    }
+
+    /// A held lock with no record reads as absent, not dead: a holder that
+    /// predates the stamp (or wiped it) leaves the refusal honest instead of
+    /// naming a pid that is not there.
+    #[test]
+    fn a_held_lock_with_an_empty_record_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let _holder = BoundedLock::acquire(&graph, Duration::from_secs(1)).unwrap();
+        let lock_path = PathBuf::from(format!("{}.lock", graph.display()));
+        std::fs::write(&lock_path, b"").unwrap();
+        let err = BoundedLock::acquire(&graph, Duration::from_millis(150)).unwrap_err();
+        match err {
+            StoreError::LockTimeout(_, _, detail) => {
+                assert!(
+                    detail.contains("no holder recorded"),
+                    "refusal must report the empty record: {detail}"
+                );
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
     }
 
     #[test]
