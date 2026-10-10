@@ -278,7 +278,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         .rows
         .iter()
         .map(|r| match r {
-            PopupRow::Header(h) => h.clone(),
+            PopupRow::Header(h) | PopupRow::Text(h) => h.clone(),
             PopupRow::Entry { label, .. } => label.clone(),
             PopupRow::Rule => "-".into(),
             _ => String::new(),
