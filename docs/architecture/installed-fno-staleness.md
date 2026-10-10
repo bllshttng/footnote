@@ -79,12 +79,18 @@ If the installed `crates_rev` matches source and the build is clean, the **`fno 
 | `--rust` flag present (force / first-install) | always (rebuild + post-deploy verify) |
 | `--no-rust` flag present | never |
 | auto: binary self-reports `crates_rev` == source AND not dirty | no (fresh; still syncs the triad to other live locations) |
-| auto: binary stale / dirty / unparseable / absent | yes (rebuild + verify) |
-| auto: rebuild needed but cargo not on PATH | warn and skip the Rust leg |
+| auto: binary stale / dirty / unparseable / absent | yes (download the CI build, else rebuild; then verify) |
+| auto: no CI build and cargo not on PATH | warn and skip the Rust leg |
 
 On cargo failure the Rust leg warns and continues to the Python reinstall rather than aborting the entire update. A post-deploy verify mismatch or triad-sync failure halts update. A silently stale or split deploy is the outage class this section prevents.
 
 `fno doctor update --rust / --no-rust` let you force or skip the Rust leg explicitly.
+
+**Download first, compile last.** An update finishes in 60 seconds. A local `cargo install` of `fno-agents` ran 2 hours at load 297, so the Rust leg downloads before it compiles. On each main merge that touches `crates/`, `.github/workflows/main-binaries.yml` builds the four binaries per platform. It uploads them to the rolling `bin-cache` pre-release as `fno-bin-<crates_rev>-<platform>.tar.gz`, beside a `.sha256` file. The key is the `crates/` subtree rev, the same rev the verdict compares. The update fetches the tarball for its source rev, checks the digest, and swaps all four binaries into the install root. A copy failure leaves the old set whole. Then the usual post-deploy verify runs. `FNO_RELEASE_REPO` names a fork that publishes its own `bin-cache`.
+
+If no tarball exists, `cargo install` runs. The causes are an unbuilt rev, a platform outside the CI matrix, or a failed download. The line before it names the reason. `cargo install` skips the checkout's `.cargo/config.toml`, so update sets `RUSTC_WRAPPER` to the admission wrapper, and the compile takes the `build:cargo` slot. A merge that changes `crates/` has no tarball until its CI build lands. An update in that window compiles.
+
+A second update joins the first. It names the running pid, waits for it to exit, and exits with that run's journaled result. An update that runs past 60 seconds still installs, but exits 1 with a failed step `the 60s budget (took Ns)`.
 
 ## Layer 2: the deferrals gate self-explains
 

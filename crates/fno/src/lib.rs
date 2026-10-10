@@ -109,6 +109,7 @@ pub mod transcript_tail;
 pub mod transcript_transfer;
 pub mod tree;
 pub mod uninstall;
+pub(crate) mod update_prebuilt;
 pub mod version;
 pub mod view_store;
 pub mod vt;

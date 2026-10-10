@@ -76,6 +76,30 @@ fn codex_app_server_rows() -> Vec<Value> {
     vec![row]
 }
 
+/// Every process under `root` in one table read, found by walking each
+/// row's ppid chain (at most 64 hops).
+pub(crate) fn descendants(table: &[ProcRow], root: u32) -> Vec<u32> {
+    let parent: std::collections::HashMap<u32, u32> =
+        table.iter().map(|row| (row.pid, row.ppid)).collect();
+    table
+        .iter()
+        .filter(|row| {
+            let mut current = row.ppid;
+            for _ in 0..64 {
+                if current == root {
+                    return true;
+                }
+                match parent.get(&current) {
+                    Some(&next) if current > 1 => current = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
+        .map(|row| row.pid)
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
     ProcRow {
