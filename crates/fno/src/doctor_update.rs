@@ -2237,14 +2237,11 @@ fn wire_label(wires: &[u32]) -> String {
     }
 }
 
-fn current_but_stale(
-    rev_label: &str,
-    stale: usize,
-    restartable: usize,
-    pane_kept: usize,
-) -> String {
+fn current_but_stale(rev_label: &str, stale: usize, restartable: usize) -> String {
+    // The keeper count stays out: the update modal's stale section prints
+    // it, and this line rendered it a second time in the same dialog.
     format!(
-        "installed {rev_label} is current; {stale} running process(es) are older builds - restart cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build until their panes end",
+        "installed {rev_label} is current; {stale} running process(es) are older builds - restart cycles {restartable}",
     )
 }
 
@@ -2286,20 +2283,11 @@ fn build_guidance(
             )
         })
         .count();
-    let pane_kept = stale_rows
-        .iter()
-        .filter(|r| {
-            matches!(
-                r.get("component").and_then(Value::as_str),
-                Some("pane-keeper") | Some("thread-keeper")
-            )
-        })
-        .count();
     // A degraded input never overrides a confidently known not-ready state:
     // if both revs were read and match, there is no update to warn about.
     if !update_ready && (revs_known || degraded_reason.is_none()) {
         if running_stale > 0 {
-            return current_but_stale(rev_label, running_stale, restartable, pane_kept);
+            return current_but_stale(rev_label, running_stale, restartable);
         }
         return format!(
             "up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"

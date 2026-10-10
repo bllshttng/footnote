@@ -979,3 +979,102 @@ fn release_newer_renders_release_body_notes() {
     );
     assert_eq!(modal.actions, vec![AuxAction::UpgradeRelease(Channel::Uv)]);
 }
+
+/// x-4bfe: a current build leads the dialog with the verdict and offers the
+/// optional mux restart when no stale section already offers one.
+#[test]
+fn update_modal_leads_with_up_to_date_when_current() {
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: false,
+        installed_rev: Some("same".into()),
+        source_rev: Some("same".into()),
+        installed_version: Some("0.4.1".into()),
+        source_prs_ahead: None,
+        changelog: vec![],
+        release_notes: None,
+        guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome.into()));
+    assert!(matches!(
+        modal.popup.rows.first(),
+        Some(PopupRow::Header(h)) if h == "up to date"
+    ));
+    assert!(row_labels(&modal).contains(
+        &"optional: restart the mux server to load new mux code. panes are kept.".to_string()
+    ));
+    assert!(modal.actions.is_empty(), "nothing pending, no action");
+}
+
+/// x-4bfe: the keeper count prints once. The payload guidance drops the
+/// clause and the stale section's count line is the one print; a degraded
+/// probe never reads as up to date.
+#[test]
+fn update_modal_keeper_count_prints_once() {
+    let stale = |name: &str| RunningRow {
+        component: "daemon".into(),
+        name: Some(name.into()),
+        verdict: "stale".into(),
+        on_restart: "restarts".into(),
+        survives: "panes".into(),
+    };
+    let keeper = RunningRow {
+        component: "pane-keeper".into(),
+        name: Some("main-1991".into()),
+        verdict: "stale".into(),
+        on_restart: "kept".into(),
+        survives: "its pane; current only when that pane ends".into(),
+    };
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: false,
+        installed_rev: Some("same".into()),
+        source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
+        changelog: vec![],
+        release_notes: None,
+        guidance:
+            "installed same is current; 2 running process(es) are older builds - restart cycles 1"
+                .into(),
+        degraded: None,
+        running: vec![stale("a"), keeper],
+        running_stale: 2,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome.into()));
+    assert!(matches!(
+        modal.popup.rows.first(),
+        Some(PopupRow::Header(h)) if h == "up to date"
+    ));
+    let labels = row_labels(&modal);
+    assert_eq!(
+        labels.iter().filter(|l| l.contains("pane keeper")).count(),
+        1,
+        "the count prints once: {labels:?}"
+    );
+    assert!(labels.contains(&"1 pane keeper on the old build".to_string()));
+    assert!(modal.actions.contains(&AuxAction::RestartAgents));
+
+    // A degraded probe never claims the build is current.
+    let degraded_modal = build_update_modal(Some(
+        &(UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: None,
+            source_rev: None,
+            installed_version: None,
+            source_prs_ahead: None,
+            changelog: vec![],
+            release_notes: None,
+            guidance: String::new(),
+            degraded: Some("local source tree unavailable".into()),
+            running: vec![],
+            running_stale: 0,
+            source_pin: None,
+        })
+        .into()),
+    ));
+    assert!(!row_labels(&degraded_modal).contains(&"up to date".to_string()));
+}
