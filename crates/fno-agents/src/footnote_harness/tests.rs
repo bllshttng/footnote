@@ -67,7 +67,8 @@ fn the_launcher_refuses_a_login_endpoint_and_a_missing_binary() {
     }
     assert_eq!(o.exit_code, 2, "{}", o.stderr);
     assert!(
-        o.stderr.contains("fno doctor update --rust"),
+        o.stderr
+            .contains("cargo install --locked --path ~/code/footnote/fnh"),
         "{}",
         o.stderr
     );
