@@ -17,6 +17,15 @@ pub(crate) struct UpdateReadiness {
     pub(crate) update_ready: bool,
     pub(crate) installed_rev: Option<String>,
     pub(crate) source_rev: Option<String>,
+    /// The installed binary's package version ("0.4.1"), from the same
+    /// binary that produced the payload. Tolerated absent: an older check
+    /// still renders the bare sha pair.
+    #[serde(default)]
+    pub(crate) installed_version: Option<String>,
+    /// Merged PRs between the installed rev and source HEAD. Tolerated
+    /// absent; None or a 0 both fall back to the bare sha pair.
+    #[serde(default)]
+    pub(crate) source_prs_ahead: Option<u64>,
     #[serde(default)]
     pub(crate) changelog: Vec<String>,
     /// Release notes Python shaped for the modal (one line per merged PR,
@@ -296,11 +305,26 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
             channel,
             installed,
             latest,
+            notes,
         }) => {
             rows.push(PopupRow::Header(format!(
                 "release {installed} -> {latest} ({})",
                 channel.name()
             )));
+            // Notes from the GitHub release body: area headings and bullets
+            // render as Headers - a release body carries no PR urls, so
+            // nothing here is a dead selectable row.
+            if !notes.is_empty() {
+                rows.push(PopupRow::Rule);
+                for section in notes {
+                    if !section.area.is_empty() {
+                        rows.push(PopupRow::Header(section.area.clone()));
+                    }
+                    for bullet in &section.bullets {
+                        rows.push(PopupRow::Header(bullet.clone()));
+                    }
+                }
+            }
             rows.push(PopupRow::Header(
                 "upgrades the fno wheel; restart afterwards to run it".into(),
             ));
@@ -331,11 +355,21 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
             let short = |rev: Option<&str>| -> String {
                 rev.unwrap_or("unknown").chars().take(10).collect()
             };
-            rows.push(PopupRow::Header(format!(
-                "{} -> {}",
-                short(r.installed_rev.as_deref()),
-                short(r.source_rev.as_deref())
-            )));
+            // Version + distance answer "how far behind am I"; either
+            // unknown (or a zero distance), the sha pair stays the fallback.
+            let ahead = r.source_prs_ahead.filter(|n| *n > 0);
+            match (r.installed_version.as_deref(), ahead) {
+                (Some(version), Some(ahead)) => rows.push(PopupRow::Header(format!(
+                    "fno {version} at {}, main is {ahead} PR{} ahead",
+                    short(r.installed_rev.as_deref()),
+                    if ahead == 1 { "" } else { "s" }
+                ))),
+                _ => rows.push(PopupRow::Header(format!(
+                    "{} -> {}",
+                    short(r.installed_rev.as_deref()),
+                    short(r.source_rev.as_deref())
+                ))),
+            }
             // Shaped notes win; the raw changelog stays the fallback for an
             // older Python payload. A tappable line is an Entry (its action
             // pairs by selectable-row index); a line without a URL renders as

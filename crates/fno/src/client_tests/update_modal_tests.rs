@@ -3,7 +3,7 @@
 
 use super::tests::view_with_agents;
 use super::*;
-use crate::client::release_check::{Channel, ReleaseOutcome};
+use crate::client::release_check::{Channel, ReleaseNotesSection, ReleaseOutcome};
 use crate::client::update_menu::{
     ReleaseNoteLine, ReleaseNotes, ReleaseNotesGroup, RunningRow, UpdateOutcome, UpdateProbe,
     UpdateReadiness,
@@ -16,6 +16,8 @@ fn degraded_release_probe(release: ReleaseOutcome, running: Vec<RunningRow>) -> 
             update_ready: false,
             installed_rev: None,
             source_rev: None,
+            installed_version: None,
+            source_prs_ahead: None,
             changelog: vec![],
             release_notes: None,
             guidance: "update check degraded (local source tree unavailable)".into(),
@@ -45,6 +47,7 @@ fn newer_uv() -> ReleaseOutcome {
         channel: Channel::Uv,
         installed: "0.3.1".into(),
         latest: "0.3.2".into(),
+        notes: vec![],
     }
 }
 
@@ -173,6 +176,8 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         update_ready: false,
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![],
         release_notes: None,
         guidance: "installed same is current; 2 running process(es) are older builds".into(),
@@ -315,6 +320,8 @@ fn no_overlay_cuts_text_with_an_ellipsis() {
         update_ready: false,
         installed_rev: Some("a".repeat(40)),
         source_rev: Some("b".repeat(40)),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![format!("feat: {long}")],
         release_notes: None,
         guidance: long.clone(),
@@ -539,6 +546,8 @@ fn sideline_menu_omits_update_row_when_not_ready() {
         update_ready: false,
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![],
         release_notes: None,
         guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
@@ -585,6 +594,8 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
         update_ready: false,
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![],
         release_notes: None,
         guidance: "update check degraded (fno mux ls --json failed) - ...".into(),
@@ -676,6 +687,8 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): thing".into()],
         release_notes: None,
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
@@ -710,6 +723,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): thing".into(), "feat(y): other thing".into()],
         release_notes: None,
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
@@ -757,6 +772,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): raw subject".into()],
         release_notes: Some(notes),
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
@@ -799,6 +816,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): raw subject".into()],
         release_notes: Some(ReleaseNotes {
             highlights: vec![],
@@ -843,4 +862,95 @@ fn readiness_payload_from_the_native_verb_parses_for_the_tui() {
     let parsed: Result<UpdateReadiness, _> = serde_json::from_value(payload.clone());
     assert!(parsed.is_ok());
     assert!(payload.get("probes").is_some());
+}
+
+/// The source modal leads with the installed version and the distance in
+/// PRs; an older payload (or a zero/unknown distance) falls back to the
+/// bare sha pair.
+#[test]
+fn update_modal_shows_version_and_pr_distance_or_falls_back() {
+    let ready = |version: Option<&str>, ahead: Option<u64>| {
+        UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: true,
+            installed_rev: Some("af56e2f24e".into()),
+            source_rev: Some("6c3024996f".into()),
+            installed_version: version.map(str::to_string),
+            source_prs_ahead: ahead,
+            changelog: vec![],
+            release_notes: None,
+            guidance: "update ready - detach, fno doctor update, reattach".into(),
+            degraded: None,
+            running: vec![],
+            running_stale: 0,
+            source_pin: None,
+        })
+    };
+    let headers = |probe: UpdateProbe| -> Vec<String> {
+        build_update_modal(Some(&probe))
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Header(h) => Some(h.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let has = |probe: UpdateProbe, want: &str| headers(probe).iter().any(|h| h == want);
+    assert!(has(
+        ready(Some("0.4.1"), Some(2)).into(),
+        "fno 0.4.1 at af56e2f24e, main is 2 PRs ahead"
+    ));
+    assert!(has(
+        ready(Some("0.4.1"), Some(1)).into(),
+        "fno 0.4.1 at af56e2f24e, main is 1 PR ahead"
+    ));
+    for fallback in [
+        ready(None, None),
+        ready(Some("0.4.1"), Some(0)),
+        ready(None, Some(2)),
+    ] {
+        assert!(has(fallback.into(), "af56e2f24e -> 6c3024996f"));
+    }
+}
+
+/// A newer release renders the GitHub release body under the version pair:
+/// intro prose and area bullets as Headers (a release body carries no PR
+/// urls), and the upgrade entry stays the one action.
+#[test]
+fn release_newer_renders_release_body_notes() {
+    let release = ReleaseOutcome::Newer {
+        channel: Channel::Uv,
+        installed: "0.4.0".into(),
+        latest: "0.4.1".into(),
+        notes: vec![
+            ReleaseNotesSection {
+                area: String::new(),
+                bullets: vec!["42 merged pull requests since v0.4.0.".into()],
+            },
+            ReleaseNotesSection {
+                area: "mux".into(),
+                bullets: vec!["Portals open operator-owned windows".into()],
+            },
+        ],
+    };
+    let modal = build_update_modal(Some(&degraded_release_probe(release, vec![])));
+    let headers: Vec<&str> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(headers.contains(&"release 0.4.0 -> 0.4.1 (uv)"));
+    assert!(headers.contains(&"42 merged pull requests since v0.4.0."));
+    assert!(headers.contains(&"mux"));
+    assert!(headers.contains(&"Portals open operator-owned windows"));
+    assert_eq!(
+        entry_labels(&modal),
+        vec!["upgrade now: uv tool upgrade fno"]
+    );
+    assert_eq!(modal.actions, vec![AuxAction::UpgradeRelease(Channel::Uv)]);
 }

@@ -2146,6 +2146,22 @@ fn changelog_subjects(installed_rev: &str, source: &Path) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Merged PRs between the installed rev and source HEAD (first-parent
+/// merges, the release-notes window); None falls back to the sha pair.
+fn source_prs_ahead(installed_rev: &str, source: &Path) -> Option<u64> {
+    git_in(
+        source,
+        &[
+            "rev-list",
+            "--count",
+            "--first-parent",
+            "--merges",
+            &format!("{installed_rev}..HEAD"),
+        ],
+    )
+    .and_then(|out| out.trim().parse().ok())
+}
+
 /// Release notes for the update modal, built by the native leg through the
 /// verb seam: one line per merged PR between `installed_rev` and source
 /// HEAD. None on any failure; the payload never blocks on it.
@@ -2373,6 +2389,7 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     let shells_ended: u64 = if wire_bump { shells } else { 0 };
     let mut changelog: Vec<String> = Vec::new();
     let mut release_notes: Option<Value> = None;
+    let mut prs_ahead: Option<u64> = None;
     if let (Some(installed), Some(src), Some(rev)) = (
         installed_rev.as_deref(),
         resolved_source.as_ref(),
@@ -2380,6 +2397,7 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
     ) {
         changelog = changelog_subjects(installed, src);
         release_notes = release_notes_payload(installed, src);
+        prs_ahead = source_prs_ahead(installed, src);
         let _ = rev;
     }
     let census = running_components();
@@ -2479,6 +2497,8 @@ pub(crate) fn update_readiness(source: Option<&Path>) -> Value {
         "source_pin": pin,
         "last_update_event": last_update_event(),
         "installed_rev": installed_rev,
+        "installed_version": env!("CARGO_PKG_VERSION"),
+        "source_prs_ahead": prs_ahead,
         "source_rev": src_rev,
         "python_tool": {
             "script": script_str,

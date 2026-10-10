@@ -15,6 +15,12 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const BIN_CACHE_TAG: &str = "bin-cache";
 const DEFAULT_REPO: &str = "bllshttng/footnote";
+
+/// The GitHub `owner/repo` releases publish to; the env override keeps a
+/// fork's install testable.
+pub(crate) fn release_repo() -> String {
+    std::env::var("FNO_RELEASE_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string())
+}
 /// One curl bound per file. The tarball is about 30 MB; a link that cannot
 /// move it in this window loses to the compile fallback anyway.
 const FETCH_SECS: &str = "45";
@@ -44,7 +50,7 @@ pub(crate) fn asset_name(crates_rev: &str, platform: &str) -> String {
 }
 
 pub(crate) fn asset_url(crates_rev: &str, platform: &str) -> String {
-    let repo = std::env::var("FNO_RELEASE_REPO").unwrap_or_else(|_| DEFAULT_REPO.to_string());
+    let repo = release_repo();
     format!(
         "https://github.com/{repo}/releases/download/{BIN_CACHE_TAG}/{}",
         asset_name(crates_rev, platform)

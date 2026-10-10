@@ -45,12 +45,29 @@ pub(crate) enum ReleaseOutcome {
         channel: Channel,
         installed: String,
         latest: String,
+        /// Notes parsed from the GitHub release body for the latest tag.
+        /// Empty when the fetch or parse failed: notes degrade silently,
+        /// the versions and the upgrade command never do.
+        notes: Vec<ReleaseNotesSection>,
     },
     Degraded(String),
 }
 
+/// One curated section of a GitHub release body: the `### area` heading,
+/// its `- bullet` lines, and prose before the first heading (area-less).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReleaseNotesSection {
+    pub(crate) area: String,
+    pub(crate) bullets: Vec<String>,
+}
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(300);
+const NOTES_TIMEOUT: Duration = Duration::from_secs(10);
+/// The modal is a popup, not a changelog page: the newest sections and
+/// bullets win, mirroring the readiness payload's ten-subject window.
+const NOTES_MAX_BULLETS: usize = 10;
+const NOTES_MAX_SECTIONS: usize = 6;
 
 /// `Some(true)` when the uv receipt installed fno from an index (so
 /// `uv tool upgrade` can move it), `Some(false)` for a directory, path, git,
@@ -166,6 +183,7 @@ where
                 channel: Channel::Uv,
                 installed,
                 latest,
+                notes: Vec::new(),
             },
             Ok(None) => ReleaseOutcome::Current {
                 channel: Channel::Uv,
@@ -194,6 +212,127 @@ async fn run(program: &Path, args: &[&str], bound: Duration) -> Result<String, S
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Parse the release body markdown: `### area` opens a section, `- `/`* `
+/// is a bullet, prose before the first heading is the area-less intro, the
+/// `##` title is skipped, the caps keep the modal a popup. No bullets, no
+/// sections.
+pub(crate) fn parse_release_body(body: &str) -> Vec<ReleaseNotesSection> {
+    let mut sections: Vec<ReleaseNotesSection> = vec![ReleaseNotesSection {
+        area: String::new(),
+        bullets: Vec::new(),
+    }];
+    let mut total = 0usize;
+    for line in body.lines() {
+        if total >= NOTES_MAX_BULLETS {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if let Some(area) = trimmed.strip_prefix("### ") {
+            if sections.len() >= NOTES_MAX_SECTIONS {
+                break;
+            }
+            sections.push(ReleaseNotesSection {
+                area: area.trim().to_string(),
+                bullets: Vec::new(),
+            });
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            continue;
+        }
+        let bullet = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "));
+        let text = match bullet {
+            Some(b) => b.trim().to_string(),
+            None => {
+                if trimmed.trim().is_empty() || sections.last().is_some_and(|s| !s.area.is_empty())
+                {
+                    continue;
+                }
+                trimmed.trim().to_string()
+            }
+        };
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(last) = sections.last_mut() {
+            last.bullets.push(text);
+            total += 1;
+        }
+    }
+    sections.retain(|s| !s.bullets.is_empty());
+    sections
+}
+
+/// The release body from a `releases/tags/<tag>` API reply, or None: a
+/// malformed reply costs the notes, never the modal.
+pub(crate) fn parse_release_json(json_text: &str) -> Option<Vec<ReleaseNotesSection>> {
+    let value: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    let body = value.get("body")?.as_str()?;
+    let sections = parse_release_body(body);
+    (!sections.is_empty()).then_some(sections)
+}
+
+/// One notes fetch per client per version: the memo keys on the tag so a
+/// re-probe never spends the unauthenticated per-IP budget again. Only
+/// successes cache; a failed fetch retries on the next probe.
+static NOTES_MEMO: std::sync::Mutex<Option<(String, Vec<ReleaseNotesSection>)>> =
+    std::sync::Mutex::new(None);
+
+/// The newest published release's notes for `v{latest}`; any failure
+/// answers empty and the modal shows versions without notes.
+async fn fetch_release_notes(latest: &str) -> Vec<ReleaseNotesSection> {
+    if let Ok(memo) = NOTES_MEMO.lock() {
+        if let Some((tag, notes)) = memo.as_ref() {
+            if tag == latest {
+                return notes.clone();
+            }
+        }
+    }
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/v{latest}",
+        crate::update_prebuilt::release_repo()
+    );
+    let args = [
+        "-sS",
+        "--max-time",
+        "10",
+        "-H",
+        "Accept: application/vnd.github+json",
+        &url,
+    ];
+    let notes = match run(Path::new("curl"), &args, NOTES_TIMEOUT).await {
+        Ok(json_text) => parse_release_json(&json_text).unwrap_or_default(),
+        Err(_) => return Vec::new(),
+    };
+    if !notes.is_empty() {
+        if let Ok(mut memo) = NOTES_MEMO.lock() {
+            *memo = Some((latest.to_string(), notes.clone()));
+        }
+    }
+    notes
+}
+
+/// Fill the notes a release-modal shows for a newer release. Only Newer
+/// fetches: a current install never pays the network round.
+async fn attach_notes(outcome: ReleaseOutcome) -> ReleaseOutcome {
+    match outcome {
+        ReleaseOutcome::Newer {
+            channel,
+            installed,
+            latest,
+            ..
+        } => ReleaseOutcome::Newer {
+            channel,
+            installed,
+            notes: fetch_release_notes(&latest).await,
+            latest,
+        },
+        other => other,
+    }
+}
+
 /// Ask the channel that owns this install whether a newer release exists.
 /// Runs off the UI loop; every failure degrades, never hangs.
 pub(crate) async fn probe_release() -> ReleaseOutcome {
@@ -209,13 +348,14 @@ pub(crate) async fn probe_release() -> ReleaseOutcome {
     };
     if brew {
         let args = ["outdated", "--json=v2", "--formula", "fno"];
-        return match run(Path::new("brew"), &args, PROBE_TIMEOUT).await {
+        let outcome = match run(Path::new("brew"), &args, PROBE_TIMEOUT).await {
             Err(e) => ReleaseOutcome::Degraded(format!("brew outdated: {e}")),
             Ok(json) => match parse_brew_outdated(&json) {
                 Ok(Some((installed, latest))) => ReleaseOutcome::Newer {
                     channel: Channel::Brew,
                     installed,
                     latest,
+                    notes: Vec::new(),
                 },
                 Ok(None) => ReleaseOutcome::Current {
                     channel: Channel::Brew,
@@ -223,6 +363,7 @@ pub(crate) async fn probe_release() -> ReleaseOutcome {
                 Err(e) => ReleaseOutcome::Degraded(format!("brew outdated: {e}")),
             },
         };
+        return attach_notes(outcome).await;
     }
     let Some(uv) = uv else {
         return ReleaseOutcome::NotApplicable;
@@ -232,7 +373,7 @@ pub(crate) async fn probe_release() -> ReleaseOutcome {
         Err(e) => return ReleaseOutcome::Degraded(format!("uv tool dir: {e}")),
     };
     let receipt = std::fs::read_to_string(Path::new(&dir).join("fno/uv-receipt.toml")).ok();
-    uv_outcome(receipt.as_deref(), || async {
+    let outcome = uv_outcome(receipt.as_deref(), || async {
         run(
             &uv,
             &["tool", "list", "--outdated", "--color", "never"],
@@ -240,7 +381,8 @@ pub(crate) async fn probe_release() -> ReleaseOutcome {
         )
         .await
     })
-    .await
+    .await;
+    attach_notes(outcome).await
 }
 
 /// Run the channel's upgrade off the UI loop and return one notice line.
@@ -305,6 +447,7 @@ mod tests {
                 channel: Channel::Uv,
                 installed: "0.3.1".into(),
                 latest: "0.3.2".into(),
+                notes: Vec::new(),
             }
         );
     }
@@ -399,5 +542,30 @@ mod tests {
         );
         assert_eq!(Channel::Brew.upgrade_command(), "brew upgrade fno");
         assert_eq!(Channel::Uv.upgrade_command(), "uv tool upgrade fno");
+    }
+
+    #[test]
+    fn release_body_parses_caps_and_degrades() {
+        let body = "## v0.4.1\n\n42 merged pull requests since v0.4.0.\n\n### mux\n\n- Portals open\n- Themes switch live\n\n### backlog\n\n- Rank orders the board\n";
+        let sections = parse_release_body(body);
+        assert_eq!(sections.len(), 3);
+        assert_eq!(sections[0].area, "");
+        assert_eq!(
+            sections[0].bullets,
+            vec!["42 merged pull requests since v0.4.0."]
+        );
+        assert_eq!(sections[1].area, "mux");
+        assert_eq!(
+            sections[1].bullets,
+            vec!["Portals open", "Themes switch live"]
+        );
+        assert_eq!(sections[2].bullets, vec!["Rank orders the board"]);
+        let long = "### area\n".to_string() + &"- bullet\n".repeat(NOTES_MAX_BULLETS + 5);
+        let parsed = parse_release_body(&long);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].bullets.len(), NOTES_MAX_BULLETS);
+        assert!(parse_release_body("## v0.4.1\n").is_empty());
+        assert!(parse_release_json("{\"body\": 3}").is_none());
+        assert!(parse_release_json("{").is_none());
     }
 }
