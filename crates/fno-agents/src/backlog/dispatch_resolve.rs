@@ -738,7 +738,7 @@ pub fn dispatch_cfg_for(node_cwd: Option<&str>, verb: &str) -> DispatchCfg {
                 .collect::<Vec<String>>()
         });
     let verb_registry = lookup(&["dispatch", "verb_registry"])
-        .and_then(|v| v.as_object().cloned())
+        .and_then(|v| v.as_table().cloned())
         .map(|table| {
             table
                 .into_iter()
