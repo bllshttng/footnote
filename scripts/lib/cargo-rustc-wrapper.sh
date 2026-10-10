@@ -21,6 +21,10 @@ fi
 # See docs/architecture/test-run-lifecycle.md "Build admission" / "Run admission".
 admit() {
     local mode="$1"
+    # The run door names the program cargo is about to start, so it can
+    # refuse an agent's test binary; the compile door names none. Only the
+    # admission call sees it: the program itself does not.
+    local program="${2:-}"
     # A failed admission is said once per cargo, not once per crate. A
     # marker older than an hour belongs to an earlier cargo with this pid.
     unadmitted="${TMPDIR:-/tmp}/fno-build-unadmitted.$PPID"
@@ -33,12 +37,12 @@ admit() {
         # fence reads it as "a cargo-launched build" and refuses the claims
         # store, so with it set every build ran claimless. Only this call
         # drops it: the compiler and the test binary keep it.
-        env -u CARGO_MANIFEST_DIR fno-agents test-run "${mode}-admit" --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
+        env -u CARGO_MANIFEST_DIR FNO_CARGO_RUN_PROGRAM="$program" fno-agents test-run "${mode}-admit" --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
         if [[ "$rc" -eq 86 ]]; then
-            # Slot-busy is policy, not breakage: the door printed the answer
-            # ("commit, push, CI runs it"). Stop the compile or run here;
-            # failing open would build unadmitted under the very saturation
-            # the gate exists to cap.
+            # Slot-busy, and an agent's test binary, are policy, not
+            # breakage: the door printed the answer ("commit, push, CI runs
+            # it"). Stop the compile or run here; failing open would build
+            # unadmitted under the very saturation the gate exists to cap.
             exit 86
         fi
         if [[ "$rc" -ge 128 ]]; then
@@ -94,7 +98,7 @@ if [[ "${1:-}" == "--run" ]]; then
         echo "cargo-rustc-wrapper: --run needs a program" >&2
         exit 2
     fi
-    admit run
+    admit run "$1"
     exec "$@"
 fi
 
