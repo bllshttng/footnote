@@ -432,8 +432,10 @@ impl MachineSample {
 }
 
 /// How far back the cheap tail read reaches before falling back to the full
-/// journal: machine_sample rows land once per daemon tick (300s), so an 8MB
-/// window holds one unless other events flooded the journal for hours.
+/// journal: machine_sample rows land once per daemon tick (300s), so the
+/// window holds the newest row unless other events outgrow 8MB between two
+/// ticks. The full-read fallback is correct but slow; the window only has
+/// to be generous, never exact.
 const NEWEST_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn newest(journal: &Path) -> Option<(String, Value)> {
