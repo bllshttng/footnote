@@ -485,6 +485,7 @@ pub mod team_settle;
 pub mod team_spawn;
 pub mod team_split;
 pub mod team_widen;
+pub mod terminal_route;
 pub mod terminal_stop;
 pub mod terminal_vocab;
 pub mod territory;

@@ -48,7 +48,7 @@ pub(crate) fn route(class: HelpClass, rung: u64) -> Route {
         HelpClass::Question => Route::OffSession { to: Recipient::Ladder, text: format!("A session asks a question (help {rung}). Answer by mail or record a ruling with fno inbox decide. 10 minutes without a read climbs the ladder.") },
         HelpClass::Budget => match rung {
             0 => Route::Timer { backoff_secs: 300 },
-            _ => Route::OffSession { to: Recipient::Lead, text: format!("Budget hit twice in one run (help {rung}). The evidence names the cap axis and value. A lead re-scopes or raises it.") },
+            _ => Route::OffSession { to: Recipient::Lead, text: format!("Budget hit twice (help {rung}). The evidence names the cap axis and value. A lead re-scopes or raises it.") },
         },
         HelpClass::Unclassified => Route::OffSession { to: Recipient::Lead, text: format!("An unclassified help (help {rung}). No route matched. A lead triages it, else it climbs the question ladder.") },
         }
@@ -530,14 +530,20 @@ fn climb(home: &crate::paths::AgentsHome, config_cwd: &Path, row: &Value, run: &
     }
 }
 
-/// The wait elapsed: wake the session with the timer's resolution.
+/// The wait elapsed: wake the session with the timer's resolution. A
+/// budget-class timer is the terminal route's resume leg: the
+/// body names the resume, not a wait re-check.
 fn fire_timer(home: &crate::paths::AgentsHome, row: &Value, run: &str) {
     let to = row
         .pointer("/data/to")
         .and_then(Value::as_str)
         .unwrap_or(run);
     let _ = home;
-    let body = "help-router: your wait backoff elapsed. Re-check the condition you were waiting on; if it cleared, carry on, else re-emit <help class=\"wait\"> with fresh evidence.";
+    let body = if row.pointer("/data/class").and_then(Value::as_str) == Some("budget") {
+        "help-router: your budget resume is due. The run was cut on its budget cap; resume from the resume receipt with the same cap. If the resumed run trips the cap again, the route asks the lead instead of you."
+    } else {
+        "help-router: your wait backoff elapsed. Re-check the condition you were waiting on; if it cleared, carry on, else re-emit <help class=\"wait\"> with fresh evidence."
+    };
     let _ = wake(to, body);
 }
 

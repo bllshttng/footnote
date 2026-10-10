@@ -697,6 +697,38 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
+    // ── non-delivery terminal: route on the help router ──
+    // The terminal becomes a help event with a node-scoped rung, the claim
+    // moves with the route, and a second terminal on one node asks the lead
+    // with both postmortems. Interrupted is respected and routes nothing.
+    // Wall-clock age of this run at the terminal, from the manifest's
+    // created_at (the implementation window's start): the elapsed the
+    // budget evidence quotes.
+    let elapsed_min = m
+        .created_at
+        .as_deref()
+        .and_then(parse_utc_epoch)
+        .map(|start| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            u64::try_from(now.saturating_sub(start)).unwrap_or(0) / 60
+        });
+
+    crate::terminal_route::route_terminal(&crate::terminal_route::TerminalRouteFacts {
+        cwd: &cwd,
+        session_id: &session_id,
+        node: m.graph_node_id.as_deref(),
+        reason: &reason,
+        postmortem: postmortem_path.as_deref(),
+        elapsed_min,
+        claim_key: m.target_claim_key.as_deref(),
+        claim_holder: m.target_claim_holder.as_deref(),
+        project_events: &project_events,
+        global_events: &global_events,
+    });
+
     // ── STUCK ONLY: file an unanswered operator question (HALF TWO) ──
     // A worker that idles on an unanswered question and then dies (measured:
     // 7h idle, "awaiting operator's terminal/mux info", `fno inbox outstanding`

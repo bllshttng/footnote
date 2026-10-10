@@ -131,12 +131,18 @@ fn budget_flat_key_enforces_cost_cap_ab41b13d9d() {
 
     assert_eq!(
         check_budget(&manifest_att, &settings, &now, &ledger),
-        Some(BudgetTrip::Cost),
+        Some(BudgetTrip::Cost {
+            cap_usd: Some(0.10),
+            spent_usd: 0.50
+        }),
         "flat budget_cap must enforce for attended"
     );
     assert_eq!(
         check_budget(&manifest_unatt, &settings, &now, &ledger),
-        Some(BudgetTrip::Cost),
+        Some(BudgetTrip::Cost {
+            cap_usd: Some(0.10),
+            spent_usd: 0.50
+        }),
         "flat budget_cap must enforce for unattended"
     );
 }
@@ -157,7 +163,10 @@ fn check_budget_malformed_cost_cap_trips_budget() {
     std::fs::write(&ledger, r#"[{"session_id":"s","cost_usd":0.0}]"#).unwrap();
     assert_eq!(
         check_budget(&m, &s, &now, &ledger),
-        Some(BudgetTrip::Cost),
+        Some(BudgetTrip::Cost {
+            cap_usd: None,
+            spent_usd: 0.0
+        }),
         "malformed cost cap must fail closed"
     );
 }
