@@ -18,6 +18,7 @@ Before the push boundary existed, `queued (durable)` was the last thing a sender
 The first implementation shelled from the hook to the Python `fno agents mail notify-self`.
 The interpreter start alone outran the hook budget on a loaded box: 46 of 46 recorded runs were cancelled at the budget and nothing ever delivered.
 The verb is native Rust now (`crates/fno-agents/src/mail_notify_self.rs`), dispatched from `client.rs` before the tokio runtime builds, so a fire answers in microseconds; the shell layer is a cheap gate around it.
+The Python leg is deleted with the boundary it served: `fno agents mail notify-self` is no longer a verb, so the Rust verb is the only renderer for this payload and the two can no longer drift.
 
 The verb reuses `drain-self`'s identity path (`canonical_handle` -> unread scan) and the same forward-only consume cursor.
 It renders the complete `UserPromptSubmit` JSON envelope in Rust, writes and flushes that envelope, and only then advances the cursor through the last rendered message.
@@ -34,7 +35,7 @@ Every path degrades to silence, never to a blocked turn: no harness identity -> 
 The `</system-reminder>` delimiter is defanged across the complete untrusted mail render before embedding.
 The hook bounds the verb at the one load-aware hook budget (`scripts/lib/hook-budget.sh`): the normal tier, shortened to 1s under fleet load, and past the load threshold the run is skipped entirely so a killed mid-ack render cannot lose mail; skipped mail stays pending.
 The hook always exits 0.
-A miss (timeout 124, identity refusal, crash) records a `mail_notify_self_missed` event row naming the rc and stderr tail, so a delivery gap is diagnosable instead of silent; a gate skip (no identity, no bus log, no binary) records nothing, because there was nothing to deliver.
+A miss (timeout 124, identity refusal, crash, or rc 127: jq missing, so the session id was unreadable) records a `mail_notify_self_missed` event row naming the rc and stderr tail, so a delivery gap is diagnosable instead of silent; the other gate skips (no identity, no bus log, no binary) record nothing, because there was nothing to deliver.
 A rendering, serialization, write, flush, or process failure before acknowledgement leaves the cursor unchanged, so the next active-turn or SessionStart boundary can repeat the message instead of losing it.
 The achievable guarantee is therefore at-least-once display around process failure: a crash may repeat mail, but successful output-before-ack prevents permanent loss.
 
@@ -45,7 +46,7 @@ Live injection is a bracketed paste into the recipient's input buffer. For a wor
 The fix is a recipient-level delivery policy, not a heuristic: `delivery_policy: bus-only` on the agents registry row.
 
 - **Who sets it:** the session itself, once: `fno agents register --delivery-policy bus-only` (in the human-attended session). `--delivery-policy off` clears it. A later flagless re-register preserves the stamp. The re-firing SessionStart hook cannot silently revert the recipient to injectable.
-- **What senders see:** `queued (durable) for <handle> [DND (bus-only): recipient polls the bus at each turn boundary]` on the name, job, and registered-agent lanes. No recovery warning, no send-time escalation. The queue is designed, not stranded, and it drains through this doc's own `notify-self` push at each turn boundary.
+- **What senders see:** `queued (durable) for <handle> [DND (bus-only): recipient polls the bus at each turn boundary]` on the name, job, and registered-agent lanes. No recovery warning, no send-time escalation. The queue is designed, not stranded, and it drains through this doc's own turn-boundary push (`fno-agents mail-notify-self`).
 - **What never happens:** a prompt-line paste, on any lane. The gate lives inside the three shared injectors (`_mail_inject_claude`, `_mail_inject_codex`, `_mux_pane_send` in `cli/src/fno/agents/dispatch.py`). Name, reply, job, project, raw, dispatch, ask, and annotate lanes inherit it rather than remembering to check.
 - **The raw lane:** `--raw` never queues durable, so a raw send to a bus-only recipient refuses non-zero (`refused: ... is DND (delivery-policy bus-only)`). `--check` answers `not-injectable` naming the policy.
 - **The naming rule:** bus-only is a DELIVERY-POLICY fact, never a liveness verdict. A bus-only session can be alive and mid-turn. It just belongs on the bus. This is the same distinction that renamed `NOT_INJECTABLE` off "not-live" (see `mail_inject.rs`).

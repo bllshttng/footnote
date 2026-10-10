@@ -33,15 +33,28 @@ hook_overloaded && exit 0
 BUS="${FNO_STATE_DIR:-$HOME/.fno}/bus"
 [[ -f "$BUS/messages.jsonl" ]] || exit 0
 
+# The binary gate runs before identity: a gate skip records nothing, so a
+# missing fno-agents must not be able to masquerade as a missing session id.
+command -v fno-agents >/dev/null 2>&1 || exit 0
+
 # No harness identity, no delivery. The pattern admits opencode's ses_ ids
 # alongside claude's session uuids; canonical_handle() first-eights both.
-SID="$(jq -r '.session_id // empty' 2>/dev/null)"
+# The assignment's status IS the substitution's: rc 127 means jq is missing,
+# and reading that as "no session id" would disable delivery on every run
+# with no miss row. jq reads the real top-level key; grepping the raw input
+# for one would let a planted "session_id" in a prompt fake the identity.
+SID=$(jq -r '.session_id // empty' 2>/dev/null)
+if (( $? == 127 )); then
+    source "$HOOK_DIR/../scripts/lib/events.sh" 2>/dev/null \
+        && emit_event_raw_literal mail_notify_self_missed \
+            '{"rc":127,"stderr_tail":"jq not found; session id unreadable"}' \
+            "hook" 2>/dev/null
+    exit 0
+fi
 case "$SID" in
     '' | *[!A-Za-z0-9_-]*) exit 0 ;;
 esac
 [[ "${#SID}" -ge 16 ]] || exit 0
-
-command -v fno-agents >/dev/null 2>&1 || exit 0
 
 # Stdout of the atomic verb IS the hook payload: it streams through fd 3
 # (saved below) untouched, byte-for-byte. Stderr lands in the variable so a

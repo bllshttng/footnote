@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # fno hook: PreToolUse - control mail drain at the tool boundary.
 #
-# A control body that demoted durable waits on notify-self, which fires only
-# at a prompt boundary; a worker holding one long turn never reaches one, so
-# a merge freeze could not stop it. This hook lands CONTROL mail at the next
-# tool call instead. The shell layer is a cheap gate only: three stat calls
+# A control body that demoted durable waits on the turn-boundary mail push,
+# which fires only at a prompt boundary; a worker holding one long turn never
+# reaches one, so a merge freeze could not stop it. This hook lands CONTROL
+# mail at the next tool call instead. The shell layer is a cheap gate only:
+# three stat calls
 # against the sender-stamped pending flags, then the fno-agents verb owns
 # scan, cursors, dedup, and rendering. A config-redirected bus degrades to
 # prompt-boundary delivery, never a loss.

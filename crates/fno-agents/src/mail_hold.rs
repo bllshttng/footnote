@@ -270,7 +270,7 @@ fn read_clock(handle: &str) -> Option<Clock> {
     })
 }
 
-/// Re-arm an idle hold (hold.py `extend`, the `--extend` branch body).
+/// Re-arm an idle hold (the `--extend` branch body).
 /// `Ok(Some(json_line))` answers a live hold (an idle re-arm, or a wall hold
 /// returned unchanged so the policy stays live without moving); `Ok(None)`
 /// answers no live hold (no clock, `until: null`, one lapsed, or past its
@@ -327,10 +327,10 @@ pub(crate) fn extend_clock(handle: &str) -> Result<Option<String>, ()> {
     ))
 }
 
-/// Clear a lapsed clock the prompt-boundary notify found (hold.py
-/// `tidy_lapsed`): drop the sidecar and lift the bus-only stamp so a finished
-/// hold stops refusing delivery. Best-effort throughout - a tidy failure
-/// must never cost this turn's delivery.
+/// Clear a lapsed clock the prompt-boundary notify found: drop the sidecar
+/// and lift the bus-only stamp so a finished hold stops refusing delivery.
+/// Best-effort throughout - a tidy failure must never cost this turn's
+/// delivery.
 pub(crate) fn tidy_lapsed(handle: &str) {
     let Some(clock) = read_clock(handle) else {
         return;
@@ -406,8 +406,8 @@ fn spawn_release_timer(handle: &str) {
 }
 
 /// A stamped row with no clock never lapses, so a clock a concurrent
-/// `tidy_lapsed` (hold.py) removed between the write and the stamp is
-/// written back once. True when the clock exists after the call.
+/// `tidy_lapsed` removed between the write and the stamp is written back
+/// once. True when the clock exists after the call.
 fn ensure_clock(handle: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     if read_clock(handle).is_some() {
         return true;

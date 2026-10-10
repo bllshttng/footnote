@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -93,7 +92,7 @@ def _hold_transport(argv: list[str]) -> str:
 
 def _hold_query(argv: list[str]) -> Optional[dict]:
     """The verb's one-line JSON state, or None when it printed nothing
-    (nothing to extend: no clock, a permanent policy, or a lapsed one)."""
+    (no clock, a permanent policy, or a lapsed one)."""
     stdout = _hold_transport(argv)
     return json.loads(stdout) if stdout else None
 
@@ -148,9 +147,8 @@ def read(handle: str) -> Optional[Hold]:
     neither is evidence that a hold is running.
 
     Never raises. The catch is deliberately broad because this read runs on
-    every ``UserPromptSubmit`` (notify-self's extend and tidy) and at every
-    render: a missing binary or a failed transport must degrade to "no
-    clock", never break the turn-boundary render the old file read served.
+    the status path, where a missing binary or a failed transport must
+    degrade to "no clock", never break the verb answering.
     """
     try:
         state = _hold_query(["--read", handle])
@@ -205,29 +203,6 @@ def clear(handle: str) -> None:
     _hold_transport(["--clear", handle])
 
 
-def extend(handle: str) -> Optional[Hold]:
-    """Re-arm an idle hold, or return a live wall hold unchanged.
-
-    Returns None when there is no live timed hold to extend (no clock, a
-    permanent policy, or one already lapsed) - the verb answers an empty
-    stdout for each. Wall-clock holds return their existing deadline so the
-    policy stays live without moving it. The caller is ``fno agents mail
-    notify-self``, which fires on every ``UserPromptSubmit``.
-    """
-    state = _hold_query(["--extend", handle])
-    if state is None:
-        return None
-    ceiling = state.get("ceiling")
-    return Hold(
-        handle=handle,
-        until=_parse(state["until"]),
-        window_s=state["window_s"],
-        clock_kind=state["clock_kind"],
-        ceiling=_parse(ceiling) if ceiling else None,
-        source=None,
-    )
-
-
 def lapsed(handle) -> bool:
     """True when a TIMED hold for ``handle`` has run out. Only ever timed.
 
@@ -239,34 +214,15 @@ def lapsed(handle) -> bool:
     forever, does not describe this design: held mail is durable on the bus
     and surfaces at the next SessionStart or turn boundary, so a lost clock
     costs a stall bounded by the operator's next prompt, never a lost message.
-    Auto-expire stays real through two carriers that do not depend on this
-    file surviving: the detached release timer, and that turn-boundary tidy.
+    Auto-expire stays real through carriers that do not depend on this file
+    surviving: the detached release timer, and the Rust verb's
+    turn-boundary tidy of lapsed clocks.
 
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     that already holds the registry lock and cannot raise into the gate.
     """
     state = _describe(handle)
     return bool(state and state.get("lapsed"))
-
-
-def tidy_lapsed(handle: str) -> bool:
-    """Clear a timed hold that has run out, flag and clock together.
-
-    The delivery gate stays a pure read, so this is where a stale ``bus-only``
-    flag gets cleared: a turn boundary, where the registry lock is free. Only a
-    TIMED hold is tidied. A ``until: null`` clock is a deliberate permanent
-    policy, and an absent clock cannot be told apart from a row that never had
-    one, so neither is touched here.
-    """
-    clock = read(handle)
-    if clock is None or clock.until is None or clock.until > _now():
-        return False
-    clear(handle)
-    # Report what the WRITE did, not that the attempt was made. `set_policy`
-    # returns False for a registry it could not read or a row it never found,
-    # and returning True over that is an instrument reporting success on its
-    # own no-op path. The caller learns nothing, and the flag is still set.
-    return set_policy(handle, None)
 
 
 def candidate_keys(target) -> tuple:
@@ -544,8 +500,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     # The old order discarded set_policy's result and cleared the clock either
     # way, which turned a partial failure into a worse state than the failure:
     # a bus-only row with no clock never lapses, so a hold that failed to lift
-    # became PERMANENT, and no automatic path clears it - `tidy_lapsed` needs a
-    # clock it no longer has.
+    # became PERMANENT, with no automatic path left that could clear it.
     #
     # Keeping the clock on a failed write also lets this delivery through. The
     # gate reads a bus-only row with a LAPSED clock as not-holding, so the
@@ -684,104 +639,3 @@ def _emit_drain_marker(
         )
     except (OSError, ValueError, TypeError):
         pass
-
-
-def cmd_notify_self() -> None:
-    """Body of ``fno agents mail notify-self`` (hidden): one atomic
-    ``UserPromptSubmit`` mail payload, then acknowledge it.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-    from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.config import load_settings
-    from fno.harness_identity import canonical_handle, session_identity_key
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError as exc:
-        print(f"error: notify-self: {exc}", file=sys.stderr)
-        return
-    if not ident.harness or not ident.session_id:
-        return
-
-    handle = canonical_handle(ident.session_id)
-    clock_key = session_identity_key(ident.session_id)
-
-    # Busy mode: the hook fires on every UserPromptSubmit - an idle
-    # hold re-arms, a wall hold keeps its policy live. Both calls WRITE, so a
-    # hold failure must degrade to rendering the mail, never swallowing this turn.
-    try:
-        if extend(clock_key) is not None:
-            return
-        # The first-eight key is the pre-migration clock: extend it so an old
-        # hold keeps its idle re-arm, and tidy whichever form has lapsed.
-        if extend(handle) is not None:
-            return
-        tidy_lapsed(clock_key)
-        tidy_lapsed(handle)
-    except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
-        pass
-
-    lines: list[str] = []
-
-    unread = scan_unread(handle)
-    from fno.mail.reply_resolve import present_mail_ids
-
-    present = present_mail_ids()
-
-    def _dup(m: object) -> bool:
-        return present is not None and getattr(m, "id", "") in present
-
-    to_render = [m for m in unread if not _dup(m)]
-    if to_render:
-        lines.append(f"[fno agents mail] {len(to_render)} message(s) for {handle}:")
-        for message in to_render:
-            lines.extend(
-                (
-                    f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
-                    message.body.rstrip("\n"),
-                )
-            )
-        lines.append(
-            '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
-        )
-
-    from fno.mail.landed import _defang_reminder, _sent_unclaimed, nag_line
-
-    ttl = load_settings().inbox.unclaimed_ttl
-    unclaimed = _sent_unclaimed(handle, ttl)
-    line = nag_line(unclaimed)
-    if line:
-        lines.append(line)
-
-    if not lines:
-        if unread:
-            advance_cursor(handle, unread[-1].id)
-            for m in unread:
-                _emit_drain_marker(m.id, handle, handle, m.from_, "skipped-duplicate")
-        return
-
-    try:
-        context = (
-            f"<system-reminder>\n"
-            f"{_defang_reminder(chr(10).join(lines))}\n"
-            f"</system-reminder>"
-        )
-        payload = json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": context,
-                }
-            },
-            ensure_ascii=False,
-        )
-        sys.stdout.write(payload + "\n")
-        sys.stdout.flush()
-    except (OSError, TypeError, ValueError):
-        return
-
-    if unread:
-        advance_cursor(handle, unread[-1].id)
-        for m in unread:
-            reason = "skipped-duplicate" if _dup(m) else "printed"
-            _emit_drain_marker(m.id, handle, handle, m.from_, reason)

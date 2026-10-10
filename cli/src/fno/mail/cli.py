@@ -618,8 +618,8 @@ def _sent_unclaimed_count() -> int:
     """Count of THIS session's sent mail unclaimed past config.inbox.unclaimed_ttl.
 
     Session-scoped (keyed on my canonical handle), so a no-identity surface
-    honestly reports 0 rather than a project-wide figure. Shares the notify-self
-    predicate; never raises (a broken read degrades to 0).
+    honestly reports 0 rather than a project-wide figure. Shares the status
+    read's same predicate; never raises (a broken read degrades to 0).
     """
     from fno.agents.self_stamp import resolve_self_identity
     from fno.config import load_settings
@@ -2425,9 +2425,9 @@ def _name_lane_send(
     )
 
     # a bus-only queue is DESIGNED, not stranded. The recipient polls
-    # the durable bus at each turn boundary (notify-self), so this is delivery
-    # on the recipient's terms -- no recovery warning, no escalation, and a
-    # receipt that says so instead of reading as a live-miss.
+    # the durable bus at each turn boundary (the native verb), so this is
+    # delivery on the recipient's terms -- no recovery warning, no escalation,
+    # and a receipt that says so instead of reading as a live-miss.
     bus_only = live_reason == BUS_ONLY_POLICY
     try:
         th = write_new_thread(
@@ -3736,9 +3736,9 @@ def cmd_send(
             persist_to_memory = True
 
         # An agent-scoped heads-up must use the same canonical session handle
-        # that notify-self and drain-self consume. Resolve registered names and
-        # every supported handle form before the durable append; an unresolved
-        # token exits without creating a stranded inbox.
+        # that the turn-boundary delivery and drain-self consume. Resolve
+        # registered names and every supported handle form before the durable
+        # append; an unresolved token exits without creating a stranded inbox.
         if to_project is None:
             from fno.agents import discover as discover_mod
             from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -4834,9 +4834,7 @@ def cmd_drain_self(
                 )
 
 
-from fno.mail.hold import _emit_drain_marker, cmd_notify_self  # noqa: E402,F401
-
-mail_app.command("notify-self", hidden=True)(cmd_notify_self)
+from fno.mail.hold import _emit_drain_marker  # noqa: E402
 
 
 @mail_app.command("rebuild-render", hidden=True)

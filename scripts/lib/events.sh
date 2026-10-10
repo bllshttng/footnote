@@ -287,6 +287,29 @@ emit_event_raw() {
     return "$append_rc"
 }
 
+# emit_event_raw_literal TYPE LITERAL_JSON [SOURCE]
+#
+# The jq-free twin of emit_event_raw, for the one case where jq itself is
+# what failed: a hook that could not read its input because jq is missing
+# still owes the miss row, and building that envelope through jq would drop
+# it again. DATA must be a JSON literal the caller wrote by hand (never
+# interpolated user input); timestamp and envelope shape match
+# emit_event_raw exactly.
+emit_event_raw_literal() {
+    local type="${1:?type required}"
+    local json="${2:?literal JSON required}"
+    local source="${3:-${EMIT_SOURCE_ID:-target}}"
+    local events_path="${EVENTS_FILE:-.fno/events.jsonl}"
+    local event
+    printf -v event '{"ts":"%s","type":"%s","source":"%s","data":%s}' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$type" "$source" "$json"
+    # Same rc contract: 0 stored, 3 skipped on purpose, 1 lost with the
+    # reason already on stderr from the root.
+    local append_rc=0
+    _append_bounded_event emit_event_raw_literal "$event" "$events_path" || append_rc=$?
+    return "$append_rc"
+}
+
 # emit_polling_external_review key=value [key=value ...]
 #
 # Emits the polling_external_review event used by /fno:ship pr check to register

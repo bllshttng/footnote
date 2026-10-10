@@ -186,6 +186,42 @@ else
     bad "hung binary: rc=$hang_rc elapsed=${elapsed}s rows=$(read_miss_events)"
 fi
 
+# --- broken jq: identity is unreadable, a deterministic miss row records it -
+
+fresh_env
+seed_bus '{"id":"m1","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"hi","ts":"2026-10-09T00:00:00Z"}'
+NOJQ_BIN="$TMP/nojq-bin"
+mkdir -p "$NOJQ_BIN"
+printf '#!/bin/sh\nexit 127\n' > "$NOJQ_BIN/jq"
+chmod +x "$NOJQ_BIN/jq"
+out="$(PATH="$NOJQ_BIN:$TMP/bin:$PATH" FNO_STATE_DIR="$STATE" FNO_HOME="$STATE" \
+    EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" FNO_STUB_ARGS_LOG="$ARGS_LOG" \
+    FNO_HOOK_BUDGET_SKIP_PER_CORE=1000000 \
+    bash "$HOOK" <<<"$STDIN_OK" 2>/dev/null)" && nojq_rc=0 || nojq_rc=$?
+if [[ "$nojq_rc" -eq 0 && -z "$out" && ! -s "$ARGS_LOG" ]] \
+    && miss_row_holding '.rc == 127 and .stderr_tail == "jq not found; session id unreadable"' >/dev/null; then
+    ok "broken jq: turn proceeds, stub not called, deterministic miss row rc 127"
+else
+    bad "broken jq: rc=$nojq_rc out=${#out} rows=$(read_miss_events)"
+fi
+
+# --- emit_event_raw_literal: the jq-free miss-row writer --------------------
+
+fresh_env
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/events.sh"
+EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" \
+    emit_event_raw_literal mail_notify_self_missed \
+    '{"rc":127,"stderr_tail":"jq not found; session id unreadable"}' "hook" \
+    && emit_rc=0 || emit_rc=$?
+if [[ "$emit_rc" -eq 0 ]] \
+    && miss_row_holding '.rc == 127 and .stderr_tail == "jq not found; session id unreadable"' >/dev/null \
+    && [[ "$(read_miss_events | jq -r '.[0] | fromjson | .source' 2>/dev/null)" == "hook" ]]; then
+    ok "emit_event_raw_literal: jq-free writer lands a well-formed miss row"
+else
+    bad "emit_event_raw_literal: rc=$emit_rc rows=$(read_miss_events)"
+fi
+
 # --- manifests: both harnesses wire the hook on UserPromptSubmit -----------
 
 for manifest in hooks/hooks.json hooks/codex-hooks.json; do
