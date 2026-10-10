@@ -36,7 +36,7 @@ setup_sandbox() {
     local tmp
     tmp=$(mktemp -d -t wt-hook-test.XXXXXX)
     (
-        cd "$tmp"
+        cd "$tmp" || exit 1
         git init -q
         git -c user.email=t@t -c user.name=t commit --allow-empty -m init -q
         mkdir -p .fno
