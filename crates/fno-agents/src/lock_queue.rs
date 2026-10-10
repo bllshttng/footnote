@@ -164,7 +164,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("graph.json.lock");
         let dead = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
-        std::fs::write(&dead, format!("{{\"pid\":{},\"start\":{start}}}")).unwrap();
+        std::fs::write(
+            &dead,
+            format!("{{\"pid\":{},\"start\":{start}}}", child.id()),
+        )
+        .unwrap();
         let second = register(&lock).unwrap();
         assert!(am_head(&second), "the zombie ticket pins no one");
         assert!(!dead.exists(), "the scan pruned the zombie ticket");
@@ -214,7 +218,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("graph.json.lock");
         let live = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
-        std::fs::write(&live, format!("{{\"pid\":{},\"start\":{start}}}")).unwrap();
+        std::fs::write(
+            &live,
+            format!("{{\"pid\":{},\"start\":{start}}}", child.id()),
+        )
+        .unwrap();
         let second = register(&lock).unwrap();
         assert!(
             !am_head(&second),
