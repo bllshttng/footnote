@@ -280,7 +280,9 @@ fn column_grid_rows() {
     let o = overlay_in(vec![long, over], feed_view::FeedOrder::Recent);
     let lines = feed_panel_lines(&o, false, 120, ROWS, 0);
     let header = &lines[1];
-    let row = &lines[2];
+    // Recent order renders NEWEST first, so display row 0 is `over` and
+    // display row 1 (lines[3]) is `long`, whose cells carry the wide values.
+    let row = &lines[3];
     let ts_cell = display_slice(row, 3, 11);
     assert!(
         !ts_cell.trim().is_empty(),
@@ -302,8 +304,8 @@ fn column_grid_rows() {
         );
     }
     // A kind past the cap ellipsizes to exactly the cap and the node column
-    // keeps its grid position.
-    let over_row = &lines[3];
+    // keeps its grid position (over is display row 0, lines[2]).
+    let over_row = &lines[2];
     assert!(
         over_row.contains("prompt_parked_b\u{2026} "),
         "the over-cap kind ellipsizes at 16 columns: {over_row}"
