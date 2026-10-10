@@ -220,6 +220,7 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
                         i,
                         kw + 1,
                         wrap(hint, w.saturating_sub(kw + 5)),
+                        PopupRow::Header,
                     );
                 }
             }
