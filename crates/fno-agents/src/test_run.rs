@@ -56,6 +56,10 @@ pub(crate) fn build_slot_cap(load: Option<f64>) -> usize {
     }
 }
 
+/// What a waiter names when no cargo holds the slot it waits for: the load
+/// cap alone keeps it out.
+const NO_HOLDER: &str = "no holder; the load caps the compile slots";
+
 fn build_slot_cap_now() -> usize {
     build_slot_cap(crate::machine_sample::load_average().map(|(one, _, _)| one))
 }
@@ -1279,15 +1283,27 @@ fn run_build_admit(args: &[String]) -> i32 {
                     // A holder whose owner session died frees the door now,
                     // compiling or not; the next poll acquires.
                     crate::cargo_orphans::release_orphan_holders(&build_keys, &worktree);
-                    let (h, pid, _) = rows.first()?;
-                    let holder_pid = (*pid).filter(|p| *p > 0)?;
                     // A holder that has stopped compiling keeps the slot for no
                     // one. Feed the idle clock on the scan poll_held already makes;
                     // when the window is out, release the holder's claim by its
                     // exact holder string (a holder mismatch is a silent no-op,
                     // which is how two waiters racing stay safe) and let the next
-                    // poll acquire.
-                    let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+                    // poll acquire. With several compile slots the clock watches
+                    // the first holder that is not compiling, so an idle holder
+                    // on any slot is found, not only the one on slot 0.
+                    let readings: Vec<(&String, i32, bool)> = rows
+                        .iter()
+                        .filter_map(|(h, pid, _)| {
+                            let holder_pid = (*pid).filter(|p| *p > 0)?;
+                            let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+                            Some((h, holder_pid, compiling))
+                        })
+                        .collect();
+                    let (h, holder_pid, compiling) = readings
+                        .iter()
+                        .find(|(_, _, compiling)| !compiling)
+                        .or_else(|| readings.first())
+                        .copied()?;
                     // A takeover reason names the holder it displaced. When the
                     // claim passes to a different holder, the guard resets, so this
                     // waiter can still take over the new holder when it idles.
@@ -1785,7 +1801,13 @@ impl CargoWait {
             return OnHeld::Stop(128 + sig);
         }
         if !self.marked {
-            if let (Some(path), Some((holder, _, _))) = (&self.marker, rows.first()) {
+            // A waiter the load cap holds can face an empty door; it still
+            // writes its marker, so the stop hook parks it and the builds
+            // view lists it.
+            if let Some(path) = &self.marker {
+                let holder = rows
+                    .first()
+                    .map_or(NO_HOLDER, |(holder, _, _)| holder.as_str());
                 write_waiter_marker(path, self.cargo_pid, &self.worktree, holder, w.lane);
             }
             self.marked = true;
@@ -1799,7 +1821,7 @@ impl CargoWait {
         {
             self.last_readout = Some(readout);
             self.last_notice = Some(Instant::now());
-            let held = rows
+            let mut held = rows
                 .iter()
                 .map(|(h, pid, _)| {
                     format!(
@@ -1809,10 +1831,13 @@ impl CargoWait {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            if held.is_empty() {
+                held = NO_HOLDER.to_string();
+            }
             let context = slot_context
                 .map(|(cap, label)| {
                     if cap == 0 {
-                        "load is over 150, so only the user's cargo compiles; held by ".to_string()
+                        "load is over 150, so only the user's cargo compiles; holders: ".to_string()
                     } else {
                         format!("{} of {cap} {label} held by ", rows.len())
                     }
@@ -1984,10 +2009,14 @@ fn build_wait_in(dir: &Path, cwd: &Path) -> Option<BuildWait> {
 
 fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
     build_wait_in(dir, cwd).map(|wait| {
-        format!(
-            "held for cargo build admission: {} is building",
-            wait.holder
-        )
+        if wait.holder == NO_HOLDER {
+            format!("held for cargo build admission: {NO_HOLDER}")
+        } else {
+            format!(
+                "held for cargo build admission: {} is building",
+                wait.holder
+            )
+        }
     })
 }
 
