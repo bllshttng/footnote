@@ -564,7 +564,8 @@ pub enum RestartError {
 /// The grace a SIGTERM'd daemon gets before the restart escalates to SIGKILL.
 /// 30s because a loaded machine measured `fno agents list` at 11.5-18.7s the
 /// same hour, and restart.py wraps the verb in a 120s subprocess timeout:
-/// 30s grace + 2s kill + FORCE_LOCK_TIMEOUT + start_fresh fits inside it.
+/// 30s grace + 2s kill + FORCE_LOCK_TIMEOUT + a 60s start_fresh fits inside
+/// it.
 const RESTART_SIGTERM_GRACE: Duration = Duration::from_secs(30);
 
 /// The result of [`terminate_confirmed`]. `Survived` is the honest-failure
@@ -724,7 +725,11 @@ async fn await_lock_holder(home: &AgentsHome) -> Option<(u32, Option<u64>)> {
 /// Lazy-start a fresh daemon and return its pid. Shared by every restart exit.
 async fn start_fresh(home: &AgentsHome, daemon_bin: &Path) -> Result<u32, RestartError> {
     let started = Instant::now();
-    let budget = Duration::from_secs(10);
+    // 60s: a stress-loaded runner measures process spawns at 30s and more,
+    // and the e2e harness backstops at 180s for the same reason. The 120s
+    // restart.py subprocess wrap still fits (30s grace + 2s kill +
+    // FORCE_LOCK_TIMEOUT + 60s).
+    let budget = Duration::from_secs(60);
     loop {
         ensure_daemon(home, daemon_bin).await?;
         match read_daemon_pid(home).await {
