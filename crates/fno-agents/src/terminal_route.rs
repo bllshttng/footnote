@@ -468,106 +468,87 @@ mod tests {
     }
 
     #[test]
-    fn budget_first_trip_routes_budget_at_rung_zero() {
-        let ledger = led(&format!(
-            r#"[{{"fno_id":"a1","graph_node_id":"x-n","termination_reason":"Budget"}}]"#
-        ));
+    fn budget_ladder_routes_by_node_history() {
+        // First trip on the node rides the rung-0 resume timer.
+        let ledger =
+            led(r#"[{"fno_id":"a1","graph_node_id":"x-n","termination_reason":"Budget"}]"#);
         let f = facts("cur", Some("x-n"), "Budget");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Budget);
         assert_eq!(rung, 0);
-    }
 
-    #[test]
-    fn budget_second_trip_without_delivery_routes_stuck() {
+        // Second trip with no delivered step between: a resume burns the cap
+        // again for nothing, so the run routes stuck.
         let ledger = led(r#"[
             {"fno_id":"a1","graph_node_id":"x-n","termination_reason":"Budget"},
             {"fno_id":"a2","graph_node_id":"x-n","termination_reason":"Budget"},
             {"fno_id":"cur","graph_node_id":"x-n","termination_reason":"Budget"}
         ]"#);
-        let f = facts("cur", Some("x-n"), "Budget");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Stuck);
         assert_eq!(rung, 2);
-    }
 
-    #[test]
-    fn budget_second_trip_after_delivery_asks_the_lead() {
+        // Second trip after a delivered step asks the lead with the spend.
         let ledger = led(r#"[
             {"fno_id":"a1","graph_node_id":"x-n","termination_reason":"Budget"},
             {"fno_id":"a2","graph_node_id":"x-n","termination_reason":"DonePRGreen"},
             {"fno_id":"cur","graph_node_id":"x-n","termination_reason":"Budget"}
         ]"#);
-        let f = facts("cur", Some("x-n"), "Budget");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Budget);
         assert_eq!(rung, 1);
-    }
 
-    #[test]
-    fn other_nodes_rows_never_count_as_priors() {
+        // Rows from other nodes never count as priors: the ladder is
+        // node-scoped.
         let ledger = led(r#"[
             {"fno_id":"a1","graph_node_id":"other","termination_reason":"Budget"},
             {"fno_id":"cur","graph_node_id":"x-n","termination_reason":"Budget"}
         ]"#);
-        let f = facts("cur", Some("x-n"), "Budget");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Budget);
         assert_eq!(rung, 0);
     }
 
     #[test]
-    fn noprogress_and_aborted_take_their_classes() {
+    fn remaining_terminal_classes_take_their_routes() {
         let empty: Vec<Value> = Vec::new();
+
+        // NoProgress routes stuck; Aborted routes unclassified.
         let f = facts("cur", Some("x-n"), "NoProgress");
         let (class, rung, _) = decide(&f, &empty).unwrap();
         assert_eq!(class, HelpClass::Stuck);
         assert_eq!(rung, 2);
-
         let f = facts("cur", Some("x-n"), "Aborted");
         let (class, rung, _) = decide(&f, &empty).unwrap();
         assert_eq!(class, HelpClass::Unclassified);
         assert_eq!(rung, 0);
-    }
 
-    #[test]
-    fn unreviewed_ladder_waits_twice_then_asks() {
-        let empty: Vec<Value> = Vec::new();
+        // Unreviewed-Done ladder: wait, wait again, then ask the lead.
         let f = facts("cur", Some("x-n"), "DoneUnreviewed");
         let (class, rung, _) = decide(&f, &empty).unwrap();
         assert_eq!(class, HelpClass::Wait);
         assert_eq!(rung, 0);
-
         let ledger =
             led(r#"[{"fno_id":"a1","graph_node_id":"x-n","termination_reason":"DoneUnreviewed"}]"#);
-        let f = facts("cur", Some("x-n"), "DoneUnreviewed");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Wait);
         assert_eq!(rung, 1);
-
         let ledger = led(r#"[
             {"fno_id":"a1","graph_node_id":"x-n","termination_reason":"DoneUnreviewed"},
             {"fno_id":"a2","graph_node_id":"x-n","termination_reason":"DoneUnreviewed"},
             {"fno_id":"cur","graph_node_id":"x-n","termination_reason":"DoneUnreviewed"}
         ]"#);
-        let f = facts("cur", Some("x-n"), "DoneUnreviewed");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Question);
         assert_eq!(rung, 0);
-    }
 
-    #[test]
-    fn awaiting_review_routes_gate_unsatisfiable() {
-        let empty: Vec<Value> = Vec::new();
+        // Reviewer unavailable routes gate-unsatisfiable to the lead.
         let f = facts("cur", Some("x-n"), "DoneAwaitingReview");
         let (class, rung, _) = decide(&f, &empty).unwrap();
         assert_eq!(class, HelpClass::GateUnsatisfiable);
         assert_eq!(rung, 0);
-    }
 
-    #[test]
-    fn interrupted_and_delivered_route_nothing() {
-        let empty: Vec<Value> = Vec::new();
+        // Interrupted is respected; delivered reasons route nothing.
         for reason in ["Interrupted", "DonePRGreen", "HeldOnQuestion", "NoWork"] {
             let f = facts("cur", Some("x-n"), reason);
             assert!(decide(&f, &empty).is_none());
@@ -575,7 +556,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_row_data_carries_the_postmortem_key() {
+    fn terminal_row_and_evidence_contracts_hold() {
+        // The row data carries the run's postmortem path: the pair rule
+        // reads it from a prior run's row. Absent reads as null, never an
+        // omitted key.
         let mut f = facts("cur", Some("x-n"), "Budget");
         f.postmortem = Some("/tmp/pm-cur.md");
         let data = terminal_data(
@@ -588,8 +572,7 @@ mod tests {
         );
         assert_eq!(
             data.get("postmortem").and_then(Value::as_str),
-            Some("/tmp/pm-cur.md"),
-            "row data must carry the run's postmortem path: the pair rule reads it from a prior run's row"
+            Some("/tmp/pm-cur.md")
         );
         let bare = facts("cur", Some("x-n"), "Budget");
         let data = terminal_data(
@@ -600,15 +583,10 @@ mod tests {
             "terminal:Budget",
             "ev",
         );
-        assert_eq!(
-            data.get("postmortem").map(Value::is_null),
-            Some(true),
-            "absent postmortem reads as a null key, never an omitted key"
-        );
-    }
+        assert_eq!(data.get("postmortem").map(Value::is_null), Some(true));
 
-    #[test]
-    fn pair_evidence_names_both_postmortems_from_the_prior_row() {
+        // The pair evidence names both postmortems; a legacy row without
+        // the key reads as unrecorded.
         let prior = serde_json::json!({
             "run": "a1",
             "data": {"kind": "terminal", "postmortem": "/tmp/pm-a1.md"}
@@ -619,20 +597,13 @@ mod tests {
             Some("/tmp/pm-cur.md"),
             "axis=cost value=1.5 cap=0.5; spend=$1.50",
         );
-        assert!(
-            ev.contains("postmortems: /tmp/pm-cur.md and /tmp/pm-a1.md"),
-            "pair evidence must carry both postmortem paths: {ev}"
-        );
+        assert!(ev.contains("postmortems: /tmp/pm-cur.md and /tmp/pm-a1.md"));
         let legacy = serde_json::json!({"run": "a0", "data": {"kind": "terminal"}});
         let ev = pair_evidence("x-n", &legacy, None, "terminal Budget on node");
-        assert!(
-            ev.contains("unrecorded (row predates the terminal route)"),
-            "a prior row without a postmortem key reads as unrecorded: {ev}"
-        );
-    }
+        assert!(ev.contains("unrecorded (row predates the terminal route)"));
 
-    #[test]
-    fn budget_axis_facts_read_cap_and_value_off_the_termination_row() {
+        // The budget axis facts read cap and value off the termination row;
+        // a malformed cap reads as absent while the trip stays real.
         let row = serde_json::json!({
             "ts": "2026-10-10T12:00:00Z",
             "data": {"session_id": "cur", "axis": "cost", "cap": 0.5, "value": 1.5}
@@ -647,6 +618,6 @@ mod tests {
         });
         let (axis, cap, _) = budget_axis_facts(&bare).unwrap();
         assert_eq!(axis, "cost");
-        assert_eq!(cap, None, "malformed cap reads as absent, trip stays real");
+        assert_eq!(cap, None);
     }
 }
