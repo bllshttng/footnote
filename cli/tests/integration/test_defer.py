@@ -275,7 +275,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
     assert node.get("status") == "done"
 
 
-def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
+def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path, monkeypatch):
     """Triage apply lands the same done -> deferred transition cleanly."""
     monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     node_id = _seed_with_plan(tmp_path, "Plan Triage Done Then Defer")

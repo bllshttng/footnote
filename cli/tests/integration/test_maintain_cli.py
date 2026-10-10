@@ -606,7 +606,7 @@ def _invoke_health(args: list[str]):
     )
 
 
-def test_health_stranded_lists_dependents_of_auto_deferred_blocker(tmp_graph):
+def test_health_stranded_lists_dependents_of_auto_deferred_blocker(tmp_graph, monkeypatch):
     # AC3-UI: each auto-failure-deferred node lists its dependents.
     monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     _seed(
