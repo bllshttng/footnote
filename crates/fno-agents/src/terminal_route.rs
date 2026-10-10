@@ -469,9 +469,9 @@ mod tests {
 
     #[test]
     fn budget_ladder_routes_by_node_history() {
-        // First trip on the node rides the rung-0 resume timer.
-        let ledger =
-            led(r#"[{"fno_id":"a1","graph_node_id":"x-n","termination_reason":"Budget"}]"#);
+        // First trip on the node rides the rung-0 resume timer: no prior
+        // Budget terminal on this node in the ledger.
+        let ledger: Vec<Value> = Vec::new();
         let f = facts("cur", Some("x-n"), "Budget");
         let (class, rung, _) = decide(&f, &ledger).unwrap();
         assert_eq!(class, HelpClass::Budget);

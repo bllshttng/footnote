@@ -16,7 +16,7 @@ Every `<help class=... reason=... evidence=...>` routes to its next step. The ru
 | `gate-deadlock` | off-session, evidence holder: Two gates wait on each other (help 0). The evidence names the holder to break the deadlock. The stop allows as Interrupted. | off-session, evidence holder: Two gates wait on each other (help 2). The evidence names the holder to break the deadlock. The stop allows as Interrupted. |
 | `gate-unsatisfiable` | off-session, lead: The run hit an environment or gate refusal it cannot clear (help 0). Evidence carries the receipt. A lead decides. | off-session, lead: The run hit an environment or gate refusal it cannot clear (help 2). Evidence carries the receipt. A lead decides. |
 | `question` | off-session, ladder: A session asks a question (help 0). Answer by mail or record a ruling with fno inbox decide. 10 minutes without a read climbs the ladder. | off-session, ladder: A session asks a question (help 2). Answer by mail or record a ruling with fno inbox decide. 10 minutes without a read climbs the ladder. |
-| `budget` | timer: 300s backoff, 5m/10m/15m cap | off-session, lead: Budget hit twice in one run (help 2). The evidence names the cap axis and value. A lead re-scopes or raises it. |
+| `budget` | timer: 300s backoff, 5m/10m/15m cap | off-session, lead: Budget hit twice (help 2). The evidence names the cap axis and value. A lead re-scopes or raises it. |
 | `unclassified` | off-session, lead: An unclassified help (help 0). No route matched. A lead triages it, else it climbs the question ladder. | off-session, lead: An unclassified help (help 2). No route matched. A lead triages it, else it climbs the question ladder. |
 
 ## Flow
