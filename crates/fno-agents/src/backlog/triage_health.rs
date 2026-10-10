@@ -1747,7 +1747,8 @@ pub fn run_health(args: &[String]) -> i32 {
         if let Some(r) = rate {
             rate_txt = format!("regression pass {:.0}%, ", r * 100.0);
         }
-        let age = evals["age_days"].as_i64();
+        // age_days is fractional; the line truncates it like int(age).
+        let age = evals["age_days"].as_f64().map(|a| a.trunc() as i64);
         let age_txt = if evals["never_ran"].as_bool().unwrap_or(false) {
             " age never".to_string()
         } else {
