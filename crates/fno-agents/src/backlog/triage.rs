@@ -931,34 +931,36 @@ fn split_priority_suffix(raw: &str) -> (String, Option<String>) {
 /// empty. Normalized to the id/goal/status keys the reasoning prompt uses.
 pub fn load_goals() -> Vec<Value> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    for keys in [["project", "goals"], ["goals"]] {
-        if let Some(goals) = crate::agents_config::config_lookup(&cwd, &keys) {
-            let Some(rows) = goals.as_array() else {
-                continue;
-            };
-            let normalized: Vec<Value> = rows
-                .iter()
-                .filter(|g| g.is_object())
-                .map(|g| {
-                    let mut m = Map::new();
-                    for key in ["id", "goal", "status"] {
-                        if let Some(v) = g.get(key) {
-                            m.insert(key.to_string(), v.clone());
-                        }
+    for keys in [&["project", "goals"][..], &["goals"][..]] {
+        let Some(found) = crate::agents_config::config_lookup(&cwd, keys) else {
+            continue;
+        };
+        let Ok(goals) = serde_json::to_value(found) else {
+            continue;
+        };
+        let Some(rows) = goals.as_array() else {
+            continue;
+        };
+        let normalized: Vec<Value> = rows
+            .iter()
+            .filter(|g| g.is_object())
+            .map(|g| {
+                let mut m = Map::new();
+                for key in ["id", "goal", "status"] {
+                    if let Some(v) = g.get(key) {
+                        m.insert(key.to_string(), v.clone());
                     }
-                    Value::Object(m)
-                })
-                .collect();
-            if !normalized.is_empty() {
-                return normalized;
-            }
+                }
+                Value::Object(m)
+            })
+            .collect();
+        if !normalized.is_empty() {
+            return normalized;
         }
     }
     Vec::new()
 }
 
-/// The LLM-reasoning context payload (triage.py _build_context), shared by
-/// context and consistency so both reason over one identical snapshot.
 pub fn build_context(
     deep: bool,
     all_projects: bool,

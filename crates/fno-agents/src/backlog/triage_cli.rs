@@ -5,9 +5,10 @@
 //! write; the consistency runs ride the bounded LLM one-shot seam.
 
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::triage;
+use super::triage_health::{run_health, run_trend};
 
 /// Whether the tail names one of the nine diagnostic actions this door
 /// owns; any other triage-shaped argv (a workflow runner's tail, an
@@ -29,7 +30,7 @@ pub fn owns(tail: &[String]) -> bool {
     )
 }
 
-fn echo_json(value: &Value) {
+pub(crate) fn echo_json(value: &Value) {
     let text = serde_json::to_string_pretty(value).unwrap_or_default();
     println!("{text}");
 }
@@ -270,7 +271,7 @@ pub fn run_rank(args: &[String]) -> i32 {
 /// `triage validate`: drop cycles and unknown-id entries, print cleaned
 /// JSON, exit 3 when any entry was dropped.
 pub fn run_validate(args: &[String]) -> i32 {
-    let (_deep, _project, _roadmap, positional, _json) = parse_flags(args);
+    let (_deep, _project, _roadmap, positional, _json, _all) = parse_flags(args);
     let Some(path) = positional else {
         eprintln!("Error: validate needs the path to proposal.json");
         return 2;
@@ -362,15 +363,15 @@ pub fn run_projects(args: &[String]) -> i32 {
 /// /triage skill's reasoning prompt so the consistency measurement reflects
 /// what production /triage does; when one changes, change both.
 const CONSISTENCY_PROMPT: &str = concat!(
-    "You are a backlog triage classifier. First REASON, then LABEL - never emit "
-    "the JSON first. In a short reasoning pass, name each spec's PRIMARY concern "
-    "(when a spec raises several concerns, classify on the primary, not the "
-    "loudest surface signal). Then output an optimal ordering as JSON with four "
-    "keys: `dependencies` (edges {from,to,reason} where `to` is blocked_by "
-    "`from`), `priority_changes` ({id,to,reason} where `to` is one of "
-    "p0/p1/p2/p3), `defer` ({id,reason}), and `duplicates` ({ids:[...],reason}). "
-    "Every entry MUST include a one-line `reason`. Do not propose self-edges or "
-    "cycles. Only reason over the `candidates` array; never propose changes for "
+    "You are a backlog triage classifier. First REASON, then LABEL - never emit ",
+    "the JSON first. In a short reasoning pass, name each spec's PRIMARY concern ",
+    "(when a spec raises several concerns, classify on the primary, not the ",
+    "loudest surface signal). Then output an optimal ordering as JSON with four ",
+    "keys: `dependencies` (edges {from,to,reason} where `to` is blocked_by ",
+    "`from`), `priority_changes` ({id,to,reason} where `to` is one of ",
+    "p0/p1/p2/p3), `defer` ({id,reason}), and `duplicates` ({ids:[...],reason}). ",
+    "Every entry MUST include a one-line `reason`. Do not propose self-edges or ",
+    "cycles. Only reason over the `candidates` array; never propose changes for ",
     "`ideas`.",
 );
 
@@ -398,7 +399,7 @@ fn llm_one_shot(
 ) -> Result<String, String> {
     let stub = std::env::var("FNO_LLM_STUB").unwrap_or_default();
     let stub = stub.trim().to_string();
-    let mut cmd = if stub.is_empty() {
+    let cmd = if stub.is_empty() {
         let mut c = std::process::Command::new("claude");
         c.arg("-p");
         c.args(["--output-format", "json"]);

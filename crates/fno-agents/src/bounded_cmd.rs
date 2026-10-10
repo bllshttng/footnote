@@ -187,7 +187,7 @@ pub(crate) fn output_with_timeout_stdin(
         .spawn()?;
     if let Some(mut pin) = child.stdin.take() {
         let _ = pin.write_all(input.as_bytes());
-        let _ = pin.shutdown();
+        let _ = pin.flush();
     }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();

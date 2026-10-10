@@ -7,6 +7,8 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use super::triage_cli::echo_json;
+
 /// The repo-root canonical events journal the advisory folds read
 /// (triage.py _events_path): anchored to the git toplevel so producer and
 /// consumer coincide from any subdirectory.
@@ -1423,7 +1425,7 @@ pub(crate) fn health_report(
     let routing_metrics = super::triage::fold_routing_health(&events);
     let triage_metrics = super::triage::fold_triage_health(&events);
     let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(root) = project.and_then(super::triage::project_root_from_settings) {
+    if let Some(root) = project.and_then(|p| super::triage::project_root_from_settings(Some(p))) {
         roots.push(PathBuf::from(root));
     }
     let dnm = done_not_merged_report(&entries, &roots);
@@ -1585,13 +1587,14 @@ pub(crate) fn health_report(
 /// The batch events journal the verdict reads: a scoped project reads ITS
 /// root's journal; unmapped scopes read the canonical root's.
 fn batch_verdict_for(project: Option<&str>) -> Option<String> {
-    let root: PathBuf = match project.and_then(super::triage::project_root_from_settings) {
-        Some(r) => PathBuf::from(r),
-        None => {
-            let cwd = std::env::current_dir().ok()?;
-            crate::paths::canonical_repo_root(&cwd).unwrap_or(cwd)
-        }
-    };
+    let root: PathBuf =
+        match project.and_then(|p| super::triage::project_root_from_settings(Some(p))) {
+            Some(r) => PathBuf::from(r),
+            None => {
+                let cwd = std::env::current_dir().ok()?;
+                crate::paths::canonical_repo_root(&cwd).unwrap_or(cwd)
+            }
+        };
     batch_verdict(&root.join(".fno").join("events.jsonl"))
 }
 
