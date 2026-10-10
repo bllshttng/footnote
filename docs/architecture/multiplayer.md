@@ -28,13 +28,15 @@ Reads stay local. This machine's `graph.db` is a replica. Every 5 seconds, one d
 
 Every backlog write opens through one seam, `backlog::open_connection`. With the key on, triggers there copy each row change into the local `backlog_outbox`, in the writer's own transaction. The commit stays local, so no writer holds the graph lock across the network. A flush then sends the outbox to the primary in one request, as one transaction. Each update and delete matches every old column of its row. Each insert must not collide. The same request adds one row to the primary's change log. The flush takes its own lock file, never the graph lock. A write through `mutate_rows` flushes right after the graph lock drops. The daemon flushes every other write within 5 seconds.
 
+A build from before the shared backlog writes with no outbox, and the primary never sees that write. So a store that shares carries a guard trigger on each shared table. The trigger calls `fno_backlog_writer()`, and only a current build registers that function. An older `fno-agents`, daemon, worker, or a plain `sqlite3` shell fails its write with `no such function: fno_backlog_writer` and changes nothing. When the key is unset, the guard stays. So a machine that once shared needs a current build to write.
+
 A row that a peer changed first refuses the whole batch, and the primary writes nothing. The replica then takes the primary's rows back for every row the batch touched, and the refusal names the table. A write through `mutate_rows` syncs and retries by itself.
 
 If the primary cannot be reached, backlog writes still land in the replica and wait in the outbox. The next flush that reaches the primary sends them, and a peer's newer change refuses them then. Reads keep working from the replica. To work alone for good, unset `store.share_backlog`.
 
 ## Start sharing
 
-1. Run `fno doctor update` on every machine and restart its daemon. An older `fno-agents`, `fno-agents-daemon` or `fno-agents-worker` writes with no outbox. The primary never sees that write, and the next refused flush takes the primary's row back over it.
+1. Run `fno doctor update` on every machine and restart its daemon. Once the store shares, an older `fno-agents`, `fno-agents-daemon` or `fno-agents-worker` cannot write the backlog.
 2. Copy `graph.db`. The first sync on a machine replaces that machine's backlog with the primary's. It also writes a `graph.pre-share-<ms>.db` backup beside the store.
 3. On one machine, set both keys and run `fno agents claim backlog seed`. It copies this backlog to the primary. It refuses a primary that already holds one.
 4. On every other machine, set both keys and run `fno agents claim backlog sync`.

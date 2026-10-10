@@ -17,6 +17,11 @@
 //! Read: reads stay local. One daemon arm per machine runs [`flush`] and then
 //! [`sync`], which applies the primary's change log to the replica.
 //!
+//! Guard: a store that shares carries a persistent trigger on each shared
+//! table that calls `fno_backlog_writer()`. Only a build with this module
+//! registers that function, so an older build's write to a shared table
+//! fails at once instead of landing with no outbox record.
+//!
 //! Unset, [`attach`] returns at once: no table, no trigger, no socket.
 
 use crate::store_remote::{Remote, SqlValue};
@@ -85,6 +90,12 @@ pub const REFUSED: &str = "backlog write refused by the shared primary";
 pub const CHANGED: &str = "changed on the primary after this machine read it";
 
 const CURSOR: &str = "backlog_share_cursor";
+/// The last outbox id of a batch whose result never came back. The next
+/// flush resends exactly that batch, so the primary can answer that it
+/// already landed.
+const SENDING: &str = "backlog_share_sending";
+/// The function every guard trigger calls.
+const WRITER: &str = "fno_backlog_writer";
 const PAGE: i64 = 200;
 pub const INTERVAL: Duration = Duration::from_secs(5);
 const FLUSH_WAIT: Duration = Duration::from_secs(30);
@@ -239,6 +250,29 @@ fn column_info(connection: &Connection, table: &str) -> Result<Vec<(String, i64)
     rows
 }
 
+/// Mark `connection` as a writer that records its changes. Every store
+/// connection this build opens calls it before its first write, key on or
+/// off, so the guard triggers pass it.
+pub(crate) fn register_writer(connection: &Connection) -> Result<(), String> {
+    connection
+        .create_scalar_function(WRITER, 0, FunctionFlags::SQLITE_DETERMINISTIC, |_| Ok(1))
+        .map_err(|e| e.to_string())
+}
+
+/// Install the guard triggers on every shared table this store holds.
+fn guard(connection: &Connection) -> Result<(), String> {
+    let mut ddl = String::new();
+    for table in shared_columns(connection)?.keys() {
+        for (op, event) in [("i", "INSERT"), ("u", "UPDATE"), ("d", "DELETE")] {
+            ddl.push_str(&format!(
+                "CREATE TRIGGER IF NOT EXISTS main.fno_share_guard_{table}_{op} BEFORE {event} \
+                 ON \"{table}\" BEGIN SELECT {WRITER}(); END;\n"
+            ));
+        }
+    }
+    connection.execute_batch(&ddl).map_err(|e| e.to_string())
+}
+
 /// Install the write path on a backlog connection when sharing is on.
 ///
 /// TEMP triggers live in this connection only, so the shared tables keep
@@ -254,6 +288,7 @@ pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String
     connection
         .execute_batch(OUTBOX_DDL)
         .map_err(|e| e.to_string())?;
+    guard(connection)?;
     let columns = shared_columns(connection)?;
     let names = columns.clone();
     connection
@@ -524,6 +559,7 @@ fn replica(graph: &Path) -> Result<Connection, String> {
         drop(crate::backlog::open(graph)?);
     }
     let connection = crate::store_conn::open_write(&db)?;
+    register_writer(&connection)?;
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
         .map_err(|e| e.to_string())?;
@@ -547,12 +583,31 @@ pub fn flush(graph: &Path) -> Result<usize, String> {
     let _lock = crate::graph_store::BoundedLock::acquire(&db.with_extension("share"), FLUSH_WAIT)
         .map_err(|e| e.to_string())?;
     let mut connection = replica(graph)?;
+    let mut sending =
+        crate::backlog::meta(&connection, SENDING)?.and_then(|v| v.parse::<i64>().ok());
+    if let Some(mark) = sending {
+        let held: bool = connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM backlog_outbox WHERE id <= ?1)",
+                [mark],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !held {
+            connection
+                .execute("DELETE FROM graph_meta WHERE key = ?1", [SENDING])
+                .map_err(|e| e.to_string())?;
+            sending = None;
+        }
+    }
     let rows: Vec<(i64, String)> = {
         let mut statement = connection
-            .prepare("SELECT id, change FROM backlog_outbox ORDER BY id")
+            .prepare("SELECT id, change FROM backlog_outbox WHERE id <= ?1 ORDER BY id")
             .map_err(|e| e.to_string())?;
         let rows = statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([sending.unwrap_or(i64::MAX)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -571,8 +626,10 @@ pub fn flush(graph: &Path) -> Result<usize, String> {
         .collect::<Result<Vec<_>, _>>()?);
     let clear = |connection: &Connection| {
         connection
-            .execute("DELETE FROM backlog_outbox WHERE id <= ?1", [last])
-            .map(drop)
+            .execute_batch(&format!(
+                "DELETE FROM backlog_outbox WHERE id <= {last};
+                 DELETE FROM graph_meta WHERE key = '{SENDING}';"
+            ))
             .map_err(|e| e.to_string())
     };
     if changes.is_empty() {
@@ -580,7 +637,14 @@ pub fn flush(graph: &Path) -> Result<usize, String> {
         return Ok(0);
     }
     let origin = crate::claims::machine_id();
-    let batch = format!("{origin}:{}:{last}", db.display());
+    // The content hash keeps a reused outbox id (a rebuilt or restored
+    // store) from reading as a batch that already landed.
+    let batch = format!(
+        "{origin}:{}:{last}:{:016x}",
+        db.display(),
+        fnv1a(ops_json(&changes).as_bytes())
+    );
+    crate::backlog::stamp_meta(&connection, SENDING, &last.to_string())?;
     match publish(&remote, &origin, &batch, &changes) {
         Ok(()) => {
             clear(&connection)?;
@@ -596,6 +660,13 @@ pub fn flush(graph: &Path) -> Result<usize, String> {
             Err(error)
         }
     }
+}
+
+/// 64-bit FNV-1a: a stable hash, the same in every build.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// Take the primary's rows back for every row a refused batch touched, and
@@ -676,7 +747,10 @@ fn repair(
         nodes_moved |= table == "nodes";
     }
     transaction
-        .execute("DELETE FROM backlog_outbox WHERE id <= ?1", [last])
+        .execute_batch(&format!(
+            "DELETE FROM backlog_outbox WHERE id <= {last};
+             DELETE FROM graph_meta WHERE key = '{SENDING}';"
+        ))
         .map_err(|e| e.to_string())?;
     if nodes_moved {
         rebuild_search(&transaction)?;
@@ -913,6 +987,7 @@ fn snapshot(remote: &Remote, graph: &Path, connection: &mut Connection) -> Resul
         }
     }
     crate::backlog::stamp_meta(&transaction, CURSOR, &top.to_string())?;
+    guard(&transaction)?;
     rebuild_search(&transaction)?;
     stamp_fresh(&transaction, "snapshot")?;
     transaction.commit().map_err(|e| e.to_string())?;
@@ -941,7 +1016,16 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
             remote.url()
         ));
     }
+    let db = crate::backlog::database_path(graph);
+    let _lock = crate::graph_store::BoundedLock::acquire(&db.with_extension("share"), FLUSH_WAIT)
+        .map_err(|e| e.to_string())?;
     let connection = replica(graph)?;
+    // A write after this point may miss the copy, so its record stays.
+    let carried: i64 = connection
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM backlog_outbox", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
     let mut ddl = String::from(PRIMARY_DDL);
     {
         let mut statement = connection
@@ -1015,9 +1099,15 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
         .and_then(|r| r[0].integer())
         .unwrap_or(0);
     crate::backlog::stamp_meta(&connection, CURSOR, &top.to_string())?;
-    // The seed carried every row the outbox held.
+    guard(&connection)?;
+    // The seed carried every row these records name. A later record is sent
+    // by the next flush; a primary that already holds its row refuses it,
+    // and the repair takes back the row the seed copied.
     connection
-        .execute("DELETE FROM backlog_outbox", [])
+        .execute_batch(&format!(
+            "DELETE FROM backlog_outbox WHERE id <= {carried};
+             DELETE FROM graph_meta WHERE key = '{SENDING}';"
+        ))
         .map_err(|e| e.to_string())?;
     Ok(json!({"primary": remote.url(), "rows": counts, "cursor": top}))
 }
@@ -1251,6 +1341,21 @@ mod tests {
         // A's own write replays on A and leaves the row as it was.
         on(&primary, &a);
         sync(&a.graph).unwrap();
+        assert_eq!(title(&a, "x-1").as_deref(), Some("shared"));
+
+        // A build without this module registers no writer function, so the
+        // guard refuses its write on both the seeding and the synced store.
+        for m in [&a, &b] {
+            let old_build = Connection::open(crate::backlog::database_path(&m.graph)).unwrap();
+            let refused = old_build
+                .execute(
+                    &format!("UPDATE {NODES} SET title = 'old build' WHERE id = 'x-1'"),
+                    [],
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains(WRITER), "{refused}");
+        }
         assert_eq!(title(&a, "x-1").as_deref(), Some("shared"));
         route_to_primary(None);
     }

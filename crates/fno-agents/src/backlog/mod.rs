@@ -284,6 +284,7 @@ fn open_connection_inner(graph: &Path) -> Result<Connection, String> {
     // would otherwise open; the bounded fence wait orders us after it.
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let mut connection = crate::store_conn::open_write(&database_path(graph))?;
+    crate::backlog_share::register_writer(&connection)?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(|error| error.to_string())?;
