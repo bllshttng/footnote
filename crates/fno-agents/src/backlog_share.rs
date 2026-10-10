@@ -261,9 +261,9 @@ pub(crate) fn register_writer(connection: &Connection) -> Result<(), String> {
 }
 
 /// Install the guard triggers on every shared table this store holds.
-fn guard(connection: &Connection) -> Result<(), String> {
+fn guard(connection: &Connection, columns: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
     let mut ddl = String::new();
-    for table in shared_columns(connection)?.keys() {
+    for table in columns.keys() {
         for (op, event) in [("i", "INSERT"), ("u", "UPDATE"), ("d", "DELETE")] {
             ddl.push_str(&format!(
                 "CREATE TRIGGER IF NOT EXISTS main.fno_share_guard_{table}_{op} BEFORE {event} \
@@ -317,8 +317,8 @@ pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String
     connection
         .execute_batch(OUTBOX_DDL)
         .map_err(|e| e.to_string())?;
-    guard(connection)?;
     let columns = shared_columns(connection)?;
+    guard(connection, &columns)?;
     let names = columns.clone();
     connection
         .create_scalar_function(
@@ -1021,7 +1021,7 @@ fn snapshot(remote: &Remote, graph: &Path, connection: &mut Connection) -> Resul
         }
     }
     crate::backlog::stamp_meta(&transaction, CURSOR, &top.to_string())?;
-    guard(&transaction)?;
+    guard(&transaction, &columns)?;
     rebuild_search(&transaction)?;
     stamp_fresh(&transaction, "snapshot")?;
     transaction.commit().map_err(|e| e.to_string())?;
@@ -1133,7 +1133,7 @@ pub fn seed(graph: &Path) -> Result<Value, String> {
         .and_then(|r| r[0].integer())
         .unwrap_or(0);
     crate::backlog::stamp_meta(&connection, CURSOR, &top.to_string())?;
-    guard(&connection)?;
+    guard(&connection, &columns)?;
     // The seed carried every row these records name. A later record is sent
     // by the next flush; a primary that already holds its row refuses it,
     // and the repair takes back the row the seed copied.
