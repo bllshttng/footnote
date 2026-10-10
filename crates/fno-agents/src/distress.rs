@@ -340,7 +340,8 @@ pub(crate) fn read_stopping_turn(transcript_path: &Path) -> Option<TurnRead> {
                             val.pointer("/payload/id")
                                 .and_then(Value::as_str)
                                 .map(str::to_string)
-                        });
+                        })
+                        .or_else(|| val.get("id").and_then(Value::as_str).map(str::to_string));
                 }
                 texts_rev.push(text);
             }

@@ -29,7 +29,6 @@ pub(crate) enum Recipient {
     Lead,
     Ladder,
     EvidenceHolder,
-    UserPage,
 }
 
 pub(crate) const IN_SESSION_CAP: u64 = 2;
@@ -140,7 +139,8 @@ pub(crate) fn route_emitted_distress(
 /// Q10: queued (durable receipt, no live lane), handed (a live lane took
 /// it), read (proven in the recipient transcript at the sweep). An
 /// unresolvable recipient re-routes as a Question one rung up, never a
-/// silent skip; above the king the route files on the user page.
+/// silent skip; a route that climbs past every lead rung files on the user
+/// page.
 #[allow(clippy::too_many_arguments)]
 fn deliver_off_session(
     cwd: &Path,
@@ -261,7 +261,6 @@ fn resolve_recipient(
             .and_then(holder_from_evidence)
             .map(Target::Session)
             .unwrap_or(Target::Unresolved),
-        Recipient::UserPage => Target::UserPage,
     }
 }
 
@@ -758,7 +757,6 @@ fn route_kind(r: &Route) -> &'static str {
             Recipient::Lead => "off-session, lead",
             Recipient::Ladder => "off-session, ladder",
             Recipient::EvidenceHolder => "off-session, evidence holder",
-            Recipient::UserPage => "user page",
         },
         Route::Timer { .. } => "timer",
     }
