@@ -65,10 +65,11 @@ fn wrong_re() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"(?i)\bwrong\b").expect("wrong pattern is valid"))
 }
 
-/// The bare "wrong" alternative, with the scan's guards: no "what's wrong",
-/// "went wrong", "something/anything wrong", "go/goes/gone wrong", and no
-/// "wrong with". The regex crate has no lookaround, so the context reads
-/// around each match instead.
+/// The bare "wrong" alternative, with the scan's guards, case-sensitive as
+/// the scan's lookbehind was: no "what's wrong", "went wrong",
+/// "something/anything wrong", "go/goes/gone wrong", and no "wrong with".
+/// The regex crate has no lookaround, so the context reads around each
+/// match instead.
 fn wrong_out_of_place(text: &str) -> bool {
     const BEFORE: [&str; 8] = [
         "what's ",
@@ -81,8 +82,8 @@ fn wrong_out_of_place(text: &str) -> bool {
         "gone ",
     ];
     wrong_re().find_iter(text).any(|m| {
-        let before = text[..m.start()].to_lowercase();
-        let after = text[m.end()..].to_lowercase();
+        let before = &text[..m.start()];
+        let after = &text[m.end()..];
         !BEFORE.iter().any(|p| before.ends_with(p)) && !after.starts_with(" with")
     })
 }
