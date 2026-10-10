@@ -2056,8 +2056,21 @@ impl BoundedLock {
             .open(&lock_path)?;
         let deadline = Instant::now() + timeout;
         let ticket = crate::lock_queue::register(&lock_path).ok();
+        // The head scan walks the ticket directory, so it runs every fifth
+        // poll while try_lock keeps the 20 ms cycle once this waiter is
+        // head (a ticket only leaves the queue by withdrawal or death, so
+        // the head verdict never flips back).
+        const QUEUE_SCAN_EVERY: u32 = 5;
+        let mut since_scan = QUEUE_SCAN_EVERY;
+        let mut my_turn = ticket.is_none();
         loop {
-            let my_turn = ticket.as_deref().is_none_or(crate::lock_queue::am_head);
+            since_scan += 1;
+            if since_scan >= QUEUE_SCAN_EVERY {
+                since_scan = 0;
+                if let Some(t) = ticket.as_deref() {
+                    my_turn = crate::lock_queue::am_head(t);
+                }
+            }
             if my_turn {
                 match file.try_lock() {
                     Ok(()) => {

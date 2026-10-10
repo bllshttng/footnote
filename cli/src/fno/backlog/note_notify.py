@@ -222,20 +222,16 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
     from fno.graph.store import read_nodes_by_ids
 
     try:
-        # The by-id seam answers the exact id/slug tiers without reading
-        # every row (the non-quiet path read the whole graph for one
-        # node). The full read stays for a keeper that cannot answer, so a
-        # fuzzy token or an older keeper keeps today's resolution.
+        # The by-id seam answers the exact id/slug tiers without the whole
+        # read; the full read stays for a keeper that cannot answer.
         fast = read_nodes_by_ids(Path(graph_path), [task_id])
         rows: list[dict] | None = None
         entry: dict | None = None
         if fast and (fast.get("entries") or []) and not (fast.get("missing") or []):
             entry = fast["entries"][0]
-            # The by-id read includes archived rows (the full read below
-            # does not), so an archived hit falls through to the archived
-            # refusal instead of writing to a retired node.
+            # The by-id read includes archived rows the full read excludes.
             if entry.get("archived_at"):
-                entry = None
+                entry = None  # fall through to the archived refusal
         if entry is None:
             rows = wire_rows(path=graph_path)
             entry = _find_node(rows, task_id) or next(  # the write path takes slugs too
