@@ -34,7 +34,8 @@ pub const KNOWN_TYPES: &[&str] = &[
 
 /// The launch spec's version. The binary refuses any other, so a stale
 /// `footnote` beside a newer supervisor fails loudly instead of misreading.
-pub const LAUNCH_SPEC_V: u64 = 1;
+/// v2 adds `permission_mode`: a v1 binary must never run plan as default.
+pub const LAUNCH_SPEC_V: u64 = 2;
 
 /// The record: `<fno_id>.jsonl` beside the sidecar dir.
 pub fn transcript_file(dir: &Path, fno_id: &str) -> PathBuf {
@@ -108,6 +109,9 @@ pub struct LaunchSpec {
     pub wall_cap_minutes: Option<u64>,
     pub plugin_root: Option<PathBuf>,
     pub parent_session_id: Option<String>,
+    /// `--permission-mode`, one of the capability row's `permission_modes`.
+    /// `None` runs the binary's default mode.
+    pub permission_mode: Option<String>,
     pub price_cache: PathBuf,
     /// The model's context window in tokens; compaction fires at 80%.
     pub context_window: u64,

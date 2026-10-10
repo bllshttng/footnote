@@ -520,6 +520,14 @@ pub fn permission_mappable(provider: &str, mode: &str, substrate: &str) -> Resul
                 Ok(true)
             } else if provider == "grok" {
                 permission_pane_tokens(provider, mode).map(|_| true)
+            } else if provider == "footnote" {
+                // The mode rides the launch spec, so the row's list is the
+                // whole vocabulary.
+                Ok(crate::harness_capabilities::HarnessContract::packaged()
+                    .ok()
+                    .and_then(|contract| contract.harness.get(provider).cloned())
+                    .and_then(|row| row.permission_modes)
+                    .is_some_and(|modes| modes.iter().any(|m| m == mode)))
             } else {
                 Ok(false)
             }
@@ -641,9 +649,12 @@ mod mappable_tests {
     }
 
     #[test]
-    fn grok_headless_maps_permission_modes_but_cursor_agent_does_not() {
+    fn grok_and_footnote_headless_map_permission_modes_but_cursor_agent_does_not() {
         assert!(permission_mappable("grok", "acceptEdits", "headless").unwrap());
         assert!(!permission_mappable("cursor-agent", "acceptEdits", "headless").unwrap());
+        assert!(permission_mappable("footnote", "plan", "headless").unwrap());
+        assert!(permission_mappable("footnote", "dontAsk", "headless").unwrap());
+        assert!(!permission_mappable("footnote", "yolo", "headless").unwrap());
     }
 }
 

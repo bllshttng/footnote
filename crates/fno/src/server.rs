@@ -10352,9 +10352,8 @@ impl Core {
                         // derived label (Locked 2: "reset to auto" is a
                         // meaningful rename target).
                         t.name = (!clean.is_empty()).then_some(clean);
-                        self.push_layout(true);
-                        // (US4) Persist so the chosen tab name survives a
-                        // restart; a no-op for an unnamed/untracked squad.
+                        // (US4) Persist before the push: a client that sees the
+                        // name knows it survives a restart. No-op when untracked.
                         self.persist_squad(sid);
                         // persist_squad preserves tab_specs byte-for-byte,
                         // so a template tab's stored spec would keep the OLD name
@@ -10364,6 +10363,7 @@ impl Core {
                         if self.template_specs.contains_key(&tid) {
                             self.persist_template_specs(sid);
                         }
+                        self.push_layout(true);
                     }
                     None => self.notice(client_id, "no such tab"),
                 }
@@ -10399,7 +10399,6 @@ impl Core {
                             .squad_mut(squad)
                             .expect("squad() live above")
                             .name = new_name.clone();
-                        self.push_layout(true);
                         // Write-through only for persisted (tracked) squads. A
                         // rename between two names is ONE atomic delete-old +
                         // upsert-new (so a concurrent restore never sees a window
@@ -10458,6 +10457,7 @@ impl Core {
                                 (None, None) => self.persist_squad(squad),
                             }
                         }
+                        self.push_layout(true);
                     }
                     None => self.notice(client_id, "no such workspace"),
                 }

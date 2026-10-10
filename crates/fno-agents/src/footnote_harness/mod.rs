@@ -73,6 +73,7 @@ fn launch_spec(
     message: &str,
     timeout: Option<Duration>,
     node: Option<&str>,
+    permission_mode: Option<&str>,
 ) -> Result<LaunchSpec, String> {
     let endpoint = endpoint::resolve_endpoint(cwd, &|k| std::env::var(k).ok())?;
     let manifest = crate::state_path::resolve("target-state", cwd);
@@ -95,6 +96,7 @@ fn launch_spec(
         parent_session_id: std::env::var("FNO_HARNESS_SESSION_ID")
             .ok()
             .filter(|v| !v.is_empty()),
+        permission_mode: permission_mode.map(str::to_string),
         price_cache: price_cache(),
         context_window: crate::context_window::window_for_model(model),
         endpoint,
@@ -191,6 +193,7 @@ fn mark_row(home: &AgentsHome, name: &str, transcript: &Path) {
 
 /// `fno agents spawn -H footnote --substrate headless`: mint the id, start
 /// the binary, register the row with the child's pid, run, mark it Exited.
+/// `params` is the spawn request; it supplies `node` and `permission_mode`.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_once(
     home: &AgentsHome,
@@ -200,7 +203,7 @@ pub fn dispatch_once(
     cwd: &Path,
     model: Option<&str>,
     timeout: Option<Duration>,
-    node: Option<&str>,
+    params: &Value,
 ) -> AskOutcome {
     if let Err(msg) = crate::claude_ask::validate_spawn_inputs(name, from_name) {
         return outcome(2, String::new(), format!("{msg}\n"));
@@ -225,7 +228,11 @@ pub fn dispatch_once(
     };
     let dir = transcript::session_dir(&transcript::sessions_root(), cwd, &sid);
     let record = transcript::transcript_file(&dir, &sid);
-    let spec = match launch_spec("create", &sid, dir, cwd, model, message, timeout, node) {
+    let node = params.get("node").and_then(Value::as_str);
+    let mode = params.get("permission_mode").and_then(Value::as_str);
+    let spec = match launch_spec(
+        "create", &sid, dir, cwd, model, message, timeout, node, mode,
+    ) {
         Ok(s) => s,
         Err(e) => return outcome(2, String::new(), format!("{e}\n")),
     };
@@ -241,6 +248,7 @@ pub fn dispatch_once(
         substrate: Some("headless".into()),
         session_id: Some(sid.clone()),
         requested_model: Some(model.to_string()),
+        requested_permission_mode: spec.permission_mode.clone(),
         route_provider_id: spec.endpoint.provider_id.clone(),
         node: spec.node.clone(),
         cwd: cwd.to_string_lossy().to_string(),
@@ -299,6 +307,8 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
     let row_name = entry.name.clone();
     let cwd = PathBuf::from(&entry.cwd);
     let model = entry.requested_model.clone().unwrap_or_default();
+    // A resume keeps the mode the session was spawned with.
+    let mode = entry.requested_permission_mode.clone();
     let message = params["message"].as_str().unwrap_or("").to_string();
     let timeout = params["timeout"].as_u64().map(Duration::from_secs);
     let Some(dir) = transcript::find_session_dir(&transcript::sessions_root(), &fno_id) else {
@@ -307,7 +317,15 @@ pub fn maybe_run_ask(home: &AgentsHome, params: &Value, name: &str) -> Option<i3
     };
     let record = transcript::transcript_file(&dir, &fno_id);
     let spec = match launch_spec(
-        "resume", &fno_id, dir, &cwd, &model, &message, timeout, None,
+        "resume",
+        &fno_id,
+        dir,
+        &cwd,
+        &model,
+        &message,
+        timeout,
+        None,
+        mode.as_deref(),
     ) {
         Ok(s) => s,
         Err(e) => {

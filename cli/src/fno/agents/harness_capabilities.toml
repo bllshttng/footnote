@@ -1672,7 +1672,9 @@ measured_by = { reader = "session-id resume journey", version = "3.14.3", date =
 mail_header_at = true
 permission_bypass = []
 efforts = []
-permission_modes = []
+# permission_modes: the modes the fnh binary reads from launch spec v2,
+# Claude Code's own names. dontAsk denies what default would ask.
+permission_modes = ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]
 resume = "native-session"
 autonomous_pane = false
 route_on_pane = false
@@ -1874,8 +1876,8 @@ state = "supported"
 via = ["hooks/hooks.json", "hooks/lead-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/mod.rs"]
 
 [harness.footnote.hooks.lead_reinject]
-state = "impossible"
-reason = "the footnote harness compacts in-process (bllshttng/fnh maybe_compact) and fires no compaction hook event, so the postcompact carrier never runs; the lead brief rides SessionStart only"
+state = "supported"
+via = ["hooks/hooks.json", "hooks/context-hooks.json", "hooks/lead-postcompact-reinject.sh"]
 
 [harness.gemini.hooks.lead_guard]
 state = "missing"
