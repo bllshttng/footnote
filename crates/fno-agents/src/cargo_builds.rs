@@ -279,8 +279,8 @@ mod tests {
     #[test]
     fn the_view_reads_holder_kind_and_duration() {
         assert_eq!(
-            parse_holder("cargo:/w/x-b792:4242"),
-            Some(("/w/x-b792".to_string(), 4242))
+            parse_holder("cargo:/w/feature:4242"),
+            Some(("/w/feature".to_string(), 4242))
         );
         assert_eq!(parse_holder("worktree:/w"), None);
         assert_eq!(cargo_kind("/opt/cargo +1.94.1 test -p fno-agents"), "test");
