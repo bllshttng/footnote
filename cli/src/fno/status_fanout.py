@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import string
 import threading
 import time
@@ -82,24 +81,11 @@ class TickResult:
 # ── event stream (rotation-aware, skip-and-count) ───────────────────────────
 
 
-_LENIENT_FRACTION = re.compile(
-    r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})\.([0-9]{7,9})(Z|\+00:00)$"
-)
-
-
 def _timestamp_key(value: str) -> datetime:
     """Return one chronological key for every schema-valid timestamp spelling."""
     if value == "":
         return datetime.min.replace(tzinfo=timezone.utc)
     parsed = _utc_timestamp(value)
-    if parsed is None:
-        # Rust emitters stamp nanosecond fractions; the shared parser stops at
-        # microseconds, and a row it cannot key crashed the tick before any
-        # cursor persisted, wedging the backlog forever. Truncating the
-        # fraction is monotone, so ordering and the occurrence index hold.
-        m = _LENIENT_FRACTION.match(value)
-        if m is not None:
-            parsed = _utc_timestamp(f"{m.group(1)}.{m.group(2)[:6]}Z")
     if parsed is None:
         raise ValueError(f"invalid event timestamp: {value!r}")
     return parsed
@@ -977,12 +963,13 @@ def tick_cmd(
     if result.locked_out:
         typer.echo("status-fanout: another tick holds the lock; skipped")
         return
-    # The daemon ticks every few seconds: an idle pass prints nothing.
-    if not result.sinks and dry_run:
-        if result.parked_sinks:
-            typer.echo("status-fanout: short-circuit backoff; parked: "
-                       + ", ".join(result.parked_sinks))
-        elif result.undeliverable_sinks:
+    # The daemon ticks every few seconds: an idle pass prints nothing. A fully
+    # parked tick is the one non-idle no-op, so it prints in both modes.
+    if not result.sinks and result.parked_sinks:
+        typer.echo("status-fanout: short-circuit backoff; parked: "
+                   + ", ".join(result.parked_sinks))
+    elif not result.sinks and dry_run:
+        if result.undeliverable_sinks:
             typer.echo("status-fanout: no deliverable sink (url unresolved; no-op): "
                        + ", ".join(result.undeliverable_sinks))
         else:

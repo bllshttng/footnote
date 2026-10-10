@@ -365,14 +365,19 @@ def test_tick_nanosecond_fractions_key_monotonically(tmp_path, monkeypatch):
     assert _cursor(ss, "s")["n"] == 0  # advanced past the window, count zeroed
 
 
-def test_tick_short_circuit_parks_the_next_tick(tmp_path):
+def test_tick_short_circuit_parks_the_next_tick(tmp_path, monkeypatch):
     # A dead webhook re-attempted every tick burned ~20s of doomed retries per
     # pass while its held cursor kept the backlog window growing. The
     # short-circuit must park the sink: the next tick neither reads nor
-    # dispatches it until the deadline passes.
+    # dispatches it, and the CLI says so, until the deadline passes.
     import time as _time
 
+    from typer.testing import CliRunner
+
     from fno import status_fanout as sf
+    from fno.cli import app
+    from fno.config import SettingsModel
+    from fno import paths as _paths
 
     ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
@@ -388,8 +393,19 @@ def test_tick_short_circuit_parks_the_next_tick(tmp_path):
     deadline = sf._read_backoff(tmp_path)["s"]
     assert _time.time() < deadline <= _time.time() + 301
 
-    monkey_free = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=_boom)
-    assert monkey_free.sinks == [] and monkey_free.parked_sinks == ("s",)
+    parked = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=_boom)
+    assert parked.sinks == [] and parked.parked_sinks == ("s",)
+
+    monkeypatch.setattr(_paths, "resolve_repo_root", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SettingsModel(status_sinks=[
+            {"name": "s", "type": "text-webhook", "events": ["blocked"],
+             "url": "https://x", "template": "hi", "field": "content"}]))
+    out = CliRunner().invoke(app, ["doctor", "event", "fanout", "tick"],
+                             catch_exceptions=False)
+    assert out.exit_code == 0
+    assert "short-circuit backoff; parked: s" in out.output
 
 
 def test_tick_backoff_expiry_resumes_and_delivery_clears_it(tmp_path):
