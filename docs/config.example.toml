@@ -370,7 +370,13 @@ expired_claims_retain_days = 30
 # Days to retain expendable PR-status cache files (default 14).
 pr_status_cache_retain_days = 14
 
+[agents.claude]
+# What keeps a claude lead waking between events: auto (default) reads the harness capability row (today loop: the lead arms /loop beside the daemon wake), or daemon, loop, goal, schedule to override. `fno-agents harness-beat` prints the resolved beat.
+beat = "auto"
+
 [agents.codex]
+# What keeps a codex lead waking between events: auto (default) reads the harness capability row (today goal: the provider goal), or daemon, loop, goal, schedule to override. `fno-agents harness-beat` prints the resolved beat.
+beat = "auto"
 # Use full-yolo (drop sandbox) for headless codex workers.
 headless_yolo = false
 

@@ -13,6 +13,15 @@ map_version = 24
 # The value is the composer check's verdict (tests/mail-header-composer-smoke.sh),
 # read as data by the renderer - never a branch in code.
 mail_header_at = true
+# THE LEAD BEAT. What keeps a lead waking between events, read when
+# `agents.<harness>.beat` is `auto` (the default). `daemon`: the daemon's
+# lead-wake mail is the only beat. `loop`: the lead also arms the native
+# `/loop`. `goal`: the provider goal is the continuation. `schedule`: the
+# harness's own recurring schedule tool. An absent key reads `daemon`.
+# Claude keeps `loop` until the daemon wake has a delivery bound past the
+# user-typing hold and a stopped daemon is reported at SessionStart; then
+# this row flips to `daemon` and the /loop retires.
+beat = "loop"
 permission_bypass = ["--dangerously-skip-permissions"]
 # LAUNCHER CHOICE LISTS. The mux composer's picker chips read these. Three
 # states: key ABSENT = no surface at all (the chip reads "not offered");
@@ -205,6 +214,9 @@ state = "native"
 
 [harness.codex]
 mail_header_at = true
+# The provider goal keeps a Codex lead working between wakes. It stays
+# while mail to an idle thread can fail to start a turn.
+beat = "goal"
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 # efforts: the keys of model_switch_strategy.effort_labels below.
 # permission_modes: the two shortcuts plus every <sandbox>:<approval> pair
@@ -510,6 +522,8 @@ state = "capable"
 
 [harness.agy]
 mail_header_at = true
+# agy documents a recurring `schedule` tool (internal/agy/docs/Hookslink.md:135).
+beat = "schedule"
 permission_bypass = ["--dangerously-skip-permissions"]
 # efforts: agy's own `--effort (low|medium|high)`. permission_modes: exactly
 # the vocabulary permission_pane_tokens maps (codex_posture.rs).
@@ -673,6 +687,7 @@ clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 
 [harness.opencode]
 mail_header_at = true
+beat = "daemon"
 permission_bypass = ["--dangerously-skip-permissions"]
 # efforts EMPTY: the door passes provider values through, so the picker
 # offers free text rather than a list.

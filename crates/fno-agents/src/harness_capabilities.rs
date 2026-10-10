@@ -49,6 +49,9 @@ pub const HOOK_JOBS: [&str; 4] = [
 ];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
+/// What keeps a lead waking between events on a harness. `agents.<harness>.beat
+/// = "auto"` resolves to the row's member; see `harness_beat`.
+pub const BEATS: [&str; 4] = ["daemon", "loop", "goal", "schedule"];
 
 /// Name the reason a harness cannot use the thread spawn lane.
 pub fn thread_substrate_refusal(harness: &str) -> String {
@@ -253,6 +256,9 @@ pub struct HarnessCapabilities {
     /// `@` can open a composer mention picker or read as an address). The
     /// composer check's verdict, read as data - never a branch in code.
     pub mail_header_at: bool,
+    /// One of [`BEATS`]. Empty reads `daemon`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub beat: String,
     /// The mux composer's effort-picker list. `None` = no effort surface at
     /// all; `Some([])` = the axis exists but values are provider passthrough
     /// (free text); a filled list is the enumerable choices. Absent on a row
@@ -619,6 +625,13 @@ impl HarnessContract {
     /// plain `name`. `None` = unknown harness.
     pub fn mail_header_at(&self, harness: &str) -> Option<bool> {
         Some(self.harness.get(harness)?.mail_header_at)
+    }
+
+    /// The lead beat a harness's row declares; an absent key reads `daemon`.
+    /// `None` = unknown harness.
+    pub fn beat(&self, harness: &str) -> Option<&str> {
+        let beat = self.harness.get(harness)?.beat.as_str();
+        Some(if beat.is_empty() { "daemon" } else { beat })
     }
 
     /// Gate ONE merged candidate row (bundled + config override) through the
@@ -1402,6 +1415,9 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
     validate_model_switch_strategy(harness, &caps.model_switch_strategy)?;
     if !LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()) {
         return Err(field_error(harness, "loop_participation", "unknown member"));
+    }
+    if !caps.beat.is_empty() && !BEATS.contains(&caps.beat.as_str()) {
+        return Err(field_error(harness, "beat", "unknown member"));
     }
     // Only an `extension` row may name an artifact: a `native` row
     // closes its loop through a shell hook and a `none` row closes it

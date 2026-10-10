@@ -1968,13 +1968,22 @@ class AgentProviderBlock(BaseModel):
     dropping the sandbox - strictly safer than the full bypass. A malformed
     block fails safe to bounded. Only the autonomous exec lane consults it; an
     interactive `host`/`drive` launch and claude (yolo is a no-op) are never
-    affected. (The old "sandboxed-but-prompting" meaning of `false` is removed;
-    it was strictly worse than bounded - sandboxed AND hangs.)
+    affected.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     headless_yolo: bool = False
+
+
+class AgentBeatBlock(BaseModel):
+    """`config.agents.<harness>.beat`; `auto` reads the harness capability row."""
+
+    beat: str = "auto"
+
+
+class CodexAgentBlock(AgentProviderBlock, AgentBeatBlock):
+    """The codex block: the provider settings plus its lead beat."""
 
 
 # The routing schema block lives in routing_blocks (the hub is shrink-only).
@@ -2274,7 +2283,8 @@ class AgentsBlock(SweepKeys):
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     reap: ReapBlock = Field(default_factory=ReapBlock)
     state_reap: StateReapBlock = Field(default_factory=StateReapBlock)
-    codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
+    claude: AgentBeatBlock = Field(default_factory=AgentBeatBlock)
+    codex: CodexAgentBlock = Field(default_factory=CodexAgentBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate scalars degrade to safe defaults: max_live caps the roster
     # union as the BACKSTOP behind the RAM floor (min_free_gb) and the CPU
@@ -2495,7 +2505,7 @@ class AgentsBlock(SweepKeys):
             return v.strip().lower()
         return "utility"
 
-    @field_validator("codex", "gemini", mode="before")
+    @field_validator("claude", "codex", "gemini", mode="before")
     @classmethod
     def _coerce_provider_block(cls, v: object) -> object:
         """Fail-safe: a non-mapping provider block degrades to defaults.
@@ -2506,7 +2516,7 @@ class AgentsBlock(SweepKeys):
         passes through so an explicit ``headless_yolo: false`` opt-out still
         takes effect. Mirrors ``ConfigBlock._coerce_auto_continue``.
         """
-        if isinstance(v, (dict, AgentProviderBlock)):
+        if isinstance(v, (dict, BaseModel)):
             return v
         return {}
 
