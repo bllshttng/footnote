@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Where a clicked URI goes. `Message` and `Handle` finish on the UI loop;
-/// the rest are dispatched to blocking threads and report back through their
-/// channels.
+/// Where a clicked URI goes. `Message`, `Handle` and `Sender` finish on the
+/// UI loop; the rest are dispatched to blocking threads and report back
+/// through their channels.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
     Message(String),
@@ -46,7 +46,6 @@ pub fn route(url: &str) -> Route {
 }
 
 type LinkTx = UnboundedSender<(String, Result<(), String>)>;
-type SenderTx = UnboundedSender<(String, Option<String>)>;
 
 /// The on-loop message route, carried out of [`start`] so the caller's match
 /// stays one-armed.
@@ -56,26 +55,23 @@ pub enum RoutedKind {
     Message(String),
     /// The handle a `fno-handle:` URI named; the Messages tab filters to it.
     Handle(String),
+    /// The sender handle a `fno-sender:` URI named; the open-session
+    /// chooser lands on the row carrying it.
+    Sender(String),
 }
 
 pub struct Routed {
     pub kind: RoutedKind,
 }
 
-/// Start the off-loop leg for `url`'s route. Returns `Some` only for
-/// [`Route::Message`] and [`Route::Handle`], whose legs [`finish`] lands on
-/// the UI loop.
-pub fn start(url: &str, link_tx: LinkTx, sender_tx: SenderTx) -> Option<Routed> {
+/// Start the off-loop leg for `url`'s route. Returns `Some` only for the
+/// UI-loop routes ([`Route::Message`], [`Route::Handle`], [`Route::Sender`]),
+/// whose legs [`finish`] lands on the UI loop.
+pub fn start(url: &str, link_tx: LinkTx) -> Option<Routed> {
     let kind = match route(url) {
         Route::Message(id) => RoutedKind::Message(id),
         Route::Handle(name) => RoutedKind::Handle(name),
-        Route::Sender(id) => {
-            tokio::task::spawn_blocking(move || {
-                let resolved = super::open_chooser::resolve_sender(&id);
-                let _ = sender_tx.send((id, resolved));
-            });
-            return None;
-        }
+        Route::Sender(handle) => RoutedKind::Sender(handle),
         r => {
             let url = url.to_string();
             tokio::task::spawn_blocking(move || {
@@ -92,12 +88,13 @@ pub fn start(url: &str, link_tx: LinkTx, sender_tx: SenderTx) -> Option<Routed> 
     Some(Routed { kind })
 }
 
-/// Land a routed UI-loop leg: open the message, or filter Messages to the
-/// clicked handle. The caller repaints.
+/// Land a routed UI-loop leg: open the message, filter Messages to the
+/// clicked handle, or open the sender's session chooser. The caller repaints.
 pub fn finish(routed: Routed, view: &mut super::View) {
     match routed.kind {
         RoutedKind::Message(id) => super::messages_view::open_message(view, id),
         RoutedKind::Handle(name) => super::messages_view::open_handle(view, name),
+        RoutedKind::Sender(handle) => super::open_chooser::open_for_session(view, &handle),
     }
 }
 
@@ -115,10 +112,7 @@ mod tests {
                 "fno-message:fmail-0123456789ab",
                 Route::Message("fmail-0123456789ab".into()),
             ),
-            (
-                "fno-sender:fmail-0123456789ab",
-                Route::Sender("fmail-0123456789ab".into()),
-            ),
+            ("fno-sender:t-glm-9663", Route::Sender("t-glm-9663".into())),
             ("fno-handle:nemo", Route::Handle("nemo".into())),
             (
                 "fno-file:/tmp/notes.md:42",

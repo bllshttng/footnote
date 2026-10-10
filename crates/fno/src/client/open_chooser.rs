@@ -154,20 +154,18 @@ pub(super) fn build_open_chooser(
     Ok(menu)
 }
 
-/// The row owning `from_key`, by session identity - not by name: two rows
-/// may share a name, only one owns the session.
-fn row_for_session<'a>(rows: &'a [AgentRow], from_key: &str) -> Option<&'a AgentRow> {
-    rows.iter()
-        .find(|a| a.harness_session_id.as_deref() == Some(from_key))
+/// The row carrying `name`, by exact name. The tapped handle IS the row
+/// name, so the tap opens the handle's own row; the registry keeps agent
+/// names unique, so first match is exact match.
+fn row_for_name<'a>(rows: &'a [AgentRow], name: &str) -> Option<&'a AgentRow> {
+    rows.iter().find(|a| a.name == name)
 }
 
-/// Open the chooser on the row whose harness session is `resolved` - the
-/// identity the tapped fmail id resolved to. Resolve failed or no row
-/// carries it: a notice, and nothing opens. Never a guess by name.
-pub(super) fn open_for_session(view: &mut View, id: &str, resolved: Option<String>) {
-    let row = resolved.and_then(|k| row_for_session(&view.layout.agents, k.as_str()).cloned());
-    let Some(row) = row else {
-        view.set_notice(format!("sender {id}: no session found"));
+/// Open the chooser on the row named `handle` - the tapped `@sender` header
+/// token. No row carries the handle: a notice, and nothing opens.
+pub(super) fn open_for_session(view: &mut View, handle: &str) {
+    let Some(row) = row_for_name(&view.layout.agents, handle).cloned() else {
+        view.set_notice(format!("sender {handle}: no session found"));
         return;
     };
     let last = crate::view_store::load_open_target().and_then(|s| OpenTarget::parse(&s));
@@ -179,45 +177,6 @@ pub(super) fn open_for_session(view: &mut View, id: &str, resolved: Option<Strin
         }
         Err(msg) => view.set_notice(msg),
     }
-}
-
-/// Resolve a mail-sender id to the sender's bus session key by shelling the
-/// `fno-agents chats resolve` verb: argv array, output captured, 5 s bound.
-/// `None` on any failure - the caller shows `no session found` and never
-/// guesses by name.
-pub(super) fn resolve_sender(id: &str) -> Option<String> {
-    const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
-    let mut child = std::process::Command::new(crate::digest_overlay::fno_agents_bin())
-        .args(["chats", "resolve", "--prefix", id])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + BOUND;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                break;
-            }
-            Ok(None) => {}
-            Err(_) => return None,
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    let out = child.wait_with_output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().next()?;
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    v.get("from_key")?.as_str().map(str::to_string)
 }
 
 #[cfg(test)]
@@ -319,20 +278,15 @@ mod tests {
             assert_eq!(OpenTarget::parse(pick.as_str()), Some(pick));
         }
 
-        // AC5-HP. Two rows share a name; only one owns the tapped session.
-        // The finder returns the session owner, never the first name match.
-        let mut twin_a = focus_agent(1);
-        twin_a.name = "twin".into();
-        twin_a.harness_session_id = Some("fmail-aaaaaaaaaaaa".into());
-        let mut twin_b = focus_agent(2);
-        twin_b.name = "twin".into();
-        twin_b.harness_session_id = Some("fmail-bbbbbbbbbbbb".into());
-        let rows = [twin_a, twin_b];
-        let found = row_for_session(&rows, "fmail-bbbbbbbbbbbb").expect("the owner resolves");
-        assert_eq!(found.pane_id, Some(2));
+        // AC5-HP. The tapped handle opens the row carrying that exact name.
+        let mut named = focus_agent(1);
+        named.name = "t-glm-9663".into();
+        let rows = [named, focus_agent(2)];
+        let found = row_for_name(&rows, "t-glm-9663").expect("the handle resolves");
+        assert_eq!(found.pane_id, Some(1));
         assert!(
-            row_for_session(&rows, "fmail-cccccccccccc").is_none(),
-            "no session, no row"
+            row_for_name(&rows, "t-none").is_none(),
+            "no row carries the handle, no session"
         );
     }
 }
