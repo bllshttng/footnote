@@ -111,6 +111,9 @@ capture tidy
 batch open
 batch status
 batch metrics
+# the triage route forwards at the native door; every action reads or
+# applies through the classified engine
+triage
 # read-only operators' surface over the graph store
 # graph-store integrity check (read-only)
 collisions check
