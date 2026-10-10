@@ -1,10 +1,9 @@
 """The ``fno agents mail hold`` verb family: one session's do-not-disturb.
 
 Extracted from ``fno.mail.cli`` (file-budget: that module is shrink-only);
-cli.py registers the two commands explicitly, the way it registers
-``notify-self``. Everything here is hold-shaped: the manifest reader, the
-held-job-mail scan, the self-handle resolver, and the hold / hold-release
-verbs.
+cli.py registers the two commands explicitly. Everything here is
+hold-shaped: the manifest reader, the held-job-mail scan, the self-handle
+resolver, and the hold / hold-release verbs.
 """
 
 from __future__ import annotations

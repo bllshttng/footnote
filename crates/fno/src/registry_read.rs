@@ -17,10 +17,50 @@ pub fn database_path(path: &Path) -> Option<PathBuf> {
     Some(crate::state_layout::place(root, "graph.json").with_extension("db"))
 }
 
-/// The registry document at `path` as JSON text. A missing path is
-/// `NotFound`, exactly as the legacy file read was.
+/// Whether the registry table owns `path`: the fence directory stands there,
+/// or graph.db records the import. A plain `registry.json` beside an imported
+/// table is a stale pre-import file, never the registry: rm edits the table,
+/// so reading that file brings removed rows back. A store that exists but
+/// cannot be read counts as owned, so the read fails instead of falling back
+/// to the file.
+pub fn table_owns(path: &Path) -> bool {
+    if path.is_dir() {
+        return true;
+    }
+    if path.file_name().is_none_or(|name| name != "registry.json") {
+        return false;
+    }
+    let Some(database) = database_path(path) else {
+        return false;
+    };
+    if !database.exists() {
+        return false;
+    }
+    let Ok(connection) = crate::store_conn::open_read(&database) else {
+        return true;
+    };
+    let has_meta = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry_meta')",
+        [],
+        |r| r.get::<_, bool>(0),
+    );
+    match has_meta {
+        Ok(false) => false,
+        Ok(true) => connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM registry_meta WHERE key='imported')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+/// The registry document at `path` as JSON text. Before the import a missing
+/// path is `NotFound`, exactly as the legacy file read was.
 pub fn registry_text(path: &Path) -> std::io::Result<String> {
-    if !path.is_dir() {
+    if !table_owns(path) {
         return std::fs::read_to_string(path);
     }
     let invalid = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidData, e);

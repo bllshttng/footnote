@@ -113,11 +113,40 @@ pub fn fill_sccache_env(root: &Path) {
     }
 }
 
+/// sccache is opt-in: the rustc wrapper compiles bare rustc unless the
+/// global `~/.fno/config.toml` sets `build.sccache = true` or FNO_SCCACHE=1,
+/// and SCCACHE_DISABLE=1 wins over either. The machine-wide server keep-alive
+/// reads the same signal (the machine scope is why only the global config
+/// counts here), so a machine nobody opted in runs no server.
+pub fn sccache_opted_in() -> bool {
+    sccache_opted_in_values(
+        std::env::var("SCCACHE_DISABLE").ok().as_deref(),
+        std::env::var("FNO_SCCACHE").ok().as_deref(),
+        crate::agents_config::config_lookup_global(&["build", "sccache"]).and_then(|v| v.as_bool()),
+    )
+}
+
+/// The env-and-config-free form, so the precedence the wrapper applies is
+/// unit-testable without mutating process env.
+fn sccache_opted_in_values(
+    disable: Option<&str>,
+    opt_in: Option<&str>,
+    config: Option<bool>,
+) -> bool {
+    if disable == Some("1") {
+        return false;
+    }
+    if opt_in == Some("1") {
+        return true;
+    }
+    config == Some(true)
+}
+
 /// Best-effort: one long-lived sccache server per machine. Probes for a live
-/// server and, when none answers and sccache is installed, starts one
-/// detached with the never-stop idle timeout. Never blocks or fails the
-/// caller: a machine without sccache, or one where the start fails, keeps
-/// every current behavior.
+/// server and, when none answers, the machine opted into sccache, and sccache
+/// is installed, starts one detached with the never-stop idle timeout. Never
+/// blocks or fails the caller: a machine without sccache, one where the start
+/// fails, or one that never opted in, keeps every current behavior.
 pub fn ensure_sccache_server() {
     ensure_sccache_server_unless(sccache_server_pid().is_some());
 }
@@ -125,7 +154,7 @@ pub fn ensure_sccache_server() {
 /// The rows-taking form: a caller holding a process table (the census verb,
 /// the machine-watch tick) answers the probe without a second table walk.
 pub fn ensure_sccache_server_unless(live_server: bool) {
-    if live_server || sccache_bin().is_none() {
+    if live_server || sccache_bin().is_none() || !sccache_opted_in() {
         return;
     }
     let Some(bin) = sccache_bin() else {
@@ -1911,6 +1940,19 @@ mod tests {
         assert_eq!(sccache_row_pid(&rows), Some(20));
         let clients = vec![row(10, "sccache /usr/bin/rustc --crate-name a")];
         assert_eq!(sccache_row_pid(&clients), None);
+    }
+
+    // The keep-alive reads the same opt-in signal the rustc wrapper reads, so
+    // a machine nobody opted in runs no server. Pure form: no process-env
+    // mutation.
+    #[test]
+    fn sccache_opt_in_precedence_matches_the_wrapper() {
+        assert!(!sccache_opted_in_values(Some("1"), None, Some(true)));
+        assert!(sccache_opted_in_values(None, Some("1"), Some(false)));
+        assert!(sccache_opted_in_values(None, None, Some(true)));
+        assert!(!sccache_opted_in_values(None, None, None));
+        // FNO_SCCACHE=0 is not an opt-in; the config key still decides.
+        assert!(sccache_opted_in_values(None, Some("0"), Some(true)));
     }
 
     #[test]

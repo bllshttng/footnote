@@ -370,6 +370,12 @@ pub(crate) fn record_at(
         let Some((chat_id, rec)) = message_line(line) else {
             return Ok(Recorded::Skipped);
         };
+        // A send stored before its live attempt that then missed reaches
+        // here again as the durable copy: one id records one message line.
+        let id = line.get("id").and_then(Value::as_str).unwrap_or("");
+        if chat_holds_message(&chats_dir.join(&chat_id), id) {
+            return Ok(Recorded::Skipped);
+        }
         append_chat_line(&chats_dir.join(&chat_id), &rec)?;
         Ok(Recorded::Message { chat_id })
     } else if is_message_kind(kind) {
@@ -465,24 +471,27 @@ fn scan_chat_files_for_id(chats_dir: &Path, id: &str) -> Result<Option<String>, 
         Err(_) => return Ok(None),
     };
     for entry in rd.flatten() {
-        let file = entry.path().join("messages.jsonl");
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for line in text.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if v.get("type").and_then(Value::as_str) == Some("message")
-                && v.get("id").and_then(Value::as_str) == Some(id)
-            {
-                if let Some(chat) = entry.file_name().to_str() {
-                    return Ok(Some(chat.to_string()));
-                }
+        if chat_holds_message(&entry.path(), id) {
+            if let Some(chat) = entry.file_name().to_str() {
+                return Ok(Some(chat.to_string()));
             }
         }
     }
     Ok(None)
+}
+
+/// Whether the chat at `chat_dir` already holds a message line for `id`.
+fn chat_holds_message(chat_dir: &Path, id: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(chat_dir.join("messages.jsonl")) else {
+        return false;
+    };
+    text.lines()
+        .filter(|line| line.contains(id))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|v| {
+            v.get("type").and_then(Value::as_str) == Some("message")
+                && v.get("id").and_then(Value::as_str) == Some(id)
+        })
 }
 
 /// The sender name the store row for `id` carries: the bus envelope's
@@ -1299,20 +1308,31 @@ pub(crate) struct ShowQuery {
     pub caller: Option<String>,
 }
 
-fn participant_key(v: &Value, session: &str, fallback: &str) -> String {
-    v.get(session)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| v.get(fallback).and_then(Value::as_str).unwrap_or("unknown"))
-        .to_string()
-}
-
 /// The privacy rule a body prints under: the caller is the message's sender
-/// or recipient; `--all` is the operator override.
+/// or recipient; `--all` is the operator override. The caller resolves to a
+/// full session id. A side that stores a full id matches it exactly; a side
+/// that stores only the 8-character handle matches the head of the caller's
+/// id, since sessions in one clock bucket share that head.
 fn caller_in_message(line: &Value, caller: &str) -> bool {
+    fn text(v: Option<&Value>) -> Option<&str> {
+        v.and_then(Value::as_str).filter(|s| !s.is_empty())
+    }
     let norm = crate::mail_hold::identity_key;
-    norm(&participant_key(line, "from_session", "from")) == norm(caller)
-        || norm(&participant_key(line, "to_key", "to")) == norm(caller)
+    let caller = norm(caller);
+    let side =
+        |full: Option<&str>, handles: [Option<&str>; 2]| match full {
+            Some(full) => norm(full) == caller,
+            None => handles.into_iter().flatten().map(norm).any(|handle| {
+                handle == caller || (handle.len() == 8 && caller.starts_with(&handle))
+            }),
+        };
+    side(
+        text(line.get("from_session")),
+        [text(line.get("from")), None],
+    ) || side(
+        text(line.get("to_session")).or(text(line.pointer("/meta/to_session"))),
+        [text(line.get("to_key")), text(line.get("to"))],
+    )
 }
 
 fn message_body(line: &Value) -> &str {
@@ -1534,9 +1554,9 @@ fn usage() -> i32 {
 /// const and every carrier that prints the line follows.
 pub const MAIL_READ_VERB: &str = "show";
 
-/// The one-line lesson carried once per session at session start, again after
-/// each compaction, and on a hookless session's first delivered header. Every
-/// carrier prints THIS string, so no carrier hardcodes the verb.
+/// The one-line lesson carried once per session at session start and again
+/// after each compaction. Every carrier prints THIS string, so no carrier
+/// hardcodes the verb.
 pub fn teach_line() -> String {
     format!(
         "mail: an `fmail-<id>` header in a delivered turn is unread mail on the bus; \
@@ -1907,6 +1927,23 @@ pub(crate) fn resolve_prefix(prefix: &str) -> Result<Resolved, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn show_admits_the_recipient_whose_handle_the_row_stores() {
+        // A hosted row stores the recipient as its 8-character handle; the
+        // caller resolves to the full session id and still reads its mail.
+        let row = serde_json::json!({
+            "from": "e78df019", "from_session": "e78df019-1d40-4132-b6f5-8704d38c0fc9",
+            "to": "aa2f99d7", "to_key": "aa2f99d7",
+            "meta": {"to_session": "aa2f99d7-9155-4fca-9eca-adf9ca1aafb2"}
+        });
+        let reads = |caller: &str| caller_in_message(&row, caller);
+        assert!(reads("aa2f99d7-9155-4fca-9eca-adf9ca1aafb2"));
+        assert!(reads("e78df019-1d40-4132-b6f5-8704d38c0fc9"));
+        assert!(!reads("bb2eb475-0000-4000-8000-000000000000"));
+        // A sibling in the same clock bucket shares the head, not the full id.
+        assert!(!reads("aa2f99d7-0000-4000-8000-000000000000"));
+    }
+
     /// One temp root per test; env-mutating tests share the process, so the
     /// mutex keeps FNO_* pins from racing.
     static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
@@ -2087,6 +2124,11 @@ mod tests {
             panic!()
         };
         assert_eq!(fallback_id, chat_id_for_pair("sess-a", "stranger@nowhere"));
+        assert_eq!(
+            record_at(&chats, &db, &bus, &stranger).unwrap(),
+            Recorded::Skipped,
+            "a send stored before its live attempt records once"
+        );
         let mut withdraw = bus_line("msg-000002", "a", "b", "withdraw");
         withdraw["meta"] = serde_json::json!({"withdraws": "msg-000003"});
         assert_eq!(

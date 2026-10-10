@@ -47,6 +47,9 @@ pub struct GridCell {
 pub enum PopupRow {
     /// Section header, rendered in an accent style, not selectable.
     Header(String),
+    /// Plain body text, not selectable: prose and bullets that must not
+    /// wear the header accent. An empty string renders the spacer line.
+    Text(String),
     /// A horizontal rule separator, not selectable.
     Rule,
     /// A read-only field row: the label in the fixed key column (accent, the
@@ -104,6 +107,7 @@ impl PopupRow {
             | PopupRow::SwatchEntry { enabled: false, .. } => 0,
             PopupRow::Entry { .. } | PopupRow::SwatchEntry { .. } | PopupRow::FullWidth(_) => 1,
             PopupRow::Header(_)
+            | PopupRow::Text(_)
             | PopupRow::Rule
             | PopupRow::Info { .. }
             | PopupRow::Input { .. } => 0,
@@ -133,9 +137,10 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
         i: usize,
         indent: usize,
         lines: Vec<String>,
+        cont: fn(String) -> PopupRow,
     ) {
         for line in lines {
-            out.push(PopupRow::Header(format!("{}{line}", " ".repeat(indent))));
+            out.push(cont(format!("{}{line}", " ".repeat(indent))));
             src.push(i);
         }
     }
@@ -151,7 +156,15 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
                     _ => PopupRow::Header(first),
                 });
                 src.push(i);
-                tail(&mut out, &mut src, i, 0, lines.collect());
+                tail(&mut out, &mut src, i, 0, lines.collect(), PopupRow::Header);
+            }
+            // Body text wraps like a Header but lands as plain Text rows.
+            PopupRow::Text(s) if cols(s) + 1 > w => {
+                let mut lines = wrap(s, w.saturating_sub(2)).into_iter();
+                let first = lines.next().unwrap_or_default();
+                out.push(PopupRow::Text(first));
+                src.push(i);
+                tail(&mut out, &mut src, i, 0, lines.collect(), PopupRow::Text);
             }
             // An Entry wraps only where render would cut it: pad + key column
             // + gap + label in a plain body, pad + glyph + space + label
@@ -192,7 +205,14 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
                     enabled: *enabled,
                 });
                 src.push(i);
-                tail(&mut out, &mut src, i, kw + 1, lines.collect());
+                tail(
+                    &mut out,
+                    &mut src,
+                    i,
+                    kw + 1,
+                    lines.collect(),
+                    PopupRow::Header,
+                );
                 if !hint_inline {
                     tail(
                         &mut out,
@@ -200,6 +220,7 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
                         i,
                         kw + 1,
                         wrap(hint, w.saturating_sub(kw + 5)),
+                        PopupRow::Header,
                     );
                 }
             }
@@ -210,7 +231,14 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
                     value: lines.next().unwrap_or_default(),
                 });
                 src.push(i);
-                tail(&mut out, &mut src, i, kw + 1, lines.collect());
+                tail(
+                    &mut out,
+                    &mut src,
+                    i,
+                    kw + 1,
+                    lines.collect(),
+                    PopupRow::Header,
+                );
             }
             PopupRow::SwatchEntry {
                 glyph,
@@ -228,7 +256,14 @@ fn wrap_rows(rows: &[PopupRow], w: usize, kw: usize, plain: bool) -> (Vec<PopupR
                     color: *color,
                 });
                 src.push(i);
-                tail(&mut out, &mut src, i, kw + 4, lines.collect());
+                tail(
+                    &mut out,
+                    &mut src,
+                    i,
+                    kw + 4,
+                    lines.collect(),
+                    PopupRow::Header,
+                );
             }
             row => {
                 out.push(row.clone());
@@ -263,6 +298,7 @@ fn validate_menu_glyphs(rows: &[PopupRow]) {
                 }
             }
             PopupRow::Header(_)
+            | PopupRow::Text(_)
             | PopupRow::Rule
             | PopupRow::FullWidth(_)
             | PopupRow::Info { .. }
@@ -662,7 +698,9 @@ impl Popup {
         self.rows
             .iter()
             .map(|r| match r {
-                PopupRow::Header(s) | PopupRow::FullWidth(s) => chrome::str_cols(s) + 2,
+                PopupRow::Header(s) | PopupRow::Text(s) | PopupRow::FullWidth(s) => {
+                    chrome::str_cols(s) + 2
+                }
                 PopupRow::Rule => 0,
                 PopupRow::Info { label: _, value } => 1 + kw + 1 + chrome::str_cols(value) + 2,
                 PopupRow::Input {
@@ -767,6 +805,20 @@ impl Popup {
                         hits: vec![],
                         roles: vec![],
                         segs,
+                        pad_role: Role::PanelBody,
+                    }
+                }
+                PopupRow::Text(s) => {
+                    // Body text: no accent, no selection. An empty string is
+                    // the inter-section spacer line.
+                    let text = pad(&format!(" {s}"), width);
+                    RenderedLine {
+                        text,
+                        disabled: false,
+                        sel_span: None,
+                        hits: vec![],
+                        roles: vec![],
+                        segs: vec![],
                         pad_role: Role::PanelBody,
                     }
                 }

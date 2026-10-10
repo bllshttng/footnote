@@ -52,7 +52,7 @@ fn open(path: &Path) -> Result<Connection, StateError> {
         // this child's read, so taking it again deadlocks. The IMMEDIATE
         // transaction already serializes importers.
         if !migrated {
-            let raw = retire_registry(path)?;
+            let raw = drop_removed(path, retire_registry(path)?);
             save_document(&transaction, path, raw)?;
             transaction
                 .execute(
@@ -64,7 +64,139 @@ fn open(path: &Path) -> Result<Connection, StateError> {
             return Ok(connection);
         }
     }
+    // Best effort: every reader already ignores this file through
+    // `registry_read::table_owns`; the fence only keeps older binaries off it.
+    let _ = refence_stray_file(path);
     Ok(connection)
+}
+
+/// A plain registry file beside an imported table is a stale pre-import copy
+/// that an older binary or a hand restore wrote. Move it into the snapshots
+/// and put the fence back. The fence names no source, so a later re-import
+/// starts empty instead of from the stale rows.
+fn refence_stray_file(path: &Path) -> Result<(), StateError> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure(path, "registry has no parent"))?;
+    let filename = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| failure(path, "registry filename is not UTF-8"))?;
+    let pending = parent.join(format!(".{filename}.table-fence"));
+    let snapshots = parent.join("registry-snapshots");
+    std::fs::create_dir_all(&snapshots)?;
+    match std::fs::create_dir(&pending) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    // A pending dir an earlier attempt left may lack its marker; a fence
+    // without one fails every later import.
+    let marker_path = pending.join("migration.json");
+    if !marker_path.is_file() {
+        let marker =
+            json!({"storage":"graph.db", "remedy":"upgrade fno to read the registry table"});
+        std::fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Outside the `registry.json.` snapshot prefix, so rotation never prunes it.
+    let aside = snapshots.join(format!("stray.{filename}.{stamp}"));
+    match std::fs::rename(path, &aside) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    if path.is_dir() {
+        return Ok(());
+    }
+    std::fs::rename(&pending, path)?;
+    Ok(())
+}
+
+/// Rows `fno agents rm` removed stay removed through an import: drop every
+/// row whose harness session a tombstone beside the registry names. Session
+/// ids are unique across harnesses, so the id alone decides.
+fn drop_removed(path: &Path, mut raw: Value) -> Value {
+    let stones: Vec<Value> = path
+        .parent()
+        .and_then(|p| std::fs::read(p.join("rm_tombstones.json")).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let removed: std::collections::HashSet<&str> = stones
+        .iter()
+        .filter_map(|s| s.get("session_id")?.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // The legacy per-harness keys too: `save_document` folds them into
+    // `harness_session_id` only after this filter runs.
+    const SESSION_KEYS: [&str; 4] = [
+        "harness_session_id",
+        "claude_session_uuid",
+        "codex_session_id",
+        "gemini_session_id",
+    ];
+    if let Some(rows) = raw.get_mut("agents").and_then(Value::as_array_mut) {
+        rows.retain(|row| {
+            !SESSION_KEYS
+                .iter()
+                .filter_map(|key| row.get(*key).and_then(Value::as_str))
+                .any(|session| removed.contains(session))
+        });
+    }
+    raw
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn import_drops_removed_rows_and_a_stale_file_is_fenced_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = temp.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let path = agents.join("registry.json");
+        let row = |name: &str, sid: &str| json!({"name": name, "harness": "claude", "claude_session_uuid": sid});
+        let legacy = json!({"schema_version": 4, "agents": [row("kept", "s-kept"), row("ghost", "s-ghost")]});
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        std::fs::write(
+            agents.join("rm_tombstones.json"),
+            json!([{"harness": "claude", "session_id": "s-ghost", "removed_at": 0}]).to_string(),
+        )
+        .unwrap();
+        let names = |doc: serde_json::Value| -> Vec<String> {
+            doc["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(names(super::read(&path).unwrap()), ["kept"]);
+        assert!(path.is_dir(), "the import leaves the fence");
+
+        // A pre-import copy written back over the fence is moved aside on the
+        // next open, and no reader serves its rows.
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        assert_eq!(names(super::read(&path).unwrap()), ["kept"]);
+        assert!(path.is_dir(), "the stale file is fenced off");
+        let aside = std::fs::read_dir(agents.join("registry-snapshots"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("stray.registry.json.")
+            });
+        assert!(aside, "the stale file is kept, not deleted");
+    }
 }
 
 fn save_document(
@@ -209,9 +341,16 @@ pub(crate) struct Write {
     pub(crate) document: Value,
     pub(crate) revision: i64,
     path: PathBuf,
+    _lock: crate::graph_store::BoundedLock,
 }
 
 pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
+    // The registry lives in graph.db, so its writers queue on the same
+    // bounded flock the graph writers hold. BEGIN IMMEDIATE under
+    // a held graph lock used to lose the 5 s busy race and die with
+    // "database is locked" (spawn failure 2026-10-10). The json spelling is
+    // the one graph_lock_path canonicalizes for every graph writer.
+    let _lock = graph_lock(path)?;
     let connection = open(path)?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
@@ -223,7 +362,27 @@ pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
         document,
         revision,
         path: path.to_path_buf(),
+        _lock,
     })
+}
+
+/// The bounded lock over the graph the registry at `path` lives in, on the
+/// same `<graph>.lock` file every graph writer takes. Fails `begin` when the
+/// queue cannot serve this writer inside the bound: proceeding without the
+/// lock would reintroduce the busy race this change retires.
+fn graph_lock(path: &Path) -> Result<crate::graph_store::BoundedLock, StateError> {
+    let home = path
+        .parent()
+        .ok_or_else(|| failure(path, "registry has no parent"))?;
+    let root = if home.file_name().is_some_and(|name| name == "agents") {
+        home.parent()
+            .ok_or_else(|| failure(path, "registry has no state root"))?
+    } else {
+        home
+    };
+    let json = crate::state_layout::place(root, "graph.json");
+    crate::graph_store::BoundedLock::acquire(&json, crate::graph_store::DEFAULT_LOCK_TIMEOUT)
+        .map_err(|e| failure(path, e))
 }
 
 impl Write {
@@ -280,11 +439,11 @@ pub fn replace_document(path: &Path, document: Value) {
 }
 
 /// The `agent.watch` version of the registry at `path`, or `None` when it
-/// vanished. After the table import the path is a fence directory whose stat
-/// never moves, so the table revision rides the `mtime_nanos` slot the agents
+/// vanished. After the table import no file stat moves, so the table
+/// revision rides the `mtime_nanos` slot the agents
 /// view already parses; before it, the file's (mtime, len) stamp.
 pub fn watch_version(path: &Path) -> Result<Option<serde_json::Value>, crate::state::StateError> {
-    if path.is_dir() {
+    if crate::registry_read::table_owns(path) {
         let (_, revision) = read_versioned(path)?;
         return Ok(Some(serde_json::json!({"mtime_nanos": revision, "len": 0})));
     }
@@ -309,7 +468,7 @@ pub fn watch_version(path: &Path) -> Result<Option<serde_json::Value>, crate::st
 /// replace the table document.
 pub fn seed_raw(path: impl AsRef<Path>, body: impl AsRef<[u8]>) {
     let path = path.as_ref();
-    if path.is_dir() {
+    if crate::registry_read::table_owns(path) {
         let body = body.as_ref();
         let document = if body.iter().all(u8::is_ascii_whitespace) {
             serde_json::to_value(Registry::default()).unwrap()
@@ -325,7 +484,7 @@ pub fn seed_raw(path: impl AsRef<Path>, body: impl AsRef<[u8]>) {
 /// The registry at `path` as pretty JSON text: the legacy file before the
 /// import, the table document after. Tests read rows back here.
 pub fn read_raw(path: &Path) -> String {
-    if path.is_dir() {
+    if crate::registry_read::table_owns(path) {
         serde_json::to_string_pretty(&read(path).unwrap()).unwrap()
     } else {
         std::fs::read_to_string(path).unwrap()

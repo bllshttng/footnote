@@ -2029,6 +2029,54 @@ mod tests {
         assert!(failures.is_empty(), "{failures:?}");
     }
 
+    /// First writes of a brand-new store, two at once, all land: each writer
+    /// enters through the full mutate cycle (snapshot, row diff, publish),
+    /// the surface the store's clients drive, not a bare open. A conflict
+    /// heals inside the cycle; any other error fails the run.
+    #[test]
+    fn concurrent_first_writes_on_a_new_store_all_land() {
+        for iteration in 0..25 {
+            let (_dir, graph) = fixture("graph.json");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let writers: Vec<_> = (0..2)
+                .map(|writer| {
+                    let (graph, barrier) = (graph.clone(), barrier.clone());
+                    let node_id = format!("ab-w{iteration}-{writer}");
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        crate::graph_store::mutate_rows(
+                            &graph,
+                            Duration::from_secs(10),
+                            None,
+                            None,
+                            move |rows| {
+                                rows.push(serde_json::json!({
+                                    "id": node_id, "slug": node_id, "title": "First",
+                                    "type": "feature", "status": "idea", "priority": "p2",
+                                    "domain": "code",
+                                }));
+                                Ok(true)
+                            },
+                        )
+                        .map(drop)
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+            let rows = crate::graph_store::read_rows(&graph).unwrap();
+            for writer in 0..2 {
+                let id = format!("ab-w{iteration}-{writer}");
+                assert!(
+                    rows.iter()
+                        .any(|row| row.get("id").and_then(|v| v.as_str()) == Some(id.as_str())),
+                    "row {id} never landed"
+                );
+            }
+        }
+    }
+
     fn two_node_graph(dir: &TempDir) -> PathBuf {
         let graph = dir.path().join("graph.json");
         let rows: Value = serde_json::from_str(

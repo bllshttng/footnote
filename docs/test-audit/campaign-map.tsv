@@ -1019,7 +1019,6 @@ K6	cli/tests/unit/test_mail_hold_parity.py	py	5
 K6	cli/tests/unit/test_mail_job_address.py	py	17
 K6	cli/tests/unit/test_mail_keeper_lane.py	py	12
 K6	cli/tests/unit/test_mail_landed.py	py	18
-K6	cli/tests/unit/test_mail_notify_self.py	py	16
 K6	cli/tests/unit/test_mail_origin.py	py	15
 K6	cli/tests/unit/test_mail_owner_stamp.py	py	5
 K6	cli/tests/unit/test_mail_raw.py	py	73

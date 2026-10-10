@@ -346,6 +346,13 @@ impl AgentsHome {
         self.root.join("events.jsonl")
     }
 
+    /// The last footprint probe answer (`footprint-cache.json`). Any real
+    /// probe run writes it; readers that can serve a recent answer read it
+    /// instead of re-spawning the probe child. See [`crate::spawn_gate`].
+    pub fn footprint_cache_json(&self) -> PathBuf {
+        self.root.join("footprint-cache.json")
+    }
+
     /// Local OTel ingest tree: `port` (the receiver's bound port) and
     /// `otel.db` (one `api_requests` row per API request, harness-neutral).
     /// Owned by the daemon's otel_ingest arm.

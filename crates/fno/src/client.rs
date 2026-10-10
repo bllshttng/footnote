@@ -41,7 +41,6 @@ mod rename_overlay;
 mod row_menu;
 mod sweep_scope;
 mod wire_version;
-use open_chooser::open_for_session;
 use wire_version::{server_has_splitdir, split_skew_notice};
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
@@ -7330,10 +7329,6 @@ async fn attach_and_run(
     let (link_tx, mut link_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<(), String>)>();
 
-    // Resolve sender taps off-loop; the CLI can cold-start.
-    let (sender_tx, mut sender_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
-
     // the needs-me event-fold leg runs off the UI loop and reports back
     // here, tagged with the generation token it was kicked under, so a slow
     // `fno-agents needs` never blocks the overlay and a result landing after the
@@ -7822,7 +7817,7 @@ async fn attach_and_run(
                     // rendering. The router names the opener per pseudo scheme;
                     // open_link::finish lands the UI-loop legs.
                     if let Some(routed) =
-                        crate::client::open_link::start(&url, link_tx.clone(), sender_tx.clone())
+                        crate::client::open_link::start(&url, link_tx.clone())
                     {
                         crate::client::open_link::finish(routed, &mut view);
                         if let Err(e) = compositor.draw(&view.compose()) {
@@ -7997,14 +7992,6 @@ async fn attach_and_run(
                     }
                 };
                 view.set_notice(notice);
-                if let Err(e) = compositor.draw(&view.compose()) {
-                    break Err(format!("draw: {e}"));
-                }
-            }
-            Some((id, resolved)) = sender_rx.recv() => {
-                // the fmail id resolved (or not); open the shared
-                // open-session chooser on the owning row, or say why not.
-                open_for_session(&mut view, &id, resolved);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -8589,7 +8576,7 @@ async fn attach_and_run(
                 eprintln!("fno: {n}");
             }
             // The update modal's restart unwinds here: run the verb in the foreground, exec the fresh client.
-            if let Some(err) = update_menu::maybe_reattach(code, &view.session).await {
+            if let Some(err) = update_menu::maybe_reattach(code, &mut view).await {
                 return Err(err);
             }
             Ok(code)

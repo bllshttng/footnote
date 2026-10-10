@@ -139,15 +139,6 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
     here is that ``--force`` types the WRAPPED body rather than bare text.
     """
     _entry_row, sent = _install(monkeypatch)
-    # Pre-mark the read-verb lesson taught for the recipient, so this test's
-    # one-line turn contract stays about --force's wrap semantics.
-    from fno.paths import agents_registry_path
-
-    _stamp_dir = agents_registry_path().parent / "mail_teach"
-    _stamp_dir.mkdir(parents=True, exist_ok=True)
-    (_stamp_dir / "0199aaaa-1111-7000-8000-aaaaaaaaaaaa.json").write_text(
-        json.dumps({"session": "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "taught_boundary_epoch": 0})
-    )
 
     result = runner.invoke(
         mail_app,
@@ -158,10 +149,11 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
 
     _e, text, kwargs = sent[0]
     assert text.splitlines()[0].startswith("`@lead · fmail-"), text[:80]
-    # The typed turn is header only: one line; the body stays on the record.
+    # The typed turn is the header line, then the body.
     lines = text.splitlines()
-    assert len(lines) == 1, text
+    assert len(lines) == 2, text
     assert lines[0].startswith("`@lead · fmail-")
+    assert lines[1] == "status?"
     # The record plane keeps the body: the outbox row stores the full-body
     # envelope, so the id the read line names resolves to the message.
     from fno.bus.log import iter_messages

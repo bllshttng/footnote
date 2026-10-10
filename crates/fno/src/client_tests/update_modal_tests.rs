@@ -3,7 +3,7 @@
 
 use super::tests::view_with_agents;
 use super::*;
-use crate::client::release_check::{Channel, ReleaseOutcome};
+use crate::client::release_check::{Channel, ReleaseNotesSection, ReleaseOutcome};
 use crate::client::update_menu::{
     ReleaseNoteLine, ReleaseNotes, ReleaseNotesGroup, RunningRow, UpdateOutcome, UpdateProbe,
     UpdateReadiness,
@@ -16,6 +16,8 @@ fn degraded_release_probe(release: ReleaseOutcome, running: Vec<RunningRow>) -> 
             update_ready: false,
             installed_rev: None,
             source_rev: None,
+            installed_version: None,
+            source_prs_ahead: None,
             changelog: vec![],
             release_notes: None,
             guidance: "update check degraded (local source tree unavailable)".into(),
@@ -40,11 +42,27 @@ fn entry_labels(popup: &AuxPopup) -> Vec<String> {
         .collect()
 }
 
+/// Every row's visible label (headers, body text, entries): for assertions
+/// that care about presence, not row kind.
+fn row_labels(popup: &AuxPopup) -> Vec<String> {
+    popup
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) | PopupRow::Text(h) | PopupRow::FullWidth(h) => Some(h.clone()),
+            PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn newer_uv() -> ReleaseOutcome {
     ReleaseOutcome::Newer {
         channel: Channel::Uv,
         installed: "0.3.1".into(),
         latest: "0.3.2".into(),
+        notes: vec![],
     }
 }
 
@@ -173,6 +191,8 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         update_ready: false,
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![],
         release_notes: None,
         guidance: "installed same is current; 2 running process(es) are older builds".into(),
@@ -241,12 +261,15 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         .collect();
     assert!(headers.contains(&"aaaaaaaaaa -> bbbbbbbbbb"), "{headers:?}");
     assert_eq!(
-        headers.iter().filter(|h| h.contains("pane keeper")).count(),
+        row_labels(&wide)
+            .iter()
+            .filter(|h| h.contains("keeper"))
+            .count(),
         2,
         "the count line and the promise: {headers:?}"
     );
     assert!(
-        headers.contains(&"20 pane keepers on the old build"),
+        row_labels(&wide).contains(&"20 pane keepers on the old build".to_string()),
         "{headers:?}"
     );
     let modal = build_update_modal(Some(&outcome.clone().into()));
@@ -255,7 +278,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         .rows
         .iter()
         .map(|r| match r {
-            PopupRow::Header(h) => h.clone(),
+            PopupRow::Header(h) | PopupRow::Text(h) => h.clone(),
             PopupRow::Entry { label, .. } => label.clone(),
             PopupRow::Rule => "-".into(),
             _ => String::new(),
@@ -272,14 +295,12 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         "current rows are not listed: {body}"
     );
     assert!(
-        body.contains(
-            "restart keeps every pane. pane keepers stay on the old build until their pane ends."
-        ),
+        body.contains("restart keeps panes. keepers stay on the old build until their pane ends."),
         "{body}"
     );
     assert!(
         body.contains(
-            "restart detaches, runs `fno agents restart --mux` in the foreground, then reattaches."
+            "restart detaches, runs `fno agents restart --mux` in the foreground, reattaches."
         ),
         "the modal names the flow the tap starts: {body}"
     );
@@ -315,6 +336,8 @@ fn no_overlay_cuts_text_with_an_ellipsis() {
         update_ready: false,
         installed_rev: Some("a".repeat(40)),
         source_rev: Some("b".repeat(40)),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![format!("feat: {long}")],
         release_notes: None,
         guidance: long.clone(),
@@ -539,6 +562,8 @@ fn sideline_menu_omits_update_row_when_not_ready() {
         update_ready: false,
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![],
         release_notes: None,
         guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
@@ -585,6 +610,8 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
         update_ready: false,
         installed_rev: Some("same".into()),
         source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec![],
         release_notes: None,
         guidance: "update check degraded (fno mux ls --json failed) - ...".into(),
@@ -676,6 +703,8 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): thing".into()],
         release_notes: None,
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
@@ -710,6 +739,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): thing".into(), "feat(y): other thing".into()],
         release_notes: None,
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
@@ -729,9 +760,11 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         })
         .collect();
     assert!(headers.contains(&"aaa1111 -> bbb2222"));
-    assert!(headers.contains(&"fix(x): thing"));
-    assert!(headers.contains(&"feat(y): other thing"));
-    assert!(headers.iter().any(|h| h.contains("14 shells survive")));
+    assert!(row_labels(&modal).contains(&"fix(x): thing".to_string()));
+    assert!(row_labels(&modal).contains(&"feat(y): other thing".to_string()));
+    assert!(row_labels(&modal)
+        .iter()
+        .any(|h| h.contains("14 shells survive")));
 
     // Shaped notes win over the raw changelog: highlights lead as tappable
     // Entries carrying OpenPr (actions pair with selectable rows by index),
@@ -757,6 +790,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): raw subject".into()],
         release_notes: Some(notes),
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
@@ -787,9 +822,9 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         })
         .collect();
     assert!(headers.contains(&"mux"));
-    assert!(headers.contains(&"stop the crash (#104)"));
-    assert!(headers.contains(&"3 test/docs/ci/chore PRs hidden"));
-    assert!(!headers.contains(&"fix(x): raw subject"));
+    assert!(row_labels(&modal).contains(&"stop the crash (#104)".to_string()));
+    assert!(row_labels(&modal).contains(&"3 test/docs/ci/chore PRs hidden".to_string()));
+    assert!(!row_labels(&modal).contains(&"fix(x): raw subject".to_string()));
     assert_eq!(
         modal.actions,
         vec![AuxAction::OpenPr("https://github.com/o/r/pull/105".into())]
@@ -799,6 +834,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
+        installed_version: None,
+        source_prs_ahead: None,
         changelog: vec!["fix(x): raw subject".into()],
         release_notes: Some(ReleaseNotes {
             highlights: vec![],
@@ -812,16 +849,7 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         source_pin: None,
     });
     let modal = build_update_modal(Some(&empty.clone().into()));
-    let headers: Vec<&str> = modal
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Header(h) => Some(h.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(headers.contains(&"fix(x): raw subject"));
+    assert!(row_labels(&modal).contains(&"fix(x): raw subject".to_string()));
 }
 
 #[test]
@@ -843,4 +871,217 @@ fn readiness_payload_from_the_native_verb_parses_for_the_tui() {
     let parsed: Result<UpdateReadiness, _> = serde_json::from_value(payload.clone());
     assert!(parsed.is_ok());
     assert!(payload.get("probes").is_some());
+}
+
+/// The source modal leads with the installed version and the distance in
+/// PRs; an older payload (or a zero/unknown distance) falls back to the
+/// bare sha pair.
+#[test]
+fn update_modal_shows_version_and_pr_distance_or_falls_back() {
+    let ready = |version: Option<&str>, ahead: Option<u64>| {
+        UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: true,
+            installed_rev: Some("af56e2f24e".into()),
+            source_rev: Some("6c3024996f".into()),
+            installed_version: version.map(str::to_string),
+            source_prs_ahead: ahead,
+            changelog: vec![],
+            release_notes: None,
+            guidance: "update ready - detach, fno doctor update, reattach".into(),
+            degraded: None,
+            running: vec![],
+            running_stale: 0,
+            source_pin: None,
+        })
+    };
+    let headers = |probe: UpdateProbe| -> Vec<String> {
+        build_update_modal(Some(&probe))
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Header(h) => Some(h.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let has = |probe: UpdateProbe, want: &str| headers(probe).iter().any(|h| h == want);
+    assert!(has(
+        ready(Some("0.4.1"), Some(2)).into(),
+        "fno 0.4.1 at af56e2f24e, main is 2 PRs ahead"
+    ));
+    assert!(has(
+        ready(Some("0.4.1"), Some(1)).into(),
+        "fno 0.4.1 at af56e2f24e, main is 1 PR ahead"
+    ));
+    for fallback in [
+        ready(None, None),
+        ready(Some("0.4.1"), Some(0)),
+        ready(None, Some(2)),
+    ] {
+        assert!(has(fallback.into(), "af56e2f24e -> 6c3024996f"));
+        // A release install has neither rev: no sha line at all.
+        let bare = UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: None,
+            source_rev: None,
+            installed_version: Some("0.4.0".into()),
+            source_prs_ahead: None,
+            changelog: vec![],
+            release_notes: None,
+            guidance: "release install refreshes with the upgrade command".into(),
+            degraded: Some("local source tree unavailable".into()),
+            running: vec![],
+            running_stale: 0,
+            source_pin: None,
+        });
+        assert!(!headers(bare.into()).iter().any(|h| h.contains("->")));
+    }
+}
+
+/// A newer release renders the GitHub release body under the version pair:
+/// intro prose and area bullets as Headers (a release body carries no PR
+/// urls), and the upgrade entry stays the one action.
+#[test]
+fn release_newer_renders_release_body_notes() {
+    let release = ReleaseOutcome::Newer {
+        channel: Channel::Uv,
+        installed: "0.4.0".into(),
+        latest: "0.4.1".into(),
+        notes: vec![
+            ReleaseNotesSection {
+                area: String::new(),
+                bullets: vec!["42 merged pull requests since v0.4.0.".into()],
+            },
+            ReleaseNotesSection {
+                area: "mux".into(),
+                bullets: vec!["Portals open operator-owned windows".into()],
+            },
+        ],
+    };
+    let modal = build_update_modal(Some(&degraded_release_probe(release, vec![])));
+    let headers: Vec<&str> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(headers.contains(&"release 0.4.0 -> 0.4.1 (uv)"));
+    assert!(row_labels(&modal).contains(&"- 42 merged pull requests since v0.4.0.".to_string()));
+    assert!(headers.contains(&"mux"));
+    assert!(row_labels(&modal).contains(&"- Portals open operator-owned windows".to_string()));
+    assert_eq!(
+        entry_labels(&modal),
+        vec!["upgrade now: uv tool upgrade fno"]
+    );
+    assert_eq!(modal.actions, vec![AuxAction::UpgradeRelease(Channel::Uv)]);
+}
+
+/// x-4bfe: a current build leads the dialog with the verdict and offers the
+/// optional mux restart when no stale section already offers one.
+#[test]
+fn update_modal_leads_with_up_to_date_when_current() {
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: false,
+        installed_rev: Some("same".into()),
+        source_rev: Some("same".into()),
+        installed_version: Some("0.4.1".into()),
+        source_prs_ahead: None,
+        changelog: vec![],
+        release_notes: None,
+        guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome.into()));
+    assert!(matches!(
+        modal.popup.rows.first(),
+        Some(PopupRow::Header(h)) if h == "up to date"
+    ));
+    assert!(row_labels(&modal).contains(
+        &"optional: restart the mux server to load new mux code. panes are kept.".to_string()
+    ));
+    assert!(modal.actions.is_empty(), "nothing pending, no action");
+}
+
+/// x-4bfe: the keeper count prints once. The payload guidance drops the
+/// clause and the stale section's count line is the one print; a degraded
+/// probe never reads as up to date.
+#[test]
+fn update_modal_keeper_count_prints_once() {
+    let stale = |name: &str| RunningRow {
+        component: "daemon".into(),
+        name: Some(name.into()),
+        verdict: "stale".into(),
+        on_restart: "restarts".into(),
+        survives: "panes".into(),
+    };
+    let keeper = RunningRow {
+        component: "pane-keeper".into(),
+        name: Some("main-1991".into()),
+        verdict: "stale".into(),
+        on_restart: "kept".into(),
+        survives: "its pane; current only when that pane ends".into(),
+    };
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: false,
+        installed_rev: Some("same".into()),
+        source_rev: Some("same".into()),
+        installed_version: None,
+        source_prs_ahead: None,
+        changelog: vec![],
+        release_notes: None,
+        guidance:
+            "installed same is current; 2 running process(es) are older builds - restart cycles 1"
+                .into(),
+        degraded: None,
+        running: vec![stale("a"), keeper],
+        running_stale: 2,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome.into()));
+    assert!(matches!(
+        modal.popup.rows.first(),
+        Some(PopupRow::Header(h)) if h == "up to date"
+    ));
+    let labels = row_labels(&modal);
+    assert_eq!(
+        labels.iter().filter(|l| l.contains("pane keeper")).count(),
+        1,
+        "the count prints once: {labels:?}"
+    );
+    assert!(labels.contains(&"1 pane keeper on the old build".to_string()));
+    assert!(modal.actions.contains(&AuxAction::RestartAgents));
+
+    // The producer side of the same contract: the payload guidance stays
+    // clause-free, so a regression there cannot re-double the count.
+    assert_eq!(
+        crate::doctor_update::current_but_stale("same", 2, 1),
+        "installed same is current; 2 running process(es) are older builds - restart cycles 1"
+    );
+
+    // A degraded probe never claims the build is current.
+    let degraded_modal = build_update_modal(Some(
+        &(UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: None,
+            source_rev: None,
+            installed_version: None,
+            source_prs_ahead: None,
+            changelog: vec![],
+            release_notes: None,
+            guidance: String::new(),
+            degraded: Some("local source tree unavailable".into()),
+            running: vec![],
+            running_stale: 0,
+            source_pin: None,
+        })
+        .into()),
+    ));
+    assert!(!row_labels(&degraded_modal).contains(&"up to date".to_string()));
 }

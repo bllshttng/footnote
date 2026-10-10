@@ -22,8 +22,8 @@ HANDLE = "abcd1234"
 def _isolated_state(tmp_path, monkeypatch):
     """Point the clock directory at a tmp state root, not the real ~/.fno.
 
-    FNO_HOME aims the Rust writer (arm/clear/extend now shell the mail-hold
-    verb) at the same root the Python readers use; without it the arm writes
+    FNO_HOME aims the Rust writer (arm/clear shell the mail-hold verb) at
+    the same root the Python readers use; without it the arm writes
     the machine's state while read() checks the tmp one.
     """
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
@@ -48,9 +48,9 @@ def _msg(msg_id, sender, body, ts="2026-08-20T10:00:00Z"):
 
 
 def _seed(hold: hold_mod.Hold) -> hold_mod.Hold:
-    """Write a clock file directly: the transport only arms, clears and
-    extends, and several tests need states it cannot express (a lapsed
-    clock, a conversation-sourced one). Same bytes the old writer wrote."""
+    """Write a clock file directly: the transport only arms and clears, and
+    several tests need states it cannot express (a lapsed clock, a
+    conversation-sourced one). Same bytes the old writer wrote."""
     import json
 
     fields = {
@@ -151,39 +151,6 @@ def test_wall_clock_arm_has_fixed_deadline_and_no_idle_ceiling(monkeypatch):
     assert armed.window_s == 480
 
 
-def test_wall_clock_activity_preserves_the_original_deadline():
-    hold_mod.arm_wall(HANDLE, 8)
-    armed = hold_mod.read(HANDLE)
-
-    active = hold_mod.extend(HANDLE)
-
-    assert active is not None
-    assert active.clock_kind == "wall"
-    assert active.until == armed.until
-    assert active.window_s == armed.window_s
-
-
-def test_idle_activity_clamps_at_the_absolute_ceiling():
-    now = datetime.now(timezone.utc)
-    _seed(
-        hold_mod.Hold(
-            handle=HANDLE,
-            until=now + timedelta(seconds=60),
-            window_s=480,
-            clock_kind="idle",
-            ceiling=now + timedelta(seconds=90),
-        )
-    )
-
-    active = hold_mod.extend(HANDLE)
-
-    assert active is not None
-    # The re-arm would push the deadline to now+480s; the immutable
-    # ceiling clamps it, and the clock stays idle.
-    assert active.until == active.ceiling
-    assert active.clock_kind == "idle"
-
-
 def test_a_permanent_policy_renders_as_held_with_no_countdown():
     hold_mod.arm_permanent(HANDLE)
     # The permanent marker is the ABSENCE of a clock file plus the registry
@@ -230,8 +197,8 @@ def test_a_live_hold_does_not_lapse_and_an_expired_one_does():
 def test_a_corrupt_clock_reads_as_no_clock_and_keeps_holding():
     """An unreadable clock is not evidence the hold ended, so the flag stands.
 
-    The hold then lifts at the recipient's next turn boundary (notify-self
-    tidies it) or on `fno agents mail hold --off`. A stall, and a bounded one.
+    The hold then lifts on `fno agents mail hold --off`. A stall, and a
+    bounded one.
     """
     hold_mod.arm(HANDLE, 5)
     hold_mod.hold_path(HANDLE).write_text("{not json", encoding="utf-8")
@@ -354,46 +321,6 @@ def test_gate_leaves_a_clockless_bus_only_row_refusing_on_both_branches(monkeypa
     assert dispatch._delivery_policy_refusal(HANDLE) == dispatch.BUS_ONLY_POLICY
 
 
-def test_extend_pushes_a_live_hold_out_and_refuses_everything_else():
-    hold_mod.arm(HANDLE, 5)
-    first = hold_mod.read(HANDLE).until
-    extended = hold_mod.extend(HANDLE)
-    assert extended is not None and extended.until >= first
-
-    hold_mod.arm_permanent(HANDLE)
-    assert hold_mod.extend(HANDLE) is None
-
-    hold_mod.clear(HANDLE)
-    assert hold_mod.extend(HANDLE) is None
-
-
-def test_tidy_lapsed_clears_a_timed_hold_but_never_a_permanent_policy(monkeypatch):
-    cleared = []
-    monkeypatch.setattr(
-        hold_mod,
-        "set_policy",
-        # Returns True: this stub stands in for a write that SUCCEEDED, and
-        # tidy_lapsed now reports the write rather than the attempt.
-        lambda handle, policy: (cleared.append((handle, policy)), True)[1],
-    )
-
-    hold_mod.arm_permanent(HANDLE)
-    assert hold_mod.tidy_lapsed(HANDLE) is False
-    # A permanent hold is the absence of a clock now; tidy touches neither.
-    assert hold_mod.read(HANDLE) is None
-
-    _seed(
-        hold_mod.Hold(
-            handle=HANDLE,
-            until=datetime.now(timezone.utc) - timedelta(seconds=1),
-            window_s=60,
-        )
-    )
-    assert hold_mod.tidy_lapsed(HANDLE) is True
-    assert hold_mod.read(HANDLE) is None
-    assert cleared == [(HANDLE, None)]
-
-
 # --- Release rendering -----------------------------------------------------
 
 
@@ -484,7 +411,7 @@ def test_a_failed_policy_write_keeps_the_clock_so_the_hold_stays_recoverable(mon
 
     Clearing the clock regardless left a bus-only row with no clock, and that
     never lapses, so a hold that failed to lift became permanent with no
-    automatic path back: `tidy_lapsed` needs a clock it no longer has.
+    automatic path back.
     """
     _expire(HANDLE)
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: False)
@@ -495,8 +422,8 @@ def test_a_failed_policy_write_keeps_the_clock_so_the_hold_stays_recoverable(mon
 
     clock = hold_mod.read(HANDLE)
     assert clock is not None, "a failed policy write must keep the clock"
-    # Still lapsed, so the gate lets mail through and the next turn boundary
-    # retries the tidy.
+    # Still lapsed, so the gate lets mail through, and the next turn
+    # boundary's Rust tidy lifts the row.
     assert hold_mod.lapsed(HANDLE) is True
 
 
@@ -967,18 +894,6 @@ def test_an_unreadable_clock_renders_a_question_mark_not_an_empty_cell(monkeypat
     monkeypatch.setattr(hold_mod, "dnd_label", _boom)
 
     assert fmt._dnd_label(_full_entry()) == "?"
-
-
-def test_tidy_lapsed_reports_the_write_not_the_attempt(monkeypatch):
-    """Returning True over a policy write that no-opped is the same defect."""
-    _expire(HANDLE)
-    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: False)
-
-    assert hold_mod.tidy_lapsed(HANDLE) is False
-
-    _expire(HANDLE)
-    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
-    assert hold_mod.tidy_lapsed(HANDLE) is True
 
 
 def test_a_bus_only_row_with_no_clock_reads_held_not_blank():

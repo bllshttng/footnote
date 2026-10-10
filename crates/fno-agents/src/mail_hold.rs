@@ -270,6 +270,81 @@ fn read_clock(handle: &str) -> Option<Clock> {
     })
 }
 
+/// Re-arm an idle hold (the `--extend` branch body).
+/// `Ok(Some(json_line))` answers a live hold (an idle re-arm, or a wall hold
+/// returned unchanged so the policy stays live without moving); `Ok(None)`
+/// answers no live hold (no clock, `until: null`, one lapsed, or past its
+/// ceiling); `Err(())` is the silent write failure the branch answers rc 2 to.
+pub(crate) fn extend_clock(handle: &str) -> Result<Option<String>, ()> {
+    let now = chrono::Utc::now();
+    let Some(clock) = read_clock(handle) else {
+        return Ok(None);
+    };
+    let Some(until) = clock.until else {
+        return Ok(None);
+    };
+    let window_s = clock.window_s;
+    if until <= now {
+        return Ok(None);
+    }
+    if clock.clock_kind == "wall" {
+        return Ok(Some(
+            serde_json::json!({
+                "until": until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "window_s": window_s,
+                "clock_kind": clock.clock_kind,
+            })
+            .to_string(),
+        ));
+    }
+    let ceiling = clock
+        .ceiling
+        .unwrap_or_else(|| until + chrono::Duration::seconds(window_s));
+    if ceiling <= now {
+        return Ok(None);
+    }
+    let new_until = std::cmp::min(now + chrono::Duration::seconds(window_s), ceiling);
+    if write_clock(
+        handle,
+        new_until,
+        window_s,
+        "idle",
+        Some(ceiling),
+        clock.source.as_deref(),
+    )
+    .is_err()
+    {
+        return Err(());
+    }
+    Ok(Some(
+        serde_json::json!({
+            "until": new_until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "window_s": window_s,
+            "clock_kind": "idle",
+            "ceiling": ceiling.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        })
+        .to_string(),
+    ))
+}
+
+/// Clear a lapsed clock the prompt-boundary notify found: drop the sidecar
+/// and lift the bus-only stamp so a finished hold stops refusing delivery.
+/// Best-effort throughout - a tidy failure must never cost this turn's
+/// delivery.
+pub(crate) fn tidy_lapsed(handle: &str) {
+    let Some(clock) = read_clock(handle) else {
+        return;
+    };
+    let Some(until) = clock.until else {
+        return;
+    };
+    if until > chrono::Utc::now() {
+        return;
+    }
+    let _ = std::fs::remove_file(hold_sidecar_path(handle));
+    let _ = set_policy(handle, None);
+}
+
 /// The clock read's shape: the extend print's fields plus source, with null
 /// fields omitted so a reader keys off a key's absence, not a null check.
 fn clock_json(clock: &Clock) -> serde_json::Value {
@@ -331,8 +406,8 @@ fn spawn_release_timer(handle: &str) {
 }
 
 /// A stamped row with no clock never lapses, so a clock a concurrent
-/// `tidy_lapsed` (hold.py) removed between the write and the stamp is
-/// written back once. True when the clock exists after the call.
+/// `tidy_lapsed` removed between the write and the stamp is written back
+/// once. True when the clock exists after the call.
 fn ensure_clock(handle: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     if read_clock(handle).is_some() {
         return true;
@@ -1189,56 +1264,11 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
         // hold to extend (no clock, a permanent policy, or one lapsed). A
         // live wall hold returns unchanged so the policy stays live without
         // moving.
-        let now = chrono::Utc::now();
-        let Some(clock) = read_clock(handle) else {
-            return 0;
-        };
-        let Some(until) = clock.until else {
-            return 0;
-        };
-        let window_s = clock.window_s;
-        if until <= now {
-            return 0;
+        match extend_clock(handle) {
+            Ok(Some(line)) => println!("{line}"),
+            Ok(None) => {}
+            Err(()) => return 2,
         }
-        if clock.clock_kind == "wall" {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "until": until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                    "window_s": window_s,
-                    "clock_kind": clock.clock_kind,
-                })
-            );
-            return 0;
-        }
-        let ceiling = clock
-            .ceiling
-            .unwrap_or_else(|| until + chrono::Duration::seconds(window_s));
-        if ceiling <= now {
-            return 0;
-        }
-        let new_until = std::cmp::min(now + chrono::Duration::seconds(window_s), ceiling);
-        if write_clock(
-            handle,
-            new_until,
-            window_s,
-            "idle",
-            Some(ceiling),
-            clock.source.as_deref(),
-        )
-        .is_err()
-        {
-            return 2;
-        }
-        println!(
-            "{}",
-            serde_json::json!({
-                "until": new_until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                "window_s": window_s,
-                "clock_kind": "idle",
-                "ceiling": ceiling.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            })
-        );
         return 0;
     }
     if let Some(handle) = read_handle {

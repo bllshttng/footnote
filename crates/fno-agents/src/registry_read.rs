@@ -16,10 +16,50 @@ pub fn database_path(path: &Path) -> Option<PathBuf> {
     Some(crate::state_layout::place(root, "graph.json").with_extension("db"))
 }
 
-/// The registry document at `path` as JSON text. A missing path is
-/// `NotFound`, exactly as the legacy file read was.
+/// Whether the registry table owns `path`: the fence directory stands there,
+/// or graph.db records the import. A plain `registry.json` beside an imported
+/// table is a stale pre-import file, never the registry: rm edits the table,
+/// so reading that file brings removed rows back. A store that exists but
+/// cannot be read counts as owned, so the read fails instead of falling back
+/// to the file.
+pub fn table_owns(path: &Path) -> bool {
+    if path.is_dir() {
+        return true;
+    }
+    if path.file_name().is_none_or(|name| name != "registry.json") {
+        return false;
+    }
+    let Some(database) = database_path(path) else {
+        return false;
+    };
+    if !database.exists() {
+        return false;
+    }
+    let Ok(connection) = crate::store_conn::open_read(&database) else {
+        return true;
+    };
+    let has_meta = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry_meta')",
+        [],
+        |r| r.get::<_, bool>(0),
+    );
+    match has_meta {
+        Ok(false) => false,
+        Ok(true) => connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM registry_meta WHERE key='imported')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+/// The registry document at `path` as JSON text. Before the import a missing
+/// path is `NotFound`, exactly as the legacy file read was.
 pub fn registry_text(path: &Path) -> std::io::Result<String> {
-    if !path.is_dir() {
+    if !table_owns(path) {
         return std::fs::read_to_string(path);
     }
     let invalid = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
@@ -74,5 +114,42 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(doc["agents"][0]["fno_id"], "a");
         assert_eq!(doc["schema_version"], 6);
+    }
+
+    #[test]
+    fn a_stale_file_beside_an_imported_table_is_never_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = temp.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let path = agents.join("registry.json");
+        std::fs::write(&path, r#"{"agents":[{"name":"ghost"}]}"#).unwrap();
+        assert!(
+            !super::table_owns(&path),
+            "no store yet: the file is the registry"
+        );
+        let db = super::database_path(&path).unwrap();
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE registry (identity TEXT, ordinal INTEGER, payload TEXT);
+             CREATE TABLE registry_meta (key TEXT, value TEXT);
+             INSERT INTO registry_meta VALUES ('document','{}');",
+        )
+        .unwrap();
+        assert!(
+            !super::table_owns(&path),
+            "a table with no import marker owns nothing"
+        );
+        c.execute_batch("INSERT INTO registry_meta VALUES ('imported','1');")
+            .unwrap();
+        drop(c);
+        assert!(super::table_owns(&path));
+        let text = super::registry_text(&path).unwrap();
+        assert!(!text.contains("ghost"), "{text}");
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            super::registry_text(&path).is_ok(),
+            "a missing path still reads the table"
+        );
     }
 }

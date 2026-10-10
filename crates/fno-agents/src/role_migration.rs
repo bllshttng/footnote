@@ -132,7 +132,7 @@ fn migrate_registry_table(root: &Path) -> Result<(), String> {
         let Some(database) = crate::registry_read::database_path(&path) else {
             continue;
         };
-        if !path.is_dir() || !database.exists() {
+        if !crate::registry_read::table_owns(&path) || !database.exists() {
             continue;
         }
         let mut conn = crate::store_conn::open_write(&database)?;
