@@ -2350,6 +2350,12 @@ mod tests {
         assert_eq!(crate::codex_ask::hook_trust_tokens(Some("0.148.0")), trust);
         assert!(crate::codex_ask::hook_trust_tokens(Some("0.147.9")).is_empty());
         assert!(crate::codex_ask::hook_trust_tokens(None).is_empty());
+        // The env pin parses like the Python twin's regex.
+        let pin = crate::codex_ask::pinned_version;
+        assert_eq!(pin("0.148.0").as_deref(), Some("0.148.0"));
+        assert_eq!(pin("codex-cli 0.150.0 (abc)").as_deref(), Some("0.150.0"));
+        assert_eq!(pin("0.148"), None);
+        assert_eq!(pin(""), None);
 
         let mut ctx = create_ctx();
         ctx.reasoning_effort = Some("high".into());

@@ -143,7 +143,7 @@ pub fn hook_trust_flag() -> Vec<String> {
     // key, so a run that sets it gets one argv from both runtimes. Empty
     // means unknown, so the flag is omitted.
     if let Ok(pinned) = std::env::var("FNO_CODEX_VERSION") {
-        return hook_trust_tokens(pinned.split_whitespace().last());
+        return hook_trust_tokens(pinned_version(&pinned).as_deref());
     }
     // Unit tests swap fake codex binaries onto PATH, and the probe below is
     // cached once per process, so a probe here would make exact-argv tests
@@ -151,12 +151,27 @@ pub fn hook_trust_flag() -> Vec<String> {
     if cfg!(test) {
         return Vec::new();
     }
-    static INSTALLED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     // The bare PATH `codex` is what every argv here launches, not
-    // `FNO_CODEX_BIN`.
-    let installed =
-        INSTALLED.get_or_init(|| crate::codex_daemon_readiness::cli_version_of("codex"));
+    // `FNO_CODEX_BIN`. Only an answer is cached: a probe that timed out on a
+    // loaded machine must not strip the flag for the life of the daemon.
+    static INSTALLED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let installed = match INSTALLED.get() {
+        Some(version) => Some(version.clone()),
+        None => crate::codex_daemon_readiness::cli_version_of("codex")
+            .map(|version| INSTALLED.get_or_init(|| version).clone()),
+    };
     hook_trust_tokens(installed.as_deref())
+}
+
+/// The first `major.minor.patch` run in a `FNO_CODEX_VERSION` pin, the same
+/// match the Python twin's regex makes, so both runtimes read one pin alike.
+pub(crate) fn pinned_version(raw: &str) -> Option<String> {
+    raw.split(|c: char| !c.is_ascii_digit() && c != '.')
+        .find_map(|token| {
+            let parts: Vec<&str> = token.split('.').collect();
+            (parts.len() >= 3 && parts[..3].iter().all(|p| !p.is_empty()))
+                .then(|| parts[..3].join("."))
+        })
 }
 
 pub(crate) fn hook_trust_tokens(installed: Option<&str>) -> Vec<String> {
