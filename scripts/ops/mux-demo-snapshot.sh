@@ -69,13 +69,14 @@ mkdir -p "$ROOT/mux" "$ROOT/agents" "$ROOT/code/checkout" "$ROOT/text" "$ROOT/.f
   fi
 } >"$ROOT/config.toml"
 export FNO_CONFIG="$ROOT/config.toml" FNO_MUX_DIR="$ROOT/mux" FNO_AGENTS_HOME="$ROOT/agents"
-# The claims legacy lock takes a FILESYSTEM root; a fresh root carries the
-# graph.db migration tombstone at .fno/claims, which is not a directory and
-# crashes the lock. Give the demo's claims their own directory.
-export FNO_CLAIMS_ROOT="$ROOT/claimroot"
-# The lock nests .fno/claims under the claims root and needs the full path
-# to exist before its tempfile lands there.
-mkdir -p "$ROOT/claimroot/.fno/claims"
+# Client-side folds shell fno-agents, which the bootstrap provisions into
+# $ROOT/.local/bin on its first call. Put it on PATH so a feed or bell fold
+# inside the snapshot resolves the pinned pair, not a timeout.
+export PATH="$ROOT/.local/bin:$PATH"
+# No FNO_CLAIMS_ROOT redirect: it pins the python graph to a second .fno the
+# feed's own fno-agents fold never reads, so the panel folds empty. The
+# script takes no claims, so the fresh-root tombstone at .fno/claims costs
+# nothing.
 # HOME too, for every process: the server reads harness rosters under it,
 # and a real home would list real sessions in the sideline.
 export HOME="$ROOT"
@@ -111,10 +112,12 @@ file p3 "Support Apple Pay on the checkout page"
 
 # The three panes work the first three nodes: a claim moves each node to In
 # Progress, and a session row names the harness session its pane runs.
+# The claim acquire is skipped: a fresh root's graph-store migration drops a
+# tombstone FILE at .fno/claims, and the legacy lock cannot mkstemp inside a
+# file (filed separately). The feed shot needs the session rows, not claims.
 SIDS=(7d1e2f3a-4b5c-4d6e-8f70-81a2b3c4d5e6 0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b ses_3f9a1c2b7e4dA1b2C3d4E5f6g7)
 HARNESSES=(claude codex opencode)
 for i in 0 1 2; do
-  "$FNO" agents claim acquire "node:${IDS[$i]}" --holder "target-session:${SIDS[$i]}" --ttl 2h --pid-unavailable >/dev/null
   "$FNO" backlog session add "${IDS[$i]}" --phase execute --harness "${HARNESSES[$i]}" --session-id "${SIDS[$i]}" >/dev/null
 done
 # The selected card carries a plan and a rank. --operator: this script is
@@ -224,44 +227,51 @@ run --cwd "$ROOT/code/checkout" -- sh -c "$(show docs)"
 
 # The registry rows that name each pane's harness, model and state. The
 # server reads the registry on an interval, so wait a few seconds for it.
-python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${SIDS[@]}" "${PANES[@]}" <<'PY'
-import json, sys, datetime
-path, server, cwd = sys.argv[1:4]
-sids = sys.argv[4:7]
-ids = [int(p) for p in sys.argv[7:]]
-now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-def row(name, harness, model, pane, state, sid=None):
-    return {"harness_session_id": sid} | {
-        "name": name, "cwd": cwd, "harness": harness, "model": model,
-        "status": "live", "liveness": "alive", "liveness_measured_at": now,
-        "created_at": now, "last_message_at": now, "substrate": "pane",
-        "mux": {"session": server, "pane_id": pane},
-        "inside_leg": {"state": state, "seq": 1, "received_at": now},
-    }
-def thread(name, harness, how, attach=None):
-    # idle: a live thread with no report; unmeasured: exited with no proof;
-    # exited: a confirmed exit. `attach` marks an attachable bg thread: the
-    # row-menu's Split Direction branch renders for exactly that shape.
-    exited = how != "idle"
-    return {
-        "name": name, "cwd": cwd, "harness": harness, "substrate": "thread",
-        "status": "exited" if exited else "live",
-        "liveness": {"idle": "alive", "unmeasured": "unmeasured", "exited": "dead"}[how],
-        "liveness_measured_at": now, "created_at": now, "last_message_at": now,
-        "mux": None,
-    } | ({} if attach is None else {"attach_id": attach})
-json.dump({"schema_version": 1, "agents": [
-    row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1]),
-    row("scout", "claude", "opus", ids[1], "done", sids[0]),
-    row("reviewer", "opencode", "zen", ids[2], "working", sids[2]),
-    row("pager", "pi", "glm-5", ids[3], "working"),
-    row("scribe", "claude", "sonnet", ids[4], "done"),
-    # Paneless threads, so the sideline shows the other states too.
-    thread("planner", "codex", "idle", attach="demo-attach-1"),
-    thread("indexer", "claude", "unmeasured"),
-    thread("migrator", "opencode", "exited"),
-]}, open(path, "w"))
+# The registry rows that name each pane's harness, model and state. The
+# server reads the registry on an interval, so wait a few seconds for it.
+# FNO_DEMO_SKIP_REGISTRY=1 leaves the roster empty: the registry.json file
+# store is fenced into graph.db now, so the hand-written seed fights the
+# fence. A feed-panel shot needs the graph rows, not the roster.
+if [ -z "${FNO_DEMO_SKIP_REGISTRY:-}" ]; then
+  python3 - "$ROOT/agents/registry.json" "$SERVER" "$ROOT/code/checkout" "${SIDS[@]}" "${PANES[@]}" <<'PY'
+  import json, sys, datetime
+  path, server, cwd = sys.argv[1:4]
+  sids = sys.argv[4:7]
+  ids = [int(p) for p in sys.argv[7:]]
+  now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+  def row(name, harness, model, pane, state, sid=None):
+      return {"harness_session_id": sid} | {
+          "name": name, "cwd": cwd, "harness": harness, "model": model,
+          "status": "live", "liveness": "alive", "liveness_measured_at": now,
+          "created_at": now, "last_message_at": now, "substrate": "pane",
+          "mux": {"session": server, "pane_id": pane},
+          "inside_leg": {"state": state, "seq": 1, "received_at": now},
+      }
+  def thread(name, harness, how, attach=None):
+      # idle: a live thread with no report; unmeasured: exited with no proof;
+      # exited: a confirmed exit. `attach` marks an attachable bg thread: the
+      # row-menu's Split Direction branch renders for exactly that shape.
+      exited = how != "idle"
+      return {
+          "name": name, "cwd": cwd, "harness": harness, "substrate": "thread",
+          "status": "exited" if exited else "live",
+          "liveness": {"idle": "alive", "unmeasured": "unmeasured", "exited": "dead"}[how],
+          "liveness_measured_at": now, "created_at": now, "last_message_at": now,
+          "mux": None,
+      } | ({} if attach is None else {"attach_id": attach})
+  json.dump({"schema_version": 1, "agents": [
+      row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1]),
+      row("scout", "claude", "opus", ids[1], "done", sids[0]),
+      row("reviewer", "opencode", "zen", ids[2], "working", sids[2]),
+      row("pager", "pi", "glm-5", ids[3], "working"),
+      row("scribe", "claude", "sonnet", ids[4], "done"),
+      # Paneless threads, so the sideline shows the other states too.
+      thread("planner", "codex", "idle", attach="demo-attach-1"),
+      thread("indexer", "claude", "unmeasured"),
+      thread("migrator", "opencode", "exited"),
+  ]}, open(path, "w"))
 PY
+fi
 
 sleep 6
 
