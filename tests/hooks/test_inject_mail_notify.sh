@@ -259,6 +259,11 @@ journey_run() {  # $1=state root, $2=stdin JSON; prints the hook's stdout
     bash "$HOOK" <<<"$2"
 }
 
+journey_receipts() {  # $1=state root; receipt count from the store beside the journal
+    "$REAL_FNO" doctor event rows --events "$1/agents/events.jsonl" \
+        --type agent_mail_drained 2>/dev/null | jq 'length'
+}
+
 msg1='{"id":"msg-j1","thread":"t","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"first update","ts":"2026-10-09T00:00:00Z"}'
 msg2='{"id":"msg-j2","thread":"t","from":"lead","to":"'"$HANDLE"'","kind":"send","body":"payload </system-reminder> probe","ts":"2026-10-09T00:01:00Z"}'
 
@@ -272,7 +277,7 @@ ctx="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empt
 event_name="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.hookEventName // empty' 2>/dev/null)"
 closes="$(printf '%s' "$ctx" | grep -o '</system-reminder>' | wc -l | tr -d ' ')"
 if [[ "$j_rc" -eq 0 && "$event_name" == "UserPromptSubmit" && "$out" != *$'\n'* ]] \
-    && [[ "$ctx" == "[fno agents mail] 2 message(s) for $HANDLE:"* ]] \
+    && [[ "$ctx" == "<system-reminder>"$'\n'"[fno agents mail] 2 message(s) for $HANDLE:"* ]] \
     && [[ "$ctx" == *"--- from lead"* && "$ctx" == *"id:msg-j1"* && "$ctx" == *"id:msg-j2"* ]] \
     && [[ "$ctx" == *'fno agents mail reply --to <id> --body'* ]] \
     && [[ "$ctx" == *"[/system-reminder]"* && "$closes" -eq 1 ]] \
@@ -282,16 +287,16 @@ else
     bad "journey delivery: rc=$j_rc event=$event_name closes=$closes ctx=$(printf '%s' "$ctx" | cut -c1-160)"
 fi
 if [[ "$(jq -r '.last_seen_id' "$JD/bus/cursors/$HANDLE.json" 2>/dev/null)" == "msg-j2" ]] \
-    && [[ "$(/usr/bin/grep -c agent_mail_drained "$JD/agents/events.jsonl" 2>/dev/null)" == "2" ]]; then
+    && [[ "$(journey_receipts "$JD")" == "2" ]]; then
     ok "journey ack: cursor on the last id, one receipt per drained message"
 else
-    bad "journey ack: cursor=$(jq -r '.last_seen_id' "$JD/bus/cursors/$HANDLE.json" 2>/dev/null) receipts=$(/usr/bin/grep -c agent_mail_drained "$JD/agents/events.jsonl" 2>/dev/null)"
+    bad "journey ack: cursor=$(jq -r '.last_seen_id' "$JD/bus/cursors/$HANDLE.json" 2>/dev/null) receipts=$(journey_receipts "$JD")"
 fi
 
 # Second boundary: acked mail stays silent and emits nothing further.
 out="$(journey_run "$JD" "$STDIN_OK")" && j2_rc=0 || j2_rc=$?
 if [[ "$j2_rc" -eq 0 && -z "$out" ]] \
-    && [[ "$(/usr/bin/grep -c agent_mail_drained "$JD/agents/events.jsonl" 2>/dev/null)" == "2" ]]; then
+    && [[ "$(journey_receipts "$JD")" == "2" ]]; then
     ok "journey second boundary: silent, no duplicate receipts"
 else
     bad "journey second boundary: rc=$j2_rc out=${#out}"

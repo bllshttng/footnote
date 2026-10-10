@@ -454,6 +454,10 @@ dual_owner_kinds = {
     "agent_inconsistent",
     "reconcile_done",
     "startup_reconcile_done",
+    # agent_mail_drained: the prompt-submit drain boundary moved from the
+    # Python mail-notify verb to the Rust mail-notify-self verb; both
+    # emitters run until the Python leg retires.
+    "agent_mail_drained",
 }
 collisions -= dual_owner_kinds
 if collisions:
