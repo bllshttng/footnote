@@ -61,8 +61,13 @@ fi
 
 # The one worktree.* reader (wt_config) and linker call (wt_link), shared with
 # the plugin WorktreeCreate hook.
-# shellcheck source=worktree-config.sh
-source "$WTM_SCRIPT_DIR/worktree-config.sh"
+if [[ -f "$WTM_SCRIPT_DIR/worktree-config.sh" ]]; then
+    # shellcheck source=worktree-config.sh
+    source "$WTM_SCRIPT_DIR/worktree-config.sh"
+else
+    wt_config() { echo "$2"; }
+    wt_link() { _wtm_log "worktree-config.sh missing; shared state not linked"; }
+fi
 
 # Memoize the calling repo root. `setup` is a hot path for every cross-
 # project worker and every target worktree creation, and the verbs each call
