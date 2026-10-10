@@ -1299,20 +1299,28 @@ pub(crate) struct ShowQuery {
     pub caller: Option<String>,
 }
 
-fn participant_key(v: &Value, session: &str, fallback: &str) -> String {
-    v.get(session)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| v.get(fallback).and_then(Value::as_str).unwrap_or("unknown"))
-        .to_string()
-}
-
 /// The privacy rule a body prints under: the caller is the message's sender
-/// or recipient; `--all` is the operator override.
+/// or recipient; `--all` is the operator override. A stored side names a full
+/// session id or its 8-character handle, and the caller resolves to the full
+/// id, so a handle matches the head of the caller's id.
 fn caller_in_message(line: &Value, caller: &str) -> bool {
-    let norm = crate::mail_hold::identity_key;
-    norm(&participant_key(line, "from_session", "from")) == norm(caller)
-        || norm(&participant_key(line, "to_key", "to")) == norm(caller)
+    let caller = crate::mail_hold::identity_key(caller);
+    [
+        line.get("from_session"),
+        line.get("from"),
+        line.get("to_session"),
+        line.pointer("/meta/to_session"),
+        line.get("to_key"),
+        line.get("to"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .filter(|key| !key.is_empty())
+    .any(|key| {
+        let key = crate::mail_hold::identity_key(key);
+        key == caller || (key.len() == 8 && caller.starts_with(&key))
+    })
 }
 
 fn message_body(line: &Value) -> &str {
@@ -1534,9 +1542,9 @@ fn usage() -> i32 {
 /// const and every carrier that prints the line follows.
 pub const MAIL_READ_VERB: &str = "show";
 
-/// The one-line lesson carried once per session at session start, again after
-/// each compaction, and on a hookless session's first delivered header. Every
-/// carrier prints THIS string, so no carrier hardcodes the verb.
+/// The one-line lesson carried once per session at session start and again
+/// after each compaction. Every carrier prints THIS string, so no carrier
+/// hardcodes the verb.
 pub fn teach_line() -> String {
     format!(
         "mail: an `fmail-<id>` header in a delivered turn is unread mail on the bus; \
@@ -1906,6 +1914,21 @@ pub(crate) fn resolve_prefix(prefix: &str) -> Result<Resolved, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_admits_the_recipient_whose_handle_the_row_stores() {
+        // A hosted row stores the recipient as its 8-character handle; the
+        // caller resolves to the full session id and still reads its mail.
+        let row = serde_json::json!({
+            "from": "e78df019", "from_session": "e78df019-1d40-4132-b6f5-8704d38c0fc9",
+            "to": "aa2f99d7", "to_key": "aa2f99d7",
+            "meta": {"to_session": "aa2f99d7-9155-4fca-9eca-adf9ca1aafb2"}
+        });
+        let reads = |caller: &str| caller_in_message(&row, caller);
+        assert!(reads("aa2f99d7-9155-4fca-9eca-adf9ca1aafb2"));
+        assert!(reads("e78df019-1d40-4132-b6f5-8704d38c0fc9"));
+        assert!(!reads("bb2eb475-0000-4000-8000-000000000000"));
+    }
 
     /// One temp root per test; env-mutating tests share the process, so the
     /// mutex keeps FNO_* pins from racing.

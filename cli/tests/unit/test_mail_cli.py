@@ -890,13 +890,12 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     assert payload == []
 
 
-def test_plain_send_delivers_read_line_on_a_hookless_harness(
+def test_plain_send_delivers_header_and_body(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    # A plain peer send (no --kind) delivers the header line alone; the
-    # receiver is taught the read verb once per session, and the fmail-
-    # prefix is the cue. The bus row keeps the full body, so the id the
-    # header names resolves to something worth reading.
+    # A plain peer send (no --kind) delivers the header line and then the
+    # body: no live turn arrives as the header alone. The bus row keeps the
+    # same body, so the id the header names resolves to it.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     injected: list[str] = []
@@ -914,13 +913,12 @@ def test_plain_send_delivers_read_line_on_a_hookless_harness(
     assert sent.exit_code == 0, sent.output
     assert len(injected) == 1
     # Without a subject the header's third field is the body's first sentence
-    # (AC10-HP). The turn is the header line plus the read-verb lesson: a
-    # never-taught recipient's first delivered header carries it once.
+    # (AC10-HP). A body that is only that sentence still follows the header.
     lines = injected[0].splitlines()
     assert len(lines) == 2, injected[0]
     header = lines[0]
     assert header.startswith("`@web · fmail-")
-    assert "fno agents mail show <id>" in lines[1], injected[0]
+    assert lines[1] == "secret body words", injected[0]
     msg_id = header.split(" · ")[1]
 
     # The bus copy the id points at holds the full body.
@@ -981,15 +979,6 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     takes the turn live, so no durable thread is written."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    # Pre-mark the read-verb lesson taught for the recipient, so this test's
-    # one-line turn contract stays about the pane rung's routing.
-    from fno.paths import agents_registry_path
-
-    _stamp_dir = agents_registry_path().parent / "mail_teach"
-    _stamp_dir.mkdir(parents=True, exist_ok=True)
-    (_stamp_dir / f"{sid}.json").write_text(
-        json.dumps({"session": sid, "taught_boundary_epoch": 0})
-    )
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=True, pane_sends=True, expect_token=sid
@@ -1002,10 +991,11 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     assert "delivered (hosted)" in sent.output
     assert "queued (durable)" not in sent.output
     assert len(calls) == 1
-    # The live turn is header only: one line, no body on the bus floor.
+    # The live turn is the header line, then the body.
     lines = calls[0][1].splitlines()
-    assert len(lines) == 1, calls[0][1]
+    assert len(lines) == 2, calls[0][1]
     assert lines[0].startswith("`@web · fmail-")
+    assert lines[1] == "ping"
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])

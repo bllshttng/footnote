@@ -6869,7 +6869,6 @@ def _deliver_live(
     sender_entry: "Optional[AgentEntry]" = None,
     reason_out: "Optional[list]" = None,
     family1_state: Optional[str] = None,
-    header_only: bool = False,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node).
@@ -6883,8 +6882,7 @@ def _deliver_live(
 
     ``family1_state`` is the caller's already-computed registered-state class
     for ``entry``, passed in so the recipient transcript is not re-read;
-    ``"working"`` scales the claude confirm budget; ``header_only`` wraps the
-    turn as the header line alone (records and durable copies keep the body).
+    ``"working"`` scales the claude confirm budget.
 
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
@@ -6912,7 +6910,6 @@ def _deliver_live(
             origin=mail.origin,
             to_session=mail.to_session,
             subject=mail.subject,
-            header_only=header_only,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -7403,7 +7400,6 @@ def dispatch_send(
     registry_stamp_timeout_seconds: float = 1.0,
     origin: Optional[str] = None,
     subject: Optional[str] = None,
-    header_only: bool = False,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -7748,7 +7744,6 @@ def dispatch_send(
                         sender_entry=sender_entry,
                         reason_out=_live_reason,
                         family1_state=family1_state,
-                        header_only=header_only,
                     )
                     if _live_delivered:
                         delivery = "hosted"
