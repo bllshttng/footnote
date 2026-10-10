@@ -1,5 +1,6 @@
 //! The daemon's worktree sweep: one report per repo on a 6h floor.
-//! Report-only until a merge-minted cleanup order stands, then applying.
+//! Report-only until a merge proof stands - a minted cleanup order, or the
+//! verb's own dry-run judgment for an outside merge - then applying.
 //! Moved out of daemon.rs (shrink-only file) with its tests; the event
 //! carries `enumerated` and `judged` alongside the judged-bucket counts so a
 //! truncated read cannot be told from a partial sweep.
@@ -131,14 +132,33 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
     })
 }
 
+/// The sweep's apply authority for one repository, decided from evidence
+/// reads alone.
+///
+/// A pending `merge_cleanup_requested` envelope is the fno-merge proof. An
+/// outside merge (`gh pr merge`, the web button) mints no envelope, so with
+/// none standing the verb's own dry-run summary is the same proof in git
+/// form: a tree it would archive reads merged-or-done and clean, and the
+/// `--apply` pass re-judges every guard tree by tree. An unreadable or
+/// empty dry-run authorizes nothing: a probe that cannot read never
+/// widens the sweep's authority.
+pub fn apply_authority(pending: bool, dry_run_summary: Option<&str>) -> bool {
+    pending
+        || dry_run_summary
+            .and_then(parse_worktree_sweep)
+            .is_some_and(|report| report.eligible > 0)
+}
+
 /// Worktree sweep, one line per repo, on a 6h floor: report-only until a
-/// merge-minted cleanup request stands, then applying.
+/// merge proof stands, then applying.
 ///
 /// A timer tick proves nothing on its own, so an unearned tick still only
-/// REPORTS. Removal is merge-triggered: `fno do pr merge` (and the post-merge
+/// REPORTS. Removal is merge-evidenced: `fno do pr merge` (and the post-merge
 /// ritual, as its second mint site) writes the `merge_cleanup_requested`
 /// envelope, and while a pending request stands for a repository (`orders`
-/// injects that scoped read) that repository's pass runs with `--apply`. The
+/// injects that scoped read) that repository's pass runs with `--apply`. An
+/// outside merge mints no envelope, so `orders` may also read the verb's own
+/// dry-run judgment there (`apply_authority` carries that policy). The
 /// primary consumer is the merge reaper (merge_reap.rs), which stops the
 /// harness, drops the rows, and takes the tree; this sweep only catches what
 /// that pass leaves behind. The sweep's own guards - reapable, live claim,
@@ -615,5 +635,30 @@ mod tests {
         let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("\"exit_code\":0"));
         assert!(log.contains("\"stderr\":\"\""));
+    }
+
+    #[test]
+    fn apply_authority_pending_order_stands_without_a_dry_run() {
+        // The fno-merge proof needs no dry-run read at all.
+        assert!(apply_authority(true, None));
+        assert!(apply_authority(true, Some("garbage\n")));
+    }
+
+    #[test]
+    fn apply_authority_unminted_merge_reads_the_dry_run() {
+        // Outside merges mint no envelope; eligible trees in the verb's own
+        // dry-run summary are the same merge proof in git form.
+        let summary = "Summary: 2 would archive, 3 kept (1 unmerged, 1 dirty), 0 failed\n";
+        assert!(apply_authority(false, Some(summary)));
+    }
+
+    #[test]
+    fn apply_authority_no_false_authority() {
+        // A probe that cannot read never widens the sweep's authority, and
+        // zero eligible trees is not a proof either.
+        let zero = "Summary: 0 would archive, 4 kept (2 unmerged, 1 dirty), 0 failed\n";
+        assert!(!apply_authority(false, Some(zero)));
+        assert!(!apply_authority(false, None));
+        assert!(!apply_authority(false, Some("no summary line\n")));
     }
 }

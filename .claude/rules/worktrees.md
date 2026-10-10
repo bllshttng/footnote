@@ -38,7 +38,7 @@ The removal contract, missing until 174 trees piled up (74 GB). Four buckets, on
 - **unborn** - a branch with no commit of its own is never merged, whatever the merge-base says. Setup refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives. Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
 - **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual. The daemon reaper pays after a grace window.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
-- **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
+- **Backstop: the daemon's `cleanup --merged` sweep**. The ritual sees its own PRs. An outside merge (`gh pr merge`, the web button) mints no request. There the sweep's own dry-run judgment is the proof, and its tree goes on that sweep.
 
 **`worktree.prune_done`** judges a done tree's uncommitted tracked changes:
 

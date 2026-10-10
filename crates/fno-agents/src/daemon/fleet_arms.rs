@@ -61,6 +61,16 @@ pub(super) struct FleetArms {
     park_sweep_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// The merged-cleanup verb command the sweep arm runs, shared by the apply
+/// pass and the orders probe's dry-run read.
+fn cleanup_command(home: &crate::paths::AgentsHome, root: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+    cmd.current_dir(root)
+        .env("FNO_AGENTS_HOME", home.root())
+        .args(["agents", "workspace", "worktree", "cleanup", "--merged"]);
+    cmd
+}
+
 impl FleetArms {
     pub(super) fn new(opts: &DaemonOptions) -> Self {
         let now = Instant::now();
@@ -167,13 +177,22 @@ impl FleetArms {
                     &|root| {
                         // A pending merge-cleanup request is the standing
                         // order: the pass applies while one waits.
-                        crate::merge_reap::merge_cleanup_requested(&home, root).into()
+                        if crate::merge_reap::merge_cleanup_requested(&home, root) {
+                            return true.into();
+                        }
+                        // An outside merge (`gh pr merge`, the web button)
+                        // mints no request. The verb's own dry-run judgment
+                        // is the same merge proof in git form: an eligible
+                        // tree reads merged-or-done and clean, and the
+                        // --apply pass re-judges every guard per tree.
+                        let dry = cleanup_command(&home, root)
+                            .output()
+                            .ok()
+                            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+                        worktree_sweep::apply_authority(false, dry.as_deref()).into()
                     },
                     &|root, apply| {
-                        let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
-                        cmd.current_dir(root)
-                            .env("FNO_AGENTS_HOME", home.root())
-                            .args(["agents", "workspace", "worktree", "cleanup", "--merged"]);
+                        let mut cmd = cleanup_command(&home, root);
                         if apply {
                             cmd.arg("--apply");
                         }
