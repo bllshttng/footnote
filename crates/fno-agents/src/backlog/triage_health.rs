@@ -562,13 +562,19 @@ pub(crate) fn evals_summary() -> Option<Value> {
     }))
 }
 
-/// The evals history file (fno.paths.evals_history).
+/// The evals history file (fno.paths.evals_history): the
+/// `config.paths.evals_history` override, else the state dir's history
+/// folder. Per-machine ledger, not a repo artifact.
 fn evals_history_path() -> Option<PathBuf> {
-    if let Some(pin) = std::env::var_os("FNO_EVALS_HISTORY").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(pin));
+    let cwd = std::env::current_dir().ok()?;
+    if let Some(v) = crate::agents_config::config_lookup(&cwd, &["paths", "evals_history"]) {
+        let raw = v.as_str().unwrap_or_default();
+        if !raw.is_empty() {
+            return Some(PathBuf::from(super::super::territory::normalize_path(raw)));
+        }
     }
-    let root = super::triage::intake_repo_root()?;
-    Some(root.join(".fno").join("evals").join("history.jsonl"))
+    let state = crate::agents_config::state_dir(&cwd)?;
+    Some(state.join("history").join("evals-history.jsonl"))
 }
 
 // ---------------------------------------------------------------------------
