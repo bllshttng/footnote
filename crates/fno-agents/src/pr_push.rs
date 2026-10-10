@@ -338,6 +338,17 @@ pub(crate) fn job_id(link: &str) -> Option<String> {
     re.captures(link).map(|c| c[1].to_string())
 }
 
+/// The distinct Actions run ids behind `rows`, sorted.
+pub(crate) fn pending_run_ids(rows: &[&Value]) -> Vec<u64> {
+    let mut runs: Vec<u64> = rows
+        .iter()
+        .filter_map(|row| run_id(row.get("link").and_then(|v| v.as_str()).unwrap_or("")))
+        .collect();
+    runs.sort_unstable();
+    runs.dedup();
+    runs
+}
+
 /// The Actions run id out of a check's `link`: the cancel endpoint speaks
 /// runs, not jobs.
 pub(crate) fn run_id(link: &str) -> Option<u64> {
@@ -629,12 +640,7 @@ pub(crate) fn in_flight(ctx: &PushCtx, branch: &str, head: &str) -> Result<Optio
         .unwrap_or("")
         .to_string();
     let job = job_id(first.get("link").and_then(|v| v.as_str()).unwrap_or(""));
-    let mut runs: Vec<u64> = pending
-        .iter()
-        .filter_map(|row| run_id(row.get("link").and_then(|v| v.as_str()).unwrap_or("")))
-        .collect();
-    runs.sort_unstable();
-    runs.dedup();
+    let runs = pending_run_ids(&pending);
     Ok(Some(Flight {
         check,
         job,

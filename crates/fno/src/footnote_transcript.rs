@@ -3,7 +3,7 @@
 //! session (the `footnote` binary, through the fno crate's generated copy)
 //! and the supervisor that launches it and reads it back. The record is
 //! `<fno_id>.jsonl` beside the `<fno_id>/` sidecar dir. Field lists live in
-//! `crates/footnote/src/schema.md`.
+//! `docs/architecture/footnote-transcript-schema.md`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

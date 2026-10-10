@@ -193,7 +193,7 @@ def status(
         "one PR cost one network read per cache TTL, a rate-limit backoff is "
         "ridden out rather than hammered, and the gh-call count prints at "
         "exit. --timeout (15m default) exits with the last observed code and "
-        "a still-unsettled note. A CONFLICTING PR refuses with exit 5 and a "
+        "a still-unsettled note. Red cancels the head's runs, exits 1; CONFLICTING exits 5 with a "
         "rebase receipt. Use this instead of a hand-rolled "
         "`while/sleep/grep` loop - every such loop is an uncoordinated poll "
         "against a quota the whole machine shares."
@@ -203,7 +203,7 @@ def wait(
     pr_number: int = typer.Argument(..., help="GitHub PR number"),
     until: str = typer.Option(
         "settled", "--until",
-        help="Exit when: settled (any terminal verdict), green, or a new review posts.",
+        help="settled (terminal, or red at once), red (fail fast), green (every check), review.",
     ),
     timeout: str = typer.Option("15m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
     interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),
