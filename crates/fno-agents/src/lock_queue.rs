@@ -89,6 +89,19 @@ pub fn am_head(ticket: &Path) -> bool {
     head.as_deref().is_none_or(|h| mine < h)
 }
 
+/// The pid on the oldest ticket in the queue for `lock_path`: the holder or
+/// the waiter every later ticket queues behind. Names who blocks a timeout
+/// when the lock file carries no holder stamp.
+pub fn head_pid(lock_path: &Path) -> Option<u64> {
+    let mut names: Vec<String> = fs::read_dir(queue_dir(lock_path))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    names.first().and_then(|name| ticket_pid(name))
+}
+
 /// The pid encoded in a ticket name's middle field.
 fn ticket_pid(name: &str) -> Option<u64> {
     name.split('-').nth(1)?.parse().ok()

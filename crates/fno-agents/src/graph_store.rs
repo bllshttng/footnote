@@ -2127,11 +2127,11 @@ fn stamp_lock_holder(mut file: &File) {
 fn holder_summary(lock_path: &Path) -> String {
     let text = match std::fs::read_to_string(lock_path) {
         Ok(text) => text,
-        Err(_) => return "no holder recorded in the lock file".to_string(),
+        Err(_) => return unstamped_summary(lock_path),
     };
     let parsed: serde_json::Value = match serde_json::from_str(text.lines().next().unwrap_or("")) {
         Ok(value) => value,
-        Err(_) => return "no holder recorded in the lock file".to_string(),
+        Err(_) => return unstamped_summary(lock_path),
     };
     let (Some(pid), Some(at)) = (
         parsed.get("pid").and_then(serde_json::Value::as_u64),
@@ -2139,7 +2139,7 @@ fn holder_summary(lock_path: &Path) -> String {
             .get("acquired_at")
             .and_then(serde_json::Value::as_str),
     ) else {
-        return "no holder recorded in the lock file".to_string();
+        return unstamped_summary(lock_path);
     };
     let age = chrono::DateTime::parse_from_rfc3339(at)
         .ok()
@@ -2154,6 +2154,21 @@ fn holder_summary(lock_path: &Path) -> String {
         format!("recorded holder pid {pid}, {age}")
     } else {
         format!("holder record pid {pid} is dead (a crashed writer), {age}")
+    }
+}
+
+/// The holder line when the lock file carries no stamp. A release empties
+/// the stamp, so a waiter that timed out in the ticket queue reads an empty
+/// file; name the oldest queued ticket instead, the pid it waited behind.
+fn unstamped_summary(lock_path: &Path) -> String {
+    match crate::lock_queue::head_pid(lock_path) {
+        Some(pid) if super::agent_lock::pid_is_alive(pid) => {
+            format!("no holder recorded in the lock file; oldest queued ticket is pid {pid}")
+        }
+        Some(pid) => {
+            format!("no holder recorded in the lock file; oldest queued ticket pid {pid} is dead")
+        }
+        None => "no holder recorded in the lock file".to_string(),
     }
 }
 
@@ -3428,6 +3443,13 @@ mod tests {
                 assert!(
                     detail.contains("no holder recorded"),
                     "refusal must report the empty record: {detail}"
+                );
+                // The holder's own ticket heads the queue, so the refusal
+                // still names the pid it waited behind.
+                let pid = format!("pid {}", std::process::id());
+                assert!(
+                    detail.contains(&pid),
+                    "refusal must name the queue head: {detail}"
                 );
             }
             other => panic!("expected LockTimeout, got {other}"),
