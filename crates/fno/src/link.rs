@@ -332,8 +332,9 @@ pub fn is_sender_uri(s: &str) -> bool {
 /// The name grammar every `@handle`-shaped URI payload follows: a short run
 /// of letters, digits, `_` and `-`, led by a letter or digit. Shared by the
 /// handle and sender validators so neither can smuggle a path or whitespace
-/// into a later opener.
-fn is_handle_name(name: &str) -> bool {
+/// into a later opener. A header token the grammar rejects (a retired
+/// `a/b` name, say) spans no sender URI.
+pub fn is_handle_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name.starts_with(|c: char| c.is_ascii_alphanumeric())

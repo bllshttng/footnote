@@ -515,7 +515,10 @@ impl Pane {
                         }
                     }
                     if let Some((start, end, handle, _)) = crate::link::find_mail_sender(text) {
-                        if idx >= start && idx < end {
+                        // A token the handle grammar rejects (a retired
+                        // `a/b` name, say) spans no sender URI; the id
+                        // beside it still opens the mail.
+                        if idx >= start && idx < end && crate::link::is_handle_name(&handle) {
                             return Some(LinkSpan {
                                 uri: format!("{}{handle}", crate::link::SENDER_SCHEME),
                                 cells: self.visible_cells(&points[start..end]),
@@ -2126,6 +2129,23 @@ mod tests {
             pane.link_span(0, 4, "/nonexistent").is_some(),
             "prompt prefix still spans"
         );
+        // A retired name the handle grammar rejects (`a/b`, today's field
+        // case) spans no sender URI; the id beside it still opens the mail,
+        // and the name's valid prefix still reads as the generic handle it
+        // grammatically is.
+        let mut pane = Pane::new(4, 60);
+        pane.feed("`@fno/quiet-recovery · fmail-840a07863897 · hi`".as_bytes());
+        assert_eq!(
+            pane.link_span(0, 3, "/nonexistent")
+                .expect("prefix spans")
+                .uri,
+            "fno-handle:fno",
+            "a slash name is no sender link; its prefix is a plain handle"
+        );
+        let message = pane
+            .link_span(0, 24, "/nonexistent")
+            .expect("the fmail ID beside it still resolves");
+        assert_eq!(message.uri, "fno-message:fmail-840a07863897");
         // A malformed id, a spaced name, an empty summary, a legacy msg- id,
         // and a nameless separator resolve no span at all.
         for bad in [
