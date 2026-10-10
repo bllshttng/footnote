@@ -514,10 +514,10 @@ impl Pane {
                             });
                         }
                     }
-                    if let Some((start, end, id)) = crate::link::find_mail_sender(text) {
+                    if let Some((start, end, handle, _)) = crate::link::find_mail_sender(text) {
                         if idx >= start && idx < end {
                             return Some(LinkSpan {
-                                uri: format!("{}{id}", crate::link::SENDER_SCHEME),
+                                uri: format!("{}{handle}", crate::link::SENDER_SCHEME),
                                 cells: self.visible_cells(&points[start..end]),
                             });
                         }
@@ -2089,14 +2089,16 @@ mod tests {
 
     #[test]
     fn sender_span_cells_in_a_pane_line() {
-        // The sender and message ID are separate clickable spans.
+        // The sender and message ID are separate clickable spans on one
+        // header line: the @handle opens the handle's session, the fmail id
+        // opens the mail.
         let line = "`@t-glm-9663 · fmail-840a07863897 · fix the gate`";
         let mut pane = Pane::new(4, 60);
         pane.feed(line.as_bytes());
         let span = pane
             .link_span(0, 2, "/nonexistent")
             .expect("a cell inside @name resolves");
-        assert_eq!(span.uri, "fno-sender:fmail-840a07863897");
+        assert_eq!(span.uri, "fno-sender:t-glm-9663");
         assert_eq!(
             span.cells,
             (1..12).map(|c| (0, c)).collect::<Vec<_>>(),
