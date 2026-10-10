@@ -15,6 +15,10 @@ class RegistryDoorError(RuntimeError):
     """The native registry door refused or could not run."""
 
 
+class RegistryRevisionConflict(RegistryDoorError):
+    """The commit refused because the table moved since the read; reload and re-apply."""
+
+
 def read_registry_document(path: Optional[Path] = None) -> tuple[dict[str, Any], int]:
     """Return the whole registry document and its table revision."""
     from fno import paths, rust_binary
@@ -55,6 +59,11 @@ def commit_registry_document(
             {**payload, "path": str(Path(path).absolute()), "revision": revision},
         )
     except rust_binary.VerbUnavailable as exc:
+        # the Rust refusal JSON, reason "revision_conflict", rides the stderr
+        if "revision_conflict" in str(exc):
+            raise RegistryRevisionConflict(
+                f"registry-commit refused {path}: {exc}"
+            ) from exc
         raise RegistryDoorError(f"registry-commit refused {path}: {exc}") from exc
     if answer.get("status") != "written":
         detail = answer.get("message") or answer.get("reason") or "unknown refusal"

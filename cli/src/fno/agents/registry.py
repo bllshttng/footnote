@@ -1345,6 +1345,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     """
     from fno.registry_door import (
         RegistryDoorError,
+        RegistryRevisionConflict,
         commit_registry_document,
         read_registry_document,
     )
@@ -1367,6 +1368,8 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     }
     try:
         commit_registry_document(target, payload, revision)
+    except RegistryRevisionConflict:
+        raise
     except RegistryDoorError as exc:
         raise RegistryVersionError(str(exc)) from exc
 
@@ -2863,13 +2866,24 @@ def update_registry(
     remains the low-level primitive for cases that already hold the
     lock (test fixtures, repair tooling).
     """
+    from fno.registry_door import RegistryRevisionConflict
+
     target = _registry_path(path)
     with _hold_registry_lock(target, timeout=lock_timeout):
-        current = load_registry(path=target)
-        before = {entry.name: _identity_signature(entry) for entry in current}
-        new_entries = updater(list(current))
-        _validate_changed_identities(before, new_entries)
-        write_registry(new_entries, path=target)
+        # A non-flock writer (the Rust side skips this lock) can land in the
+        # read-to-commit window; reload and re-apply so its row survives.
+        for _attempt in range(3):
+            current = load_registry(path=target)
+            before = {entry.name: _identity_signature(entry) for entry in current}
+            new_entries = updater(list(current))
+            try:
+                _validate_changed_identities(before, new_entries)
+                write_registry(new_entries, path=target)
+            except RegistryRevisionConflict as exc:
+                if _attempt == 2:
+                    raise RegistryVersionError(str(exc)) from exc
+                continue
+            break
         # Removal accounting runs on the Rust choke point's own path: the
         # before-rows ride the payload, the after-rows read from disk, and
         # the existing accounting stages the receipts and emits the events.
