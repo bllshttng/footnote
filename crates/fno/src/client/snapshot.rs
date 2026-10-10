@@ -142,7 +142,7 @@ pub fn parse(tail: &[OsString]) -> Result<SnapshotArgs, String> {
             "--view" => {
                 let v = value()?;
                 view = Some(parse_view(&v).ok_or_else(|| {
-                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, row-menu, tab-menu, sideline-menu or composer")
+                    format!("fno mux serve --snapshot: unknown view {v:?}; use bell, row-menu, tab-menu, sideline-menu, composer, split-menu, settings or keys")
                 })?)
             }
             tok @ ("--server" | "--session") => {
@@ -585,13 +585,18 @@ mod tests {
             ("tab-menu", ViewKind::TabMenu),
             ("sideline-menu", ViewKind::SidelineMenu),
             ("composer", ViewKind::Composer),
+            ("split-menu", ViewKind::SplitMenu),
+            ("settings", ViewKind::Settings),
+            ("keys", ViewKind::Keys),
         ] {
             let args = parse_extra(&["--view", name]).expect(name);
             assert_eq!(args.view, Some(kind), "{name}");
         }
         let e = parse_extra(&["--view", "feed"]).expect_err("unknown view names the options");
         assert!(
-            e.contains("bell, row-menu, tab-menu, sideline-menu or composer"),
+            e.contains(
+                "bell, row-menu, tab-menu, sideline-menu, composer, split-menu, settings or keys"
+            ),
             "{e}"
         );
     }
