@@ -1511,6 +1511,38 @@ async fn run(args: Vec<String>) -> i32 {
             eprintln!("{message}");
             return 2;
         }
+        // Trust preflight: an untrusted workspace kills claude only
+        // AFTER the max_live queue and the routing have been paid, and the bg
+        // wrapper reports exit 0 over the harness's EXIT=1, so the refusal was
+        // easy to miss twice. Read the resolved config's trust flag BEFORE the
+        // gate queue and refuse here. Read-only: fno never flips the flag.
+        let spawn_provider = params
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("codex");
+        if let Ok(fno_agents::claude_workspace_trust::Verdict::Untrusted { ref config_json }) =
+            fno_agents::claude_workspace_trust::preflight(
+                spawn_provider,
+                substrate,
+                params.get("account").and_then(|v| v.as_str()),
+                params
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+        {
+            eprintln!(
+                "Workspace not trusted. Run claude in {} once and accept the trust prompt, \
+                 then retry. (trust read from {config_json})",
+                params
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .filter(|c| !c.is_empty())
+                    .unwrap_or(".")
+            );
+            return 2;
+        }
         // A DEFAULT never opens a view: a bare spawn is a paneless thread,
         // inside a mux or out. Only an explicit placement flag opens
         // anything, and it opens through place_thread_portal_after_spawn.

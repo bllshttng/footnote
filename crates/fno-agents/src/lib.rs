@@ -112,6 +112,7 @@ pub mod claude_stream_entry;
 pub mod claude_supervisor;
 pub mod claude_transcript_paths;
 pub mod claude_vault;
+pub mod claude_workspace_trust;
 pub mod cli_args;
 pub mod client;
 pub mod client_render;
