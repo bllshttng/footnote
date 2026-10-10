@@ -50,7 +50,7 @@ from fno.mail.receipts import _escalate_to_human, _recipient_is_attended
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import NoReturn, Optional, TypedDict
+from typing import Any, NoReturn, Optional, TypedDict
 
 import typer
 
@@ -2110,7 +2110,7 @@ def _name_lane_send(
     # `from_session` the full id a recipient can answer when two workers share a
     # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
-    def _envelope(to_session: Optional[str] = None, header_only: bool = False) -> str:
+    def _envelope(to_session: Optional[str] = None) -> str:
         return wrap_fno_mail(
             message,
             from_=sender,
@@ -2122,13 +2122,11 @@ def _name_lane_send(
             origin=origin,
             to_session=to_session,
             subject=subject,
-            header_only=header_only,
         )
 
     # Live carries the recipient's role; the durable floor below carries none,
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
-    turn_envelope = _envelope(recipient_session, header_only=True)
 
     # --force (node): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
@@ -2163,7 +2161,7 @@ def _name_lane_send(
             )
             raise typer.Exit(code=1)
         _forced_pane_send(
-            turn_envelope,
+            wrapped,
             entry=entry,
             recipient=recipient,
             sender=sender,
@@ -2180,6 +2178,20 @@ def _name_lane_send(
         )
         return
 
+    from fno.bus.log import record_hosted_delivery
+
+    record: dict[str, Any] = dict(
+        msg_id=msg_id, sender=sender, recipient=recipient, body=wrapped,
+        from_harness=sender_harness, in_reply_to=reply_to, from_session=sender_session,
+        from_model=sender_model, to_kind="name", word_count=authored_words, subject=subject,
+    )
+    # Write first for a known recipient. A token no store knows exits 16
+    # having sent nothing, so it gets no stored copy.
+    if not self_send and (resolved is not None or (token and token_reachable)):
+        try:
+            record_hosted_delivery(**record, before_live=True)
+        except Exception as exc:  # noqa: BLE001 - the live attempt still runs
+            print(f"stored copy not written before live delivery: {exc}", file=sys.stderr)
     injected = False
     woken_as: Optional[str] = None
     lanes: list[str] = []
@@ -2220,7 +2232,7 @@ def _name_lane_send(
             if probe_agent == "codex":
                 _codex_probe_reason: list = []
                 injected = _mail_inject_codex(
-                    probe_target, turn_envelope, reason_out=_codex_probe_reason
+                    probe_target, wrapped, reason_out=_codex_probe_reason
                 )
                 if injected:
                     to_harness = "codex"
@@ -2228,7 +2240,7 @@ def _name_lane_send(
                     live_reason = ";".join(_codex_probe_reason) or None
             else:
                 _probe_reason: list = []
-                injected = _mail_inject_claude(probe_target, turn_envelope, reason_out=_probe_reason)
+                injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
                 if injected:
                     to_harness = "claude"
                 if not injected:
@@ -2236,7 +2248,7 @@ def _name_lane_send(
                 if not injected and probe_agent is None:
                     _both_reason: list = []
                     injected = _mail_inject_codex(
-                        probe_target, turn_envelope, reason_out=_both_reason
+                        probe_target, wrapped, reason_out=_both_reason
                     )
                     if injected:
                         to_harness = "codex"
@@ -2264,7 +2276,7 @@ def _name_lane_send(
                     pass
                 else:
                     injected, woken_as, wake_lane = _wake_rung(
-                        token_reachable, turn_envelope
+                        token_reachable, wrapped
                     )
                     if wake_lane:
                         lanes.append(wake_lane)
@@ -2288,14 +2300,14 @@ def _name_lane_send(
         if provider == "claude":
             _resolved_reason: list = []
             injected = _mail_inject_claude(
-                resolved.session_id, turn_envelope, reason_out=_resolved_reason
+                resolved.session_id, wrapped, reason_out=_resolved_reason
             )
             if not injected:
                 live_reason = ";".join(_resolved_reason) or None
         elif provider == "codex":
             _resolved_codex_reason: list = []
             injected = _mail_inject_codex(
-                resolved.session_id, turn_envelope, reason_out=_resolved_codex_reason
+                resolved.session_id, wrapped, reason_out=_resolved_codex_reason
             )
             if not injected:
                 live_reason = ";".join(_resolved_codex_reason) or None
@@ -2309,7 +2321,7 @@ def _name_lane_send(
             _resolved_keeper_reason: list = []
             injected = _mail_inject_keeper(
                 resolved.session_id,
-                turn_envelope,
+                wrapped,
                 harness=lane_harness,
                 reason_out=_resolved_keeper_reason,
             )
@@ -2339,34 +2351,17 @@ def _name_lane_send(
                     # Name the failure values, never bool(): bool("unconfirmed")
                     # would read an unclassified frame as delivered.
                     delivered = _mux_pane_send(
-                        entry, turn_envelope, guarded=False, confirm=True
+                        entry, wrapped, guarded=False, confirm=True
                     )
                     injected = delivered not in (False, "unconfirmed")
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
     if injected:
-        from fno.bus.log import record_hosted_delivery
-
         try:
-            record_hosted_delivery(
-                msg_id=msg_id,
-                sender=sender,
-                recipient=recipient,
-                body=wrapped,
-                from_harness=sender_harness,
-                # One value now feeds the row field AND the landed-check meta
-                # copy; the lane-refined `to_harness` is the actual injected
-                # harness, more truthful than the routing token's `provider`.
-                to_harness=to_harness,
-                in_reply_to=reply_to,
-                from_session=sender_session,
-                from_model=sender_model,
-                to_kind="name",
-                word_count=authored_words,
-                to_session=to_session,
-                subject=subject,
-            )
+            # The lane-refined `to_harness` is the harness actually injected
+            # into, more truthful than the routing token's `provider`.
+            record_hosted_delivery(**record, to_harness=to_harness, to_session=to_session)
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
                 "delivery succeeded; outbox record failed; "
@@ -4015,7 +4010,6 @@ def cmd_send(
             from_name=stamp_from(from_name),
             origin=mail_origin,
             subject=subject,
-            header_only=True,
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE

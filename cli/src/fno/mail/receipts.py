@@ -80,6 +80,7 @@ _LIVE_LANE_FAILURE_REASONS = frozenset(
         "mux-send-failed",
         "unsafe-text",
         "no-confirm-source",
+        "left-in-composer",
     }
 )
 

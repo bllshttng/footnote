@@ -18,7 +18,6 @@ use crate::gc_sweep::OpenPrRow;
 use crate::paths::AgentsHome;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
 
 /// Failed nudges before the ladder escalates to the operator and waits for
 /// activity.
@@ -26,16 +25,6 @@ pub const MAX_ATTEMPTS: u32 = 3;
 
 const NUDGE_SENDER: &str = "fno/pr-nudge";
 const NUDGE_SENDER_LINE: &str = "Automatic retry from the fno daemon pr-nudge arm, not a person. A hold from your team or the operator outranks it.";
-
-/// The bounded subprocess budget, shared by the PR-status read and every
-/// mail/resume/ask effect.
-const RUN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The resume argv's own bound. The parked revive waits inside the verb
-/// (roster polls plus content confirms) before the respawn returns, so the
-/// shared 30 s budget would cut it short by construction; 180 s is the
-/// bound `fno agents watchdog` gives the same verb.
-const RESUME_RUN_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The paused hold re-emits at most once per hour per session, so a stuck
 /// merge order names itself without flooding the event log.
@@ -219,13 +208,10 @@ fn production_run(argv: &[String], cwd: &str) -> (i32, String, String) {
     } else {
         std::path::PathBuf::from(cwd)
     };
-    // ponytail: a resume holds the retire arm up to 180 s; move resumes off
-    // the arm if the resume rung grows past a few rows a pass.
-    let timeout = if argv.len() > 2 && argv[2] == "resume" {
-        RESUME_RUN_TIMEOUT
-    } else {
-        RUN_TIMEOUT
-    };
+    // A resume holds the retire arm up to 180 s and a mail send up to the
+    // send bound; move them off the arm if the rungs grow past a few rows a
+    // pass.
+    let timeout = crate::burn_watch::run_timeout(argv);
     match crate::loopcheck::bounded_read(bin.as_ref(), &refs, &dir, "pr-nudge", timeout) {
         Ok(out) => (
             if out.status.success() {

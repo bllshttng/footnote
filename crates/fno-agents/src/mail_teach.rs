@@ -4,9 +4,9 @@
 //! receiver gets; the header shipped without teaching the read verb, and no
 //! hook, skill or spawn brief on main mentions it. One line teaches it, at
 //! most once per session and again after each compaction: every carrier
-//! (the session-start drain, the post-compact reinject, and the header-only
-//! render for a harness with no hooks at all) asks this module whether the
-//! lesson is due and prints [`crate::chats::teach_line`] only when it is.
+//! (the session-start drain and the post-compact reinject) asks this module
+//! whether the lesson is due and prints [`crate::chats::teach_line`] only
+//! when it is.
 //!
 //! State is one session-keyed file, `<home>/mail_teach/<session>.json`,
 //! holding the newest compaction boundary epoch the lesson was taught at
@@ -81,9 +81,8 @@ fn resolve_transcript(
 /// leaves the never-taught case. Best-effort by contract: a state write that
 /// fails still answers, so a carrier can never fail a delivery for it.
 ///
-/// `root` is the state root owning both the stamp and the registry - the
-/// agents home for the door, the render's own registry parent for the
-/// header-only attach.
+/// `root` is the state root owning both the stamp and the registry: the
+/// agents home for the door.
 pub fn teach_if_due_at(
     root: &Path,
     session: &str,
