@@ -19,16 +19,17 @@ use std::collections::BTreeSet;
 fn retraction_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?i)(\bI was (wrong|mistaken|incorrect)\b\
-|\bI (got|had) (it|that|this) wrong\b\
-|\bI mis(read|stated|reported|counted|spoke|attributed|diagnosed)\b\
-|\bmy (earlier|previous|last|prior) (claim|statement|reading|report|answer|diagnosis|conclusion)\b[^.]{0,80}\b(wrong|false|incorrect|mistaken|overstated)\b\
-|\b(correction|retraction)\s*:\
-|\bI (retract|withdraw)\b|\bretracting\b|\bwithdrawn\b\
-|\bthat (claim|reading|conclusion|diagnosis) was (wrong|false|incorrect)\b\
-|\bI stand corrected\b|\bmy (mistake|error)\b|\bscratch that\b)",
-        )
+        regex::Regex::new(concat!(
+            r"(?i)(",
+            r"\bI was (wrong|mistaken|incorrect)\b",
+            r"|\bI (got|had) (it|that|this) wrong\b",
+            r"|\bI mis(read|stated|reported|counted|spoke|attributed|diagnosed)\b",
+            r"|\bmy (earlier|previous|last|prior) (claim|statement|reading|report|answer|diagnosis|conclusion)\b[^.]{0,80}\b(wrong|false|incorrect|mistaken|overstated)\b",
+            r"|\b(correction|retraction)\s*:",
+            r"|\bI (retract|withdraw)\b|\bretracting\b|\bwithdrawn\b",
+            r"|\bthat (claim|reading|conclusion|diagnosis) was (wrong|false|incorrect)\b",
+            r"|\bI stand corrected\b|\bmy (mistake|error)\b|\bscratch that\b)",
+        ))
         .expect("retraction pattern is valid")
     })
 }
@@ -36,11 +37,12 @@ fn retraction_re() -> &'static regex::Regex {
 fn ack_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?i)(\byou('re| are) right\b\
-|\b(L\d|lead|peer|worker|reviewer|operator|user|[0-9a-f]{8}) (is|was) right\b\
-|\bgood catch\b|\bfair (point|catch)\b|\bas you (said|pointed out)\b|\byour (catch|correction)\b)"#,
-        )
+        regex::Regex::new(concat!(
+            r"(?i)(",
+            r"\byou('re| are) right\b",
+            r"|\b(L\d|lead|peer|worker|reviewer|operator|user|[0-9a-f]{8}) (is|was) right\b",
+            r"|\bgood catch\b|\bfair (point|catch)\b|\bas you (said|pointed out)\b|\byour (catch|correction)\b)",
+        ))
         .expect("ack pattern is valid")
     })
 }
@@ -48,14 +50,15 @@ fn ack_re() -> &'static regex::Regex {
 fn op_correction_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?i)(\bthat'?s (not (right|true|correct|what)|wrong|false|incorrect)\b\
-|\b(you'?re|you are|it'?s|this is) (wrong|not right|incorrect|mistaken)\b\
-|\bwhy (are|did|would) you\b\
-|\bnot true\b|\bthat is false\b|\bincorrect\b\
-|\byou (said|claimed|told me)\b\
-|\bno,? (that|it|you|this)\b)",
-        )
+        regex::Regex::new(concat!(
+            r"(?i)(",
+            r"\bthat'?s (not (right|true|correct|what)|wrong|false|incorrect)\b",
+            r"|\b(you'?re|you are|it'?s|this is) (wrong|not right|incorrect|mistaken)\b",
+            r"|\bwhy (are|did|would) you\b",
+            r"|\bnot true\b|\bthat is false\b|\bincorrect\b",
+            r"|\byou (said|claimed|told me)\b",
+            r"|\bno,? (that|it|you|this)\b)",
+        ))
         .expect("operator correction pattern is valid")
     })
 }
@@ -365,7 +368,6 @@ pub(crate) fn render_line(value: &Value) -> String {
     }
     line
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,126 +387,87 @@ mod tests {
         )
     }
 
-    // AC1: an unprompted retraction in window 1 reads self; a typed
-    // correction answered by an acknowledged retraction in window 2 reads
-    // operator.
+    // One transcript through the whole meter. Window 1: an unprompted
+    // retraction reads self; a typed correction plus its acknowledged
+    // retraction reads operator once. Window 2: the structural interrupt
+    // and reject counts, a corrective bare-wrong turn whose retraction
+    // credits the operator without a second count, a meta row ending the
+    // prompt so the next unacknowledged retraction reads self, a peer
+    // acknowledgement after mail, uuid and message-id dedup, and the
+    // "went wrong" guard. Window 3 exists so the reading carries the last
+    // two windows only, newest last.
     #[test]
-    fn two_windows_self_then_operator() {
+    fn window_counts() {
         let raw = concat!(
-            r#"{"uuid":"u1","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I was wrong about the port."}]}}"#,
+            r#"{"uuid":"w1","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I was wrong about the port."}]}}"#,
+            "\n",
+            r#"{"uuid":"w2","type":"user","message":{"content":"that's not true"}}"#,
+            "\n",
+            r#"{"uuid":"w3","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"You're right, I was wrong."}]}}"#,
             "\n",
             r#"{"subtype":"compact_boundary","timestamp":"2026-10-10T00:00:00Z"}"#,
             "\n",
-            r#"{"uuid":"u2","type":"user","message":{"content":"that's not true"}}"#,
+            r#"{"uuid":"e1","type":"user","message":{"content":"[Request interrupted by user for tool use]"}}"#,
             "\n",
-            r#"{"uuid":"u3","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"You're right, I was wrong."}]}}"#,
+            r#"{"uuid":"e2","type":"user","isMeta":true,"message":{"content":[{"type":"tool_result","is_error":true,"content":"The user doesn't want to proceed with this command"}]}}"#,
             "\n",
-        );
-        let value = meter(raw);
-        assert_eq!(value["windows_total"], json!(2));
-        assert_eq!(counts(&value, 0), (1, 0, 0, 0, 0));
-        assert_eq!(counts(&value, 1), (0, 1, 0, 0, 0));
-    }
-
-    // AC3: interrupts and rejects count structurally, a duplicated uuid row
-    // counts once, and a retraction acknowledging a peer prompt reads peer,
-    // never self.
-    #[test]
-    fn edge_rows() {
-        let raw = concat!(
-            r#"{"uuid":"i1","type":"user","message":{"content":"[Request interrupted by user for tool use]"}}"#,
+            r#"{"uuid":"g1","type":"user","message":{"content":"that port number was wrong"}}"#,
             "\n",
-            r#"{"uuid":"r1","type":"user","isMeta":true,"message":{"content":[{"type":"tool_result","is_error":true,"content":"The user doesn't want to proceed with this command"}]}}"#,
+            r#"{"uuid":"g2","type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"my mistake, the port is 8080"}]}}"#,
+            "\n",
+            r#"{"uuid":"g3","type":"user","isMeta":true,"message":{"content":"Stop hook feedback: beat blocked"}}"#,
+            "\n",
+            r#"{"uuid":"g4","type":"assistant","message":{"id":"m4","content":[{"type":"text","text":"I was wrong to stage that"}]}}"#,
+            "\n",
+            r#"{"uuid":"p1","type":"user","message":{"content":"<fno_mail from=\"w1\">recheck the gate</fno_mail>"}}"#,
+            "\n",
+            r#"{"uuid":"p2","type":"assistant","message":{"id":"m5","content":[{"type":"text","text":"L1 is right and I was wrong."}]}}"#,
             "\n",
             r#"{"uuid":"d1","type":"assistant","message":{"id":"m9","content":[{"type":"text","text":"scratch that"}]}}"#,
             "\n",
             r#"{"uuid":"d1","type":"assistant","message":{"id":"m10","content":[{"type":"text","text":"scratch that"}]}}"#,
             "\n",
-            r#"{"uuid":"p1","type":"user","message":{"content":"<fno_mail from=\"w1\">recheck the gate</fno_mail>"}}"#,
+            r#"{"uuid":"q1","type":"user","message":{"content":"what went wrong with the build?"}}"#,
             "\n",
-            r#"{"uuid":"p2","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"L1 is right and I was wrong."}]}}"#,
+            r#"{"uuid":"q2","type":"assistant","message":{"id":"m11","content":[{"type":"text","text":"I misread the config key"}]}}"#,
             "\n",
-        );
-        let value = meter(raw);
-        assert_eq!(counts(&value, 0), (1, 0, 1, 1, 1));
-    }
-
-    // A retraction right after a plain operator prompt credits the operator
-    // even without ack wording, and a machine-prompted unacknowledged one
-    // stays self. "went wrong" is not an operator correction.
-    #[test]
-    fn prompt_attribution() {
-        let raw = concat!(
-            r#"{"uuid":"a1","type":"user","message":{"content":"that port number was wrong"}}"#,
+            r#"{"uuid":"z1","type":"assistant","message":{"id":"m11","content":[{"type":"text","text":"I was wrong again."}]}}"#,
             "\n",
-            r#"{"uuid":"a2","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"my mistake, the port is 8080"}]}}"#,
+            r#"{"subtype":"compact_boundary","timestamp":"2026-10-10T00:01:00Z"}"#,
             "\n",
-            r#"{"uuid":"a3","type":"user","message":{"content":"carry on"}}"#,
-            "\n",
-            r#"{"uuid":"a4","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"I misread the config key"}]}}"#,
-            "\n",
-            r#"{"uuid":"a5","type":"user","message":{"content":"what went wrong with the build?"}}"#,
-            "\n",
-            r#"{"uuid":"a6","type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"I stand corrected on the cache dir"}]}}"#,
+            r#"{"uuid":"f1","type":"assistant","message":{"id":"m12","content":[{"type":"text","text":"I stand corrected on the cache dir"}]}}"#,
             "\n",
         );
         let value = meter(raw);
-        assert_eq!(counts(&value, 0), (2, 1, 0, 0, 0));
+        assert_eq!(value["windows_total"], json!(3));
+        let recent = value["recent"].as_array().expect("recent array");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(counts(&value, 0), (3, 1, 1, 1, 1));
+        assert_eq!(counts(&value, 1), (1, 0, 0, 0, 0));
+        assert_eq!(recent[0]["window"], json!(2));
+        assert_eq!(recent[1]["window"], json!(3));
+
+        // The acceptance pair verbatim: an unprompted retraction in window
+        // 1, and the acknowledged correction pair in window 2.
+        let ac1 = meter(concat!(
+            r#"{"uuid":"a1","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I was wrong about the port."}]}}"#,
+            "\n",
+            r#"{"subtype":"compact_boundary","timestamp":"2026-10-10T00:00:00Z"}"#,
+            "\n",
+            r#"{"uuid":"a2","type":"user","message":{"content":"that's not true"}}"#,
+            "\n",
+            r#"{"uuid":"a3","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"You're right, I was wrong."}]}}"#,
+            "\n",
+        ));
+        assert_eq!(counts(&ac1, 0), (1, 0, 0, 0, 0));
+        assert_eq!(counts(&ac1, 1), (0, 1, 0, 0, 0));
     }
 
-    // A meta row with text (stop-hook feedback) ends an operator prompt's
-    // reach: the next unacknowledged retraction reads self, never operator.
+    // The render names the open window and the previous closed one, drops
+    // the previous clause with one window, and reads unmeasured rather
+    // than rendering zeros.
     #[test]
-    fn meta_resets_prompt() {
-        let raw = concat!(
-            r#"{"uuid":"c1","type":"user","message":{"content":"that's wrong"}}"#,
-            "\n",
-            r#"{"uuid":"c2","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"understood"}]}}"#,
-            "\n",
-            r#"{"uuid":"c3","type":"user","isMeta":true,"message":{"content":"Stop hook feedback: beat blocked"}}"#,
-            "\n",
-            r#"{"uuid":"c4","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"I was wrong to stage that"}]}}"#,
-            "\n",
-        );
-        let value = meter(raw);
-        assert_eq!(counts(&value, 0), (1, 1, 0, 0, 0));
-    }
-
-    // The reading carries the last two windows only, newest last, whatever
-    // the transcript's window count.
-    #[test]
-    fn recent_caps_at_two() {
-        let boundary = r#"{"subtype":"compact_boundary","timestamp":"2026-10-10T00:00:00Z"}"#;
-        let raw = format!("{boundary}\n{boundary}\n{boundary}\n");
-        let value = meter(&raw);
-        assert_eq!(value["windows_total"], json!(4));
-        let ids: Vec<u64> = value["recent"]
-            .as_array()
-            .expect("recent array")
-            .iter()
-            .map(|w| w["window"].as_u64().expect("window id"))
-            .collect();
-        assert_eq!(ids, vec![3, 4]);
-    }
-
-    // One retraction per message id, even when a second text block repeats
-    // the marker, and reminder text never reads as a correction.
-    #[test]
-    fn dedup_and_reminders() {
-        let raw = concat!(
-            r#"{"uuid":"b1","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I was wrong."},{"type":"text","text":"I was wrong again."}]}}"#,
-            "\n",
-            r#"{"uuid":"b2","type":"user","message":{"content":"<system-reminder>that's wrong stuff in a reminder</system-reminder>continue"}}"#,
-            "\n",
-        );
-        let value = meter(raw);
-        assert_eq!(counts(&value, 0), (1, 0, 0, 0, 0));
-    }
-
-    // AC4 shape: the render names the open window, its interrupts and
-    // rejects, and the previous closed window.
-    #[test]
-    fn render_two_windows() {
+    fn render_shapes() {
         let line = render_line(&json!({
             "windows_total": 2,
             "recent": [
@@ -516,11 +479,6 @@ mod tests {
             line,
             "self_correction: window 2 (open) self 0 / operator 1 (interrupts 2, rejects 1); window 1 self 3 / operator 0"
         );
-    }
-
-    // One window only: no previous-window clause.
-    #[test]
-    fn render_one_window() {
         let line = render_line(&json!({
             "windows_total": 1,
             "recent": [
@@ -531,12 +489,6 @@ mod tests {
             line,
             "self_correction: window 1 (open) self 2 / operator 0 (interrupts 0, rejects 0)"
         );
-    }
-
-    // AC5 shape: an unmeasured reading renders the unmeasured line, and an
-    // empty recent array never renders zeros.
-    #[test]
-    fn render_unmeasured() {
         assert_eq!(
             render_line(&json!({"unmeasured": "no compaction windows to count corrections in for harness codex"})),
             "self_correction: unmeasured (no compaction windows to count corrections in for harness codex)"
