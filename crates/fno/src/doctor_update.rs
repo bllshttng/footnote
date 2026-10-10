@@ -2237,7 +2237,7 @@ fn wire_label(wires: &[u32]) -> String {
     }
 }
 
-fn current_but_stale(rev_label: &str, stale: usize, restartable: usize) -> String {
+pub(crate) fn current_but_stale(rev_label: &str, stale: usize, restartable: usize) -> String {
     // The keeper count stays out: the update modal's stale section prints
     // it, and this line rendered it a second time in the same dialog.
     format!(

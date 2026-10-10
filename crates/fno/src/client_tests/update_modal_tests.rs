@@ -1058,6 +1058,13 @@ fn update_modal_keeper_count_prints_once() {
     assert!(labels.contains(&"1 pane keeper on the old build".to_string()));
     assert!(modal.actions.contains(&AuxAction::RestartAgents));
 
+    // The producer side of the same contract: the payload guidance stays
+    // clause-free, so a regression there cannot re-double the count.
+    assert_eq!(
+        crate::doctor_update::current_but_stale("same", 2, 1),
+        "installed same is current; 2 running process(es) are older builds - restart cycles 1"
+    );
+
     // A degraded probe never claims the build is current.
     let degraded_modal = build_update_modal(Some(
         &(UpdateOutcome::Ok(UpdateReadiness {
