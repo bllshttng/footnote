@@ -200,23 +200,120 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     # and fno doctor test sets a new build dir per run, which would split
     # the cache key per worktree.
     unset CARGO_BUILD_BUILD_DIR CARGO_BUILD_TARGET_DIR CARGO_TARGET_DIR
-    # A wedged server leaves this client parked at 0 percent CPU for hours
-    # while holding the build-dir lock. The bound ends the wait and the
-    # compile runs on bare rustc; the daemon's machine-watch tick restarts the
-    # server. 0 turns the bound off.
-    client_bound="${FNO_SCCACHE_CLIENT_TIMEOUT_SECS:-3600}"
-    if [[ "$client_bound" != "0" ]]; then
-        # shellcheck source=scripts/lib/with-timeout.sh
-        source "$REPO_ROOT/scripts/lib/with-timeout.sh"
-        sccache_rc=0
-        with_timeout "$client_bound" sccache "$@" || sccache_rc=$?
-        if [[ "$sccache_rc" -ne 124 ]]; then
-            exit "$sccache_rc"
-        fi
-        echo "cargo-rustc-wrapper: sccache gave no answer in ${client_bound}s; compiling with bare rustc" >&2
-    else
+    # A wedged server leaves this client parked at 0 percent CPU while it
+    # holds the build-dir lock: 5h30m on 2026-10-08, 38 minutes inside an fno
+    # update on 2026-10-09. The client always sits at 0 percent, so its CPU
+    # says nothing. A live compile always shows as a child of the server, so
+    # the watcher reads that instead. 0 turns the watcher off.
+    client_bound="${FNO_SCCACHE_CLIENT_TIMEOUT_SECS:-300}"
+    stall_bound="${FNO_SCCACHE_STALL_SECS:-60}"
+    [[ "$client_bound" =~ ^[0-9]+$ ]] || client_bound=300
+    [[ "$stall_bound" =~ ^[0-9]+$ ]] || stall_bound=60
+    if [[ "$client_bound" == "0" ]]; then
         exec sccache "$@"
     fi
+    # The extra-filename hash names this one compile in the server's child
+    # argv, so the watcher can tell our rustc from another client's.
+    token=""
+    for arg in "$@"; do
+        case "$arg" in
+            *extra-filename=*) token="extra-filename=${arg#*extra-filename=}" ;;
+        esac
+    done
+    cargo_pid="$PPID"
+    verdict="$(mktemp "${TMPDIR:-/tmp}/fno-sccache-watch.XXXXXX")"
+
+    # One line in $verdict when the watcher stops the client:
+    #   orphan       - cargo is gone; our server-side rustc is stopped too
+    #   stall <pid>  - server <pid> ran no compile for stall_bound seconds
+    #   bound        - our compile never started within client_bound seconds
+    # A long compile that is running is never stopped: the bound only counts
+    # while the server runs no rustc for this crate.
+    watch_client() {
+        local client="$1" poll waited=0 quiet=0 server kids ours
+        poll=$(( stall_bound >= 12 ? stall_bound / 12 : 1 ))
+        while sleep "$poll"; do
+            waited=$((waited + poll))
+            read -r server kids ours < <(ps -A -ww -o pid=,ppid=,command= 2>/dev/null | awk -v token="$token" '
+                {
+                    pid[NR] = $1; ppid[NR] = $2
+                    cmd = $0; sub(/^ *[0-9]+ +[0-9]+ */, "", cmd); sub(/ +$/, "", cmd); line[NR] = cmd
+                    if (server == "" && (cmd == "(sccache)" || cmd ~ /sccache --start-server$/ || (cmd ~ /(^|\/)sccache$/ && cmd !~ /[ \t]/))) server = $1
+                }
+                END {
+                    kids = 0; ours = 0
+                    if (server != "") for (i = 1; i <= NR; i++) if (ppid[i] == server) {
+                        kids++
+                        if (token != "" && index(line[i], token)) ours = pid[i]
+                    }
+                    print (server == "" ? 0 : server), kids, ours
+                }')
+            if ! kill -0 "$cargo_pid" 2>/dev/null; then
+                echo orphan >"$verdict"
+                if [[ "$ours" != "0" ]]; then
+                    kill -TERM "$ours" 2>/dev/null || true
+                fi
+                break
+            fi
+            if [[ "$kids" -gt 0 ]]; then
+                quiet=0
+            else
+                quiet=$((quiet + poll))
+            fi
+            if [[ "$stall_bound" != "0" && "$quiet" -ge "$stall_bound" ]]; then
+                echo "stall $server" >"$verdict"
+                break
+            fi
+            if [[ "$ours" == "0" && "$waited" -ge "$client_bound" ]]; then
+                echo bound >"$verdict"
+                break
+            fi
+        done
+        kill -TERM -"$client" 2>/dev/null || kill -TERM "$client" 2>/dev/null || true
+        # A wrapper stopped with its cargo never reads the verdict.
+        if ! kill -0 "$$" 2>/dev/null; then
+            rm -f "$verdict"
+        fi
+    }
+
+    # set -m gives the client and the watcher each a process group, so a
+    # stop reaches the whole client. The caller's stdin passes through.
+    set -m
+    sccache "$@" <&0 &
+    client=$!
+    watch_client "$client" >/dev/null 2>&1 &
+    watcher=$!
+    set +m
+    sccache_rc=0
+    wait "$client" 2>/dev/null || sccache_rc=$?
+    kill -TERM -"$watcher" 2>/dev/null || kill -TERM "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    reason="$(cat "$verdict" 2>/dev/null || true)"
+    rm -f "$verdict"
+    case "$reason" in
+        "")
+            exit "$sccache_rc"
+            ;;
+        orphan)
+            echo "cargo-rustc-wrapper: cargo (pid $cargo_pid) is gone; stopped this compile" >&2
+            exit 1
+            ;;
+        stall*)
+            server="${reason#stall }"
+            # The server ran no compile for the whole window, so stopping it
+            # loses no work. One wrapper per server pid stops it; the next
+            # client or the daemon's machine-watch tick starts a fresh one.
+            if [[ "$server" != "0" ]] && ( set -o noclobber; : >"${TMPDIR:-/tmp}/fno-sccache-stopped.$server" ) 2>/dev/null; then
+                kill -TERM "$server" 2>/dev/null || true
+                sleep 1
+                kill -KILL "$server" 2>/dev/null || true
+            fi
+            echo "cargo-rustc-wrapper: the sccache server ran no compile for ${stall_bound}s; stopped it, compiling with bare rustc" >&2
+            ;;
+        *)
+            echo "cargo-rustc-wrapper: sccache did not start this compile in ${client_bound}s; compiling with bare rustc" >&2
+            ;;
+    esac
 fi
 
 compiler="$1"
