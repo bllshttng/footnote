@@ -2441,10 +2441,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             })
             .unwrap_or(false);
     if permission_mode.is_some() && provider != "claude" && !mapped_permission_lane {
-        let remedy = if provider == "codex" {
-            "drop --permission-mode and pass -Y/--yolo"
-        } else {
-            "use --substrate pane"
+        let remedy = match provider {
+            "codex" => "drop --permission-mode and pass -Y/--yolo",
+            "footnote" => "pass a mode its capability row lists in permission_modes",
+            _ => "use --substrate pane",
         };
         eprintln!(
             "--permission-mode is not supported for harness {} on --substrate thread/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
@@ -2876,14 +2876,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 
         // footnote headless: footnote's own loop, run in this process.
         ("footnote", "headless") => emit!(fno_agents::footnote_harness::dispatch_once(
-            home,
-            name,
-            &message,
-            from_name,
-            &cwd,
-            model,
-            timeout,
-            params.get("node").and_then(|v| v.as_str()),
+            home, name, &message, from_name, &cwd, model, timeout, params,
         )),
 
         // Codex thread is supervisor-hosted by the daemon. Returning `None`
