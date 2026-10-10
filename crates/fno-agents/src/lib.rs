@@ -72,6 +72,7 @@ pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
 pub mod backlog_ready;
+pub mod backlog_share;
 pub mod bash_census;
 #[cfg(test)]
 #[path = "birth_guard_tests.rs"]

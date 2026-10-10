@@ -54,7 +54,31 @@ Turn off Wi-Fi on machine B during a run. Expected:
 
 Keep B offline past 10 minutes, then take one of B's nodes on A. Bring B back. Expected: B's daemon writes a `claim_lost` event, and B's worker ends at its next stop with `claim lost:` and the taker's name.
 
-## 5. Roll back
+## 5. Share the backlog on rehearsal homes
+
+Run this step only on the per-machine temp homes from step 2, never on `~/.fno`. Copy the real store into home A so the test has real rows:
+
+```bash
+sqlite3 -readonly ~/.fno/db/graph.db ".backup '$HOME_A/.fno/db/graph.db'"
+```
+
+A plain `cp` of a live store can copy a half-written WAL. The backup reads one consistent snapshot.
+
+To rehearse a branch build, export `FNO_AGENTS_BIN` and `FNO_AGENTS_WORKER` with that build's paths in both homes. Otherwise the Python leg calls the installed older binaries, and the guard refuses their writes.
+
+Add `share_backlog = true` under `[store]` in both homes' config. Then, with home A's environment:
+
+```bash
+fno agents claim backlog seed
+```
+
+The receipt names each table and its row count. With home B's environment, run `fno agents claim backlog sync`. Expected: `snapshot: true`, and `fno backlog get <id>` on B prints the node A holds.
+
+File a node on A, run the sync on B, and read it on B. Then change one node's title on A, and change the same node on B before B syncs. Then run the sync on B. Expected: B's flush refuses and names the `nodes` row. B shows A's title, and the primary never held B's.
+
+Last, write to home A's store with a plain `sqlite3` shell, which stands in for an older build. Expected: the write fails with `no such function: fno_backlog_writer`, and the row does not change.
+
+## 6. Roll back
 
 Remove the `[store]` table on both machines, and restart each daemon. Then copy the primary into a local file:
 
