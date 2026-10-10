@@ -38,6 +38,27 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
     if roster_lists(&short, sid) == Some(false) {
         return true;
     }
+    // The ask ends the session, not the Bash commands it started: each runs
+    // in its own process group and outlives it under pid 1, a cargo among
+    // them still holding its admission slot. Name them while the session
+    // still parents them.
+    // The root pid must be this session's live process: the same session id
+    // when both sides name one, and the roster's recorded start time, so a
+    // stale or recycled pid never roots the walk at an unrelated tree.
+    let leftovers = agents_roster_row(&short)
+        .filter(|row| match (row.session_id.as_deref(), sid) {
+            (Some(listed), Some(wanted)) => listed == wanted,
+            _ => true,
+        })
+        .and_then(|row| row.pid)
+        .filter(|&pid| {
+            pid > 1
+                && roster_proc_start(&short, pid).is_some_and(|recorded| {
+                    crate::daemon::process_start_time(pid) == Some(recorded)
+                })
+        })
+        .map(session_descendants)
+        .unwrap_or_default();
     let stopped = {
         let short = short.clone();
         std::thread::spawn(move || {
@@ -61,6 +82,7 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
     if !stopped {
         return false;
     }
+    end_leftovers(&leftovers);
     let confirmed = stop_claude_confirmed_with(
         &short,
         sid,
@@ -85,6 +107,29 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
         }
     }
     confirmed
+}
+
+/// Every process under the session, each with its start time.
+fn session_descendants(pid: u32) -> Vec<(u32, u64)> {
+    let (table, _) = crate::census::process_table();
+    crate::census::descendants(&table, pid)
+        .into_iter()
+        .filter(|member| *member > 1)
+        .filter_map(|member| crate::daemon::process_start_time(member).map(|start| (member, start)))
+        .collect()
+}
+
+/// SIGTERM each process named before the stop that is still the same
+/// incarnation; a recycled pid takes nothing.
+fn end_leftovers(members: &[(u32, u64)]) {
+    for &(pid, start) in members {
+        if crate::daemon::process_start_time(pid) == Some(start) {
+            // SAFETY: start-time equality proves the process named before the stop.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
 }
 
 /// The injectable stop-confirmation core (change 1b). The stop ran

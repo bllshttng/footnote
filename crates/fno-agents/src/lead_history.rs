@@ -349,31 +349,83 @@ pub(crate) fn previous_beat(
     holder_session: Option<&str>,
     loop_only: bool,
 ) -> Result<Option<Value>, String> {
-    if let Some(session) = holder_session.filter(|s| !s.trim().is_empty()) {
-        let payload = scan_scopes(events_paths, None)?;
-        let found = payload["events"].as_array().and_then(|events| {
-            events.iter().find(|r| {
-                r.get("data")
-                    .and_then(|d| d.get("holder_session"))
-                    .and_then(Value::as_str)
-                    == Some(session)
-                    && (!loop_only || s_str(r, "source") == Some("loop"))
-            })
-        });
-        // No row of this holder yet (or pre-holder rows only): the scope's
-        // own newest row is the baseline, exactly the pre-holder read.
-        if let Some(row) = found {
-            return Ok(Some(row.clone()));
+    Ok(previous_beat_with_source(events_paths, scope, holder_session, loop_only)?.row)
+}
+
+/// The beat row plus the live journal that held it, so a caller can say
+/// where its beat was read.
+pub(crate) struct BeatSource {
+    pub row: Option<Value>,
+    pub journal: Option<PathBuf>,
+}
+
+/// `previous_beat` plus the row's journal. One scan per journal, keeping
+/// the global newest winner: the same row a merged scan returns, now
+/// carrying the file it was read from. `scan_scopes` errors the WHOLE
+/// list when one store cannot be opened, so the error semantics are
+/// unchanged.
+pub(crate) fn previous_beat_with_source(
+    events_paths: &[PathBuf],
+    scope: &str,
+    holder_session: Option<&str>,
+    loop_only: bool,
+) -> Result<BeatSource, String> {
+    fn keep_newer(winner: &mut Option<(Value, PathBuf)>, row: Value, journal: PathBuf) {
+        // Journal order is not recency order, so the ts picks the winner;
+        // an equal ts keeps the first journal's copy, the row a merged
+        // scan's stable sort surfaces first.
+        let newer = match winner {
+            None => true,
+            Some((best, _)) => s_str(&row, "ts").unwrap_or("") > s_str(best, "ts").unwrap_or(""),
+        };
+        if newer {
+            *winner = Some((row, journal));
         }
     }
-    let payload = scan(events_paths, scope)?;
-    Ok(payload["events"]
-        .as_array()
-        .and_then(|e| {
+    let mut winner: Option<(Value, PathBuf)> = None;
+    if let Some(session) = holder_session.filter(|s| !s.trim().is_empty()) {
+        for path in events_paths {
+            let payload = scan_scopes(std::slice::from_ref(path), None)?;
+            // No row of this holder in this journal: the next one may
+            // still hold it, so the scope fallback only fires after every
+            // journal came up empty.
+            let Some(row) = payload["events"].as_array().and_then(|events| {
+                events.iter().find(|r| {
+                    r.get("data")
+                        .and_then(|d| d.get("holder_session"))
+                        .and_then(Value::as_str)
+                        == Some(session)
+                        && (!loop_only || s_str(r, "source") == Some("loop"))
+                })
+            }) else {
+                continue;
+            };
+            let journal = crate::event_store::live_journal(path);
+            keep_newer(&mut winner, row.clone(), journal);
+        }
+        if let Some((row, journal)) = winner.take() {
+            return Ok(BeatSource {
+                row: Some(row),
+                journal: Some(journal),
+            });
+        }
+    }
+    for path in events_paths {
+        let payload = scan_scopes(std::slice::from_ref(path), Some(scope))?;
+        let Some(row) = payload["events"].as_array().and_then(|e| {
             e.iter()
                 .find(|r| !loop_only || s_str(r, "source") == Some("loop"))
-        })
-        .cloned())
+        }) else {
+            continue;
+        };
+        let journal = crate::event_store::live_journal(path);
+        keep_newer(&mut winner, row.clone(), journal);
+    }
+    let (row, journal) = match winner {
+        Some((row, journal)) => (Some(row), Some(journal)),
+        None => (None, None),
+    };
+    Ok(BeatSource { row, journal })
 }
 
 fn render(payload: &Value) -> String {
@@ -2175,6 +2227,60 @@ mod tests {
         let none =
             previous_beat(std::slice::from_ref(&apath), "x-bbbb", Some("sess-x"), true).unwrap();
         assert_eq!(none, None);
+    }
+
+    #[test]
+    fn previous_beat_names_the_journal_that_held_the_row() {
+        let (_old_dir, old_path) = journal(&[checkin(
+            "2026-09-10T08:00:00Z",
+            json!({"scope": "x-aaaa", "change": "older beat", "holder_session": "sess-k"}),
+        )]);
+        let (_new_dir, new_path) = journal(&[checkin(
+            "2026-09-10T09:00:00Z",
+            json!({"scope": "x-bbbb", "change": "newer beat", "holder_session": "sess-k"}),
+        )]);
+        let source = previous_beat_with_source(
+            &[old_path.clone(), new_path.clone()],
+            "x-aaaa",
+            Some("sess-k"),
+            false,
+        )
+        .unwrap();
+        // The holder walk crosses journals, so the newest row wins even
+        // though the older journal is listed first.
+        let row = source.row.expect("the newest row across both journals");
+        assert_eq!(row["data"]["change"], json!("newer beat"));
+        // live_journal canonicalizes the recorded path, so the expectation
+        // is spelled the same way, never against the raw tempdir path.
+        assert_eq!(
+            source.journal,
+            Some(crate::event_store::live_journal(&new_path))
+        );
+        // No row of this session anywhere: the scope fallback wins and
+        // still names its journal.
+        let source = previous_beat_with_source(
+            &[old_path.clone(), new_path.clone()],
+            "x-bbbb",
+            Some("sess-none"),
+            false,
+        )
+        .unwrap();
+        let row = source.row.expect("the scope's newest row");
+        assert_eq!(row["data"]["change"], json!("newer beat"));
+        assert_eq!(
+            source.journal,
+            Some(crate::event_store::live_journal(&new_path))
+        );
+        // The delegating wrapper keeps the row and drops the journal.
+        let row = previous_beat(
+            &[old_path.clone(), new_path.clone()],
+            "x-aaaa",
+            Some("sess-k"),
+            false,
+        )
+        .unwrap()
+        .expect("the wrapper returns the same row");
+        assert_eq!(row["data"]["change"], json!("newer beat"));
     }
 
     #[test]

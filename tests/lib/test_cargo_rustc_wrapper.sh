@@ -83,7 +83,7 @@ t03_compile_asks_admission_and_probe_does_not() {
   calls="$stub_dir/calls.txt"
   cat > "$stub_dir/fno-agents" <<STUB
 #!/usr/bin/env bash
-echo "\$*" >> "$calls"
+echo "\$* manifest=\${CARGO_MANIFEST_DIR:-}" >> "$calls"
 STUB
   chmod +x "$stub_dir/fno-agents"
 
@@ -91,12 +91,14 @@ STUB
   PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo --print=cfg >/dev/null 2>&1
   [[ -s "$calls" ]] && { fail "T03: a probe asked for admission: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
 
-  PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >/dev/null 2>&1
+  # Cargo sets CARGO_MANIFEST_DIR on the wrapper. The admission call must not
+  # carry it, or the live-store fence refuses the claims store.
+  CARGO_MANIFEST_DIR=/crate PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >/dev/null 2>&1
   rc=$?
   [[ "$rc" -eq 0 ]] || { fail "T03: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
-  grep -q "^test-run build-admit --cargo-pid [0-9][0-9]* --worktree ${REPO_ROOT}\$" "$calls" \
-    || { fail "T03: compile did not ask admission as expected: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
-  pass "T03 a compile asks build admission; -vV and --print probes do not"
+  grep -q "^test-run build-admit --cargo-pid [0-9][0-9]* --worktree ${REPO_ROOT} manifest=\$" "$calls" \
+    || { fail "T03: compile did not ask admission without cargo's manifest dir: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
+  pass "T03 a compile asks build admission without CARGO_MANIFEST_DIR; -vV and --print probes do not"
   rm -rf "$stub_dir"
 }
 
@@ -136,7 +138,7 @@ STUB
   grep -q "build admission unavailable (exit 2)" "$err_file" \
     || { fail "T04: stderr does not name the unadmitted build: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$fno_calls" ]] \
       && grep -q "doctor event emit build_admission_unavailable" "$fno_calls" \
       && grep -q '"reason":"error"' "$fno_calls"; then
@@ -178,19 +180,21 @@ t06_run_door_admits_then_execs() {
   calls="$stub_dir/calls.txt"
   cat > "$stub_dir/fno-agents" <<STUB
 #!/usr/bin/env bash
-echo "\$*" >> "$calls"
+echo "\$* manifest=\${CARGO_MANIFEST_DIR:-}" >> "$calls"
 STUB
   chmod +x "$stub_dir/fno-agents"
   out_file="$stub_dir/out.txt"
   err_file="$stub_dir/err.txt"
 
-  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/sh -c 'echo ran "$@"; exit 7' x a b >"$out_file" 2>"$err_file"
+  # The test binary keeps CARGO_MANIFEST_DIR: the live-store fence reads it to
+  # keep tests off the operator store. Only the admission call drops it.
+  CARGO_MANIFEST_DIR=/crate TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/sh -c 'echo ran "$@" "$CARGO_MANIFEST_DIR"; exit 7' x a b >"$out_file" 2>"$err_file"
   rc=$?
   [[ "$rc" -eq 7 ]] || { fail "T06: expected rc=7 (the binary's own exit), got $rc"; rm -rf "$stub_dir"; return; }
-  grep -q '^ran a b$' "$out_file" || { fail "T06: the binary did not run with its args: $(cat "$out_file")"; rm -rf "$stub_dir"; return; }
-  grep -q "^test-run run-admit --cargo-pid [0-9][0-9]* --worktree ${REPO_ROOT}\$" "$calls" \
-    || { fail "T06: the run door did not ask admission: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
-  pass "T06 --run asks run admission, then execs the binary with its own args and exit code"
+  grep -q '^ran a b /crate$' "$out_file" || { fail "T06: the binary did not run with its args and CARGO_MANIFEST_DIR: $(cat "$out_file")"; rm -rf "$stub_dir"; return; }
+  grep -q "^test-run run-admit --cargo-pid [0-9][0-9]* --worktree ${REPO_ROOT} manifest=\$" "$calls" \
+    || { fail "T06: the run door did not ask admission without cargo's manifest dir: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
+  pass "T06 --run asks run admission without CARGO_MANIFEST_DIR, then execs the binary with its args, env and exit code"
   rm -rf "$stub_dir"
 }
 
@@ -323,7 +327,7 @@ STUB
   grep -q "fno doctor update" "$err_file" \
     || { fail "T12: stderr does not name the remedy: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$fno_calls" ]] \
       && grep -q "doctor event emit build_admission_unavailable" "$fno_calls" \
       && grep -q '"reason":"verb_missing"' "$fno_calls"; then
@@ -366,7 +370,7 @@ STUB
   grep -q "has no run-admit" "$err_file" \
     || { fail "T13: stderr does not name the missing verb: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
   found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [[ -s "$fno_calls" ]] \
       && grep -q "doctor event emit run_admission_unavailable" "$fno_calls" \
       && grep -q '"reason":"verb_missing"' "$fno_calls"; then

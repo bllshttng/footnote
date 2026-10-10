@@ -35,6 +35,7 @@ const SOURCE_PIN_UNAVAILABLE: &str = "the deployed fno-agents could not answer s
 
 const UPDATE_CLAIM_KEY: &str = "update:fno";
 const UV_INSTALL_ATTEMPTS: u32 = 3;
+const UPDATE_BUDGET_SECS: u64 = 60;
 
 fn exe_suffix() -> &'static str {
     if cfg!(windows) {
@@ -256,6 +257,49 @@ fn run_inherit(bin: &Path, args: &[String]) -> i32 {
         },
         Err(_) => 1,
     }
+}
+
+/// The compile fallback. `cargo install` skips the checkout's
+/// `.cargo/config.toml`, so the admission wrapper it names never ran and an
+/// update compiled outside the build:cargo slot. RUSTC_WRAPPER puts it back.
+fn run_cargo_install(source: &Path, args: &[String]) -> i32 {
+    let mut cmd = crate::process_admission::std_command("cargo");
+    cmd.args(args);
+    if std::env::var_os("RUSTC_WRAPPER").is_none() {
+        let wrapper = source
+            .parent()
+            .map(|root| root.join("scripts/lib/cargo-rustc-wrapper.sh"))
+            .filter(|w| w.is_file());
+        if let Some(wrapper) = wrapper {
+            cmd.env("RUSTC_WRAPPER", wrapper);
+        }
+    }
+    cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+}
+
+/// Install the CI-built tarball for `crates_rev` into `bin_dir`. Err names
+/// why there is none, for the compile fallback's line.
+fn deploy_prebuilt(crates_rev: &str, bin_dir: &Path, dry_run: bool) -> Result<(), String> {
+    use crate::update_prebuilt as pre;
+    let platform = pre::platform().ok_or("CI builds no binary for this platform")?;
+    let url = pre::asset_url(crates_rev, platform);
+    if dry_run {
+        println!("Would download: {url} (cargo install only when it is absent)");
+        return Ok(());
+    }
+    println!("fno doctor update: downloading the CI build: {url}");
+    let unpacked = pre::fetch(crates_rev, &install_dir())?;
+    let swapped = pre::swap_into(&unpacked, bin_dir);
+    if let Some(staging) = unpacked.parent() {
+        let _ = std::fs::remove_dir_all(staging);
+    }
+    swapped?;
+    println!(
+        "fno doctor update: installed the CI build for crates rev {} into {}",
+        &crates_rev[..crates_rev.len().min(12)],
+        bin_dir.display()
+    );
+    Ok(())
 }
 
 fn command_for(bin: &Path, args: &[String]) -> std::io::Result<Command> {
@@ -799,7 +843,7 @@ fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> 
         "fno doctor update: refreshing mux front door: cargo {}",
         args.join(" ")
     );
-    let code = run_inherit(Path::new("cargo"), &args);
+    let code = run_cargo_install(source, &args);
     if code != 0 {
         eprintln!(
             "fno doctor update: WARNING: mux front door install failed (exit {code}); `fno` may be absent/stale; continuing"
@@ -1106,38 +1150,52 @@ fn refresh_rust_bins(
             .unwrap_or_else(|| cargo_default_home()),
         None => cargo_default_home(),
     };
-    if which_cargo().is_none() {
-        eprintln!(
-            "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping"
-        );
-        render_component_evidence(source, subtree.as_deref(), &install_root);
-        return "skipped-no-cargo".into();
+    // CI already built this crates/ rev on its main merge: download it. A
+    // local compile ran 2 hours at load 297, so it is the fallback only.
+    let prebuilt = match subtree.as_deref() {
+        Some(st) => deploy_prebuilt(st, &install_root.join("bin"), dry_run),
+        None => Err("the crates/ rev is unknown".to_string()),
+    };
+    if let Err(why) = &prebuilt {
+        println!("fno doctor update: no CI build to install ({why}); compiling from source");
     }
-    let args: Vec<String> = [
-        "install".to_string(),
-        "--path".into(),
-        crate_dir.to_string_lossy().into_owned(),
-        "--bins".into(),
-        "--root".into(),
-        install_root.to_string_lossy().into_owned(),
-    ]
-    .to_vec();
-    if dry_run {
-        println!("Would run: cargo {}", args.join(" "));
-        install_mux_front_door(source, &install_root, true);
+    if dry_run && prebuilt.is_ok() {
         return "dry-run".into();
     }
-    println!(
-        "fno doctor update: refreshing rust bins: cargo {}",
-        args.join(" ")
-    );
-    if run_inherit(Path::new("cargo"), &args) != 0 {
-        eprintln!(
-            "fno doctor update: WARNING: cargo install failed; rust bins NOT refreshed; continuing with the install"
+    if prebuilt.is_err() {
+        if which_cargo().is_none() {
+            eprintln!(
+                "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping"
+            );
+            render_component_evidence(source, subtree.as_deref(), &install_root);
+            return "skipped-no-cargo".into();
+        }
+        let args: Vec<String> = [
+            "install".to_string(),
+            "--path".into(),
+            crate_dir.to_string_lossy().into_owned(),
+            "--bins".into(),
+            "--root".into(),
+            install_root.to_string_lossy().into_owned(),
+        ]
+        .to_vec();
+        if dry_run {
+            println!("Would run: cargo {}", args.join(" "));
+            install_mux_front_door(source, &install_root, true);
+            return "dry-run".into();
+        }
+        println!(
+            "fno doctor update: refreshing rust bins: cargo {}",
+            args.join(" ")
         );
-        render_component_evidence(source, subtree.as_deref(), &install_root);
-        failed.push("rust bins refresh".into());
-        return "failed".into();
+        if run_cargo_install(source, &args) != 0 {
+            eprintln!(
+                "fno doctor update: WARNING: cargo install failed; rust bins NOT refreshed; continuing with the install"
+            );
+            render_component_evidence(source, subtree.as_deref(), &install_root);
+            failed.push("rust bins refresh".into());
+            return "failed".into();
+        }
     }
     // Post-deploy verify: cargo can exit 0 yet deploy stale bytes, so the
     // triad is re-probed natively; the client must prove current first.
@@ -1174,7 +1232,10 @@ fn refresh_rust_bins(
         failed.push("rust bins post-deploy verify".into());
         return "failed".into();
     }
-    install_mux_front_door(source, &install_root, false);
+    // The tarball carries the front door; only a compile builds it apart.
+    if prebuilt.is_err() {
+        install_mux_front_door(source, &install_root, false);
+    }
     if let Err(e) = sync_triad(&bin_dir, false) {
         eprintln!("{e}");
         failed.push("triad sync".into());
@@ -1252,7 +1313,16 @@ fn refresh_fresh_path(
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .unwrap_or_else(cargo_default_home);
-        install_mux_front_door(source, &root, dry_run);
+        // The tarball's triad is built from the same crates/ rev as the
+        // fresh one, so replacing it with the front door is safe.
+        let prebuilt = match subtree {
+            Some(st) => deploy_prebuilt(st, &root.join("bin"), dry_run),
+            None => Err("the crates/ rev is unknown".to_string()),
+        };
+        if let Err(why) = prebuilt {
+            println!("fno doctor update: no CI build to install ({why}); compiling the front door");
+            install_mux_front_door(source, &root, dry_run);
+        }
     }
     let report = component_verdict(
         source,
@@ -1554,7 +1624,8 @@ fn has_shipped_pyc(td: &Path) -> bool {
 
 /// Acquire the machine-global update claim. Held means another session is
 /// updating fno right now: the loser's update either already landed (the
-/// marker reads this run's rev) or is minutes away, so REFUSE, never queue.
+/// marker reads this run's rev) or is under way, so it JOINS that run and
+/// exits with its result. It never starts a second install.
 fn acquire_update_claim(rev: Option<&str>) -> Result<(), i32> {
     let holder = format!("fno-update-pid{}", std::process::id());
     let args: Vec<String> = [
@@ -1584,10 +1655,13 @@ fn acquire_update_claim(rev: Option<&str>) -> Result<(), i32> {
                     return Err(0);
                 }
             }
-            println!(
-                "fno doctor update: another session is updating fno right now (claim held by {peer}); skipping. Re-run once it finishes."
-            );
-            Err(0)
+            let Some(pid) = update_holder_pid(peer) else {
+                println!(
+                    "fno doctor update: another session is updating fno right now (claim held by {peer}); skipping. Re-run once it finishes."
+                );
+                return Err(0);
+            };
+            Err(join_running_update(pid))
         }
         _ => {
             eprintln!(
@@ -1595,6 +1669,56 @@ fn acquire_update_claim(rev: Option<&str>) -> Result<(), i32> {
             );
             Err(1)
         }
+    }
+}
+
+/// The pid in an update claim holder (`fno-update-pid<N>`), or None for any
+/// other holder.
+pub(crate) fn update_holder_pid(holder: &str) -> Option<u32> {
+    holder.strip_prefix("fno-update-pid")?.parse().ok()
+}
+
+/// Wait for the update that holds the claim, then exit with its result. A
+/// second update used to refuse, or before that, wait 52 minutes on cargo's
+/// build-dir lock and never say for whom.
+fn join_running_update(pid: u32) -> i32 {
+    const JOIN_BOUND: Duration = Duration::from_secs(30 * 60);
+    let deadline = Instant::now() + JOIN_BOUND;
+    // kill(pid, 0) probes liveness without a signal; EPERM still means alive.
+    let alive = || {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    };
+    // A dead holder ran nothing this joiner can wait on: the journal's last
+    // row belongs to some earlier update, so it proves nothing about now.
+    if !alive() {
+        eprintln!(
+            "fno doctor update: the update claim names pid {pid}, which is gone; the stale claim frees on its TTL. Re-run then."
+        );
+        return 1;
+    }
+    println!("fno doctor update: joining the running update (pid {pid}); waiting for it to finish");
+    while alive() {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "fno doctor update: the update (pid {pid}) is still running after 30 minutes; stopped waiting"
+            );
+            return 1;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let outcome = last_update_event()
+        .and_then(|e| e.get("type").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
+    if outcome == "fno_update_installed" {
+        println!("fno doctor update: the update (pid {pid}) installed; nothing left to do.");
+        0
+    } else {
+        eprintln!(
+            "fno doctor update: the update (pid {pid}) ended without an install ({}); re-run to retry.",
+            if outcome.is_empty() { "no journal row" } else { outcome.as_str() }
+        );
+        1
     }
 }
 
@@ -1625,6 +1749,7 @@ fn release_update_claim() {
 /// Run the verb for one argv tail (`doctor update ...` minus the leading
 /// words, or the root `update` spelling). Returns the process exit code.
 pub fn run(rest: &[std::ffi::OsString]) -> i32 {
+    let started = Instant::now();
     let flags = match parse_args(rest) {
         Ok(f) => f,
         Err(e) => {
@@ -1848,6 +1973,13 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         journal_call("failed", &[("rc", rc.to_string())], None);
         1
     };
+    // An update finishes in 60 seconds (user order 2026-10-09). One that runs
+    // longer still installs, but exits 1 and names its time, so a slow path
+    // such as the compile fallback never passes as healthy.
+    let took = started.elapsed().as_secs();
+    if took > UPDATE_BUDGET_SECS {
+        failed.push(format!("the {UPDATE_BUDGET_SECS}s budget (took {took}s)"));
+    }
     // One summary line, always last: the daemon verdict, then any failed step.
     match &verdict {
         Ok(line) if failed.is_empty() => println!("fno update: done; {line}."),
@@ -1856,7 +1988,7 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
             eprintln!("fno update: FAILED step(s): {}; {line}.", failed.join(", "))
         }
     }
-    if verdict.is_err() {
+    if verdict.is_err() || !failed.is_empty() {
         1
     } else {
         code

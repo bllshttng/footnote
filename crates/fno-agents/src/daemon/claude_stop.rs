@@ -35,11 +35,12 @@ fn proved_ours(pid: u32, start: u64) -> bool {
 }
 
 /// The one process set a stop may end: the roster worker claude names for the
-/// session, plus every direct child (the `bg-pty-host` and its `bg-spare` are
+/// session, every direct child (the `bg-pty-host` and its `bg-spare` are
 /// separate process groups, so a group kill of the host would orphan the
-/// session). Pure, so tests inject the roster, the process table and the
-/// start-time reader. Refuses on any doubt, and a refusal means no caller in
-/// this module signals anything.
+/// session), and every deeper descendant. Pure, so tests inject the roster,
+/// the process table and the start-time reader. Refuses on any doubt about
+/// the worker or a direct child, and a refusal means no caller in this module
+/// signals anything.
 fn capture_target(
     roster: &ClaudeRoster,
     short: &str,
@@ -86,7 +87,16 @@ fn capture_target(
             .filter(|row| row.ppid == pid)
             .map(|row| row.pid),
     );
-    let mut proved = Vec::with_capacity(members.len());
+    // Claude runs each Bash command in its own process group, so neither a
+    // group kill nor the session's exit reaches a cargo it started: left
+    // alone, the cargo runs on under pid 1 and keeps its admission slot.
+    // Deeper descendants join the set. One that exits between the table
+    // read and its start-time read is skipped, not refused.
+    let deeper: Vec<u32> = crate::census::descendants(table, pid)
+        .into_iter()
+        .filter(|member| !members.contains(member))
+        .collect();
+    let mut proved = Vec::with_capacity(members.len() + deeper.len());
     for member in members {
         if member <= 1 {
             return Err(format!("pid {member} is not a signalable target"));
@@ -94,6 +104,11 @@ fn capture_target(
         match start_of(member) {
             Some(start) => proved.push((member, start)),
             None => return Err(format!("no readable start time for pid {member}")),
+        }
+    }
+    for member in deeper.into_iter().filter(|member| *member > 1) {
+        if let Some(start) = start_of(member) {
+            proved.push((member, start));
         }
     }
     Ok(proved)
@@ -465,23 +480,32 @@ mod tests {
         Some(u64::from(pid) + 7)
     }
 
-    /// AC2-HP: the worker plus its direct children, each with a start time.
+    /// AC2-HP: the worker, its direct children and every deeper descendant,
+    /// each with a start time. The Bash command's shell and its cargo sit
+    /// below the session in their own process group; a deeper process whose
+    /// start time is gone (it exited between reads) is skipped, not refused.
     #[test]
-    fn capture_target_names_the_worker_and_its_children() {
+    fn capture_target_names_the_worker_and_its_descendants() {
         let roster = roster_with("ee99ff00-7777-8888-9999-aaaabbbbcccc", Some(5002));
         let table = vec![
             crate::census::test_proc_row(5002, 1, "claude bg-pty-host"),
             crate::census::test_proc_row(5100, 5002, "claude bg-spare"),
+            crate::census::test_proc_row(5150, 5100, "zsh -c cargo build"),
+            crate::census::test_proc_row(5200, 5150, "cargo build"),
+            crate::census::test_proc_row(5250, 5200, "rustc --crate-name a"),
         ];
         let got = capture_target(
             &roster,
             "ee99ff00",
             Some("ee99ff00-7777-8888-9999-aaaabbbbcccc"),
             &table,
-            &start_of_every,
+            &|p| if p == 5250 { None } else { start_of_every(p) },
         )
         .expect("proved target");
-        assert_eq!(got, vec![(5002, 5009), (5100, 5107)]);
+        assert_eq!(
+            got,
+            vec![(5002, 5009), (5100, 5107), (5150, 5157), (5200, 5207)]
+        );
     }
 
     /// AC2-ERR: a same-short worker with a different session id refuses and

@@ -304,3 +304,10 @@ fn source_sync_fast_forwards_or_refuses_naming_the_gap() {
         "{refusal}"
     );
 }
+
+#[test]
+fn a_second_update_joins_only_an_update_holder() {
+    assert_eq!(update_holder_pid("fno-update-pid4242"), Some(4242));
+    assert_eq!(update_holder_pid("target-session:abc"), None);
+    assert_eq!(update_holder_pid("fno-update-pidX"), None);
+}
