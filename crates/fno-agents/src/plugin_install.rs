@@ -6,7 +6,7 @@
 //! caches copy what they are pointed at.
 //!
 //! This module owns stage build, the `--check`/`--restage` deploy verbs, the
-//! claude, opencode and agy arms plus the env exports. The codex arm stays on
+//! claude, opencode and agy arms plus the old env-export cleanup. The codex arm stays on
 //! the Python `converge` engine in the Python shim.
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,23 +30,6 @@ pub(crate) fn state_root() -> PathBuf {
     std::env::var_os("FNO_RECLAIM_STATE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_home().join(".fno"))
-}
-
-fn build_dir_value() -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    crate::cargo_build_dirs::build_dir_env_value(&cwd)
-}
-
-/// The fleet sccache cache path, only when sccache is installed. A machine
-/// without it gets a build-dir export and nothing else.
-fn sccache_dir_value() -> Option<String> {
-    crate::cargo_build_dirs::sccache_bin()?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    Some(
-        crate::cargo_build_dirs::sccache_dir(&cwd)
-            .display()
-            .to_string(),
-    )
 }
 
 fn run_checked(cmd: &[String], cwd: Option<&Path>) -> Result<String, String> {
@@ -888,123 +871,107 @@ fn install_opencode() -> Result<String, String> {
     ))
 }
 
-fn export_claude_env() -> Result<(), String> {
-    let path = dirs_home().join(".claude/settings.json");
-    // Absent: start from an empty object. Present but unparseable: refuse to
-    // write - the file is the user's, and an env-only rewrite would destroy it.
-    let mut data: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(&path)
-    {
-        Err(_) => Default::default(),
-        Ok(text) => serde_json::from_str(&text).map_err(|e| {
-            format!(
-                "claude env: {} is not valid JSON ({e}); not overwriting",
-                path.display()
-            )
-        })?,
-    };
-    set_env_entry(&mut data, BUILD_DIR_KEY, build_dir_value());
-    if let Some(dir) = sccache_dir_value() {
-        set_env_entry(&mut data, SCCACHE_DIR_KEY, dir);
+/// A value fno wrote: under a `.fno` state dir, or the exact value this
+/// machine's build base resolves to (a custom `paths.cargo_targets_base`).
+fn fno_env_value(key: &str, value: &str) -> bool {
+    if value.contains(".fno") {
+        return true;
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("claude env: {e}"))?;
-    }
-    let text = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
-    std::fs::write(&path, text).map_err(|e| format!("claude env: {e}"))
-}
-
-fn set_env_entry(data: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: String) {
-    let env = data.entry("env").or_insert(json!({}));
-    if !env.is_object() {
-        *env = json!({});
-    }
-    if let Some(map) = env.as_object_mut() {
-        map.insert(key.to_string(), json!(value));
-    }
-}
-
-fn export_codex_env() -> Result<(), String> {
-    let path = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs_home().join(".codex"))
-        .join("config.toml");
-    // Same contract as the claude export: absent starts empty, unparseable
-    // refuses rather than replacing the user's config with a one-key table.
-    let mut document: toml::Value = match std::fs::read_to_string(&path) {
-        Err(_) => toml::Value::Table(Default::default()),
-        Ok(text) => toml::from_str(&text).map_err(|e| {
-            format!(
-                "codex env: {} is not valid TOML ({e}); not overwriting",
-                path.display()
-            )
-        })?,
-    };
-    if !document.is_table() {
-        document = toml::Value::Table(Default::default());
-    }
-    let table = document.as_table_mut().unwrap();
-    let set = table
-        .entry("shell_environment_policy")
-        .or_insert(toml::Value::Table(Default::default()))
-        .as_table_mut()
-        .ok_or("codex env: shell_environment_policy is not a table")?
-        .entry("set")
-        .or_insert(toml::Value::Table(Default::default()))
-        .as_table_mut()
-        .ok_or("codex env: shell_environment_policy.set is not a table")?;
-    set.insert(BUILD_DIR_KEY.into(), toml::Value::String(build_dir_value()));
-    if let Some(dir) = sccache_dir_value() {
-        set.insert(SCCACHE_DIR_KEY.into(), toml::Value::String(dir));
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("codex env: {e}"))?;
-    }
-    let text = toml::to_string_pretty(&document).map_err(|e| format!("codex env: {e}"));
-    std::fs::write(&path, text?).map_err(|e| format!("codex env: {e}"))
-}
-
-fn export_rc_env() -> Option<PathBuf> {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let rc = dirs_home().join(if shell.contains("zsh") {
-        ".zshrc"
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let ours = if key == BUILD_DIR_KEY {
+        crate::cargo_build_dirs::build_dir_env_value(&cwd)
     } else {
-        ".bashrc"
-    });
-    let mut text = std::fs::read_to_string(&rc).unwrap_or_default();
-    let fresh_block = rc_block(&build_dir_value(), sccache_dir_value().as_deref());
-    if let Some(mark_at) = text.find(RC_MARK) {
-        // The marked block is ours to keep current: rewrite it in place when
-        // an exported value drifted (a later cargo_targets_base change must
-        // reach the shell). The block spans the mark plus every consecutive
-        // export of a key we own, so a one-line legacy block and the current
-        // two-line one replace the same way.
-        let block_end = marked_block_end(&text, mark_at);
-        let mut updated = String::with_capacity(text.len());
-        updated.push_str(&text[..mark_at]);
-        updated.push_str(&fresh_block);
-        updated.push('\n');
-        updated.push_str(&text[block_end..]);
-        return std::fs::write(&rc, updated).ok().map(|_| rc);
-    }
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(&fresh_block);
-    text.push('\n');
-    std::fs::write(&rc, text).ok()?;
-    Some(rc)
+        crate::cargo_build_dirs::sccache_dir(&cwd)
+            .display()
+            .to_string()
+    };
+    value == ours
 }
 
-/// The marked rc block: the build-dir export, plus the sccache cache export
-/// when sccache is installed. An RUSTC_WRAPPER export is deliberately absent:
-/// the bare env var overrides the tracked build.rustc-wrapper config, which
-/// would route fleet builds around the admission wrapper.
-fn rc_block(build_dir: &str, sccache_dir: Option<&str>) -> String {
-    let mut block = format!("{RC_MARK}\nexport {BUILD_DIR_KEY}=\"{build_dir}\"");
-    if let Some(dir) = sccache_dir {
-        block.push_str(&format!("\nexport {SCCACHE_DIR_KEY}=\"{dir}\""));
+/// Drop fno's build-dir and sccache keys from a Claude settings `env` map.
+/// An `env` this pass empties goes too. Returns the count removed.
+fn strip_claude_env(
+    data: &mut serde_json::Map<String, Value>,
+    ours: impl Fn(&str, &str) -> bool,
+) -> usize {
+    let Some(env) = data.get_mut("env").and_then(Value::as_object_mut) else {
+        return 0;
+    };
+    let before = env.len();
+    for key in [BUILD_DIR_KEY, SCCACHE_DIR_KEY] {
+        if env
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|v| ours(key, v))
+        {
+            env.remove(key);
+        }
     }
-    block
+    let removed = before - env.len();
+    if removed > 0 && env.is_empty() {
+        data.remove("env");
+    }
+    removed
+}
+
+/// Line-based, so a codex config keeps its comments and layout. Drops fno's
+/// keys from `[shell_environment_policy.set]`, and the header when this pass
+/// emptied the table. `None` when nothing matched.
+fn strip_codex_env(text: &str, ours: impl Fn(&str, &str) -> bool) -> Option<String> {
+    let owned = |t: &str| {
+        [BUILD_DIR_KEY, SCCACHE_DIR_KEY].into_iter().any(|key| {
+            t.strip_prefix(key)
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('='))
+                .is_some_and(|v| ours(key, v.trim().trim_matches('"')))
+        })
+    };
+    let mut out: Vec<&str> = Vec::new();
+    let mut removed = 0;
+    let mut in_set = false;
+    // The open set header: its index in `out` and the keys removed under it.
+    // A surviving key closes it, so the header stays.
+    let mut open: Option<(usize, usize)> = None;
+    let mut emptied = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            emptied.extend(open.take().filter(|&(_, n)| n > 0).map(|(at, _)| at));
+            in_set = t == "[shell_environment_policy.set]";
+            if in_set {
+                open = Some((out.len(), 0));
+            }
+        } else if in_set {
+            if owned(t) {
+                removed += 1;
+                if let Some((_, n)) = open.as_mut() {
+                    *n += 1;
+                }
+                continue;
+            }
+            if !t.is_empty() {
+                open = None;
+            }
+        }
+        out.push(line);
+    }
+    emptied.extend(open.filter(|&(_, n)| n > 0).map(|(at, _)| at));
+    for at in emptied.into_iter().rev() {
+        out.remove(at);
+    }
+    if removed == 0 {
+        return None;
+    }
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    Some(joined)
+}
+
+/// Drop the marked rc block older installs appended. `None` when absent.
+fn strip_rc_block(text: &str) -> Option<String> {
+    let mark_at = text.find(RC_MARK)?;
+    let end = marked_block_end(text, mark_at);
+    Some([&text[..mark_at], &text[end..]].concat())
 }
 
 /// Where the marked block ends in `text`: past the mark line plus every
@@ -1023,6 +990,56 @@ fn marked_block_end(text: &str, mark_at: usize) -> usize {
         block_end += line.len() + 1;
     }
     block_end.min(text.len())
+}
+
+/// Older installs exported CARGO_BUILD_BUILD_DIR and SCCACHE_DIR machine-wide:
+/// the shell rc, Claude settings env and Codex shell env. That moved every
+/// Rust project's build files under ~/.fno, where reclaim sweeps them. Install
+/// now removes those lines instead. Footnote builds still land in the fno
+/// base: fno verbs, the target stop hook and the daemon set the build dir per
+/// process, and the repo's rustc wrapper sets SCCACHE_DIR. Returns the files
+/// rewritten, and an error line per file left alone.
+fn retract_env_exports() -> (Vec<PathBuf>, Vec<String>) {
+    let home = dirs_home();
+    let mut changed = Vec::new();
+    let mut errors = Vec::new();
+    let claude = home.join(".claude/settings.json");
+    if let Ok(text) = std::fs::read_to_string(&claude) {
+        // Unparseable: leave it. The file is the user's.
+        match serde_json::from_str::<serde_json::Map<String, Value>>(&text) {
+            Ok(mut data) if strip_claude_env(&mut data, fno_env_value) > 0 => {
+                let text = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
+                match std::fs::write(&claude, text) {
+                    Ok(()) => changed.push(claude),
+                    Err(e) => errors.push(format!("claude env: {e}")),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => errors.push(format!(
+                "claude env: {} is not valid JSON ({e}); left alone",
+                claude.display()
+            )),
+        }
+    }
+    let codex = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"))
+        .join("config.toml");
+    let edits: [(PathBuf, fn(&str) -> Option<String>); 3] = [
+        (codex, |t| strip_codex_env(t, fno_env_value)),
+        (home.join(".zshrc"), strip_rc_block),
+        (home.join(".bashrc"), strip_rc_block),
+    ];
+    for (path, strip) in edits {
+        let Some(stripped) = std::fs::read_to_string(&path).ok().and_then(|t| strip(&t)) else {
+            continue;
+        };
+        match std::fs::write(&path, stripped) {
+            Ok(()) => changed.push(path),
+            Err(e) => errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+    (changed, errors)
 }
 
 /// Remove the second copies a successful install leaves behind. The gemini
@@ -1405,10 +1422,10 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 }
             }
         }
-        // Env-only mode: export the build-dir env to the harness surfaces without
-        // an install, so the codex path (converge in Python) exports too.
+        // Env-only mode: remove the old build-dir exports without an install,
+        // so the codex path (converge in Python) cleans up too.
         Some("--env-only") => {
-            env_exports_receipt();
+            env_retract_receipt();
             0
         }
         Some(harness) => {
@@ -1437,7 +1454,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             match outcome {
                 Ok(detail) => {
                     println!("plugin install {harness}: {detail}");
-                    env_exports_receipt();
+                    env_retract_receipt();
                     let (roots, _) = plugin_roots();
                     let (stale, refused) = remove_stale_copies(&dirs_home(), &roots);
                     for line in refused {
@@ -1471,7 +1488,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
 }
 
 /// The opencode arm: one install/uninstall/status door onto
-/// `opencode_install`, plus the shared env exports and stale-copy sweep the
+/// `opencode_install`, plus the shared env cleanup and stale-copy sweep the
 /// other harness arms run. `--json` keeps stdout to the receipt alone (the
 /// Python door parses it), so the prose side lines move to stderr there.
 fn run_opencode_arm(
@@ -1632,7 +1649,7 @@ fn run_opencode_arm(
                     eprintln!("{line}");
                 }
             }
-            for (line, is_error) in env_exports_lines() {
+            for (line, is_error) in env_retract_lines() {
                 if is_error {
                     eprintln!("{line}");
                 } else {
@@ -2015,30 +2032,30 @@ fn prime_plugin_root_pointer(stage: &Path) {
     let _ = std::fs::write(&ptr, format!("{}\n", stage.display()));
 }
 
-/// The env exports as (line, is_error) pairs, so an arm that must keep
-/// stdout to a JSON receipt can still run them with everything on stderr.
-fn env_exports_lines() -> Vec<(String, bool)> {
-    let mut lines: Vec<(String, bool)> = Vec::new();
-    if let Err(e) = export_claude_env() {
-        lines.push((format!("fno plugin install: {e}"), true));
+/// The env retraction as (line, is_error) pairs, so an arm that must keep
+/// stdout to a JSON receipt can still run it with everything on stderr. A
+/// machine with nothing to remove prints nothing.
+fn env_retract_lines() -> Vec<(String, bool)> {
+    let (changed, errors) = retract_env_exports();
+    let mut lines: Vec<(String, bool)> = errors
+        .into_iter()
+        .map(|e| (format!("fno plugin install: {e}"), true))
+        .collect();
+    if !changed.is_empty() {
+        let joined: Vec<String> = changed.iter().map(|p| p.display().to_string()).collect();
+        lines.push((
+            format!(
+                "removed the machine-wide {BUILD_DIR_KEY}/{SCCACHE_DIR_KEY} exports an older install wrote: {}",
+                joined.join(", ")
+            ),
+            false,
+        ));
     }
-    if let Err(e) = export_codex_env() {
-        lines.push((format!("fno plugin install: {e}"), true));
-    }
-    let rc = export_rc_env();
-    lines.push((
-        format!(
-            "build-dir env exported to: claude settings env; codex shell_environment_policy; rc ({})",
-            rc.map(|p| p.display().to_string())
-                .unwrap_or_else(|| "skipped".into())
-        ),
-        false,
-    ));
     lines
 }
 
-fn env_exports_receipt() {
-    for (line, is_error) in env_exports_lines() {
+fn env_retract_receipt() {
+    for (line, is_error) in env_retract_lines() {
         if is_error {
             eprintln!("{line}");
         } else {
@@ -2527,54 +2544,57 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // The block rewrite consumes the legacy one-line block and the current
-    // two-line one, and stops at the first export of a key we do not own.
+    // Install removes the machine-wide exports older installs wrote, and
+    // nothing else: a user's own keys, comments and tables survive.
     #[test]
-    fn marked_block_end_scans_owned_exports_only() {
-        let mark = "# fno: cargo build-dir";
-        let cargo = "export CARGO_BUILD_BUILD_DIR=\"/u/b\"";
-        let sccache = "export SCCACHE_DIR=\"/u/b/sccache\"";
-        let keep = "export KEEP=1";
-        let legacy = [mark, "\n", cargo, "\n", keep, "\n"].concat();
+    fn env_strippers_remove_only_fno_exports() {
+        let fno = |_: &str, v: &str| v.contains(".fno");
+
+        // rc: the legacy one-line block, the two-line block, and a block at
+        // EOF with no trailing newline all go; the next export stays.
+        let mark = "# fno: cargo build-dir\n";
+        let cargo = "export CARGO_BUILD_BUILD_DIR=\"/u/.fno/b\"\n";
+        let sccache = "export SCCACHE_DIR=\"/u/.fno/b/sccache\"\n";
+        let keep = "alias ll=ls\nexport KEEP=1\n";
+        for block in [[mark, cargo].concat(), [mark, cargo, sccache].concat()] {
+            let rc = ["alias ll=ls\n", &block, "export KEEP=1\n"].concat();
+            assert_eq!(strip_rc_block(&rc).as_deref(), Some(keep));
+        }
+        let bare = ["alias ll=ls\n", mark, cargo.trim_end()].concat();
+        assert_eq!(strip_rc_block(&bare).as_deref(), Some("alias ll=ls\n"));
+        assert_eq!(strip_rc_block(keep), None);
+
+        // claude: fno's keys go, a user's own value for the same key stays,
+        // and an env this pass empties goes too.
+        let mut data: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{"env": {"CARGO_BUILD_BUILD_DIR": "/u/.fno/b", "SCCACHE_DIR": "/mine", "KEEP": "1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(strip_claude_env(&mut data, fno), 1);
         assert_eq!(
-            marked_block_end(&legacy, legacy.find(mark).unwrap()),
-            legacy.find(keep).unwrap()
+            Value::Object(data),
+            json!({"env": {"SCCACHE_DIR": "/mine", "KEEP": "1"}})
         );
-        let current = [mark, "\n", cargo, "\n", sccache, "\n", keep, "\n"].concat();
+        let mut only: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"env": {"SCCACHE_DIR": "/u/.fno/b/sccache"}, "x": 1}"#)
+                .unwrap();
+        assert_eq!(strip_claude_env(&mut only, fno), 1);
+        assert_eq!(Value::Object(only), json!({"x": 1}));
+
+        // codex: an emptied set table loses its header; a table that keeps a
+        // key keeps it; keys outside the set table are never touched.
+        let codex = "model = \"x\"\n# mine\n\n[shell_environment_policy.set]\nCARGO_BUILD_BUILD_DIR = \"/u/.fno/b/{workspace-path-hash}\"\nSCCACHE_DIR = \"/u/.fno/b/sccache\"\n\n[plugins.\"other@x\"]\nenabled = true\nSCCACHE_DIR = \"/u/.fno/b\"\n";
         assert_eq!(
-            marked_block_end(&current, current.find(mark).unwrap()),
-            current.find(keep).unwrap()
+            strip_codex_env(codex, fno).as_deref(),
+            Some("model = \"x\"\n# mine\n\n\n[plugins.\"other@x\"]\nenabled = true\nSCCACHE_DIR = \"/u/.fno/b\"\n")
         );
-        // A block at EOF without a trailing newline clamps to the text end.
-        let bare = [mark, "\n", cargo].concat();
+        let shared =
+            "[shell_environment_policy.set]\nFOO = \"1\"\nSCCACHE_DIR = \"/u/.fno/b/sccache\"\n";
         assert_eq!(
-            marked_block_end(&bare, bare.find(mark).unwrap()),
-            bare.len()
+            strip_codex_env(shared, fno).as_deref(),
+            Some("[shell_environment_policy.set]\nFOO = \"1\"\n")
         );
-    }
-    // rc_block: build-dir only without sccache, both exports with it.
-    // No RUSTC_WRAPPER line ever: the bare env var overrides the tracked
-    // build.rustc-wrapper config and would bypass the admission wrapper.
-    #[test]
-    fn rc_block_lists_owned_keys_only() {
-        let b = "/u/.fno/cargo-build/{workspace-path-hash}";
-        let s = "/u/.fno/cargo-build/sccache";
-        let mark = "# fno: cargo build-dir";
-        let n = "\n";
-        let e1 = "export CARGO_BUILD_BUILD_DIR=\"";
-        let e2 = "export SCCACHE_DIR=\"";
-        assert_eq!(rc_block(b, None), [mark, n, e1, b, "\""].concat());
-        assert_eq!(
-            rc_block(b, Some(s)),
-            [
-                mark.to_string(),
-                n.to_string(),
-                [e1, b, "\""].concat(),
-                n.to_string(),
-                [e2, s, "\""].concat()
-            ]
-            .concat()
-        );
+        assert_eq!(strip_codex_env("model = \"x\"\n", fno), None);
     }
 
     // zcode install: a malformed config is refused byte-identical.

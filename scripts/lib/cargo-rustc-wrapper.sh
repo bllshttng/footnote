@@ -163,7 +163,7 @@ name_fallback_writer() {
             tail -n 500 "$log" >"$log.tmp" && mv "$log.tmp" "$log"
         fi
     } 2>/dev/null || true
-    echo "cargo-rustc-wrapper: CARGO_BUILD_BUILD_DIR is unset, so this build lands in the fallback base ~/.cargo/build; logged to ~/.fno/logs/cargo-fallback-writers.log. Run: fno config plugin install" >&2
+    echo 'cargo-rustc-wrapper: CARGO_BUILD_BUILD_DIR is unset, so this build lands in the fallback base ~/.cargo/build; logged to ~/.fno/logs/cargo-fallback-writers.log. To use the fno base in this shell: export CARGO_BUILD_BUILD_DIR="$(fno config build-dir)"' >&2
 }
 
 case " $* " in
@@ -186,8 +186,9 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     # keeps an operator's shorter override working.
     export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
     # The fleet cache lives under the build-dir base so one reclaim lane owns
-    # the whole tree. The rc export and fill_sccache_env set it first; this
-    # default only covers shells that predate them.
+    # the whole tree. fill_sccache_env sets it first for fno-spawned
+    # processes; this default covers every other footnote build. fno never
+    # exports it machine-wide, so other Rust projects keep their own cache.
     if [[ -z "${SCCACHE_DIR:-}" ]]; then
         base="${FNO_CARGO_TARGETS_BASE:-$STATE_DIR/cargo-build}"
         case "$base" in
