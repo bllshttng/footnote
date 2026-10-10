@@ -950,7 +950,7 @@ def test_interrupted_live_send_keeps_the_stored_copy(
 
     from fno.rust_binary import chats_verb
 
-    stored = chats_verb(["read", msg_id, "--all", "--json"], {})
+    stored = chats_verb(["show", msg_id, "--all", "--json"], {})
     assert stored["id"] == msg_id
     assert "kept body words" in stored["body"]
 
