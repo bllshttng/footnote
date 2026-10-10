@@ -27,6 +27,8 @@ bash scripts/setup/setup-worktree.sh
 
 Setup links shared state from canonical: vault symlink, gitignored `.claude/` subdirs, harness config roots. It warns and skips real files. Tracked files come from git checkout.
 
+The plugin `WorktreeCreate` hook and `worktree-manager.sh setup` already run this script through `scripts/lib/worktree-config.sh`. A bare `git worktree add` does not. Skip the setup line and `internal/` is a real directory: a plan written there never reaches canonical, and nothing warns.
+
 ## Removal
 
 The removal contract, missing until 174 trees piled up (74 GB). Four buckets, one trigger, one gate:

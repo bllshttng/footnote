@@ -118,8 +118,8 @@ Neither reads a field `_apply_graph_defaults` rewrites, so neither is a drift la
 | 1 | `fno agents workspace worktree ensure` / `fno do target start` | `worktree_cli/cli.py:282`, `target_cli.py:900` | KEEP, canonical autonomous path | - |
 | 2 | Raw `git worktree add` + linker | `scripts/setup/setup-worktree.sh` | KEEP, manual path converges | — |
 | 3 | Conductor UI recipe | `conductor.json:3`, `worktree-create-hook.sh` | KEEP, converge on linker | — |
-| 4 | Claude WorktreeCreate hook | `hooks/worktree-setup.sh` | RETIRE duplicate setup | OPEN |
-| 5 | `/speculate` private setup | `skills/speculate/scripts/worktree-setup.sh` | RETIRE duplicate setup | OPEN |
+| 4 | Claude WorktreeCreate hook | `hooks/worktree-setup.sh` | DONE: relocates, then links and reads config through `scripts/lib/worktree-config.sh` | — |
+| 5 | `/speculate` private setup | `scripts/lib/worktree-manager.sh setup` | DONE: private copy deleted; setup links through `scripts/lib/worktree-config.sh` | — |
 | 6 | Harness EnterWorktree | harness tool | KEEP, enters only | — |
 
 ## Census 9: test running
