@@ -116,7 +116,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_HARNESS` | py+rs | unclear: cli/src/fno/lead/state.py:268 |
 | `FNO_HARNESS_NAME` | rs | The caller's harness name in the canonical identity stamp; the hold gate's direct read pairs it with FNO_HARNESS_SESSION_ID to answer whether the caller is the recipient. |
 | `FNO_HARNESS_SESSION_ID` | rs | The normalized full harness session id; native context hooks use it when the provider-specific id is absent. |
-| `FNO_HEALTH_HISTORY` | py+rs | unclear: cli/src/fno/graph/triage.py:2038; crates/fno-agents/src/backlog/triage_health.rs (history_path) |
+| `FNO_HEALTH_HISTORY` | rs | crates/fno-agents/src/backlog/triage_health.rs (history_path) |
 | `FNO_HOME` | py+rs | Relocates fno's config-free sidecars (plugin-root pointer, push-stamps, corrections log, decision index) and the Rust defaults when no config sets state_dir. Does not move state_dir or the backlog; a store write under FNO_HOME that targets the default store ($HOME/.fno) is refused. Sandbox with FNO_CONFIG (docs/path-config.md). |
 | `FNO_IDLE_EXIT_GRACE_MS` | rs | unclear: crates/fno/src/server.rs:14324 |
 | `FNO_INBOX_ROOT` | py+rs | unclear: cli/src/fno/inbox/store.py:218 |
