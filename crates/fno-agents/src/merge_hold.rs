@@ -1169,16 +1169,23 @@ mod tests {
         assert!(r["detail"].as_str().unwrap().contains("not superuser lane"));
 
         // A store that cannot be read never answers "no rulings exist". The
-        // seeded fixture graph anchors a real decisions db, so clobber it:
-        // the db leg errors and, with no JSONL beside it, the read refuses.
-        std::fs::write(fx.graph.with_extension("db"), b"not a database").unwrap();
-        let r = release_with_decisions(
+        // seeded fixture graph anchors a real decisions db at the anchor
+        // walk's own path, so clobber THAT file (not the naive sibling) after
+        // the row read: the db leg errors and, with no JSONL beside it, the
+        // store read refuses.
+        let rows = crate::graph_store::read_rows(&fx.graph).unwrap();
+        std::fs::write(crate::backlog::database_path(&fx.graph), b"not a database").unwrap();
+        let out = release_hold(
+            &rows[0],
+            "t-0001",
+            &release_payload(fx.graph.display().to_string(), "d-anything"),
+            &rows,
             &fx.graph,
-            "d-anything",
             &fx._dir.path().join("absent.jsonl"),
         );
+        let r: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(r["outcome"], "refused", "{r}");
-        assert_eq!(r["exit_code"], 5);
+        assert_eq!(r["exit_code"], 5, "{r}");
     }
 
     #[test]
