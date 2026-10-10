@@ -1622,10 +1622,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // nothing, because a reaper that speaks only when it kills cannot be told
     // apart from a reaper that never ran.
     "orphan_reap_sweep",
-    // Worktree report sweep (daemon-emitted): one line per repo per 24h
-    // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
-    // construction, because a timer tick is not proof that work landed; removal
-    // stays on the merge-triggered path. Emitted even when the counts are zero,
+    // Worktree sweep (daemon-emitted): one line per repo per 6h saying what
+    // `fno agents workspace worktree cleanup --merged` WOULD archive, or what
+    // its --apply pass archived once a merge proof stands (a minted cleanup
+    // request, or the pass's own dry-run judgment for an outside merge).
+    // Emitted even when the counts are zero,
     // so a quiet repo cannot be mistaken for a sweep that never ran.
     "worktree_sweep",
     // Stale-question reconcile (daemon-emitted): `fno agents stale-escalate`
