@@ -5,11 +5,10 @@
 //! waiter is served, not timed out). Tickets make the order explicit: each
 //! waiter writes one ticket file beside the lock and only the oldest live
 //! ticket may run `try_lock`. flock stays the source of truth - a ticketless
-//! writer (an older binary mid-rollout) can still take the lock out of
-//! order - so this is fairness, not correctness. A dead waiter's ticket is
-//! pruned by any scan (the same dead-pid contract the lock stamp's holder
-//! summary uses); a stalled head is bounded by its own deadline, and
-//! withdrawing it serves the next ticket.
+//! writer can still take the lock out of order - so this is fairness, not
+//! correctness. A dead waiter's ticket is pruned by any scan (the same
+//! dead-pid contract the lock stamp's holder summary uses); a stalled head
+//! is bounded by its own deadline, and withdrawing it serves the next.
 
 use std::fs;
 use std::path::{Path, PathBuf};
