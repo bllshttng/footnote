@@ -31,13 +31,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
     let mut json = false;
     for arg in args {
         match arg.as_str() {
-            "--json" => json = true,
+            a if crate::json_output::is_flag(a) => json = true,
             "-h" | "--help" => {
-                println!("usage: fno doctor builds [--json]");
+                println!("usage: fno doctor builds [--json|-J]");
                 return 0;
             }
             other => {
-                eprintln!("fno doctor builds: unrecognized argument: {other}. usage: fno doctor builds [--json]");
+                eprintln!("fno doctor builds: unrecognized argument: {other}. usage: fno doctor builds [--json|-J]");
                 return 2;
             }
         }
