@@ -428,6 +428,10 @@ model = {}
 # Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = "orange"). A row's own `color` field outranks this table for the same row.
 row = {}
 
+[split]
+# Where the mux row menu's Split Direction toggle starts: pane (default) | portal. The t key flips it inside the open menu, and the flip lands here.
+opens = "pane"
+
 [autonomy]
 # The one master switch over every autonomous session-starting spawner. Defaults true; shipping this changes nothing until explicitly disabled.
 enabled = true

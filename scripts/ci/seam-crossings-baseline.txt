@@ -120,7 +120,6 @@ resolver	crates/fno/src/bootstrap.rs	fn diagnose_locate_failure() -> Option<Stri
 resolver	crates/fno/src/client_tests/theme_import_tests.rs	async fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
 resolver	crates/fno/src/doctor_update.rs	fn resolve_source_pin(override_path: Option<&Path>) -> Result<Value, String> {
 resolver	crates/fno/src/doctor_update.rs	fn component_verdict(
-resolver	crates/fno/src/doctor_update.rs	fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> bool {
 resolver	crates/fno/src/doctor_update.rs	fn resolve_fno_py() -> PathBuf {
 resolver	crates/fno/src/doctor_update.rs	fn verify_uv_install() -> bool {
 resolver	crates/fno/src/doctor_update.rs	fn has_shipped_pyc(td: &Path) -> bool {

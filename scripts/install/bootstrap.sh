@@ -382,6 +382,14 @@ mode_from_source() {
     else
       say "from-source: cargo install crates/fno-agents failed."
     fi
+    if [ -d "$checkout/crates/footnote" ]; then
+      say "from-source: cargo install crates/footnote (the -H footnote harness) ..."
+      if run_bounded 900 cargo install --locked --path "$checkout/crates/footnote" >&2; then
+        actions="${actions:+$actions,}\"cargo install crates/footnote\""
+      else
+        say "from-source: cargo install crates/footnote failed."
+      fi
+    fi
   else
     say "from-source: no cargo; the Rust binaries were not built. The Python CLI works as fno-py."
   fi

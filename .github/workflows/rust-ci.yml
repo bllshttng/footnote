@@ -73,6 +73,10 @@ jobs:
         working-directory: crates/fno
         run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all --check
 
+      - name: cargo fmt --check (footnote)
+        working-directory: crates/footnote
+        run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all --check
+
   warnings:
     name: cargo check --all-targets (deny warnings)
     # The ratchet the node asked for: rustc warnings fail CI, so the count can
@@ -101,12 +105,13 @@ jobs:
             ~/.cargo/build
             crates/fno-agents/target
             crates/fno/target
+            crates/footnote/target
           # Key prefix deliberately OUTSIDE the `test` job's `cargo-` restore
           # prefix (same rule the `stressonly` key records below): the test job
           # builds check-only artifacts that the big job must never restore.
           # It still WARMS from the big cache via its own restore-keys - the
           # asymmetry is the point.
-          key: ${{ runner.os }}-warncheck-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          key: ${{ runner.os }}-warncheck-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock', 'crates/footnote/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-warncheck-
             ${{ runner.os }}-cargo-
@@ -118,6 +123,38 @@ jobs:
       - name: cargo check --all-targets (fno)
         working-directory: crates/fno
         run: cargo check --all-targets --locked
+
+      - name: cargo check --all-targets (footnote)
+        working-directory: crates/footnote
+        run: cargo check --all-targets --locked
+
+  footnote:
+    name: cargo test (footnote harness)
+    # The -H footnote loop crate: its own lockfile and target dir. It
+    # links fno, never fno-agents, and is never published.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/footnote/target
+          key: ${{ runner.os }}-footnote-${{ hashFiles('crates/footnote/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-footnote-
+
+      - name: cargo test (footnote)
+        working-directory: crates/footnote
+        run: cargo test --locked
 
   release-version-math:
     name: release version math (sync-version + release-version)
@@ -307,4 +344,8 @@ jobs:
 
       - name: cargo audit (fno)
         working-directory: crates/fno
+        run: cargo audit
+
+      - name: cargo audit (footnote)
+        working-directory: crates/footnote
         run: cargo audit

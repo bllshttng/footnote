@@ -1643,14 +1643,20 @@ mod tests {
         assert_eq!(row["exit"], 0);
         assert_eq!(row["re_pulled"], 1);
         assert_eq!(row["pr"], 5);
-        // The priority lane was taken and released: no live hold left.
+        // The priority lane this run took must be released: no live hold on
+        // this run's own checkout. Sibling tests run in parallel without the
+        // env lock and their production acquire resolves the same root, so a
+        // foreign record mid-flight is a sibling's transient state, not a
+        // leak from this run.
+        let own_holder = format!("worktree:{}", tmp.path().display());
         let (state, rec) =
             crate::claims::status(crate::test_run::PRIORITY_KEY, Some(claims_root.path()));
+        let own_hold_left = matches!(
+            state,
+            crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+        ) && matches!(&rec, Some(record) if record.holder == own_holder);
         assert!(
-            !matches!(
-                state,
-                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
-            ),
+            !own_hold_left,
             "priority lane hold left behind: {state:?} {rec:?}"
         );
 
