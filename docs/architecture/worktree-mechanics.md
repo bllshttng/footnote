@@ -12,6 +12,10 @@ The one mint, resolver and parser live in `crates/fno-agents/src/node_branch.rs`
 
 Every reader parses both shapes through the one scanner (`node_branch::node_ids`), so the old `feature/<id>` shape needs no sunset. Worktree directories stay the bare node id.
 
+## Who runs the linker
+
+The `WorktreeCreate` hook and `worktree-manager.sh setup` run the checkout's own `scripts/setup/setup-worktree.sh` through `scripts/lib/worktree-config.sh`. That lib also holds the one `worktree.*` config reader, which asks `fno config get`. A bare `git worktree add` runs no linker. Skip the setup line and `internal/` is a real directory: a plan written there never reaches canonical, and nothing warns.
+
 ## The refusal shape
 
 Both creation paths honor `policy = "never"`. The `WorktreeCreate` hook resolves the policy through `fno agents workspace worktree policy`, so there is one resolver and no second precedence implementation.
