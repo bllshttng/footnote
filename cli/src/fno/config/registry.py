@@ -584,22 +584,22 @@ FIELD_META: dict[str, Meta] = {
     ),
     "worktree.auto_install": Meta(
         "advanced",
-        "Run dependency install when a new worktree is set up (read by skills/speculate/scripts/worktree-setup.sh); "
+        "Run dependency install when a new worktree is set up (read by hooks/worktree-setup.sh and worktree-manager.sh); "
         "set false to skip it. Default true.",
     ),
     "worktree.setup_command": Meta(
         "advanced",
         "Explicit setup command run after a new worktree is created, whatever auto_install says "
-        "(read by skills/speculate/scripts/worktree-setup.sh). Default empty.",
+        "(read by hooks/worktree-setup.sh and worktree-manager.sh). Default empty.",
     ),
     "worktree.skip_verification": Meta(
         "advanced",
         "Skip the post-setup verification step in a new worktree (read by "
-        "skills/speculate/scripts/worktree-setup.sh). Default false.",
+        "hooks/worktree-setup.sh). Default false.",
     ),
     "worktree.test_command": Meta(
         "advanced",
-        "Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); "
+        "Verification command for a new worktree (read by hooks/worktree-setup.sh); "
         "falls back to the script's own detection when empty. Default empty.",
     ),
     "guards.preset": Meta(

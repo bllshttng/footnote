@@ -3777,8 +3777,8 @@ class WorktreeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     policy: Optional[str] = None
-    # The worktree.* leaves below are read ad-hoc by
-    # skills/speculate/scripts/worktree-setup.sh (wt_config) and by the
+    # The worktree.* leaves below are read through `fno config get` by
+    # scripts/lib/worktree-config.sh (wt_config) and by the
     # done-node gate (prune_done, in Rust), so the model carries them but
     # never enforces their values.
     auto_install: bool = True

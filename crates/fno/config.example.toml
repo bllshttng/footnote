@@ -665,13 +665,13 @@ sandbox = false
 [worktree]
 # Global worktree-isolation policy (never|harness-native|external); default harness-native. `never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project work.workspaces.<slug>.projects[].worktree key overrides it.
 # policy = <unset>   # optional; no default
-# Run dependency install when a new worktree is set up (read by skills/speculate/scripts/worktree-setup.sh); set false to skip it. Default true.
+# Run dependency install when a new worktree is set up (read by hooks/worktree-setup.sh and worktree-manager.sh); set false to skip it. Default true.
 auto_install = true
-# Explicit setup command run after a new worktree is created, whatever auto_install says (read by skills/speculate/scripts/worktree-setup.sh). Default empty.
+# Explicit setup command run after a new worktree is created, whatever auto_install says (read by hooks/worktree-setup.sh and worktree-manager.sh). Default empty.
 setup_command = ""
-# Skip the post-setup verification step in a new worktree (read by skills/speculate/scripts/worktree-setup.sh). Default false.
+# Skip the post-setup verification step in a new worktree (read by hooks/worktree-setup.sh). Default false.
 skip_verification = false
-# Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); falls back to the script's own detection when empty. Default empty.
+# Verification command for a new worktree (read by hooks/worktree-setup.sh); falls back to the script's own detection when empty. Default empty.
 test_command = ""
 # How far the merged sweep's done-node arm goes on a done tree with uncommitted tracked changes: balanced (default) keeps the tree and reports the diff; aggressive salvages the tracked diff to refs/fno/salvage/<node>, then prunes once the 30m grace passes and no live session holds the tree. Both keep the branch, salvage untracked files, and still block on conflicts, unborn trees, unreadable probes, live claims, and live sessions.
 prune_done = "balanced"
