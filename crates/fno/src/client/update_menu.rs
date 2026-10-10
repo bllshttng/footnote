@@ -357,18 +357,22 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
             };
             // Version + distance answer "how far behind am I"; either
             // unknown (or a zero distance), the sha pair stays the fallback.
-            let ahead = r.source_prs_ahead.filter(|n| *n > 0);
-            match (r.installed_version.as_deref(), ahead) {
-                (Some(version), Some(ahead)) => rows.push(PopupRow::Header(format!(
-                    "fno {version} at {}, main is {ahead} PR{} ahead",
-                    short(r.installed_rev.as_deref()),
-                    if ahead == 1 { "" } else { "s" }
-                ))),
-                _ => rows.push(PopupRow::Header(format!(
-                    "{} -> {}",
-                    short(r.installed_rev.as_deref()),
-                    short(r.source_rev.as_deref())
-                ))),
+            // A release install has neither rev: no sha line at all, its
+            // release section is the whole story.
+            if r.installed_rev.is_some() || r.source_rev.is_some() {
+                let ahead = r.source_prs_ahead.filter(|n| *n > 0);
+                match (r.installed_version.as_deref(), ahead) {
+                    (Some(version), Some(ahead)) => rows.push(PopupRow::Header(format!(
+                        "fno {version} at {}, main is {ahead} PR{} ahead",
+                        short(r.installed_rev.as_deref()),
+                        if ahead == 1 { "" } else { "s" }
+                    ))),
+                    _ => rows.push(PopupRow::Header(format!(
+                        "{} -> {}",
+                        short(r.installed_rev.as_deref()),
+                        short(r.source_rev.as_deref())
+                    ))),
+                }
             }
             // Shaped notes win; the raw changelog stays the fallback for an
             // older Python payload. A tappable line is an Entry (its action

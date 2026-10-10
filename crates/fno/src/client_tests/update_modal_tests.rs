@@ -911,6 +911,22 @@ fn update_modal_shows_version_and_pr_distance_or_falls_back() {
         ready(None, Some(2)),
     ] {
         assert!(has(fallback.into(), "af56e2f24e -> 6c3024996f"));
+        // A release install has neither rev: no sha line at all.
+        let bare = UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: None,
+            source_rev: None,
+            installed_version: Some("0.4.0".into()),
+            source_prs_ahead: None,
+            changelog: vec![],
+            release_notes: None,
+            guidance: "release install refreshes with the upgrade command".into(),
+            degraded: Some("local source tree unavailable".into()),
+            running: vec![],
+            running_stale: 0,
+            source_pin: None,
+        });
+        assert!(!headers(bare.into()).iter().any(|h| h.contains("->")));
     }
 }
 
