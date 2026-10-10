@@ -709,7 +709,7 @@ pub(crate) fn serve_effective_verb(params: &Value) -> Result<Value, String> {
 /// A plan-less idea the autonomous drain may dispatch without a plan
 /// (`ladder.is_cold_dispatchable`): `status == "idea"` AND rung `none`, so
 /// a linked decompose stub (rung `idea`) stays behind --include-ideas.
-fn is_cold_dispatchable(e: &Value) -> bool {
+pub(crate) fn is_cold_dispatchable(e: &Value) -> bool {
     get_str(e, "status") == Some("idea") && plan_rung(e) == "none"
 }
 

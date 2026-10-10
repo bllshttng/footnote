@@ -750,49 +750,6 @@ def test_lock_defect_keeps_priority_over_do_row_defect():
     )
     result = recompute_statuses([e])
     assert result[0]["ownership_defect"]["kind"] == "stale-active-owner-unverified"
-
-
-# -- x-f8b1 change 5: triage health reads the marker, because today nothing does --
-
-def test_triage_health_names_ownership_defect(monkeypatch, capsys):
-    """A defect-carrying node is named with its kind and holder; a clean
-    graph reports zero and leaves the exit code alone."""
-    import json as _json
-
-    from fno.graph import triage
-
-    defect_node = _entry("ab-dohealth1", status="in_progress")
-    defect_node["ownership_defect"] = {
-        "kind": "stale-open-do-unverified",
-        "node_id": "ab-dohealth1",
-        "holder": "s-do",
-        "liveness": "unverified",
-    }
-    fresh = (datetime.now(timezone.utc) - timedelta(minutes=17)).isoformat()
-    clean_node = _entry("ab-dohealth2", status="in_progress", sessions=[_do_row(fresh)])
-
-    monkeypatch.setattr(triage, "_triage_entries", lambda: [defect_node, clean_node])
-    triage.cmd_health(
-        project=None, all_projects=False, json_output=True, stale_days=30,
-        check=False, quiet=False,
-    )
-    report = _json.loads(capsys.readouterr().out)
-    named = [d for d in report["ownership_defects"] if d["id"] == "ab-dohealth1"]
-    assert len(named) == 1
-    assert named[0]["kind"] == "stale-open-do-unverified"
-    assert named[0]["holder"] == "s-do"
-    assert report["totals"]["ownership_defects"] == 1
-
-    monkeypatch.setattr(triage, "_triage_entries", lambda: [clean_node])
-    triage.cmd_health(
-        project=None, all_projects=False, json_output=True, stale_days=30,
-        check=False, quiet=False,
-    )
-    report = _json.loads(capsys.readouterr().out)
-    assert report["ownership_defects"] == []
-    assert report["totals"]["ownership_defects"] == 0
-
-
 def test_an_unconsulted_roster_raises_naming_the_reader():
     """A not-consulted roster read raises with the reader prefixed, so the
     spawn-guard receipt points at read_roster instead of implying the node is

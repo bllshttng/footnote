@@ -214,6 +214,7 @@ def test_ac4_err_done_rejects_invalid_id(tmp_graph):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_ac1_hp_triage_sub_app_registered():
     """`fno backlog triage --help` lists the five triage verbs."""
     r = _invoke("backlog", "triage", "--help")
@@ -229,6 +230,7 @@ def test_ac2_edge_triage_in_backlog_help():
     assert "triage" in r.output
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_ac1_hp_triage_context_emits_candidates(tmp_graph):
     """`fno backlog triage context` emits JSON with a `candidates` key."""
     r = _invoke("backlog", "triage", "context", "--all")
@@ -237,6 +239,7 @@ def test_ac1_hp_triage_context_emits_candidates(tmp_graph):
     assert "candidates" in data, f"expected 'candidates' key, got {list(data.keys())}"
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
     """`fno backlog triage projects` on an empty graph returns an empty projects list.
 
@@ -301,6 +304,7 @@ def test_advertised_verbs_point_at_hidden_siblings():
     assert dn.exit_code == 0 and "reconcile" in dn.output, dn.output
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_ac2_hp_triage_propose_dry_run_emits_template(tmp_graph):
     """`fno backlog triage propose --dry-run` emits a stub proposal."""
     r = _invoke("backlog", "triage", "propose", "--dry-run", "--all")
@@ -310,6 +314,7 @@ def test_ac2_hp_triage_propose_dry_run_emits_template(tmp_graph):
         assert key in data, f"proposal template missing {key!r}"
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_ac1_hp_triage_validate_passes_clean_proposal(tmp_graph, tmp_path):
     """A proposal with no edges / cycles passes through validate unchanged."""
     prop = tmp_path / "prop.json"

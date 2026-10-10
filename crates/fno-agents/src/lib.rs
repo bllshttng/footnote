@@ -1499,6 +1499,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // events/schema.yaml; session_satisfied carries the pr_merge data source).
     "session_satisfied",
     "human_touch",
+    // Triage apply telemetry (the native triage engine): one row per
+    // committed apply, carrying the applied counts, the priority moves and
+    // the dropped-entry count.
+    "triage_applied",
     // The pr-watch sweep flipped an open fno-bound draft PR back to ready
     // (config.pr.open_ready's sweep leg, decided by pr_draft_ready.rs).
     "pr_watch_draft_flip",

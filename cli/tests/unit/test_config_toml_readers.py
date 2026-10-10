@@ -62,12 +62,3 @@ def test_triage_settings_reads_config_toml(tmp_path: Path) -> None:
     assert s.timeout_sec == 99
 
 
-def test_load_goals_reads_config_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_toml(
-        tmp_path,
-        '[[project.goals]]\nid = "g1"\ngoal = "ship it"\nstatus = "active"\n',
-    )
-    monkeypatch.chdir(tmp_path)
-    from fno.graph.triage import _load_goals
-
-    assert _load_goals() == [{"id": "g1", "goal": "ship it", "status": "active"}]

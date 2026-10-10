@@ -69,15 +69,14 @@ cli = typer.Typer(
     ),
 )
 
-# Nested triage sub-app: `fno backlog triage <verb>`.
-from fno.graph.triage import cli as _triage_cli  # noqa: E402
 _register_node_builder(cli)
 from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
 
+from fno.graph.triage_forward import register_triage_forward  # noqa: E402
+register_triage_forward(cli)
 cli.command("worked", hidden=True)(_cmd_worked)
 cli.command("version", hidden=True)(_cmd_version)
 
-cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
@@ -7338,7 +7337,6 @@ def iter_backlog_registry():
     """
     return [
         (None, cli),
-        ("triage", _triage_cli),
         ("capture", _capture_cli),
         ("batch", _batch_cli),
         ("relatedness", _relatedness_cli),

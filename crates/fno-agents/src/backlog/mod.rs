@@ -3,8 +3,12 @@
 //! `TABLE_OWNERS` names the owners and the table_ownership test enforces
 //! Every mutation writes only the changed nodes' rows in one transaction.
 
+pub mod advance;
+pub mod advance_dispatch;
 pub mod advance_fill;
+pub mod advance_settings;
 pub mod api;
+pub mod autobrief;
 pub mod autolink;
 pub(crate) mod binding;
 pub mod birth;
@@ -17,6 +21,7 @@ pub mod costs;
 pub mod create_cli;
 pub mod decisions;
 pub mod decisions_cli;
+pub mod dispatch_resolve;
 pub mod done_evidence;
 pub(crate) mod drift_emit;
 pub(crate) mod drift_scan;
@@ -47,6 +52,7 @@ pub mod pr_link;
 pub(crate) mod promise;
 pub mod provenance_cli;
 pub mod pull_requests;
+pub mod quota_route;
 pub mod rank_cli;
 pub mod receipt;
 pub(crate) mod reconcile_cli;
@@ -62,6 +68,9 @@ pub mod style_check;
 pub(crate) mod supersession;
 pub mod target_binding;
 pub mod title_gate;
+pub mod triage;
+pub mod triage_cli;
+pub mod triage_health;
 pub mod undispatched;
 pub mod update_cli;
 pub mod worked;

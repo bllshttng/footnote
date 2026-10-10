@@ -373,6 +373,11 @@ dual_owner_kinds = {
     # session-report arm and the Python identification arm emit the same
     # failure row into one journal.
     "role_manifest_arm_failed",
+    # triage_applied: one row per committed triage apply, emitted by the
+    # native triage engine (Rust) and the Python twin it ports, both with
+    # the backlog source, until the Python leg deletes with the closing
+    # ship.
+    "triage_applied",
     # Evals demand: the pr-watch tick's evals leg (Python) is the only
     # emitter; the rows ride the daemon's journal, so the Rust known-kind
     # table carries them for acceptance without emitting.

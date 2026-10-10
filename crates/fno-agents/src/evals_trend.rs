@@ -690,7 +690,7 @@ fn bootstrap_rate(n: usize, passes: usize) -> (f64, f64, f64) {
 /// tier pass rate, flake count, and the staleness fold (newest
 /// regression-tier timestamp vs the window). Staleness lives here so Python
 /// carries the fields instead of re-folding them (d-b6cc1a2a).
-fn summary_payload(history: &str, stale_days: i64, now: DateTime<Utc>) -> Value {
+pub(crate) fn summary_payload(history: &str, stale_days: i64, now: DateTime<Utc>) -> Value {
     let rows = read_rows(history, Some("baseline"), None);
     let (_, regressed) = trend_fold(&rows, stale_days, now);
     let w = chrono::Duration::days(stale_days);

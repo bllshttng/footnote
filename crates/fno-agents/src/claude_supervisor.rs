@@ -383,7 +383,7 @@ pub fn guard_birth_for_plan(env: &std::collections::BTreeMap<String, String>) {
 
 /// The seed provenance group, by name. The Rust side never imports the Python
 /// tuple; the names are the wire contract (cli/src/fno/mail/seed_provenance.py).
-const SEED_PROVENANCE_KEYS: [&str; 6] = [
+pub(crate) const SEED_PROVENANCE_KEYS: [&str; 6] = [
     "FNO_SEED_PROV_SEED_B64",
     "FNO_SEED_PROV_FROM",
     "FNO_SEED_PROV_FROM_SESSION",

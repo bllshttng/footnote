@@ -233,15 +233,7 @@ backlog status	T1	backlog status	1
 backlog supersede	T1	backlog supersede	10
 backlog task list	T1	backlog task list	0
 backlog task update	T1	backlog task update	2
-backlog triage apply	T1	backlog triage apply	3
-backlog triage consistency	T1	backlog triage consistency	2
-backlog triage context	T1	backlog triage context	7
-backlog triage health	T1	backlog triage health	19
-backlog triage projects	T1	backlog triage projects	2
-backlog triage propose	T1	backlog triage propose	1
-backlog triage rank	T1	backlog triage rank	2
-backlog triage trend	T1	backlog triage trend	2
-backlog triage validate	T1	backlog triage validate	1
+backlog triage	T1	backlog triage	39	
 backlog unarchive	T1	backlog unarchive	2
 backlog unclaim	T1	backlog unclaim	8
 backlog requeue	T1	backlog requeue	3

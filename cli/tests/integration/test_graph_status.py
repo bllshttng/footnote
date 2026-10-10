@@ -965,6 +965,7 @@ def test_backlog_idea_listed_in_help():
     assert "idea" in proc.stdout
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_triage_context_separates_ideas_from_candidates(tmp_graph, tmp_path):
     """`backlog triage context` surfaces ideas in their own array, not in candidates."""
     idea_id, _ = _seed_one_idea_one_ready(tmp_graph, tmp_path)

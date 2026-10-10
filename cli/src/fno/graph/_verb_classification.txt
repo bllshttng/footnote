@@ -59,8 +59,6 @@ join
 # footnote-owned DATA with a graph-resident write path (refused until the
 # write moves to the sidecar seam)
 cost
-# sub-app mutations
-triage apply
 capture promote
 batch join
 batch prepare
@@ -109,19 +107,13 @@ capture empty-pass
 capture list
 capture scan
 capture tidy
-# triage read/propose surfaces (apply is tracker-owned)
-triage consistency
-triage context
-triage health
-triage projects
-triage propose
-triage rank
-triage trend
-triage validate
 # batch read surfaces
 batch open
 batch status
 batch metrics
+# the triage route forwards at the native door; every action reads or
+# applies through the classified engine
+triage
 # read-only operators' surface over the graph store
 # graph-store integrity check (read-only)
 collisions check

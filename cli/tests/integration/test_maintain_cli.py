@@ -606,6 +606,7 @@ def _invoke_health(args: list[str]):
     )
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_stranded_lists_dependents_of_auto_deferred_blocker(tmp_graph):
     # AC3-UI: each auto-failure-deferred node lists its dependents.
     _seed(
@@ -636,6 +637,7 @@ def test_health_stranded_lists_dependents_of_auto_deferred_blocker(tmp_graph):
     assert blk["status"] == "deferred"
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_stranded_ignores_manual_defer(tmp_graph):
     # A hand-deferred blocker (no auto-failure sentinel) is NOT strand-reported.
     _seed(
@@ -655,6 +657,7 @@ def test_health_stranded_ignores_manual_defer(tmp_graph):
     assert json.loads(result.output)["stranded_by_failed_blocker"] == []
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_stranded_section_always_runs(tmp_graph):
     # The section always runs (read-only): an absent entry means "none
     # stranded", never "not checked" - the key is present with an empty list.
