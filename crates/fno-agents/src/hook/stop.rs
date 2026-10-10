@@ -123,10 +123,42 @@ pub fn run(args: &[String]) -> i32 {
         goal_payload,
     );
 
+    // The distress scan fires on EVERY Stop with a transcript, before the
+    // ownership evaluation: lead-owned stops, event-rule returns and trees
+    // holding another session's manifest all get their help read and routed
+    // (F1). The node id comes from the resident manifest when this
+    // session owns it, else None - the help still routes by lineage. The
+    // turn-keyed dedup makes the later loopcheck read on a target-owned
+    // stop write nothing. An in-session route blocks HERE, before the
+    // ownership evaluation, with the route text: separate from the fno
+    // backstop counters, so it never burns the loop's own streak (F5).
+    let distress_hit = if !fire.transcript_path.as_os_str().is_empty() {
+        let node_id = resident_node_id(&cwd, &fire);
+        let project_events = events_path(&cwd);
+        let global_events = crate::loopcheck::default_global_events_path();
+        distress::scan_and_emit(
+            &project_events,
+            &global_events,
+            &cwd,
+            &fire.resolve_harness_id,
+            node_id.as_deref(),
+            fire.harness.as_deref(),
+            &fire.transcript_path,
+            fire.last_assistant_message.as_deref(),
+        )
+    } else {
+        None
+    };
+    if let Some((class, rung)) = distress_hit {
+        if let crate::help_router::Route::InSession(text) = crate::help_router::route(class, rung) {
+            return emit_block_for_harness(&text);
+        }
+    }
+
     // Event rules run before the ownership evaluation: a session with no
     // target or lead manifest still owes its chat asks to the board
     // (docs/architecture/event-rules.md). A notify leaves through the
-    // operator chokepoint; the first block or nudge speaks the same
+    // operator chokepoint; the first block or nudge serves the same
     // harness-shaped block the stop gate prints, and the stop returns.
     let rule_fires = crate::event_rules::eval_stop(&cwd, &payload);
     for notify in rule_fires.iter().filter_map(|f| f.notify.as_ref()) {
@@ -891,7 +923,6 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
         worktree_repo_root(cwd).join(".fno").join("target-state.md")
     };
 
-    let mut pre_manifest_no_file = false;
     let step = if live_state.exists() {
         // Presence is not ownership: a resident manifest naming a FOREIGN
         // session sends the resolver out (the shell's non-resident branch).
@@ -906,7 +937,6 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
         // whatever else is on disk.
         resolve_across_worktrees(cwd, &fire.resolve_ids).map_err(|_| true)
     } else {
-        pre_manifest_no_file = true;
         // A stranger stop with no other worktree present cannot be a
         // worktree-ownership question, so an unreadable listing falls
         // through to the lead and visitor arms instead of blocking.
@@ -953,8 +983,7 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
     }
 
     // Visitor allow. The diagnostic names every id tried (a contract the
-    // docs reference), and the distress scan reads the payload's own
-    // message first so no reader subprocess runs for an ordinary stop.
+    // docs reference).
     if clean_miss && !fire.resolve_harness_id.is_empty() {
         eprintln!(
             "loop-check: no manifest names session {}; visitor allowed (tried: {})",
@@ -962,21 +991,27 @@ fn evaluate(cwd: &Path, fire: &Fire) -> Verdict {
             fire.resolve_ids.join(" ")
         );
     }
-    if clean_miss && pre_manifest_no_file && !fire.transcript_path.as_os_str().is_empty() {
-        let project_events = events_path(cwd);
-        let global_events = crate::loopcheck::default_global_events_path();
-        distress::scan_and_emit(
-            &project_events,
-            &global_events,
-            cwd,
-            &fire.resolve_harness_id,
-            None,
-            fire.harness.as_deref(),
-            &fire.transcript_path,
-            fire.last_assistant_message.as_deref(),
-        );
-    }
     Verdict::NoOwner
+}
+
+/// The node id from the resident manifest, when THIS stop's session is the
+/// one it names; else None (a stranger or lead stop routes by lineage, so
+/// it carries no node).
+fn resident_node_id(cwd: &Path, fire: &Fire) -> Option<String> {
+    let wt_state = worktree_space_dir(cwd).join("target-state.md");
+    let live_state = if wt_state.exists() {
+        wt_state
+    } else {
+        worktree_repo_root(cwd).join(".fno").join("target-state.md")
+    };
+    if !resident_matches(&live_state, &fire.hook_harness_id) {
+        return None;
+    }
+    let content = std::fs::read_to_string(&live_state).ok()?;
+    crate::loopcheck::scan_manifest_field(&content, "graph_node_id").or_else(|| {
+        crate::loopcheck::scan_manifest_field(&content, "target_claim_key")
+            .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
+    })
 }
 
 /// The shim's resident check: does the manifest at `state` name THIS stop's

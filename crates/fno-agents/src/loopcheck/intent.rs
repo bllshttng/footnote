@@ -239,7 +239,7 @@ fn enough_entries(lines: &[String]) -> bool {
 /// The last `cap` bytes of the file as complete lines, oldest first. A window
 /// that starts mid-line drops that torn line; a window covering the whole
 /// file keeps its first line.
-fn read_tail_lines(path: &Path, cap: u64) -> Vec<String> {
+pub(crate) fn read_tail_lines(path: &Path, cap: u64) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
