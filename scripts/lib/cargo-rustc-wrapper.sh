@@ -221,7 +221,9 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
         esac
     done
     cargo_pid="$PPID"
-    verdict="$(mktemp "${TMPDIR:-/tmp}/fno-sccache-watch.XXXXXX")"
+    # Written only when the watcher stops the client, so the hot path forks
+    # nothing for it.
+    verdict="${TMPDIR:-/tmp}/fno-sccache-watch.$$"
 
     # One line in $verdict when the watcher stops the client:
     #   orphan       - cargo is gone; our server-side rustc is stopped too
@@ -246,7 +248,7 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
                         kids++
                         if (token != "" && index(line[i], token)) ours = pid[i]
                     }
-                    print (server == "" ? 0 : server), kids, ours
+                    print (NR == 0 ? "unread" : (server == "" ? 0 : server)), kids, ours
                 }')
             if ! kill -0 "$cargo_pid" 2>/dev/null; then
                 echo orphan >"$verdict"
@@ -254,6 +256,10 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
                     kill -TERM "$ours" 2>/dev/null || true
                 fi
                 break
+            fi
+            # A table that could not be read says nothing about the server.
+            if [[ "$server" == "unread" ]]; then
+                continue
             fi
             if [[ "$kids" -gt 0 ]]; then
                 quiet=0
@@ -269,7 +275,12 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
                 break
             fi
         done
+        # TERM alone is not a bound: a client that survives it would hold the
+        # wait forever. The wrapper stops this watcher as soon as the client
+        # dies, so the grace second is paid only by a client that ignores TERM.
         kill -TERM -"$client" 2>/dev/null || kill -TERM "$client" 2>/dev/null || true
+        sleep 1
+        kill -KILL -"$client" 2>/dev/null || kill -KILL "$client" 2>/dev/null || true
         # A wrapper stopped with its cargo never reads the verdict.
         if ! kill -0 "$$" 2>/dev/null; then
             rm -f "$verdict"
@@ -288,8 +299,15 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     wait "$client" 2>/dev/null || sccache_rc=$?
     kill -TERM -"$watcher" 2>/dev/null || kill -TERM "$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true
-    reason="$(cat "$verdict" 2>/dev/null || true)"
-    rm -f "$verdict"
+    reason=""
+    if [[ -e "$verdict" ]]; then
+        read -r reason <"$verdict" || true
+        rm -f "$verdict"
+    fi
+    # A client that answered before the stop landed keeps its answer.
+    if [[ "$sccache_rc" -eq 0 ]]; then
+        reason=""
+    fi
     case "$reason" in
         "")
             exit "$sccache_rc"
@@ -303,7 +321,11 @@ if [[ "$HAS_SCCACHE" -eq 1 ]]; then
             # The server ran no compile for the whole window, so stopping it
             # loses no work. One wrapper per server pid stops it; the next
             # client or the daemon's machine-watch tick starts a fresh one.
-            if [[ "$server" != "0" ]] && ( set -o noclobber; : >"${TMPDIR:-/tmp}/fno-sccache-stopped.$server" ) 2>/dev/null; then
+            # The marker goes stale after an hour, so a later server that
+            # reuses the pid can be stopped again.
+            stopped="${TMPDIR:-/tmp}/fno-sccache-stopped.$server"
+            find "$stopped" -mmin +60 -delete 2>/dev/null || true
+            if [[ "$server" != "0" ]] && ( set -o noclobber; : >"$stopped" ) 2>/dev/null; then
                 kill -TERM "$server" 2>/dev/null || true
                 sleep 1
                 kill -KILL "$server" 2>/dev/null || true
