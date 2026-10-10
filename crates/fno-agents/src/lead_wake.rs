@@ -5,7 +5,7 @@
 //! and a `lead_wake` journal event receipts each wake, so a lead woken
 //! inside one beat is never woken twice for the same miss.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -410,20 +410,21 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
             ),
         });
     }
-    // holder -> repo root (project_root, else cwd): where the lead manifest
-    // and the provider thread's cwd live, read once per pass, and only when
-    // a wake actually plans (the quiet pass never pays the registry parse).
+    // holder -> repo root (project_root, else the row's workspace entry,
+    // else cwd): where the lead manifest and the provider thread's cwd
+    // live, read once per pass, and only when a wake actually plans (the
+    // quiet pass never pays the registry parse).
     let roots: BTreeMap<String, String> = crate::state::load_registry(&registry)
         .map(|loaded| {
             loaded
                 .entries
                 .into_iter()
                 .map(|e| {
-                    let root = if e.project_root.is_empty() {
-                        e.cwd
-                    } else {
-                        e.project_root
-                    };
+                    let member = e
+                        .role_scope
+                        .as_deref()
+                        .and_then(|s| scope_members(s).next());
+                    let root = journal_root(&e, member, &workspace_roots);
                     (e.name, root)
                 })
                 .collect()
@@ -448,6 +449,31 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
 
 fn short(text: &str) -> String {
     text.chars().take(160).collect()
+}
+
+/// One row's wake-delivery root: the row's `project_root`, else the row's
+/// own workspace entry from the config project map, else the row's `cwd`.
+/// The workspace step is the fno heal (2026-10-10): the registry-fix
+/// restart left the level-1 head's row with an empty `project_root` and a
+/// HOME launch `cwd`, so the delivery roots map anchored the wake at a
+/// space the led repo does not live in. The beat lookup covers the same
+/// drift the other way: it keeps the row's own journal and adds the
+/// workspace journal the scope names. `member` is the row's first
+/// role-scope member where the caller knows it.
+fn journal_root(
+    entry: &crate::state::RegistryEntry,
+    member: Option<&str>,
+    workspace: &HashMap<String, String>,
+) -> String {
+    if !entry.project_root.is_empty() {
+        return entry.project_root.clone();
+    }
+    if let Some(root) = member.and_then(|m| workspace.get(m)) {
+        if !root.is_empty() {
+            return root.clone();
+        }
+    }
+    entry.cwd.clone()
 }
 
 /// The journals for one team's beat lookup: the shared pair, the holder
@@ -704,6 +730,31 @@ mod tests {
             plans.is_empty(),
             "a finished check-in is the beat, not a miss"
         );
+    }
+
+    #[test]
+    fn journal_root_prefers_the_row_then_the_workspace_map_then_cwd() {
+        let workspace = HashMap::from([("fno".to_string(), "/repo".to_string())]);
+        let row = |project_root: &str| crate::state::RegistryEntry {
+            name: "vellum".to_string(),
+            cwd: "/launch".to_string(),
+            project_root: project_root.to_string(),
+            ..Default::default()
+        };
+        // A row that carries its project root keeps it.
+        assert_eq!(
+            journal_root(&row("/repo/other"), Some("fno"), &workspace),
+            "/repo/other"
+        );
+        // No project root: the workspace map answers for the scope.
+        assert_eq!(journal_root(&row(""), Some("fno"), &workspace), "/repo");
+        // An empty workspace entry falls through to the launch cwd.
+        let mut sparse = workspace.clone();
+        sparse.insert("x-aaa".to_string(), String::new());
+        assert_eq!(journal_root(&row(""), Some("x-aaa"), &sparse), "/launch");
+        // An unmapped scope and a scope-less row both keep the launch cwd.
+        assert_eq!(journal_root(&row(""), Some("x-zzz"), &workspace), "/launch");
+        assert_eq!(journal_root(&row(""), None, &workspace), "/launch");
     }
 
     fn team(scope: &str, level: u8, holder: &str, sid: &str) -> Team {
