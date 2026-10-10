@@ -9,7 +9,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-GUARD="${REPO_ROOT}/hooks/generated-write-guard.sh"
+GUARD="${REPO_ROOT}/hooks/write-gate.sh"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); printf '[gwg] PASS: %s\n' "$*"; }

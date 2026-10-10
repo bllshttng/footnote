@@ -815,14 +815,44 @@ fn copied_label(copied: &[String]) -> String {
 }
 
 /// Best-effort: install the crates/fno mux binary (`fno` on PATH, the front
-/// door) into the same --root as the agents bins. Warn-and-continue: the mux
+/// door) into the same --root as the agents bins, then the `footnote` harness
+/// binary fno-agents launches for `-H footnote`. Warn-and-continue: the mux
 /// is heavier to build (tokio + pty), and an absent/stale mux is a front-door
-/// problem `fno doctor` surfaces.
+/// problem `fno doctor` surfaces. Returns the mux install's result.
 fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> bool {
+    let mux = install_crate_bins(
+        source,
+        install_root,
+        "fno",
+        "mux front door",
+        "fno",
+        dry_run,
+    );
+    install_crate_bins(
+        source,
+        install_root,
+        "footnote",
+        "footnote harness",
+        "footnote",
+        dry_run,
+    );
+    mux
+}
+
+/// `cargo install --path crates/<crate_name> --bins` into `install_root`.
+/// False when the crate is absent, on a dry run, or when the install fails.
+fn install_crate_bins(
+    source: &Path,
+    install_root: &Path,
+    crate_name: &str,
+    what: &str,
+    bin: &str,
+    dry_run: bool,
+) -> bool {
     let Some(src_parent) = source.parent() else {
         return false;
     };
-    let crate_dir = src_parent.join("crates").join("fno");
+    let crate_dir = src_parent.join("crates").join(crate_name);
     if !crate_dir.is_dir() {
         return false;
     }
@@ -840,17 +870,17 @@ fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> 
         return false;
     }
     println!(
-        "fno doctor update: refreshing mux front door: cargo {}",
+        "fno doctor update: refreshing {what}: cargo {}",
         args.join(" ")
     );
     let code = run_cargo_install(source, &args);
     if code != 0 {
         eprintln!(
-            "fno doctor update: WARNING: mux front door install failed (exit {code}); `fno` may be absent/stale; continuing"
+            "fno doctor update: WARNING: {what} install failed (exit {code}); `{bin}` may be absent/stale; continuing"
         );
         return false;
     }
-    println!("fno doctor update: mux front door refreshed (crates/fno -> `fno`)");
+    println!("fno doctor update: {what} refreshed (crates/{crate_name} -> `{bin}`)");
     true
 }
 

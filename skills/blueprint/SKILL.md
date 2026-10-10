@@ -13,7 +13,7 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 <HARD-GATE>
 NEVER edit ~/.fno/graph.db directly via Edit/Write tools or `sqlite3`/`jq -i`/`sed -i`.
 ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.
-Direct edits are blocked by `hooks/graph-write-protect.sh`.
+Direct edits are blocked by `hooks/write-gate.sh`.
 </HARD-GATE>
 
 Create implementation plans scaled to the task. The output shape is always one plan `.md` (`plan == PR == node`); the input decides the path (mutate a `/think` doc in place, or create a fresh doc from an idea). Which gates fire is a READ of the input and the plan, not a guess - the dispatch table below names each trigger.
