@@ -2,10 +2,21 @@
 
 use super::*;
 
+/// The trip carries its cap and the value that crossed it, so the
+/// termination event names the axis with numbers: a lead reading a
+/// budget route sees what was spent against what, not just the axis word.
+/// A malformed cap trips fail-closed with `cap_*: None` - the trip is real,
+/// the number is unreadable.
 #[derive(Debug, PartialEq)]
 pub(super) enum BudgetTrip {
-    WallClock,
-    Cost,
+    WallClock {
+        cap_min: Option<u64>,
+        elapsed_min: u64,
+    },
+    Cost {
+        cap_usd: Option<f64>,
+        spent_usd: f64,
+    },
 }
 
 /// Resolve an `Option<Result<T, String>>` budget cap for use in check_budget.
@@ -49,7 +60,10 @@ pub(super) fn check_budget(
     match wall_cap {
         ResolvedCap::Malformed(raw) => {
             eprintln!("loop-check: malformed budget cap '{raw}' - failing closed; fix the config");
-            return Some(BudgetTrip::WallClock);
+            return Some(BudgetTrip::WallClock {
+                cap_min: None,
+                elapsed_min: 0,
+            });
         }
         ResolvedCap::Valid(cap) => {
             if let Some(ca_str) = &manifest.created_at {
@@ -62,7 +76,10 @@ pub(super) fn check_budget(
                         duration.num_minutes() as u64
                     };
                     if elapsed_min >= cap {
-                        return Some(BudgetTrip::WallClock);
+                        return Some(BudgetTrip::WallClock {
+                            cap_min: Some(cap),
+                            elapsed_min,
+                        });
                     }
                 }
             }
@@ -89,13 +106,19 @@ pub(super) fn check_budget(
     match cost_cap {
         ResolvedCap::Malformed(raw) => {
             eprintln!("loop-check: malformed budget cap '{raw}' - failing closed; fix the config");
-            Some(BudgetTrip::Cost)
+            Some(BudgetTrip::Cost {
+                cap_usd: None,
+                spent_usd: 0.0,
+            })
         }
         ResolvedCap::Valid(cap) => {
             if let Some(session_id) = &manifest.session_id {
                 let cost = session_cost_from_ledger(ledger_path, session_id);
                 if cost >= cap {
-                    return Some(BudgetTrip::Cost);
+                    return Some(BudgetTrip::Cost {
+                        cap_usd: Some(cap),
+                        spent_usd: cost,
+                    });
                 }
             }
             None

@@ -263,6 +263,7 @@ pub(crate) use self_review_floor::self_review_floor_applies;
 use self_review_floor::{
     classify_payload_for_floor, floor_self_review, reviewer_invocation_for, REVIEW_ORDER,
 };
+pub(crate) use settings::session_cost_from_ledger;
 use settings::{
     fail_closed_settings, normalize_reviewer, parse_manifest, parse_settings_result, Manifest,
     PeerEntry,
@@ -674,19 +675,34 @@ pub(crate) fn decide_with_payload(
 
     // ── Step 3: budget check ──────────────────────────────────────────────────
     if let Some(trip) = check_budget(&manifest, &settings, &now, &ledger_path) {
-        let axis = match &trip {
-            BudgetTrip::WallClock => "wall_clock",
-            BudgetTrip::Cost => "cost",
+        // The event names the cap axis with its numbers: the
+        // finalize terminal route quotes them back to the lead it asks.
+        let (axis, cap, value) = match &trip {
+            BudgetTrip::WallClock {
+                cap_min,
+                elapsed_min,
+            } => (
+                "wall_clock",
+                cap_min.map(|c| serde_json::json!(c)),
+                serde_json::json!(elapsed_min),
+            ),
+            BudgetTrip::Cost { cap_usd, spent_usd } => (
+                "cost",
+                cap_usd.map(|c| serde_json::json!(c)),
+                serde_json::json!(spent_usd),
+            ),
         };
-        emit(
-            "termination",
-            serde_json::json!({
-                "session_id": session_id,
-                "reason": "Budget",
-                "axis": axis,
-                "message": format!("budget exceeded (axis={axis})")
-            }),
-        );
+        let mut data = serde_json::json!({
+            "session_id": session_id,
+            "reason": "Budget",
+            "axis": axis,
+            "value": value,
+            "message": format!("budget exceeded (axis={axis})")
+        });
+        if let Some(cap) = cap {
+            data["cap"] = cap;
+        }
+        emit("termination", data);
         return (
             0,
             allow_output(
