@@ -180,7 +180,8 @@ async fn settings_tabs_switch_by_tab_and_by_tap() {
         v.keys_modal.is_some(),
         "the launcher opens the which-key table"
     );
-    keys.send(&mut v, b"\x1b").await;
+    // A real esc: the lone byte plus the quiet-window flush that delivers it.
+    keys.esc(&mut v).await;
     assert!(v.aux.is_some(), "esc returns to settings");
     assert_eq!(
         v.settings_tab,
