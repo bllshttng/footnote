@@ -223,7 +223,7 @@ def test_tick_unresolved_url_skips_all_reads(tmp_path, monkeypatch):
         name="s", type="text-webhook", events=["blocked"], url_env="OPS_MISSING"
     )
     res = sf.run_tick(tmp_path, [sink])
-    assert res.sinks == [] and res.no_sink_configured is True
+    assert res.sinks == [] and res.undeliverable_sinks == ("s",)
     assert _cursor(ss, "s")["ts"] == "2026-07-12T00:00:00Z"  # untouched
 
 

@@ -73,7 +73,7 @@ class TickResult:
     rows_read: int = 0  # status rows the pass read; 0 on an unchanged store
     locked_out: bool = False  # another tick held the per-project lock; skipped
     lease_lost: bool = False  # lock was stolen; cursor persistence was aborted
-    no_sink_configured: bool = False  # every enabled sink's url is unresolved; no read attempted
+    undeliverable_sinks: "tuple[str, ...]" = ()  # enabled sinks' url unresolved; no read attempted
 
 
 # ── event stream (rotation-aware, skip-and-count) ───────────────────────────
@@ -271,7 +271,7 @@ def run_tick(
         # would short-circuit and hold the scan cursor, so every later tick
         # rereads the whole journal. Skip before any read; the sink's stored
         # cursor resumes the backlog once the url resolves.
-        return TickResult(no_sink_configured=True)
+        return TickResult(undeliverable_sinks=tuple(s.name for s in enabled))
 
     lock = _TickLock(project_root)
     if not lock.acquire():
@@ -863,8 +863,9 @@ def tick_cmd(
         return
     # The daemon ticks every few seconds: an idle pass prints nothing.
     if not result.sinks and dry_run:
-        if result.no_sink_configured:
-            typer.echo("status-fanout: no deliverable sink (url unresolved; no-op)")
+        if result.undeliverable_sinks:
+            typer.echo("status-fanout: no deliverable sink (url unresolved; no-op): "
+                       + ", ".join(result.undeliverable_sinks))
         else:
             typer.echo("status-fanout: no enabled sinks (no-op)")
     verb = "would-send" if dry_run else "dispatched"
