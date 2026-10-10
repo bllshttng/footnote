@@ -558,7 +558,10 @@ fn transcript_tail_text(node: &Value, headroom: usize) -> String {
     }
     // One batched classify per read: delivered mail never counts as a pair.
     pairs.retain(|(_, text, _)| {
-        crate::mail_header::classify(text) == crate::mail_header::Framing::Bare
+        matches!(
+            crate::mail_header::classify(text),
+            crate::mail_header::Framing::Bare
+        )
     });
     let cutoff = node
         .get("created_at")
@@ -706,7 +709,7 @@ fn opencode_pairs(db_path: &Path, session_id: &str) -> Vec<Pair> {
     };
     let rows = stmt.query_map([session_id, &format!("{TAIL_RECORDS_READ}")], |row| {
         Ok((
-            row.get::<_, Option<f64>>(0)?,
+            row.get::<_, Option<rusqlite::types::Value>>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
         ))
@@ -714,7 +717,7 @@ fn opencode_pairs(db_path: &Path, session_id: &str) -> Vec<Pair> {
     let mut pairs: Vec<Pair> = Vec::new();
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            let (ts_ms, role, text) = row;
+            let (ts_raw, role, text) = row;
             let Some(role) = role else { continue };
             if role != "user" && role != "assistant" {
                 continue;
@@ -722,7 +725,12 @@ fn opencode_pairs(db_path: &Path, session_id: &str) -> Vec<Pair> {
             let Some(text) = text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else {
                 continue;
             };
-            pairs.push((role, text, ts_ms.map(|ms| ms / 1000.0)));
+            let ts = match ts_raw {
+                Some(rusqlite::types::Value::Integer(n)) => Some(n as f64 / 1000.0),
+                Some(rusqlite::types::Value::Real(f)) => Some(f / 1000.0),
+                _ => None,
+            };
+            pairs.push((role, text, ts));
         }
     }
     // The store returns newest-first; restore chronological order.
