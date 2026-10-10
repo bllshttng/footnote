@@ -67,7 +67,7 @@ pub(crate) struct Evidence {
 }
 
 pub(crate) fn should_wake(watch: &Watch, now_ms: i64, evidence: &[Evidence]) -> bool {
-    if now_ms < watch.expires_at_ms {
+    if now_ms < watch.expires_at_ms && !build_finished(watch, evidence) {
         return false;
     }
     is_current_watch(watch, evidence)
@@ -77,6 +77,39 @@ pub(crate) fn should_wake(watch: &Watch, now_ms: i64, evidence: &[Evidence]) -> 
                 && row.data.get("watch_event_id").and_then(Value::as_str)
                     == Some(watch.event_id.as_str())
         })
+}
+
+/// A build park wakes when its parked cargo exits, ahead of the deadline.
+/// The park row names the cargo pid and when its wait began; a pid that is
+/// gone, or now names a process born after the wait began, is a finished
+/// build. A pid this process may not probe reads as still running.
+fn build_finished(watch: &Watch, evidence: &[Evidence]) -> bool {
+    if watch.blocker != "build" {
+        return false;
+    }
+    let Some(data) = evidence
+        .iter()
+        .find(|row| row.event_id == watch.event_id)
+        .map(|row| &row.data)
+    else {
+        return false;
+    };
+    let Some(pid) = data
+        .get("build_cargo_pid")
+        .and_then(Value::as_i64)
+        .filter(|pid| *pid > 0 && *pid <= i64::from(i32::MAX))
+    else {
+        return false;
+    };
+    let since_ms = data
+        .get("build_since_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or(i64::MAX);
+    match crate::claims::probe_pid(pid as i32) {
+        crate::claims::PidProbe::Created(created_ms) => created_ms > since_ms,
+        crate::claims::PidProbe::Refused => false,
+        crate::claims::PidProbe::Absent => true,
+    }
 }
 
 pub(crate) fn is_current_watch(watch: &Watch, evidence: &[Evidence]) -> bool {
@@ -367,6 +400,12 @@ fn registry_session_id(entry: &crate::state::RegistryEntry) -> Option<&str> {
 }
 
 pub(crate) fn message(watch: &Watch) -> String {
+    if watch.blocker == "build" {
+        return format!(
+            "Automatic wake from the fno daemon for node {}. The cargo build this session parked on at the admission door finished, or its park deadline passed. Read its output and continue. If it still waits, stop it and push instead: commit, run `fno do pr push`, and CI builds and tests it. Every cargo job and its place in line: fno doctor builds.",
+            watch.node
+        );
+    }
     let task = watch.task_id.as_deref().unwrap_or("missing; do not guess");
     let blocker = match watch.reason.as_deref() {
         Some(blocker @ ("ci" | "review" | "merge_slot" | "local")) => blocker,
