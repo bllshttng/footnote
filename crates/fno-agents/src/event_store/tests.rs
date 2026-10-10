@@ -1244,6 +1244,129 @@ fn journal_text_checked_fast_path_stays_bounded_on_a_huge_journal() {
 }
 
 #[test]
+fn journal_text_checked_tail_type_filter_runs_the_store_filter() {
+    // The tail obeys the same type axis the store query does: an exact query
+    // (no empty type) drops typeless tail rows, `of_types` keeps them, and a
+    // legacy alias spelling matches its canonical ask.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(
+        &live,
+        &[checkin("2026-09-17T12:00:00Z", "x-aaaa", "committed")],
+    );
+    sync(&live).unwrap();
+    append(
+        &live,
+        &[
+            checkin("2026-09-17T12:01:00Z", "x-aaaa", "tail-checkin"),
+            json!({"ts": "2026-09-17T12:02:00Z", "type": "guard_decision",
+                   "data": {"change": "unwanted"}}),
+            json!({"ts": "2026-09-17T12:03:00Z", "type": "agent_role_vacated",
+                   "data": {"change": "old-spelling"}}),
+            json!({"ts": "2026-09-17T12:04:00Z", "kind": "spawn_defaults_applied",
+                   "data": {"change": "no-type-field"}}),
+        ],
+    );
+    let exact = EventQuery {
+        types: vec!["lead_checkin".into()],
+        include_rejected: true,
+        ..Default::default()
+    };
+    let text = journal_text_checked(&live, &exact).unwrap();
+    assert!(
+        text.contains("committed") && text.contains("tail-checkin"),
+        "store rows and wanted tail rows read: {text}"
+    );
+    assert!(
+        !text.contains("unwanted")
+            && !text.contains("no-type-field")
+            && !text.contains("old-spelling"),
+        "tail rows outside the query's types drop: {text}"
+    );
+
+    let text = journal_text_checked(&live, &EventQuery::of_types(&["lead_checkin"])).unwrap();
+    assert!(
+        text.contains("tail-checkin") && text.contains("no-type-field"),
+        "the empty type entry of_types adds keeps typeless rows: {text}"
+    );
+    assert!(
+        !text.contains("unwanted") && !text.contains("old-spelling"),
+        "typed rows outside the filter still drop: {text}"
+    );
+
+    let canonical = EventQuery {
+        types: vec!["agent_team_vacated".into()],
+        include_rejected: true,
+        ..Default::default()
+    };
+    let text = journal_text_checked(&live, &canonical).unwrap();
+    assert!(
+        text.contains("old-spelling"),
+        "a legacy alias spelling matches its canonical ask: {text}"
+    );
+    assert!(
+        !text.contains("tail-checkin"),
+        "rows outside the ask still drop: {text}"
+    );
+}
+
+#[test]
+fn journal_text_checked_tail_filter_keeps_a_cursorless_scan_bounded() {
+    // The perf guard for the absent-cursor fallback: a store that never
+    // ingested its journal used to put every line through sha256 plus two
+    // store probes per status read. The type filter skips the lines the
+    // query does not ask for, so the full-scan fallback stays bounded and
+    // the wanted tail row still reads.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(
+        &live,
+        &[checkin("2026-09-17T12:00:00Z", "x-aaaa", "committed")],
+    );
+    sync(&live).unwrap();
+    // Retire the cursor: the read must take the full-scan fallback.
+    rusqlite::Connection::open(store_path(&live))
+        .unwrap()
+        .execute("DELETE FROM ingest_cursor", [])
+        .unwrap();
+    let filler = checkin("2026-09-17T12:01:00Z", "x-aaaa", "filler");
+    {
+        let mut fh = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&live)
+            .unwrap();
+        for i in 0..200_000 {
+            let mut row = filler.clone();
+            row["data"]["change"] = json!(format!("filler-{i}"));
+            writeln!(fh, "{row}").unwrap();
+        }
+        writeln!(
+            fh,
+            "{}",
+            json!({"ts": "2026-09-17T12:02:00Z", "type": "control_plane_tick",
+                   "data": {"arm": "pr-watch-merge", "change": "wanted-tail"}})
+        )
+        .unwrap();
+    }
+    let exact = EventQuery {
+        types: vec!["control_plane_tick".into()],
+        include_rejected: true,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let text = journal_text_checked(&live, &exact).unwrap();
+    let elapsed = started.elapsed();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "only the wanted tail row reads: {text}");
+    assert!(text.contains("wanted-tail"), "{text}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the filtered full scan stays bounded: {elapsed:?}"
+    );
+}
+
+#[test]
 fn a_filtered_read_sorts_seqs_not_lines_and_keeps_limit_order() {
     let dir = tempfile::tempdir().unwrap();
     let journal = dir.path().join("events.jsonl");

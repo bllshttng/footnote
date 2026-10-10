@@ -2137,10 +2137,22 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         Err(err) => return Err(format!("{}: {err}", live.display())),
     };
     let complete_end = tail.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    // The tail filter the loop below applies per line: the query's types
+    // expanded the way the store side expands them, plus whether typeless
+    // rows pass (they do only when the query asked for the empty type).
+    let tail_allowed = if q.types.is_empty() {
+        None
+    } else {
+        Some(query_types_with_aliases(&q.types))
+    };
+    let tail_typeless_ok = q.types.iter().any(|t| t.is_empty());
     // ponytail: a pre-store line no import took reads as newest; any import fixes it.
     for line_bytes in tail[..complete_end].split(|&b| b == b'\n') {
         let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
         if line_bytes.is_empty() {
+            continue;
+        }
+        if !tail_line_wanted(line_bytes, tail_allowed.as_deref(), tail_typeless_ok) {
             continue;
         }
         let hash = Sha256::digest(line_bytes).to_vec();
@@ -2182,6 +2194,87 @@ fn read_range(path: &Path, start: u64) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     fh.read_to_end(&mut out)?;
     Ok(out)
+}
+
+/// True when an uncommitted tail line can matter to the query. The store half
+/// of this read filters `type IN (...)`; the tail half hashed and store-probed
+/// every line, so a cursor-less journal put its whole file through sha256 plus
+/// two EXISTS probes per status read even when the fold wanted none of it. The
+/// tail now runs the store's own filter: no `types` filter keeps everything;
+/// otherwise a line survives when any `"type"` key in it carries one of the
+/// query's expanded types, and a line whose type is present but unwanted drops
+/// even when typeless rows pass. The scan is bytes, not a parse: a false keep
+/// only costs what the unfiltered path paid.
+fn tail_line_wanted(line: &[u8], allowed: Option<&[String]>, typeless_ok: bool) -> bool {
+    let Some(allowed) = allowed else {
+        return true;
+    };
+    let mut saw_type_value = false;
+    let mut rest = line;
+    loop {
+        let Some(pos) = find_bytes(rest, b"\"type\"") else {
+            return !saw_type_value && typeless_ok;
+        };
+        rest = &rest[pos + b"\"type\"".len()..];
+        if let Some(value) = json_string_value_after_key(rest) {
+            saw_type_value = true;
+            if allowed.iter().any(|t| t.as_bytes() == value) {
+                return true;
+            }
+        }
+    }
+}
+
+/// First-byte-anchored needle search. Tail lines can be hundreds of KB and a
+/// windows-per-offset scan compares at every position, so advance on the
+/// needle's first byte instead.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let last = haystack.len().checked_sub(needle.len())?;
+    let first = needle[0];
+    let mut at = 0;
+    loop {
+        while at <= last && haystack[at] != first {
+            at += 1;
+        }
+        if at > last {
+            return None;
+        }
+        if &haystack[at..at + needle.len()] == needle {
+            return Some(at);
+        }
+        at += 1;
+    }
+}
+
+/// The byte value of the JSON string literal that begins after an
+/// optional-space colon at `rest`, or None. Escapes pass through byte-wise:
+/// the comparison targets are plain type identifiers, so an escaped byte
+/// simply fails the equality.
+fn json_string_value_after_key(rest: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    if rest.get(i) != Some(&b':') {
+        return None;
+    }
+    i += 1;
+    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+        i += 1;
+    }
+    if rest.get(i) != Some(&b'"') {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < rest.len() {
+        match rest[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(&rest[start..i]),
+            _ => i += 1,
+        }
+    }
+    None
 }
 /// Write every committed row, in commit order, to `out` as JSONL - atomically
 /// (tmp file + rename), labeled by the caller as the snapshot it is. Returns
