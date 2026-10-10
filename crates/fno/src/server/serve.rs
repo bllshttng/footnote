@@ -161,17 +161,17 @@ pub(super) async fn serve(
                 cached: Option<(std::time::SystemTime, u64)>,
             ) -> (Option<(std::time::SystemTime, u64)>, Option<String>) {
                 let stat_path = path.clone();
-                let stamp = tokio::task::spawn_blocking(move || {
-                    std::fs::metadata(&stat_path)
+                let (stamp, table) = tokio::task::spawn_blocking(move || {
+                    let stamp = std::fs::metadata(&stat_path)
                         .ok()
-                        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+                        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
+                    (stamp, crate::registry_read::table_owns(&stat_path))
                 })
                 .await
-                .ok()
-                .flatten();
-                // A fence directory's stat never moves; its rows live in graph.db,
-                // so it is read every tick.
-                let raw = if stamp != cached || path.is_dir() {
+                .unwrap_or((None, false));
+                // An imported registry's rows live in graph.db, where no file
+                // stat moves, so it is read every tick.
+                let raw = if stamp != cached || table {
                     tokio::task::spawn_blocking(move || {
                         crate::registry_read::registry_text(&path).ok()
                     })

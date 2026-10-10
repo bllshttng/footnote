@@ -83,17 +83,25 @@ pub(crate) fn quiet_retire_reason(
     None
 }
 
+/// The registry's write stamp for the probe race: the table revision once
+/// imported (no file stat moves then), the file stamp before.
+pub(crate) fn registry_stamp(home: &AgentsHome) -> Option<serde_json::Value> {
+    crate::registry_store::watch_version(&home.registry_json())
+        .ok()
+        .flatten()
+}
+
 /// The freshness gate a probe verdict must pass before it may retire the
 /// daemon: no worker live, no request served, and no registry write while the
 /// probe ran. Pane-substrate workers spawn by writing the registry directly
-/// with no daemon contact, so the mtime is the one positive marker of that
-/// race (shared verbatim by idle and drift retirement).
-pub(crate) fn probe_verdict_fresh(
+/// with no daemon contact, so the registry stamp is the one positive marker
+/// of that race (shared verbatim by idle and drift retirement).
+pub(crate) fn probe_verdict_fresh<V: PartialEq>(
     no_worker: bool,
     probe_activity: Instant,
     last_activity: Instant,
-    probe_mtime: Option<std::time::SystemTime>,
-    mtime_now: Option<std::time::SystemTime>,
+    probe_mtime: Option<V>,
+    mtime_now: Option<V>,
 ) -> bool {
     no_worker && probe_activity == last_activity && mtime_now == probe_mtime
 }
