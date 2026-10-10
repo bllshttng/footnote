@@ -178,7 +178,7 @@ pub(crate) fn wait_review(
 }
 
 /// The `status-wait` door op: `{cwd, pr, until, timeout, interval}`.
-/// Durations parse from the CLI's raw strings (`30m`, `60`).
+/// Durations parse from the CLI's raw strings (`15m`, `60`).
 pub(crate) fn run_wait(payload: &Value) -> (i32, String, String) {
     let cwd_str = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
     let pr = payload.get("pr").and_then(Value::as_u64).unwrap_or(0);
@@ -189,7 +189,7 @@ pub(crate) fn run_wait(payload: &Value) -> (i32, String, String) {
             _ => default,
         }
     };
-    let timeout = field("timeout", 1800.0);
+    let timeout = field("timeout", 900.0);
     let interval = field("interval", 60.0);
     if timeout <= 0.0 || interval <= 0.0 {
         return (

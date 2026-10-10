@@ -106,8 +106,9 @@ exit 0
 }
 
 /// Stub gh: a settled read (completed failure buckets as not pending) by
-/// default; write `pending` to make the check-runs read report a run in
-/// flight with a job link. The pulls read (the push verb's integration
+/// default; write `pending` for a run in flight with a job link, or
+/// `red-pending` for a head whose latest rows already failed while a run
+/// is still testing it. The pulls read (the push verb's integration
 /// gate) answers a DIRTY PR by default, so the integrating tests keep
 /// exercising the rebase/merge leg; write `clean-pr` for a mergeable PR
 /// that is merely behind, or `no-pr` for a branch with no open PR.
@@ -135,10 +136,18 @@ for a in "$@"; do case "$a" in
   */check-runs)
     if [ -f "$D/no-runs" ]; then
       echo '{"check_runs":[]}'
+    elif [ -f "$D/red-pending" ]; then
+      echo '{"check_runs":[{"name":"lint","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/6/job/40"},{"name":"guards","status":"in_progress","conclusion":null,"html_url":"https://github.com/o/r/actions/runs/7/job/42"}]}'
     elif [ -f "$D/pending" ]; then
       echo '{"check_runs":[{"name":"guards","status":"in_progress","conclusion":null,"html_url":"https://github.com/o/r/actions/runs/7/job/42"}]}'
     else
       echo '{"check_runs":[{"name":"guards","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/7/job/42"}]}'
+    fi
+    exit 0 ;;
+  */cancel)
+    if [ -f "$D/cancel-fails" ]; then
+      echo "cancel failed" >&2
+      exit 1
     fi
     exit 0 ;;
   */status) echo '{"statuses":[]}'; exit 0 ;;
@@ -323,6 +332,50 @@ fn inflight_rows() {
     assert!(
         !log_of(&d, "git.log").contains("fetch"),
         "no fetch after a dirty refusal"
+    );
+    assert!(!log_of(&d, "git.log").contains("git push"));
+}
+
+#[test]
+fn red_cancel_rows() {
+    // A red head's stale run cancels best-effort, the bypass row journals,
+    // and the fix pushes with no flag (user law 2026-10-09).
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("red-pending"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("ci=red-cancel"), "{out}");
+    let gh = log_of(&d, "gh.log");
+    assert!(gh.contains("actions/runs/7/cancel"), "{gh}");
+    assert!(gh.contains("-X POST"), "{gh}");
+    assert!(
+        log_of(&d, "fno.log").contains("push_debounce_bypass"),
+        "the journal row"
+    );
+    assert_eq!(log_of(&d, "git.log").matches("git push").count(), 1);
+
+    // A failed cancel never blocks the push.
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("red-pending"), "").unwrap();
+    std::fs::write(d.join("cancel-fails"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("ci=red-cancel"), "{out}");
+    assert!(err.contains("cancel of run 7 failed"), "{err}");
+    assert_eq!(log_of(&d, "git.log").matches("git push").count(), 1);
+    assert!(
+        log_of(&d, "fno.log").contains("push_debounce_bypass"),
+        "the journal row survives a failed cancel"
+    );
+
+    // A run on a head with no red row is never cancelled.
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("pending"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 2, "{out}\n{err}");
+    assert!(
+        !log_of(&d, "gh.log").contains("cancel"),
+        "an all-green run is never cancelled"
     );
     assert!(!log_of(&d, "git.log").contains("git push"));
 }
