@@ -46,6 +46,8 @@ fn tmpdir(tag: &str) -> PathBuf {
 fn install_fake_codex(bin_dir: &Path) {
     let script = r#"#!/bin/sh
 set -e
+# The spawn's version probe gets an answer at once, as from the real CLI.
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.0"; exit 0; fi
 # Orphan-prevention test (ab-e7fdbcb6): record that a forwarded signal landed.
 if [ -n "$FAKE_CODEX_SIGINT_SENTINEL" ]; then
   trap 'printf caught > "$FAKE_CODEX_SIGINT_SENTINEL"; exit 130' INT TERM

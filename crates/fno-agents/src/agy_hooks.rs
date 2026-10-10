@@ -32,6 +32,9 @@ pub struct HookStatus {
     pub guard: String,
     /// footnote handlers whose script is gone; any one blocks `installed`.
     pub dead: usize,
+    /// live footnote handlers from an older checkout beside the current
+    /// script; agy runs both, so any one blocks `installed`.
+    pub superseded: usize,
     pub loaded: &'static str,
     pub runtime: &'static str,
     pub installed: bool,
@@ -119,14 +122,24 @@ fn handlers(list: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
-/// Dead handlers across the footnote namespace. Only footnote's own
-/// namespace is read here; foreign namespaces stay untouched even when dead.
-fn count_dead(fn_map: &Map<String, Value>) -> usize {
+/// Handlers `pick` selects across the footnote namespace. Only footnote's
+/// own namespace is read here; foreign namespaces stay untouched even when
+/// dead.
+fn count_handlers(fn_map: &Map<String, Value>, pick: impl Fn(&Value) -> bool) -> usize {
     fn_map
         .values()
         .filter_map(Value::as_array)
-        .map(|list| handlers(list).into_iter().filter(|h| is_dead(h)).count())
+        .map(|list| handlers(list).into_iter().filter(|h| pick(h)).count())
         .sum()
+}
+
+/// The session-state reporter ships beside the stop adapter in the same
+/// plugin stage; `None` when this stage carries none.
+fn report_script(adapter: &Path) -> Option<std::path::PathBuf> {
+    adapter
+        .parent()
+        .map(|dir| dir.join("agy-session-report.sh"))
+        .filter(|path| path.is_file())
 }
 
 /// Remove the handlers `gone` selects from every footnote event list. A group
@@ -178,11 +191,13 @@ impl HookStatus {
                 self.file_error.clone().unwrap_or_default()
             ),
         };
-        let dead = if self.dead > 0 {
-            format!(" dead={}", self.dead)
-        } else {
-            String::new()
-        };
+        let mut dead = String::new();
+        if self.dead > 0 {
+            dead.push_str(&format!(" dead={}", self.dead));
+        }
+        if self.superseded > 0 {
+            dead.push_str(&format!(" superseded={}", self.superseded));
+        }
         format!(
             "file={} footnote={} {} stop={} team={} guard={}{} -> {}",
             file,
@@ -222,6 +237,7 @@ pub fn status(
         team: "not_shipped".to_string(),
         guard: "not_shipped".to_string(),
         dead: 0,
+        superseded: 0,
         loaded: "unverified",
         runtime: "unverified",
         installed: false,
@@ -252,7 +268,15 @@ pub fn status(
     s.footnote = footnote_word.to_string();
     if let Some(fn_map) = fn_map {
         s.enabled = !matches!(fn_map.get("enabled"), Some(Value::Bool(false)));
-        s.dead = count_dead(fn_map);
+        s.dead = count_handlers(fn_map, is_dead);
+        let report = adapter.and_then(report_script);
+        let current: Vec<&Path> = [team, guard, report.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        s.superseded = count_handlers(fn_map, |h| {
+            !is_dead(h) && current.iter().any(|script| other_copy_of(h, script))
+        });
     }
     s.stop = match (adapter, fn_map) {
         (None, _) => "unverifiable",
@@ -294,7 +318,8 @@ pub fn status(
         && s.stop == "matches"
         && s.team != "missing"
         && s.guard != "missing"
-        && s.dead == 0;
+        && s.dead == 0
+        && s.superseded == 0;
     s
 }
 
@@ -343,14 +368,10 @@ pub fn install(
         }
     };
     let enabled = !matches!(fn_map.get("enabled"), Some(Value::Bool(false)));
-    // The session-state reporter ships beside the stop adapter in the same
-    // plugin stage; when the sibling exists on disk, register it under
+    // When the session-state reporter exists on disk, register it under
     // PreInvocation (agy ignores Stop stdout, and the stop adapter owns that
     // event's decision contract). Append-once like the team.
-    let report = adapter
-        .parent()
-        .map(|dir| dir.join("agy-session-report.sh"))
-        .filter(|path| path.is_file());
+    let report = report_script(adapter);
     let mut pruned = remove_handlers(fn_map, is_dead);
     for script in [team, guard, report.as_deref()].into_iter().flatten() {
         pruned += remove_handlers(fn_map, |h| other_copy_of(h, script));
@@ -661,11 +682,15 @@ mod tests {
         std::fs::write(&path, data.to_string()).unwrap();
         let before = status(&path, Some(&adapter), Some(&team), None);
         assert_eq!(before.dead, 2);
+        assert_eq!(
+            before.superseded, 1,
+            "the older live copy runs beside the new one"
+        );
         assert!(!before.installed, "a dead handler is not installed");
         let receipt = install(&path, &adapter, Some(&team), None).expect("install");
         assert!(receipt.note.contains("pruned 3"), "{}", receipt.note);
         let after = status(&path, Some(&adapter), Some(&team), None);
-        assert_eq!(after.dead, 0);
+        assert_eq!((after.dead, after.superseded), (0, 0));
         assert!(after.installed);
         let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let pre = data["footnote"]["PreInvocation"].as_array().unwrap();

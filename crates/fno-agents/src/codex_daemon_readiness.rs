@@ -94,7 +94,12 @@ pub fn codex_cli_path() -> Option<std::path::PathBuf> {
 /// silent past 5 s: spawn argv builders call this, and a wedged or fake
 /// `codex` must not hang the spawn.
 pub fn installed_cli_version() -> Option<String> {
-    let mut cmd = std::process::Command::new(codex_cli_path()?);
+    cli_version_of(codex_cli_path()?)
+}
+
+/// `<bin> --version` under the same parse and 5 s bound.
+pub fn cli_version_of(bin: impl AsRef<std::ffi::OsStr>) -> Option<String> {
+    let mut cmd = std::process::Command::new(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
     let out = crate::bounded_cmd::output_with_timeout(cmd, 5)?;
     if !out.status.success() {
