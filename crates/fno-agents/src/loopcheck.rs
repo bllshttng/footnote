@@ -579,7 +579,7 @@ pub(crate) fn decide_with_payload(
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
     });
     let harness = scan_manifest_field(&manifest_content, "harness");
-    crate::distress::scan_and_emit(
+    let _ = crate::distress::scan_and_emit(
         &project_events,
         &global_events,
         &cwd,

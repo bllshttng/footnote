@@ -11,7 +11,7 @@
 
 use crate::burn_watch;
 use crate::distress::HelpClass;
-use crate::owner_ladder::{resolve, Ask, Owner, Rung, World};
+use crate::owner_ladder::{resolve, Ask, Rung, World};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 pub(crate) const SENDER: &str = "fno/help-router";
@@ -109,6 +109,8 @@ pub(crate) fn route_emitted_distress(
             let _ = text;
         }
         Route::Timer { backoff_secs } => {
+            // The row's `to` is the wake target the sweep fires at, so it
+            // names the emitting session, not the literal word "self".
             emit_help_route(
                 cwd,
                 run,
@@ -117,7 +119,7 @@ pub(crate) fn route_emitted_distress(
                 reason,
                 rung,
                 "timer",
-                "self",
+                run,
                 None,
                 Some(backoff_secs),
                 0,
@@ -805,7 +807,7 @@ mod tests {
     /// the router was dispatch-bound to CI-only cargo. Un-ignore when the
     /// page lands.
     #[test]
-    #[ignore = "needs one HELP_ROUTING_BLESS=1 cargo test run to land docs/architecture/help-routing.md; see the x-1d4c node note"]
+    #[ignore = "needs one HELP_ROUTING_BLESS=1 cargo test run to land docs/architecture/help-routing.md; the page's only sanctioned writer is this bless path"]
     fn checked_in_routing_page_matches_the_renderer() {
         let page_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/architecture/help-routing.md");
