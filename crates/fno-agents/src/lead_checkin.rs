@@ -1242,6 +1242,10 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("pushback", crate::lead_pushback::reading());
     take("subagents", crate::lead_answers::r_subagents());
     take("wake_meter", r_wake_meter(since));
+    take(
+        "correction_meter",
+        crate::correction_meter::r_correction_meter(),
+    );
     take("drain", r_drain(ctx));
     take("held", crate::lead_answers::held_reading(&ctx.scope));
     take("repeated_asks", crate::repeated_asks::reading());
@@ -1386,6 +1390,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "subagent_tokens_session".into(),
             wm.value["tokens_session"].clone(),
         );
+    }
+    if let Some(cm) = get("correction_meter").filter(|r| r.ok) {
+        crate::correction_meter::add_data(&cm.value, &mut data);
     }
     if let Some(drain) = get("drain").filter(|r| r.ok) {
         data.insert("undelivered".into(), drain.value.clone());
@@ -2152,6 +2159,16 @@ fn render_lines_with(
                     dash(wm.get("tokens_session")),
                 ));
             }
+        }
+    }
+
+    match failed("correction_meter") {
+        Some(r) => lines.push(format!("READER FAILED correction_meter: {}", r.error)),
+        None => {
+            let cm = by_name("correction_meter")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            lines.push(crate::correction_meter::render_line(cm));
         }
     }
 

@@ -139,6 +139,7 @@ pub mod component_update;
 pub mod context_run;
 pub mod context_window;
 pub mod convert;
+pub mod correction_meter;
 pub mod corrections_verify;
 pub mod cursor_agent;
 pub mod daemon;
