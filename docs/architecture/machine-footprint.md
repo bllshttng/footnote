@@ -67,11 +67,11 @@ The shared sccache server is machine-wide, lazily started by the first rustc cal
 
 A live server can also wedge. It answers `--show-stats` but runs no compile. Every rustc client parks at 0 percent CPU and holds the build-dir lock (measured 2026-10-08: one client waited 5h30m). The same tick reads the process table for that shape: a server with no child process and a client older than 600 seconds. It then runs `sccache --stop-server` and sends SIGKILL after ten seconds. It starts a fresh server and journals `sccache_wedge_restart` with the server pid, the stuck client count and the oldest client age.
 
-The rustc wrapper does not wait for that tick. A watcher reads the process table beside each sccache client, so a stuck compile ends by progress, not by wall clock (measured 2026-10-09: a client sat 38 minutes inside an fno update). The client CPU tells nothing, because a waiting client always sits at 0 percent. The watcher reads the server's children instead. It acts on three cases:
+The rustc wrapper does not wait for that tick. A watcher reads the process table beside each sccache client. So a stuck compile ends on progress, not on wall clock. On 2026-10-09 one client sat 38 minutes inside an fno update. The client CPU tells nothing, because a waiting client always sits at 0 percent. The watcher reads the server's children instead. It acts on three cases:
 
 - The server runs no child for `FNO_SCCACHE_STALL_SECS` (default 60, `0` turns it off). The wrapper stops that server once per pid, and compiles with bare rustc. The server ran nothing for the whole window, so the stop loses no work. The next client or the daemon tick starts a fresh server.
 - No server child carries this compile's `extra-filename` hash after `FNO_SCCACHE_CLIENT_TIMEOUT_SECS` (default 300). The wrapper compiles with bare rustc. A compile that is running is never stopped, however long it takes. A setting of `0` turns the whole watcher off.
-- The cargo that started the wrapper is gone (measured 2026-10-10: an orphaned rustc ran 13 minutes after an fno update ended). The watcher stops the client and the server-side rustc with this compile's hash, and the wrapper exits 1.
+- The cargo that started the wrapper is gone. On 2026-10-10 an orphaned rustc ran 13 minutes after an fno update ended. The watcher stops the client and the server-side rustc with this compile's hash, and the wrapper exits 1.
 
 ## Session costs
 
