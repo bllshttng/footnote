@@ -695,3 +695,1091 @@ pub(crate) fn now_ms_i64() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+// ---------------------------------------------------------------------------
+// Claim observation (family-2 pre-dispatch verdict)
+// ---------------------------------------------------------------------------
+
+/// `walker:<canonical_repo_root>` - byte-identical to the key the Rust loop
+/// runtime writes for walker-scoped claims.
+pub fn walker_key() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    crate::paths::canonical_repo_root(&cwd)
+        .map(|root| format!("walker:{root}"))
+        .or_else(|| Some(format!("walker:{cwd}")))
+}
+
+/// True iff `holder` is THIS session's identity (any claim state). Env ids
+/// first, then the resolved ambient identity, then the pid arm (skipped for
+/// pid_unavailable claims - they carry no pid to compare).
+fn holder_is_ours(holder: &str, record: Option<&crate::claims::ClaimRecord>) -> bool {
+    for env_var in ["TARGET_SESSION_ID", "CODEX_THREAD_ID"] {
+        if let Ok(own) = std::env::var(env_var) {
+            if !own.is_empty() && holder == format!("target-session:{own}") {
+                return true;
+            }
+        }
+    }
+    let (session, _harness) = crate::claims::resolve_identity();
+    if let Some(sid) = session {
+        if !sid.is_empty() && holder == format!("target-session:{sid}") {
+            return true;
+        }
+    }
+    let Some(record) = record else { return false };
+    if record.pid_unavailable {
+        return false;
+    }
+    match record.pid {
+        Some(pid) => pid == std::process::id() as i32,
+        None => false,
+    }
+}
+
+/// `(verdict, info)` for `node:<id>` from THIS session's view; verdict in
+/// {ours, foreign_live, dead_predecessor, free}. Read-only, never fails the
+/// caller: a probe failure reads as free (a re-acquire candidate).
+pub fn classify_node_claim(
+    node_id: &str,
+    info: Option<crate::claims::ClaimRecord>,
+) -> (String, Option<crate::claims::ClaimRecord>) {
+    let record = match info {
+        Some(r) => Some(r),
+        None => match crate::claims::status(&format!("node:{node_id}"), None) {
+            (crate::claims::ClaimState::Free, None) => None,
+            (state, rec @ Some(_)) => {
+                use crate::claims::ClaimState::*;
+                match state {
+                    Free | Corrupted => None,
+                    _ => rec,
+                }
+            }
+            _ => None,
+        },
+    };
+    let Some(record) = record else {
+        return ("free".to_string(), None);
+    };
+    let state = record_state(&record);
+    if state.is_empty() || state == "free" {
+        return ("free".to_string(), Some(record));
+    }
+    if holder_is_ours(&record.holder, Some(&record)) {
+        return ("ours".to_string(), Some(record));
+    }
+    if state == "live" || state == "suspect" {
+        return ("foreign_live".to_string(), Some(record));
+    }
+    ("dead_predecessor".to_string(), Some(record))
+}
+
+fn record_state(record: &crate::claims::ClaimRecord) -> String {
+    match crate::claims::status(&record.key, None).0 {
+        crate::claims::ClaimState::Free => "free".to_string(),
+        crate::claims::ClaimState::Live => "live".to_string(),
+        crate::claims::ClaimState::Suspect => "suspect".to_string(),
+        crate::claims::ClaimState::Stale => "stale".to_string(),
+        crate::claims::ClaimState::Corrupted => "corrupted".to_string(),
+    }
+}
+
+/// The worked overlay for one node, or the roster outage. A full read per
+/// call is the Python shape; the callers that batch pass a pre-read map.
+pub fn live_worked_overlay() -> Result<BTreeMap<String, Vec<String>>, String> {
+    let graph = super::settings::graph_path();
+    let entries = crate::graph_store::read_rows_strict(&graph)
+        .map_err(|_| "the graph is unreadable".to_string())?;
+    crate::backlog::worked::live_worked_node_ids(&entries)
+}
+
+/// The family-2 pre-dispatch verdict shared by every node-dispatch caller.
+#[allow(clippy::too_many_arguments)]
+pub fn observe_node_claim(
+    node_id: &str,
+    node_cwd: Option<&str>,
+    enforce_failure_limit: bool,
+    emit_events: bool,
+    native_info: Option<crate::claims::ClaimRecord>,
+    worked_nodes: Option<BTreeMap<String, Vec<String>>>,
+    worked_error: Option<String>,
+    events_path: Option<&Path>,
+) -> DispatchClaimObservation {
+    let (verdict, info) = classify_node_claim(node_id, native_info);
+    let info_ref = info.as_ref();
+    // Truth is diagnostic; the claim verdict is authority. An unreadable
+    // truth read degrades to unknown, never to a false claim verdict.
+    let truth_status = resolve_truth_status_word(node_id);
+    let claim_state = info_ref.map(|r| record_state(r)).filter(|s| !s.is_empty());
+    let holder = info_ref
+        .map(|r| r.holder.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let default_occupied = verdict == "ours" || verdict == "foreign_live";
+    let mut occupied = default_occupied;
+    let mut worker = String::new();
+    let mut worked_nodes = worked_nodes;
+    let mut worked_error = worked_error;
+    if worked_nodes.is_none() && worked_error.is_none() {
+        match live_worked_overlay() {
+            Ok(map) => worked_nodes = Some(map),
+            Err(e) => worked_error = Some(e),
+        }
+    }
+    if let Some(map) = &worked_nodes {
+        if let Some(workers) = map.get(node_id) {
+            if !workers.is_empty() {
+                occupied = true;
+                worker = workers.join(", ");
+            }
+        }
+    }
+    // Occupancy outranks the outage; the branch keeps block_reason bound.
+    let mut block_reason = if worked_error.is_some() && !occupied {
+        Some("worked-authority-unavailable".to_string())
+    } else {
+        None
+    };
+    if occupied {
+        // task: `blocked`/`already-claimed` starved auto_continue for 97
+        // minutes once; name what was consulted and what it found.
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(state) = &claim_state {
+            if state == "live" || state == "suspect" {
+                parts.push(format!("claim {state} held by {holder}"));
+            }
+        }
+        if !worker.is_empty() {
+            parts.push(format!("worked overlay: {worker}"));
+        }
+        if !parts.is_empty() {
+            block_reason = Some(format!("held: {}", parts.join("; ")));
+        }
+    }
+    let dead_action = if occupied || !enforce_failure_limit {
+        None
+    } else {
+        refuse_repeated_dead_dispatch(node_id, node_cwd)
+    };
+    let action = if occupied {
+        "blocked".to_string()
+    } else if let Some(dead) = dead_action {
+        dead
+    } else if worked_error.is_some() {
+        "blocked".to_string()
+    } else if verdict == "dead_predecessor" {
+        "redispatch".to_string()
+    } else {
+        "dispatch".to_string()
+    };
+
+    if emit_events {
+        let mut data = json!({
+            "node_id": node_id,
+            "claim_verdict": verdict,
+            "claim_state": claim_state,
+            "holder": holder,
+            "truth_status": truth_status,
+            "action": action,
+        });
+        if let Some(obj) = data.as_object_mut() {
+            if !worker.is_empty() {
+                obj.insert("worker".to_string(), Value::from(worker.clone()));
+            }
+            if let Some(reason) = &block_reason {
+                obj.insert("block_reason".to_string(), Value::from(reason.clone()));
+            }
+            if let Some(err) = &worked_error {
+                obj.insert("worked_error".to_string(), Value::from(err.clone()));
+            }
+        }
+        advance_emit(EVENT_CLAIM_OBSERVED, data, events_path);
+    }
+    if emit_events {
+        if let Some(state) = &claim_state {
+            if state == "stale" || state == "suspect" {
+                // Lead with the worker when one is on the node: this line
+                // pointed at a stale claim while the row was the occupant,
+                // and an operator followed it to a claim that read UNCLAIMED.
+                let lead = if worker.is_empty() {
+                    String::new()
+                } else {
+                    format!("worker row {worker} is on the node; ")
+                };
+                let message = format!(
+                    "dispatch {action} for {node_id}: {lead}node claim is {state}, \
+prior holder={holder}, truth_status={truth_status}"
+                );
+                eprintln!("advance: WARNING: {message}");
+                crate::operator_notice::notify_operator(
+                    "footnote: contested node dispatch",
+                    &message,
+                    None,
+                );
+            }
+        }
+    }
+    DispatchClaimObservation {
+        verdict,
+        claim_state,
+        holder,
+        truth_status,
+        action,
+        worker,
+        block_reason,
+        worked_error,
+    }
+}
+
+/// The truth row's state word, or "unknown" when nothing answers. The claim
+/// verdict is authority; truth is diagnostic. Native derivation over the
+/// node claim + the newest loop_check fire per session (30-minute recency).
+fn resolve_truth_status_word(node_id: &str) -> String {
+    let key = format!("node:{node_id}");
+    let (state, record) = crate::claims::status(&key, None);
+    let holder = record
+        .as_ref()
+        .map(|r| r.holder.clone())
+        .unwrap_or_default();
+    let sid = holder
+        .strip_prefix("target-session:")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    match state {
+        crate::claims::ClaimState::Stale => "stalled".to_string(),
+        crate::claims::ClaimState::Suspect => "suspect".to_string(),
+        crate::claims::ClaimState::Live => {
+            let age = sid.as_deref().and_then(loop_check_age);
+            match age {
+                Some(age) if age <= 1800.0 => "working".to_string(),
+                _ => "waiting".to_string(),
+            }
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Seconds since the newest loop_check fire for `sid`, from a bounded tail
+/// of the state root's events journal. None when nothing fired.
+fn loop_check_age(sid: &str) -> Option<f64> {
+    let path = std::env::var_os("FNO_EVENTS_PATH")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let cwd = std::env::current_dir().ok()?;
+            crate::agents_config::state_dir(&cwd).map(|root| root.join("events.jsonl"))
+        })?;
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return None;
+    };
+    let size = meta.len();
+    let start = size.saturating_sub(256 * 1024);
+    let mut file = std::fs::File::open(&path).ok()?;
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    let now = now_ms_i64() as f64 / 1000.0;
+    let mut newest: Option<f64> = None;
+    for line in text.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() || !line.contains("\"loop_check\"") {
+            continue;
+        }
+        let Ok(rec) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if rec.get("type").and_then(Value::as_str) != Some("loop_check") {
+            continue;
+        }
+        let row_sid = rec
+            .get("data")
+            .and_then(|d| d.get("session_id"))
+            .and_then(Value::as_str)?;
+        if row_sid != sid {
+            continue;
+        }
+        let ts = rec.get("ts").and_then(Value::as_str)?;
+        let epoch = rfc3339_to_epoch(ts)?;
+        newest = Some(now - epoch);
+        break;
+        // newest fire per session is always near the end (append-ordered)
+    }
+    newest
+}
+
+/// RFC3339 `ts` -> epoch seconds; None when unparsable.
+fn rfc3339_to_epoch(ts: &str) -> Option<f64> {
+    let dt = chrono::DateTime::parse_from_rfc3339(ts.trim()).ok()?;
+    Some(dt.timestamp_millis() as f64 / 1000.0)
+}
+
+/// One pre-birth decision for node ownership plus boot reservation.
+pub fn node_dispatch_block_reason(
+    node_id: &str,
+    node_cwd: Option<&str>,
+    worked_nodes: Option<BTreeMap<String, Vec<String>>>,
+    worked_error: Option<String>,
+    events_path: Option<&Path>,
+) -> Option<String> {
+    let observation = observe_node_claim(
+        node_id,
+        node_cwd,
+        true,
+        true,
+        None,
+        worked_nodes,
+        worked_error,
+        events_path,
+    );
+    if observation.blocks_dispatch() {
+        return observation.refusal_reason();
+    }
+    if claim_is_live(&format!("dispatch:{node_id}")) {
+        return Some("already-claimed".to_string());
+    }
+    None
+}
+
+/// Live OR suspect blocks selection: suspect is TTL-unexpired but dead pid
+/// (respawned worker); the TTL still protects the slot, so selection must
+/// skip it, never steal.
+pub fn claim_is_live(key: &str) -> bool {
+    match crate::claims::status(key, None) {
+        (crate::claims::ClaimState::Live, _) | (crate::claims::ClaimState::Suspect, _) => true,
+        _ => false,
+    }
+}
+
+/// Release a claim, swallowing any error. Called on the spawn-failure path
+/// BEFORE the decision event is emitted, so a raising release would lose the
+/// decision event and leak the reservation. Truly non-raising keeps "exactly
+/// one decision event, always" an invariant.
+pub fn safe_release(key: &str, holder: &str) {
+    let _ = crate::claims::release(key, holder);
+}
+
+/// Auto-defer at the durable failure limit; return the refusal action
+/// ("auto-deferred" | "defer-failed"). Reads the failure streak from the
+/// journal pair (state root + the node's own project journal), defers via
+/// `fno backlog defer` past the limit, and notifies.
+pub fn refuse_repeated_dead_dispatch(node_id: &str, node_cwd: Option<&str>) -> Option<String> {
+    let failure_limit =
+        crate::backlog::advance_settings::load_merged(node_cwd.map(std::path::Path::new))
+            .ok()
+            .and_then(|doc| {
+                doc.get("active_backlog")
+                    .and_then(|a| a.get("failure_limit"))
+                    .and_then(Value::as_i64)
+            })
+            .unwrap_or(3);
+    let events = read_failure_events(node_cwd);
+    let streak = consecutive_failures(node_id, &events);
+    if streak < failure_limit {
+        return None;
+    }
+    let reason = format!(
+        "auto-failure: {streak} consecutive dead dispatches (worker reaped without termination)"
+    );
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return Some("defer-failed".to_string()),
+    };
+    let mut argv = vec![
+        "backlog".to_string(),
+        "defer".to_string(),
+        node_id.to_string(),
+        "--reason".to_string(),
+        reason,
+    ];
+    if let Some(cwd) = node_cwd {
+        argv.push("--cwd".to_string());
+        argv.push(cwd.to_string());
+    }
+    let out = bounded_command_env(&exe, &argv, 300, &[]);
+    let code = out.as_ref().map(|o| o.code).unwrap_or(1);
+    let action = if code == 0 {
+        "auto-deferred"
+    } else {
+        "defer-failed"
+    };
+    advance_emit(
+        EVENT_DEAD_FAILURE_LIMIT,
+        json!({
+            "node_id": node_id,
+            "consecutive_failures": streak,
+            "failure_limit": failure_limit,
+            "action": action,
+        }),
+        None,
+    );
+    crate::operator_notice::notify_operator(
+        "footnote: dead dispatch limit",
+        &format!("{node_id}: {streak} dead dispatches; {action}. No worker launched."),
+        None,
+    );
+    if code != 0 {
+        let detail = out
+            .ok()
+            .map(|o| {
+                let raw = if o.stderr.is_empty() {
+                    &o.stdout
+                } else {
+                    &o.stderr
+                };
+                raw.trim().chars().take(200).collect::<String>()
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "dead-dispatch limit reached for {node_id}; defer failed (exit {code}: {detail}); refusing another worker"
+        );
+    }
+    Some(action.to_string())
+}
+
+/// The failure-event types the dead-dispatch streak reads. Mirrors
+/// fno.graph.failure.FAILURE_EVENT_TYPES.
+pub(crate) const FAILURE_EVENT_TYPES: &[&str] = &["dispatch_spawned", "dispatch_claim_observed"];
+
+fn read_failure_events(node_cwd: Option<&str>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    if let Some(pin) = std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
+        append_journal_rows(Path::new(&pin), FAILURE_EVENT_TYPES, &mut out);
+        return out;
+    }
+    let cwd = std::env::current_dir().ok();
+    if let Some(space) = cwd.as_deref().and_then(crate::paths::space_dir_opt) {
+        append_journal_rows(&space.join("events.jsonl"), FAILURE_EVENT_TYPES, &mut out);
+    }
+    if let Some(cwd) = node_cwd {
+        let path = Path::new(cwd).join(".fno").join("events.jsonl");
+        if path.is_file() {
+            append_journal_rows(&path, FAILURE_EVENT_TYPES, &mut out);
+        }
+    }
+    out
+}
+
+fn append_journal_rows(path: &Path, types: &[&str], out: &mut Vec<Value>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines().rev() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
+        if types.contains(&kind) {
+            out.push(row);
+        }
+    }
+}
+
+/// Consecutive dead dispatches for the node, newest first (a spawned row or
+/// a claim observation naming a live worker breaks the streak).
+fn consecutive_failures(node_id: &str, events: &[Value]) -> i64 {
+    let mut streak: i64 = 0;
+    for row in events {
+        let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "dispatch_spawned" => break,
+            "dispatch_claim_observed" => {
+                let data = row.get("data").cloned().unwrap_or(Value::Null);
+                let action = data.get("action").and_then(Value::as_str).unwrap_or("");
+                if action == "dispatch" {
+                    break;
+                }
+                if action == "redispatch" {
+                    streak += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    streak
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project continuation (advance_dependents)
+// ---------------------------------------------------------------------------
+
+/// Ready, direct `blocked_by` dependents of the closed node. Reads the graph
+/// (statuses recompute at read), so a dependent whose only open blocker was
+/// the just-closed node already reads ready here. Returns minimal dicts.
+pub fn direct_dependents(
+    closed_node_id: &str,
+    closed_project: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let graph = super::settings::graph_path();
+    let entries = crate::graph_store::read_rows(&graph).map_err(|e| e.to_string())?;
+    // Containers are never dispatched as workers: a dependent that is itself
+    // some other node's parent is an epic, and /target builds its leaves, not
+    // the box. The container id set is the one implementation `next` uses.
+    let parent_ids = container_ids(&entries);
+    let by_id: BTreeMap<String, Value> = entries
+        .iter()
+        .filter_map(|e| {
+            e.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), e.clone()))
+        })
+        .collect();
+    let staleness_days = guard_staleness_days(None);
+    let now_ms = now_ms_i64();
+    let held = held_questions();
+    let mut out: Vec<Value> = Vec::new();
+    for e in &entries {
+        let blocked_by = match e.get("blocked_by").and_then(Value::as_array) {
+            Some(rows) => rows
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|b| b == closed_node_id),
+            None => false,
+        };
+        if !blocked_by {
+            continue;
+        }
+        // "now-unblocked" == ready OR a plan-less idea. The stored status is
+        // the honest readiness: the derived view still reads blocked from
+        // the blocked_by edge the close just satisfied.
+        let status = e
+            .get("persisted_status")
+            .or_else(|| e.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let cold = crate::backlog_ready::is_cold_dispatchable(e);
+        if status != "ready" && !cold {
+            continue;
+        }
+        if crate::backlog_ready::selection_guards(e, &by_id, now_ms, staleness_days, &held)
+            .is_some()
+        {
+            continue; // dead-ancestor or stale-quarantine - do not revive
+        }
+        // An in-flight PR (pr_number set, not yet merged-and-closed) still
+        // reads ready because completed_at is only set at close; the project
+        // next path excludes these via the unmerged-PR guard - mirror it.
+        let has_pr = e.get("pr_number").map(|v| !v.is_null()).unwrap_or(false);
+        let closed = e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false);
+        if has_pr && !closed {
+            continue;
+        }
+        let Some(node_id) = e.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if parent_ids.contains(node_id) {
+            continue; // epic/container dependent - build its leaves, not the box
+        }
+        out.push(json!({
+            "id": node_id,
+            "project": e.get("project"),
+            "slug": e.get("slug").or_else(|| e.get("title")),
+            "cwd": e.get("cwd"),
+            "model": e.get("model"),
+            "difficulty": e.get("difficulty"),
+            "dispatch_verb": e.get("dispatch_verb"),
+            "cross_project": e.get("project").and_then(Value::as_str).or(None)
+                != closed_project.or(None),
+        }));
+    }
+    Ok(out)
+}
+
+/// Ids of container nodes: an owner of only contained children is a delivery
+/// unit, not a box; a node that is some other node's parent is. Mirrors the
+/// container set the next picker applies so this path cannot drift.
+fn container_ids(entries: &[Value]) -> BTreeSet<String> {
+    let mut parents: BTreeSet<String> = BTreeSet::new();
+    for e in entries {
+        if let Some(p) = e.get("parent").and_then(Value::as_str) {
+            if !p.is_empty() {
+                parents.insert(p.to_string());
+            }
+        }
+    }
+    parents
+}
+
+use std::collections::BTreeSet;
+
+/// Best-effort graph->doc projection for the given ids (unblocked
+/// dependents). Never fails the caller: convergence, never a dispatch
+/// blocker.
+pub fn project_unblocked(node_ids: &[String]) {
+    if node_ids.is_empty() {
+        return;
+    }
+    // The projection owner is the plan projection pass; native callers reach
+    // it through the client verb so a plan-doc renderer keeps one owner.
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let argv = vec![
+        "plan-project".to_string(),
+        serde_json::to_string(node_ids).unwrap_or_default(),
+    ];
+    if let Err(e) = bounded_command_env(&exe, &argv, 120, &[]) {
+        eprintln!("warning: unblocked-dependent projection failed: {e}");
+    }
+}
+
+/// True when the DEPENDENT project's own walker is live. Its
+/// `walker:<root>` claim lives under that root's claims store, which is a
+/// different claims root from this process's, so check it there explicitly.
+/// Live OR suspect: a suspect walker claim is still an occupied lane.
+pub fn walker_live_at(project_root: &str) -> bool {
+    let key = format!("walker:{project_root}");
+    let root = std::path::PathBuf::from(project_root);
+    matches!(
+        crate::claims::status(&key, Some(&root)),
+        (crate::claims::ClaimState::Live, _) | (crate::claims::ClaimState::Suspect, _)
+    )
+}
+
+/// The pre-spawn refusal reason for one child, or None to dispatch: a live
+/// walker in the target repo, then the node-claim liveness gate. The
+/// --explain preview runs the SAME classifier so it cannot describe a
+/// selection the drain would not make.
+pub fn converge_gate(child: &Value, root: &str) -> Option<String> {
+    if walker_live_at(root) {
+        return Some("walker-live".to_string());
+    }
+    let id = child.get("id").and_then(Value::as_str)?;
+    node_dispatch_block_reason(id, Some(root), None, None, None)
+}
+
+/// The one shared converge-dispatch core: dedup, reserve, spawn, one
+/// receipt. Merge-advance's per-dependent dispatch and the epic fan-out run
+/// the IDENTICAL choreography so they can never fork. Emits exactly one
+/// decision event; never fails the caller: a spawn failure releases the
+/// reservation (node stays re-dispatchable) and resolves to failed.
+#[allow(clippy::too_many_arguments)]
+pub fn converge_one(
+    node_meta: &Value,
+    root: &str,
+    ev_path: Option<&Path>,
+    verbose: bool,
+    cross_project: bool,
+    mission: Option<&str>,
+    closed_node_id: Option<&str>,
+    model: Option<&str>,
+    provider: Option<&str>,
+    rank: Option<&str>,
+    source: Option<&str>,
+) -> AdvanceResult {
+    let node_id = node_meta
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let slug = node_meta
+        .get("slug")
+        .or_else(|| node_meta.get("title"))
+        .and_then(Value::as_str);
+
+    let tag = |mut data: Value| -> Value {
+        if let Some(obj) = data.as_object_mut() {
+            if let Some(closed) = closed_node_id {
+                obj.insert("closed_node_id".to_string(), Value::from(closed));
+            }
+            if let Some(mission) = mission {
+                obj.insert("mission".to_string(), Value::from(mission));
+            }
+            if let Some(rank) = rank {
+                obj.insert("rank".to_string(), Value::from(rank));
+            }
+        }
+        data
+    };
+    let skip = |reason: &str,
+                detail: Option<String>,
+                retry_at: Option<f64>,
+                exit_code: Option<i32>,
+                data: Value|
+     -> AdvanceResult {
+        let mut payload = tag(data);
+        if let Some(obj) = payload.as_object_mut() {
+            if let Some(r) = retry_at {
+                obj.insert("retry_at".to_string(), json!(r));
+            }
+            if let Some(c) = exit_code {
+                obj.insert("exit_code".to_string(), json!(c));
+            }
+            if let Some(d) = &detail {
+                obj.insert(
+                    "detail".to_string(),
+                    Value::from(d.chars().take(200).collect::<String>()),
+                );
+            }
+        }
+        advance_emit(EVENT_SKIPPED, payload, ev_path);
+        AdvanceResult {
+            decision: "skipped".to_string(),
+            event: EVENT_SKIPPED,
+            reason: Some(reason.to_string()),
+            node_id: Some(node_id.clone()),
+            short_id: None,
+            detail,
+            exit_code,
+            substrate: None,
+            notes: Vec::new(),
+        }
+    };
+    let failed = |error: &str, data: Value| -> AdvanceResult {
+        let mut payload = tag(data);
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "error".to_string(),
+                Value::from(error.chars().take(400).collect::<String>()),
+            );
+        }
+        advance_emit(EVENT_FAILED, payload, ev_path);
+        AdvanceResult {
+            decision: "failed".to_string(),
+            event: EVENT_FAILED,
+            reason: Some("spawn-failed".to_string()),
+            node_id: Some(node_id.clone()),
+            short_id: None,
+            detail: Some(error.to_string()),
+            exit_code: None,
+            substrate: None,
+            notes: Vec::new(),
+        }
+    };
+
+    // The pre-spawn gates, shared with the --explain preview.
+    if let Some(gate) = converge_gate(node_meta, root) {
+        return skip(
+            &gate,
+            None,
+            None,
+            None,
+            json!({"reason": gate, "node_id": node_id}),
+        );
+    }
+
+    let dispatch_key = format!("dispatch:{node_id}");
+    let holder = format!("advance:{}", std::process::id());
+    let reason_tail = {
+        let mut tail = String::from("converge dispatch");
+        if let Some(m) = mission {
+            tail.push_str(&format!(" (mission {m})"));
+        }
+        if let Some(c) = closed_node_id {
+            tail.push_str(&format!(" (dep of {c})"));
+        }
+        tail.push_str(&format!(" for {node_id}"));
+        tail
+    };
+    match crate::claims::acquire(
+        &dispatch_key,
+        &holder,
+        crate::claims::AcquireOpts {
+            ttl_ms: Some(DISPATCH_TTL_MS as i64),
+            reason: Some(reason_tail),
+            ..Default::default()
+        },
+    ) {
+        crate::claims::AcquireOutcome::Acquired(_) => {}
+        crate::claims::AcquireOutcome::Error(e) => {
+            return skip(
+                "claim-error",
+                Some(e),
+                None,
+                None,
+                json!({"reason": "claim-error", "node_id": node_id}),
+            );
+        }
+        _ => {
+            return skip(
+                "already-claimed",
+                None,
+                None,
+                None,
+                json!({"reason": "already-claimed", "node_id": node_id}),
+            )
+        }
+    }
+
+    // Reserve-to-outcome span: every exit that is not a dispatch returns the
+    // boot-window reservation, so nothing between acquire and the dispatched
+    // receipt can strand the bridge.
+    let spawn_outcome = super::advance_dispatch::spawn_worker(
+        &node_id,
+        root,
+        slug,
+        node_meta,
+        model,
+        provider,
+        None,
+        None,
+        None,
+        None,
+        Some((&dispatch_key, &holder)),
+        "_converge_one",
+        source,
+        ev_path,
+    );
+    let (short_id, spawn_receipt, spawn_failure) = match spawn_outcome {
+        Ok(v) => v,
+        Err(super::advance_dispatch::SpawnOutcome::AlreadyRunning(msg)) => {
+            safe_release(&dispatch_key, &holder);
+            return skip(
+                "already-claimed",
+                Some(msg),
+                None,
+                None,
+                json!({"reason": "already-claimed", "node_id": node_id}),
+            );
+        }
+        Err(super::advance_dispatch::SpawnOutcome::Failed(err)) => {
+            safe_release(&dispatch_key, &holder);
+            if let Some(refusal) = err.gate_refusal() {
+                return skip(
+                    &refusal.reason,
+                    Some(refusal.detail.clone()),
+                    refusal.retry_at,
+                    Some(refusal.exit_code),
+                    json!({"reason": refusal.reason, "node_id": node_id}),
+                );
+            }
+            return failed(&err.message, json!({"node_id": node_id}));
+        }
+    };
+
+    let mut dispatched_data = tag(json!({
+        "node_id": node_id,
+        "short_id": short_id,
+        "agent_name": spawn_receipt.get("agent_name").cloned().unwrap_or_default(),
+        "cross_project": cross_project,
+        "verb": spawn_receipt.get("verb").cloned().unwrap_or(Value::from("builtin")),
+        "verb_source": spawn_receipt.get("verb_source").cloned().unwrap_or(Value::from("field-absent")),
+        "notes": spawn_receipt.get("notes").cloned().unwrap_or(Value::Array(vec![])),
+    }));
+    if let Some(obj) = dispatched_data.as_object_mut() {
+        if let Some(brief) = spawn_receipt.get("brief") {
+            obj.insert("brief".to_string(), brief.clone());
+        }
+    }
+    advance_emit(EVENT_DISPATCHED, dispatched_data, ev_path);
+    if verbose {
+        let scope = mission.map(|m| format!("mission {m} ")).unwrap_or_default();
+        let kind = if cross_project {
+            "cross-project"
+        } else {
+            "same-project"
+        };
+        eprintln!(
+            "advance: dispatched {scope}{kind} {node_id} -> target worker {short_id} (--cwd {root})"
+        );
+    }
+    AdvanceResult {
+        decision: "dispatched".to_string(),
+        event: EVENT_DISPATCHED,
+        reason: None,
+        node_id: Some(node_id),
+        short_id: Some(short_id),
+        detail: None,
+        exit_code: None,
+        substrate: spawn_receipt
+            .get("substrate")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        notes: spawn_receipt
+            .get("notes")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Resolve one dependent's own project root, then converge-dispatch it. A
+/// CROSS-project dependent launches in its work-map root; a SAME-project
+/// one launches in its own recorded cwd route (never a foreign root, which
+/// could land it on a protected branch where the bg worker dies).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_one_dependent(
+    dep: &Value,
+    closed_node_id: &str,
+    ev_path: Option<&Path>,
+    verbose: bool,
+    model: Option<&str>,
+    provider: Option<&str>,
+    rank: Option<&str>,
+    source: Option<&str>,
+) -> AdvanceResult {
+    let node_id = dep.get("id").and_then(Value::as_str).unwrap_or("");
+    let cross_project = dep
+        .get("cross_project")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let skip = |reason: &str, detail: Option<String>| -> AdvanceResult {
+        let mut data = json!({
+            "reason": reason,
+            "node_id": node_id,
+            "closed_node_id": closed_node_id,
+        });
+        if let (Some(obj), Some(rank)) = (data.as_object_mut(), rank) {
+            obj.insert("rank".to_string(), Value::from(rank));
+        }
+        if let (Some(obj), Some(d)) = (data.as_object_mut(), &detail) {
+            obj.insert(
+                "detail".to_string(),
+                Value::from(d.chars().take(200).collect::<String>()),
+            );
+        }
+        advance_emit(EVENT_SKIPPED, data, ev_path);
+        AdvanceResult {
+            decision: "skipped".to_string(),
+            event: EVENT_SKIPPED,
+            reason: Some(reason.to_string()),
+            node_id: Some(node_id.to_string()),
+            short_id: None,
+            detail,
+            exit_code: None,
+            substrate: None,
+            notes: Vec::new(),
+        }
+    };
+
+    let Some(project) = dep
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+    else {
+        return skip("no-project", None);
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let work_map = crate::territory::workspace_paths(&cwd);
+    let mapped = work_map.get(project).cloned();
+    let root: String = if cross_project {
+        match mapped {
+            Some(r) => r,
+            None => return skip("unmapped-project", Some(project.to_string())),
+        }
+    } else {
+        // Same-project: the work-map root is the cwd authority; recorded cwd
+        // is fallback data. Fail closed if neither resolves rather than
+        // guess canonical main.
+        match mapped.or_else(|| {
+            dep.get("cwd")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+        }) {
+            Some(r) => r,
+            None => return skip("no-cwd", None),
+        }
+    };
+
+    converge_one(
+        dep,
+        &root,
+        ev_path,
+        verbose,
+        cross_project,
+        None,
+        Some(closed_node_id),
+        model,
+        provider,
+        rank,
+        source,
+    )
+}
+
+/// Dispatch the closed node's now-unblocked direct dependents. Gated on the
+/// same opt-in as advance(); strictly non-fatal; covers BOTH same-project
+/// dependents and cross-project ones. Emits exactly one decision event per
+/// dependent; a clean run with no dependents emits nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_dependents(
+    closed_node_id: &str,
+    closed_project: Option<&str>,
+    project_root: Option<&Path>,
+    events_path: Option<&Path>,
+    verbose: bool,
+    model: Option<&str>,
+    provider: Option<&str>,
+    source: Option<&str>,
+) -> Vec<AdvanceResult> {
+    let ev_path_owned = advance_events_path(project_root);
+    let ev_path = events_path.or(ev_path_owned.as_deref());
+    let (armed, rank) = auto_continue_resolve(project_root);
+    if !armed {
+        return Vec::new();
+    }
+    if walker_key().map(|k| claim_is_live(&k)).unwrap_or(false) {
+        return Vec::new();
+    }
+    // Fail closed: without the closed node's project we cannot tell a
+    // same-project dependent from a cross-project one, and misrouting lands
+    // a worker on a protected branch where it dies. Dispatch nothing.
+    let Some(closed_project) = closed_project.filter(|p| !p.is_empty()) else {
+        advance_emit(
+            EVENT_SKIPPED,
+            json!({"reason": "closed-project-unknown", "closed_node_id": closed_node_id, "rank": rank}),
+            ev_path,
+        );
+        return vec![AdvanceResult {
+            decision: "skipped".to_string(),
+            event: EVENT_SKIPPED,
+            reason: Some("closed-project-unknown".to_string()),
+            node_id: None,
+            short_id: None,
+            detail: None,
+            exit_code: None,
+            substrate: None,
+            notes: Vec::new(),
+        }];
+    };
+    let deps = match direct_dependents(closed_node_id, Some(closed_project)) {
+        Ok(d) => d,
+        Err(e) => {
+            advance_emit(
+                EVENT_SKIPPED,
+                json!({
+                    "reason": "dependents-error",
+                    "closed_node_id": closed_node_id,
+                    "detail": e.chars().take(200).collect::<String>(),
+                    "rank": rank,
+                }),
+                ev_path,
+            );
+            return vec![AdvanceResult {
+                decision: "skipped".to_string(),
+                event: EVENT_SKIPPED,
+                reason: Some("dependents-error".to_string()),
+                node_id: None,
+                short_id: None,
+                detail: Some(e),
+                exit_code: None,
+                substrate: None,
+                notes: Vec::new(),
+            }];
+        }
+    };
+    // Repaint each now-unblocked dependent's doc so a merge-gated dependent
+    // carries current mirror fields the moment its blocker closes.
+    let ids: Vec<String> = deps
+        .iter()
+        .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    project_unblocked(&ids);
+    deps.iter()
+        .map(|dep| {
+            dispatch_one_dependent(
+                dep,
+                closed_node_id,
+                ev_path,
+                verbose,
+                model,
+                provider,
+                Some(rank),
+                source,
+            )
+        })
+        .collect()
+}
