@@ -952,7 +952,7 @@ pub(crate) fn sync_source_checkout(source: &Path, dry_run: bool) -> Result<(), S
 }
 
 /// The closing verdict: does the running daemon run the build on disk? Ok
-/// when it does or when none runs (the next verb starts the new build).
+/// when it does or when none runs (the next verb runs the build on disk).
 fn daemon_verdict() -> Result<String, String> {
     let bin = fno_agents_bin();
     let rev = run_bounded(
@@ -986,7 +986,7 @@ fn daemon_verdict() -> Result<String, String> {
                 .and_then(Value::as_u64)
                 .map_or("?".to_string(), |p| p.to_string());
             match status.get("drift").and_then(Value::as_str) {
-                Some("fresh") => Ok(format!("daemon pid {pid} runs the new build {rev}")),
+                Some("fresh") => Ok(format!("daemon pid {pid} runs the build on disk ({rev})")),
                 Some("drifted") => Err(format!(
                     "daemon pid {pid} still runs an older build, not {rev}{restart_failure}; run `fno restart`"
                 )),
@@ -996,7 +996,7 @@ fn daemon_verdict() -> Result<String, String> {
             }
         }
         Ok((13, _, _)) => Ok(format!(
-            "no daemon running; the next fno-agents verb starts the new build {rev}"
+            "no daemon running; the next fno-agents verb runs the build on disk ({rev})"
         )),
         Ok((code, _, err)) => Err(format!(
             "the daemon status read exited {code} ({}){restart_failure}",
@@ -1193,6 +1193,7 @@ fn refresh_rust_bins(
                 "fno doctor update: WARNING: cargo install failed; rust bins NOT refreshed; continuing with the install"
             );
             render_component_evidence(source, subtree.as_deref(), &install_root);
+            failed.push("rust bins refresh".into());
             return "failed".into();
         }
     }
