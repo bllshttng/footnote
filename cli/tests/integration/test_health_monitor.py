@@ -481,12 +481,14 @@ def test_dispatch_throttle_does_not_suppress_alert_severity(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_check_mode_exit_0_when_healthy(tmp_graph):
     """--check on empty backlog exits 0."""
     result = runner.invoke(app, ["backlog", "triage", "health", "--check", "--quiet"])
     assert result.exit_code == 0, result.output + result.stderr
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_quiet_mode_no_output_when_healthy(tmp_graph):
     """--quiet on healthy backlog produces no stdout."""
     result = runner.invoke(app, ["backlog", "triage", "health", "--check", "--quiet"])
@@ -495,6 +497,7 @@ def test_quiet_mode_no_output_when_healthy(tmp_graph):
     assert result.stdout.strip() == ""
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_check_mode_exit_4_on_breach(tmp_graph, monkeypatch):
     """Seed enough idea nodes to breach default threshold; --check exits 4."""
     # Default idea_pile_depth threshold is 25. Seed 30 idea nodes.
@@ -509,6 +512,7 @@ def test_check_mode_exit_4_on_breach(tmp_graph, monkeypatch):
     )
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_trend_verb_prints_summary_when_history_empty(tmp_graph, tmp_path, monkeypatch):
     """trend prints a friendly message when no history exists yet."""
     # Point the trend verb at an empty history file via env override
@@ -563,6 +567,7 @@ def test_summarize_trend_counts_legacy_entries_without_complete_key():
     assert summary["stale_ready_nodes"]["latest"] == 7
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_check_to_history_to_throttle_to_trend_journey(tmp_graph, tmp_path, monkeypatch):
     """End-to-end wiring: --check breach -> history append -> throttle write
     -> repeat --check still breaches but throttle suppresses dispatch ->
@@ -771,11 +776,24 @@ def _make_pending_node(
     }
 
 
+def _map_projects(fno_dir: Path, monkeypatch, roots: dict[str, str]) -> None:
+    """Seed the work map the native door reads: the global config.toml under
+    the tmp HOME. The run starts from that HOME so no project config found
+    from the checkout outranks it."""
+    rows = [
+        f'[[work.workspaces.test.projects]]\nname = "{name}"\npath = "{root}"\n'
+        for name, root in roots.items()
+    ]
+    (fno_dir / "config.toml").write_text("\n".join(rows))
+    monkeypatch.chdir(fno_dir.parent)
+
+
 def _write_nodes(graph_path: Path, nodes: list[dict]) -> None:
     graph_path.parent.mkdir(parents=True, exist_ok=True)
     seed_graph(graph_path, json.dumps({"entries": nodes}, indent=2))
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_mismatch_ac3_hp(tmp_graph, monkeypatch):
     """AC3-HP: pending node with mapped project and cwd != work-map root is
     counted in project_cwd_mismatch and listed in project_cwd_mismatch_nodes."""
@@ -785,12 +803,7 @@ def test_health_mismatch_ac3_hp(tmp_graph, monkeypatch):
     node = _make_pending_node("ab-mismatch01", project="my-proj", cwd=wrong_cwd)
     _write_nodes(tmp_graph / "graph.json", [node])
 
-    # Patch project_root_from_settings at its import location so cmd_health's
-    # lazy import inside the function body is intercepted.
-    monkeypatch.setattr(
-        "fno.graph._intake.project_root_from_settings",
-        lambda proj: mapped_root if proj == "my-proj" else None,
-    )
+    _map_projects(tmp_graph, monkeypatch, {"my-proj": mapped_root})
 
     result = runner.invoke(app, ["backlog", "triage", "health", "--json", "--all"])
     assert result.exit_code == 0, result.output
@@ -799,6 +812,7 @@ def test_health_mismatch_ac3_hp(tmp_graph, monkeypatch):
     assert "ab-mismatch01" in data["project_cwd_mismatch_nodes"]
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_mismatch_ac3_err_unmapped_not_counted(tmp_graph, monkeypatch):
     """AC3-ERR: pending node whose project has no work-map entry is not counted."""
     node = _make_pending_node(
@@ -806,10 +820,7 @@ def test_health_mismatch_ac3_err_unmapped_not_counted(tmp_graph, monkeypatch):
     )
     _write_nodes(tmp_graph / "graph.json", [node])
 
-    monkeypatch.setattr(
-        "fno.graph._intake.project_root_from_settings",
-        lambda proj: None,  # no mapping for any project
-    )
+    _map_projects(tmp_graph, monkeypatch, {})
 
     result = runner.invoke(app, ["backlog", "triage", "health", "--json", "--all"])
     assert result.exit_code == 0, result.output
@@ -818,6 +829,7 @@ def test_health_mismatch_ac3_err_unmapped_not_counted(tmp_graph, monkeypatch):
     assert data["project_cwd_mismatch_nodes"] == []
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_mismatch_ac3_ui_zero_when_clean(tmp_graph, monkeypatch):
     """AC3-UI: when all pending nodes agree with the work-map, report contains
     explicit project_cwd_mismatch: 0 (not absent)."""
@@ -829,10 +841,7 @@ def test_health_mismatch_ac3_ui_zero_when_clean(tmp_graph, monkeypatch):
     )
     _write_nodes(tmp_graph / "graph.json", [node])
 
-    monkeypatch.setattr(
-        "fno.graph._intake.project_root_from_settings",
-        lambda proj: mapped_root if proj == "clean-proj" else None,
-    )
+    _map_projects(tmp_graph, monkeypatch, {"clean-proj": mapped_root})
 
     result = runner.invoke(app, ["backlog", "triage", "health", "--json", "--all"])
     assert result.exit_code == 0, result.output
@@ -841,6 +850,7 @@ def test_health_mismatch_ac3_ui_zero_when_clean(tmp_graph, monkeypatch):
     assert data["project_cwd_mismatch"] == 0
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_mismatch_ac3_edge_done_not_counted(tmp_graph, monkeypatch):
     """AC3-EDGE: a done node (completed_at set) with historical cwd mismatch
     is NOT counted in project_cwd_mismatch."""
@@ -857,10 +867,7 @@ def test_health_mismatch_ac3_edge_done_not_counted(tmp_graph, monkeypatch):
     )
     _write_nodes(tmp_graph / "graph.json", [done_node])
 
-    monkeypatch.setattr(
-        "fno.graph._intake.project_root_from_settings",
-        lambda proj: mapped_root if proj == "my-proj" else None,
-    )
+    _map_projects(tmp_graph, monkeypatch, {"my-proj": mapped_root})
 
     result = runner.invoke(app, ["backlog", "triage", "health", "--json", "--all"])
     assert result.exit_code == 0, result.output
@@ -868,6 +875,7 @@ def test_health_mismatch_ac3_edge_done_not_counted(tmp_graph, monkeypatch):
     assert data["project_cwd_mismatch"] == 0
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_mismatch_normalization_tilde(tmp_graph, monkeypatch):
     """Normalization edge: cwd stored as ~/x matches abspath expanded root."""
     import os
@@ -881,10 +889,7 @@ def test_health_mismatch_normalization_tilde(tmp_graph, monkeypatch):
 
     # Override HOME so expanduser resolves correctly
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(
-        "fno.graph._intake.project_root_from_settings",
-        lambda proj: mapped_root if proj == "tilde-proj" else None,
-    )
+    _map_projects(tmp_graph, monkeypatch, {"tilde-proj": mapped_root})
 
     result = runner.invoke(app, ["backlog", "triage", "health", "--json", "--all"])
     assert result.exit_code == 0, result.output
@@ -932,6 +937,7 @@ def test_health_mismatch_ac3_fr_evaluate_thresholds_breach():
     assert not any(b.key == "project_cwd_mismatch" for b in breaches_clean)
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_mismatch_check_exit4(tmp_graph, monkeypatch):
     """--check exits 4 when project_cwd_mismatch breaches threshold=0."""
     mapped_root = "/real/root"
@@ -940,25 +946,14 @@ def test_health_mismatch_check_exit4(tmp_graph, monkeypatch):
     node = _make_pending_node("ab-check01", project="check-proj", cwd=wrong_cwd)
     _write_nodes(tmp_graph / "graph.json", [node])
 
-    monkeypatch.setattr(
-        "fno.graph._intake.project_root_from_settings",
-        lambda proj: mapped_root if proj == "check-proj" else None,
+    _map_projects(tmp_graph, monkeypatch, {"check-proj": mapped_root})
+    config = tmp_graph / "config.toml"
+    config.write_text(
+        config.read_text()
+        + "\n[health_monitor]\nenabled = true\n"
+        + "[health_monitor.thresholds]\nproject_cwd_mismatch = 0\n"
+        + '[health_monitor.notifications]\nsurfaces = ["log_only"]\n'
     )
-
-    # Write a project settings that sets project_cwd_mismatch threshold to 0
-    settings_text = (
-        "config:\n"
-        "  health_monitor:\n"
-        "    enabled: true\n"
-        "    thresholds:\n"
-        "      project_cwd_mismatch: 0\n"
-        "    notifications:\n"
-        "      surfaces: [log_only]\n"
-    )
-    fno_dir = tmp_graph.parent / ".fno"
-    fno_dir.mkdir(exist_ok=True)
-    (fno_dir / "settings.yaml").write_text(settings_text)
-    monkeypatch.chdir(tmp_graph.parent)
 
     result = runner.invoke(
         app, ["backlog", "triage", "health", "--check", "--all"]
@@ -979,12 +974,13 @@ def _append_eval_row(path, row):
         fh.write(json.dumps(row) + "\n")
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_evals_line_carries_age_and_stale(tmp_graph, monkeypatch):
     """A 9-day-old newest regression run reads 'age 9d STALE', not a healthy
     100%: the line demands a fresh run instead of only displaying history."""
+    # The native door reads the history under the store's state root.
     hist = tmp_graph / "history" / "evals-history.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     now = datetime.now(timezone.utc)
     _append_eval_row(hist, {
         "ts": (now - timedelta(days=9)).isoformat().replace("+00:00", "Z"),
@@ -999,10 +995,11 @@ def test_health_evals_line_carries_age_and_stale(tmp_graph, monkeypatch):
     assert "age 9d STALE" in result.stdout
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_health_evals_line_fresh_has_no_stale_marker(tmp_graph, monkeypatch):
+    # The native door reads the history under the store's state root.
     hist = tmp_graph / "history" / "evals-history.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     now = datetime.now(timezone.utc)
     _append_eval_row(hist, {
         "ts": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),

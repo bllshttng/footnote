@@ -61,7 +61,7 @@ backlog groom
 backlog maintain
 backlog rank
 backlog roadmap
-backlog triage health
+backlog triage
 backlog advance
 backlog intake
 # Track C, the mesh (L12-L14)

@@ -1135,9 +1135,9 @@ def test_triage_health_shows_evals_line_when_history_exists(tmp_graph, tmp_path,
     from datetime import datetime, timedelta, timezone
     from fno.evals import history as _eh
 
-    hist = tmp_graph / "history" / "evals-history.jsonl"
+    # The native door reads the history under the store's state root.
+    hist = tmp_path / "history" / "evals-history.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_graph))
     now = datetime.now(timezone.utc)
     _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": True,
                           "ts": (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")})
