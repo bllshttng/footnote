@@ -958,10 +958,10 @@ pub fn resolve_node_spawn(
     if let Some(src) = source {
         if matches!(src, "ac" | "rd" | "ab") {
             run_env.insert("FNO_SPAWN_TRIGGER".to_string(), format!("dispatch:{src}"));
-            for key in AMBIENT_IDENTITY_ENV {
+            for key in ambient_scrub_names() {
                 run_env.remove(key);
             }
-            for key in SEED_PROVENANCE_KEYS {
+            for key in crate::claude_supervisor::SEED_PROVENANCE_KEYS {
                 run_env.remove(key);
             }
         }
@@ -999,38 +999,28 @@ fn root_of() -> String {
 }
 
 /// The ambient session-identity env a dispatch-sourced child must not
-/// inherit (the Python owner's AMBIENT_IDENTITY_ENV).
-const AMBIENT_IDENTITY_ENV: [&str; 19] = [
-    "FNO_HARNESS_NAME",
-    "FNO_HARNESS_SESSION_ID",
-    "CODEX_THREAD_ID",
-    "CLAUDE_CODE_SESSION_ID",
-    "CODEX_SESSION_ID",
-    "GEMINI_SESSION_ID",
-    "OPENCODE_SESSION_ID",
-    "CLAUDE_SESSION_ID",
-    "CLAUDECODE",
-    "CLAUDECODE_SESSION_ID",
-    "HERMES_SESSION_ID",
-    "TARGET_SESSION_ID",
-    "CODEX_CI",
-    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
-    "CODEX_SHELL",
-    "CODEX_COMPANION_SESSION_ID",
-    "CODEX_COMPANION_TRANSCRIPT_PATH",
-    "FNO_AGENT_SUBSTRATE",
-    "FNO_NODE_REASON",
-];
-
-/// The seed-provenance env group, set-or-cleared together.
-const SEED_PROVENANCE_KEYS: [&str; 6] = [
-    "FNO_SEED_PROV_SEED_B64",
-    "FNO_SEED_PROV_FROM",
-    "FNO_SEED_PROV_FROM_SESSION",
-    "FNO_SEED_PROV_HARNESS",
-    "FNO_SEED_PROV_NODE",
-    "FNO_SEED_PROV_MSG_ID",
-];
+/// inherit: the launcher's own ambient set (claims::AMBIENT_IDENTITY_NAMES)
+/// narrowed to the dispatch scrub's membership, plus the node-reason stamp.
+/// The long names live in ONE list (claims.rs); this file retypes none. The
+/// seed-provenance names are claude_supervisor's list.
+fn ambient_scrub_names() -> Vec<&'static str> {
+    // The launcher keys (SELF/HARNESS/PROVIDER/SESSION) are the ask lanes'
+    // stamps, not ambient session identity: the dispatch scrub keeps them,
+    // exactly like the Python owner's list.
+    const LAUNCHER_KEYS: [&str; 4] = [
+        "FNO_AGENT_SELF",
+        "FNO_AGENT_HARNESS",
+        "FNO_AGENT_PROVIDER",
+        "FNO_AGENT_SESSION",
+    ];
+    let mut names: Vec<&'static str> = crate::claims::AMBIENT_IDENTITY_NAMES
+        .iter()
+        .copied()
+        .filter(|n| !LAUNCHER_KEYS.contains(n))
+        .collect();
+    names.push("FNO_NODE_REASON");
+    names
+}
 
 /// fno's builtin unattended permission answer (spawn_compose's constant).
 const SPAWN_PERMISSION_BUILTIN: &str = "bypassPermissions";
