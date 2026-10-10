@@ -1,6 +1,6 @@
 {
   "name": "buddy",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "A Claude Code mod (claude-mod-buddy). Bring back buddy: a terminal companion beside your status line that watches your work and talks back.",
   "author": {
     "name": "Jason Noah Choi",

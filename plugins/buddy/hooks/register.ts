@@ -392,7 +392,33 @@ async function readSettings($: EngineInterface): Promise<Record<string, unknown>
 }
 
 function isOurs(statusLine: any): boolean {
-  return typeof statusLine?.command === 'string' && [WRAPPER, FAST].some(file => statusLine.command.includes(`/state/buddy/${file}`))
+  return wrapperRoot(statusLine) !== undefined
+}
+
+// The state folder of the wrapper a status line runs, or undefined when it runs no buddy wrapper.
+export function wrapperRoot(statusLine: any): string | undefined {
+  if (typeof statusLine?.command !== 'string') return undefined
+  return statusLine.command.match(/(?:^|\s)(\S+)\/state\/buddy\/statusline\.(?:py|sh)(?:\s|$)/)?.[1]
+}
+
+// The wrapper reads frames from its own folder, so every session must write there. A session that
+// asks fno for the folder can time out under load and fall back to ~/.local, then write where no
+// wrapper reads; so the wrapper in the settings decides, and fno is asked only when there is none.
+async function findStateDir($: EngineInterface, settings: Record<string, unknown> | null): Promise<string> {
+  return wrapperRoot(settings?.statusLine) ?? (await resolveStateDir($))
+}
+
+// A buddy from before the shell entry point did not know statusline.sh as its own, so it could
+// save one wrapper as the user's line and wrap it again. The user's line is the one that wrapper saved.
+async function unnest($: EngineInterface): Promise<void> {
+  const path = `${buddyDir()}/inner.json`
+  const inner = await readJson($, path).catch(() => undefined)
+  const root = wrapperRoot(inner?.statusLine)
+  if (!root) return
+  const deeper = root === stateDir ? undefined : await readJson($, `${root}/state/buddy/inner.json`).catch(() => undefined)
+  // Without the line that wrapper saved there is nothing to put back, so the file stays as it is.
+  if (!deeper || !('statusLine' in deeper) || isOurs(deeper.statusLine)) return
+  await $.fs.write(path, JSON.stringify({ statusLine: deeper.statusLine }, null, 2) + '\n')
 }
 
 async function resolveStateDir($: EngineInterface): Promise<string> {
@@ -702,15 +728,16 @@ export function register(on: On) {
     if (deferred) muted = true
     // A buddy that is off runs nothing at start: no process, no settings read.
     if (!muted) {
-      stateDir = await resolveStateDir($)
+      const settings = await readSettings($)
+      stateDir = await findStateDir($, settings)
       // The fno mux sets both in each pane it hosts, and writes <mux dir>/<session>.visible.json.
       const mux = await $.env.get('FNO_SESSION')
       muxPane = Number(await $.env.get('FNO_PANE')) || 0
       if (mux && muxPane && stateDir) muxVisible = `${(await $.env.get('FNO_MUX_DIR')) || `${stateDir}/mux`}/${mux}.visible.json`
-      const settings = await readSettings($)
       wrapped = isOurs(settings?.statusLine)
       if (wrapped && stateDir) {
         await installWrapper($).catch(() => {})
+        await unnest($).catch(() => {})
         await keepTicking($, settings!).catch(() => {})
       }
       else if (stateDir) {
@@ -732,7 +759,10 @@ export function register(on: On) {
         }
         await syncSoul($).catch(() => {})
         const was = wrapped
-        wrapped = (await wrapperSeen($, at)) || isOurs((await readSettings($))?.statusLine)
+        const line = (await readSettings($))?.statusLine
+        // Another session or the user can point the status line at another folder; follow it.
+        stateDir = wrapperRoot(line) ?? stateDir
+        wrapped = (await wrapperSeen($, at)) || isOurs(line)
         if (wrapped && !was) await $.ui.close({ id: PANE_ID }).catch(() => {})
         if (wrapped) $.ui.invalidate('ui.render')
       }
@@ -761,7 +791,7 @@ export function register(on: On) {
     const arg = e.args.trim().toLowerCase()
     if (!buddy) await load($, now)
     if (deferred) return { text: 'Your fno plugin still runs its own buddy. Update fno (/plugin update fno@footnote), then start a new session.' }
-    if (!stateDir) stateDir = await resolveStateDir($)
+    if (!stateDir) stateDir = await findStateDir($, await readSettings($))
     if (arg === 'statusline') return { text: await statuslineOn($) }
     if (arg === 'bye') {
       const { ok, text } = await statuslineOff($)
@@ -916,13 +946,20 @@ export function register(on: On) {
       justifyContent: 'flex-end',
       height: e.props.scroll?.bodyRows ?? 12,
       children: [
-        ...(words ? [Box({ borderStyle: 'round', children: [Text({ wrap: 'wrap', children: [words] })] }), Text({ children: ['  ◦ ·'] })] : []),
-        ...(fleet ? [Text({ dimColor: true, wrap: 'wrap', children: [fleet] }), Text({ children: [' '] })] : []),
-        ...drawArt({ Text, Svg: $.ui.resolve(e).Svg }, buddy, sprite(buddy, now)),
-        Button({ key: 'pet', label: buddy.name, hotkey: 'p', plain: true, dimColor: true, onPress: async () => {
-          pettedAt = await $.clock.now()
-          $.ui.invalidate('ui.render')
-        } }),
+        ...(words ? [Box({ borderStyle: 'round', children: [Text({ wrap: 'wrap', children: [words] })] }), Box({ justifyContent: 'center', children: [Text({ children: ['◦ ·'] })] })] : []),
+        // The bubble takes the full width; the fleet line, the buddy, and its name stand centered under it.
+        Box({
+          flexDirection: 'column',
+          alignItems: 'center',
+          children: [
+            ...(fleet ? [Text({ dimColor: true, wrap: 'wrap', children: [fleet] }), Text({ children: [' '] })] : []),
+            ...drawArt({ Text, Svg: $.ui.resolve(e).Svg }, buddy, sprite(buddy, now)),
+            Button({ key: 'pet', label: buddy.name, hotkey: 'p', plain: true, dimColor: true, onPress: async () => {
+              pettedAt = await $.clock.now()
+              $.ui.invalidate('ui.render')
+            } }),
+          ],
+        }),
       ],
     })
   })
