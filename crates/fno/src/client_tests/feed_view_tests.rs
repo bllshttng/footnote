@@ -235,6 +235,86 @@ fn render_rows() {
     );
 }
 
+/// Header and data draw through ONE column grid: every title's display
+/// offset equals its column's value offset, a value at the cap fills its
+/// cell with a one-space gutter, and a value past the cap ellipsizes
+/// without pushing the next column sideways.
+#[test]
+fn column_grid_rows() {
+    fn display_col(line: &str, needle: &str) -> Option<usize> {
+        let byte = line.find(needle)?;
+        Some(
+            line[..byte]
+                .chars()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
+                .sum(),
+        )
+    }
+    // The rendered ts spells differently per zone (short_ts is local), so the
+    // time cell is read back out of the row: display columns 3..14 are the
+    // marker block plus the 11-wide date cell.
+    fn display_slice(line: &str, start: usize, len: usize) -> String {
+        let mut out = String::new();
+        let mut col = 0usize;
+        for ch in line.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if col >= start + len {
+                break;
+            }
+            if col + cw > start {
+                out.push(ch);
+            }
+            col += cw;
+        }
+        out
+    }
+    let mut long = feed_item(Some("x-a1b2c3d4e5f6"), Some("s-1234567890"));
+    long.kind = "daemon_restarted".into();
+    long.area = "mux".into();
+    long.harness = Some("claude".into());
+    long.lead = Some("team-alpha".into());
+    long.title = "restarted the daemon".into();
+    let mut over = feed_item(Some("x-b"), Some("s-2"));
+    // A kind past the 16-column cap: the cell ellipsizes at the cap.
+    over.kind = "prompt_parked_by_gatekeeper".into();
+    let o = overlay_in(vec![long, over], feed_view::FeedOrder::Recent);
+    let lines = feed_panel_lines(&o, false, 120, ROWS, 0);
+    let header = &lines[1];
+    let row = &lines[2];
+    let ts_cell = display_slice(row, 3, 11);
+    assert!(
+        !ts_cell.trim().is_empty(),
+        "the row carries a time cell: {row}"
+    );
+    for (title, value) in [
+        ("time", ts_cell.as_str()),
+        ("area", "mux"),
+        ("harness", "claude"),
+        ("kind", "daemon_restarted"),
+        ("node", "x-a1b2c"),
+        ("session", "09876543"),
+        ("lead", "team-alpha"),
+    ] {
+        assert_eq!(
+            display_col(header, title),
+            display_col(row, value),
+            "column `{title}`: header and data sit at different x\nheader: {header}\nrow:    {row}"
+        );
+    }
+    // A kind past the cap ellipsizes to exactly the cap and the node column
+    // keeps its grid position.
+    let over_row = &lines[3];
+    assert!(
+        over_row.contains("prompt_parked_b\u{2026} "),
+        "the over-cap kind ellipsizes at 16 columns: {over_row}"
+    );
+    assert_eq!(
+        display_col(header, "node"),
+        display_col(over_row, "x-b"),
+        "node keeps its offset under an ellipsized kind\nheader: {header}\nrow:    {over_row}"
+    );
+}
+
 #[test]
 fn hit_rows() {
     // The cwd basename is the node id: the join the sideline itself uses.

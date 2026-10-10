@@ -285,10 +285,92 @@ pub(crate) fn feed_panel_rows(
     // session (tail 8), lead, summary. The narrowest panel keeps time, kind,
     // node and summary; a wider one adds lead, harness, area, session back
     // in that drop order (AC11).
-    // Date plus time needs a 15-column cell; below 48 columns the panel
-    // keeps the compact HH:MM so kind, node and a summary sliver survive.
+    //
+    // Header and rows draw through ONE grid: each column's width is
+    // the widest value the table shows (display columns), capped, and a
+    // longer value ellipsizes inside its cell, so a title can never sit at a
+    // different x than its data.
     let show_date = w >= 48;
-    let mut used = (if show_date { 16usize } else { 10usize }) + 17usize + 9usize;
+    let ts_w = if show_date { 11 } else { 5 };
+    let dw = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+    let col_w = |title: usize, cap: usize, vals: Vec<usize>| {
+        vals.into_iter().fold(title, usize::max).min(cap)
+    };
+    let area_w = col_w(4, 8, o.win.items.iter().map(|i| dw(&i.area)).collect());
+    let harness_w = col_w(
+        7,
+        8,
+        o.win
+            .items
+            .iter()
+            .filter_map(|i| i.harness.as_deref())
+            .map(dw)
+            .collect(),
+    );
+    let kind_w = col_w(
+        4,
+        16,
+        o.win
+            .items
+            .iter()
+            .map(|i| dw(display_kind(&i.kind)))
+            .collect(),
+    );
+    let node_w = col_w(
+        4,
+        8,
+        o.win
+            .items
+            .iter()
+            .filter_map(|i| i.node.as_deref())
+            .map(dw)
+            .collect(),
+    );
+    let session_w = col_w(
+        7,
+        8,
+        o.win
+            .items
+            .iter()
+            .filter_map(|i| {
+                i.session_id
+                    .as_deref()
+                    .map(|s| s.chars().rev().take(8).collect::<String>())
+            })
+            .map(|s| dw(&s))
+            .collect(),
+    );
+    let lead_w = col_w(
+        4,
+        12,
+        o.win
+            .items
+            .iter()
+            .filter_map(|i| i.lead.as_deref())
+            .map(dw)
+            .collect(),
+    );
+    // The rows show only what fits the cap: a longer value ellipsizes to
+    // cap-1 columns plus the ellipsis, so the next column never moves.
+    let fit_cell = |s: &str, cap: usize| -> String {
+        if dw(s) <= cap {
+            return s.to_string();
+        }
+        let mut out = String::new();
+        let mut cell_w = 0usize;
+        for ch in s.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cell_w + cw > cap - 1 {
+                break;
+            }
+            out.push(ch);
+            cell_w += cw;
+        }
+        out.push('\u{2026}');
+        out
+    };
+
+    let mut used = 3 + ts_w + 1 + kind_w + 1 + node_w + 1;
     let fits = |needed: usize, used: &mut usize| {
         if *used + needed <= w {
             *used += needed;
@@ -297,23 +379,20 @@ pub(crate) fn feed_panel_rows(
             false
         }
     };
-    let show_lead = fits(13, &mut used);
-    let show_harness = fits(8, &mut used);
-    let show_area = fits(8, &mut used);
-    let show_session = fits(9, &mut used);
+    let show_lead = fits(lead_w + 1, &mut used);
+    let show_harness = fits(harness_w + 1, &mut used);
+    let show_area = fits(area_w + 1, &mut used);
+    let show_session = fits(session_w + 1, &mut used);
 
-    let header = |cols: Vec<(&str, bool)>| -> Vec<Span> {
-        let mut row = vec![Span::plain(" ".to_string())];
-        for (title, on) in cols {
-            if on {
-                row.push(Span {
-                    text: format!("{title:<width$} ", title = title, width = title.len() + 2),
-                    bold: true,
-                    brand: false,
-                });
-            }
-        }
-        row
+    // One cell writer for the column header and every row: a value (or a
+    // title) plus padding to the column width and a one-column gutter.
+    let push_col = |row: &mut Vec<Span>, text: &str, width: usize, bold: bool, brand: bool| {
+        let pad = width.saturating_sub(dw(text));
+        row.push(Span {
+            text: format!("{text}{}", " ".repeat(pad + 1)),
+            bold,
+            brand,
+        });
     };
 
     let mut rows: Vec<Vec<Span>> = Vec::new();
@@ -321,15 +400,23 @@ pub(crate) fn feed_panel_rows(
         &header_line(focused, o.order, w),
         w,
     ))]);
-    rows.push(header(vec![
-        ("time", true),
-        ("area", show_area),
-        ("harness", show_harness),
-        ("kind", true),
-        ("node", true),
-        ("session", show_session),
-        ("lead", show_lead),
-    ]));
+    let mut header = vec![Span::plain("   ")];
+    push_col(&mut header, "time", ts_w, true, false);
+    if show_area {
+        push_col(&mut header, "area", area_w, true, false);
+    }
+    if show_harness {
+        push_col(&mut header, "harness", harness_w, true, false);
+    }
+    push_col(&mut header, "kind", kind_w, true, false);
+    push_col(&mut header, "node", node_w, true, false);
+    if show_session {
+        push_col(&mut header, "session", session_w, true, false);
+    }
+    if show_lead {
+        push_col(&mut header, "lead", lead_w, true, false);
+    }
+    rows.push(header);
     let visible = visible_rows.saturating_sub(3); // header, column header, footer
     let slots = display_slots(&o.win.items, o.order);
     for d in offset..offset + visible {
@@ -345,58 +432,53 @@ pub(crate) fn feed_panel_rows(
                 let item = &o.win.items[*i];
                 let selected = focused && d == o.sel;
                 let marker = if d == o.sel { '▸' } else { ' ' };
-                let cell = |row: &mut Vec<Span>, text: String, bold: bool, brand: bool| {
-                    row.push(Span { text, bold, brand });
-                };
                 let mut row = Vec::new();
-                cell(
+                row.push(Span {
+                    text: format!(" {marker} "),
+                    bold: selected,
+                    brand: selected,
+                });
+                push_col(
                     &mut row,
-                    format!(
-                        " {marker} {:<width$} ",
-                        short_ts(&item.ts, show_date),
-                        width = if show_date { 11 } else { 5 },
-                    ),
+                    &fit_cell(&short_ts(&item.ts, show_date), ts_w),
+                    ts_w,
                     selected,
                     selected,
                 );
                 if show_area {
-                    cell(&mut row, format!("{:<7} ", item.area), false, false);
+                    push_col(
+                        &mut row,
+                        &fit_cell(&item.area, area_w),
+                        area_w,
+                        false,
+                        false,
+                    );
                 }
                 if show_harness {
                     let h = item.harness.as_deref().unwrap_or("-");
-                    cell(&mut row, format!("{:<7} ", h), false, false);
+                    push_col(&mut row, &fit_cell(h, harness_w), harness_w, false, false);
                 }
-                cell(
-                    &mut row,
-                    format!("{:<16} ", display_kind(&item.kind)),
-                    bold_kind(item),
-                    bold_kind(item),
-                );
+                let kind = fit_cell(display_kind(&item.kind), kind_w);
+                push_col(&mut row, &kind, kind_w, bold_kind(item), bold_kind(item));
                 let node = item
                     .node
                     .as_deref()
-                    .map(|n| n.chars().take(8).collect::<String>())
+                    .map(|n| fit_cell(n, node_w))
                     .unwrap_or_else(|| "-".to_string());
-                cell(
-                    &mut row,
-                    format!("{:<8} ", node),
-                    item.node.is_some(),
-                    false,
-                );
+                push_col(&mut row, &node, node_w, item.node.is_some(), false);
                 if show_session {
                     let sid = item
                         .session_id
                         .as_deref()
-                        .map(|s| s.chars().rev().take(8).collect::<String>())
+                        .map(|s| fit_cell(&s.chars().rev().take(8).collect::<String>(), session_w))
                         .unwrap_or_else(|| "-".to_string());
-                    cell(&mut row, format!("{:<8} ", sid), false, false);
+                    push_col(&mut row, &sid, session_w, false, false);
                 }
                 if show_lead {
                     // The lead column names a lead or nothing: the epic
                     // rollup lives in the owner grouping, never here.
                     let lead = item.lead.as_deref().unwrap_or("-");
-                    let lead: String = lead.chars().take(12).collect();
-                    cell(&mut row, format!("{:<12} ", lead), false, false);
+                    push_col(&mut row, &fit_cell(lead, lead_w), lead_w, false, false);
                 }
                 let title = pan_by(&item.title, o.hpan);
                 row.push(Span::plain(title));
