@@ -2909,7 +2909,7 @@ event_types:
           type: string
 
   - name: lead_armed
-    description: "A titled lead finished arming its beat: the self-injected /loop. Journaled by the leading session through fno doctor event emit."
+    description: "A titled lead finished arming the beat fno-agents harness-beat names: the self-injected /loop on loop, the provider-goal and Stop receipts on goal. Journaled by the leading session through fno doctor event emit."
     sources: [loop, daemon]
     data:
       required: []
