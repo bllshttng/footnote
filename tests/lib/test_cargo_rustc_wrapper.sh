@@ -498,7 +498,7 @@ STUB
     PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name cold >"$out_file" 2>/dev/null
   rc=$?
   [[ "$rc" -eq 0 ]] || { fail "T17: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
-  grep -q "compiler --crate-name cold" "$stub_dir/compiler.log" \
+  grep -q -- "--crate-name cold" "$stub_dir/compiler.log" \
     || { fail "T17: the default compile did not reach the compiler"; rm -rf "$stub_dir"; return; }
   [[ -e "$stub_dir/sccache.log" ]] \
     && { fail "T17: sccache ran without an opt-in: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
@@ -509,7 +509,7 @@ STUB
     PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name warm >"$out_file" 2>/dev/null
   rc=$?
   [[ "$rc" -eq 0 ]] || { fail "T17: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
-  grep -q "sccache --crate-name warm" "$stub_dir/sccache.log" \
+  grep -q -- "--crate-name warm" "$stub_dir/sccache.log" \
     || { fail "T17: build.sccache = true did not route the compile through sccache: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
   pass "T17 the default compile is bare rustc; a project build.sccache = true opts it in"
   rm -rf "$stub_dir"
@@ -537,19 +537,19 @@ STUB
 
   env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name off >/dev/null 2>&1
-  grep -q "compiler --crate-name off" "$stub_dir/compiler.log" \
+  grep -q -- "--crate-name off" "$stub_dir/compiler.log" \
     || { fail "T18: a false config did not keep the compile bare"; rm -rf "$stub_dir"; return; }
   [[ -e "$stub_dir/sccache.log" ]] \
     && { fail "T18: sccache ran under a false config: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
 
   env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name envin >/dev/null 2>&1
-  grep -q "sccache --crate-name envin" "$stub_dir/sccache.log" \
+  grep -q -- "--crate-name envin" "$stub_dir/sccache.log" \
     || { fail "T18: FNO_SCCACHE=1 did not override the false config: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
 
   env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 SCCACHE_DISABLE=1 PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name disabled >/dev/null 2>&1
-  grep -q "compiler --crate-name disabled" "$stub_dir/compiler.log" \
+  grep -q -- "--crate-name disabled" "$stub_dir/compiler.log" \
     || { fail "T18: SCCACHE_DISABLE=1 did not win over the env opt-in"; rm -rf "$stub_dir"; return; }
   pass "T18 config false keeps bare, FNO_SCCACHE=1 overrides it, SCCACHE_DISABLE=1 wins"
   rm -rf "$stub_dir"
