@@ -29,7 +29,7 @@ const GRAPH_REASON: &str =
     "graph.json is retired; do not recreate it. Mutate the graph.db store via `fno backlog` commands.";
 const DB_REASON: &str = "graph.db is the authoritative store; direct writes to it or its WAL files are blocked. Mutate via `fno backlog` commands.";
 const MANIFEST_REASON: &str = "target-state.md is an immutable session manifest; direct Edit/Write is blocked. The only legal post-init write is first-fill of an empty plan_path via `fno do state set --field plan_path`. Use `fno do state` / `fno do target` verbs, not a hand edit.";
-const CONFIG_REASON: &str = "Do not edit an fno config.toml by hand. Run `fno config set <key> <value>` (add `--scope project` for a repo file). It checks the key against the schema. A hand-added key that is not in the schema prints a warning on every fno call. If `fno config set` refuses the key, the key is not modeled yet: file a node with `fno backlog idea`.";
+const CONFIG_REASON: &str = "Do not edit an fno config.toml by hand. Run `fno config set <key> <value>` (add `--local` for a repo file). It checks the key against the schema. A hand-added key that is not in the schema prints a warning on every fno call. If `fno config set` refuses the key, the key is not modeled yet: file a node with `fno backlog idea`.";
 const BASH_BLOCK_SUFFIX: &str =
     " (this Bash write to a protected state file is blocked; use `fno backlog` / `fno do state`).";
 const FAILCLOSED_MALFORMED: &str =
@@ -270,8 +270,21 @@ fn under_test_dir(fp: &str) -> bool {
 /// on purpose: a malformed payload naming config.toml fails open, as the
 /// config guard does, not closed like the state files.
 fn config_toml_write(p: &Payload) -> bool {
+    const TAIL: &str = ".fno/config.toml";
+    let is_config = |path: &str| {
+        let path = norm(path);
+        path.ends_with(TAIL) && !under_test_dir(&path)
+    };
+    // Every Bash call reaches this gate: compile no regex for a command that
+    // never names the file.
+    if !p.fp_norm.contains(TAIL) && !p.cmd_norm.contains(TAIL) {
+        return false;
+    }
+    if p.command.contains("*** Begin Patch") {
+        return write_targets("", &p.command).iter().any(|t| is_config(t));
+    }
     match p.tool.as_str() {
-        "Edit" | "Write" => p.fp_norm.ends_with(".fno/config.toml") && !under_test_dir(&p.fp_norm),
+        "Edit" | "Write" => is_config(&p.file_path),
         "Bash" => bash_writes(
             &p.cmd_norm,
             r"[^[:space:];|&<>]*\.fno/config\.toml",
@@ -1199,6 +1212,8 @@ mod tests {
             ("Edit", "/repo/.cargo/config.toml", "", false),
             ("Bash", "", "cat ~/.fno/config.toml", false),
             ("Bash", "", "fno config set store.share_backlog true", false),
+            ("apply_patch", "", "*** Begin Patch\n*** Update File: .fno/config.toml\n@@\n+x = 1\n*** End Patch", true),
+            ("apply_patch", "", "*** Begin Patch\n*** Update File: docs/a.md\n@@\n+see .fno/config.toml\n*** End Patch", false),
         ];
         for (tool, file_path, command, refused) in cases {
             let got = config_toml_write(&call(tool, file_path, command));
