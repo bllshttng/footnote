@@ -2,10 +2,9 @@
 //! only when GitHub reports a reason (the PR reads dirty, or its base
 //! requires an up-to-date branch), preflight, read the in-flight state, push
 //! exactly once, print one receipt. Every push site in `skills/ship` calls
-//! this through `fno do pr push`, so a queued CI run is never cancelled by a
-//! second push, and a green, mergeable PR is never moved by a routine
-//! refresh (ruling 2026-09-28: each merge-only commit restarts CI and voids
-//! a head-scoped merge grant).
+//! this through `fno do pr push`. A green, mergeable PR is never moved by a
+//! routine refresh (ruling 2026-09-28: each merge-only commit restarts CI
+//! and voids a head-scoped merge grant).
 //!
 //! The in-flight guard is heal's, promoted. heal used to hold a private copy
 //! of the re-read-and-push decision; this module is now the shared push
@@ -17,11 +16,18 @@
 //! * `0` pushed
 //! * `1` preflight red (heal already uses 1 for escalations; the meanings
 //!   are per-verb, the numbers shared)
-//! * `2` a run in flight (nothing pushed)
+//! * `2` a run in flight on a not-yet-red head (nothing pushed)
 //! * `3` a refusal the caller must fix (protected, dirty, conflict,
 //!   remote-only commits)
 //! * `4` a read error (fetch failed, check read failed, compare failed,
 //!   push failed)
+//!
+//! When the remote head's latest rows already carry a failure, a run still
+//! testing it holds a CI slot the fix waits behind. User law 2026-10-09:
+//! the verb cancels that run (the Actions run endpoints, best-effort),
+//! journals the cancellation like a `--force-ci-cancel` bypass, and pushes.
+//! A head with no red row is never cancelled: an all-green or clean run
+//! still refuses with exit 2 and gets to finish.
 //!
 //! A rebased branch is pushed with `--force-with-lease` pinned to the exact
 //! remote sha this run fetched, and only after a patch-equivalence check
@@ -332,6 +338,14 @@ pub(crate) fn job_id(link: &str) -> Option<String> {
     re.captures(link).map(|c| c[1].to_string())
 }
 
+/// The Actions run id out of a check's `link`: the cancel endpoint speaks
+/// runs, not jobs.
+pub(crate) fn run_id(link: &str) -> Option<u64> {
+    let re =
+        regex::Regex::new(r"^https?://[^/]+/[^/]+/[^/]+/actions/runs/(\d+)").expect("static regex");
+    re.captures(link)?.get(1)?.as_str().parse().ok()
+}
+
 /// The worktree's porcelain status, for the dirty guard.
 pub(crate) fn porcelain(git_bin: &str, cwd: &Path) -> String {
     run_labeled(
@@ -405,12 +419,23 @@ pub(crate) struct PushCtx {
     pub lease: Option<String>,
 }
 
-/// What a push decision ended as.
+/// What a push decision ended as. `ci` names why the push went out:
+/// `settled` (no run in flight), `bypassed` (--force-ci-cancel), or
+/// `red-cancel` (a red head's stale run was cancelled first).
 pub(crate) enum PushOutcome {
-    Pushed { sha: String },
+    Pushed { sha: String, ci: &'static str },
     InFlight { check: String, job: Option<String> },
     Unreadable(String),
     PushFailed(String),
+}
+
+/// One in-flight read: what the verb would refuse with, whether any latest
+/// row already failed, and the Actions run ids still testing the head.
+pub(crate) struct Flight {
+    pub check: String,
+    pub job: Option<String>,
+    pub red: bool,
+    pub runs: Vec<u64>,
 }
 
 /// The in-flight decision + one push. heal calls this after its commit; the
@@ -433,11 +458,28 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
             "refusing to push the protected branch '{branch}'"
         ));
     }
+    let mut ci = "settled";
     if ctx.force {
         emit_bypass_row(ctx);
+        ci = "bypassed";
     } else {
         match in_flight(ctx, &current_branch_quoted(ctx), head) {
-            Ok(Some((check, job))) => return PushOutcome::InFlight { check, job },
+            Ok(Some(flight)) => {
+                if flight.red {
+                    // A run still testing a head that already failed holds
+                    // the CI slot the fix waits behind (user law
+                    // 2026-10-09): cancel it best-effort, journal like a
+                    // bypass, and push.
+                    cancel_runs(ctx, &flight.runs);
+                    emit_bypass_row(ctx);
+                    ci = "red-cancel";
+                } else {
+                    return PushOutcome::InFlight {
+                        check: flight.check,
+                        job: flight.job,
+                    };
+                }
+            }
             Ok(None) => {}
             Err(msg) => return PushOutcome::Unreadable(msg),
         }
@@ -475,6 +517,22 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
         )
         .map(|(_, out, _)| out.trim().to_string())
         .unwrap_or_default(),
+        ci,
+    }
+}
+
+/// Best-effort cancel of the Actions runs still testing a red head. A
+/// failed cancel is said on stderr, never blocks the push.
+fn cancel_runs(ctx: &PushCtx, runs: &[u64]) {
+    for id in runs {
+        if let Err(err) = gh_api(
+            &ctx.gh_bin,
+            &ctx.cwd,
+            &format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/cancel"),
+            &["-X", "POST"],
+        ) {
+            eprintln!("pr-push: cancel of run {id} failed ({err}); pushing anyway");
+        }
     }
 }
 
@@ -523,14 +581,11 @@ fn stamp_age_secs(ctx: &PushCtx, branch: &str) -> Option<u64> {
     Some(age.as_secs())
 }
 
-/// Read whether a remote head would be cancelled by a push. `None` means the
-/// head has no registered pending check; errors stay distinct so callers can
-/// fail open only at the hand-push hook, never in the guarded verb.
-pub(crate) fn in_flight(
-    ctx: &PushCtx,
-    branch: &str,
-    head: &str,
-) -> Result<Option<(String, Option<String>)>, String> {
+/// Read whether a remote head has a run in flight, and whether any latest
+/// row is already red. `None` means the head has no registered pending
+/// check; errors stay distinct so callers can fail open only at the
+/// hand-push hook, never in the guarded verb.
+pub(crate) fn in_flight(ctx: &PushCtx, branch: &str, head: &str) -> Result<Option<Flight>, String> {
     if head.is_empty() {
         return Ok(None);
     }
@@ -538,10 +593,12 @@ pub(crate) fn in_flight(
     if rows.is_empty() {
         if let Some(age) = stamp_age_secs(ctx, branch) {
             if age < PUSH_DEBOUNCE_SECS {
-                return Ok(Some((
-                    format!("last push {age}s ago, its run may not be registered yet"),
-                    None,
-                )));
+                return Ok(Some(Flight {
+                    check: format!("last push {age}s ago, its run may not be registered yet"),
+                    job: None,
+                    red: false,
+                    runs: Vec::new(),
+                }));
             }
         }
     }
@@ -549,28 +606,44 @@ pub(crate) fn in_flight(
     if !any_pending(&arr) {
         return Ok(None);
     }
-    let row = crate::check_supersession::latest_per_name(&arr)
+    let latest = crate::check_supersession::latest_per_name(&arr)
         .as_array()
-        .and_then(|rows| {
-            rows.iter().find(|row| {
-                !matches!(
-                    row.get("bucket").and_then(|v| v.as_str()).unwrap_or(""),
-                    "pass" | "fail" | "skipping" | "cancel"
-                )
-            })
-        })
         .cloned()
-        .unwrap_or(Value::Null);
-    let check = row
+        .unwrap_or_default();
+    let red = latest
+        .iter()
+        .any(|row| row.get("bucket").and_then(|v| v.as_str()) == Some("fail"));
+    let pending: Vec<&Value> = latest
+        .iter()
+        .filter(|row| {
+            !matches!(
+                row.get("bucket").and_then(|v| v.as_str()).unwrap_or(""),
+                "pass" | "fail" | "skipping" | "cancel"
+            )
+        })
+        .collect();
+    let first = pending.first().copied().cloned().unwrap_or(Value::Null);
+    let check = first
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let job = job_id(row.get("link").and_then(|v| v.as_str()).unwrap_or(""));
-    Ok(Some((check, job)))
+    let job = job_id(first.get("link").and_then(|v| v.as_str()).unwrap_or(""));
+    let mut runs: Vec<u64> = pending
+        .iter()
+        .filter_map(|row| run_id(row.get("link").and_then(|v| v.as_str()).unwrap_or("")))
+        .collect();
+    runs.sort_unstable();
+    runs.dedup();
+    Ok(Some(Flight {
+        check,
+        job,
+        red,
+        runs,
+    }))
 }
 
-fn print_in_flight(branch: &str, head: &str, check: &str, job: Option<&str>) -> i32 {
+fn print_in_flight(branch: &str, head: &str, check: &str, job: Option<&str>, red: bool) -> i32 {
     println!(
         "{}",
         json!({
@@ -579,6 +652,7 @@ fn print_in_flight(branch: &str, head: &str, check: &str, job: Option<&str>) -> 
             "in_flight": true,
             "check": check,
             "job": job,
+            "red": red,
         })
     );
     2
@@ -1040,7 +1114,13 @@ pub fn run_push(argv: &[String]) -> i32 {
             lease: None,
         };
         return match in_flight(&ctx, probe_branch, &head) {
-            Ok(Some((check, job))) => print_in_flight(probe_branch, &head, &check, job.as_deref()),
+            Ok(Some(flight)) => print_in_flight(
+                probe_branch,
+                &head,
+                &flight.check,
+                flight.job.as_deref(),
+                flight.red,
+            ),
             Ok(None) => {
                 println!(
                     "{}",
@@ -1293,15 +1373,18 @@ pub fn run_push(argv: &[String]) -> i32 {
     // first spend a rehearsal of up to an hour.
     if !a.force {
         match in_flight(&ctx, &branch, &remote_head) {
-            Ok(Some((check, job))) => {
+            // A red head's stale run belongs to guarded_push: fall through so
+            // it cancels, journals, and pushes. Only a live run refuses here.
+            Ok(Some(flight)) if !flight.red => {
                 eprintln!(
                     "pr-push: a run is in flight on the remote head, nothing pushed: \
-                     check '{check}' job {}.",
-                    job.as_deref().unwrap_or("?")
+                     check '{}' job {}.",
+                    flight.check,
+                    flight.job.as_deref().unwrap_or("?")
                 );
                 return 2;
             }
-            Ok(None) => {}
+            Ok(_) => {}
             Err(msg) => {
                 eprintln!("pr-push: could not read checks ({msg}); nothing pushed");
                 return 4;
@@ -1341,12 +1424,11 @@ pub fn run_push(argv: &[String]) -> i32 {
     // when the branch was rebased.
     let outcome = guarded_push(&ctx, &remote_head);
     match outcome {
-        PushOutcome::Pushed { sha } => {
+        PushOutcome::Pushed { sha, ci } => {
             println!(
                 "pr-push: origin/main behind-before={before} behind-after={after} integrate={integrate} \
-                 preflight={} ci={} sha={sha} pushed=1",
-                mode.label(),
-                if a.force { "bypassed" } else { "settled" }
+                 preflight={} ci={ci} sha={sha} pushed=1",
+                mode.label()
             );
             0
         }
