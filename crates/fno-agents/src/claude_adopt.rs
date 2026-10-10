@@ -785,10 +785,24 @@ mod tests {
 
         let mut born = fixture_entry("2026-10-09T21:00:00Z");
         born.spawned_by_session = Some("born-parent".into());
-        // Same root, so the claimed record is still there to tempt the fill.
-        std::fs::remove_file(&reg).unwrap();
-        upsert_adopted_row(&reg, born).unwrap();
-        let row = &crate::state::load_registry(&reg).unwrap().entries[0];
+        // A second root holding the same claimed record, so the claim is
+        // there to tempt the fill on a row born with its own edge.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join("launches").join("claimed")).unwrap();
+        std::fs::copy(
+            dir.path()
+                .join("launches")
+                .join("claimed")
+                .join(format!("{}.json", worker().session_id)),
+            other
+                .join("launches")
+                .join("claimed")
+                .join(format!("{}.json", worker().session_id)),
+        )
+        .unwrap();
+        let reg2 = other.join("registry.json");
+        upsert_adopted_row(&reg2, born).unwrap();
+        let row = &crate::state::load_registry(&reg2).unwrap().entries[0];
         assert_eq!(row.spawned_by_session.as_deref(), Some("born-parent"));
     }
 

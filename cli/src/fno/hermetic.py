@@ -172,6 +172,9 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # base URL, and the encounter verb reads it for vote provenance. A test
     # must not see the developer's effort value.
     "CLAUDE_EFFORT",
+    # A claude --bg job's state dir: the launch claim reads the job's name
+    # there, so a developer's own job must never name a test's child.
+    "CLAUDE_JOB_DIR",
     "DATABASE_URL",
     # Shell-prompt config the mux integration reads.
     "STARSHIP_CONFIG",
