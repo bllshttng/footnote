@@ -143,6 +143,35 @@ fn read_config(cwd: &Path) -> PostMergeCfg {
 // Small helpers
 // ---------------------------------------------------------------------------
 
+/// A sync_command leg that starts a binary update or compile. A post-merge
+/// sync runs seconds after the merge, before CI publishes the new tarball,
+/// so such a leg can only fall back to a local compile: dropped by name.
+fn is_compile_leg(leg: &str) -> bool {
+    let t = leg.trim();
+    t == "fno update"
+        || t.starts_with("fno update ")
+        || t == "fno doctor update"
+        || t.starts_with("fno doctor update ")
+        || t == "cargo install"
+        || t.starts_with("cargo install ")
+}
+
+/// Split an `&&` chain, drop the compile legs, rejoin the rest. Returns the
+/// runnable remainder (possibly empty) and what was dropped, so the caller
+/// names each loss.
+fn strip_compile_legs(cmd: &str) -> (String, Vec<String>) {
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for leg in cmd.split("&&") {
+        if is_compile_leg(leg) {
+            dropped.push(leg.trim().to_string());
+        } else {
+            kept.push(leg.trim().to_string());
+        }
+    }
+    (kept.join(" && "), dropped)
+}
+
 fn synced_marker(canonical: &Path, sha: &str) -> PathBuf {
     canonical.join(".fno").join("post-merge-synced").join(sha)
 }
@@ -901,7 +930,24 @@ fn sync_under_lease(
             "post-merge install: test:priority held by {holder}; building without priority"
         ));
     }
-    let out = shell(&cfg.sync_command, canonical);
+    // A post-merge sync never starts a binary update or compile: the chain
+    // runs before CI publishes the new tarball, so an update leg here can
+    // only fall back to a local compile. Compile legs are dropped by name.
+    let (sync_command, dropped) = strip_compile_legs(&cfg.sync_command);
+    for leg in &dropped {
+        stdout.push(format!(
+            "post-merge sync: dropped '{leg}' from sync_command: a post-merge sync never starts a binary update or compile (the tarball for the new rev is not published yet)"
+        ));
+    }
+    if sync_command.trim().is_empty() {
+        write_marker(&marker, stderr);
+        stdout.push(format!(
+            "post-merge sync: sync_command held only update/compile legs; nothing to run; marked {}",
+            sha12(&sha)
+        ));
+        return 0;
+    }
+    let out = shell(&sync_command, canonical);
     if matches!(prio, crate::claims::AcquireOutcome::Acquired(_)) {
         // A swallowed release failure leaves a TTL hold the next sync parks
         // behind, invisible in every receipt.
@@ -1332,6 +1378,34 @@ mod tests {
         auto_run = true\n\
         catchup_window_days = 3\n\
         sync_stale_hours = 24\n";
+
+    #[test]
+    fn strip_compile_legs_drops_update_and_cargo_only() {
+        // The observed machine shape: the update leg sits mid-chain.
+        let (kept, dropped) = strip_compile_legs(
+            "git checkout main && git pull origin main && fno update && fno restart",
+        );
+        assert_eq!(
+            kept,
+            "git checkout main && git pull origin main && fno restart"
+        );
+        assert_eq!(dropped, vec!["fno update".to_string()]);
+
+        // A bare cargo install leg and an update with flags drop too.
+        let (kept, dropped) = strip_compile_legs("cargo install --path crates/fno && git pull");
+        assert_eq!(kept, "git pull");
+        assert_eq!(dropped, vec!["cargo install --path crates/fno".to_string()]);
+
+        // A command of only compile legs runs nothing.
+        let (kept, dropped) = strip_compile_legs("fno update --rust");
+        assert_eq!(kept, "");
+        assert_eq!(dropped, vec!["fno update --rust".to_string()]);
+
+        // A plain command passes through untouched.
+        let (kept, dropped) = strip_compile_legs("git pull origin main");
+        assert_eq!(kept, "git pull origin main");
+        assert!(dropped.is_empty());
+    }
 
     fn write_cfg(cwd: &Path, body: &str) {
         std::fs::create_dir_all(cwd.join(".fno")).unwrap();

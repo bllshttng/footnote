@@ -10,9 +10,12 @@
 #   T11     - a build-script rustc (CARGO_CFG_* set) never asks
 #   T12/T13 - a binary without the verb is named with its remedy and the
 #             event is journaled, at both doors
-#   T17     - sccache is opt-in: the default compile is bare rustc, a
+#   T17-T19 - the sccache client watcher: a server that runs no compile is
+#             stopped and the compile falls back; the bound spares a running
+#             compile; a compile whose cargo is gone is reaped
+#   T20     - sccache is opt-in: the default compile is bare rustc, a
 #             project `build.sccache = true` opts it in
-#   T18     - opt-in precedence: config false keeps bare, FNO_SCCACHE=1
+#   T21     - opt-in precedence: config false keeps bare, FNO_SCCACHE=1
 #             overrides it, SCCACHE_DISABLE=1 wins over the env
 #
 # All use PATH-shadowing stubs in place of the real sccache/fno-agents/fno.
@@ -48,8 +51,9 @@ STUB
   err_file="$stub_dir/err.txt"
 
   # Default: sccache installed but not opted in, so the probe names bare
-  # rustc and the remedy, and the bare compiler really runs.
-  PATH="$stub_dir:$PATH" "$BASH_BIN" "$WRAPPER" /bin/echo -vV >"$out_file" 2>"$err_file"
+  # rustc and the remedy, and the bare compiler really runs. SCCACHE_DISABLE
+  # is pinned off so a machine that exports it still exercises the gate.
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" "$BASH_BIN" "$WRAPPER" /bin/echo -vV >"$out_file" 2>"$err_file"
   rc=$?
 
   [[ "$rc" -eq 0 ]] || { fail "T01: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
@@ -60,7 +64,7 @@ STUB
 
   # Opted in through the env, the probe names sccache and stdout stays the
   # compiler's own.
-  PATH="$stub_dir:$PATH" FNO_SCCACHE=1 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" FNO_SCCACHE=1 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
   rc=$?
 
   [[ "$rc" -eq 0 ]] || { fail "T01: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
@@ -454,7 +458,7 @@ STUB
   out_file="$stub_dir/out.txt"
   err_file="$stub_dir/err.txt"
 
-  PATH="$stub_dir:$PATH" FNO_SCCACHE=1 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" FNO_SCCACHE=1 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
   rc=$?
   idle="$(cat "$out_file")"
 
@@ -462,7 +466,7 @@ STUB
   [[ "$idle" == "0" ]] \
     || { fail "T16: the compiler saw SCCACHE_IDLE_TIMEOUT=$idle, expected 0"; rm -rf "$stub_dir"; return; }
 
-  PATH="$stub_dir:$PATH" FNO_SCCACHE=1 SCCACHE_IDLE_TIMEOUT=3 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
+  SCCACHE_DISABLE=0 PATH="$stub_dir:$PATH" FNO_SCCACHE=1 SCCACHE_IDLE_TIMEOUT=3 "$BASH_BIN" "$WRAPPER" /fake/rustc -vV >"$out_file" 2>"$err_file"
   idle="$(cat "$out_file")"
   [[ "$idle" == "3" ]] \
     || fail "T16: an operator override SCCACHE_IDLE_TIMEOUT=3 became $idle; it must survive"
@@ -470,11 +474,11 @@ STUB
   rm -rf "$stub_dir"
 }
 
-# T17: the compile door under the opt-in gate. With sccache installed and
+# T20: the compile door under the opt-in gate. With sccache installed and
 # nothing opting in, the compile reaches the real compiler and sccache never
 # runs. A project `.fno/config.toml` carrying `build.sccache = true` opts
 # the same argv in through sccache.
-t17_config_key_opts_the_compile_in() {
+t20_config_key_opts_the_compile_in() {
   local stub_dir out_file rc
   stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
   cat > "$stub_dir/sccache" <<STUB
@@ -494,31 +498,31 @@ STUB
   out_file="$stub_dir/out.txt"
 
   # Default: bare rustc, sccache untouched.
-  TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" \
+  TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" SCCACHE_DISABLE=0 \
     PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name cold >"$out_file" 2>/dev/null
   rc=$?
-  [[ "$rc" -eq 0 ]] || { fail "T17: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  [[ "$rc" -eq 0 ]] || { fail "T20: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
   grep -q -- "--crate-name cold" "$stub_dir/compiler.log" \
-    || { fail "T17: the default compile did not reach the compiler"; rm -rf "$stub_dir"; return; }
+    || { fail "T20: the default compile did not reach the compiler"; rm -rf "$stub_dir"; return; }
   [[ -e "$stub_dir/sccache.log" ]] \
-    && { fail "T17: sccache ran without an opt-in: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
+    && { fail "T20: sccache ran without an opt-in: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
 
   # The project file opts in: the same argv now routes through sccache.
   printf '[build]\nsccache = true\n' > "$stub_dir/.fno/config.toml"
-  TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" \
+  TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" SCCACHE_DISABLE=0 \
     PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name warm >"$out_file" 2>/dev/null
   rc=$?
-  [[ "$rc" -eq 0 ]] || { fail "T17: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  [[ "$rc" -eq 0 ]] || { fail "T20: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
   grep -q -- "--crate-name warm" "$stub_dir/sccache.log" \
-    || { fail "T17: build.sccache = true did not route the compile through sccache: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
-  pass "T17 the default compile is bare rustc; a project build.sccache = true opts it in"
+    || { fail "T20: build.sccache = true did not route the compile through sccache: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
+  pass "T20 the default compile is bare rustc; a project build.sccache = true opts it in"
   rm -rf "$stub_dir"
 }
 
-# T18: precedence. A project `build.sccache = false` keeps the compile bare,
+# T21: precedence. A project `build.sccache = false` keeps the compile bare,
 # FNO_SCCACHE=1 overrides that false, and SCCACHE_DISABLE=1 wins over the
 # env opt-in.
-t18_opt_in_precedence() {
+t21_opt_in_precedence() {
   local stub_dir rc
   stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
   cat > "$stub_dir/sccache" <<STUB
@@ -535,27 +539,135 @@ STUB
   cp "$REPO_ROOT/scripts/lib/paths.sh" "$REPO_ROOT/scripts/lib/with-timeout.sh" "$stub_dir/scripts/lib/"
   printf '[build]\nsccache = false\n' > "$stub_dir/.fno/config.toml"
 
-  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" PATH="$stub_dir:/usr/bin:/bin" \
+  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" SCCACHE_DISABLE=0 PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name off >/dev/null 2>&1
   grep -q -- "--crate-name off" "$stub_dir/compiler.log" \
-    || { fail "T18: a false config did not keep the compile bare"; rm -rf "$stub_dir"; return; }
+    || { fail "T21: a false config did not keep the compile bare"; rm -rf "$stub_dir"; return; }
   [[ -e "$stub_dir/sccache.log" ]] \
-    && { fail "T18: sccache ran under a false config: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
+    && { fail "T21: sccache ran under a false config: $(cat "$stub_dir/sccache.log")"; rm -rf "$stub_dir"; return; }
 
-  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 PATH="$stub_dir:/usr/bin:/bin" \
+  env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 SCCACHE_DISABLE=0 PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name envin >/dev/null 2>&1
   grep -q -- "--crate-name envin" "$stub_dir/sccache.log" \
-    || { fail "T18: FNO_SCCACHE=1 did not override the false config: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
+    || { fail "T21: FNO_SCCACHE=1 did not override the false config: $(cat "$stub_dir/sccache.log" 2>/dev/null)"; rm -rf "$stub_dir"; return; }
 
   env TMPDIR="$stub_dir" REPO_ROOT="$stub_dir" HOME="$stub_dir/home" FNO_SCCACHE=1 SCCACHE_DISABLE=1 PATH="$stub_dir:/usr/bin:/bin" \
     "$BASH_BIN" "$WRAPPER" "$stub_dir/compiler" --crate-name disabled >/dev/null 2>&1
   grep -q -- "--crate-name disabled" "$stub_dir/compiler.log" \
-    || { fail "T18: SCCACHE_DISABLE=1 did not win over the env opt-in"; rm -rf "$stub_dir"; return; }
-  pass "T18 config false keeps bare, FNO_SCCACHE=1 overrides it, SCCACHE_DISABLE=1 wins"
+    || { fail "T21: SCCACHE_DISABLE=1 did not win over the env opt-in"; rm -rf "$stub_dir"; return; }
+  pass "T21 config false keeps bare, FNO_SCCACHE=1 overrides it, SCCACHE_DISABLE=1 wins"
   rm -rf "$stub_dir"
 }
 
-t01_probe_announces_per_opt_in
+# T17-T19 share one stub: `ps -A` prints a scripted process table, so the
+# watcher reads a fake server and its children whatever sccache this machine
+# runs. Every pid a test expects stopped is a real `sleep` the test owns.
+watch_stubs() {
+  local stub_dir="$1" client_body="$2"
+  cat > "$stub_dir/ps" <<STUB
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-A" ]]; then cat "$stub_dir/table.txt"; exit 0; fi
+exec /bin/ps "\$@"
+STUB
+  printf '#!/usr/bin/env bash\necho $$ > "%s/client.pid"\n%s\n' "$stub_dir" "$client_body" > "$stub_dir/sccache"
+  chmod +x "$stub_dir/ps" "$stub_dir/sccache"
+}
+
+# A stopped process can linger as a zombie until init reaps it, and `kill -0`
+# still finds a zombie. Two seconds covers the reap.
+gone() {
+  local state
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    state="$(/bin/ps -o stat= -p "$1" 2>/dev/null)"
+    state="${state// /}"
+    [[ -z "$state" || "$state" == Z* ]] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+t17_quiet_server_is_stopped_and_compile_falls_back() {
+  local stub_dir out_file err_file rc server start
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  watch_stubs "$stub_dir" 'exec sleep 30'
+  server="$(sleep 30 >/dev/null 2>&1 & echo $!)"
+  printf '%s 1 /opt/bin/sccache\n' "$server" > "$stub_dir/table.txt"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  start=$SECONDS
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_STALL_SECS=2 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T17: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; kill "$server" 2>/dev/null; rm -rf "$stub_dir"; return; }
+  grep -q "compiling" "$out_file" || { fail "T17: the compile did not fall back to bare rustc"; kill "$server" 2>/dev/null; rm -rf "$stub_dir"; return; }
+  grep -q "ran no compile for 2s" "$err_file" || { fail "T17: stderr does not name the stall: $(cat "$err_file")"; kill "$server" 2>/dev/null; rm -rf "$stub_dir"; return; }
+  [[ $((SECONDS - start)) -lt 15 ]] || { fail "T17: the fallback took $((SECONDS - start))s"; kill "$server" 2>/dev/null; rm -rf "$stub_dir"; return; }
+  gone "$server" || { fail "T17: the quiet server is still alive"; kill "$server" 2>/dev/null; rm -rf "$stub_dir"; return; }
+  gone "$(cat "$stub_dir/client.pid")" || { fail "T17: the parked client is still alive"; rm -rf "$stub_dir"; return; }
+  pass "T17 a server that runs no compile for the stall window is stopped and the compile falls back"
+  rm -rf "$stub_dir"
+}
+
+t18_bound_spares_a_running_compile_only() {
+  local stub_dir out_file err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  watch_stubs "$stub_dir" 'sleep 4; echo client-done'
+  # The server is busy, so the stall check never fires. Its child is another
+  # crate's: this compile has not started, and the bound ends the wait.
+  printf '7001 1 /opt/bin/sccache\n7002 7001 rustc --crate-name other -C extra-filename=-other\n' > "$stub_dir/table.txt"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_CLIENT_TIMEOUT_SECS=2 FNO_SCCACHE_STALL_SECS=0 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" "$WRAPPER" /bin/echo compiling -C extra-filename=-mine >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T18: expected rc=0, got $rc (stderr: $(cat "$err_file"))"; rm -rf "$stub_dir"; return; }
+  grep -q "did not start this compile in 2s" "$err_file" \
+    || { fail "T18: the bound did not fire for an unstarted compile: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  grep -q "client-done" "$out_file" && { fail "T18: the client answered after the bound"; rm -rf "$stub_dir"; return; }
+
+  # Now the server runs this crate's rustc: the compile is live, so the bound
+  # leaves it to finish.
+  printf '7001 1 /opt/bin/sccache\n7002 7001 rustc --crate-name mine -C extra-filename=-mine\n' > "$stub_dir/table.txt"
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_CLIENT_TIMEOUT_SECS=2 FNO_SCCACHE_STALL_SECS=0 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" "$WRAPPER" /bin/echo compiling -C extra-filename=-mine >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T18: expected rc=0 for the running compile, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "client-done" "$out_file" || { fail "T18: the bound stopped a running compile: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  grep -q "compiling" "$out_file" && { fail "T18: a running compile also fell back to bare rustc"; rm -rf "$stub_dir"; return; }
+  pass "T18 the bound ends a wait for an unstarted compile and spares a running one"
+  rm -rf "$stub_dir"
+}
+
+t19_compile_whose_cargo_is_gone_is_reaped() {
+  local stub_dir ours wrapper_pid
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  watch_stubs "$stub_dir" 'exec sleep 30'
+  ours="$(sleep 30 >/dev/null 2>&1 & echo $!)"
+  printf '7001 1 /opt/bin/sccache\n%s 7001 rustc --crate-name mine -C extra-filename=-mine\n' "$ours" > "$stub_dir/table.txt"
+
+  # The middle shell stands in for cargo and exits at once, so the wrapper is
+  # orphaned before its first poll.
+  CI=1 SCCACHE_DISABLE=0 FNO_SCCACHE=1 FNO_SCCACHE_STALL_SECS=2 TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" \
+    "$BASH_BIN" -c '"$0" "$1" /bin/echo compiling -C extra-filename=-mine >"$2/out.txt" 2>&1 & echo $! > "$2/wrapper.pid"' \
+    "$BASH_BIN" "$WRAPPER" "$stub_dir"
+  wrapper_pid="$(cat "$stub_dir/wrapper.pid")"
+  for _ in $(seq 1 50); do
+    kill -0 "$wrapper_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  if kill -0 "$wrapper_pid" 2>/dev/null; then
+    fail "T19: the orphaned wrapper is still running"; kill "$wrapper_pid" "$ours" 2>/dev/null; rm -rf "$stub_dir"; return
+  fi
+  gone "$ours" || { fail "T19: the server-side rustc for this crate is still running"; kill "$ours" 2>/dev/null; rm -rf "$stub_dir"; return; }
+  gone "$(cat "$stub_dir/client.pid")" || { fail "T19: the client is still running"; rm -rf "$stub_dir"; return; }
+  grep -q "^compiling" "$stub_dir/out.txt" && { fail "T19: an orphaned compile fell back to bare rustc"; rm -rf "$stub_dir"; return; }
+  grep -q "cargo (pid [0-9]*) is gone" "$stub_dir/out.txt" || { fail "T19: no orphan line: $(cat "$stub_dir/out.txt")"; rm -rf "$stub_dir"; return; }
+  pass "T19 a compile whose cargo is gone stops its client and its server-side rustc"
+  rm -rf "$stub_dir"
+}
+
+t01_sccache_present_announces_on_probe
 t02_sccache_absent_ordinary_compile_silent
 t03_compile_asks_admission_and_probe_does_not
 t04_admission_failure_builds_anyway
@@ -571,8 +683,11 @@ t13_run_door_missing_verb_is_named
 t14_slot_busy_refuses_the_compile
 t15_slot_busy_refuses_the_run
 t16_wrapper_exports_never_stop_idle_timeout
-t17_config_key_opts_the_compile_in
-t18_opt_in_precedence
+t17_quiet_server_is_stopped_and_compile_falls_back
+t18_bound_spares_a_running_compile_only
+t19_compile_whose_cargo_is_gone_is_reaped
+t20_config_key_opts_the_compile_in
+t21_opt_in_precedence
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
