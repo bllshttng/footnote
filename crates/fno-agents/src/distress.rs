@@ -105,6 +105,18 @@ pub(crate) struct HelpDistress {
     class: HelpClass,
 }
 
+/// The one constructor for callers outside this module: the stuck row the
+/// self-cancel path writes. The fields stay private to the emitter, so a
+/// distress keeps its one shape at the door it is parsed at.
+pub(crate) fn help_distress_stuck(reason: String, evidence: Option<String>) -> HelpDistress {
+    HelpDistress {
+        reason,
+        evidence,
+        kind: DistressKind::Help,
+        class: HelpClass::Stuck,
+    }
+}
+
 /// First `<help ...>` opening tag whose name is exactly `help` (a raw
 /// `find("<help")` would also match `<helper>`). An empty or missing reason
 /// still parses: the events schema permits a reason-less blocked row, and the

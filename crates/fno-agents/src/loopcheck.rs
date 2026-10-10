@@ -603,13 +603,11 @@ pub(crate) fn decide_with_payload(
             // One-shot: consume the sentinel and write the stuck row instead.
             // The router takes the follow-through from the row.
             let _ = std::fs::remove_file(&hit.path);
-            let distress = crate::distress::HelpDistress {
-                reason: "self-cancel requested by the session itself; the run routes stuck instead of stopping"
+            let distress = crate::distress::help_distress_stuck(
+                "self-cancel requested by the session itself; the run routes stuck instead of stopping"
                     .to_string(),
-                evidence: hit.reason.clone(),
-                kind: crate::distress::DistressKind::Help,
-                class: crate::distress::HelpClass::Stuck,
-            };
+                hit.reason.clone(),
+            );
             let _ = crate::distress::emit_help_distress_blocked(
                 &project_events,
                 &global_events,
