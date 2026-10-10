@@ -225,6 +225,7 @@ pub(crate) mod keeper_revival;
 pub mod kill_criteria;
 pub mod lane_heal;
 pub mod lanes;
+pub mod launch_record;
 pub mod launch_workdir;
 pub mod law_match;
 pub mod lead_answers;

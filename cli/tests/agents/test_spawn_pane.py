@@ -773,14 +773,15 @@ def test_terminal_raise_keeps_meaning_for_a_declared_harness_with_no_arm(
         build_pane_argv("declared-but-armless", "", tmp_path, False, None)
 
 
-def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
+def test_build_pane_argv_codex_hook_trust_bypass_on_every_posture(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Codex 0.148 parks a fresh pane on a `Hooks need review` modal that the
     approvals bypass alone does not clear. No harness declares a modal response
     mapping - `submit_keys` submits a composed turn and says nothing about a
-    modal - so only --dangerously-bypass-hook-trust clears it, and only on a
-    bypass posture on a codex new enough to support it."""
+    modal - so only --dangerously-bypass-hook-trust clears it. fno trusts the
+    hooks of every worker it launches, on a codex new enough to parse the flag.
+    The sandboxed postures keep their sandbox and approval tokens."""
     from fno.agents import mux_spawn
     from fno.agents.mux_spawn import build_pane_argv
 
@@ -794,19 +795,25 @@ def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
     )
     assert "--dangerously-bypass-hook-trust" in yolo_mode
 
+    bypass_permissions = build_pane_argv(
+        "codex", "", tmp_path, False, None, permission_mode="bypassPermissions"
+    )
+    assert "--dangerously-bypass-hook-trust" in bypass_permissions
+
     sandboxed_default = build_pane_argv("codex", "", tmp_path, False, None)
-    assert "--dangerously-bypass-hook-trust" not in sandboxed_default
+    assert "--dangerously-bypass-hook-trust" in sandboxed_default
+    assert "workspace-write" in sandboxed_default
 
     full_auto = build_pane_argv(
         "codex", "", tmp_path, False, None, permission_mode="full-auto"
     )
-    assert "--dangerously-bypass-hook-trust" not in full_auto
+    assert "--dangerously-bypass-hook-trust" in full_auto
 
     explicit_sandbox = build_pane_argv(
         "codex", "", tmp_path, False, None,
         permission_mode="workspace-write:on-request",
     )
-    assert "--dangerously-bypass-hook-trust" not in explicit_sandbox
+    assert "--dangerously-bypass-hook-trust" in explicit_sandbox
 
 
 def test_build_pane_argv_codex_hook_trust_omitted_on_older_or_unknown_codex(
@@ -4826,6 +4833,11 @@ def test_codex_hook_review_prompt_refuses_before_seed_and_reaps(
     tmp_path: Path, monkeypatch
 ) -> None:
     from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents import mux_spawn
+
+    # A codex too old or unknown for the hook-trust flag still meets the
+    # modal, and the spawn must refuse it.
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: None)
     from fno.agents.registry import load_registry
 
     runner = FakeRunner(read_stdout="Hooks need review")
@@ -4871,6 +4883,11 @@ def test_empty_codex_spawn_still_refuses_trust_prompt(
     tmp_path: Path, monkeypatch, modal: str, expected: str
 ) -> None:
     from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents import mux_spawn
+
+    # A codex too old or unknown for the hook-trust flag still meets the
+    # modal, and the spawn must refuse it.
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: None)
     from fno.agents.registry import load_registry
 
     runner = FakeRunner(read_stdout=modal)

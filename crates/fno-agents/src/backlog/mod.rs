@@ -45,6 +45,7 @@ pub mod orphan_plans;
 pub mod patch;
 pub mod pr_link;
 pub(crate) mod promise;
+pub mod provenance_cli;
 pub mod pull_requests;
 pub mod rank_cli;
 pub mod receipt;

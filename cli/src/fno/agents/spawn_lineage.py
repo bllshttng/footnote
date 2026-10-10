@@ -328,49 +328,24 @@ def _stamp_launch_edge(node: "str | None") -> None:
 
     The sibling of :func:`_stamp_spawned_session_row`, which records who WORKED
     it. Refuses rather than half-writes: no node, no write; no proven parent
-    session, no write; launch is the FIRST launch, never overwritten.
+    session, no write; launch is the FIRST launch, never overwritten. The
+    write itself is the Rust stamp the SessionStart launch claim also uses.
     """
     if not node:
         return
     session_id, harness, parent_cwd = _capture_parent_edge()
     if not session_id:
         return
-
-    # Read before paying the locked write; say when nothing was written, or
-    # a graph missing the node commits an unchanged snapshot and exits 0.
+    argv = ["fno", "backlog", "provenance", node, "--stamp-launch", "--session", session_id]
+    if harness:
+        argv += ["--harness", harness]
+    if parent_cwd:
+        argv += ["--cwd", parent_cwd]
     try:
-        from fno.graph.api import wire_rows
-        from fno.graph.store import commit_rows_via_store
-        from fno.paths import graph_json
-        from fno.tracker import active_backend_name
+        import subprocess
 
-        if active_backend_name() != "graph":
-            # Under an external tracker this graph.json is not the record.
-            return
-
-        existing = next((r for r in wire_rows(path=graph_json()) if r.get("id") == node), None)
-        if existing is None:
-            print(f"spawn: launch edge not recorded on {node} (node not in graph); "
-                  f"the edge was not written. Skipped.", file=sys.stderr)
-            return
-        if existing.get("spawned_by_session"):
-            who = existing["spawned_by_session"]
-            print(f"spawn: launch edge on {node} already names {who}; kept.",
-                  file=sys.stderr)
-            return
-
-        def mutator(entries: "list[dict]") -> "list[dict]":
-            for row in entries:
-                # Re-check under the lock: the read above is a snapshot, and a
-                # racing spawn may have landed the first launch since.
-                if row.get("id") != node or row.get("spawned_by_session"):
-                    continue
-                row["spawned_by_session"] = session_id
-                row["spawned_by_harness"] = harness
-                row["spawned_by_cwd"] = parent_cwd
-            return entries
-
-        commit_rows_via_store(graph_json(), mutator)
+        # stdout carries the spawn's JSON receipt; the stamp must not write there.
+        subprocess.run(argv, timeout=10, check=False, stdout=subprocess.DEVNULL)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
 
