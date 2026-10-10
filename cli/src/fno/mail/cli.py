@@ -50,7 +50,7 @@ from fno.mail.receipts import _escalate_to_human, _recipient_is_attended
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import NoReturn, Optional, TypedDict
+from typing import Any, NoReturn, Optional, TypedDict
 
 import typer
 
@@ -2178,6 +2178,20 @@ def _name_lane_send(
         )
         return
 
+    from fno.bus.log import record_hosted_delivery
+
+    record: dict[str, Any] = dict(
+        msg_id=msg_id, sender=sender, recipient=recipient, body=wrapped,
+        from_harness=sender_harness, in_reply_to=reply_to, from_session=sender_session,
+        from_model=sender_model, to_kind="name", word_count=authored_words, subject=subject,
+    )
+    # Write first for a known recipient. A token no store knows exits 16
+    # having sent nothing, so it gets no stored copy.
+    if not self_send and (resolved is not None or (token and token_reachable)):
+        try:
+            record_hosted_delivery(**record, before_live=True)
+        except Exception as exc:  # noqa: BLE001 - the live attempt still runs
+            print(f"stored copy not written before live delivery: {exc}", file=sys.stderr)
     injected = False
     woken_as: Optional[str] = None
     lanes: list[str] = []
@@ -2344,27 +2358,10 @@ def _name_lane_send(
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
     if injected:
-        from fno.bus.log import record_hosted_delivery
-
         try:
-            record_hosted_delivery(
-                msg_id=msg_id,
-                sender=sender,
-                recipient=recipient,
-                body=wrapped,
-                from_harness=sender_harness,
-                # One value now feeds the row field AND the landed-check meta
-                # copy; the lane-refined `to_harness` is the actual injected
-                # harness, more truthful than the routing token's `provider`.
-                to_harness=to_harness,
-                in_reply_to=reply_to,
-                from_session=sender_session,
-                from_model=sender_model,
-                to_kind="name",
-                word_count=authored_words,
-                to_session=to_session,
-                subject=subject,
-            )
+            # The lane-refined `to_harness` is the harness actually injected
+            # into, more truthful than the routing token's `provider`.
+            record_hosted_delivery(**record, to_harness=to_harness, to_session=to_session)
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
                 "delivery succeeded; outbox record failed; "

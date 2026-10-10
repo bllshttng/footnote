@@ -7717,11 +7717,11 @@ def dispatch_send(
                 # so it cannot drain during a live window, and there is no live
                 # window to crash in. Write its durable placeholder BEFORE
                 # anything else so a sender crash before the recipient wakes does
-                # not lose the message. A recipient we WILL attempt live stays
-                # live-first: it can drain at its next SessionStart while the live
-                # turn is still in flight, before the id lands in its transcript,
-                # so W2 cannot skip a write-ahead placeholder there and the
-                # message would double-deliver.
+                # not lose the message. A recipient we WILL attempt live gets no
+                # bus placeholder: it can drain while the live turn is in flight,
+                # before the id lands in its transcript, so W2 cannot skip it and
+                # the message would double-deliver. Its stored copy is written
+                # first to the chats record instead (before_live below).
                 if durable_recipient is not None and not family1_attemptable:
                     _write_durable()
                 delivery = "durable"
@@ -7735,6 +7735,29 @@ def dispatch_send(
                 if not family1_attemptable:
                     live_miss_reason = f"transcript-{family1_state}"
                 if family1_attemptable:
+                    from fno import rust_binary
+                    from fno.bus.log import record_hosted_delivery
+                    from fno.mail.envelope import wrap_fno_mail
+
+                    record: dict[str, Any] = dict(
+                        msg_id=msg_id, sender=mail_ctx.from_,
+                        recipient=durable_recipient or existing.short_id,
+                        body=wrap_fno_mail(
+                            message, from_=mail_ctx.from_, harness=mail_ctx.harness,
+                            node=mail_ctx.node, to=mail_ctx.to, id=mail_ctx.id,
+                            from_session=mail_ctx.from_session,
+                            to_session=mail_ctx.to_session, subject=mail_ctx.subject,
+                        ),
+                        from_harness=from_harness, to_harness=existing.harness,
+                        to_session=mail_ctx.to_session, from_session=from_session,
+                        from_model=mail_ctx.model, to_kind="session",
+                        word_count=rust_binary.style_word_count(message),
+                        subject=mail_ctx.subject,
+                    )
+                    try:
+                        record_hosted_delivery(**record, before_live=True)
+                    except Exception as exc:  # noqa: BLE001 - the live attempt still runs
+                        print(f"stored copy not written before live delivery: {exc}", file=sys.stderr)
                     live_attempted = True
                     _live_delivered = _deliver_live(
                         existing,
@@ -7747,36 +7770,8 @@ def dispatch_send(
                     )
                     if _live_delivered:
                         delivery = "hosted"
-                        from fno.bus.log import record_hosted_delivery
-                        from fno.mail.envelope import wrap_fno_mail
-
-                        hosted_body = wrap_fno_mail(
-                            message,
-                            from_=mail_ctx.from_,
-                            harness=mail_ctx.harness,
-                            node=mail_ctx.node,
-                            to=mail_ctx.to,
-                            id=mail_ctx.id,
-                            from_session=mail_ctx.from_session,
-                            to_session=mail_ctx.to_session,
-                            subject=mail_ctx.subject,
-                        )
-                        from fno import rust_binary
                         try:
-                            record_hosted_delivery(
-                                msg_id=msg_id,
-                                sender=mail_ctx.from_,
-                                recipient=durable_recipient or existing.short_id,
-                                body=hosted_body,
-                                from_harness=from_harness,
-                                to_harness=existing.harness,
-                                to_session=mail_ctx.to_session,
-                                from_session=from_session,
-                                from_model=mail_ctx.model,
-                                to_kind="session",
-                                word_count=rust_binary.style_word_count(message),
-                                subject=mail_ctx.subject,
-                            )
+                            record_hosted_delivery(**record)
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(
                                 "delivery succeeded; outbox record failed; "

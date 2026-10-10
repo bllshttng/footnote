@@ -370,6 +370,12 @@ pub(crate) fn record_at(
         let Some((chat_id, rec)) = message_line(line) else {
             return Ok(Recorded::Skipped);
         };
+        // A send stored before its live attempt that then missed reaches
+        // here again as the durable copy: one id records one message line.
+        let id = line.get("id").and_then(Value::as_str).unwrap_or("");
+        if chat_holds_message(&chats_dir.join(&chat_id), id) {
+            return Ok(Recorded::Skipped);
+        }
         append_chat_line(&chats_dir.join(&chat_id), &rec)?;
         Ok(Recorded::Message { chat_id })
     } else if is_message_kind(kind) {
@@ -465,24 +471,27 @@ fn scan_chat_files_for_id(chats_dir: &Path, id: &str) -> Result<Option<String>, 
         Err(_) => return Ok(None),
     };
     for entry in rd.flatten() {
-        let file = entry.path().join("messages.jsonl");
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for line in text.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if v.get("type").and_then(Value::as_str) == Some("message")
-                && v.get("id").and_then(Value::as_str) == Some(id)
-            {
-                if let Some(chat) = entry.file_name().to_str() {
-                    return Ok(Some(chat.to_string()));
-                }
+        if chat_holds_message(&entry.path(), id) {
+            if let Some(chat) = entry.file_name().to_str() {
+                return Ok(Some(chat.to_string()));
             }
         }
     }
     Ok(None)
+}
+
+/// Whether the chat at `chat_dir` already holds a message line for `id`.
+fn chat_holds_message(chat_dir: &Path, id: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(chat_dir.join("messages.jsonl")) else {
+        return false;
+    };
+    text.lines()
+        .filter(|line| line.contains(id))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|v| {
+            v.get("type").and_then(Value::as_str) == Some("message")
+                && v.get("id").and_then(Value::as_str) == Some(id)
+        })
 }
 
 /// The sender name the store row for `id` carries: the bus envelope's
@@ -2110,6 +2119,11 @@ mod tests {
             panic!()
         };
         assert_eq!(fallback_id, chat_id_for_pair("sess-a", "stranger@nowhere"));
+        assert_eq!(
+            record_at(&chats, &db, &bus, &stranger).unwrap(),
+            Recorded::Skipped,
+            "a send stored before its live attempt records once"
+        );
         let mut withdraw = bus_line("msg-000002", "a", "b", "withdraw");
         withdraw["meta"] = serde_json::json!({"withdraws": "msg-000003"});
         assert_eq!(

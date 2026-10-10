@@ -928,6 +928,33 @@ def test_plain_send_delivers_header_and_body(
     assert "secret body words" in row.body
 
 
+def test_interrupted_live_send_keeps_the_stored_copy(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    # Write first: the stored copy lands before the live attempt, so a sender
+    # killed between the two steps still leaves the mail `mail show` reads.
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    typed: list[str] = []
+
+    def _interrupted(recipient, text, **_k):
+        typed.append(text)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _interrupted)
+    runner.invoke(
+        app, ["mail", "send", "9a063cd3", "kept body words", "--from-name", "web"]
+    )
+    assert len(typed) == 1
+    msg_id = typed[0].split(" · ")[1]
+
+    from fno.rust_binary import chats_verb
+
+    stored = chats_verb(["read", msg_id, "--all", "--json"], {})
+    assert stored["id"] == msg_id
+    assert "kept body words" in stored["body"]
+
+
 # ---------------------------------------------------------------------------
 # a2a US7b / AC3-HP: the mux PaneSend live rung. A resolved session that is
 # mux-hosted (fno owns its PTY) delivers live through its pane instead of

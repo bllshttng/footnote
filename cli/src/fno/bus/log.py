@@ -434,10 +434,14 @@ def record_hosted_delivery(
     word_count: Optional[int] = None,
     to_session: Optional[str] = None,
     subject: Optional[str] = None,
+    before_live: bool = False,
 ) -> Envelope:
     """Append one audit-only record after confirmed hosted delivery. ``to_session``/
     ``to_harness`` name the session actually injected into, for the landed check
-    (which reads the ``to_harness`` meta copy)."""
+    (which reads the ``to_harness`` meta copy).
+
+    ``before_live`` writes first: the chats record only, before the live attempt,
+    so an interrupt cannot lose it and no drain sees it twice."""
     meta = {k: v for k, v in (("to_session", to_session), ("to_harness", to_harness)) if v}
     env = Envelope.new(
         id=msg_id,
@@ -450,7 +454,7 @@ def record_hosted_delivery(
         to_harness=to_harness,
         request_id=request_id,
         in_reply_to=in_reply_to,
-        delivery=HOSTED_DELIVERY,
+        delivery=None if before_live else HOSTED_DELIVERY,
         from_session=from_session,
         from_model=from_model,
         to_kind=to_kind,
@@ -458,7 +462,10 @@ def record_hosted_delivery(
         meta=meta or None,
         subject=subject,
     )
-    append(env)
+    if before_live:
+        chats_verb(["append"], json.loads(to_json_line(env)))
+    else:
+        append(env)
     return env
 
 
