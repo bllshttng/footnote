@@ -8576,7 +8576,7 @@ async fn attach_and_run(
                 eprintln!("fno: {n}");
             }
             // The update modal's restart unwinds here: run the verb in the foreground, exec the fresh client.
-            if let Some(err) = update_menu::maybe_reattach(code, &view.session).await {
+            if let Some(err) = update_menu::maybe_reattach(code, &mut view).await {
                 return Err(err);
             }
             Ok(code)

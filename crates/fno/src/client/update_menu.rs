@@ -300,6 +300,26 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
     let outcome = probe.map(|p| &p.readiness);
     let mut rows = vec![];
     let mut actions = Vec::new();
+    // Nothing pending anywhere (no source update, not behind origin, no
+    // newer release): the dialog leads with that verdict instead of leaving
+    // the operator to infer it from a version pair.
+    let current = matches!(
+        outcome,
+        Some(UpdateOutcome::Ok(r))
+            if !r.update_ready
+                && r.degraded.is_none()
+                && !r
+                    .source_pin
+                    .as_ref()
+                    .and_then(|p| p.behind)
+                    .is_some_and(|n| n > 0)
+    ) && !matches!(
+        probe.map(|p| &p.release),
+        Some(ReleaseOutcome::Newer { .. })
+    );
+    if current {
+        rows.push(PopupRow::Header("up to date".into()));
+    }
     match probe.map(|p| &p.release) {
         Some(ReleaseOutcome::Newer {
             channel,
@@ -481,6 +501,10 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                     hint: String::new(),
                     enabled: true,
                 });
+            } else if current {
+                rows.push(PopupRow::Text(
+                    "optional: restart the mux server to load new mux code. panes are kept.".into(),
+                ));
             }
         }
         Some(UpdateOutcome::Degraded(reason)) => {
@@ -559,6 +583,7 @@ pub(crate) async fn open_pr(view: &mut View, url: String) {
 /// --force. Returns the verb's exit code.
 pub(crate) async fn run_restart_foreground() -> i32 {
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command.args(["agents", "restart", "--mux"]);
     match command.status().await {
         Ok(s) => s.code().unwrap_or(1),
         Err(e) => {
@@ -614,15 +639,18 @@ pub(crate) fn detach_exit(view: &View) -> i32 {
 /// stdin thread holds a blocking stdin lock a second reader would deadlock
 /// on. Some(failure) when the reattach itself failed; on success exec never
 /// returns.
-pub(crate) async fn maybe_reattach(code: i32, session: &str) -> Option<String> {
+pub(crate) async fn maybe_reattach(code: i32, view: &mut View) -> Option<String> {
     if code != RESTART_REATTACH_EXIT {
         return None;
     }
     run_restart_foreground().await;
+    // The restart ran once; drop the arm so this process can never unwind
+    // into a second reattach.
+    view.restart_pending = false;
     use std::os::unix::process::CommandExt as _;
     let err = std::process::Command::new(crate::server::fno_bin())
-        .arg("--session")
-        .arg(session)
+        .arg("--server")
+        .arg(&view.session)
         .exec();
     Some(format!("restart finished; reattach failed: {err}"))
 }
