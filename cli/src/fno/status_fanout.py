@@ -73,6 +73,7 @@ class TickResult:
     rows_read: int = 0  # status rows the pass read; 0 on an unchanged store
     locked_out: bool = False  # another tick held the per-project lock; skipped
     lease_lost: bool = False  # lock was stolen; cursor persistence was aborted
+    no_sink_configured: bool = False  # every enabled sink's url is unresolved; no read attempted
 
 
 # ── event stream (rotation-aware, skip-and-count) ───────────────────────────
@@ -265,6 +266,12 @@ def run_tick(
     enabled = [s for s in sinks if s.enabled]
     if not enabled:
         return TickResult()  # clean no-op: no cursor writes, no lock churn
+    if not any(_sink_configured(s) for s in enabled):
+        # Every enabled sink's url is unresolved (e.g. url_env unset): dispatch
+        # would short-circuit and hold the scan cursor, so every later tick
+        # rereads the whole journal. Skip before any read; the sink's stored
+        # cursor resumes the backlog once the url resolves.
+        return TickResult(no_sink_configured=True)
 
     lock = _TickLock(project_root)
     if not lock.acquire():
@@ -600,6 +607,16 @@ def _resolve_url(sink: StatusSinkConfig) -> "tuple[Optional[str], Optional[str]]
     return None, "no url configured"
 
 
+def _sink_configured(sink: StatusSinkConfig) -> bool:
+    """A sink this tick could deliver through: a webhook whose url resolves
+    now (``url``, process env, then ~/.fno/.env), or a type that needs no url.
+    An enabled webhook with an unresolved url_env is not configured work."""
+    if sink.type not in ("json-webhook", "text-webhook"):
+        return True
+    url, _ = _resolve_url(sink)
+    return url is not None
+
+
 # ── adapter router + adapters ───────────────────────────────────────────────
 
 
@@ -846,7 +863,10 @@ def tick_cmd(
         return
     # The daemon ticks every few seconds: an idle pass prints nothing.
     if not result.sinks and dry_run:
-        typer.echo("status-fanout: no enabled sinks (no-op)")
+        if result.no_sink_configured:
+            typer.echo("status-fanout: no deliverable sink (url unresolved; no-op)")
+        else:
+            typer.echo("status-fanout: no enabled sinks (no-op)")
     verb = "would-send" if dry_run else "dispatched"
     for sr in result.sinks:
         if not (dry_run or sr.matched or sr.dropped or sr.short_circuited):

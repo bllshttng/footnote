@@ -206,6 +206,50 @@ def test_tick_empty_sinks_is_clean_noop(tmp_path):
     assert not _sinks_dir(tmp_path).exists()
 
 
+def test_tick_unresolved_url_skips_all_reads(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    monkeypatch.delenv("OPS_MISSING", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("journal read attempted with no deliverable sink")
+
+    monkeypatch.setattr(sf, "_stream_since", _boom)
+    sink = StatusSinkConfig(
+        name="s", type="text-webhook", events=["blocked"], url_env="OPS_MISSING"
+    )
+    res = sf.run_tick(tmp_path, [sink])
+    assert res.sinks == [] and res.no_sink_configured is True
+    assert _cursor(ss, "s")["ts"] == "2026-07-12T00:00:00Z"  # untouched
+
+
+def test_tick_mixed_sinks_still_read_when_one_delivers(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "a", "2026-07-12T00:00:00Z")
+    _seed_cursor(ss, "b", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
+    monkeypatch.delenv("OPS_MISSING", raising=False)
+    monkeypatch.setattr(
+        sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=True, status=200))
+    good = StatusSinkConfig(
+        name="a", type="json-webhook", events=["blocked"], url="https://x"
+    )
+    bad = StatusSinkConfig(
+        name="b", type="text-webhook", events=["blocked"], url_env="OPS_MISSING"
+    )
+    res = sf.run_tick(tmp_path, [good, bad])
+    assert res.rows_read == 1  # the gate did not fire: one sink delivers
+    assert res.sinks[0].dispatched == 1
+    assert res.sinks[1].short_circuited is True  # held for retry, as before
+
+
 def test_tick_fresh_cursor_starts_at_eof_no_backfill(tmp_path):
     from fno import status_fanout as sf
 
