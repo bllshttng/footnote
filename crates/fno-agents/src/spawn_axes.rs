@@ -616,23 +616,18 @@ pub fn reentry_mechanism_decide(ask: &Value) -> Value {
 
 /// The `wake_name` field's answer: the name a wake fork spawns under, read
 /// from the registry beside the reentry plan (same field-on-a-verb shape).
-/// An unreadable registry degrades to the alias, the answer a never-named
-/// uuid earns: a wake must never block mail on registry state.
+/// An unreadable registry degrades to an empty one, so the full rung chain
+/// (row, tombstone, transcript, alias) still answers: a wake must never
+/// block mail on registry state.
 pub fn wake_name_decide(ask: &Value) -> Value {
     let session_id = ask.get("session_id").and_then(Value::as_str).unwrap_or("");
     if session_id.trim().is_empty() {
         return serde_json::json!({ "refused": "session_id is required" });
     }
-    let alias = format!("wake-{}", crate::identity::canonical_handle(session_id));
     let home = crate::paths::AgentsHome::from_env();
     let registry_path = home.registry_json();
-    let name = crate::state::load_registry(&registry_path)
-        .ok()
-        .map(|registry| crate::reentry::wake_spawn_name(&registry, &registry_path, session_id))
-        // An unreadable registry degrades through the tombstone before the
-        // alias: a stamped name is the better answer at every rung.
-        .or_else(|| crate::wake_name::lookup_beside(&registry_path, session_id))
-        .unwrap_or(alias);
+    let registry = crate::state::load_registry(&registry_path).unwrap_or_default();
+    let name = crate::reentry::wake_spawn_name(&registry, &registry_path, session_id);
     serde_json::json!({ "name": name })
 }
 

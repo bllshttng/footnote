@@ -1443,11 +1443,7 @@ fn relaunch_name(claude_home: &ClaudeHome, row_name: &str, short_id: &str, uuid:
         return row_name.to_string();
     }
     transcript_custom_title(claude_home, uuid)
-        .filter(|title| {
-            title
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        })
+        .filter(|title| crate::wake_name::spawn_safe_name(title))
         .unwrap_or_else(|| row_name.to_string())
 }
 

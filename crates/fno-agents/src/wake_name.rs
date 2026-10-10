@@ -1,14 +1,17 @@
 //! The wake-name tombstone: one JSON file beside the registry mapping a
 //! stopped worker's harness session uuid to the registry name it last held.
 //! `fno agents stop` keeps the row (Exited + the stop record), but the
-//! retirement sweep's later drop deletes it, and a wake that arrives after
-//! the drop used to fall back to `wake-<handle>` - a name the board and mail
-//! never knew. The stop stamps the name here first, so every wake after a
-//! stop revives under the old name. One producer (the stop seams, plus the
-//! rm tombstone stamp), one consumer (`reentry::wake_spawn_name_beside`).
+//! retirement sweep's later drop deletes it, and a wake that arrived after
+//! such a drop used to fall back to `wake-<handle>` - a name the board and
+//! mail never knew. Every registry-row drop stamps the name here (the stop
+//! seams, the rm tombstone stamp, and the retirement sweep's
+//! `commit_retirements`), and a wake that finds neither row nor tombstone
+//! reads the transcript's own naming records before the alias
+//! (`lookup_transcript`). One consumer (`reentry::wake_spawn_name`).
 //! No expiry: a name is the worker-to-node join for the uuid's lifetime;
 //! the per-uuid dedupe plus the record cap bound the file.
 
+use crate::claude_ask::ClaudeHome;
 use crate::daemon::now_epoch_secs;
 use crate::paths::AgentsHome;
 use serde_json::{json, Value};
@@ -69,6 +72,72 @@ pub(crate) fn lookup_beside(registry_path: &Path, session_id: &str) -> Option<St
     })
 }
 
+/// The shape a spawnable name keeps: alphanumerics plus `-` `_` `.`. One
+/// predicate for both filters that name a session (the relaunch name and
+/// the wake-name transcript rung), so the two cannot drift.
+pub(crate) fn spawn_safe_name(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// A transcript past this many bytes is skipped: the rung is best-effort,
+/// and a wake must not pay a multi-MB scan to answer a name. Titles ride
+/// normal records, so the cap only sheds pathological files.
+const TRANSCRIPT_SCAN_CAP_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The last spawn-safe name this uuid's transcript carries: the newest
+/// `custom-title` (customTitle) or `agent-name` (agentName) record whose
+/// value is non-empty, not this session's own `wake-<handle>` alias, and
+/// spawn-name shaped. The rung between the tombstone and the alias: a row
+/// dropped before the tombstone existed still revives under the name its
+/// transcript shows. An unreadable store answers None - best-effort by the
+/// module contract.
+pub(crate) fn lookup_transcript(claude_home: &ClaudeHome, session_id: &str) -> Option<String> {
+    let alias = format!("wake-{}", crate::identity::canonical_handle(session_id));
+    for projects in claude_home.project_dirs() {
+        let Some(path) = crate::claude_transcript_paths::resolve_transcript(&projects, session_id)
+        else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() > TRANSCRIPT_SCAN_CAP_BYTES {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut name = None;
+        for line in std::io::BufRead::lines(std::io::BufReader::new(file)).map_while(Result::ok) {
+            let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let value = match record.get("type").and_then(Value::as_str) {
+                Some("custom-title") => record.get("customTitle").and_then(Value::as_str),
+                Some("agent-name") => record.get("agentName").and_then(Value::as_str),
+                _ => None,
+            };
+            let Some(value) = value
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && *v != alias)
+            else {
+                continue;
+            };
+            // A spawn name only: the fallback's answer must be spawnable.
+            if !spawn_safe_name(value) {
+                continue;
+            }
+            name = Some(value.to_string());
+        }
+        if name.is_some() {
+            return name;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +186,59 @@ mod tests {
         assert!(
             lookup_beside(&reg, "aaaabbbb-cccc-dddd-eeee-ffff000000000019").is_some(),
             "a recent record survives"
+        );
+    }
+
+    /// The transcript rung answers the last non-wake customTitle or
+    /// agentName: the store that lost both the row and the tombstone still
+    /// revives under the name the transcript shows.
+    #[test]
+    fn transcript_rung_answers_the_last_non_wake_name() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude").join("projects").join("work");
+        std::fs::create_dir_all(&projects).unwrap();
+        let uuid = "7ada6c8a-1111-2222-3333-444444444444";
+        std::fs::write(
+            projects.join(format!("{uuid}.jsonl")),
+            concat!(
+                "{\"type\":\"custom-title\",\"customTitle\":\"t-old-name\"}\n",
+                "{\"type\":\"user\",\"message\":{}}\n",
+                "{\"type\":\"agent-name\",\"agentName\":\"wake-7ada6c8a\"}\n",
+                "{\"type\":\"agent-name\",\"agentName\":\"t-rename-later\"}\n",
+            ),
+        )
+        .unwrap();
+        let claude_home = ClaudeHome::at(home.path());
+        assert_eq!(
+            lookup_transcript(&claude_home, uuid).as_deref(),
+            Some("t-rename-later"),
+            "the last non-wake record wins; the wake alias is skipped",
+        );
+    }
+
+    /// A title that cannot spawn (spaces, blank) never reaches the answer,
+    /// and a store with no transcript answers None for the alias fallback.
+    #[test]
+    fn transcript_rung_skips_unspawnable_titles_and_missing_stores() {
+        let home = tempfile::tempdir().unwrap();
+        let projects = home.path().join(".claude").join("projects").join("work");
+        std::fs::create_dir_all(&projects).unwrap();
+        let uuid = "7ada6c8a-1111-2222-3333-444444444444";
+        std::fs::write(
+            projects.join(format!("{uuid}.jsonl")),
+            concat!(
+                "{\"type\":\"custom-title\",\"customTitle\":\"not a spawn name\"}\n",
+                "{\"type\":\"custom-title\",\"customTitle\":\"  \"}\n",
+                "{\"type\":\"summary\",\"summary\":\"noise\"}\n",
+            ),
+        )
+        .unwrap();
+        let claude_home = ClaudeHome::at(home.path());
+        assert_eq!(lookup_transcript(&claude_home, uuid), None);
+        assert_eq!(
+            lookup_transcript(&ClaudeHome::at(home.path().join("none")), uuid),
+            None,
+            "no transcript anywhere: None, the alias fallback applies"
         );
     }
 }
