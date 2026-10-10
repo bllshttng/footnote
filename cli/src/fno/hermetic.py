@@ -193,6 +193,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # developer's exported editor is ambient state a test must not inherit.
     "EDITOR",
     "VISUAL",
+    # The routing-page bless toggle a deliberate `cargo test -- --ignored
+    # bless_help_routing` sets by hand; no hermetic run needs the ambient
+    # value (crates/fno-agents/src/help_router.rs reads it).
+    "HELP_ROUTING_BLESS",
 )
 
 # Read by source but NOT ambient state: the process needs these to run, and
