@@ -61,6 +61,10 @@ fn correction_rows() {
                     {"window": 1, "self_caught": 1, "operator_caught": 0, "peer_caught": 0, "interrupts": 0, "rejects": 0},
                     {"window": 2, "self_caught": 0, "operator_caught": 1, "peer_caught": 0, "interrupts": 2, "rejects": 1},
                 ],
+                "correction_windows": [
+                    {"window": 1, "self_caught": 1, "operator_caught": 0, "peer_caught": 0, "interrupts": 0, "rejects": 0},
+                    {"window": 2, "self_caught": 0, "operator_caught": 1, "peer_caught": 0, "interrupts": 2, "rejects": 1},
+                ],
             }),
         ),
     );

@@ -321,6 +321,9 @@ pub(crate) fn r_correction_meter() -> Result<Value, String> {
                 value["self_caught_window"] = self_caught;
                 value["operator_caught_window"] = operator_caught;
             }
+            // The beat data copies this key by name, so the reading carries
+            // the window array under it beside `recent`.
+            value["correction_windows"] = value["recent"].clone();
             Ok(value)
         }
         Ok(crate::lead_checkin::OwnTranscript::Text { harness, .. }) => {
