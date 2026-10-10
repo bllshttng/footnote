@@ -279,7 +279,7 @@ pub fn run_validate(args: &[String]) -> i32 {
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("Error: no proposal file at {path}");
+            eprintln!("Error: proposal file not found: {path}");
             return 2;
         }
         Err(e) => {

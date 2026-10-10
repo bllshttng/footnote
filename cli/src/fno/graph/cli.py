@@ -72,6 +72,32 @@ cli = typer.Typer(
 _register_node_builder(cli)
 from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
 
+def _triage_forward(ctx) -> None:
+    """The native door owns every triage action; the wheel keeps the route.
+
+    The whole argv rides `fno-agents backlog triage` with stdio inherited
+    and its exit code returned, so the front door lists the group and
+    serves it on installs whose `fno` resolves to this wheel.
+    """
+    import subprocess
+
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_binary()
+    if binary is None:
+        typer.echo(
+            "Error: the triage group is served by the native door; no fno-agents binary found.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    proc = subprocess.run([str(binary), "backlog", "triage", *ctx.args])
+    raise typer.Exit(code=proc.returncode)
+
+
+cli.command("triage", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})(
+    _triage_forward
+)
+
 cli.command("worked", hidden=True)(_cmd_worked)
 cli.command("version", hidden=True)(_cmd_version)
 
