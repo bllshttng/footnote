@@ -59,7 +59,7 @@ pub fn is_idea(entry: &Value) -> bool {
 }
 
 /// First `max_lines` lines of the plan, or the empty string on any failure.
-pub fn read_plan_excerpt(plan_path: Option<&str>, max_lines: usize) -> String {
+pub fn plan_excerpt(plan_path: Option<&str>, max_lines: usize) -> String {
     let Some(path) = plan_path.filter(|p| !p.is_empty()) else {
         return String::new();
     };
@@ -136,7 +136,7 @@ pub fn candidate_record(entry: &Value, deep: bool) -> Value {
                 if !plan.is_empty() {
                     obj.insert(
                         "plan_excerpt".to_string(),
-                        Value::from(read_plan_excerpt(Some(plan), 150)),
+                        Value::from(plan_excerpt(Some(plan), 150)),
                     );
                 }
             }
@@ -544,14 +544,15 @@ pub fn fold_triage_health(events: &[Value]) -> Option<Value> {
         let d = event_data(e);
         let a = d.get("applied").cloned().unwrap_or(Value::Null);
         if let Some(obj) = a.as_object() {
-            for key in cats.keys() {
-                let v = obj.get(key).cloned().unwrap_or(Value::Null);
+            let keys: Vec<String> = cats.keys().cloned().collect();
+            for key in keys {
+                let v = obj.get(&key).cloned().unwrap_or(Value::Null);
                 let n = match v {
                     Value::Number(n) => n.as_i64().unwrap_or(0),
                     Value::String(s) => s.trim().parse().unwrap_or(0),
                     _ => 0,
                 };
-                *cats.entry(key.clone()).or_insert(0) += n;
+                *cats.entry(key).or_insert(0) += n;
             }
         }
         for (field, total) in [("proposed", &mut proposed), ("dropped", &mut dropped)] {
@@ -619,8 +620,10 @@ where
 
 /// A key agrees when every completed run assigns it the SAME value (a run
 /// that omits the key contributes None, so "some propose, some don't" is a
-/// disagreement). Returns {agree, total, disagreeing}.
-fn category_agreement(per_run_maps: Vec<BTreeMap<String, Value>>) -> Value {
+/// disagreement). Generic over the map's value type: priority agreement
+/// compares proposed values; the presence categories compare bools.
+/// Returns {agree, total, disagreeing}.
+fn category_agreement<V: PartialEq>(per_run_maps: Vec<BTreeMap<String, V>>) -> Value {
     let mut universe: BTreeSet<String> = BTreeSet::new();
     for m in &per_run_maps {
         universe.extend(m.keys().cloned());

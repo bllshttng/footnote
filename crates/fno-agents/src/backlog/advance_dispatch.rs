@@ -10,7 +10,7 @@
 //! until the leg lands, so the shipped surface is unchanged.
 
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[allow(unused_imports)]
 use super::advance::{
@@ -364,6 +364,36 @@ pub fn node_spawn_argv(
     cmd.push(args.agent_name.clone());
     cmd.push(args.command.clone());
     cmd
+}
+
+/// The one node-dispatch launch. The composed worker command (the verb
+/// command the lifecycle table and the harness resolver compose) is the one
+/// seam still Python-owned: until its port lands this launch REFUSES with a
+/// named gap rather than guessing a command, so a wired door can never
+/// launch a wrong worker. The caller releases its dispatch reservation on
+/// any error return, keeping the node re-dispatchable.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_worker(
+    _node_id: &str,
+    _root: &str,
+    _slug: Option<&str>,
+    _node: &Value,
+    _model: Option<&str>,
+    _provider: Option<&str>,
+    _harness: Option<&str>,
+    _verb: Option<&str>,
+    _brief: Option<&str>,
+    _dispatch_account: Option<&str>,
+    _dispatch_reservation: Option<(&str, &str)>,
+    _caller: &str,
+    _source: Option<&str>,
+    _events_path: Option<&Path>,
+) -> Result<SpawnOk, SpawnOutcome> {
+    Err(SpawnOutcome::Failed(SpawnFailure::general(
+        "launch leg unported: the composed worker command resolution is still \
+Python-owned; the native advance door stays unwired until it lands, so no \
+worker is launched and no command is guessed",
+    )))
 }
 
 /// Emit the one dispatch_spawned row and return the launch identity.

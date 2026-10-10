@@ -705,8 +705,8 @@ pub(crate) fn now_ms_i64() -> i64 {
 pub fn walker_key() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     crate::paths::canonical_repo_root(&cwd)
-        .map(|root| format!("walker:{root}"))
-        .or_else(|| Some(format!("walker:{cwd}")))
+        .map(|root| format!("walker:{}", root.display()))
+        .or_else(|| Some(format!("walker:{}", cwd.display())))
 }
 
 /// True iff `holder` is THIS session's identity (any claim state). Env ids
@@ -789,7 +789,9 @@ pub fn live_worked_overlay() -> Result<BTreeMap<String, Vec<String>>, String> {
     let graph = super::settings::graph_path();
     let entries = crate::graph_store::read_rows_strict(&graph)
         .map_err(|_| "the graph is unreadable".to_string())?;
-    crate::backlog::worked::live_worked_node_ids(&entries)
+    Ok(crate::backlog::worked::live_worked_node_ids(&entries)?
+        .into_iter()
+        .collect())
 }
 
 /// The family-2 pre-dispatch verdict shared by every node-dispatch caller.
@@ -1054,7 +1056,7 @@ pub fn claim_is_live(key: &str) -> bool {
 /// decision event and leak the reservation. Truly non-raising keeps "exactly
 /// one decision event, always" an invariant.
 pub fn safe_release(key: &str, holder: &str) {
-    let _ = crate::claims::release(key, holder);
+    let _ = crate::claims::release(key, holder, None, None);
 }
 
 /// Auto-defer at the durable failure limit; return the refusal action
@@ -1173,16 +1175,20 @@ fn append_journal_rows(path: &Path, types: &[&str], out: &mut Vec<Value>) {
     }
 }
 
-/// Consecutive dead dispatches for the node, newest first (a spawned row or
-/// a claim observation naming a live worker breaks the streak).
+/// Consecutive dead dispatches for THIS node, newest first. A spawned row,
+/// or a claim observation naming a live worker on the node, breaks the
+/// streak; rows for other nodes never enter it.
 fn consecutive_failures(node_id: &str, events: &[Value]) -> i64 {
     let mut streak: i64 = 0;
     for row in events {
+        let data = row.get("data").cloned().unwrap_or(Value::Null);
+        if data.get("node_id").and_then(Value::as_str) != Some(node_id) {
+            continue;
+        }
         let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
             "dispatch_spawned" => break,
             "dispatch_claim_observed" => {
-                let data = row.get("data").cloned().unwrap_or(Value::Null);
                 let action = data.get("action").and_then(Value::as_str).unwrap_or("");
                 if action == "dispatch" {
                     break;
@@ -1513,7 +1519,7 @@ pub fn converge_one(
         None,
         None,
         None,
-        Some((&dispatch_key, &holder)),
+        Some((dispatch_key.as_str(), holder.as_str())),
         "_converge_one",
         source,
         ev_path,
