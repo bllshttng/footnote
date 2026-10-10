@@ -166,7 +166,7 @@ jobs:
           uv run fno-py doctor harness-matrix --write
           git diff --exit-code -- ../docs/harnesses/verb-matrix.md
 
-      # hooks/generated-write-guard.sh refuses edits only to generated copies
+      # hooks/write-gate.sh refuses edits only to generated copies
       # that generated-artifacts.tsv or skill-bundles.yaml names. The census
       # fails on a dead row and on a marked generated file no list covers.
       - name: Generated-copy manifest complete (selftest, then check)
@@ -551,7 +551,7 @@ jobs:
         run: bash tests/ci/test_check_client_actions_shrink.sh
 
       # State-root tidiness: the inventory doc's root rows are shrink-only.
-      # The runtime half is hooks/claude-config-write-guard.sh, which refuses
+      # The runtime half is hooks/write-gate.sh, which refuses
       # a NEW top-level write in either root; this gate is the review half,
       # failing a PR whose diff adds a root pattern to the doc.
       - name: State-root inventory rows are shrink-only

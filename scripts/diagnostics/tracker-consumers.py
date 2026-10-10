@@ -84,6 +84,10 @@ READ_ALLOWLIST = (
     # Unit-test fixture module, included cfg(test) from spawn_gate.rs: its
     # graph.json literals write hermetic tempdir fixtures, never store reads.
     "crates/fno-agents/src/spawn_gate_territory_tests.rs",
+    # The PreToolUse write gate (the collapsed shell guards): it
+    # pattern-matches protected filenames in hook payloads to refuse
+    # writes; it never opens the store.
+    "crates/fno-agents/src/hook/write_gate.rs",
 )
 
 # Known-positive controls (task 4.2 / AC9): verbs the census must FIND in the

@@ -10,7 +10,7 @@ Measured 2026-08-13 against one real install: 527 top-level entries, 395 of them
 
 The root holds folders, plus the rows this page already has. Nothing new lands at the top level: state goes in a named subfolder wherever one can hold it.
 
-Two gates hold that line. At runtime, `hooks/claude-config-write-guard.sh` refuses an agent write creating a new top-level entry, in the state root or the Claude config dir, whatever its name. The refusal names the session's job tmp dir. In CI, `scripts/ci/check-state-root-rows.sh` fails any PR that adds a root pattern to this page against the checked-in baseline, so the root rows below are SHRINK-ONLY. A writer that moves into a subfolder or dies takes its row with it. A row never enters.
+Two gates hold that line. At runtime, the write gate (`hooks/write-gate.sh`, policy in `crates/fno-agents/src/hook/write_gate.rs`) refuses an agent write creating a new top-level entry, in the state root or the Claude config dir, whatever its name. The refusal names the session's job tmp dir. In CI, `scripts/ci/check-state-root-rows.sh` fails any PR that adds a root pattern to this page against the checked-in baseline, so the root rows below are SHRINK-ONLY. A writer that moves into a subfolder or dies takes its row with it. A row never enters.
 
 "Belongs at the root" used to mean one durable file per install, named for what it is: `graph.db`, `ledger.json`, `config.toml`. That set closed on 2026-09-27. A family of files keyed by session, band, or timestamp never belonged there, however small each one is. The cost is legibility, not bytes: all 395 context-nudge latches together were 14,625 bytes and made the directory unreadable.
 
