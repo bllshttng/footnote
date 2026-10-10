@@ -22,7 +22,8 @@
 //! registers that function, so an older build's write to a shared table
 //! fails at once instead of landing with no outbox record.
 //!
-//! Unset, [`attach`] returns at once: no table, no trigger, no socket.
+//! Unset, [`attach`] drops any guard a past share left, so an older build
+//! can write again, and opens no socket.
 
 use crate::store_remote::{Remote, SqlValue};
 use rusqlite::config::DbConfig;
@@ -273,6 +274,29 @@ fn guard(connection: &Connection) -> Result<(), String> {
     connection.execute_batch(&ddl).map_err(|e| e.to_string())
 }
 
+/// Drop the guard triggers: with sharing off, no write needs an outbox.
+fn unguard(connection: &Connection) -> Result<(), String> {
+    let names: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+                 AND name LIKE 'fno\\_share\\_guard\\_%' ESCAPE '\\'",
+            )
+            .map_err(|e| e.to_string())?;
+        let names = statement
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        names
+    };
+    let ddl: String = names
+        .iter()
+        .map(|name| format!("DROP TRIGGER IF EXISTS main.\"{name}\";\n"))
+        .collect();
+    connection.execute_batch(&ddl).map_err(|e| e.to_string())
+}
+
 /// Install the write path on a backlog connection when sharing is on.
 ///
 /// TEMP triggers live in this connection only, so the shared tables keep
@@ -283,7 +307,7 @@ fn guard(connection: &Connection) -> Result<(), String> {
 /// bindgen, on every machine, key on or off.)
 pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String> {
     if primary_for(graph)?.is_none() {
-        return Ok(());
+        return unguard(connection);
     }
     connection
         .execute_batch(OUTBOX_DDL)
@@ -760,21 +784,26 @@ fn repair(
 }
 
 /// After a write through `mutate_rows`, once the graph lock is gone: flush
-/// the outbox. `Ok` covers a primary that is unreachable or unseeded, since
-/// the write waits in the outbox for the next flush. A refusal syncs the
-/// replica and returns the refusal, so the caller retries on fresh rows.
+/// the outbox. Only a refusal took the write back, so only a refusal syncs
+/// the replica and returns, and the caller retries on fresh rows. Every
+/// other failure leaves the write in the outbox for the next flush, and a
+/// retry would apply it twice.
 pub(crate) fn publish_after_write(graph: &Path) -> Result<(), String> {
     match flush(graph) {
         Ok(_) => Ok(()),
-        Err(error) if crate::store_remote::is_unreachable(&error) || unseeded(&error) => {
-            eprintln!("{error} The write is kept and sent on the next flush.");
-            Ok(())
-        }
-        Err(error) => {
+        Err(error)
+            if error.starts_with(REFUSED)
+                && !crate::store_remote::is_unreachable(&error)
+                && !unseeded(&error) =>
+        {
             if let Err(sync_error) = sync(graph) {
                 eprintln!("backlog-share: sync after a refusal: {sync_error}");
             }
             Err(error)
+        }
+        Err(error) => {
+            eprintln!("{error} The write is kept and sent on the next flush.");
+            Ok(())
         }
     }
 }
@@ -1357,7 +1386,18 @@ mod tests {
             assert!(refused.contains(WRITER), "{refused}");
         }
         assert_eq!(title(&a, "x-1").as_deref(), Some("shared"));
+
+        // Sharing off: the next open drops the guard, so an older build
+        // writes again.
         route_to_primary(None);
+        drop(crate::backlog::open(&a.graph).unwrap());
+        Connection::open(crate::backlog::database_path(&a.graph))
+            .unwrap()
+            .execute(
+                &format!("UPDATE {NODES} SET title = 'old build' WHERE id = 'x-1'"),
+                [],
+            )
+            .unwrap();
     }
 
     #[test]
