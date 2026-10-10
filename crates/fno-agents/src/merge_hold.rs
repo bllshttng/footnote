@@ -5,13 +5,16 @@
 //! skills). The block it writes is the same
 //! `dispatch_hold` frontmatter every merge path already reads; the write is
 //! proven by the same reader ready selection uses, and a failed readback
-//! restores the original bytes. Rides an existing verb rather than a new
-//! top-level root, and keeps the writer out of the Python tree the file
+//! restores the original bytes. A release of a hold the user set, or of one
+//! naming a question, must cite a live superuser-lane ruling at the held
+//! node or at the question it names. Rides an existing verb rather than a
+//! new top-level root, and keeps the writer out of the Python tree the file
 //! budget caps.
 
 use crate::backlog_ready::{
     dispatch_hold, dispatch_hold_verdict, read_frontmatter, resolve_plan_probe, HoldState,
 };
+use crate::decision_index;
 use crate::graph_get::{default_graph_path, find_entry};
 use crate::graph_store;
 use serde_json::{json, Map, Value};
@@ -82,7 +85,10 @@ pub fn run(op: &str, payload: &Value) -> String {
         .to_string();
     match op.strip_prefix("hold-").unwrap_or(op) {
         "set" => set_hold(&entry, &node_id, payload, &graph),
-        "release" => release_hold(&entry, &node_id, payload, &entries, &graph),
+        "release" => {
+            let decisions = crate::decision_index::default_state_path("decisions.jsonl");
+            release_hold(&entry, &node_id, payload, &entries, &graph, &decisions)
+        }
         // The one hold verdict the merge and dispatch gates ask for: the
         // reader walks the bounded ancestry and answers with the first
         // hold, fields flattened for the receipt.
@@ -288,11 +294,18 @@ fn remove_hold_block(text: &str) -> Option<String> {
 }
 
 fn existing_hold(probe: &Path) -> (String, String) {
+    let (r, w, _) = existing_hold_fields(probe);
+    (r, w)
+}
+
+/// The plan hold's string fields by name ("" when a field is missing). The
+/// release guard reads `set_by` and the free text its ruling must govern.
+fn existing_hold_fields(probe: &Path) -> (String, String, String) {
     let Some(fm) = read_frontmatter(probe) else {
-        return (String::new(), String::new());
+        return (String::new(), String::new(), String::new());
     };
     let Some(block) = fm.get("dispatch_hold").and_then(Value::as_object) else {
-        return (String::new(), String::new());
+        return (String::new(), String::new(), String::new());
     };
     let field = |k: &str| {
         block
@@ -301,7 +314,7 @@ fn existing_hold(probe: &Path) -> (String, String) {
             .unwrap_or("")
             .to_string()
     };
-    (field("reason"), field("release_when"))
+    (field("reason"), field("release_when"), field("set_by"))
 }
 
 fn pr_number(entry: &Value) -> Option<u64> {
@@ -587,6 +600,7 @@ fn release_hold(
     payload: &Value,
     entries: &[Value],
     graph: &Path,
+    decisions_jsonl: &Path,
 ) -> String {
     let evidence = payload_str(payload, "evidence").unwrap_or("");
     if evidence.trim().is_empty() {
@@ -595,7 +609,7 @@ fn release_hold(
     let probe = match resolve_plan(entry, node_id) {
         Ok(p) => p,
         Err(_) => {
-            return release_node_hold(entry, node_id, graph, evidence);
+            return release_node_hold(entry, node_id, graph, evidence, decisions_jsonl);
         }
     };
     let _lock = match PlanLock::acquire(&probe) {
@@ -609,6 +623,17 @@ fn release_hold(
             format!("node {node_id} carries no merge hold; nothing to release"),
         )
         .to_string();
+    }
+    let (hold_reason, hold_when, hold_set_by) = existing_hold_fields(&probe);
+    if let Some(refusal) = release_evidence_refusal(
+        node_id,
+        &hold_set_by,
+        &format!("{hold_reason}\n{hold_when}"),
+        evidence,
+        graph,
+        decisions_jsonl,
+    ) {
+        return refusal.to_string();
     }
     let original = match std::fs::read_to_string(&probe) {
         Ok(t) => t,
@@ -654,7 +679,13 @@ fn release_hold(
 /// Release the node row's own hold field (the plan-less arm). The
 /// verdict reads the FRESH row - the stale `entry` still carries the field
 /// this op just cleared.
-fn release_node_hold(entry: &Value, node_id: &str, graph: &Path, evidence: &str) -> String {
+fn release_node_hold(
+    entry: &Value,
+    node_id: &str,
+    graph: &Path,
+    evidence: &str,
+    decisions_jsonl: &Path,
+) -> String {
     match entry.get("dispatch_hold") {
         None | Some(Value::Null) => {
             return receipt(
@@ -665,6 +696,22 @@ fn release_node_hold(entry: &Value, node_id: &str, graph: &Path, evidence: &str)
             .to_string();
         }
         _ => {}
+    }
+    let hold = entry.get("dispatch_hold");
+    let field = |k: &str| {
+        hold.and_then(|h| h.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    if let Some(refusal) = release_evidence_refusal(
+        node_id,
+        field("set_by"),
+        &format!("{}\n{}", field("reason"), field("release_when")),
+        evidence,
+        graph,
+        decisions_jsonl,
+    ) {
+        return refusal.to_string();
     }
     let fresh_rows = match mutate_node_hold(graph, node_id, None) {
         Ok(rows) => rows,
@@ -694,6 +741,110 @@ fn release_node_hold(entry: &Value, node_id: &str, graph: &Path, evidence: &str)
         obj.insert("disarm".into(), Value::String("skipped".into()));
     }
     out.to_string()
+}
+
+/// The question ids a hold's free text names (`q-xc129`), lowercased, in
+/// order. A hold names a question by writing its id in `reason` or
+/// `release_when`; the ruling that lifts it may sit at
+/// `question:<qid>` instead of at the node.
+fn named_question_ids(hold_text: &str) -> Vec<String> {
+    static QID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = QID.get_or_init(|| regex::Regex::new(r"(?i)\bq-[0-9a-z]{1,}\b").expect("static"));
+    let mut ids: Vec<String> = Vec::new();
+    for cap in re.captures_iter(hold_text) {
+        let id = cap[0].to_lowercase();
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// The release guard: a hold the user set, or one naming a question, lifts
+/// only on a live superuser-lane ruling (operator or chat_attested, the
+/// `decision_index::is_law` test) at the held node or at the question it
+/// names. Measured 2026-09-30: any non-blank text released a user's hold,
+/// and a ruling recorded at a different subject was read as lifting it
+/// (2026-10-09 live case). A crown ruling lifts only a hold it governs; a
+/// team hold naming no question releases as before. The decisions path is a
+/// parameter, never a payload key: the caller must not name the store that
+/// proves the release. `Some` carries the refusal receipt.
+fn release_evidence_refusal(
+    node_id: &str,
+    set_by: &str,
+    hold_text: &str,
+    evidence: &str,
+    graph: &Path,
+    decisions_jsonl: &Path,
+) -> Option<Value> {
+    let qids = named_question_ids(hold_text);
+    if !set_by.eq_ignore_ascii_case("user") && qids.is_empty() {
+        return None;
+    }
+    let where_a_ruling_lifts = if qids.is_empty() {
+        format!("node {node_id}")
+    } else {
+        let named: Vec<String> = qids.iter().map(|q| format!("question:{q}")).collect();
+        format!("node {node_id} or {}", named.join(" or "))
+    };
+    let index = match decision_index::read_store_live(graph, decisions_jsonl) {
+        Ok(i) => i,
+        Err(e) => {
+            return Some(receipt(
+                "refused",
+                5,
+                format!(
+                    "the decision store is unreadable ({e}); refusing to assume \
+                     the release is lawful; a live ruling at {where_a_ruling_lifts} lifts this hold"
+                ),
+            ))
+        }
+    };
+    let wanted = evidence.trim().to_lowercase();
+    let row = index.rows.iter().find(|r| {
+        r.get("decision_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.to_lowercase() == wanted)
+    });
+    let Some(row) = row else {
+        return Some(receipt(
+            "refused",
+            3,
+            format!(
+                "no live decision '{evidence}': this hold was set by {set_by}, so the \
+                 release evidence must be a live superuser-lane ruling at {where_a_ruling_lifts}"
+            ),
+        ));
+    };
+    if !decision_index::is_law(row) {
+        let authority = row
+            .get("authority_source")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return Some(receipt(
+            "refused",
+            3,
+            format!(
+                "decision {evidence} is not superuser lane (authority_source={authority}): \
+                 only an operator or chat_attested ruling at {where_a_ruling_lifts} lifts this hold"
+            ),
+        ));
+    }
+    let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+    let at_named_question = qids
+        .iter()
+        .any(|q| subject.eq_ignore_ascii_case(&format!("question:{q}")));
+    if !subject.eq_ignore_ascii_case(node_id) && !at_named_question {
+        return Some(receipt(
+            "refused",
+            3,
+            format!(
+                "decision {evidence} sits at subject '{subject}', which governs nothing \
+                 here: a crown ruling lifts only a hold at {where_a_ruling_lifts}"
+            ),
+        ));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -918,6 +1069,131 @@ mod tests {
         );
         let r: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(r["hold"]["still_held_by"], "dispatch-hold:t-parent");
+    }
+
+    // --- the release guard: user-set and question-naming holds ----
+
+    fn seed_decision(path: &std::path::Path, id: &str, subject: &str, authority: &str) {
+        let line = json!({
+            "type": "operator_decision",
+            "ts": "2026-10-01T00:00:00Z",
+            "data": {
+                "decision_id": id,
+                "subject": subject,
+                "decision": "Ruling.",
+                "text": "Ruling.",
+                "authority_source": authority,
+            },
+        });
+        let mut text = std::fs::read_to_string(path).unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&line.to_string());
+        text.push('\n');
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn release_with_decisions(
+        graph: &std::path::Path,
+        evidence: &str,
+        decisions: &std::path::Path,
+    ) -> Value {
+        let rows = crate::graph_store::read_rows(graph).unwrap();
+        let out = release_hold(
+            &rows[0],
+            "t-0001",
+            &release_payload(graph.display().to_string(), evidence),
+            &rows,
+            graph,
+            decisions,
+        );
+        serde_json::from_str(&out).unwrap()
+    }
+
+    #[test]
+    fn a_user_set_hold_lifts_only_on_a_live_ruling_at_the_node() {
+        let fx = fixture(json!({}));
+        let decisions = fx._dir.path().join("decisions.jsonl");
+        let mut set = set_payload(fx.graph.display().to_string());
+        set["set_by"] = json!("user");
+        run("hold-set", &set);
+
+        // Free text refuses: the old non-blank read is gone, the block stays.
+        let r = release_with_decisions(&fx.graph, "the freeze is lifted", &decisions);
+        assert_eq!(r["outcome"], "refused", "{r}");
+        assert_eq!(r["exit_code"], 3);
+        assert!(r["detail"].as_str().unwrap().contains("no live decision"));
+        assert!(matches!(dispatch_hold(&hold_entry(&fx)), HoldState::Held));
+
+        // A live operator row at the held node lifts it.
+        seed_decision(&decisions, "d-02a1a", "t-0001", "operator");
+        let r = release_with_decisions(&fx.graph, "d-02a1a", &decisions);
+        assert_eq!(r["outcome"], "released", "{r}");
+        assert!(matches!(dispatch_hold(&hold_entry(&fx)), HoldState::Absent));
+
+        // The plan-less arm reads the same fields off the node row, and an
+        // unreadable store refuses instead of reading as empty.
+        let (_dir, graph) = fixture_plan_less(json!({}));
+        let decisions = _dir.path().join("decisions.jsonl");
+        let mut set = set_payload(graph.display().to_string());
+        set["set_by"] = json!("user");
+        run("hold-set", &set);
+        let r = release_with_decisions(&graph, "any words", &decisions);
+        assert_eq!(r["outcome"], "refused", "{r}");
+        seed_decision(&decisions, "d-02a1b", "t-0001", "operator");
+        let r = release_with_decisions(&graph, "d-02a1b", &decisions);
+        assert_eq!(r["outcome"], "released", "{r}");
+    }
+
+    #[test]
+    fn the_ruling_must_govern_the_hold_foreign_subjects_and_lanes_refuse() {
+        let fx = fixture(json!({}));
+        let decisions = fx._dir.path().join("decisions.jsonl");
+        let mut set = set_payload(fx.graph.display().to_string());
+        set["set_by"] = json!("user");
+        run("hold-set", &set);
+
+        // A live operator row at a DIFFERENT subject governs nothing here;
+        // the 2026-10-09 live case read one as a full release.
+        seed_decision(&decisions, "d-foreign", "t-other", "operator");
+        let r = release_with_decisions(&fx.graph, "d-foreign", &decisions);
+        assert_eq!(r["outcome"], "refused", "{r}");
+        assert!(r["detail"].as_str().unwrap().contains("governs nothing"));
+        assert!(matches!(dispatch_hold(&hold_entry(&fx)), HoldState::Held));
+
+        // A coordination-lane row at the right subject is still not law.
+        seed_decision(&decisions, "d-coord", "t-0001", "team");
+        let r = release_with_decisions(&fx.graph, "d-coord", &decisions);
+        assert_eq!(r["outcome"], "refused", "{r}");
+        assert!(r["detail"].as_str().unwrap().contains("not superuser lane"));
+
+        // A store that cannot be read never answers "no rulings exist".
+        let r = release_with_decisions(
+            &fx.graph,
+            "d-anything",
+            std::path::Path::new("/nonexistent/x-02a1/decisions.jsonl"),
+        );
+        assert_eq!(r["outcome"], "refused", "{r}");
+        assert_eq!(r["exit_code"], 5);
+    }
+
+    #[test]
+    fn a_hold_naming_a_question_lifts_on_a_ruling_at_that_question() {
+        let fx = fixture(json!({}));
+        let decisions = fx._dir.path().join("decisions.jsonl");
+        let mut set = set_payload(fx.graph.display().to_string());
+        set["release_when"] = json!("when question q-02a1 is answered");
+        run("hold-set", &set);
+
+        // The named question triggers the guard even on a team-set hold:
+        // free text refuses, a chat_attested row AT the question lifts.
+        let r = release_with_decisions(&fx.graph, "the answer landed", &decisions);
+        assert_eq!(r["outcome"], "refused", "{r}");
+        seed_decision(&decisions, "d-answer", "question:q-02a1", "chat_attested");
+        let r = release_with_decisions(&fx.graph, "d-answer", &decisions);
+        assert_eq!(r["outcome"], "released", "{r}");
+        assert!(matches!(dispatch_hold(&hold_entry(&fx)), HoldState::Absent));
     }
 
     #[test]
