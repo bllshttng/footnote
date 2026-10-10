@@ -261,7 +261,10 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         .collect();
     assert!(headers.contains(&"aaaaaaaaaa -> bbbbbbbbbb"), "{headers:?}");
     assert_eq!(
-        headers.iter().filter(|h| h.contains("pane keeper")).count(),
+        row_labels(&wide)
+            .iter()
+            .filter(|h| h.contains("keeper"))
+            .count(),
         2,
         "the count line and the promise: {headers:?}"
     );
@@ -759,7 +762,9 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
     assert!(headers.contains(&"aaa1111 -> bbb2222"));
     assert!(row_labels(&modal).contains(&"fix(x): thing".to_string()));
     assert!(row_labels(&modal).contains(&"feat(y): other thing".to_string()));
-    assert!(headers.iter().any(|h| h.contains("14 shells survive")));
+    assert!(row_labels(&modal)
+        .iter()
+        .any(|h| h.contains("14 shells survive")));
 
     // Shaped notes win over the raw changelog: highlights lead as tappable
     // Entries carrying OpenPr (actions pair with selectable rows by index),
