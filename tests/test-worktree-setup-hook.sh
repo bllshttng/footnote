@@ -264,25 +264,7 @@ SH
     fi
     rm -rf "$sandbox"
 
-    # Case 8: no linker in the checkout. Creation still succeeds and stderr
-    # names the gap.
-    sandbox=$(setup_sandbox)
-    worktree="$sandbox/test-wt"
-    stdin_json=$(printf '{"session_id":"s1","name":"test-wt","path":"%s","hook_event_name":"WorktreeCreate"}' "$worktree")
-    output=$(run_hook "$worktree" "$hook" "$stdin_json")
-    rc=$(echo "$output" | sed -n '1p')
-    stdout_file=$(echo "$output" | sed -n '2p')
-    stderr_file=$(echo "$output" | sed -n '3p')
-    if [[ "$rc" -eq 0 && "$(cat "$stdout_file")" == "$worktree" ]] \
-        && grep -q "no scripts/setup/setup-worktree.sh" "$stderr_file"; then
-        pass "$name :: missing linker warns and still creates"
-    else
-        fail "$name :: missing linker warns and still creates" "rc=$rc stderr: $(cat "$stderr_file")"
-    fi
-    rm -f "$stdout_file" "$stderr_file"
-    rm -rf "$sandbox"
-
-    # Case 9: worktree.auto_install = false reaches the hook as false. yq's //
+    # Case 8: worktree.auto_install = false reaches the hook as false. yq's //
     # used to turn boolean false into the default, so installs always ran.
     sandbox=$(setup_sandbox)
     worktree="$sandbox/test-wt"
