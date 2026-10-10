@@ -57,10 +57,8 @@ The table lists every distinct configured command variant. A command used by bot
 
 | Command variant | Registered event(s) | Action |
 |---|---|---|
-| `graph-write-protect.sh` | Claude and Codex PreToolUse (`Edit|Write|Bash`) | Refuses direct writes to the managed graph store. |
-| `claude-config-write-guard.sh` | Claude PreToolUse (`Edit|Write|Bash`) | Refuses protected Claude configuration edits. |
 | `worktree-write-protect.sh` | Claude and Codex PreToolUse (`Edit|Write`) | Refuses edits outside the session's permitted worktree. |
-| `generated-write-guard.sh` | Claude and Codex PreToolUse (`Edit|Write|Bash`) | Refuses writes to generated copies and names their source. |
+| `write-gate.sh` | Claude and Codex PreToolUse (`Edit|Write|Bash`) | One gate for the three write surfaces: refuses direct writes to the graph store, protected Claude configuration edits, and writes to generated copies (naming their source). Policy in `crates/fno-agents/src/hook/write_gate.rs`; the shell file only resolves the binary. |
 | `join-partition-write-guard.sh` | Claude PreToolUse (`Edit|Write`) | Refuses writes to a partition owned by another join participant. |
 | `plan-location-guard.sh` | Claude and Codex PreToolUse (`Write`) / (`Edit|Write`) | Refuses plan writes outside the configured plans directory. |
 | `lead-delegation-guard.sh` | Claude PreToolUse (`Edit|Write|NotebookEdit|Bash`) | Refuses a titled lead's direct implementation writes. |

@@ -65,7 +65,7 @@ pub(crate) fn holder_note(home: &AgentsHome, name: &str) -> String {
 /// previous holder's line can outlive it. Naming a dead pid is the
 /// 31-hour-corpse misreading this stamp exists to end, told with more
 /// authority than the bare mtime ever had, so the reader drops it.
-fn pid_is_alive(pid: u64) -> bool {
+pub(crate) fn pid_is_alive(pid: u64) -> bool {
     if pid == 0 || pid > i32::MAX as u64 {
         return false;
     }

@@ -1,0 +1,32 @@
+[package]
+name = "footnote"
+# Keep in lockstep with crates/fno and crates/fno-agents.
+version = "0.4.1"
+edition = "2021"
+rust-version = "1.89"
+description = "footnote's own agent turn loop over a borrowed model endpoint, launched by the fno-agents supervisor as the `-H footnote` harness."
+license = "Apache-2.0"
+repository = "https://github.com/bllshttng/footnote"
+# Never published: the harness lives here until it moves to its own repo.
+# fno-agents cannot link it (fno-agents publishes), so it runs as a child
+# binary that reads one launch spec on stdin.
+publish = false
+
+[[bin]]
+name = "footnote"
+path = "src/main.rs"
+
+[dependencies]
+# The shared store and file contracts: the transcript reader, the launch
+# spec, the effect map and the event store. Never fno-agents.
+fno = { path = "../fno" }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
+libc = "0.2"
+getrandom = "0.3"
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "fallible_uint"] }

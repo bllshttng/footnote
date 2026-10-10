@@ -815,14 +815,44 @@ fn copied_label(copied: &[String]) -> String {
 }
 
 /// Best-effort: install the crates/fno mux binary (`fno` on PATH, the front
-/// door) into the same --root as the agents bins. Warn-and-continue: the mux
+/// door) into the same --root as the agents bins, then the `footnote` harness
+/// binary fno-agents launches for `-H footnote`. Warn-and-continue: the mux
 /// is heavier to build (tokio + pty), and an absent/stale mux is a front-door
-/// problem `fno doctor` surfaces.
+/// problem `fno doctor` surfaces. Returns the mux install's result.
 fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> bool {
+    let mux = install_crate_bins(
+        source,
+        install_root,
+        "fno",
+        "mux front door",
+        "fno",
+        dry_run,
+    );
+    install_crate_bins(
+        source,
+        install_root,
+        "footnote",
+        "footnote harness",
+        "footnote",
+        dry_run,
+    );
+    mux
+}
+
+/// `cargo install --path crates/<crate_name> --bins` into `install_root`.
+/// False when the crate is absent, on a dry run, or when the install fails.
+fn install_crate_bins(
+    source: &Path,
+    install_root: &Path,
+    crate_name: &str,
+    what: &str,
+    bin: &str,
+    dry_run: bool,
+) -> bool {
     let Some(src_parent) = source.parent() else {
         return false;
     };
-    let crate_dir = src_parent.join("crates").join("fno");
+    let crate_dir = src_parent.join("crates").join(crate_name);
     if !crate_dir.is_dir() {
         return false;
     }
@@ -840,17 +870,17 @@ fn install_mux_front_door(source: &Path, install_root: &Path, dry_run: bool) -> 
         return false;
     }
     println!(
-        "fno doctor update: refreshing mux front door: cargo {}",
+        "fno doctor update: refreshing {what}: cargo {}",
         args.join(" ")
     );
     let code = run_cargo_install(source, &args);
     if code != 0 {
         eprintln!(
-            "fno doctor update: WARNING: mux front door install failed (exit {code}); `fno` may be absent/stale; continuing"
+            "fno doctor update: WARNING: {what} install failed (exit {code}); `{bin}` may be absent/stale; continuing"
         );
         return false;
     }
-    println!("fno doctor update: mux front door refreshed (crates/fno -> `fno`)");
+    println!("fno doctor update: {what} refreshed (crates/{crate_name} -> `{bin}`)");
     true
 }
 
@@ -952,7 +982,7 @@ pub(crate) fn sync_source_checkout(source: &Path, dry_run: bool) -> Result<(), S
 }
 
 /// The closing verdict: does the running daemon run the build on disk? Ok
-/// when it does or when none runs (the next verb starts the new build).
+/// when it does or when none runs (the next verb runs the build on disk).
 fn daemon_verdict() -> Result<String, String> {
     let bin = fno_agents_bin();
     let rev = run_bounded(
@@ -986,7 +1016,7 @@ fn daemon_verdict() -> Result<String, String> {
                 .and_then(Value::as_u64)
                 .map_or("?".to_string(), |p| p.to_string());
             match status.get("drift").and_then(Value::as_str) {
-                Some("fresh") => Ok(format!("daemon pid {pid} runs the new build {rev}")),
+                Some("fresh") => Ok(format!("daemon pid {pid} runs the build on disk ({rev})")),
                 Some("drifted") => Err(format!(
                     "daemon pid {pid} still runs an older build, not {rev}{restart_failure}; run `fno restart`"
                 )),
@@ -996,7 +1026,7 @@ fn daemon_verdict() -> Result<String, String> {
             }
         }
         Ok((13, _, _)) => Ok(format!(
-            "no daemon running; the next fno-agents verb starts the new build {rev}"
+            "no daemon running; the next fno-agents verb runs the build on disk ({rev})"
         )),
         Ok((code, _, err)) => Err(format!(
             "the daemon status read exited {code} ({}){restart_failure}",
@@ -1193,6 +1223,7 @@ fn refresh_rust_bins(
                 "fno doctor update: WARNING: cargo install failed; rust bins NOT refreshed; continuing with the install"
             );
             render_component_evidence(source, subtree.as_deref(), &install_root);
+            failed.push("rust bins refresh".into());
             return "failed".into();
         }
     }

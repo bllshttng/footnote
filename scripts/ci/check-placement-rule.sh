@@ -155,7 +155,7 @@
 #      not footnote state (the Rust leg of the wizard adapter,
 #      dual-implementation-inventory 2026-10-02). Its test builds the same
 #      tree under temp_dir as a fixture and asserts on that.
-#      claude-config-write-guard.sh is the PreToolUse write guard for the
+#      hooks/write-gate.sh is the PreToolUse write gate for the
 #      same dir: the config dir IS the thing being guarded, so every token
 #      it matches (the ambient root, CLAUDE_CONFIG_DIR, the regex-quoted
 #      arms) names its subject on purpose. Comparison only; it writes
@@ -380,7 +380,8 @@ crates/fno/src/connections_view.rs
 crates/fno/src/transcript_tail.rs
 hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
-hooks/claude-config-write-guard.sh
+hooks/write-gate.sh
+crates/fno-agents/src/hook/write_gate.rs
 hooks/corrections-git-postcommit.sh
 hooks/lead-delegation-guard.sh
 hooks/session-start.sh

@@ -2,7 +2,7 @@
 
 The plan asks for a `claude --print` session that attempts to Edit
 graph.json. Replacing that with a direct subprocess invocation of
-hooks/graph-write-protect.sh fed a synthesized PreToolUse JSON payload
+hooks/write-gate.sh fed a synthesized PreToolUse JSON payload
 on stdin. This exercises the hook payload contract and verifies:
 
 - Edit/Write of `~/.fno/graph.json` returns decision="block".
@@ -28,7 +28,7 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).parent.parent.parent.parent
-_HOOK_SCRIPT = _REPO_ROOT / "hooks" / "graph-write-protect.sh"
+_HOOK_SCRIPT = _REPO_ROOT / "hooks" / "write-gate.sh"
 
 
 def _invoke_hook(payload: dict) -> dict:
