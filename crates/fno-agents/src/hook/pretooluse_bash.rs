@@ -118,9 +118,42 @@ pub fn run(_args: &[String]) -> i32 {
     }
 
     if refusals.is_empty() {
+        record_launch(&payload, &cwd);
         super::emit_allow()
     } else {
         super::emit_block(&refusals.join("\n\n"))
+    }
+}
+
+/// Not a guard. An allowed command that starts a harness session leaves a
+/// launch record, which the child claims at SessionStart: a `claude --bg`
+/// child cannot see its launcher any other way (see launch_record.rs).
+fn record_launch(payload: &Value, cwd: &Path) {
+    let Some(cmd) = payload
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if !crate::launch_record::may_launch(cmd) {
+        return;
+    }
+    let (ambient_session, harness, _) = crate::claims::ambient_parent_edge();
+    let session = payload
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or(ambient_session);
+    let home = crate::paths::AgentsHome::from_env();
+    if let Err(error) = crate::launch_record::record_command(
+        home.root(),
+        cmd,
+        &cwd.to_string_lossy(),
+        session.as_deref(),
+        harness.as_deref(),
+        crate::claims::now_ms(),
+    ) {
+        eprintln!("pretooluse-bash: launch record not written: {error}");
     }
 }
 

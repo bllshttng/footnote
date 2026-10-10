@@ -241,10 +241,10 @@ pub(crate) fn manifest_field(content: &str, key: &str) -> Option<String> {
 /// duplicating it.
 pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<(), StateError> {
     update_registry(registry_path, |reg| {
-        // Find the row index by the session uuid first (the borrow of `entry`
-        // ends here), then move `entry` into place -- no clone of the key.
-        let key = entry.claude_session_uuid.as_deref();
-        let idx = key.and_then(|k| {
+        // Find the row index by the session uuid first, then move `entry`
+        // into place. The key is kept for the launch-edge fill below.
+        let key = entry.claude_session_uuid.clone();
+        let idx = key.as_deref().and_then(|k| {
             reg.entries
                 .iter()
                 .position(|e| e.claude_session_uuid.as_deref() == Some(k))
@@ -299,6 +299,25 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 reg.entries[i].created_at = prev.created_at;
             }
             None => reg.entries.push(entry),
+        }
+        // A claude --bg worker has no spawn birth, so its launcher is the
+        // launch record its SessionStart claimed. A born edge always wins.
+        let root = registry_path.parent().unwrap_or(Path::new("."));
+        for row in reg.entries.iter_mut().filter(|r| {
+            r.spawned_by_session
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+                && r.claude_session_uuid.as_deref() == key.as_deref()
+        }) {
+            let Some(uuid) = row.claude_session_uuid.as_deref() else {
+                continue;
+            };
+            if let Some(launch) = crate::launch_record::claimed_edge(root, uuid) {
+                row.spawned_by_session = Some(launch.launcher_session);
+                row.spawned_by_harness = launch.launcher_harness;
+                row.spawned_by_cwd = launch.launcher_cwd;
+            }
         }
     })
 }
@@ -734,6 +753,57 @@ mod tests {
             "requested axes survive"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_adopted_bg_worker_takes_its_claimed_launcher_and_a_born_edge_wins() {
+        let _root = crate::paths::DeclaredRoot::declare("adopt_claimed_launcher");
+        let dir = tempfile::TempDir::new().unwrap();
+        let reg = dir.path().join("registry.json");
+        let cwd = dir.path().to_string_lossy().into_owned();
+        crate::launch_record::record_command(
+            dir.path(),
+            "claude --bg -n w1 hi",
+            &cwd,
+            Some("lead-1"),
+            Some("claude"),
+            1_000_000,
+        )
+        .unwrap();
+        let child = crate::launch_record::Child {
+            harness: "claude".into(),
+            session_id: worker().session_id,
+            cwd,
+            name: Some("w1".into()),
+            started_at_ms: 1_002_000,
+        };
+        crate::launch_record::claim(dir.path(), &child).unwrap();
+        upsert_adopted_row(&reg, fixture_entry("2026-10-09T20:00:00Z")).unwrap();
+        let row = &crate::state::load_registry(&reg).unwrap().entries[0];
+        assert_eq!(row.spawned_by_session.as_deref(), Some("lead-1"));
+        assert_eq!(row.spawned_by_harness.as_deref(), Some("claude"));
+
+        let mut born = fixture_entry("2026-10-09T21:00:00Z");
+        born.spawned_by_session = Some("born-parent".into());
+        // A second root holding the same claimed record, so the claim is
+        // there to tempt the fill on a row born with its own edge.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join("launches").join("claimed")).unwrap();
+        std::fs::copy(
+            dir.path()
+                .join("launches")
+                .join("claimed")
+                .join(format!("{}.json", worker().session_id)),
+            other
+                .join("launches")
+                .join("claimed")
+                .join(format!("{}.json", worker().session_id)),
+        )
+        .unwrap();
+        let reg2 = other.join("registry.json");
+        upsert_adopted_row(&reg2, born).unwrap();
+        let row = &crate::state::load_registry(&reg2).unwrap().entries[0];
+        assert_eq!(row.spawned_by_session.as_deref(), Some("born-parent"));
     }
 
     #[test]

@@ -241,6 +241,12 @@ pub fn run(args: &[String]) -> i32 {
         "lane-fill" => super::advance_fill::run_lane_fill(resolved.tail),
         "schedule-shadow" => super::advance_fill::run_schedule_shadow(resolved.tail),
         "worked" => super::worked::run(resolved.tail),
+        // The launch-edge writers are native (the first-launch stamp the
+        // spawn front forwards to, and the receipted backfill); the read
+        // shapes of `provenance` stay with the Python surface.
+        "provenance" if super::provenance_cli::owns(resolved.tail) => {
+            super::provenance_cli::run(resolved.tail)
+        }
         _ => forward_python(&resolved),
     }
 }
