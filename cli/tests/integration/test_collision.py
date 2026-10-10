@@ -1171,23 +1171,21 @@ def test_triage_health_resolves_relative_plan_paths(tmp_graph, tmp_path, monkeyp
     yields zero collisions (false negatives).
 
     Simulates the scenario by using relative plan_paths in the graph and
-    monkey-patching _find_repo_root to a known root so the test does not
+    running from a fake repo root (a `.git` marker), so the test does not
     depend on the test runner's actual cwd.
     """
-    import fno.graph.collision as collision
-
     # Create plans inside a fake repo root.
     repo = tmp_path / "fakerepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
     (repo / "plans").mkdir()
     plan_a = repo / "plans" / "a.md"
     plan_b = repo / "plans" / "b.md"
     _write_quick_plan(plan_a, ["src/a.py", "src/b.py", "src/c.py"])
     _write_quick_plan(plan_b, ["src/a.py", "src/b.py", "src/c.py"])
 
-    # Pin the resolver to our fake repo, regardless of where pytest runs.
-    monkeypatch.setattr(collision, "_repo_root_cache", None)
-    monkeypatch.setattr(collision, "_find_repo_root", lambda: repo)
+    # The native door resolves relative plans against the cwd's repo root.
+    monkeypatch.chdir(repo)
 
     entries = _read_entries(tmp_graph)
     # Store relative plan_paths the way intake does on the live graph.
