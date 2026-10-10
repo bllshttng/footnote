@@ -45,6 +45,10 @@ pub(crate) struct TerminalRouteFacts<'a> {
     pub reason: &'a str,
     /// This run's postmortem path, when the eval artifact was written.
     pub postmortem: Option<&'a str>,
+    /// This run's wall-clock age in minutes at the terminal, from the
+    /// manifest's created_at, so the budget evidence quotes the run's
+    /// elapsed and not the seconds since the termination event fired.
+    pub elapsed_min: Option<u64>,
     pub claim_key: Option<&'a str>,
     pub claim_holder: Option<&'a str>,
     pub project_events: &'a Path,
@@ -80,7 +84,7 @@ pub(crate) fn route_terminal(f: &TerminalRouteFacts<'_>) -> Option<HelpClass> {
         &turn_key,
     );
     move_claim_with_route(f, class, rung);
-    pair_question(f, prior_pair_row.as_ref(), &evidence);
+    pair_question(f, prior_pair_row.as_ref(), &evidence, class);
     Some(class)
 }
 
@@ -142,7 +146,8 @@ fn decide(f: &TerminalRouteFacts<'_>, ledger: &[Value]) -> Option<(HelpClass, u6
 fn terminal_evidence(f: &TerminalRouteFacts<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if f.reason == "Budget" {
-        if let Some((axis, cap, value)) = budget_axis_facts(f) {
+        let term = newest_termination_row(f);
+        if let Some((axis, cap, value)) = term.as_ref().and_then(budget_axis_facts) {
             let mut fact = format!("axis={axis} value={value}");
             if let Some(c) = cap {
                 fact.push_str(&format!(" cap={c}"));
@@ -155,7 +160,7 @@ fn terminal_evidence(f: &TerminalRouteFacts<'_>) -> String {
         );
         parts.push(format!("spend=${:.2}", spend));
     }
-    if let Some(mins) = elapsed_minutes(f) {
+    if let Some(mins) = f.elapsed_min {
         parts.push(format!("elapsed={mins}min"));
     }
     if let Some(pm) = f.postmortem.filter(|p| !p.trim().is_empty()) {
@@ -169,8 +174,7 @@ fn terminal_evidence(f: &TerminalRouteFacts<'_>) -> String {
 
 /// The budget cap axis facts off this session's termination event (the
 /// loopcheck emit carries axis, cap and value since the terminal route).
-fn budget_axis_facts(f: &TerminalRouteFacts<'_>) -> Option<(String, Option<String>, String)> {
-    let row = newest_termination_row(f)?;
+fn budget_axis_facts(row: &Value) -> Option<(String, Option<String>, String)> {
     let data = row.get("data")?;
     let axis = data.get("axis")?.as_str()?.to_string();
     let cap = data.get("cap").map(|c| match c {
@@ -200,15 +204,6 @@ fn newest_termination_row(f: &TerminalRouteFacts<'_>) -> Option<Value> {
         }
     }
     best.map(|(_, row)| row)
-}
-
-/// Minutes from the terminal event's ts to now: the elapsed the budget
-/// evidence quotes.
-fn elapsed_minutes(f: &TerminalRouteFacts<'_>) -> Option<u64> {
-    let row = newest_termination_row(f)?;
-    let ts = row_ts(&row);
-    let now = now_epoch();
-    Some(u64::try_from((now - ts).max(0)).unwrap_or(0))
 }
 
 /// Prior ledger rows for the node as (session, reason) pairs, excluding
@@ -261,6 +256,28 @@ fn terminal_row_exists(f: &TerminalRouteFacts<'_>, turn_key: &str) -> bool {
     false
 }
 
+/// The `blocked` row's data object: the distress payload with
+/// `kind = "terminal"` so readers tell a terminal from a tag, plus the
+/// postmortem path the pair rule reads from a prior run's row.
+fn terminal_data(
+    f: &TerminalRouteFacts<'_>,
+    class: &HelpClass,
+    reason_text: &str,
+    rung: u64,
+    turn_key: &str,
+    evidence: &str,
+) -> Value {
+    serde_json::json!({
+        "reason": cap500(reason_text),
+        "kind": "terminal",
+        "class": class.as_str(),
+        "postmortem": f.postmortem,
+        "turn": turn_key,
+        "rung": rung,
+        "evidence": cap500(evidence),
+    })
+}
+
 /// The `blocked` row the terminal becomes: the distress envelope with
 /// `data.kind = "terminal"`, so readers tell a terminal from a tag.
 /// Mirrored to both journals like every blocked row.
@@ -272,14 +289,7 @@ fn append_terminal_row(
     turn_key: &str,
     evidence: &str,
 ) {
-    let data = serde_json::json!({
-        "reason": cap500(reason_text),
-        "kind": "terminal",
-        "class": class.as_str(),
-        "turn": turn_key,
-        "rung": rung,
-        "evidence": cap500(evidence),
-    });
+    let data = terminal_data(f, class, reason_text, rung, turn_key, evidence);
     let mut env = serde_json::json!({
         "ts": crate::loopcheck::now_rfc3339_utc(),
         "v": 1,
@@ -333,7 +343,12 @@ fn newest_prior_terminal_row(f: &TerminalRouteFacts<'_>, node: &str) -> Option<V
 /// a question carrying both postmortems, so the pattern (not just this
 /// run's shape) gets a ruling. Rides the Question route (the ladder), and
 /// skips when the terminal itself already routed as Question.
-fn pair_question(f: &TerminalRouteFacts<'_>, prior: Option<&Value>, evidence: &str) {
+fn pair_question(
+    f: &TerminalRouteFacts<'_>,
+    prior: Option<&Value>,
+    evidence: &str,
+    class: HelpClass,
+) {
     let Some(node) = f.node else {
         return;
     };
@@ -341,22 +356,10 @@ fn pair_question(f: &TerminalRouteFacts<'_>, prior: Option<&Value>, evidence: &s
         Some(p) => p,
         None => return,
     };
-    if decide(f, &read_ledger(f.cwd)).map(|(c, _, _)| c) == Some(HelpClass::Question) {
+    if class == HelpClass::Question {
         return;
     }
-    let prior_run = prior
-        .get("run")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let prior_pm = prior
-        .pointer("/data/postmortem")
-        .and_then(Value::as_str)
-        .unwrap_or("unrecorded (row predates the terminal route)");
-    let mut q_evidence = format!(
-        "second non-delivery terminal on node {node} (prior run {prior_run}); postmortems: {} and {prior_pm}",
-        f.postmortem.unwrap_or("unrecorded")
-    );
-    q_evidence.push_str(&format!("; this run: {evidence}"));
+    let q_evidence = pair_evidence(node, prior, f.postmortem, evidence);
     let turn = format!("terminal-pair:{node}");
     if terminal_row_exists(f, &turn) {
         return;
@@ -379,6 +382,25 @@ fn pair_question(f: &TerminalRouteFacts<'_>, prior: Option<&Value>, evidence: &s
         0,
         &turn,
     );
+}
+
+/// The pair question's evidence line: both postmortems, the prior run's
+/// read from its terminal row, and this run's own evidence tail.
+fn pair_evidence(node: &str, prior: &Value, postmortem: Option<&str>, evidence: &str) -> String {
+    let prior_run = prior
+        .get("run")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let prior_pm = prior
+        .pointer("/data/postmortem")
+        .and_then(Value::as_str)
+        .unwrap_or("unrecorded (row predates the terminal route)");
+    let mut q_evidence = format!(
+        "second non-delivery terminal on node {node} (prior run {prior_run}); postmortems: {} and {prior_pm}",
+        postmortem.unwrap_or("unrecorded")
+    );
+    q_evidence.push_str(&format!("; this run: {evidence}"));
+    q_evidence
 }
 
 /// The claim moves with the route (the claim-handoff discipline): an
@@ -418,13 +440,6 @@ fn row_ts(row: &Value) -> i64 {
         .unwrap_or(0)
 }
 
-fn now_epoch() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +459,7 @@ mod tests {
             node,
             reason,
             postmortem: None,
+            elapsed_min: None,
             claim_key: None,
             claim_holder: None,
             project_events: Path::new("/nonexistent-events"),
@@ -556,5 +572,81 @@ mod tests {
             let f = facts("cur", Some("x-n"), reason);
             assert!(decide(&f, &empty).is_none());
         }
+    }
+
+    #[test]
+    fn terminal_row_data_carries_the_postmortem_key() {
+        let mut f = facts("cur", Some("x-n"), "Budget");
+        f.postmortem = Some("/tmp/pm-cur.md");
+        let data = terminal_data(
+            &f,
+            &HelpClass::Budget,
+            "terminal Budget",
+            0,
+            "terminal:Budget",
+            "axis=cost value=1.5 cap=0.5",
+        );
+        assert_eq!(
+            data.get("postmortem").and_then(Value::as_str),
+            Some("/tmp/pm-cur.md"),
+            "row data must carry the run's postmortem path: the pair rule reads it from a prior run's row"
+        );
+        let bare = facts("cur", Some("x-n"), "Budget");
+        let data = terminal_data(
+            &bare,
+            &HelpClass::Budget,
+            "terminal Budget",
+            0,
+            "terminal:Budget",
+            "ev",
+        );
+        assert_eq!(
+            data.get("postmortem").map(Value::is_null),
+            Some(true),
+            "absent postmortem reads as a null key, never an omitted key"
+        );
+    }
+
+    #[test]
+    fn pair_evidence_names_both_postmortems_from_the_prior_row() {
+        let prior = serde_json::json!({
+            "run": "a1",
+            "data": {"kind": "terminal", "postmortem": "/tmp/pm-a1.md"}
+        });
+        let ev = pair_evidence(
+            "x-n",
+            &prior,
+            Some("/tmp/pm-cur.md"),
+            "axis=cost value=1.5 cap=0.5; spend=$1.50",
+        );
+        assert!(
+            ev.contains("postmortems: /tmp/pm-cur.md and /tmp/pm-a1.md"),
+            "pair evidence must carry both postmortem paths: {ev}"
+        );
+        let legacy = serde_json::json!({"run": "a0", "data": {"kind": "terminal"}});
+        let ev = pair_evidence("x-n", &legacy, None, "terminal Budget on node");
+        assert!(
+            ev.contains("unrecorded (row predates the terminal route)"),
+            "a prior row without a postmortem key reads as unrecorded: {ev}"
+        );
+    }
+
+    #[test]
+    fn budget_axis_facts_read_cap_and_value_off_the_termination_row() {
+        let row = serde_json::json!({
+            "ts": "2026-10-10T12:00:00Z",
+            "data": {"session_id": "cur", "axis": "cost", "cap": 0.5, "value": 1.5}
+        });
+        let (axis, cap, value) = budget_axis_facts(&row).unwrap();
+        assert_eq!(axis, "cost");
+        assert_eq!(cap.as_deref(), Some("0.5"));
+        assert_eq!(value, "1.5");
+        let bare = serde_json::json!({
+            "ts": "2026-10-10T12:00:00Z",
+            "data": {"session_id": "cur", "axis": "cost", "value": 1.5}
+        });
+        let (axis, cap, _) = budget_axis_facts(&bare).unwrap();
+        assert_eq!(axis, "cost");
+        assert_eq!(cap, None, "malformed cap reads as absent, trip stays real");
     }
 }
