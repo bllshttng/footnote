@@ -848,7 +848,8 @@ mod tests {
             Some("codex"),
             &d,
             "turn-1"
-        ));
+        )
+        .is_some());
         let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -870,7 +871,7 @@ mod tests {
             serde_json::to_string(&row).unwrap(),
             "the global mirror carries the identical row"
         );
-        assert!(!append_blocked_event(
+        assert!(append_blocked_event(
             &project,
             &global,
             "run-a",
@@ -878,7 +879,8 @@ mod tests {
             Some("codex"),
             &d,
             "turn-1"
-        ));
+        )
+        .is_none());
         assert_eq!(
             crate::events::committed_journal_text(&project)
                 .lines()
@@ -894,7 +896,8 @@ mod tests {
             Some("codex"),
             &d,
             "turn-2"
-        ));
+        )
+        .is_some());
         assert_eq!(
             crate::events::committed_journal_text(&project)
                 .lines()
@@ -916,9 +919,9 @@ mod tests {
             kind: DistressKind::Help,
             class: HelpClass::Unclassified,
         };
-        assert!(append_blocked_event(
-            &project, &global, "run-a", None, None, &d2, "turn-1"
-        ));
+        assert!(
+            append_blocked_event(&project, &global, "run-a", None, None, &d2, "turn-1").is_some()
+        );
         let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -943,9 +946,9 @@ mod tests {
             evidence: None,
             kind: DistressKind::Help,
         };
-        assert!(append_blocked_event(
-            &project, &global, "run-a", None, None, &d, "turn-1"
-        ));
+        assert!(
+            append_blocked_event(&project, &global, "run-a", None, None, &d, "turn-1").is_some()
+        );
         let row: serde_json::Value = serde_json::from_str(
             crate::events::committed_journal_text(&project)
                 .lines()
@@ -955,9 +958,9 @@ mod tests {
         .unwrap();
         let capped: String = "x".repeat(BLOCKED_DATA_STR_CAP);
         assert_eq!(row["data"]["reason"], serde_json::json!(capped));
-        assert!(!append_blocked_event(
-            &project, &global, "run-a", None, None, &d, "turn-1"
-        ));
+        assert!(
+            append_blocked_event(&project, &global, "run-a", None, None, &d, "turn-1").is_none()
+        );
         assert_eq!(
             crate::events::committed_journal_text(&project)
                 .lines()
@@ -1530,7 +1533,7 @@ mod tests {
                 fixture,
                 None,
             );
-            assert!(wrote, "fixture {fixture:?} must write a row");
+            assert!(wrote.is_some(), "fixture {fixture:?} must write a row");
             let row: serde_json::Value =
                 serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
             assert_eq!(row["data"]["class"], expect_class);
@@ -1576,8 +1579,9 @@ mod tests {
             None,
             &mk("wall a"),
             "turn-1"
-        ));
-        assert!(!append_blocked_event(
+        )
+        .is_some());
+        assert!(append_blocked_event(
             &project,
             &global,
             "run-a",
@@ -1585,7 +1589,8 @@ mod tests {
             None,
             &mk("wall a, reworded"),
             "turn-1"
-        ));
+        )
+        .is_none());
         assert!(append_blocked_event(
             &project,
             &global,
@@ -1594,7 +1599,8 @@ mod tests {
             None,
             &mk("wall b"),
             "turn-2"
-        ));
+        )
+        .is_some());
         let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())

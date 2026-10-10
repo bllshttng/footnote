@@ -519,6 +519,10 @@ fn climb(home: &crate::paths::AgentsHome, config_cwd: &Path, row: &Value, run: &
                 None,
                 0,
                 next,
+                row
+                    .pointer("/data/turn")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
             );
         }
     }

@@ -658,8 +658,8 @@ fn stamp_deferred(
     changes: &mut Vec<Change>,
 ) -> Result<(), PatchRefusal> {
     // F7: a session may not defer the node it holds. The holder deferring
-    // its own node is exactly the self-cleanup that left x-cb30 ownerless
-    // after a stale plan; the refusal names the routed step instead. A
+    // its own node is exactly the self-cleanup that once left a stale-plan
+    // node ownerless; the refusal names the routed step instead. A
     // lead (any other session, or an unattributed ambient) defers as
     // today.
     let (_, my_session) = crate::claims::resolve_identity();
