@@ -91,7 +91,7 @@ pub(crate) fn pid_is_gone(pid: u64, recorded_start: Option<u64>) -> bool {
     if !pid_is_alive(pid) {
         return true;
     }
-    match crate::daemon::process_bsd(pid as u32) {
+    match crate::process_probe::process_bsd(pid as u32) {
         Some((actual_start, zombie)) => {
             zombie || recorded_start.is_some_and(|recorded| recorded != actual_start)
         }

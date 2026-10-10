@@ -52,7 +52,7 @@ pub fn register(lock_path: &Path) -> std::io::Result<PathBuf> {
     // scan racing this write never prunes a fresh waiter.
     let stamp = serde_json::json!({
         "pid": std::process::id(),
-        "start": crate::daemon::process_bsd(std::process::id()).map(|(start, _)| start),
+        "start": crate::process_probe::process_bsd(std::process::id()).map(|(start, _)| start),
     });
     let _ = fs::write(&path, format!("{stamp}"));
     Ok(path)
@@ -151,14 +151,14 @@ mod tests {
 
     #[test]
     fn zombie_ticket_is_pruned_and_serves_the_next_waiter() {
-        let child = zombie_child();
+        let mut child = zombie_child();
         // The trap: the zombie still answers kill(pid,0), so the old
         // pid-death prune called its ticket live forever.
         assert!(
             crate::agent_lock::pid_is_alive(child.id() as u64),
             "the zombie still answers kill(pid,0)"
         );
-        let start = crate::daemon::process_bsd(child.id())
+        let start = crate::process_probe::process_bsd(child.id())
             .expect("zombie start readable")
             .0;
         let dir = tempfile::tempdir().unwrap();
@@ -168,7 +168,6 @@ mod tests {
         let second = register(&lock).unwrap();
         assert!(am_head(&second), "the zombie ticket pins no one");
         assert!(!dead.exists(), "the scan pruned the zombie ticket");
-        let mut child = child;
         let _ = child.wait();
     }
 
@@ -178,7 +177,7 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("sleep spawns");
-        let real_start = crate::daemon::process_bsd(child.id())
+        let real_start = crate::process_probe::process_bsd(child.id())
             .expect("live child start readable")
             .0;
         let dir = tempfile::tempdir().unwrap();
@@ -209,7 +208,7 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("sleep spawns");
-        let start = crate::daemon::process_bsd(child.id())
+        let start = crate::process_probe::process_bsd(child.id())
             .expect("live child start readable")
             .0;
         let dir = tempfile::tempdir().unwrap();
