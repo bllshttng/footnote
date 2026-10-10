@@ -307,7 +307,12 @@ fn unguard(connection: &Connection) -> Result<(), String> {
 /// bindgen, on every machine, key on or off.)
 pub(crate) fn attach(connection: &Connection, graph: &Path) -> Result<(), String> {
     if primary_for(graph)?.is_none() {
-        return unguard(connection);
+        // Only the key going off drops the guard. With the key on, a store
+        // this process does not share may still be the shared one.
+        return match crate::store_remote::share_backlog()? {
+            None => unguard(connection),
+            Some(_) => Ok(()),
+        };
     }
     connection
         .execute_batch(OUTBOX_DDL)
