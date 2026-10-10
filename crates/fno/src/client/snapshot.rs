@@ -17,6 +17,7 @@ use super::{theme_import_ui, LayoutView, View};
 use crate::frame_html::{self, Theme};
 use crate::popup::Anchor;
 use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSION};
+use serde_json::Value;
 
 const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
@@ -409,7 +410,23 @@ fn live_frame(
             .map(|b| b.gen)
             .unwrap_or_default();
         let mail = runtime.block_on(crate::messages_model::gather());
+        // A board with no threads paints a pane of chrome around nothing -
+        // exactly the shot law d-9f18c4d5 exists to stop. Read the gather
+        // before apply moves it, and refuse.
+        let board_empty = mail
+            .as_ref()
+            .ok()
+            .and_then(|p| p.get("threads"))
+            .and_then(Value::as_array)
+            .is_none_or(|t| t.is_empty());
         crate::client::messages_view::apply_gather(&mut view, gen, mail, Err("no org tree".into()));
+        if board_empty {
+            return Err(
+                "messages board rendered empty: mail-threads returned no threads; \
+shoot a root whose chats store has rows (scripts/ops/mux-demo-snapshot.sh seeds one)"
+                    .into(),
+            );
+        }
     }
     // The messages seam above is the shape: flip the client state the live
     // keys flip, run one synchronous gather where the live panel would kick
@@ -419,7 +436,23 @@ fn live_frame(
         Some(ViewKind::Bell) => {
             let gen = crate::client::bell::open(&mut view);
             let projection = runtime.block_on(crate::messages_model::gather());
+            // Same refusal as the messages board: an announcements-less
+            // gather paints the bell as "nothing here", a shot with nothing
+            // to judge (law d-9f18c4d5).
+            let bell_empty = projection
+                .as_ref()
+                .ok()
+                .and_then(|p| p.get("announcements"))
+                .and_then(Value::as_array)
+                .is_none_or(|a| a.is_empty());
             crate::client::bell::apply(&mut view, gen, projection);
+            if bell_empty {
+                return Err(
+                    "bell view rendered empty: the messages projection has no announcements; \
+shoot a root whose chats store has rows (scripts/ops/mux-demo-snapshot.sh seeds one)"
+                        .into(),
+                );
+            }
         }
         Some(ViewKind::Feed) => {
             // The `e` key's state flip plus the fold the live panel's run
@@ -433,6 +466,16 @@ fn live_frame(
                 None,
             ));
             super::feed_view::apply_fold(&mut view, 0, outcome);
+            // A fresh root has no feed rows, so the changed view rendered
+            // with nothing to judge. Refuse the shot.
+            if view.feed.as_ref().is_none_or(|f| f.win.items.is_empty()) {
+                return Err(
+                    "feed view rendered empty: this root has no feed rows; \
+shoot a root seeded with questions, mail or backlog activity \
+(scripts/ops/mux-demo-snapshot.sh seeds one)"
+                        .into(),
+                );
+            }
         }
         Some(ViewKind::RowMenu) => {
             let i = view

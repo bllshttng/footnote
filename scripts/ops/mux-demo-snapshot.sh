@@ -4,9 +4,11 @@
 #   scripts/ops/mux-demo-snapshot.sh --out shot.svg [--theme light] [--format png] [--size 200x60]
 #
 # Builds a throwaway server in a temp state root: its own config, graph,
-# agent registry, view prefs and socket dir. It seeds invented backlog nodes
-# and three harness panes, shoots it with `fno mux serve --snapshot --server`,
-# then kills the server and deletes the root. The live mux is never touched.
+# agent registry, view prefs and socket dir. It seeds invented backlog nodes,
+# leads, mail, feed questions and harness panes, then shoots it with
+# `fno mux serve --snapshot --server`, kills the server and deletes the root.
+# Every view a paint PR changes renders populated: the verb itself refuses an
+# empty view render, and the refusal dies here.
 set -euo pipefail
 
 FNO="${FNO_BIN:-fno}"
@@ -108,6 +110,8 @@ file p2 "Split the payments module out of the monolith"
 file p2 "Remove the legacy coupon service"
 file p3 "Move image resizing to a queue worker"
 file p3 "Support Apple Pay on the checkout page"
+file p2 "Unify the three checkout config surfaces into one documented schema with a migration guide and a deprecation window"
+file p3 "Migrate the billing webhooks to the retry queue with backoff, jitter, and a dead-letter queue for poison events"
 
 # The three panes work the first three nodes: a claim moves each node to In
 # Progress, and a session row names the harness session its pane runs.
@@ -257,10 +261,76 @@ json.dump({"schema_version": 1, "agents": [
     row("pager", "pi", "glm-5", ids[3], "working"),
     row("scribe", "claude", "sonnet", ids[4], "done"),
     # Paneless threads, so the sideline shows the other states too.
+    # Leads dispatch and never host a pane: attachable thread rows.
+    thread("rowan", "claude", "idle", attach="demo-lead-1"),
+    thread("wren", "codex", "idle", attach="demo-lead-2"),
     thread("planner", "codex", "idle", attach="demo-attach-1"),
     thread("indexer", "claude", "unmeasured"),
     thread("migrator", "opencode", "exited"),
 ]}, open(path, "w"))
+PY
+
+# Mail and feed events. The bell, the Messages tab and the activity feed read
+# stores the board fixture never wrote, so those views shot empty.
+# Both stores are append-only JSONL with a documented row shape, so the seed
+# writes them directly: chats/<chat>/messages.jsonl and questions.jsonl.
+python3 - "$ROOT" <<'PY'
+import json, os, sys, datetime
+root = sys.argv[1]
+now = datetime.datetime.now(datetime.timezone.utc)
+
+def ts(mins_ago):
+    return (now - datetime.timedelta(minutes=mins_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# Chats store: from/to join the registry rows above, so threads resolve to
+# seeded agents. The fleet: broadcast lands on the bell's Announcements tab.
+chats = f"{root}/.fno/chats"
+
+def msg(i, mins_ago, frm, to, body):
+    return {"type": "message", "kind": "send", "v": 1, "id": f"fmail-demo-{i}",
+            "ts": ts(mins_ago), "thread": f"chat-demo-{i}", "from": frm, "to": to,
+            "body": body}
+
+def write(chat, rows):
+    os.makedirs(f"{chats}/{chat}", exist_ok=True)
+    with open(f"{chats}/{chat}/messages.jsonl", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+write("chat-demo-review", [
+    msg(1, 9, "rowan", "scout", "Rate-limit review pass today? PR 118 is up."),
+    msg(2, 6, "scout", "rowan", "Landed: 60 req/min per key, the 429 carries Retry-After."),
+])
+write("chat-demo-scope", [
+    msg(3, 21, "wren", "archer", "Webhook retry landed behind a flag; the dead-letter queue drains nightly."),
+])
+# Broadcasts: an announce row lands on the bell (fleet-incident) or the #fno
+# channel (a lead's team row). A plain send to fleet: never does, and a pair
+# row it is not, so the demo seeds real announce rows.
+write("chat-demo-broadcast", [
+    {"type": "message", "kind": "announce", "v": 1, "id": "fmail-demo-5",
+     "ts": ts(2), "from": "fno/fleet-incident", "to": "fleet:fno",
+     "meta": {"scope": "fno"},
+     "body": "Test hold lifted at noon; CI covers the fleet."},
+    {"type": "message", "kind": "announce", "v": 1, "id": "fmail-demo-6",
+     "ts": ts(2), "from": "rowan", "to": "fleet:fno",
+     "meta": {"scope": "fno"},
+     "body": "Demo lanes reseeded; workers start on the top three cards after the shot."},
+])
+
+# Questions journal: the feed's questions leg (operator_question,
+# operator_decision envelopes).
+qs = [
+    {"ts": ts(4), "type": "operator_question", "source": "target",
+     "data": {"question_id": "q-demo-a1", "question": "Hold the 18:00 demo until the rate-limit shot lands?"}},
+    {"ts": ts(14), "type": "operator_question", "source": "target",
+     "data": {"question_id": "q-demo-b2", "question": "Keep the demo root's mail store after the shot run?"}},
+    {"ts": ts(26), "type": "operator_decision", "source": "target",
+     "data": {"decision_id": "d-demo-c3", "decision": "Ship the seeded shots behind the paint gate"}},
+]
+with open(f"{root}/.fno/questions.jsonl", "w") as f:
+    for q in qs:
+        f.write(json.dumps(q) + "\n")
 PY
 
 sleep 6
