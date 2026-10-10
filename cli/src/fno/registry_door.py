@@ -16,7 +16,7 @@ class RegistryDoorError(RuntimeError):
 
 
 class RegistryRevisionConflict(RegistryDoorError):
-    """The commit refused because the table moved since the read; reload and re-apply."""
+    """The table moved since the read, or its lock stayed busy; reload and re-apply."""
 
 
 def read_registry_document(path: Optional[Path] = None) -> tuple[dict[str, Any], int]:
@@ -59,8 +59,8 @@ def commit_registry_document(
             {**payload, "path": str(Path(path).absolute()), "revision": revision},
         )
     except rust_binary.VerbUnavailable as exc:
-        # the Rust refusal JSON, reason "revision_conflict", rides the stderr
-        if "revision_conflict" in str(exc):
+        # a revision_conflict refusal or a busy-lock timeout rides the stderr
+        if "revision_conflict" in str(exc) or "stayed busy past" in str(exc):
             raise RegistryRevisionConflict(
                 f"registry-commit refused {path}: {exc}"
             ) from exc

@@ -13,6 +13,7 @@ import fcntl
 import json
 import multiprocessing as mp
 import time
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -408,7 +409,7 @@ def _seed_registry(registry_path: Path) -> None:
 def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """One conflict, then the retry lands with every row still present."""
+    """A busy lock, then a conflict, then the retry lands with every row present."""
     use_tmpdir(monkeypatch, tmp_path)
 
     import fno.rust_binary as rb
@@ -425,6 +426,11 @@ def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
         if verb == "registry-commit" and "revision" in payload:
             commits["n"] += 1
             if commits["n"] == 1:
+                raise rb.VerbUnavailable(
+                    "registry-commit: lock at /x/graph.json.lock stayed busy past the 10s "
+                    "deadline; no holder recorded in the lock file"
+                )
+            if commits["n"] == 2:
                 raise rb.VerbUnavailable(_CONFLICT_JSON)
         return real_verb_call(verb, payload, **kwargs)
 
@@ -439,18 +445,71 @@ def test_update_registry_retries_revision_conflict_and_keeps_concurrent_row(
     update_registry(_append_spawned, path=registry_path)
 
     assert [e.name for e in load_registry(path=registry_path)] == ["resident", "spawned"]
-    assert commits["n"] == 2
-    assert commits["applies"] == 2
+    assert commits["n"] == 3
+    assert commits["applies"] == 3
+
+
+def test_update_registry_reapplies_when_a_writer_lands_between_load_and_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The guard covers the load, not just the commit's own read: a row a
+    non-flock writer adds after the load survives, never refused as row loss."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    import fno.rust_binary as rb
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    _seed_registry(registry_path)
+
+    real_verb_call = rb.verb_call
+    concurrent = AgentEntry(name="concurrent", harness="claude", cwd="/tmp", log_path="/tmp/c.log")
+    landed = {"done": False}
+
+    def _writer_lands_after_first_read(verb, payload, **kwargs):
+        answer = real_verb_call(verb, payload, **kwargs)
+        if payload.get("op") == "read" and not landed["done"]:
+            landed["done"] = True
+            doc = answer["document"]
+            rows = doc["agents"] + [asdict(concurrent)]
+            real_verb_call(
+                verb,
+                {"path": payload["path"], "schema_version": doc["schema_version"],
+                 "agents": rows, "revision": answer["revision"]},
+            )
+        return answer
+
+    monkeypatch.setattr(rb, "verb_call", _writer_lands_after_first_read)
+
+    update_registry(
+        lambda entries: entries
+        + [AgentEntry(name="spawned", harness="codex", cwd="/tmp", log_path="/tmp/s.log")],
+        path=registry_path,
+    )
+
+    assert [e.name for e in load_registry(path=registry_path)] == [
+        "resident", "concurrent", "spawned"
+    ]
 
 
 def test_update_registry_conflict_exhaustion_and_non_conflict_single_shot(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Exhaustion keeps RegistryVersionError; a non-conflict refusal never retries."""
+    """Conflicts retry until the deadline, past any fixed count, then keep
+    RegistryVersionError; a non-conflict refusal never retries."""
     use_tmpdir(monkeypatch, tmp_path)
 
+    import fno.agents.registry as reg
     import fno.rust_binary as rb
     from fno.agents.registry import AgentEntry, RegistryVersionError, update_registry
+
+    clock = {"now": 0.0}
+    fake_time = SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if k[0] != "_"})
+    fake_time.monotonic = lambda: clock["now"]
+    fake_time.sleep = lambda s: clock.__setitem__("now", clock["now"] + s)
+    monkeypatch.setattr(reg, "time", fake_time)
+    monkeypatch.setattr(reg, "_CONFLICT_RETRY_SECONDS", 1.0)
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -474,7 +533,8 @@ def test_update_registry_conflict_exhaustion_and_non_conflict_single_shot(
 
     with pytest.raises(RegistryVersionError, match="revision_conflict"):
         update_registry(_append, path=registry_path)
-    assert commits["n"] == 3
+    assert commits["n"] > 3
+    assert clock["now"] >= 1.0
 
     commits["n"] = 0
 
@@ -2803,7 +2863,6 @@ def test_update_registry_accounts_for_a_removed_row(
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -2890,7 +2949,6 @@ def test_update_registry_journals_rows_lost_naming_the_writer(
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -3011,7 +3069,6 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -3069,7 +3126,6 @@ def test_update_registry_reports_a_stale_binary_and_writes_nothing(
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [

@@ -158,13 +158,13 @@ fn registry_commit(payload: &serde_json::Value) -> Result<serde_json::Value, (i3
 }
 
 /// Clear `mux` on matching rows of an imported registry through the table's
-/// write door, re-reading on a revision conflict.
+/// write door, re-reading on a revision conflict or a busy store lock.
 fn clear_mux_refs_in_table(
     registry: &std::path::Path,
     matches: &dyn Fn(&serde_json::Value) -> bool,
 ) -> Result<usize, String> {
     let path = registry.to_string_lossy();
-    for _ in 0..5 {
+    for attempt in 1..=5u64 {
         let read = registry_commit(&serde_json::json!({"op": "read", "path": path}))
             .map_err(|(_, e)| format!("read: {e}"))?;
         let revision = read["revision"]
@@ -196,9 +196,11 @@ fn clear_mux_refs_in_table(
         });
         match registry_commit(&payload) {
             Ok(_) => return Ok(cleared),
-            Err((3, e)) if e.contains("revision_conflict") => continue,
+            Err((3, e)) if e.contains("revision_conflict") => {}
+            Err((_, e)) if e.contains("stayed busy past") => {}
             Err((_, e)) => return Err(format!("write: {e}")),
         }
+        std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
     }
     Err("write: the registry kept changing under the reseat".to_string())
 }

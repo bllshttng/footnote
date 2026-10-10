@@ -34,6 +34,7 @@ import contextlib
 import fcntl
 import json
 import os
+import random
 import re
 import sys
 import tempfile
@@ -1337,11 +1338,13 @@ def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: 
         )
 
 
-def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
+def write_registry(
+    entries: list[AgentEntry], path: Optional[Path] = None, *, revision: Optional[int] = None
+) -> None:
     """Write the registry rows through the native table door.
 
     The table revision read here guards the write: a writer that landed
-    between the read and the commit makes the door refuse.
+    between the read (or the caller's ``revision``) and the commit makes the door refuse.
     """
     from fno.registry_door import (
         RegistryDoorError,
@@ -1352,9 +1355,12 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
 
     target = _registry_path(path)
     try:
-        raw, revision = read_registry_document(target)
+        raw, current = read_registry_document(target)
     except RegistryDoorError as exc:
         raise RegistryVersionError(str(exc)) from exc
+    if revision is not None and revision != current:
+        raise RegistryRevisionConflict(f"revision_conflict: {target} moved past {revision}")
+    revision = current
     _refuse_source_ahead_schema_bump(raw, target)
     _refuse_probe_or_row_loss_write(target, raw, entries)
     existing = _existing_row_names(raw)
@@ -1676,11 +1682,12 @@ def spawn_row_session_ids(harness: str, registry_path: Optional[Path] = None) ->
 
 
 class LoadedRegistry(list[AgentEntry]):
-    """Registry rows plus whether a forward read retained every raw row."""
+    """Registry rows, whether a forward read kept every raw row, and the read revision."""
 
-    def __init__(self, rows=(), *, complete: bool = True) -> None:
+    def __init__(self, rows=(), *, complete: bool = True, revision=None) -> None:
         super().__init__(rows)
         self.complete = complete
+        self.revision = revision
 
 
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
@@ -1707,7 +1714,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
 
     target = _registry_path(path)
     try:
-        raw = read_registry_document(target)[0]
+        raw, rev = read_registry_document(target)
     except RegistryDoorError as exc:
         raise RegistryVersionError(f"registry at {target} is unreadable: {exc}") from exc
 
@@ -1940,7 +1947,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             "are invisible to this process until it is upgraded.",
             file=sys.stderr,
         )
-    return LoadedRegistry(entries, complete=not read_forward and not skipped_rows)
+    return LoadedRegistry(entries, complete=not read_forward and not skipped_rows, revision=rev)
 
 
 def register_existing_session(
@@ -2846,6 +2853,9 @@ def record_session_observation(
     return observed[0], outcome
 
 
+_CONFLICT_RETRY_SECONDS = 30.0
+
+
 def update_registry(
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
     path: Optional[Path] = None,
@@ -2871,17 +2881,23 @@ def update_registry(
     target = _registry_path(path)
     with _hold_registry_lock(target, timeout=lock_timeout):
         # A non-flock writer (the Rust side skips this lock) can land in the
-        # read-to-commit window; reload and re-apply so its row survives.
-        for _attempt in range(3):
+        # read-to-commit window; reload and re-apply on a deadline, not a count,
+        # so a spawn that already launched outlasts a burst of writers.
+        budget = _CONFLICT_RETRY_SECONDS if lock_timeout is None else lock_timeout
+        deadline = time.monotonic() + budget
+        while True:
             current = load_registry(path=target)
             before = {entry.name: _identity_signature(entry) for entry in current}
             new_entries = updater(list(current))
             try:
                 _validate_changed_identities(before, new_entries)
-                write_registry(new_entries, path=target)
+                write_registry(
+                    new_entries, path=target, revision=getattr(current, "revision", None)
+                )
             except RegistryRevisionConflict as exc:
-                if _attempt == 2:
+                if time.monotonic() >= deadline:
                     raise RegistryVersionError(str(exc)) from exc
+                time.sleep(random.uniform(0.01, 0.25))
                 continue
             break
         # Removal accounting runs on the Rust choke point's own path: the
