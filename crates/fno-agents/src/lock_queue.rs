@@ -163,6 +163,7 @@ mod tests {
             .0;
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("graph.json.lock");
+        std::fs::create_dir_all(queue_dir(&lock)).unwrap();
         let dead = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
         std::fs::write(
             &dead,
@@ -186,6 +187,7 @@ mod tests {
             .0;
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("graph.json.lock");
+        std::fs::create_dir_all(queue_dir(&lock)).unwrap();
         let stale = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
         std::fs::write(
             &stale,
@@ -217,6 +219,7 @@ mod tests {
             .0;
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("graph.json.lock");
+        std::fs::create_dir_all(queue_dir(&lock)).unwrap();
         let live = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, child.id() as u64));
         std::fs::write(
             &live,
