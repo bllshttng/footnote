@@ -682,7 +682,7 @@ pub fn run_apply(args: &[String]) -> i32 {
             .collect()
     });
     let graph = super::settings::graph_path();
-    let mut locked_errors: Vec<String> = Vec::new();
+    let mut locked_errors: Vec<String>;
     let mut applied = json!({
         "dependencies": 0,
         "priority_changes": 0,
