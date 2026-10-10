@@ -57,10 +57,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$ROOT/mux" "$ROOT/agents" "$ROOT/code/checkout" "$ROOT/text"
+mkdir -p "$ROOT/mux" "$ROOT/agents" "$ROOT/code/checkout" "$ROOT/text" "$ROOT/.fno/claims"
 # State under $ROOT/.fno: the mux board reads the graph from $HOME/.fno.
-printf 'schema_version = 1\nstate_dir = "%s"\n' "$ROOT/.fno" >"$ROOT/config.toml"
+# FNO_DEMO_PY_SOURCE pins the CLI the rust bootstrap provisions, so the
+# python leg matches the binary: a PyPI wheel older than the graph.db
+# claims store crashes on the migration tombstone the fresh root gets.
+{
+  printf 'schema_version = 1\nstate_dir = "%s"\n' "$ROOT/.fno"
+  if [ -n "${FNO_DEMO_PY_SOURCE:-}" ]; then
+    printf '[dev]\nsource = "%s"\n' "$FNO_DEMO_PY_SOURCE"
+  fi
+} >"$ROOT/config.toml"
 export FNO_CONFIG="$ROOT/config.toml" FNO_MUX_DIR="$ROOT/mux" FNO_AGENTS_HOME="$ROOT/agents"
+# The claims legacy lock takes a FILESYSTEM root; a fresh root carries the
+# graph.db migration tombstone at .fno/claims, which is not a directory and
+# crashes the lock. Give the demo's claims their own directory.
+export FNO_CLAIMS_ROOT="$ROOT/claimroot"
+mkdir -p "$ROOT/claimroot"
 # HOME too, for every process: the server reads harness rosters under it,
 # and a real home would list real sessions in the sideline.
 export HOME="$ROOT"
@@ -223,9 +236,10 @@ def row(name, harness, model, pane, state, sid=None):
         "mux": {"session": server, "pane_id": pane},
         "inside_leg": {"state": state, "seq": 1, "received_at": now},
     }
-def thread(name, harness, how):
+def thread(name, harness, how, attach=None):
     # idle: a live thread with no report; unmeasured: exited with no proof;
-    # exited: a confirmed exit.
+    # exited: a confirmed exit. `attach` marks an attachable bg thread: the
+    # row-menu's Split Direction branch renders for exactly that shape.
     exited = how != "idle"
     return {
         "name": name, "cwd": cwd, "harness": harness, "substrate": "thread",
@@ -233,7 +247,7 @@ def thread(name, harness, how):
         "liveness": {"idle": "alive", "unmeasured": "unmeasured", "exited": "dead"}[how],
         "liveness_measured_at": now, "created_at": now, "last_message_at": now,
         "mux": None,
-    }
+    } | ({} if attach is None else {"attach_id": attach})
 json.dump({"schema_version": 1, "agents": [
     row("archer", "codex", "gpt-6-sol", ids[0], "working", sids[1]),
     row("scout", "claude", "opus", ids[1], "done", sids[0]),
@@ -241,7 +255,7 @@ json.dump({"schema_version": 1, "agents": [
     row("pager", "pi", "glm-5", ids[3], "working"),
     row("scribe", "claude", "sonnet", ids[4], "done"),
     # Paneless threads, so the sideline shows the other states too.
-    thread("planner", "codex", "idle"),
+    thread("planner", "codex", "idle", attach="demo-attach-1"),
     thread("indexer", "claude", "unmeasured"),
     thread("migrator", "opencode", "exited"),
 ]}, open(path, "w"))

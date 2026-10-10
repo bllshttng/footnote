@@ -48,6 +48,16 @@ pub enum ViewKind {
     /// The new-agent composer sheet, with a seeded draft so the editor text
     /// and the real terminal cursor's cell are in the picture.
     Composer,
+    /// The row context menu on the first PANELESS bg row: the Split
+    /// Direction group with its pane|portal toggle, the branch the first
+    /// agent row (pane-hosted) never renders.
+    SplitMenu,
+    /// The settings modal at its top level: the tab strip the tab cycle
+    /// walks.
+    Settings,
+    /// The which-key table, opened FROM settings: the printed key labels
+    /// (`ctrl+b`) live here.
+    Keys,
 }
 
 fn parse_view(v: &str) -> Option<ViewKind> {
@@ -57,6 +67,9 @@ fn parse_view(v: &str) -> Option<ViewKind> {
         "tab-menu" => Some(ViewKind::TabMenu),
         "sideline-menu" => Some(ViewKind::SidelineMenu),
         "composer" => Some(ViewKind::Composer),
+        "split-menu" => Some(ViewKind::SplitMenu),
+        "settings" => Some(ViewKind::Settings),
+        "keys" => Some(ViewKind::Keys),
         _ => None,
     }
 }
@@ -411,6 +424,29 @@ fn live_frame(
                 .position(|r| matches!(r, super::DisplayRow::Agent(_)))
                 .ok_or("no agent rows to open a row menu on")?;
             view.open_row_menu(i, Anchor::Center);
+        }
+        Some(ViewKind::SplitMenu) => {
+            let i = view
+                .display_rows()
+                .iter()
+                .position(|r| {
+                    matches!(r, super::DisplayRow::Agent(a)
+                        if a.pane_id.is_none() && a.attach_id.is_some() && !a.exited)
+                })
+                .ok_or("no paneless bg rows to open a split menu on")?;
+            view.open_row_menu(i, Anchor::Center);
+        }
+        Some(ViewKind::Settings) => {
+            view.lane.reset();
+            theme_import_ui::reset(view);
+            view.aux = Some(view.build_settings_modal());
+            view.aux_esc.clear();
+        }
+        Some(ViewKind::Keys) => {
+            // Opened FROM settings, so the dismiss marker rides: the shot
+            // shows the table exactly as the tab handoff paints it.
+            view.keys_modal_return = true;
+            view.open_keys_modal();
         }
         Some(ViewKind::TabMenu) => {
             let tid = view
