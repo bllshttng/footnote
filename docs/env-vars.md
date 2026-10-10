@@ -139,6 +139,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_MAIL_LANDED_SETTLE_S` | py | Seconds a just-sent durable row waits before the send verb re-reads the recipient for the `landed`/`NOT LANDED` verdict. Tests read 0. |
 | `FNO_MAIL_SUBJECT` | py+rs | The peeled `mail send --subject`; the front exports it, the envelope render and the bus-append door stamp it as `meta.subject`. |
 | `FNO_MCP_SIDECAR_LOG` | py | unclear: cli/src/fno/mcp/sidecar.py:646 |
+| `FNO_OPENCODE_STORAGE_DIR` | py+rs | Moves opencode's storage root, and with it the sibling `opencode.db` session store: the discover default and the dispatch brief's transcript tail read the store beside it. |
 | `FNO_MUX_ADMISSION_NAMESPACE` | rs | unclear: crates/fno/src/process_admission.rs:733 |
 | `FNO_MUX_DIR` | rs | unclear: crates/fno/src/mux_cli.rs:1533 |
 | `FNO_MUX_MOUSE_TRACE` | rs | unclear: crates/fno/src/client.rs:11590 |
