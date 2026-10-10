@@ -225,6 +225,7 @@ use gh_read::{
     GraphqlQuota,
 };
 pub(crate) use gh_read::{coverage_adapter, is_graphql_read};
+pub(crate) use intent::read_tail_lines;
 pub(crate) use intent::{declared_recovery_hold, extract_assistant_text, parse_xml_attr};
 use intent::{detect_intent, extract_last_assistant_message, Intent};
 #[cfg(test)]
@@ -589,12 +590,51 @@ pub(crate) fn decide_with_payload(
         last_assistant_message.as_deref(),
     );
 
-    // ── Step 1: cancel sentinel ───────────────────────────────────────────────
+    //     // ── Step 1: cancel sentinel ────────────────────────────
+    // F6: a self-cancel the SESSION wrote through its own assistant is a
+    // stuck signal, not a stop. The transcript is the truth: the newest
+    // user entry carrying the cancel verb proves a user typed it. The
+    // sentinel's own `via:` is advisory (the command writes it best-effort);
+    // the loop re-derives from the transcript at honor time.
     if let Some(hit) = check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
+        let user_typed = crate::distress::newest_user_entry_carries_cancel(&transcript_path);
+        let self_cancel = hit.author.as_deref() == Some(session_id.as_str()) && !user_typed;
+        if self_cancel {
+            // One-shot: consume the sentinel and write the stuck row instead.
+            // The router takes the follow-through from the row.
+            let _ = std::fs::remove_file(&hit.path);
+            let distress = crate::distress::HelpDistress {
+                reason: "self-cancel requested by the session itself; the run routes stuck instead of stopping"
+                    .to_string(),
+                evidence: hit.reason.clone(),
+                kind: crate::distress::DistressKind::Help,
+                class: crate::distress::HelpClass::Stuck,
+            };
+            let _ = crate::distress::emit_help_distress_blocked(
+                &project_events,
+                &global_events,
+                &cwd,
+                &session_id,
+                node_id.as_deref(),
+                harness.as_deref(),
+                &distress,
+                &format!("sentinel-{}", hit.path.display()),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    None,
+                    &format!(
+                        "self-cancel consumed as a stuck signal; the run routes stuck instead of stopping ({})",
+                        hit.reason.clone().unwrap_or_default()
+                    ),
+                    0,
+                    None,
+                ),
+            );
+        }
         emit("termination", hit.termination_data(&session_id));
-        // One-shot: once a sentinel has terminated this run it has done its
-        // job. Consuming it is what stops a cancel from re-terminating every
-        // later stop of a session that recovers and keeps working.
         if hit.kind == crate::cancel_sentinel::CancelKind::TargetSentinel {
             let _ = std::fs::remove_file(&hit.path);
         }
@@ -609,8 +649,7 @@ pub(crate) fn decide_with_payload(
             ),
         );
     }
-
-    // ── Step 2: legacy terminal status ───────────────────────────────────────
+    // ── Step 2: legacy terminal status ────────────────────────────────────────
     if let Some(ref status) = manifest.legacy_status {
         emit(
             "loop_check_legacy_manifest",
