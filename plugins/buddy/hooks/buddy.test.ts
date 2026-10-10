@@ -299,3 +299,26 @@ test('an old python wrapper moves to the fast path at 1 s, and an idle buddy hol
   }
   expect(seen.size).toBeGreaterThan(1)
 })
+
+test('the wrapper in the settings decides the folder, and a wrapper saved as the user line is undone', async ($, on) => {
+  const mine = { type: 'command', command: '~/bin/my-status', padding: 0, refreshInterval: 30 }
+  const ours = { type: 'command', command: 'bash /home/u/.local/state/buddy/statusline.sh', padding: 0, refreshInterval: 1 }
+  const files = new Map([
+    ['/home/u/.claude/settings.json', JSON.stringify({ statusLine: ours })],
+    ['/home/u/.local/state/buddy/inner.json', JSON.stringify({ statusLine: { type: 'command', command: 'bash /home/u/.fno/state/buddy/statusline.sh' } })],
+    ['/home/u/.fno/state/buddy/inner.json', JSON.stringify({ statusLine: mine })],
+  ])
+  const { clock } = boot(on, OLD_CONFIG, new Map(), files)
+  // fno names another folder, but the status line only reads frames from its own.
+  on('process.run', ($: any, e: any) =>
+    e.argv.join(' ') === 'fno config get state_dir'
+      ? { value: { exitCode: 0, stdout: '~/.fno/\n', stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(2_000)
+
+  expect(JSON.parse(files.get('/home/u/.claude/settings.json')!).statusLine).toEqual(ours)
+  expect(JSON.parse(files.get('/home/u/.local/state/buddy/inner.json')!).statusLine).toEqual(mine)
+  expect(files.has('/home/u/.local/state/buddy/frames/s1.json')).toBe(true)
+  expect(files.has('/home/u/.fno/state/buddy/frames/s1.json')).toBe(false)
+})
