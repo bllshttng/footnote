@@ -539,9 +539,10 @@ fn verdict_of(shipped: i64, abandoned: i64, saved: i64, wasted: i64) -> Option<S
 /// the native fold): None when the history is absent or has no rows.
 pub(crate) fn evals_summary() -> Option<Value> {
     let path = evals_history_path()?;
-    let text = std::fs::read_to_string(path).ok()?;
     let stale_days: i64 = 7;
-    let payload = crate::evals_trend::summary_payload(&text, stale_days, chrono::Utc::now());
+    // summary_payload takes the history PATH and reads the rows itself.
+    let payload =
+        crate::evals_trend::summary_payload(path.to_str()?, stale_days, chrono::Utc::now());
     if payload
         .get("row_count")
         .and_then(Value::as_i64)

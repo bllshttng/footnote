@@ -10,42 +10,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::triage;
 use super::triage_health::{run_health, run_trend};
 
-/// Whether the tail names one of the nine diagnostic actions this door
-/// owns; any other triage-shaped argv (a workflow runner's tail, an
-/// action-less help form) keeps the compat forward exactly as before.
-pub fn owns(tail: &[String]) -> bool {
-    matches!(
-        tail.first().map(String::as_str),
-        Some(
-            "context"
-                | "propose"
-                | "consistency"
-                | "rank"
-                | "validate"
-                | "apply"
-                | "projects"
-                | "health"
-                | "trend",
-        )
-    )
-}
-
 pub(crate) fn echo_json(value: &Value) {
     let text = serde_json::to_string_pretty(value).unwrap_or_default();
     println!("{text}");
 }
 
+const USAGE: &str =
+    "usage: fno backlog triage <context|propose|consistency|rank|validate|apply|projects|health|trend> [args]";
+
 fn usage() -> i32 {
-    eprintln!(
-        "usage: fno backlog triage <context|propose|consistency|rank|validate|apply|projects|health|trend> [args]"
-    );
+    eprintln!("{USAGE}");
     2
 }
 
-/// The grouped door's entry: dispatch on the action token; an unknown or
-/// missing action prints the usage line and exits 2.
+/// The grouped door's entry: dispatch on the action token; help prints the
+/// usage line on stdout and exits 0, an unknown or missing action prints it
+/// on stderr and exits 2.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+            0
+        }
         Some("context") => run_context(&args[1..]),
         Some("propose") => run_propose(&args[1..]),
         Some("rank") => run_rank(&args[1..]),
