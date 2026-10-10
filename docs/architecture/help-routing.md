@@ -6,10 +6,10 @@ Every `<help class=... reason=... evidence=...>` routes to its next step. The ru
 
 | Class | First route (rung 0) | Escalation |
 |---|---|---|
-| `stale-plan` | in-session: run the architect pass in place: /fno:blueprint rewrite <plan> | off-session, lead: The in-session route is spent at rung 2. A lead decides. |
-| `missing-prereq` | in-session: file it with fno backlog idea "<prereq>" --wave-of <this node> --difficulty <band>, build it first | off-session, lead: The in-session route is spent at rung 2. A lead decides. |
-| `ci-red` | in-session: run /fno:fix | off-session, lead: The in-session route is spent at rung 2. A lead decides. |
-| `stuck` | in-session: consult one planner subagent | off-session, lead: The in-session route is spent at rung 2. A lead decides. |
+| `stale-plan` | in-session: run the architect pass in place: /fno:blueprint rewrite <plan> | off-session, lead: run the architect pass in place: /fno:blueprint rewrite <plan> The in-session route is spent at rung 2. A lead decides. |
+| `missing-prereq` | in-session: file it with fno backlog idea "<prereq>" --wave-of <this node> --difficulty <band>, build it first | off-session, lead: file it with fno backlog idea "<prereq>" --wave-of <this node> --difficulty <band>, build it first The in-session route is spent at rung 2. A lead decides. |
+| `ci-red` | in-session: run /fno:fix | off-session, lead: run /fno:fix The in-session route is spent at rung 2. A lead decides. |
+| `stuck` | in-session: consult one planner subagent | off-session, lead: consult one planner subagent The in-session route is spent at rung 2. A lead decides. |
 | `held` | off-session, node holder: A claim on this node is held while the holder is unreachable (help 0). Mail the holder or release the claim. | off-session, node holder: A claim on this node is held while the holder is unreachable (help 2). Mail the holder or release the claim. |
 | `wait` | timer: 300s backoff, 5m/10m/15m cap | timer: 900s backoff, 5m/10m/15m cap |
 | `env-denied` | off-session, lead: The run hit an environment or gate refusal it cannot clear (help 0). Evidence carries the receipt. A lead decides. | off-session, lead: The run hit an environment or gate refusal it cannot clear (help 2). Evidence carries the receipt. A lead decides. |
