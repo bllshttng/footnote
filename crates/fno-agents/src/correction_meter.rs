@@ -5,7 +5,7 @@
 //! hand-off trigger. The reading reports counts, never a verdict: no ratio
 //! field and no over flag.
 //!
-//! Attribution rules (measured 2026-09-26 over 7 reigns, node x-cbac):
+//! Attribution rules (measured 2026-09-26 over seven lead transcripts):
 //! a retraction right after a corrective or later-acknowledged operator
 //! prompt credits the operator; an acknowledged retraction after any other
 //! prompt credits the peer; every other retraction is self-caught. Typed
@@ -137,6 +137,9 @@ pub(crate) fn correction_meter_text(raw: &str) -> Result<Value, String> {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if windows.is_empty() {
+            windows.push(Window::default());
+        }
         if row.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
             windows.push(Window::default());
             continue;
@@ -145,9 +148,6 @@ pub(crate) fn correction_meter_text(raw: &str) -> Result<Value, String> {
             if !seen_rows.insert(uuid.to_string()) {
                 continue;
             }
-        }
-        if windows.is_empty() {
-            windows.push(Window::default());
         }
         if row.get("type").and_then(Value::as_str) == Some("assistant") {
             count_retraction(
@@ -188,6 +188,12 @@ pub(crate) fn correction_meter_text(raw: &str) -> Result<Value, String> {
             }
         } else {
             count_rejects(&row, windows.last_mut().expect("window exists"));
+            // A meta row with text (stop-hook feedback, a loop wakeup) is
+            // the prompt the model answered last: it ends an operator
+            // prompt's reach, exactly as a typed or relayed turn does.
+            if crate::provenance::is_meta_row(&row) && !cleaned_text(&row).is_empty() {
+                prompt = None;
+            }
         }
     }
     let total = windows.len();
@@ -442,6 +448,41 @@ mod tests {
         );
         let value = meter(raw);
         assert_eq!(counts(&value, 0), (2, 1, 0, 0, 0));
+    }
+
+    // A meta row with text (stop-hook feedback) ends an operator prompt's
+    // reach: the next unacknowledged retraction reads self, never operator.
+    #[test]
+    fn meta_resets_prompt() {
+        let raw = concat!(
+            r#"{"uuid":"c1","type":"user","message":{"content":"that's wrong"}}"#,
+            "\n",
+            r#"{"uuid":"c2","type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"understood"}]}}"#,
+            "\n",
+            r#"{"uuid":"c3","type":"user","isMeta":true,"message":{"content":"Stop hook feedback: beat blocked"}}"#,
+            "\n",
+            r#"{"uuid":"c4","type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"I was wrong to stage that"}]}}"#,
+            "\n",
+        );
+        let value = meter(raw);
+        assert_eq!(counts(&value, 0), (1, 1, 0, 0, 0));
+    }
+
+    // The reading carries the last two windows only, newest last, whatever
+    // the transcript's window count.
+    #[test]
+    fn recent_caps_at_two() {
+        let boundary = r#"{"subtype":"compact_boundary","timestamp":"2026-10-10T00:00:00Z"}"#;
+        let raw = format!("{boundary}\n{boundary}\n{boundary}\n");
+        let value = meter(&raw);
+        assert_eq!(value["windows_total"], json!(4));
+        let ids: Vec<u64> = value["recent"]
+            .as_array()
+            .expect("recent array")
+            .iter()
+            .map(|w| w["window"].as_u64().expect("window id"))
+            .collect();
+        assert_eq!(ids, vec![3, 4]);
     }
 
     // One retraction per message id, even when a second text block repeats
