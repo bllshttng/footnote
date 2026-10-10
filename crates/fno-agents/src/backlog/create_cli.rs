@@ -1470,11 +1470,14 @@ mod tests {
             loaded,
             std::collections::BTreeSet::from(["x-6666".to_string(), "x-7777".to_string()])
         );
-        let minted =
-            mint_node_id_with_prefix(&std::collections::BTreeSet::new(), &[&loaded], "x", 4)
-                .expect("minted");
-        assert_ne!(minted, "x-6666");
-        assert_ne!(minted, "x-7777");
+        // The exclusion gate is deterministic only at saturation: with every
+        // id of the width excluded, the mint must refuse rather than emit a
+        // colliding id.
+        let all: std::collections::BTreeSet<String> =
+            (0..=0xffff).map(|i| format!("x-{i:04x}")).collect();
+        let err = mint_node_id_with_prefix(&std::collections::BTreeSet::new(), &[&all], "x", 4)
+            .unwrap_err();
+        assert!(err.contains("exhaustion"), "mint refused: {err}");
     }
 
     #[test]
