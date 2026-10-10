@@ -48,7 +48,7 @@ pub(crate) fn route(class: HelpClass, rung: u64) -> Route {
         HelpClass::Question => Route::OffSession { to: Recipient::Ladder, text: format!("A session asks a question (help {rung}). Answer by mail or record a ruling with fno inbox decide. 10 minutes without a read climbs the ladder.") },
         HelpClass::Budget => match rung {
             0 => Route::Timer { backoff_secs: 300 },
-            _ => Route::OffSession { to: Recipient::Lead, text: format!("Budget hit twice in one run (help {rung}). The evidence names the cap axis and value. A lead re-scopes or raises it.") },
+            _ => Route::OffSession { to: Recipient::Lead, text: format!("Budget hit twice (help {rung}). The evidence names the cap axis and value. A lead re-scopes or raises it.") },
         },
         HelpClass::Unclassified => Route::OffSession { to: Recipient::Lead, text: format!("An unclassified help (help {rung}). No route matched. A lead triages it, else it climbs the question ladder.") },
         }
