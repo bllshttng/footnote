@@ -11,7 +11,10 @@ fn registry_write_queues_behind_a_held_graph_lock() {
     // Another writer holds the graph flock the registry write queues on;
     // the ticket queue serves this writer after the holder releases
     // instead of BEGIN IMMEDIATE dying with "database is locked".
-    let graph = dir.join("graph.json");
+    // The holder locks the spelling the layout table resolves for this
+    // root - the same path the write's own graph_lock resolves - never a
+    // hand-assembled spelling the table may not pick.
+    let graph = crate::state_layout::place(&dir, "graph.json");
     let holder =
         crate::graph_store::BoundedLock::acquire(&graph, std::time::Duration::from_secs(1))
             .unwrap();
