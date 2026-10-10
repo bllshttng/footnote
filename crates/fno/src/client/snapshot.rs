@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{LayoutView, View};
+use super::{theme_import_ui, LayoutView, View};
 use crate::frame_html::{self, Theme};
 use crate::popup::Anchor;
 use crate::proto::{self, ClientMsg, Frame, ServerMsg, BUILD_VERSION, PROTO_VERSION};
@@ -22,7 +22,7 @@ const USAGE: &str =
     "usage: fno mux serve --snapshot --server <name> --out <path> [--squad <name>] \
 [--theme dark|light|macchiato] [--format html|svg|png] [--size <cols>x<rows> [--fit]] \
 [--font <family>] [--message <fmail-id>] \
-[--view bell|row-menu|tab-menu|sideline-menu|composer]";
+[--view bell|row-menu|tab-menu|sideline-menu|composer|split-menu|settings|keys]";
 
 #[derive(Debug, PartialEq)]
 pub enum Format {
@@ -438,7 +438,7 @@ fn live_frame(
         }
         Some(ViewKind::Settings) => {
             view.lane.reset();
-            theme_import_ui::reset(view);
+            theme_import_ui::reset(&mut view);
             view.aux = Some(view.build_settings_modal());
             view.aux_esc.clear();
         }
