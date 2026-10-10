@@ -1075,8 +1075,10 @@ fn mutate_single_row_once(
     }
     write_changed(&transaction, &rows, &working, true)?;
     nodes::recompute_status(&transaction)?;
-    let rows_after = export_rows(&transaction)?;
-    let version = content_version(&rows_after);
+    // The version hashes the rows in hand (pre-image plus this mutation's
+    // delta), not a post-write re-export of every row. authoritative_sync
+    // makes the same in-memory choice.
+    let version = content_version(&working);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(true)
