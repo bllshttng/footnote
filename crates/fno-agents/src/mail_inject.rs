@@ -123,6 +123,17 @@ pub fn keeper_lane_harness(name: &str) -> bool {
 /// age out, short enough that Python still answers its live-lane timeout.
 const QUIET_WAIT_S: u64 = 30;
 
+/// How long a claude row reported Done may hold delivery as "in Stop hooks"
+/// with no `turn_duration` row after it. The Done report fires when the Stop
+/// hooks START, and a CR typed while they run lands as a newline in the
+/// composer. Observed hook runs reach 2m48s; the cap keeps a build or an
+/// interrupted turn that never writes `turn_duration` from holding forever.
+const STOP_HOOK_HOLD_MAX_MS: i64 = 180_000;
+
+/// How much of the transcript tail the turn-end read scans: the row it looks
+/// for was written after the Done report, seconds to minutes ago.
+const TURN_END_TAIL_BYTES: u64 = 256 * 1024;
+
 /// Live-inject target harness. `claude` is the default `control.sock` path;
 /// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8);
 /// `keeper` types the envelope into a lane-B thread's pty through the keeper
@@ -626,7 +637,10 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
 /// and on total silence withdraw the typed line with DEL bytes -- unless the
 /// operator has typed since the inject (a typing row newer than
 /// `typed_since_ms`), because their text is in the composer now and the
-/// withdraw would eat it. `withdraw_on_silence: false` keeps the keeper
+/// withdraw would eat it; that skip answers `left-in-composer`. The DEL count
+/// covers both CRs too: a composer that took a CR as a newline holds one more
+/// character per CR, and DEL on an empty composer does nothing.
+/// `withdraw_on_silence: false` keeps the keeper
 /// `Unconfirmable` arm's shape: it types and never withdraws, because no
 /// landing can be seen there. Replaces the old re-Enter-every-8-polls
 /// cadence: one extra Enter is the measured fix for a swallowed CR, and a
@@ -666,9 +680,9 @@ fn confirm_or_withdraw<T: crate::claude_attach::ControlTransport>(
     let ts = crate::operator_witness::typing_state(journal, session, now_ms());
     let typed_since_inject = ts.newest_typing_ms.is_some_and(|t| t > typed_since_ms);
     if ts.recent || typed_since_inject {
-        return Err("not-confirmed");
+        return Err("left-in-composer");
     }
-    let _ = transport.send_line(&"\u{7f}".repeat(typed_chars));
+    let _ = transport.send_line(&"\u{7f}".repeat(typed_chars + 2));
     Err("not-confirmed")
 }
 
@@ -682,9 +696,10 @@ fn now_ms() -> i64 {
 
 /// The C11/C14 quiet gate: poll the recipient's typing witness and its
 /// effective registry state every `poll` for up to `budget`, so mail never
-/// lands over a live draft or into a session that is asking the operator a
-/// question. Proceeds when the operator is neither typing nor holding an
-/// unfinished draft and the row is not Blocked. On timeout the reason is
+/// lands over a live draft, into a session that is asking the operator a
+/// question, or into a claude composer while its Stop hooks run. Proceeds
+/// when the operator is neither typing nor holding an unfinished draft and
+/// [`session_hold`] reads no hold. On timeout the reason is
 /// whichever blocker held last, and a Blocked row names its stored reason
 /// (the question text, the permission prompt) so the queued mail says WHAT
 /// the session is waiting on; Python maps any not-delivered reason to the
@@ -693,6 +708,7 @@ fn now_ms() -> i64 {
 fn wait_for_quiet_in(
     journal: &Path,
     registry_path: &Path,
+    projects_base: &Path,
     session: &str,
     budget: Duration,
     poll: Duration,
@@ -702,15 +718,11 @@ fn wait_for_quiet_in(
     let deadline = now() + budget.as_millis() as i64;
     loop {
         let ts = crate::operator_witness::typing_state(journal, session, now());
-        let blocked = blocked_reason(registry_path, session);
-        if !ts.recent && !ts.draft && blocked.is_none() {
+        let hold = session_hold(registry_path, projects_base, session, now());
+        if !ts.recent && !ts.draft && hold.is_none() {
             return Ok(());
         }
-        let blocker = match blocked.as_deref() {
-            Some(reason) if !reason.is_empty() => format!("session-asking: {reason}"),
-            Some(_) => "session-asking".to_string(),
-            None => "user-typing".to_string(),
-        };
+        let blocker = hold.unwrap_or_else(|| "user-typing".to_string());
         if now() >= deadline {
             return Err(blocker);
         }
@@ -718,12 +730,23 @@ fn wait_for_quiet_in(
     }
 }
 
-/// The stored reason of the registry row `session` addresses when it is
-/// effectively Blocked (a question picker, a permission wall): the C14
-/// "session-asking" state. `None` when the row is not Blocked; an unreadable
-/// registry or no row never blocks. The reason rides `inside_leg.reason` and
-/// falls back to the screen verdict's label for hook-less rows.
-fn blocked_reason(registry_path: &Path, session: &str) -> Option<String> {
+/// Why the registry row `session` addresses cannot take a typed turn now,
+/// or `None`; an unreadable registry or no row never holds. Two holds:
+///
+/// - effectively Blocked (a question picker, a permission wall): the C14
+///   "session-asking" state, naming the stored reason. The reason rides
+///   `inside_leg.reason` and falls back to the screen verdict's label for
+///   hook-less rows; a reason-less row reads as the bare class.
+/// - "stop-hooks": a claude row reported Done less than
+///   [`STOP_HOOK_HOLD_MAX_MS`] ago, and its transcript holds no
+///   `turn_duration` row since. The Done report fires as the Stop hooks
+///   start, and the composer takes a CR as a newline until they finish.
+fn session_hold(
+    registry_path: &Path,
+    projects_base: &Path,
+    session: &str,
+    now_ms: i64,
+) -> Option<String> {
     let registry = crate::state::load_registry(registry_path).ok()?;
     let entry = registry.entries.iter().find(|e| {
         e.harness_session_id.as_deref() == Some(session)
@@ -732,23 +755,60 @@ fn blocked_reason(registry_path: &Path, session: &str) -> Option<String> {
                     .as_deref()
                     .is_some_and(|id| id.starts_with(session)))
     })?;
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if crate::wait::effective_state(entry, now_secs).0 != crate::wait::EffState::Blocked {
-        return None;
-    }
-    // A Blocked row is ALWAYS Some: an empty string renders as the bare
-    // "session-asking" label, so a reason-less row cannot read as quiet.
-    Some(
-        entry
+    let now_secs = (now_ms / 1000).max(0) as u64;
+    if crate::wait::effective_state(entry, now_secs).0 == crate::wait::EffState::Blocked {
+        let reason = entry
             .inside_leg
             .as_ref()
             .and_then(|leg| leg.reason.clone())
             .or_else(|| entry.screen_state.as_ref().map(|ss| ss.state.clone()))
-            .unwrap_or_default(),
-    )
+            .unwrap_or_default();
+        return Some(if reason.is_empty() {
+            "session-asking".to_string()
+        } else {
+            format!("session-asking: {reason}")
+        });
+    }
+    let leg = entry.inside_leg.as_ref()?;
+    if entry.harness_name() != "claude" || leg.state != crate::state::InsideLegState::Done {
+        return None;
+    }
+    let done_ms = chrono::DateTime::parse_from_rfc3339(&leg.received_at)
+        .ok()?
+        .timestamp_millis();
+    if now_ms - done_ms > STOP_HOOK_HOLD_MAX_MS {
+        return None;
+    }
+    let transcript = find_transcript_in(projects_base, entry.harness_session_id.as_deref()?)?;
+    (!turn_ended_since(&transcript, done_ms)).then(|| "stop-hooks".to_string())
+}
+
+/// Whether the transcript tail holds a `turn_duration` row stamped after
+/// `since_ms`: claude writes it once the Stop hooks finish.
+fn turn_ended_since(transcript: &Path, since_ms: i64) -> bool {
+    let Ok(mut file) = std::fs::File::open(transcript) else {
+        return false;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if file
+        .seek(io::SeekFrom::Start(len.saturating_sub(TURN_END_TAIL_BYTES)))
+        .is_err()
+    {
+        return false;
+    }
+    let mut tail = Vec::new();
+    if file.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&tail)
+        .lines()
+        .filter(|line| line.contains("\"turn_duration\""))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|row| {
+            let stamp = row.get("timestamp")?.as_str()?.to_string();
+            chrono::DateTime::parse_from_rfc3339(&stamp).ok()
+        })
+        .any(|stamp| stamp.timestamp_millis() > since_ms)
 }
 
 /// The escaped form of `marker` as it appears inside a transcript JSONL line: the
@@ -2183,6 +2243,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             if let Err(reason) = wait_for_quiet_in(
                 &home.events_jsonl(),
                 &home.registry_json(),
+                &crate::claude_drive::claude_projects_dir(),
                 &args.session,
                 Duration::from_secs(QUIET_WAIT_S),
                 Duration::from_secs(1),
@@ -3468,8 +3529,8 @@ mod tests {
         assert_eq!(r, Err("not-confirmed"));
         assert_eq!(
             t.sent,
-            vec!["\r".to_string(), "\u{7f}".repeat(7)],
-            "one extra CR, then one DEL write of the typed length"
+            vec!["\r".to_string(), "\u{7f}".repeat(9)],
+            "one extra CR, then one DEL write of the typed length plus both CRs"
         );
         let _ = std::fs::remove_file(&journal);
     }
@@ -3489,7 +3550,7 @@ mod tests {
             true,
             || false,
         );
-        assert_eq!(r, Err("not-confirmed"));
+        assert_eq!(r, Err("left-in-composer"));
         assert_eq!(
             t.sent,
             vec!["\r".to_string()],
@@ -3541,6 +3602,7 @@ mod tests {
         let r = wait_for_quiet_in(
             &journal,
             &registry,
+            &registry,
             "s2",
             Duration::from_secs(30),
             Duration::ZERO,
@@ -3568,6 +3630,7 @@ mod tests {
         let mut sleeper = sleeper;
         let r = wait_for_quiet_in(
             &journal,
+            &registry,
             &registry,
             "s1",
             Duration::from_millis(50),
@@ -3622,6 +3685,7 @@ mod tests {
             let r = wait_for_quiet_in(
                 &journal,
                 &registry,
+                &dir,
                 "s1",
                 Duration::from_millis(50),
                 Duration::ZERO,
@@ -3630,6 +3694,59 @@ mod tests {
             );
             assert_eq!(r, Err(expected.to_string()));
         }
+        let _ = std::fs::remove_file(&journal);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_for_quiet_holds_while_claude_stop_hooks_run() {
+        // A claude row reported Done (its Stop hooks started) with no
+        // turn_duration row since: the gate holds as "stop-hooks". Once the
+        // turn_duration row lands, the same gate proceeds.
+        let journal = empty_journal("quiet-stop-hooks");
+        let dir =
+            std::env::temp_dir().join(format!("mailinj-reg-{}-stophooks", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("proj")).unwrap();
+        let sid = "5d0a6c1e-2b7f-4c3e-9a1d-7e8f9a0b1c2d";
+        let transcript = dir.join("proj").join(format!("{sid}.jsonl"));
+        std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+        let registry = dir.join("registry.json");
+        let done = chrono::Utc::now();
+        let row = serde_json::json!({
+            "name": "wk", "status": "live", "cwd": "/repo", "harness": "claude",
+            "harness_session_id": sid, "created_at": "2026-09-26T00:00:00Z",
+            "inside_leg": {"state": "done", "seq": 2, "received_at": done.to_rfc3339()},
+        });
+        crate::registry_store::seed_raw(&registry, serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string());
+        let gate = || {
+            let base = now_ms();
+            let tick = std::cell::Cell::new(0i64);
+            wait_for_quiet_in(
+                &journal,
+                &registry,
+                &dir,
+                sid,
+                Duration::from_millis(50),
+                Duration::ZERO,
+                &mut || base + tick.get() * 10,
+                &mut |_d| tick.set(tick.get() + 1),
+            )
+        };
+        assert_eq!(gate(), Err("stop-hooks".to_string()));
+        let ended = (done + chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut f = OpenOptions::new().append(true).open(&transcript).unwrap();
+        writeln!(
+            f,
+            "{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"timestamp\":\"{ended}\"}}"
+        )
+        .unwrap();
+        assert_eq!(
+            gate(),
+            Ok(()),
+            "the turn ended, so the composer submits again"
+        );
         let _ = std::fs::remove_file(&journal);
         let _ = std::fs::remove_dir_all(&dir);
     }
