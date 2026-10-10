@@ -623,10 +623,10 @@ fn record_id_tombstone_in(dir: &Path, id: &str) {
     let path = dir.join("id-tombstones.json");
     // Write-then-rename so a crash mid-write never truncates the pool.
     let tmp = dir.join("id-tombstones.json.tmp");
-    if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+    if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
         return;
     }
-    let _ = std::fs::write(&path, body);
+    let _ = std::fs::write(&path, &body);
 }
 
 /// Every id a plan frontmatter names in the configured plans dir:
