@@ -186,7 +186,10 @@ fn read_usage(
             None | Some(Value::Null) => None,
             Some(v) => Some(v.as_f64()?),
         };
-        windows.push(UsageWindow { used_pct, resets_at });
+        windows.push(UsageWindow {
+            used_pct,
+            resets_at,
+        });
     }
     let probed_at = entry.get("probed_at")?.as_f64()?;
     if probed_at < now - ttl_seconds {
@@ -205,10 +208,7 @@ fn read_usage(
 
 /// The provider-level lock: `health.<id>.rate_limited_until`, plus the
 /// `last_error_at` that dates it.
-fn read_lock(
-    provider_id: &str,
-    node_cwd: Option<&str>,
-) -> (Option<f64>, Option<f64>) {
+fn read_lock(provider_id: &str, node_cwd: Option<&str>) -> (Option<f64>, Option<f64>) {
     let Some(raw) = read_state_payload(node_cwd) else {
         return (None, None);
     };
@@ -239,7 +239,7 @@ fn headroom_from(
     now: f64,
     threshold_pct: f64,
 ) -> Headroom {
-        if rlu.is_some() && lock_at.is_some() {
+    if rlu.is_some() && lock_at.is_some() {
         if let Some(snap) = snap {
             if snap.probed_at <= lock_at.unwrap_or(f64::INFINITY) {
                 // A death recorded after the probe is the newer fact; the
@@ -252,7 +252,7 @@ fn headroom_from(
             }
         }
     }
-let Some(snap) = snap else {
+    let Some(snap) = snap else {
         if rlu.is_some() {
             return Headroom {
                 state: HeadroomState::Exhausted,
@@ -269,35 +269,32 @@ let Some(snap) = snap else {
         .iter()
         .filter(|w| w.resets_at.map_or(true, |r| r > now))
         .collect();
-    let exhausted: Vec<&&UsageWindow> = binding
-        .iter()
-        .filter(|w| w.used_pct >= 100.0)
-        .collect();
+    let exhausted: Vec<&&UsageWindow> = binding.iter().filter(|w| w.used_pct >= 100.0).collect();
     if !snap.windows.is_empty() {
         if !exhausted.is_empty() {
-            let resets: Vec<Option<f64>> = exhausted
-                .iter()
-                .map(|w| w.resets_at)
-                .collect();
+            let resets: Vec<Option<f64>> = exhausted.iter().map(|w| w.resets_at).collect();
             return Headroom {
                 state: HeadroomState::Exhausted,
-                resets_at: resets.into_iter().flatten().fold(None, |acc: Option<f64>, r| {
-                    Some(acc.map_or(r, |a| a.min(r)))
-                }),
+                resets_at: resets
+                    .into_iter()
+                    .flatten()
+                    .fold(None, |acc: Option<f64>, r| {
+                        Some(acc.map_or(r, |a| a.min(r)))
+                    }),
             };
         }
         if snap.partial {
             // A partial response has a missing window, so never answer OK
             // from it; the reset is the soonest one actually observed.
-            let soonest: Vec<Option<f64>> = binding
-                .iter()
-                .map(|w| w.resets_at)
-                .collect();
+            let soonest: Vec<Option<f64>> = binding.iter().map(|w| w.resets_at).collect();
             return Headroom {
                 state: HeadroomState::Low,
-                resets_at: soonest.into_iter().flatten().fold(None, |acc: Option<f64>, r| {
-                    Some(acc.map_or(r, |a| a.min(r)))
-                }),
+                resets_at: soonest
+                    .into_iter()
+                    .flatten()
+                    .fold(None, |acc: Option<f64>, r| {
+                        Some(acc.map_or(r, |a| a.min(r)))
+                    }),
             };
         }
         if binding.is_empty() {
@@ -366,7 +363,12 @@ pub fn evaluate_quota_signal(
             "quota-observation-off",
         );
     }
-    if priority.map(str::trim).map(str::to_ascii_lowercase).as_deref() == Some("p0") {
+    if priority
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("p0")
+    {
         return signal(HeadroomState::Unknown, None, false, false, "p0-exempt");
     }
     // Probe-on-stale is the Python leg: a stale snapshot reads as absent
@@ -423,10 +425,12 @@ pub fn launch_is_pinned(
     model: Option<&str>,
     node_cwd: Option<&str>,
 ) -> bool {
-    if ["provider", "model", "harness"]
-        .iter()
-        .any(|k| node.get(k).and_then(Value::as_str).map(str::trim).is_some_and(|s| !s.is_empty()))
-    {
+    if ["provider", "model", "harness"].iter().any(|k| {
+        node.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+    }) {
         return true;
     }
     if provider.map(str::trim).is_some_and(|s| !s.is_empty())
@@ -522,8 +526,7 @@ fn healthy_alternate_exists(node_cwd: Option<&str>) -> bool {
         return false;
     }
     let cwd = node_cwd.map(Path::new).unwrap_or(Path::new("."));
-    let Some(raw) = crate::agents_config::config_lookup(cwd, &["accounts", "records"])
-    else {
+    let Some(raw) = crate::agents_config::config_lookup(cwd, &["accounts", "records"]) else {
         return false;
     };
     let Some(records) = raw.as_array() else {
@@ -563,17 +566,10 @@ pub fn select_autonomous_route(
             .unwrap_or(0) as f64
     };
     let _ = cfg;
-    let sig = evaluate_quota_signal(
-        provider_id,
-        priority,
-        cutover_low,
-        node_cwd,
-        now,
-    );
+    let sig = evaluate_quota_signal(provider_id, priority, cutover_low, node_cwd, now);
     let window = sig.state.as_str().to_string();
     if sig.cutover && !pinned {
-        if let Some((record_id, harness)) = select_destination(node_cwd, &sig.provider_id, now)
-        {
+        if let Some((record_id, harness)) = select_destination(node_cwd, &sig.provider_id, now) {
             return AutonomousRoute {
                 action: "cutover".to_string(),
                 reason: format!("{}-cutover", window.to_lowercase()),
