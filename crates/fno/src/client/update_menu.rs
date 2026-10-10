@@ -298,7 +298,7 @@ pub(crate) fn build_sideline_menu(
 /// `build_sideline_menu` never offers as a way in.
 pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
     let outcome = probe.map(|p| &p.readiness);
-    let mut rows = vec![PopupRow::Header("update".into()), PopupRow::Rule];
+    let mut rows = vec![];
     let mut actions = Vec::new();
     match probe.map(|p| &p.release) {
         Some(ReleaseOutcome::Newer {
@@ -321,12 +321,14 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                         rows.push(PopupRow::Header(section.area.clone()));
                     }
                     for bullet in &section.bullets {
-                        rows.push(PopupRow::Header(bullet.clone()));
+                        rows.push(PopupRow::Text(format!("- {bullet}")));
                     }
+                    rows.push(PopupRow::Header(String::new()));
                 }
+                rows.pop();
             }
-            rows.push(PopupRow::Header(
-                "upgrades the fno wheel; restart afterwards to run it".into(),
+            rows.push(PopupRow::Text(
+                "the upgrade replaces the wheel. restart afterwards to run it.".into(),
             ));
             rows.push(PopupRow::Entry {
                 glyph: "⬆".into(),
@@ -355,11 +357,10 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
             let short = |rev: Option<&str>| -> String {
                 rev.unwrap_or("unknown").chars().take(10).collect()
             };
-            // Version + distance answer "how far behind am I"; either
-            // unknown (or a zero distance), the sha pair stays the fallback.
-            // A release install has neither rev: no sha line at all, its
-            // release section is the whole story.
-            if r.installed_rev.is_some() || r.source_rev.is_some() {
+            // Version + distance answer "how far behind am I". A missing
+            // rev means the source story cannot render: no line at all, not
+            // an "unknown" pair.
+            if r.installed_rev.is_some() && r.source_rev.is_some() {
                 let ahead = r.source_prs_ahead.filter(|n| *n > 0);
                 match (r.installed_version.as_deref(), ahead) {
                     (Some(version), Some(ahead)) => rows.push(PopupRow::Header(format!(
@@ -401,7 +402,7 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                             });
                             actions.push(AuxAction::OpenPr(url.clone()));
                         }
-                        None => rows.push(PopupRow::Header(label)),
+                        None => rows.push(PopupRow::Text(label)),
                     }
                 };
                 for line in &notes.highlights {
@@ -417,16 +418,23 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                     }
                 }
                 if let Some(hidden) = &notes.hidden_line {
-                    rows.push(PopupRow::Header(hidden.clone()));
+                    rows.push(PopupRow::Text(hidden.clone()));
                 }
             } else if !r.changelog.is_empty() {
                 rows.push(PopupRow::Rule);
                 for subject in &r.changelog {
-                    rows.push(PopupRow::Header(subject.clone()));
+                    rows.push(PopupRow::Text(subject.clone()));
                 }
             }
-            rows.push(PopupRow::Rule);
-            rows.push(PopupRow::Header(r.guidance.clone()));
+            // The release section carries the one action already; a second
+            // guidance line only repeats it.
+            if !matches!(
+                probe.map(|p| &p.release),
+                Some(ReleaseOutcome::Newer { .. })
+            ) {
+                rows.push(PopupRow::Rule);
+                rows.push(PopupRow::Text(r.guidance.clone()));
+            }
             // change 7: one row per stale process naming what a
             // restart does and what survives, then the fixed promise. The
             // tap is the confirmation, because the modal named every effect.
@@ -445,25 +453,25 @@ pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
                     .count();
                 for row in stale.iter().filter(|r| r.component != "pane-keeper") {
                     let name = row.name.as_deref().unwrap_or("unnamed");
-                    rows.push(PopupRow::Header(format!(
+                    rows.push(PopupRow::Text(format!(
                         "{} {}: {}; keeps {}",
                         row.component, name, row.on_restart, row.survives
                     )));
                 }
                 if keepers > 0 {
-                    rows.push(PopupRow::Header(format!(
+                    rows.push(PopupRow::Text(format!(
                         "{keepers} pane keeper{} on the old build",
                         if keepers == 1 { "" } else { "s" }
                     )));
                 }
-                rows.push(PopupRow::Header(
-                    "restart keeps every pane. pane keepers stay on the old build \
-                     until their pane ends."
+                rows.push(PopupRow::Text(
+                    "restart keeps panes. keepers stay on the old build until \
+                     their pane ends."
                         .into(),
                 ));
-                rows.push(PopupRow::Header(
+                rows.push(PopupRow::Text(
                     "restart detaches, runs `fno agents restart --mux` in the \
-                     foreground, then reattaches."
+                     foreground, reattaches."
                         .into(),
                 ));
                 rows.push(PopupRow::Rule);

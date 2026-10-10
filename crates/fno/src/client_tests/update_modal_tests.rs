@@ -42,6 +42,21 @@ fn entry_labels(popup: &AuxPopup) -> Vec<String> {
         .collect()
 }
 
+/// Every row's visible label (headers, body text, entries): for assertions
+/// that care about presence, not row kind.
+fn row_labels(popup: &AuxPopup) -> Vec<String> {
+    popup
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) | PopupRow::Text(h) | PopupRow::FullWidth(h) => Some(h.clone()),
+            PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn newer_uv() -> ReleaseOutcome {
     ReleaseOutcome::Newer {
         channel: Channel::Uv,
@@ -251,7 +266,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         "the count line and the promise: {headers:?}"
     );
     assert!(
-        headers.contains(&"20 pane keepers on the old build"),
+        row_labels(&wide).contains(&"20 pane keepers on the old build".to_string()),
         "{headers:?}"
     );
     let modal = build_update_modal(Some(&outcome.clone().into()));
@@ -277,14 +292,12 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         "current rows are not listed: {body}"
     );
     assert!(
-        body.contains(
-            "restart keeps every pane. pane keepers stay on the old build until their pane ends."
-        ),
+        body.contains("restart keeps panes. keepers stay on the old build until their pane ends."),
         "{body}"
     );
     assert!(
         body.contains(
-            "restart detaches, runs `fno agents restart --mux` in the foreground, then reattaches."
+            "restart detaches, runs `fno agents restart --mux` in the foreground, reattaches."
         ),
         "the modal names the flow the tap starts: {body}"
     );
@@ -744,8 +757,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         })
         .collect();
     assert!(headers.contains(&"aaa1111 -> bbb2222"));
-    assert!(headers.contains(&"fix(x): thing"));
-    assert!(headers.contains(&"feat(y): other thing"));
+    assert!(row_labels(&modal).contains(&"fix(x): thing".to_string()));
+    assert!(row_labels(&modal).contains(&"feat(y): other thing".to_string()));
     assert!(headers.iter().any(|h| h.contains("14 shells survive")));
 
     // Shaped notes win over the raw changelog: highlights lead as tappable
@@ -804,9 +817,9 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         })
         .collect();
     assert!(headers.contains(&"mux"));
-    assert!(headers.contains(&"stop the crash (#104)"));
-    assert!(headers.contains(&"3 test/docs/ci/chore PRs hidden"));
-    assert!(!headers.contains(&"fix(x): raw subject"));
+    assert!(row_labels(&modal).contains(&"stop the crash (#104)".to_string()));
+    assert!(row_labels(&modal).contains(&"3 test/docs/ci/chore PRs hidden".to_string()));
+    assert!(!row_labels(&modal).contains(&"fix(x): raw subject".to_string()));
     assert_eq!(
         modal.actions,
         vec![AuxAction::OpenPr("https://github.com/o/r/pull/105".into())]
@@ -840,7 +853,7 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
             _ => None,
         })
         .collect();
-    assert!(headers.contains(&"fix(x): raw subject"));
+    assert!(row_labels(&modal).contains(&"fix(x): raw subject".to_string()));
 }
 
 #[test]
@@ -961,9 +974,9 @@ fn release_newer_renders_release_body_notes() {
         })
         .collect();
     assert!(headers.contains(&"release 0.4.0 -> 0.4.1 (uv)"));
-    assert!(headers.contains(&"42 merged pull requests since v0.4.0."));
+    assert!(row_labels(&modal).contains(&"- 42 merged pull requests since v0.4.0.".to_string()));
     assert!(headers.contains(&"mux"));
-    assert!(headers.contains(&"Portals open operator-owned windows"));
+    assert!(row_labels(&modal).contains(&"- Portals open operator-owned windows".to_string()));
     assert_eq!(
         entry_labels(&modal),
         vec!["upgrade now: uv tool upgrade fno"]
