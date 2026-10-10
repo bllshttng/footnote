@@ -1172,7 +1172,7 @@ mod tests {
         let r = release_with_decisions(
             &fx.graph,
             "d-anything",
-            std::path::Path::new("/nonexistent/x-02a1/decisions.jsonl"),
+            std::path::Path::new("/nonexistent/hold-guard/decisions.jsonl"),
         );
         assert_eq!(r["outcome"], "refused", "{r}");
         assert_eq!(r["exit_code"], 5);
