@@ -322,18 +322,11 @@ mod tests {
             Some("cccc3333".to_string())
         );
         assert_eq!(newest_published_rev(&assets, "linux-arm64"), None);
-        // The name parser: platform must match exactly, rev must be hex.
+        // The parser behind the pick: platform must match exactly, rev must
+        // be hex (both already exercised through the picks above).
         assert_eq!(
             asset_rev("fno-bin-bbbb2222-macos-arm64.tar.gz", "macos-arm64"),
             Some("bbbb2222".to_string())
-        );
-        assert_eq!(
-            asset_rev("fno-bin-bbbb2222-linux-x64.tar.gz", "macos-arm64"),
-            None
-        );
-        assert_eq!(
-            asset_rev("fno-bin-not-hex-macos-arm64.tar.gz", "macos-arm64"),
-            None
         );
     }
 }

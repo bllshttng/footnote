@@ -308,7 +308,6 @@ fn deploy_prebuilt(crates_rev: &str, bin_dir: &Path, dry_run: bool) -> Result<()
 /// unwritten, so the staleness stays visible and the next update retries
 /// once CI publishes. Only a real deploy defect pushes to `failed`.
 fn install_newest_published_arm(
-    source: &Path,
     subtree: Option<&str>,
     install_root: &Path,
     installed_rev: &str,
@@ -324,59 +323,49 @@ fn install_newest_published_arm(
         );
         return "dry-run".into();
     }
+    let wait = |why: String| -> String {
+        eprintln!(
+            "fno doctor update: {why}; the bins stay as installed; the next update retries; NOT compiling"
+        );
+        "waiting-ci".into()
+    };
     let platform = match crate::update_prebuilt::platform() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "fno doctor update: CI builds no binary for this platform; NOT compiling; the bins stay as installed"
-            );
-            return "waiting-ci".into();
+            return wait("CI builds no binary for this platform".to_string());
         }
     };
     let newest_rev = match crate::update_prebuilt::newest_published(platform) {
         Ok(Some(rev)) => rev,
         Ok(None) => {
-            eprintln!(
-                "fno doctor update: no published build for {platform} at all; the bins stay as installed; the next update retries after CI publishes; NOT compiling"
-            );
-            return "waiting-ci".into();
+            return wait(format!("no published build for {platform} at all"));
         }
         Err(why) => {
-            eprintln!(
-                "fno doctor update: cannot list the published builds ({why}); the bins stay as installed; the next update retries; NOT compiling"
-            );
-            return "waiting-ci".into();
+            return wait(format!("cannot list the published builds ({why})"));
         }
     };
     let got12: String = newest_rev.chars().take(12).collect();
     if !installed_rev.is_empty() && installed_rev == newest_rev {
-        eprintln!(
-            "fno doctor update: the newest published build ({got12}) is already installed; waiting for CI to publish {want12}; NOT compiling"
-        );
-        return "waiting-ci".into();
+        return wait(format!(
+            "the newest published build ({got12}) is already installed; waiting for CI to publish {want12}"
+        ));
     }
     println!(
         "fno doctor update: the source rev {want12} has no published tarball yet; installing the newest published build {got12}; never compiles"
     );
-    let unpacked = match crate::update_prebuilt::fetch(&newest_rev, &install_dir()) {
-        Ok(u) => u,
-        Err(why) => {
-            eprintln!(
-                "fno doctor update: the newest published build failed to download ({why}); the bins stay as installed; the next update retries; NOT compiling"
-            );
-            return "waiting-ci".into();
-        }
-    };
     let bin_dir = install_root.join("bin");
-    let swapped = crate::update_prebuilt::swap_into(&unpacked, &bin_dir);
-    if let Some(staging) = unpacked.parent() {
-        let _ = std::fs::remove_dir_all(staging);
-    }
-    if let Err(why) = swapped {
-        eprintln!(
-            "fno doctor update: the newest published build failed to deploy ({why}); the bins stay as installed; NOT compiling"
-        );
-        return "waiting-ci".into();
+    let deploy = |rev: &str| -> Result<(), String> {
+        let unpacked = crate::update_prebuilt::fetch(rev, &install_dir())?;
+        let swapped = crate::update_prebuilt::swap_into(&unpacked, &bin_dir);
+        if let Some(staging) = unpacked.parent() {
+            let _ = std::fs::remove_dir_all(staging);
+        }
+        swapped
+    };
+    if let Err(why) = deploy(&newest_rev) {
+        return wait(format!(
+            "the newest published build failed to deploy ({why})"
+        ));
     }
     if let Err(e) = sync_triad(&bin_dir, false) {
         eprintln!("{e}");
@@ -1311,7 +1300,6 @@ fn refresh_rust_bins(
         // load 311). Take the newest published build or wait, named.
         if on_main == Some(true) {
             return install_newest_published_arm(
-                source,
                 subtree.as_deref(),
                 &install_root,
                 &installed_rev,
