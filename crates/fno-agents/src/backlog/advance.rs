@@ -1041,13 +1041,12 @@ pub fn safe_release(key: &str, holder: &str) {
 /// project journal), defers via `fno backlog defer` past the limit, and
 /// notifies.
 pub fn refuse_repeated_dead_dispatch(node_id: &str, node_cwd: Option<&str>) -> Option<String> {
-    let failure_limit = crate::backlog::advance_settings::load_merged(
-        node_cwd.map(std::path::Path::new),
-    )
-    .get("active_backlog")
-    .and_then(|a| a.get("failure_limit"))
-    .and_then(Value::as_i64)
-    .unwrap_or(3);
+    let failure_limit =
+        crate::backlog::advance_settings::load_merged(node_cwd.map(std::path::Path::new))
+            .get("active_backlog")
+            .and_then(|a| a.get("failure_limit"))
+            .and_then(Value::as_i64)
+            .unwrap_or(3);
     let events = read_failure_events(node_cwd);
     let streak = consecutive_failures(node_id, &events);
     if streak < failure_limit {
@@ -1184,9 +1183,9 @@ fn read_failure_events(node_cwd: Option<&str>) -> Vec<Value> {
     if let Some(root) = crate::agents_config::state_dir(&cwd) {
         journals.push(root.join("events.jsonl"));
     }
-    if let Some(parent) = crate::paths::AgentsHome::from_env_opt().and_then(|h| {
-        h.root().parent().map(std::path::Path::to_path_buf)
-    }) {
+    if let Some(parent) = crate::paths::AgentsHome::from_env_opt()
+        .and_then(|h| h.root().parent().map(std::path::Path::to_path_buf))
+    {
         journals.push(parent.join("events.jsonl"));
     }
     journals.dedup();

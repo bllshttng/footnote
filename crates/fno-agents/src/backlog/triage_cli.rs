@@ -259,7 +259,7 @@ pub fn run_validate(args: &[String]) -> i32 {
     let data: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Error: proposal is not valid JSON ({path}): {e}");
+            eprintln!("Error: proposal at {path} is not valid JSON: {e}");
             return 2;
         }
     };
