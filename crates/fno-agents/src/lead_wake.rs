@@ -361,13 +361,24 @@ pub(crate) fn run_pass(home: &AgentsHome, config_cwd: &Path) -> Result<Outcome, 
         });
     }
     let beat_secs = crate::lead_verdict_inputs::checkin_interval_secs(config_cwd);
+    // project -> root, from the workspace config: the durable answer to
+    // where a team's check-ins land. A holder row's cwd is the dir the
+    // session registered from, and a resume from a stranger dir moves it,
+    // which strands the fold at a journal nobody writes beats to. The first
+    // scope member keys the map, so a project-keyed scope resolves its own
+    // repo and an epic-list scope misses and keeps the holder-cwd fold.
+    let workspace_roots = crate::territory::workspace_paths(config_cwd);
     let mut beats: BTreeMap<String, Option<i64>> = BTreeMap::new();
     // scope -> the journal the beat was read from, so the receipt can say
     // where the beat came from and a miskeyed read is visible in the log.
     let mut beat_journals: BTreeMap<String, Option<String>> = BTreeMap::new();
     for team in &teams {
+        let workspace_root = scope_members(&team.scope)
+            .next()
+            .and_then(|key| workspace_roots.get(key))
+            .map(|root| Path::new(root.as_str()));
         let beat = crate::lead_history::previous_beat_with_source(
-            &team_beat_journals(home, &registry, team),
+            &team_beat_journals(home, &registry, team, workspace_root),
             &team.scope,
             team.holder_session.as_deref(),
             false,
@@ -439,18 +450,27 @@ fn short(text: &str) -> String {
     text.chars().take(160).collect()
 }
 
-/// The journals for one team's beat lookup: the shared pair plus the team's
-/// own project journal. The check-in emitter journals where its caller
-/// points it - the Python lead CLI passes `--emit-path <space>/events.jsonl`
-/// - so the shared pair stopped seeing the rows (2026-09-17). The registry
-/// row is keyed on the holder session id, never the mutable row name (law
-/// d-e952ed19). Isolated per team on purpose: `scan_scopes` errors the WHOLE
-/// list when one store cannot be opened, so a shared list would turn one
-/// corrupt project journal into a blind pass for every team; here only that
-/// team's read degrades. An unreadable registry degrades to the shared
-/// pair and says so on stderr: the receipt's `beat_journal` records the
-/// same fact, but the daemon log is where a broken registry gets noticed.
-fn team_beat_journals(home: &AgentsHome, registry_path: &Path, team: &Team) -> Vec<PathBuf> {
+/// The journals for one team's beat lookup: the shared pair, the holder
+/// row's project journal, and the workspace journal the scope names. The
+/// check-in emitter journals where its caller points it - the Python lead
+/// CLI passes `--emit-path <space>/events.jsonl` - so the shared pair
+/// stopped seeing the rows (2026-09-17). The registry row is keyed on the
+/// holder session id, never the mutable row name (law d-e952ed19). The
+/// holder row's cwd is what the session registered from, so a resume from
+/// a stranger dir folds a journal nobody writes beats to; the workspace
+/// root names the repo the scope owns and covers that drift. Isolated per
+/// team on purpose: `scan_scopes` errors the WHOLE list when one store
+/// cannot be opened, so a shared list would turn one corrupt project
+/// journal into a blind pass for every team; here only that team's read
+/// degrades. An unreadable registry degrades to the shared pair and says
+/// so on stderr: the receipt's `beat_journal` records the same fact, but
+/// the daemon log is where a broken registry gets noticed.
+fn team_beat_journals(
+    home: &AgentsHome,
+    registry_path: &Path,
+    team: &Team,
+    workspace_root: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut journals = crate::tick_ledger::journals(home);
     match crate::state::load_registry(registry_path) {
         Ok(loaded) => {
@@ -478,6 +498,12 @@ fn team_beat_journals(home: &AgentsHome, registry_path: &Path, team: &Team) -> V
                 "lead-wake: beat lookup for {} degrades to the shared pair: {error}",
                 team.scope
             );
+        }
+    }
+    if let Some(root) = workspace_root {
+        let journal = crate::paths::space_dir(root).join("events.jsonl");
+        if !journals.contains(&journal) {
+            journals.push(journal);
         }
     }
     journals
@@ -604,7 +630,7 @@ mod tests {
         .unwrap();
         let home = AgentsHome::at(base.join("agents"));
         let head = team("fno", 1, "vellum", "sess-head");
-        let journals = team_beat_journals(&home, &registry_path, &head);
+        let journals = team_beat_journals(&home, &registry_path, &head, None);
         let want = crate::paths::space_dir(&cwd).join("events.jsonl");
         assert!(
             journals.contains(&want),
@@ -614,7 +640,7 @@ mod tests {
         // A session with no registry row reads the shared pair only.
         let stranger = team("x-zzz", 2, "stranger", "sess-none");
         assert_eq!(
-            team_beat_journals(&home, &registry_path, &stranger),
+            team_beat_journals(&home, &registry_path, &stranger, None),
             vec![home.events_jsonl(), base.join("events.jsonl")]
         );
         // A registry that cannot be read degrades to the shared pair. It gets
@@ -625,10 +651,59 @@ mod tests {
         let broken = broken_home.join("registry.json");
         std::fs::write(&broken, "not json").unwrap();
         assert_eq!(
-            team_beat_journals(&home, &broken, &head),
+            team_beat_journals(&home, &broken, &head, None),
             vec![home.events_jsonl(), base.join("events.jsonl")]
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_workspace_journal_covers_a_drifted_holder_cwd() {
+        let base = std::env::temp_dir().join(format!("lead-wake-workspace-{}", std::process::id()));
+        let _pins = PinGuard::take(&base);
+        std::fs::create_dir_all(base.join("agents")).unwrap();
+        let drifted = base.join("elsewhere");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&drifted).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let registry_path = base.join("registry.json");
+        std::fs::write(
+            &registry_path,
+            json!({
+                "schema_version": 15,
+                "agents": [
+                    {"name": "vellum", "status": "live", "cwd": drifted.to_string_lossy(),
+                     "created_at": "2026-10-08T00:00:00Z",
+                     "harness_session_id": "sess-head"},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let home = AgentsHome::at(base.join("agents"));
+        let head = team("fno", 1, "vellum", "sess-head");
+        let journals = team_beat_journals(&home, &registry_path, &head, Some(&repo));
+        assert!(
+            journals.contains(&crate::paths::space_dir(&drifted).join("events.jsonl")),
+            "the holder row's own journal still rides the lookup: {journals:?}"
+        );
+        assert!(
+            journals.contains(&crate::paths::space_dir(&repo).join("events.jsonl")),
+            "the workspace journal covers the drifted cwd: {journals:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_fresh_beat_never_plans_a_wake() {
+        let teams = vec![team("fno", 1, "vellum", "s-head")];
+        let now = 1_000_000_000;
+        let beats = BTreeMap::from([("fno".to_string(), Some(now - 100))]);
+        let plans = plan_wakes(&teams, &projects(), &beats, &BTreeMap::new(), 55 * 60, now);
+        assert!(
+            plans.is_empty(),
+            "a finished check-in is the beat, not a miss: {plans:?}"
+        );
     }
 
     fn team(scope: &str, level: u8, holder: &str, sid: &str) -> Team {
