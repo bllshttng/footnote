@@ -107,7 +107,12 @@ pub(crate) fn wait_status(
             "green" => payload.get("green").and_then(Value::as_bool),
             _ => payload.get("settled").and_then(Value::as_bool),
         };
-        if done == Some(true) {
+        // One failed check already decides this head: wake now, so the fix
+        // starts while the other checks still run. A degraded serve cannot
+        // prove the failure belongs to the current head, so it rides out.
+        let red = payload.get("verdict").and_then(Value::as_str) == Some("red")
+            && payload.get("stale_reason").is_none();
+        if done == Some(true) || red {
             let (stdout, stderr) = emit_tick(&payload, &lines, calls, ticks);
             return (rc, stdout, stderr);
         }
@@ -340,10 +345,30 @@ mod tests {
     }
 
     #[test]
-    fn a_timeout_exits_with_the_last_code_and_the_still_note() {
+    fn a_red_verdict_wakes_at_once_with_checks_pending() {
         let t = Cell::new(0.0);
         let payloads: Vec<(i32, Value)> = (0..100)
             .map(|_| (1, json!({"verdict": "red", "settled": false})))
+            .collect();
+        let (code, stdout, _stderr) = wait_status(
+            9,
+            "settled",
+            1800.0,
+            10.0,
+            staged_poll(payloads),
+            |s| t.set(t.get() + s),
+            || t.get(),
+        );
+        assert_eq!(code, 1, "the red verdict's code");
+        assert!(stdout.contains("\"verdict\":\"red\""), "{stdout}");
+        assert_eq!(t.get(), 0.0, "no sleep: the first red tick wakes");
+    }
+
+    #[test]
+    fn a_timeout_exits_with_the_last_code_and_the_still_note() {
+        let t = Cell::new(0.0);
+        let payloads: Vec<(i32, Value)> = (0..100)
+            .map(|_| (2, json!({"verdict": "pending", "settled": false})))
             .collect();
         let (code, _stdout, stderr) = wait_status(
             9,
@@ -354,9 +379,9 @@ mod tests {
             |s| t.set(t.get() + s),
             || t.get(),
         );
-        assert_eq!(code, 1, "the LAST observed code");
+        assert_eq!(code, 2, "the LAST observed code");
         assert!(
-            stderr.contains("still not settled after 30s; last verdict red"),
+            stderr.contains("still not settled after 30s; last verdict pending"),
             "{stderr}"
         );
     }
