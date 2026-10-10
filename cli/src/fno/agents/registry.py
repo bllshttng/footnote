@@ -584,7 +584,7 @@ class AgentEntry:
     # v14: this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
     # mail to this session never prompt-line injects and always takes the
     # durable bus (the recipient surfaces it at its turn boundary via
-    # ``fno agents mail notify-self``); ``None`` is the default injectable policy every
+    # ``fno-agents mail-notify-self``); ``None`` is the default injectable policy every
     # worker keeps. A DELIVERY-POLICY fact, never a liveness verdict - the same
     # distinction that renamed NOT_INJECTABLE off "not-live"
     # (crates/fno-agents/src/mail_inject.rs): a bus-only session may be alive

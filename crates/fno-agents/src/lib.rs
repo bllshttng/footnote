@@ -273,6 +273,7 @@ pub mod mail_envelope;
 pub mod mail_header;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod mail_notify_self;
 pub mod mail_receipt;
 pub mod mail_teach;
 pub mod mail_threads;
@@ -1792,6 +1793,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // agent_raw_inject records a payload delivered without the <fno_mail>
     // envelope, so the provenance marker survives in the ledger, not transcript.
     "agent_raw_inject",
+    // Prompt-boundary mail delivery (mail_notify_self.rs): one receipt per
+    // drained id, so a sender can join events to a terminal drained state.
+    "agent_mail_drained",
     // Review invocation attempt/outcome join (daemon-emitted): the
     // canonical repo-local event records how a Codex review was fired and
     // whether its transport confirmed delivery.

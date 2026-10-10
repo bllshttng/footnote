@@ -949,14 +949,14 @@ event_types:
     consumers: [hooks/target-stop-hook.sh]
 
   - name: mail_notify_self_missed
-    description: "inject-mail-notify.sh (UserPromptSubmit) called `fno agents mail notify-self` and it did not deliver within its 2-second bound: rc 124 is the bound firing; any other nonzero is a refusal or a crash the hook previously discarded (2>/dev/null || true). Forensic event: the next reading of mail_notify_self_missed rows against agent_mail_drained gaps names the cause (timeout, identity refusal, crash); recording it does not fix it."
+    description: "inject-mail-notify.sh (UserPromptSubmit) could not deliver through `fno-agents mail-notify-self` within the load-aware hook budget: rc 124 is the budget firing; rc 127 is jq missing, so the session id was unreadable; any other nonzero is a refusal or a crash the hook previously discarded (2>/dev/null || true). Forensic event: the next reading of mail_notify_self_missed rows against agent_mail_drained gaps names the cause (timeout, unreadable identity, identity refusal, crash); recording it does not fix it."
     sources: [hook]
     data:
       required: [rc]
       properties:
         rc:
           type: integer
-          description: "Exit status of `fno agents mail notify-self`; 124 means the portable 2-second bound fired."
+          description: "Exit status of the failed delivery leg in inject-mail-notify.sh; 124 means the hook budget fired, 127 means jq was missing so the session id was unreadable."
         stderr_tail:
           type: string
           description: "Last stderr line, at most 200 chars, when the verb wrote one."
