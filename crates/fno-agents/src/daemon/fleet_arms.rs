@@ -169,6 +169,14 @@ impl FleetArms {
                 let _gate = SweepGate(flag);
                 let roots = worktree_sweep::registry_repo_roots(&home);
                 let now = now_epoch_secs();
+                // The orders probe and the report pass read the same repo in
+                // the same window: the probe's output replays as the report
+                // instead of the verb running twice. Misses (a probe that
+                // never ran the verb) and apply passes still execute.
+                let probe_runs: std::cell::RefCell<
+                    std::collections::HashMap<String, (Option<i32>, String, String)>,
+                > = std::cell::RefCell::new(Default::default());
+                let probe_runs = &probe_runs;
                 worktree_sweep::worktree_sweep(
                     &home,
                     &emitter,
@@ -185,13 +193,41 @@ impl FleetArms {
                         // is the same merge proof in git form: an eligible
                         // tree reads merged-or-done and clean, and the
                         // --apply pass re-judges every guard per tree.
-                        let dry = cleanup_command(&home, root)
-                            .output()
-                            .ok()
-                            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
-                        worktree_sweep::apply_authority(false, dry.as_deref()).into()
+                        match cleanup_command(&home, root).output() {
+                            Ok(output) => {
+                                let out = (
+                                    output.status.code(),
+                                    String::from_utf8_lossy(&output.stdout).into_owned(),
+                                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                                );
+                                probe_runs
+                                    .borrow_mut()
+                                    .insert(root.to_string(), out.clone());
+                                worktree_sweep::apply_authority(false, Some(out.1.as_str())).into()
+                            }
+                            // A probe that cannot run the verb is an
+                            // unreadable order probe: skip the repo and let
+                            // the sweep emit, never collapse into report-only.
+                            Err(error) => worktree_sweep::WorktreeSweepOrderRead {
+                                standing: None,
+                                exit_code: None,
+                                stderr: error.to_string(),
+                            },
+                        }
                     },
                     &|root, apply| {
+                        let cached = if apply {
+                            None
+                        } else {
+                            probe_runs.borrow_mut().remove(root)
+                        };
+                        if let Some((code, stdout, stderr)) = cached {
+                            return worktree_sweep::WorktreeSweepOutput {
+                                exit_code: code,
+                                stdout,
+                                stderr,
+                            };
+                        }
                         let mut cmd = cleanup_command(&home, root);
                         if apply {
                             cmd.arg("--apply");
