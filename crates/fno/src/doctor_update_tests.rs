@@ -325,10 +325,8 @@ fn rev_on_origin_main_reads_merged_local_and_unanswered() {
     // ahead of origin is not; an origin-less repo is unanswerable.
     assert_eq!(rev_on_origin_main(&repo, &base), Some(true));
     git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "local"]);
-    assert_eq!(
-        rev_on_origin_main(&repo, &["rev-parse", "HEAD"]),
-        Some(false)
-    );
+    let local = git_ok(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(rev_on_origin_main(&repo, &local), Some(false));
     let bare = tempfile::tempdir().unwrap();
     git_ok(bare.path(), &["init", "-q", "-b", "main"]);
     assert_eq!(rev_on_origin_main(bare.path(), &base), None);
