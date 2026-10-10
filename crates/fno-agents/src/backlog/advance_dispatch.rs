@@ -872,11 +872,6 @@ pub fn resolve_node_spawn(
     )
     .map_err(|e| general(e.to_string()))?;
     // Only the literal "dispatch" grant reads true.
-    let auto_merge =
-        crate::agents_config::config_lookup(Path::new(&cfg_root), &["auto_merge", "grant"])
-            .and_then(|v| v.as_str().map(str::to_string))
-            .as_deref()
-            == Some("dispatch");
     // One axis: `provider` is the harness under an older spelling, so it
     // must reach the resolver too, or the command follows the stage table.
     let launch_axis = launch_harness_axis(launch.unwrap_or(""), node_cwd);

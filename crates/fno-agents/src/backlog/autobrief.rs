@@ -67,7 +67,7 @@ fn text_field(node: &Value, key: &str) -> Option<String> {
     node.get(key)
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != *"")
+        .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
 
@@ -435,7 +435,7 @@ fn resolve_opencode(session_id: &str, cwd: &str) -> ResolvedTranscript {
 /// Claude resolution searches EVERY project dir: a session's transcript can
 /// exist in more than one (a worktree re-key leaves a stub in the other).
 /// cwd stays required but no longer scopes the search.
-fn resolve_claude(session_id: &str, cwd: &str) -> ResolvedTranscript {
+fn resolve_claude(session_id: &str, _cwd: &str) -> ResolvedTranscript {
     let Some(root) = home().map(|h| h.join(".claude").join("projects")) else {
         return unresolved();
     };
