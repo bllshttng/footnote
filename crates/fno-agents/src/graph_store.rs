@@ -2706,7 +2706,14 @@ pub fn mutate_rows(
             )
         };
         match published {
-            Ok(outcome) => return Ok(Some(outcome)),
+            // The graph lock is gone here, so the shared-backlog flush holds
+            // up no writer. A refusal took the primary's rows back: retry on
+            // a fresh read.
+            Ok(outcome) => match crate::backlog_share::publish_after_write(path) {
+                Ok(()) => return Ok(Some(outcome)),
+                Err(_) if attempt + 1 < ATTEMPTS => std::thread::sleep(RETRY_BACKOFF),
+                Err(refusal) => return Err(StoreError::Sqlite(refusal)),
+            },
             Err(err @ (StoreError::Conflict | StoreError::LockTimeout(..)))
                 if attempt + 1 < ATTEMPTS =>
             {
