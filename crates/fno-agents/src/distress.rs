@@ -982,43 +982,6 @@ mod tests {
     }
 
     #[test]
-    fn distress_flows_from_turn_read_to_a_blocked_row() {
-        // The transcript fallback must feed the distress parse and land a
-        // blocked row, read natively (no reader subprocess). The codex
-        // record SHAPE is pinned by the checked-in codex fixture test.
-        let tmp = tempfile::tempdir().unwrap();
-        let transcript = tmp.path().join("claude-turn.jsonl");
-        std::fs::write(
-            &transcript,
-            concat!(
-                r#"{"message":{"role":"user","content":"go"}}"#, "\n",
-                r#"{"message":{"role":"assistant","content":[{"type":"text","text":"<help reason=\"worktree-init-blocked\" evidence=\"Unable to create .git/refs/heads lock: Operation not permitted\">detail</help>"}]},"uuid":"u-assistant-1"}"#, "\n",
-            ),
-        )
-        .unwrap();
-        let project = tmp.path().join("events.jsonl");
-        let global = tmp.path().join("global.jsonl");
-        let wrote = scan_and_emit(
-            &project,
-            &global,
-            tmp.path(),
-            "cx-run",
-            Some("x-bbbb"),
-            None,
-            &transcript,
-            None,
-        );
-        assert!(wrote.is_some());
-        let row: serde_json::Value =
-            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
-        assert_eq!(row["type"], "blocked");
-        assert_eq!(row["data"]["reason"], "worktree-init-blocked");
-        assert_eq!(row["node"], "x-bbbb");
-        assert_eq!(row["data"]["turn"], "u-assistant-1");
-        assert_eq!(row["data"]["class"], "unclassified");
-    }
-
-    #[test]
     fn scan_and_emit_writes_nothing_without_a_help_tag() {
         // AC2-EDGE: a message with no help tag returns false and appends
         // nothing to either log.

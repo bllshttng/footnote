@@ -6,7 +6,7 @@
 //! Route vocabulary: in-session classes block at the stop hook (wave 3);
 //! off-session classes mail through burn_watch::wake_with_text (wrapped
 //! mail, never --raw); timer classes fire from the daemon arm; the
-//! question ladder climbs worker, lead, king, user page with a 10 minute
+//! question ladder climbs the owner ladder with a 10 minute
 //! lease from READ (Q10).
 
 use crate::burn_watch;
@@ -129,7 +129,9 @@ pub(crate) fn route_emitted_distress(
             );
         }
         Route::OffSession { to, text } => {
-            deliver_off_session(cwd, run, node, class, reason, evidence, rung, to, &text, turn_key);
+            deliver_off_session(
+                cwd, run, node, class, reason, evidence, rung, to, &text, turn_key,
+            );
         }
     }
 }
@@ -184,7 +186,9 @@ fn deliver_off_session(
                 return;
             }
             Target::UserPage => {
-                file_user_question(cwd, run, node, class, reason, evidence, rung, ladder_pos, turn_key);
+                file_user_question(
+                    cwd, run, node, class, reason, evidence, rung, ladder_pos, turn_key,
+                );
                 return;
             }
             Target::Unresolved => {
@@ -519,8 +523,7 @@ fn climb(home: &crate::paths::AgentsHome, config_cwd: &Path, row: &Value, run: &
                 None,
                 0,
                 next,
-                row
-                    .pointer("/data/turn")
+                row.pointer("/data/turn")
                     .and_then(Value::as_str)
                     .unwrap_or(""),
             );
@@ -743,7 +746,7 @@ pub(crate) fn render_routing_page() -> String {
             route_cell(&next, next_kind),
         ));
     }
-    out.push_str("\n## Flow\n\n```mermaid\nflowchart TD\n    help[\"<help class=...>\"] --> scan[\"stop-hook scan writes the blocked row\"]\n    scan --> route{\"route(class, rung)\"}\n    route -->|in-session| block[\"stop hook blocks with the route text (2-cap)\"]\n    route -->|off-session| mail[\"fno/help-router mail to the owner rung\"]\n    route -->|timer| wait[\"daemon arm fires the wake after the backoff\"]\n    mail -->|unread 10 min| climb[\"climb worker, lead, king, user page\"]\n    climb --> page[\"fno inbox outstanding ask files on the user page\"]\n```\n\n## Emission rule\n\nEmit the tag, then take the routed step. STOP only for irreversible, money, public surface, or taste. The in-session classes block at most twice per run and class (the third help mails the lead). Question climbs worker, lead, king, user page on a 10 minute lease from READ.\n\n## Delivery legs and the lease\n\nOff-session routes deliver through `burn_watch::wake_with_text`: mail from `fno/help-router` first. A durable receipt triggers the resume fallback. The route row records the leg that landed (queued, handed). The lease runs from READ, proven in the recipient transcript at the sweep. A delivery that hands and is never read climbs one rung after 10 minutes, ending on the user page (`fno inbox outstanding ask`).\n");
+    out.push_str("\n## Flow\n\n```mermaid\nflowchart TD\n    help[\"<help class=...>\"] --> scan[\"stop-hook scan writes the blocked row\"]\n    scan --> route{\"route(class, rung)\"}\n    route -->|in-session| block[\"stop hook blocks with the route text (2-cap)\"]\n    route -->|off-session| mail[\"fno/help-router mail to the owner rung\"]\n    route -->|timer| wait[\"daemon arm fires the wake after the backoff\"]\n    mail -->|unread 10 min| climb[\"climb the owner ladder one rung\"]\n    climb --> page[\"fno inbox outstanding ask files on the user page\"]\n```\n\n## Emission rule\n\nEmit the tag, then take the routed step. STOP only for irreversible, money, public surface, or taste. The in-session classes block at most twice per run and class (the third help mails the lead). Question climbs the owner ladder on a 10 minute lease from READ.\n\n## Delivery legs and the lease\n\nOff-session routes deliver through `burn_watch::wake_with_text`: mail from `fno/help-router` first. A durable receipt triggers the resume fallback. The route row records the leg that landed (queued, handed). The lease runs from READ, proven in the recipient transcript at the sweep. A delivery that hands and is never read climbs one rung after 10 minutes, ending on the user page (`fno inbox outstanding ask`).\n");
     out
 }
 

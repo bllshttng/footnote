@@ -28,13 +28,13 @@ flowchart TD
     route -->|in-session| block["stop hook blocks with the route text (2-cap)"]
     route -->|off-session| mail["fno/help-router mail to the owner rung"]
     route -->|timer| wait["daemon arm fires the wake after the backoff"]
-    mail -->|unread 10 min| climb["climb worker, lead, king, user page"]
+    mail -->|unread 10 min| climb["climb the owner ladder one rung"]
     climb --> page["fno inbox outstanding ask files on the user page"]
 ```
 
 ## Emission rule
 
-Emit the tag, then take the routed step. STOP only for irreversible, money, public surface, or taste. The in-session classes block at most twice per run and class (the third help mails the lead). Question climbs worker, lead, king, user page on a 10 minute lease from READ.
+Emit the tag, then take the routed step. STOP only for irreversible, money, public surface, or taste. The in-session classes block at most twice per run and class (the third help mails the lead). Question climbs the owner ladder on a 10 minute lease from READ.
 
 ## Delivery legs and the lease
 

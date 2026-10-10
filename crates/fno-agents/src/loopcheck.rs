@@ -598,6 +598,10 @@ pub(crate) fn decide_with_payload(
     // the loop re-derives from the transcript at honor time.
     if let Some(hit) = check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
         let user_typed = crate::distress::newest_user_entry_carries_cancel(&transcript_path);
+        // The transcript is the truth; a sentinel that recorded `via: user`
+        // at write time corroborates it, so a user-typed cancel never reads
+        // as a self-cancel even when the newest entry drifted.
+        let user_typed = user_typed || hit.via.as_deref() == Some("user");
         let self_cancel = hit.author.as_deref() == Some(session_id.as_str()) && !user_typed;
         if self_cancel {
             // One-shot: consume the sentinel and write the stuck row instead.
