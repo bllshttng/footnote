@@ -1739,6 +1739,38 @@ mod tests {
         ));
         assert!(!crate::watch_expiry::should_wake(&watch, 103, &[receipt]));
 
+        // A build park wakes before its deadline once its parked cargo is
+        // gone, and never while that cargo still runs.
+        let mut park = watch.clone();
+        park.event_id = "park-1".into();
+        park.blocker = "build".into();
+        let park_row = |cargo_pid: u32| crate::watch_expiry::Evidence {
+            event_id: "park-1".into(),
+            seq: 1,
+            ts_ms: 50,
+            kind: "loop_check_watch_idle".into(),
+            session_id: Some("s-1".into()),
+            data: serde_json::json!({
+                "blocker": "build",
+                "build_cargo_pid": cargo_pid,
+                "build_since_ms": crate::claims::now_ms(),
+            }),
+        };
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        assert!(crate::watch_expiry::should_wake(
+            &park,
+            10,
+            &[park_row(gone_pid)]
+        ));
+        assert!(!crate::watch_expiry::should_wake(
+            &park,
+            10,
+            &[park_row(std::process::id())]
+        ));
+        assert!(crate::watch_expiry::message(&park).contains("cargo build this session parked on"));
+
         let mut review_watch = watch.clone();
         review_watch.reason = Some("review".into());
         let review_message = crate::watch_expiry::message(&review_watch);
