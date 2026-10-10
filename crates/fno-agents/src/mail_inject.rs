@@ -738,9 +738,9 @@ fn wait_for_quiet_in(
 ///   `inside_leg.reason` and falls back to the screen verdict's label for
 ///   hook-less rows; a reason-less row reads as the bare class.
 /// - "stop-hooks": a claude row reported Done less than
-///   [`STOP_HOOK_HOLD_MAX_MS`] ago, and its transcript holds no
-///   `turn_duration` row since. The Done report fires as the Stop hooks
-///   start, and the composer takes a CR as a newline until they finish.
+///   [`STOP_HOOK_HOLD_MAX_MS`] ago, and its transcript shows neither the
+///   turn's end nor its resumption since. The Done report fires as the Stop
+///   hooks start, and the composer takes a CR as a newline until they finish.
 fn session_hold(
     registry_path: &Path,
     projects_base: &Path,
@@ -780,12 +780,16 @@ fn session_hold(
         return None;
     }
     let transcript = find_transcript_in(projects_base, entry.harness_session_id.as_deref()?)?;
-    (!turn_ended_since(&transcript, done_ms)).then(|| "stop-hooks".to_string())
+    (!turn_moved_since(&transcript, done_ms)).then(|| "stop-hooks".to_string())
 }
 
-/// Whether the transcript tail holds a `turn_duration` row stamped after
-/// `since_ms`: claude writes it once the Stop hooks finish.
-fn turn_ended_since(transcript: &Path, since_ms: i64) -> bool {
+/// Whether the transcript tail shows the turn moved on after `since_ms`, a
+/// Done report's whole-second stamp. A `turn_duration` row means the Stop
+/// hooks finished. An assistant row means a blocking Stop hook resumed the
+/// turn, and a working composer queues a typed turn. An assistant row must
+/// clear the stamp by a full second: the turn's last reply can land in the
+/// second the stamp truncates.
+fn turn_moved_since(transcript: &Path, since_ms: i64) -> bool {
     let Ok(mut file) = std::fs::File::open(transcript) else {
         return false;
     };
@@ -802,13 +806,23 @@ fn turn_ended_since(transcript: &Path, since_ms: i64) -> bool {
     }
     String::from_utf8_lossy(&tail)
         .lines()
-        .filter(|line| line.contains("\"turn_duration\""))
+        .filter(|line| line.contains("\"turn_duration\"") || line.contains("\"assistant\""))
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|row| {
-            let stamp = row.get("timestamp")?.as_str()?.to_string();
-            chrono::DateTime::parse_from_rfc3339(&stamp).ok()
+        .any(|row| {
+            let floor = match row.get("type").and_then(serde_json::Value::as_str) {
+                Some("assistant") => since_ms + 1_000,
+                _ if row.get("subtype").and_then(serde_json::Value::as_str)
+                    == Some("turn_duration") =>
+                {
+                    since_ms
+                }
+                _ => return false,
+            };
+            row.get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .is_some_and(|t| t.timestamp_millis() > floor)
         })
-        .any(|stamp| stamp.timestamp_millis() > since_ms)
 }
 
 /// The escaped form of `marker` as it appears inside a transcript JSONL line: the
@@ -3734,9 +3748,25 @@ mod tests {
             )
         };
         assert_eq!(gate(), Err("stop-hooks".to_string()));
+        // The turn's last reply in the Done stamp's own second still holds.
+        let last = done.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut f = OpenOptions::new().append(true).open(&transcript).unwrap();
+        writeln!(f, "{{\"type\":\"assistant\",\"timestamp\":\"{last}\"}}").unwrap();
+        assert_eq!(gate(), Err("stop-hooks".to_string()));
+        // A blocking Stop hook resumed the turn: a reply a full second past
+        // the stamp releases the hold, since a working composer queues it.
+        let resumed = (done + chrono::Duration::seconds(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        writeln!(f, "{{\"type\":\"assistant\",\"timestamp\":\"{resumed}\"}}").unwrap();
+        assert_eq!(gate(), Ok(()), "the resumed turn takes a queued message");
+        std::fs::write(
+            &transcript,
+            format!("{{\"type\":\"assistant\",\"timestamp\":\"{last}\"}}\n"),
+        )
+        .unwrap();
+        let mut f = OpenOptions::new().append(true).open(&transcript).unwrap();
         let ended = (done + chrono::Duration::seconds(1))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let mut f = OpenOptions::new().append(true).open(&transcript).unwrap();
         writeln!(
             f,
             "{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"timestamp\":\"{ended}\"}}"
