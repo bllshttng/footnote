@@ -16,7 +16,34 @@ The claim keys that decide dispatch move: `node:`, `dispatch:`, and `reconcile:`
 
 Every other claim stays local. `build:cargo`, `test:`, `session:`, `worker:` and `flight:` name resources of one machine. A cargo lock shared across machines serializes builds that never touch each other.
 
-The backlog, the agent registry, mail and the event store stay local in this version. Each machine keeps its own `graph.db`. The node claim is the dispatch decision. So two machines never build one node, even with backlog copies that disagree on status. A shared backlog needs a read replica and a write path for every backlog writer. That is a separate node.
+The agent registry, mail and the event store stay local. A second key moves the backlog, as the next section says. Without it, each machine keeps its own backlog in `graph.db`. The node claim is the dispatch decision. So two machines never build one node, even with backlog copies that disagree on status.
+
+## The shared backlog
+
+`store.share_backlog = true` in the global config moves the backlog tables to the primary too. It needs `store.remote_url`. It is off by default. With it off, no backlog write opens a socket.
+
+The tables that move are listed in `SHARED_TABLES` in `crates/fno-agents/src/backlog_share.rs`. The content version, the sync cursor and the search index stay local in `graph.db`. A new table in neither list fails a test.
+
+Reads stay local. This machine's `graph.db` is a replica. Every 5 seconds, one daemon arm per machine sends the outbox and then applies the primary's change log. `fno agents claim backlog sync` does both at once.
+
+Every backlog write opens through one seam, `backlog::open_connection`. With the key on, triggers there copy each row change into the local `backlog_outbox`, in the writer's own transaction. The commit stays local, so no writer holds the graph lock across the network. A flush then sends the outbox to the primary in one request, as one transaction. Each update and delete matches every old column of its row. Each insert must not collide. The same request adds one row to the primary's change log. The flush takes its own lock file, never the graph lock. A write through `mutate_rows` flushes right after the graph lock drops. The daemon flushes every other write within 5 seconds.
+
+A build from before the shared backlog writes with no outbox, and the primary never sees that write. So a store that shares carries a guard trigger on each shared table. The trigger calls `fno_backlog_writer()`, and only a current build registers that function. An older `fno-agents`, daemon, worker, or a plain `sqlite3` shell fails its write with `no such function: fno_backlog_writer` and changes nothing. When the key is unset, the next open by a current build drops the guard. Before you install an older build, unset the key and run one `fno backlog` command.
+
+A row that a peer changed first refuses the whole batch, and the primary writes nothing. The replica then takes the primary's rows back for every row the batch touched, and the refusal names the table. A write through `mutate_rows` syncs and retries by itself.
+
+If the primary cannot be reached, backlog writes still land in the replica and wait in the outbox. The next flush that reaches the primary sends them, and a peer's newer change refuses them then. Reads keep working from the replica. To work alone for good, unset `store.share_backlog`.
+
+## Start sharing
+
+1. Run `fno doctor update` on every machine and restart its daemon. Once the store shares, an older `fno-agents`, `fno-agents-daemon` or `fno-agents-worker` cannot write the backlog.
+2. Copy `graph.db`. The first sync on a machine replaces that machine's backlog with the primary's. It also writes a `graph.pre-share-<ms>.db` backup beside the store.
+3. On one machine, set both keys and run `fno agents claim backlog seed`. It copies this backlog to the primary. It refuses a primary that already holds one.
+4. On every other machine, set both keys and run `fno agents claim backlog sync`.
+
+If the primary holds no seeded backlog, a flush refuses and names the seed verb. The writes wait in the outbox.
+
+A later fno version that adds a backlog column does not change the primary. Writes then refuse with the primary's "no such column" error. Export, unset the keys, and seed again from a current machine.
 
 ## The store clock decides a peer's lease
 

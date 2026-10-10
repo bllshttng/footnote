@@ -277,11 +277,20 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
     open_connection(graph)
 }
 
+/// Every write connection leaves through here, so the shared-backlog write
+/// path attaches once, after setup, whichever way the setup returned.
 fn open_connection(graph: &Path) -> Result<Connection, String> {
+    let connection = open_connection_inner(graph)?;
+    crate::backlog_share::attach(&connection, graph)?;
+    Ok(connection)
+}
+
+fn open_connection_inner(graph: &Path) -> Result<Connection, String> {
     // A migration publishing under this root parks the legacy inode we
     // would otherwise open; the bounded fence wait orders us after it.
     crate::state_layout_sqlite::wait_for_fence(state_root_of(graph));
     let mut connection = crate::store_conn::open_write(&database_path(graph))?;
+    crate::backlog_share::register_writer(&connection)?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(|error| error.to_string())?;
