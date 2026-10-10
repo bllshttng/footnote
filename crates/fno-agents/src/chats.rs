@@ -1309,27 +1309,30 @@ pub(crate) struct ShowQuery {
 }
 
 /// The privacy rule a body prints under: the caller is the message's sender
-/// or recipient; `--all` is the operator override. A stored side names a full
-/// session id or its 8-character handle, and the caller resolves to the full
-/// id, so a handle matches the head of the caller's id.
+/// or recipient; `--all` is the operator override. The caller resolves to a
+/// full session id. A side that stores a full id matches it exactly; a side
+/// that stores only the 8-character handle matches the head of the caller's
+/// id, since sessions in one clock bucket share that head.
 fn caller_in_message(line: &Value, caller: &str) -> bool {
-    let caller = crate::mail_hold::identity_key(caller);
-    [
-        line.get("from_session"),
-        line.get("from"),
-        line.get("to_session"),
-        line.pointer("/meta/to_session"),
-        line.get("to_key"),
-        line.get("to"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(Value::as_str)
-    .filter(|key| !key.is_empty())
-    .any(|key| {
-        let key = crate::mail_hold::identity_key(key);
-        key == caller || (key.len() == 8 && caller.starts_with(&key))
-    })
+    fn text(v: Option<&Value>) -> Option<&str> {
+        v.and_then(Value::as_str).filter(|s| !s.is_empty())
+    }
+    let norm = crate::mail_hold::identity_key;
+    let caller = norm(caller);
+    let side =
+        |full: Option<&str>, handles: [Option<&str>; 2]| match full {
+            Some(full) => norm(full) == caller,
+            None => handles.into_iter().flatten().map(norm).any(|handle| {
+                handle == caller || (handle.len() == 8 && caller.starts_with(&handle))
+            }),
+        };
+    side(
+        text(line.get("from_session")),
+        [text(line.get("from")), None],
+    ) || side(
+        text(line.get("to_session")).or(text(line.pointer("/meta/to_session"))),
+        [text(line.get("to_key")), text(line.get("to"))],
+    )
 }
 
 fn message_body(line: &Value) -> &str {
@@ -1937,6 +1940,8 @@ mod tests {
         assert!(reads("aa2f99d7-9155-4fca-9eca-adf9ca1aafb2"));
         assert!(reads("e78df019-1d40-4132-b6f5-8704d38c0fc9"));
         assert!(!reads("bb2eb475-0000-4000-8000-000000000000"));
+        // A sibling in the same clock bucket shares the head, not the full id.
+        assert!(!reads("aa2f99d7-0000-4000-8000-000000000000"));
     }
 
     /// One temp root per test; env-mutating tests share the process, so the
