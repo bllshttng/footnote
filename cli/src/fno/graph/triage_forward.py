@@ -3,8 +3,6 @@ door, so this module forwards instead of implementing."""
 
 from __future__ import annotations
 
-import subprocess
-
 import typer
 
 
