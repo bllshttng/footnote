@@ -8,6 +8,7 @@ pub mod advance_dispatch;
 pub mod advance_fill;
 pub mod advance_settings;
 pub mod api;
+pub mod autobrief;
 pub mod autolink;
 pub(crate) mod binding;
 pub mod birth;
