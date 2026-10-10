@@ -1,7 +1,7 @@
 """``fno config plugin install <claude|codex|opencode|agy> [--force]``.
 
 Thin Typer front door over ``fno-agents plugin-install``: the Rust verb owns
-the stage build, the claude/opencode/agy arms, the env exports and the
+the stage build, the claude/opencode/agy arms, the env cleanup and the
 reclaim call. The codex arm stays on the Python ``converge`` engine, which
 receives the stage via ``plugin-install --stage-only``.
 """

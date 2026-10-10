@@ -285,7 +285,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `PYTHONPATH` | rs | unclear: crates/fno-agents/src/finalize.rs:1090 |
 | `REDUCED_MOTION` | rs | A reduced-motion request (`1`/`true`/`yes`/`on`); the mux launch splash then prints its last frame only, once, instead of animating, and a Working row's status glyph stays a still `●` instead of spinning. |
 | `RUSTC_WRAPPER` | rs | Cargo's own rustc wrapper. `fno update` sets it to the cargo admission wrapper for its compile fallback, since `cargo install` skips the checkout's `.cargo/config.toml`; a value already set is kept. |
-| `SCCACHE_DIR` | rs | Where sccache keeps its compile cache; `fill_sccache_env` pins the fleet cache to `<fno build base>/sccache` when unset and sccache is installed, beside the build-dir shards the same lane sweeps. |
+| `SCCACHE_DIR` | rs | Where sccache keeps its compile cache; `fill_sccache_env` pins the fleet cache to `<fno build base>/sccache` when unset and sccache is installed, beside the build-dir shards the same lane sweeps. The footnote rustc wrapper sets the same default. fno never exports it to a shell rc or harness env, so other Rust projects keep their own cache. |
 | `SCCACHE_IDLE_TIMEOUT` | rs | `fill_sccache_env` and the rustc wrapper default this to `0` (never stop on idle): a server that exits on idle mid-build fell compiles back to local rustc under fleet load. A shorter operator-set value survives both defaults. The daemon's `ensure_sccache_server` starts a replacement with `0` when it finds no live server. |
 | `SHELL` | py+rs | The user's login shell. |
 | `SMOKE_CHANGED_RECEIPT` | py | unclear: cli/src/fno/test_cmd.py:1726 |
