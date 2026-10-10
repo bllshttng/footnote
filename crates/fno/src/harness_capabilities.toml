@@ -1664,7 +1664,7 @@ headless = "unsandboxed"
 state = "native"
 measured_by = { reader = "session-id resume journey", version = "3.14.3", date = "2026-09-29" }
 
-# footnote: footnote's own turn loop (crates/footnote), a child binary the
+# footnote: footnote's own turn loop (the fnh binary), a child binary the
 # client launches with one launch spec on stdin. Headless only:
 # no pane, no thread, no TUI. The id is footnote's own fno_id, minted before
 # the first record, so the binding is preassigned.
@@ -1871,11 +1871,11 @@ via = ["cli/src/fno/setup/assets/pi/footnote.ts", "hooks/lead-postcompact-reinje
 
 [harness.footnote.hooks.lead_guard]
 state = "supported"
-via = ["hooks/hooks.json", "hooks/lead-delegation-guard.sh", "crates/footnote/src/hooks.rs"]
+via = ["hooks/hooks.json", "hooks/lead-delegation-guard.sh", "crates/fno-agents/src/footnote_harness/mod.rs"]
 
 [harness.footnote.hooks.lead_reinject]
 state = "impossible"
-reason = "the footnote harness compacts in-process (crates/footnote maybe_compact) and fires no compaction hook event, so the postcompact carrier never runs; the lead brief rides SessionStart only"
+reason = "the footnote harness compacts in-process (bllshttng/fnh maybe_compact) and fires no compaction hook event, so the postcompact carrier never runs; the lead brief rides SessionStart only"
 
 [harness.gemini.hooks.lead_guard]
 state = "missing"
@@ -1997,7 +1997,7 @@ via = ["cli/src/fno/setup/assets/pi/footnote.ts", "crates/fno-agents/src/event_r
 
 [harness.footnote.hooks.event_rules]
 state = "supported"
-via = ["crates/footnote/src/hooks.rs", "crates/fno-agents/src/hook/stop.rs"]
+via = ["crates/fno-agents/src/footnote_harness/mod.rs", "crates/fno-agents/src/hook/stop.rs"]
 
 [harness.gemini.hooks.event_rules]
 state = "impossible"

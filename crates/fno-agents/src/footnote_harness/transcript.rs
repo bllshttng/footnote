@@ -1,6 +1,6 @@
 //! Where footnote sessions live, as the supervisor resolves it. The record
 //! format and its reader are `crate::footnote_transcript`, shared with the
-//! `footnote` binary; the writer lives in `crates/footnote`.
+//! `footnote` binary; the writer lives in bllshttng/fnh `src/transcript.rs`.
 
 use std::path::{Path, PathBuf};
 

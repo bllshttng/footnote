@@ -1,5 +1,5 @@
 //! `-H footnote` on the supervisor side. The loop itself is the `footnote`
-//! binary (crates/footnote); this module resolves everything it needs, hands
+//! binary, built from bllshttng/fnh; this module resolves everything it needs, hands
 //! it one `LaunchSpec` on stdin, and keeps the registry row, the way
 //! `zcode_ask` launches zcode.
 
@@ -20,7 +20,7 @@ use crate::paths::AgentsHome;
 use crate::state::{load_registry, update_registry, RegistryEntry};
 
 const INSTALL_HINT: &str =
-    "run `fno doctor update --rust`, or `cargo install --locked --path crates/footnote` from a footnote checkout";
+    "build it from bllshttng/fnh: cargo install --locked --path ~/code/footnote/fnh";
 
 /// The `footnote` binary: `FNO_FOOTNOTE_BIN`, else a sibling of this
 /// executable, else `footnote` on PATH.

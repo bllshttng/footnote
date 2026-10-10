@@ -83,22 +83,17 @@ jobs:
         working-directory: crates/fno
         run: cargo build --release --target ${{ matrix.target.rust-target }} --bin fno
 
-      - name: Build the footnote harness binary
-        working-directory: crates/footnote
-        run: cargo build --release --target ${{ matrix.target.rust-target }} --bin footnote
-
       - name: Package tarball
         shell: bash
         run: |
           # tar's -C is cumulative: a second relative -C resolves from inside
           # the first, so the fno leg chdir'd into
           # crates/fno-agents/target/.../crates/fno/target/... and failed to
-          # open. Anchor all three dirs at the workspace.
+          # open. Anchor both dirs at the workspace.
           tar -czf "fno-agents-${{ matrix.target.name }}.tar.gz" \
             -C "$PWD/crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
               "fno-agents" "fno-agents-daemon" "fno-agents-worker" \
-            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno" \
-            -C "$PWD/crates/footnote/target/${{ matrix.target.rust-target }}/release" "footnote"
+            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
