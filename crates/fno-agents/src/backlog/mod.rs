@@ -67,6 +67,7 @@ pub mod target_binding;
 pub mod title_gate;
 pub mod triage;
 pub mod triage_cli;
+pub mod triage_health;
 pub mod undispatched;
 pub mod update_cli;
 pub mod worked;

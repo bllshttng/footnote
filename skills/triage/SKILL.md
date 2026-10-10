@@ -368,7 +368,7 @@ decides what to do.
 ## References
 
 - `fno backlog triage` (canonical) — the v2 CLI sub-app; source in
-  `cli/src/fno/graph/triage.py`
+  the native `fno backlog triage` door
 - `scripts/triage.py` — compatibility shim that forwards to the v2 CLI
   (or falls back to the in-repo module when `fno` is not on PATH)
 - `cli/src/fno/graph/store.py` — `locked_mutate_graph()` entry point

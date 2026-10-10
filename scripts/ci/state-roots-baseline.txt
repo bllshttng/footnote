@@ -48,7 +48,6 @@ A	cli/src/fno/graph/_reconcile.py	events.jsonl	unowned	Python journal site survi
 A	cli/src/fno/graph/_reconcile.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/graph/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/graph/node_builder.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain. The site moved here verbatim from graph/cli.py with the node builder.
-A	cli/src/fno/graph/triage.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/observer/cli.py	ledger.json	unowned	call the resolver STATE_FILES names for this file.
 A	cli/src/fno/observer/isolation.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/observer/isolation.py	ledger.json	unowned	call the resolver STATE_FILES names for this file.
@@ -106,3 +105,4 @@ A	crates/fno-agents/src/backlog/birth.rs	target-state.md	unowned	the create port
 A	crates/fno-agents/src/backlog/birth.rs	events.jsonl	unowned	the create port moved the Python _events_path fallback verbatim (FNO_EVENTS_PATH else cwd/.fno/events.jsonl, as in spawn_think.py:962). Drains when a crate journal resolver lands.
 A	crates/fno-agents/src/backlog/drift_emit.rs	events.jsonl	unowned	the reconcile post-close emits stamp the record worktree's project journal (the Python twin's writer, ported); drains with the other backlog journal sites.
 A	crates/fno-agents/src/backlog/drift_emit.rs	target-state.md	unowned	read_state_frontmatter reads a plan's target-state.md for the session-satisfied emit (the Python twin's reader, ported). No resolver today; drains when a manifest resolver lands.
+A	crates/fno-agents/src/backlog/triage_health.rs	events.jsonl	unowned	The batch-lane verdict reads the scoped project root journal its Python twin named (a controller checkout must not report its own repo); the row drains with the batch metrics port.

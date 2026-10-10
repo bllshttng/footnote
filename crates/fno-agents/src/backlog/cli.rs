@@ -247,6 +247,10 @@ pub fn run(args: &[String]) -> i32 {
         "provenance" if super::provenance_cli::owns(resolved.tail) => {
             super::provenance_cli::run(resolved.tail)
         }
+        // The triage diagnostics group is native end to end: the nine
+        // actions over the engine, health, and the locked apply. Any
+        // other triage-shaped argv keeps the compat forward.
+        "triage" if super::triage_cli::owns(resolved.tail) => super::triage_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
 }

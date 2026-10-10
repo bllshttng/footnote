@@ -99,7 +99,6 @@ cli/tests/integration/test_provider_usage_live.py::test_live_provider_usage_has_
 cli/tests/integration/test_rank_operator_only.py::_binary::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_target_node_claim.py::_sandbox::pytest.skip  # on main before this ratchet: the sandbox helper skips when no dev fno-agents build exists
 cli/tests/integration/test_target_node_claim.py::_sandbox::pytest.skip  # second site: the real-acquire delegate needs the fno-py console script beside the test interpreter
-cli/tests/integration/test_triage_context.py::test_cli_context_tolerates_legacy_dict_cost_sessions::mark.skip  # on main before this ratchet
 cli/tests/integration/test_verify_child_promise.py::test_diagnostic_symmetry_unreadable::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_verify_child_promise.py::test_diagnostic_symmetry::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_worktree_cleanup_merged.py::_wire_real_reapable::pytest.skip  # on main before this ratchet

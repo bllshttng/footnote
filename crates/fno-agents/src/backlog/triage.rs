@@ -7,6 +7,90 @@
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The cwd the project auto-detection reads. A session running from a
+/// subdirectory still resolves through the git toplevel the way the Python
+/// intake's repo_root does.
+pub(crate) fn intake_repo_root() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    Some(crate::paths::worktree_repo_root(&cwd))
+}
+
+/// Project auto-detection from node cwd fields (graph/_intake.py
+/// detect_project): the first node whose cwd normalizes to the repo root
+/// names the project; else the first node under the repo root does.
+pub fn detect_project(entries: &[Value]) -> Option<String> {
+    let root = intake_repo_root()?;
+    let norm_root = super::super::territory::normalize_path(&root.to_string_lossy());
+    let root_with_sep = format!("{}/", norm_root.trim_end_matches('/'));
+    let mut fallback: Option<String> = None;
+    for e in entries {
+        let Some(raw) = e.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let norm_cwd = super::super::territory::normalize_path(raw);
+        if norm_cwd == norm_root {
+            return e.get("project").and_then(Value::as_str).map(str::to_string);
+        }
+        if fallback.is_none() && norm_cwd.starts_with(&root_with_sep) {
+            fallback = e.get("project").and_then(Value::as_str).map(str::to_string);
+        }
+    }
+    fallback
+}
+
+/// The work-map root for one project name, or None (graph/_intake.py
+/// project_root_from_settings): a pure map lookup over the same workspace
+/// shapes both sides read; unmapped or absent reads None, never an error.
+pub fn project_root_from_settings(project: Option<&str>) -> Option<String> {
+    let project = project.filter(|p| !p.is_empty())?;
+    let cwd = std::env::current_dir().ok()?;
+    let map = crate::territory::workspace_paths(&cwd);
+    map.get(project).cloned()
+}
+
+/// Scope the entries the way the collectors do (graph/_intake.py
+/// filter_by_project): an explicit project filters to it, `show_all`
+/// passes through, else the auto-detected project filters, else all.
+pub fn filter_by_project(entries: &[Value], project: Option<&str>, show_all: bool) -> Vec<Value> {
+    if let Some(project) = project.filter(|p| !p.is_empty()) {
+        return entries
+            .iter()
+            .filter(|e| e.get("project").and_then(Value::as_str) == Some(project))
+            .cloned()
+            .collect();
+    }
+    if show_all {
+        return entries.to_vec();
+    }
+    match detect_project(entries) {
+        Some(detected) => entries
+            .iter()
+            .filter(|e| e.get("project").and_then(Value::as_str) == Some(&detected))
+            .cloned()
+            .collect(),
+        None => entries.to_vec(),
+    }
+}
+
+/// The human scope line the report and context carry.
+pub fn resolve_scope(project: Option<&str>, all_projects: bool, entries: &[Value]) -> String {
+    if let Some(project) = project.filter(|p| !p.is_empty()) {
+        return format!("project '{project}'");
+    }
+    if all_projects {
+        return "all projects".to_string();
+    }
+    match detect_project(entries) {
+        Some(detected) => format!("project '{detected}' (auto-detected)"),
+        None => {
+            "all projects (no project detected - run an intake to register this repo)".to_string()
+        }
+    }
+}
+
 /// The priority ladder's rank (graph/_constants.py PRIORITY_ORDER).
 pub fn priority_order(priority: Option<&str>) -> i64 {
     match priority {
@@ -707,4 +791,216 @@ pub fn emit_triage_applied(applied: &Value, priority_moves: &[Value], proposed: 
         m.insert("dropped".to_string(), json!(dropped));
         m
     });
+}
+
+/// One inbox (fu-) item the context carries beside graph candidates:
+/// `{id, id_type: "fu", title, priority, source: "inbox"}` (triage.py
+/// _collect_inbox_items). The `fu-` token and `(pN)` suffix grammar is the
+/// capture tier's line format; only OPEN checkbox rows count.
+pub fn collect_inbox_items() -> Vec<Value> {
+    let Some(path) = inbox_markdown_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(item) = parse_inbox_line(line) else {
+            continue;
+        };
+        if item.0 != "open" {
+            continue;
+        }
+        out.push(json!({
+            "id": item.1,
+            "id_type": "fu",
+            "title": item.2,
+            "priority": item.3,
+            "source": "inbox",
+        }));
+    }
+    out
+}
+
+/// The capture-tier inbox markdown (fno.paths.inbox_path): the config pin,
+/// the parking-lot unification, then the vault and legacy fallbacks.
+pub fn inbox_markdown_path() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let root = crate::paths::worktree_repo_root(&cwd);
+    // 1. config.paths.inbox_path, 2. config.post_merge.parking_lot_path.
+    for keys in [["paths", "inbox_path"], ["post_merge", "parking_lot_path"]] {
+        if let Some(pin) = crate::agents_config::config_lookup(&cwd, &keys) {
+            let raw = pin.as_str().unwrap_or_default();
+            if !raw.is_empty() {
+                return Some(std::path::PathBuf::from(
+                    super::super::territory::normalize_path(raw),
+                ));
+            }
+        }
+    }
+    // 3. the vault default when internal/ exists, legacy inbox.md keeping
+    // its claim; 4/5. the legacy files alone; 6. the parking-lot default.
+    let internal = root.join("internal");
+    let vault_inbox = internal.join("fno").join("backlog").join("parking-lot.md");
+    let legacy_internal = internal.join("fno").join("backlog").join("inbox.md");
+    let legacy_dotfno = root.join(".fno").join("backlog").join("inbox.md");
+    if internal.is_dir() {
+        if legacy_internal.is_file() {
+            return Some(legacy_internal);
+        }
+        return Some(vault_inbox);
+    }
+    if legacy_internal.is_file() {
+        return Some(legacy_internal);
+    }
+    if legacy_dotfno.is_file() {
+        return Some(legacy_dotfno);
+    }
+    Some(root.join(".fno").join("backlog").join("parking-lot.md"))
+}
+
+/// One `- [mark] fu-token <sep> title` line -> (status, id, title,
+/// priority). The em-dash and hyphen separators both parse; a trailing
+/// `(pN)` splits off as the priority. None on any shape mismatch.
+fn parse_inbox_line(line: &str) -> Option<(String, String, String, Option<String>)> {
+    let rest = line.strip_prefix("- [")?;
+    let mut parts = rest.splitn(2, ']');
+    let mark = parts.next()?;
+    let after = parts.next()?.strip_prefix(' ')?;
+    if mark.len() != 1 {
+        return None;
+    }
+    let status = match mark {
+        " " => "open",
+        "x" => "promoted",
+        "-" => "dismissed",
+        _ => return None,
+    };
+    let mut tokens = after.splitn(3, ' ');
+    let fu_id = tokens.next()?;
+    if !fu_id.starts_with("fu-") || fu_id.len() < 4 {
+        return None;
+    }
+    let body = fu_id[3..].to_string();
+    if body.is_empty()
+        || !body
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        || !body
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return None;
+    }
+    let sep = tokens.next()?;
+    if sep != "-" && sep != "\u{2014}" {
+        return None;
+    }
+    let title_raw = tokens.next()?;
+    let (title, priority) = split_priority_suffix(title_raw);
+    Some((status.to_string(), format!("fu-{body}"), title, priority))
+}
+
+/// `title (p2)` -> (`title`, Some("p2")); no suffix -> (raw, None).
+fn split_priority_suffix(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim_end();
+    let mut chars = trimmed.char_indices().rev();
+    let close = chars.find(|(_, c)| *c == ')').map(|(i, _)| i);
+    if let Some(close) = close {
+        let open = trimmed[..close].rfind('(');
+        if let Some(open) = open {
+            let candidate = &trimmed[open + 1..close];
+            if candidate.len() == 2
+                && candidate.starts_with('p')
+                && candidate[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                return (
+                    trimmed[..open].trim_end().to_string(),
+                    Some(candidate.to_string()),
+                );
+            }
+        }
+    }
+    (raw.trim().to_string(), None)
+}
+
+/// Project goals from the config chain (triage.py _load_goals):
+/// `project.goals` first, then a legacy top-level `goals:` block, else
+/// empty. Normalized to the id/goal/status keys the reasoning prompt uses.
+pub fn load_goals() -> Vec<Value> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    for keys in [["project", "goals"], ["goals"]] {
+        if let Some(goals) = crate::agents_config::config_lookup(&cwd, &keys) {
+            let Some(rows) = goals.as_array() else {
+                continue;
+            };
+            let normalized: Vec<Value> = rows
+                .iter()
+                .filter(|g| g.is_object())
+                .map(|g| {
+                    let mut m = Map::new();
+                    for key in ["id", "goal", "status"] {
+                        if let Some(v) = g.get(key) {
+                            m.insert(key.to_string(), v.clone());
+                        }
+                    }
+                    Value::Object(m)
+                })
+                .collect();
+            if !normalized.is_empty() {
+                return normalized;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// The LLM-reasoning context payload (triage.py _build_context), shared by
+/// context and consistency so both reason over one identical snapshot.
+pub fn build_context(
+    deep: bool,
+    all_projects: bool,
+    project: Option<&str>,
+    roadmap_id: Option<&str>,
+) -> Result<Value, String> {
+    let entries = triage_entries()?;
+    let scoped = filter_by_project(&entries, project, all_projects);
+    let candidates = collect_candidates(&scoped, roadmap_id, deep, false);
+    let ideas = collect_candidates(&scoped, roadmap_id, deep, true);
+    let inbox_items = collect_inbox_items();
+    let goals = load_goals();
+    Ok(json!({
+        "candidates": candidates,
+        "ideas": ideas,
+        "inbox_items": inbox_items,
+        "goals": goals,
+        "mode": if deep { "deep" } else { "shallow" },
+        "count": candidates.len(),
+        "idea_count": ideas.len(),
+        "inbox_count": inbox_items.len(),
+        "scope": resolve_scope(project, all_projects, &entries),
+    }))
+}
+
+/// The pending or idea collector, scoped and priority-sorted, projected to
+/// candidate records (triage.py _collect_pending / _collect_ideas).
+pub fn collect_candidates(
+    scoped: &[Value],
+    roadmap_id: Option<&str>,
+    deep: bool,
+    idea: bool,
+) -> Vec<Value> {
+    let mut picked: Vec<Value> = scoped
+        .iter()
+        .filter(|e| {
+            e.get("roadmap_id").and_then(Value::as_str) == roadmap_id.filter(|r| !r.is_empty())
+                || roadmap_id.is_none_or(|r| r.is_empty())
+        })
+        .filter(|e| if idea { is_idea(e) } else { is_pending(e) })
+        .cloned()
+        .collect();
+    sort_entries_by_priority_created(&mut picked);
+    picked.iter().map(|e| candidate_record(e, deep)).collect()
 }
