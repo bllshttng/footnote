@@ -1,7 +1,8 @@
 name: release-binaries
 
-# Build standalone platform binaries (the `fno` front door plus all three
-# `fno-agents` binaries) into one tarball per platform. Build-only: this
+# Build standalone platform binaries (the `fno` front door, all three
+# `fno-agents` binaries, and the `footnote` harness binary) into one tarball
+# per platform. Build-only: this
 # workflow publishes nothing. It runs on manual dispatch (an inspection
 # build) or as a reusable workflow called from release.yml, which owns every
 # publish leg behind the `release` environment approval, and from
@@ -82,17 +83,22 @@ jobs:
         working-directory: crates/fno
         run: cargo build --release --target ${{ matrix.target.rust-target }} --bin fno
 
+      - name: Build the footnote harness binary
+        working-directory: crates/footnote
+        run: cargo build --release --target ${{ matrix.target.rust-target }} --bin footnote
+
       - name: Package tarball
         shell: bash
         run: |
           # tar's -C is cumulative: a second relative -C resolves from inside
           # the first, so the fno leg chdir'd into
           # crates/fno-agents/target/.../crates/fno/target/... and failed to
-          # open. Anchor both dirs at the workspace.
+          # open. Anchor all three dirs at the workspace.
           tar -czf "fno-agents-${{ matrix.target.name }}.tar.gz" \
             -C "$PWD/crates/fno-agents/target/${{ matrix.target.rust-target }}/release" \
               "fno-agents" "fno-agents-daemon" "fno-agents-worker" \
-            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno"
+            -C "$PWD/crates/fno/target/${{ matrix.target.rust-target }}/release" "fno" \
+            -C "$PWD/crates/footnote/target/${{ matrix.target.rust-target }}/release" "footnote"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
