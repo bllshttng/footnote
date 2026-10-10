@@ -74,7 +74,7 @@ if [[ -z "$DRIVER" ]]; then
   if [[ -n "${CLAUDECODE_SESSION_ID:-}" ]]; then
     DRIVER="claude-code"
   elif [[ -n "${HERMES_SESSION_ID:-}" ]] || \
-       { [[ -f "$HOME/.hermes/config.yaml" ]] && command -v hermes-agent &>/dev/null; }; then
+       { [[ -f "$HOME/.hermes/config.yaml" ]] && command -v hermes &>/dev/null; }; then
     DRIVER="hermes"
   elif command -v openclaw &>/dev/null; then
     DRIVER="openclaw"
@@ -93,18 +93,18 @@ case "$DRIVER" in
     exit 2
     ;;
   hermes)
-    cli="${HERMES_CLI:-hermes-agent}"
+    cli="${HERMES_CLI:-hermes}"
     if ! command -v "$cli" &>/dev/null; then
       exit 77
     fi
     # Build argv as two branches to avoid bash 3.2's set -u empty-array
     # bug (same workaround as driver-hermes.sh / driver-openclaw.sh).
     # Hermes preferred path inside a session is the delegate_task tool;
-    # from shell we spawn a fresh hermes process per harness-adapters.md.
+    # from shell we spawn a fresh one-shot hermes turn per harness-adapters.md.
     if [[ -n "$MODEL" ]]; then
-      "$cli" -p "$PROMPT" --model "$MODEL"
+      "$cli" chat -q "$PROMPT" -Q --model "$MODEL"
     else
-      "$cli" -p "$PROMPT"
+      "$cli" chat -q "$PROMPT" -Q
     fi
     ;;
   openclaw)
@@ -112,10 +112,12 @@ case "$DRIVER" in
     if ! command -v "$cli" &>/dev/null; then
       exit 77
     fi
+    # `openclaw agent` needs a session selector; a fresh key per spawn keeps
+    # the subagent out of the user's main session.
     if [[ -n "$MODEL" ]]; then
-      "$cli" -p "$PROMPT" --model "$MODEL"
+      "$cli" agent --message "$PROMPT" --session-key "fno-sub-$(date +%s)-$$" --model "$MODEL"
     else
-      "$cli" -p "$PROMPT"
+      "$cli" agent --message "$PROMPT" --session-key "fno-sub-$(date +%s)-$$"
     fi
     ;;
   gemini|codex)

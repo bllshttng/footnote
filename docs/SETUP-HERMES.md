@@ -1,26 +1,24 @@
-# Install footnote under hermes-agent
+# Install footnote under Hermes Agent
 
-Run footnote skills - especially the loop family (target, execute) - under hermes instead of Claude Code.
+Run footnote skills under Hermes Agent instead of Claude Code. The loop family (target, execute) runs through the loop wrapper.
 
 ## Prerequisites
 
-- Python 3.11 or later
-- [`uv`](https://github.com/astral-sh/uv) package manager
-- `hermes-agent` CLI on PATH (installed per its own instructions)
+- Hermes Agent, with the `hermes` CLI on PATH (installed per its own instructions)
+- A working default model in `~/.hermes/config.yaml`
 - `git` and `bash`
 
 ```bash
-python --version    # >= 3.11
-command -v uv
-command -v hermes-agent
+command -v hermes
+hermes chat -q 'Reply with: ok' -Q
 command -v bash
 ```
 
-If any of these are missing, install them before continuing. The footnote plugin itself has no runtime dependencies beyond bash and standard Unix tools.
+The second command must print a reply. If it fails, fix the model or provider first, for example with `hermes config set model.default <model>`. The `hermes-agent` command is Hermes's legacy runner. footnote does not use it.
 
 ## 1. Install footnote skills
 
-Hermes loads skills from `~/.hermes/skills/` (see `agent/skill_commands.py:210`). Symlink the footnote skills directory into that path:
+Hermes loads skills from `~/.hermes/skills/`. Symlink the footnote skills directory into that path:
 
 ```bash
 mkdir -p ~/.hermes/skills
@@ -30,15 +28,14 @@ ln -sfn /path/to/footnote/skills ~/.hermes/skills/footnote
 Verify the symlink:
 
 ```bash
-ls -la ~/.hermes/skills/footnote/SKILL.md 2>/dev/null || \
-  ls ~/.hermes/skills/footnote/ | head -5
+ls ~/.hermes/skills/footnote/
 ```
 
-Invoking `hermes-agent -p "/think what should I build next"` now loads the `think` skill and runs it. The `hermes` column in [docs/harnesses/verb-matrix.md](./harnesses/verb-matrix.md) reads `unmeasured` on every verb until a capability row is measured for it. [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) explains the cells. The loop family needs the next two steps.
+`hermes chat -q "/think what should I build next"` now loads the `think` skill and runs it. The `hermes` column in [docs/harnesses/verb-matrix.md](./harnesses/verb-matrix.md) reads `unmeasured` on every verb until a capability row is measured for it. [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) explains the cells.
 
 ## 2. Install the loop wrapper
 
-The wrapper runs hermes as a subprocess, scans its stdout for `<promise>MISSION COMPLETE</promise>`, and re-invokes it with conversation history re-hydrated until the tag appears or a safety cap is hit. Without the wrapper, hermes exits at `api_call_count >= max_iterations` (`run_agent.py:9333`) regardless of whether target considered the work done.
+The wrapper is `fno-agents loop run` with the `hermes` driver (`scripts/lib/driver-hermes.sh`). Each iteration is one `hermes chat -q` turn with `--format stream-json --yolo`. The turn's last JSONL record is `result`, and it carries the Hermes session id. The next iteration passes that id to `--resume`, so Hermes keeps the conversation in its own session store.
 
 ```bash
 mkdir -p ~/.local/bin
@@ -51,82 +48,47 @@ Add `~/.local/bin` to `$PATH` if it is not already. Then:
 run-target-loop --driver hermes --max-iter 10 --prompt-file /tmp/my-prompt.txt
 ```
 
-Auto-detection falls back to `--driver hermes` when `$HERMES_SESSION_ID` is set or `~/.hermes/config.yaml` exists and `hermes-agent` is on PATH.
+`--max-turns` maps to Hermes `--max-turns`, the tool-call cap per turn. `--model` maps to Hermes `--model`.
 
-## 3. Install the promise-tag reader (optional but recommended)
+The loop runtime stops a run on a `termination` event. Claude Code emits it from its Stop hook through `fno-agents loop-check`. Hermes does not emit it yet, so a Hermes run continues to `--max-iter` and exits 1, even after the work is done.
 
-Without the reader, the wrapper falls back to raw `grep <promise>MISSION COMPLETE</promise>` on hermes stdout. The grep path is real and works, but it has edge cases (tag nested in a code block, chunked output, ANSI wrapping).
+## 3. Install the promise-tag reader (optional)
 
-The reader plugin gets structured access to the final assistant message and writes `.fno/target-promise.signal` with the last tag's content. The wrapper reads that file before falling back to the grep.
-
-### Option A (preferred, portable): SKILL.md-side sentinel
-
-This is already baked into `skills/target/SKILL.md`. When the assistant emits a `<promise>` tag, the skill instructs it to also write `.fno/target-promise.signal`. No bot-side code required.
-
-No action needed if you are running a recent footnote checkout.
-
-### Option B (hermes-specific reinforcement): Python plugin
-
-Robust against model regressions where the LLM forgets the Option A instruction. Install the Python reader plugin:
+The reader is a Hermes plugin. After each model reply it writes `.fno/target-promise.signal` with the last `<promise>` tag's content. The signal is a record of the model's claim. The loop runtime does not stop on it.
 
 ```bash
 mkdir -p ~/.hermes/plugins
 ln -sfn /path/to/footnote/plugins/hermes/promise-tag-reader \
   ~/.hermes/plugins/promise-tag-reader
+hermes plugins enable promise-tag-reader
 ```
 
-Hermes picks up `~/.hermes/plugins/*` on startup. Confirm by running `hermes-agent` and checking its startup log for `plugin loaded: promise-tag-reader`.
+A directory plugin needs a `plugin.yaml` and an entry under `plugins.enabled` in `config.yaml`. Without both, Hermes does not load it. Confirm with `hermes plugins list`.
 
 ## 4. Smoke test
-
-From any repo (throwaway worktrees are fine):
-
-```bash
-cd /tmp
-git init hermes-target-smoke
-cd hermes-target-smoke
-mkdir -p .fno
-
-cat > /tmp/hermes-smoke-prompt.txt << 'EOF'
-Output exactly this and nothing else:
-
-<promise>MISSION COMPLETE: smoke test</promise>
-EOF
-
-run-target-loop --driver hermes --max-iter 3 --prompt-file /tmp/hermes-smoke-prompt.txt
-```
-
-Expected outcome:
-
-- Exit code 0
-- `.fno/target-promise.signal` exists and contains `MISSION COMPLETE: smoke test`
-- `.fno/target-loop.log` shows exactly one iteration
-
-### Scripted verification
-
-Run the full smoke test harness to verify the install end-to-end:
 
 ```bash
 bash tests/ootb/hermes-smoke.sh
 ```
 
-The script creates a throwaway worktree of your hermes-agent checkout, symlinks the footnote skill and plugin directories, and runs the wrapper with a hello-world prompt. Exit codes:
+The script creates a throwaway worktree of your Hermes checkout, symlinks the footnote skill and plugin directories, and runs the wrapper with a hello-world prompt. Exit codes:
 
 - **0** - loop completed, sentinel written, log shows one iteration
-- **1** - wrapper failed; see stderr for the captured wrapper output
-- **77** - prerequisites missing (`hermes-agent` not on PATH or no checkout at `$HERMES_REPO`). Not a failure - this is the standard "skipped" signal.
+- **1** - wrapper failed, see stderr for the captured wrapper output
+- **77** - prerequisites missing (`hermes` not on PATH or no checkout at `$HERMES_REPO`). This is the standard skipped signal, not a failure.
 
-Override the hermes checkout path with `HERMES_REPO=/path/to/hermes-agent bash tests/ootb/hermes-smoke.sh`.
+Until Hermes emits a `termination` event, the wrapper exits 1 at the iteration cap, so this script fails at the exit-code check.
+
+Override the Hermes checkout path with `HERMES_REPO=/path/to/hermes-agent bash tests/ootb/hermes-smoke.sh`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `run-target-loop: hermes-agent not found` | CLI not on PATH | Add it to PATH or pass the absolute path; wrapper exits 77 (skipped) when the driver CLI is missing. |
-| Wrapper loops forever at max-iter | `<promise>` tag never emitted | Run the skill once without the wrapper and verify the tag appears in the raw output. If not, the model is not honoring the skill instruction. |
-| `.fno/target-promise.signal` stale between runs | Wrapper did not clean up | The wrapper deletes the signal at iteration start; if a previous run crashed, remove it manually. |
-| Nix-wrapped invocation fails | Nix shell not detected | Hermes auto-wraps in Nix; pass `--no-nix` if the project does not use Nix. See hermes README. |
-| `.env` file writes blocked | footnote skill policy | Expected - use `.env.local` or `.envrc` for secrets. |
+| Wrapper exits 77 | `hermes` not on PATH | Add it to PATH, or set `HERMES_CLI` to the binary. |
+| Every iteration fails with `HTTP 404` in the `result` record | The default model is gone | Set a new one with `hermes config set model.default <model>`. |
+| Wrapper runs to `--max-iter` | No `termination` event from Hermes | Expected until Hermes emits one, see section 2. |
+| `.env` file writes blocked | footnote skill policy | Expected. Use `.env.local` or `.envrc` for secrets. |
 
 ## Switching drivers mid-project
 
@@ -136,16 +98,16 @@ Set `$FNO_DRIVER` to override auto-detection:
 FNO_DRIVER=claude-code run-target-loop --prompt-file ...
 ```
 
-This is useful when running the same repo under Claude Code and hermes on alternate days.
+Use it to run the same repo under Claude Code and Hermes on alternate days.
 
-## Known limitations (v1)
+## Known limitations
 
-- Subagent dispatch on hermes uses `delegate_task` (see `docs/harnesses/harness-adapters.md`). Parallel children run via hermes `ThreadPoolExecutor`, default 3-concurrent. Configurable per-child model via `model_override`.
-- Cache-metric features from Claude Code (`token-doctor`) are not available on hermes. See compatibility in [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md).
-- Claude Code's Stop-hook replacement here is the external wrapper loop, not an in-process hook. Signals are delivered via the sentinel file, not via process-return semantics.
+- Subagent dispatch on Hermes uses `delegate_task` (see `docs/harnesses/harness-adapters.md`).
+- Cache-metric features from Claude Code (`token-doctor`) are not available on Hermes. See [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md).
+- The loop does not stop on its own yet, see section 2.
 
 ## What next
 
-- Run `hermes-agent -p "/target fix the typo in README"` to see the full loop in action.
+- Run `hermes chat -q "/target fix the typo in README"` to see one target turn.
 - Read [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) to plan which footnote skills fit your workflow.
-- See [SETUP-OPENCLAW.md](./SETUP-OPENCLAW.md) if you also run openclaw.
+- For OpenClaw, see [SETUP-OPENCLAW.md](./SETUP-OPENCLAW.md).

@@ -8,7 +8,7 @@
 # Exit codes:
 #   0  loop completed with promise (one iteration, sentinel written)
 #   1  test failed (see stderr)
-#   77 skipped - hermes-agent not on PATH or checkout not present
+#   77 skipped - hermes not on PATH or checkout not present
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ fail() { printf '[hermes-smoke] FAIL: %s\n' "$*" >&2; exit 1; }
 skip() { printf '[hermes-smoke] SKIP: %s\n' "$*" >&2; exit 77; }
 
 # 0. Prereqs
-command -v hermes-agent &>/dev/null || skip "hermes-agent not on PATH"
+command -v hermes &>/dev/null || skip "hermes not on PATH"
 command -v git &>/dev/null || fail "git required"
 [[ -f "$FIXTURE" ]] || fail "missing fixture at $FIXTURE"
 

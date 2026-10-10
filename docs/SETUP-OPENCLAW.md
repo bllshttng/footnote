@@ -35,11 +35,13 @@ Verify:
 ls ~/.openclaw/workspace/skills/footnote/ | head -5
 ```
 
-Invoking `openclaw -p "/think what should I build next"` now loads the `think` skill and runs it. The `openclaw` column in [docs/harnesses/verb-matrix.md](./harnesses/verb-matrix.md) reads `unmeasured` on every verb until a capability row is measured for it. [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) explains the cells. The loop family needs the next two steps.
+`openclaw agent --session-key fno-try --message "/think what should I build next"` now loads the `think` skill and runs it. The `openclaw` column in [docs/harnesses/verb-matrix.md](./harnesses/verb-matrix.md) reads `unmeasured` on every verb until a capability row is measured for it. [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) explains the cells. The loop family needs the next two steps.
 
 ## 2. Install the loop wrapper
 
-The wrapper runs openclaw as a subprocess, scans its stdout for `<promise>MISSION COMPLETE</promise>`, and re-invokes it with conversation history re-hydrated until the tag appears or a safety cap is hit. Openclaw's `agent_end` hook (`plugins/hook-types.ts:62`) is observational only, not blocking, so an external wrapper is required for autonomous execution.
+The wrapper is `fno-agents loop run` with the `openclaw` driver (`scripts/lib/driver-openclaw.sh`). Each iteration is one `openclaw agent --json` turn through the Gateway. Set `OPENCLAW_LOCAL=1` to run the embedded agent with `--local` instead. The first turn opens a fresh session key. The JSON reply carries `sessionId`, and the next iteration passes it to `--session-id`, so openclaw keeps the conversation in its own store. openclaw has no per-turn tool cap, so `--max-turns` is not passed.
+
+The loop runtime stops a run on a `termination` event. Claude Code emits it from its Stop hook through `fno-agents loop-check`. openclaw does not emit it yet, so an openclaw run continues to `--max-iter` and exits 1, even after the work is done.
 
 ```bash
 mkdir -p ~/.local/bin
@@ -105,9 +107,8 @@ run-target-loop --driver openclaw --max-iter 3 --prompt-file /tmp/openclaw-smoke
 
 Expected outcome:
 
-- Exit code 0
 - `.fno/target-promise.signal` exists and contains `MISSION COMPLETE: smoke test`
-- `.fno/target-loop.log` shows exactly one iteration
+- Exit code 1 at the iteration cap, until openclaw emits a `termination` event (see section 2)
 
 ### Scripted verification
 
@@ -130,7 +131,7 @@ Override the openclaw checkout path with `OPENCLAW_REPO=/path/to/openclaw bash t
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `run-target-loop: openclaw not found` | CLI not on PATH | Add it to PATH or pass the absolute path; wrapper exits 77 (skipped) when the driver CLI is missing. |
-| Wrapper loops forever at max-iter | `<promise>` tag never emitted | Run the skill once without the wrapper and verify the tag appears in the raw output. If not, the model is not honoring the skill instruction. |
+| Wrapper runs to `--max-iter` | No `termination` event from openclaw | Expected until openclaw emits one, see section 2. |
 | `.fno/target-promise.signal` stale between runs | Wrapper did not clean up | The wrapper deletes the signal at iteration start; if a previous run crashed, remove it manually. |
 | Monorepo scope warnings | footnote skill boundary | Expected - footnote respects each project's monorepo scope. Narrow scope with `--scope path/to/project`. |
 | Plugin not loaded | Openclaw discovery path mismatch | Confirm the symlink target exists and `openclaw --list-plugins` shows it. Try restarting openclaw. |
@@ -147,12 +148,12 @@ This is useful when running the same repo under Claude Code and openclaw on alte
 
 ## Known limitations (v1)
 
-- Subagent dispatch on openclaw uses subprocess-spawn (`process({action: "log", command: "openclaw -p '...'"})`). Sequential unless the skill orchestrates parallelism via multiple `process` calls. See `docs/harnesses/harness-adapters.md`.
+- Subagent dispatch on openclaw uses subprocess-spawn (`process({action: "log", command: "openclaw agent --session-key <key> --message '...'"})`). Sequential unless the skill orchestrates parallelism via multiple `process` calls. See `docs/harnesses/harness-adapters.md`.
 - Multi-soul orchestration (one openclaw-as-orchestrator + N openclaw-as-workers with distinct `SOUL.md` personas) is future work. v1 treats openclaw subagents as single-soul subprocess spawns. The `openclaw-persona-forge` skill in the upstream skills pack generates the SOUL.md files. Integration into the target loop is a later spec.
 - Cache-metric features from Claude Code (`token-doctor`) are not available on openclaw. See compatibility in [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md).
 
 ## What next
 
-- Run `openclaw -p "/target fix the typo in README"` to see the full loop in action.
+- Run `openclaw agent --session-key fno-try --message "/target fix the typo in README"` to see one target turn.
 - Read [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) to plan which footnote skills fit your workflow.
 - See [SETUP-HERMES.md](./SETUP-HERMES.md) if you also run hermes-agent.

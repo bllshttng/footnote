@@ -207,7 +207,7 @@ pub fn resolve_driver_binary(driver: &str, cli_alias: Option<&str>) -> String {
             // 4. Default.
             "claude".to_string()
         }
-        "hermes" => "hermes-agent".to_string(),
+        "hermes" => "hermes".to_string(),
         "openclaw" => "openclaw".to_string(),
         "opencode" => "opencode".to_string(),
         _ => "claude".to_string(), // unreachable after whitelist check
@@ -834,6 +834,6 @@ mod tests {
     fn loop_wrapper_drivers_resolve_to_fixed_binaries() {
         assert_eq!(resolve_driver_binary("opencode", None), "opencode");
         assert_eq!(resolve_driver_binary("openclaw", None), "openclaw");
-        assert_eq!(resolve_driver_binary("hermes", None), "hermes-agent");
+        assert_eq!(resolve_driver_binary("hermes", None), "hermes");
     }
 }
