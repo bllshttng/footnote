@@ -209,9 +209,16 @@ pub(crate) struct Write {
     pub(crate) document: Value,
     pub(crate) revision: i64,
     path: PathBuf,
+    _lock: crate::graph_store::BoundedLock,
 }
 
 pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
+    // The registry lives in graph.db, so its writers queue on the same
+    // bounded flock the graph writers hold (x-8364). BEGIN IMMEDIATE under
+    // a held graph lock used to lose the 5 s busy race and die with
+    // "database is locked" (spawn failure 2026-10-10). The json spelling is
+    // the one graph_lock_path canonicalizes for every graph writer.
+    let _lock = graph_lock(path)?;
     let connection = open(path)?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
@@ -223,7 +230,27 @@ pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
         document,
         revision,
         path: path.to_path_buf(),
+        _lock,
     })
+}
+
+/// The bounded lock over the graph the registry at `path` lives in, on the
+/// same `<graph>.lock` file every graph writer takes. Fails `begin` when the
+/// queue cannot serve this writer inside the bound: proceeding without the
+/// lock would reintroduce the busy race this change retires.
+fn graph_lock(path: &Path) -> Result<crate::graph_store::BoundedLock, StateError> {
+    let home = path
+        .parent()
+        .ok_or_else(|| failure(path, "registry has no parent"))?;
+    let root = if home.file_name().is_some_and(|name| name == "agents") {
+        home.parent()
+            .ok_or_else(|| failure(path, "registry has no state root"))?
+    } else {
+        home
+    };
+    let json = crate::state_layout::place(root, "graph.json");
+    crate::graph_store::BoundedLock::acquire(&json, crate::graph_store::DEFAULT_LOCK_TIMEOUT)
+        .map_err(|e| failure(path, e))
 }
 
 impl Write {
