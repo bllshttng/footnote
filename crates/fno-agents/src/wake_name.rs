@@ -72,6 +72,20 @@ pub(crate) fn lookup_beside(registry_path: &Path, session_id: &str) -> Option<St
     })
 }
 
+/// The shape a spawnable name keeps: alphanumerics plus `-` `_` `.`. One
+/// predicate for both filters that name a session (the relaunch name and
+/// the wake-name transcript rung), so the two cannot drift.
+pub(crate) fn spawn_safe_name(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// A transcript past this many bytes is skipped: the rung is best-effort,
+/// and a wake must not pay a multi-MB scan to answer a name. Titles ride
+/// normal records, so the cap only sheds pathological files.
+const TRANSCRIPT_SCAN_CAP_BYTES: u64 = 8 * 1024 * 1024;
+
 /// The last spawn-safe name this uuid's transcript carries: the newest
 /// `custom-title` (customTitle) or `agent-name` (agentName) record whose
 /// value is non-empty, not this session's own `wake-<handle>` alias, and
@@ -86,6 +100,12 @@ pub(crate) fn lookup_transcript(claude_home: &ClaudeHome, session_id: &str) -> O
         else {
             continue;
         };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() > TRANSCRIPT_SCAN_CAP_BYTES {
+            continue;
+        }
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
@@ -106,10 +126,7 @@ pub(crate) fn lookup_transcript(claude_home: &ClaudeHome, session_id: &str) -> O
                 continue;
             };
             // A spawn name only: the fallback's answer must be spawnable.
-            if !value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-            {
+            if !spawn_safe_name(value) {
                 continue;
             }
             name = Some(value.to_string());
