@@ -678,7 +678,6 @@ FIELD_META: dict[str, Meta] = {
     "status_fanout.interval_secs": Meta("advanced", "Seconds between status-fanout ticks per project (daemon host)."),
     "status_fanout.http_timeout_secs": Meta("advanced", "Bounded per-webhook HTTP timeout for a status sink."),
     "status_fanout.retries": Meta("advanced", "Retry budget per webhook dispatch before drop/short-circuit."),
-    "status_fanout.short_circuit_backoff_secs": Meta("advanced", "Seconds a sink sits out after a short-circuit before the next dispatch attempt."),
     # --- config.lead.* (the lead loop; both default false) ---
     "lead.enabled": Meta("advanced", "Arm the lead loop: hold a lead session open while its board names work it can shrink. Defaults false."),
     "lead.autonomous_merge": Meta("advanced", "Let the lead merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the lead's own work."),

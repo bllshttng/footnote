@@ -282,9 +282,7 @@ def _utc_timestamp(value: Any) -> _dt.datetime | None:
     if m is None:
         return None
     frac = m.group(1)
-    if frac is not None and len(frac) > 6:
-        # Nanosecond fractions (Rust emitters) floor to microseconds; every
-        # consumer keys on the same truncated instant.
+    if frac is not None and len(frac) > 6:  # nanoseconds -> microseconds
         value = f"{value[: value.index('.')]}.{frac[:6]}Z"
     try:
         parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))

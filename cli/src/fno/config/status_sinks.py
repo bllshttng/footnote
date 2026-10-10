@@ -54,7 +54,6 @@ class StatusFanoutConfig(BaseModel):
     interval_secs: int = Field(default=5, ge=1)
     http_timeout_secs: int = Field(default=5, ge=1)
     retries: int = Field(default=2, ge=0)
-    short_circuit_backoff_secs: int = Field(default=300, ge=0)
 
 
 class StatusSinkConfig(BaseModel):

@@ -29,7 +29,6 @@ import json
 import os
 import string
 import threading
-import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,7 +74,6 @@ class TickResult:
     locked_out: bool = False  # another tick held the per-project lock; skipped
     lease_lost: bool = False  # lock was stolen; cursor persistence was aborted
     undeliverable_sinks: "tuple[str, ...]" = ()  # enabled sinks' url unresolved; no read attempted
-    parked_sinks: "tuple[str, ...]" = ()  # sinks sitting out their short-circuit backoff
 
 
 # ── event stream (rotation-aware, skip-and-count) ───────────────────────────
@@ -143,13 +141,9 @@ def _stream_pass(
 
     query: "dict[str, Any]" = {"since_ts": since_ts, "after_seq": after_seq}
     if since_ts:
-        # Also bound the window at SQL level (``ts_ms >= ?``). The native fold
-        # applies ``since_ts`` only after materializing the window's rows, so
-        # without this a cursor-less bootstrap pass scans the whole store no
-        # matter how fresh its floor is.
+        # SQL-level window bound; the fold applies since_ts only post-read.
         query["since_ms"] = int(_timestamp_key(since_ts).timestamp() * 1000)
-    rows, skipped, *high = read_projection(
-        active, "--status-stream", query)
+    rows, skipped, *high = read_projection(active, "--status-stream", query)
     return rows, skipped, (high[0] if high else None)
 
 
@@ -180,17 +174,9 @@ def _eof_cursor(active: Path) -> "tuple[str, int]":
 
 
 def _fresh_floor(active: Path) -> "tuple[str, int]":
-    """The fresh-sink starting floor on a store-backed journal: wall-clock now.
-
-    A store answers a read with every retained generation, so the file-EOF
-    floor ``("", 0)`` - "deliver everything henceforth" over the files -
-    reads as "from the epoch" over the store: the bootstrap tick rescans the
-    whole store, and on a large one the daemon's child cap kills the tick
-    before any cursor persists, so every tick bootstraps again and the fanout
-    runs nonstop. ``now`` is the floor the scan-cursor branch already uses;
-    its clock-skew window (an event written seconds before the first tick is
-    not backfilled) is the documented fresh-sink semantics. Store-less
-    journals keep the file read, which is their whole history."""
+    """Fresh-sink floor on a store-backed journal: wall-clock now. A store
+    answers with every retained generation, so the file-EOF floor ("", 0)
+    reads as "from the epoch" over the store. Store-less keeps the read."""
     if (active.parent / "events.db").exists():
         return (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), 0)
     return _eof_cursor(active)
@@ -259,43 +245,6 @@ def _log_error(name: str, project_root: Optional[Path], record: dict[str, Any]) 
         pass  # an unwritable error log must never break the tick
 
 
-# ── short-circuit backoff (per-sink park) ───────────────────────────────────
-#
-# The tick is a fresh process every interval, so a dead webhook (connect-class)
-# would otherwise be re-attempted - retries x timeouts + backoff sleeps, ~20s -
-# on EVERY tick, forever, while its held cursor keeps the backlog window (and
-# the tick's read) growing. A park deadline beside the cursors survives the
-# process boundary; a lost one only costs an extra attempt.
-
-
-def _backoff_path(project_root: Optional[Path]) -> Path:
-    return _state_dir(project_root) / "short-circuit-backoff.json"
-
-
-def _read_backoff(project_root: Optional[Path]) -> "dict[str, float]":
-    try:
-        obj = json.loads(_backoff_path(project_root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(obj, dict):
-        return {}
-    return {
-        k: v for k, v in obj.items()
-        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
-    }
-
-
-def _write_backoff(project_root: Optional[Path], backoff: "dict[str, float]") -> None:
-    path = _backoff_path(project_root)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(backoff, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        pass  # a lost backoff only costs an extra retry next tick
-
-
 # ── filter ──────────────────────────────────────────────────────────────────
 
 
@@ -336,22 +285,11 @@ def run_tick(
         # cursor resumes the backlog once the url resolves.
         return TickResult(undeliverable_sinks=tuple(s.name for s in enabled))
 
-    backoff = _read_backoff(project_root)
-    now = time.time()
-    parked = {s.name for s in enabled if backoff.get(s.name, 0.0) > now}
-    if len(parked) == len(enabled):
-        # Every enabled sink is sitting out a short-circuit backoff: dispatching
-        # is a doomed retry and each attempt holds the tick while the parked
-        # sink's backlog window keeps growing. Read nothing; wait it out.
-        return TickResult(parked_sinks=tuple(sorted(parked)))
-
     lock = _TickLock(project_root)
     if not lock.acquire():
         return TickResult(locked_out=True)
     try:
-        return _run_locked(
-            project_root, enabled, dry_run, dispatch, lock.verify,
-            parked=parked, fanout=fanout, backoff=backoff)
+        return _run_locked(project_root, enabled, dry_run, dispatch, lock.verify)
     finally:
         lock.release()
 
@@ -362,14 +300,7 @@ def _run_locked(
     dry_run: bool,
     dispatch: Dispatcher,
     verify_lease: Callable[[], bool],
-    *,
-    parked: "frozenset[str] | set[str]" = frozenset(),
-    fanout: Optional[StatusFanoutConfig] = None,
-    backoff: "Optional[dict[str, float]]" = None,
 ) -> TickResult:
-    fanout = fanout or StatusFanoutConfig()
-    backoff = backoff or {}
-    live = [s for s in sinks if s.name not in parked]
     active = paths.project_log("events.jsonl", project_root=project_root)
     scan = (_read_cursor(_SCAN, project_root) or (None, None))[1]
     cursors = {s.name: _read_cursor(s.name, project_root) for s in sinks}
@@ -387,10 +318,7 @@ def _run_locked(
 
     # Read from the oldest cursor ts INCLUSIVE so every sink sees its own same-ts
     # boundary events; the per-sink (ts, n) tiebreak below decides what is new.
-    # A parked sink sits this window out, so its held cursor does not drag the
-    # read back to its backlog; the frozen seq floor below keeps that backlog
-    # intact for the tick it resumes on.
-    min_ts = min((start[s.name][0] for s in (live or sinks)), key=_timestamp_key)
+    min_ts = min((c[0] for c in start.values()), key=_timestamp_key)
     events, skipped, high = _stream_since(active, min_ts, scan)
     if scan is None and high is not None and events:
         # A first store-backed pass: the journal EOF can predate the store's
@@ -421,7 +349,7 @@ def _run_locked(
         occ[event_key] = idx + 1
         for s in sinks:
             st = state[s.name]
-            if st.short_circuited or s.name in parked:
+            if st.short_circuited:
                 continue
             cts, cn = st.new_cursor  # type: ignore[misc]  # always a tuple here
             cursor_key = _timestamp_key(cts)
@@ -463,14 +391,10 @@ def _run_locked(
     # dispatch so the next tick never backfills.
     if not dry_run:
         # A held (short-circuited) sink re-reads this window, so the seq stays.
-        # A parked sink's held backlog may predate this window entirely, so the
-        # seq floor freezes for as long as any sink parks; its ts cursor still
-        # replays the backlog on the tick the backoff expires. Past an advance
-        # no same-ts peer remains, so counts restart at 0.
+        # Past an advance no same-ts peer remains, so counts restart at 0.
         # Cursors land first: a crash between the writes re-delivers.
         advance = high is not None and high != scan
         advance = advance and not any(state[s.name].short_circuited for s in sinks)
-        advance = advance and not parked
         for s in sinks:
             st = state[s.name]
             cursor = st.new_cursor
@@ -495,23 +419,9 @@ def _run_locked(
                 _write_cursor(_SCAN, ("", high), project_root)
             except OSError:
                 pass  # the next tick re-reads this window; ts cursors dedupe
-        # Park/unpark from this pass's outcomes: a short-circuited sink sits
-        # out its backoff; a delivered or dropped row proves the sink live
-        # again and clears any stale deadline. A parked sink records nothing.
-        new_backoff = dict(backoff)
-        for s in live:
-            st = state[s.name]
-            if st.short_circuited:
-                if fanout.short_circuit_backoff_secs > 0:
-                    new_backoff[s.name] = time.time() + fanout.short_circuit_backoff_secs
-            elif (st.dispatched or st.dropped) and s.name in new_backoff:
-                del new_backoff[s.name]
-        if new_backoff != backoff and verify_lease():
-            _write_backoff(project_root, new_backoff)
 
     return TickResult(
-        sinks=[state[s.name] for s in sinks], skipped_lines=skipped, rows_read=len(events),
-        parked_sinks=tuple(sorted(parked)))
+        sinks=[state[s.name] for s in sinks], skipped_lines=skipped, rows_read=len(events))
 
 
 # ── per-project tick lock ───────────────────────────────────────────────────
@@ -963,12 +873,8 @@ def tick_cmd(
     if result.locked_out:
         typer.echo("status-fanout: another tick holds the lock; skipped")
         return
-    # The daemon ticks every few seconds: an idle pass prints nothing. A fully
-    # parked tick is the one non-idle no-op, so it prints in both modes.
-    if not result.sinks and result.parked_sinks:
-        typer.echo("status-fanout: short-circuit backoff; parked: "
-                   + ", ".join(result.parked_sinks))
-    elif not result.sinks and dry_run:
+    # The daemon ticks every few seconds: an idle pass prints nothing.
+    if not result.sinks and dry_run:
         if result.undeliverable_sinks:
             typer.echo("status-fanout: no deliverable sink (url unresolved; no-op): "
                        + ", ".join(result.undeliverable_sinks))
