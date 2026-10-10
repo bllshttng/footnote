@@ -100,7 +100,11 @@ fn read_cursor(bus_dir: &Path, form: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn unread_count(bus_dir: &Path, msgs: &[Value], name: &str) -> usize {
+/// Unread, deliverable mail addressed to `name`, oldest first, positioned
+/// after `name`'s main cursor (`bus.cursor.scan_unread`; the cursor filename
+/// IS the address). An absent, corrupt or rotated-out cursor rescans the
+/// whole retained log.
+pub(crate) fn unread_messages<'a>(bus_dir: &Path, msgs: &'a [Value], name: &str) -> Vec<&'a Value> {
     let cursor = std::fs::read_to_string(bus_dir.join("cursors").join(format!("{name}.json")))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -124,7 +128,12 @@ pub(crate) fn unread_count(bus_dir: &Path, msgs: &[Value], name: &str) -> usize 
                     .and_then(Value::as_str)
                     .is_some_and(|id| !id.is_empty() && !withdrawn.contains(id))
         })
-        .count()
+        .map(|(_, m)| m)
+        .collect()
+}
+
+pub(crate) fn unread_count(bus_dir: &Path, msgs: &[Value], name: &str) -> usize {
+    unread_messages(bus_dir, msgs, name).len()
 }
 
 fn write_cursor(bus_dir: &Path, form: &str, msg_id: &str) {
@@ -146,7 +155,7 @@ fn is_control(body: &str) -> bool {
         .is_some_and(|first| first.to_lowercase().starts_with("control:"))
 }
 
-fn deliverable(m: &Value) -> bool {
+pub(crate) fn deliverable(m: &Value) -> bool {
     let kind = m.get("kind").and_then(Value::as_str).unwrap_or("");
     if kind == WITHDRAW_KIND || kind == LANDED_KIND {
         return false;
@@ -157,7 +166,7 @@ fn deliverable(m: &Value) -> bool {
 
 /// Ids retracted by a tombstone, plus the tombstones themselves; a tombstone
 /// counts only against a message from the same sender to the same address.
-fn withdrawn_ids(msgs: &[Value]) -> std::collections::HashSet<String> {
+pub(crate) fn withdrawn_ids(msgs: &[Value]) -> std::collections::HashSet<String> {
     let by_id: std::collections::HashMap<&str, &Value> = msgs
         .iter()
         .filter_map(|m| m.get("id").and_then(Value::as_str).map(|id| (id, m)))
@@ -189,7 +198,7 @@ fn withdrawn_ids(msgs: &[Value]) -> std::collections::HashSet<String> {
 /// token of a header line, or the `id` of an old `<fno_mail id="...">` tag -
 /// or None when the transcript cannot be resolved or read (print-everything
 /// posture).
-fn present_mail_ids(
+pub(crate) fn present_mail_ids(
     projects_base: &Path,
     session: &str,
 ) -> Option<std::collections::HashSet<String>> {
@@ -225,7 +234,7 @@ fn present_mail_ids(
 /// The defang `mail.landed._defang_reminder` applies: a body cannot close
 /// the reminder wrapper early. Ports `<\s*(/?)\s*system-reminder\s*>`
 /// (case-folded) to a `[`-bracketed literal.
-fn defang(s: &str) -> String {
+pub(crate) fn defang(s: &str) -> String {
     const TAG: &str = "system-reminder";
     let lower = s.to_lowercase();
     let skip_ws = |j: usize| -> usize {

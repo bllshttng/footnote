@@ -2,20 +2,22 @@
 # fno hook: UserPromptSubmit - notify about pending mail
 # hooks/inject-mail-notify.sh -- durable mail delivery at the turn boundary.
 #
-# The hidden CLI verb owns rendering, UserPromptSubmit JSON serialization,
-# stdout flush, and only then cursor acknowledgement. This shell layer relays
-# that already-valid envelope directly so there is no second capture or write
-# boundary between visible delivery and acknowledgement. Silent when there is
-# no harness identity or mail; a portable two-second timeout bounds a hung
-# binary; failures never block the turn.
+# The native verb owns rendering, UserPromptSubmit JSON serialization, stdout
+# flush, and only then cursor acknowledgement: a Rust early-dispatch arm
+# answers in microseconds where the old Python path paid a full interpreter
+# start and was cancelled at its budget on every run. This shell layer is a
+# cheap gate now: it checks the session identity, the bus log, and the
+# binary, then relays the verb's already-valid envelope through fd 3
+# byte-for-byte, so there is no second capture or write boundary between
+# visible delivery and acknowledgement. Silent when there is no harness
+# identity or mail; the one load-aware hook budget bounds a hung binary;
+# failures never block the turn.
 
 set -uo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
 PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
-
-command -v fno >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/hook-budget.sh
@@ -26,6 +28,21 @@ source "$HOOK_DIR/../scripts/lib/hook-budget.sh" 2>/dev/null || exit 0
 # the lost-mail case. Skipped mail stays pending and delivers next turn.
 hook_overloaded && exit 0
 
+# No bus log, nothing to deliver: one stat guards the common no-mail case
+# before any fork.
+BUS="${FNO_STATE_DIR:-$HOME/.fno}/bus"
+[[ -f "$BUS/messages.jsonl" ]] || exit 0
+
+# No harness identity, no delivery. The pattern admits opencode's ses_ ids
+# alongside claude's session uuids; canonical_handle() first-eights both.
+SID="$(jq -r '.session_id // empty' 2>/dev/null)"
+case "$SID" in
+    '' | *[!A-Za-z0-9_-]*) exit 0 ;;
+esac
+[[ "${#SID}" -ge 16 ]] || exit 0
+
+command -v fno-agents >/dev/null 2>&1 || exit 0
+
 # Stdout of the atomic verb IS the hook payload: it streams through fd 3
 # (saved below) untouched, byte-for-byte. Stderr lands in the variable so a
 # miss can name its cause instead of looking like every other miss. A miss is
@@ -35,7 +52,7 @@ hook_overloaded && exit 0
 budget="$(hook_budget_secs)"
 [[ "$budget" -gt 0 ]] || exit 0
 exec 3>&1
-notify_err="$(with_timeout "$budget" fno agents mail notify-self 2>&1 1>&3 3>&-)"
+notify_err="$(with_timeout "$budget" fno-agents mail-notify-self --bus-dir "$BUS" --session "$SID" 2>&1 1>&3 3>&-)"
 notify_rc=$?
 exec 3>&-
 

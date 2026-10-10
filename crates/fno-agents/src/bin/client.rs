@@ -226,6 +226,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("mail-hold") {
         std::process::exit(fno_agents::mail_hold::run_mail_hold(&args[1..]));
     }
+    // `mail-notify-self`: transport-only (no client action - the shrink law
+    // allows none); the inject-mail-notify hook is the caller. The arm runs
+    // detached-safe and answers in microseconds, so it dispatches before
+    // the runtime builds, with the other early arms.
+    if args.first().map(String::as_str) == Some("mail-notify-self") {
+        std::process::exit(fno_agents::mail_notify_self::run(&args[1..]));
+    }
     // `pane-rebind`: the mux workspace restore's registry rebind door;
     // transport-only (no client action - the shrink law allows no new
     // action); the mux server's restore walk is the only caller. Answers in
