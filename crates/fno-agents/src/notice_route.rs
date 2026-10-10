@@ -1368,27 +1368,6 @@ pub(crate) fn fold_tick(w: &crate::owner_ladder::World) -> (u64, Option<String>)
 mod tests {
     use super::*;
 
-    #[test]
-    fn history_rows_warn_nothing() {
-        // A terminal-rung plan is history: its verdict must ride the same
-        // silent arm as bound and terminal, or a shipped plan mails its lead
-        // asking for a rebind.
-        let (warnings, dir) = read_orphan(
-            serde_json::json!({
-                "plans_dir": "/p",
-                "rows": [
-                    {"node_id": "n-9", "verdict": "history"},
-                    {"node_id": "n-8", "verdict": "unfinalized"}
-                ]
-            })
-            .to_string()
-            .as_str(),
-        );
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].node.as_deref(), Some("n-8"));
-        assert_eq!(dir.as_deref(), Some("/p"));
-    }
-
     /// AC10-AC17 over the pure pieces: the result-file readers, the
     /// fingerprint dedupe against the sent store, and the fold's
     /// decisions. The mail/page/door legs are shelled doors verified by
@@ -1428,6 +1407,23 @@ mod tests {
         assert_eq!(orphan_warnings[0].kind, "orphan_bound");
         assert_eq!(orphan_warnings[1].kind, "orphan_held");
         assert_eq!(dir.as_deref(), Some("/p"));
+
+        // A terminal-rung plan reads history: its verdict must ride the
+        // same silent arm as bound and terminal, or a shipped plan mails
+        // its lead asking for a rebind.
+        let (history_warnings, _) = read_orphan(
+            serde_json::json!({
+                "plans_dir": "/p",
+                "rows": [
+                    {"node_id": "n-9", "verdict": "history"},
+                    {"node_id": "n-8", "verdict": "unfinalized"}
+                ]
+            })
+            .to_string()
+            .as_str(),
+        );
+        assert_eq!(history_warnings.len(), 1);
+        assert_eq!(history_warnings[0].node.as_deref(), Some("n-8"));
 
         // AC11: the same fingerprint is not resent inside the open window.
         let _root = crate::paths::DeclaredRoot::declare("notice_sent_dedupe");

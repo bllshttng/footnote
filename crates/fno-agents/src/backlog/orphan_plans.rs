@@ -767,16 +767,18 @@ mod tests {
     }
 
     #[test]
-    fn done_plan_reports_history_not_id_reuse() {
+    fn terminal_rung_plans_report_history() {
         // A shipped plan whose id was minted again for an unrelated idea.
         // The done rung is history, so the reuse guard below it never sees
-        // the row.
-        let fx = fixture(&[node(
-            "x-hist",
-            json!({"created_at": "2026-09-29T00:00:00+00:00"}),
-        )]);
-        let plan = plan_file(&fx.plans, "h.md", "x-hist", "done", "2026-08-21");
-        age_file(&plan, 3600);
+        // the row; superseded is the same plan-side terminal.
+        let fx = fixture(&[
+            node("x-hist", json!({"created_at": "2026-09-29T00:00:00+00:00"})),
+            node("x-sup", json!({})),
+        ]);
+        let done = plan_file(&fx.plans, "h.md", "x-hist", "done", "2026-08-21");
+        let gone = plan_file(&fx.plans, "sup.md", "x-sup", "superseded", "2026-09-02");
+        age_file(&done, 3600);
+        age_file(&gone, 3600);
         let rows = graph_store::read_rows(&fx.graph).unwrap();
         let by_id = read_claims(&fx.plans).unwrap();
         let (out, adoptable) = classify_claims(
@@ -786,29 +788,12 @@ mod tests {
             Some(fx.claims.path()),
             std::time::SystemTime::now(),
         );
-        assert!(adoptable.is_empty(), "a done plan never re-binds");
+        assert!(adoptable.is_empty(), "a terminal-rung plan never re-binds");
         assert!(
             out.iter()
                 .any(|(id, _, v)| id == "x-hist" && *v == Verdict::History),
             "a done plan is history, not an unfinalized draft"
         );
-    }
-
-    #[test]
-    fn superseded_plan_reports_history() {
-        let fx = fixture(&[node("x-sup", json!({}))]);
-        let plan = plan_file(&fx.plans, "sup.md", "x-sup", "superseded", "2026-09-02");
-        age_file(&plan, 3600);
-        let rows = graph_store::read_rows(&fx.graph).unwrap();
-        let by_id = read_claims(&fx.plans).unwrap();
-        let (out, adoptable) = classify_claims(
-            &rows,
-            &by_id,
-            &BTreeMap::new(),
-            Some(fx.claims.path()),
-            std::time::SystemTime::now(),
-        );
-        assert!(adoptable.is_empty(), "a superseded plan never re-binds");
         assert!(
             out.iter()
                 .any(|(id, _, v)| id == "x-sup" && *v == Verdict::History),
