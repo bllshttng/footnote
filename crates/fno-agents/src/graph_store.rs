@@ -3365,6 +3365,8 @@ mod tests {
         let started = Instant::now();
         let err = BoundedLock::acquire(&graph, Duration::from_millis(150)).unwrap_err();
         assert!(matches!(err, StoreError::LockTimeout(..)));
+        // registry_door.py and the mux reseat retry a registry commit on this text.
+        assert!(err.to_string().contains("stayed busy past"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(2), "must not block");
     }
 
