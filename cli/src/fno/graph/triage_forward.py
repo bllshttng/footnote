@@ -6,7 +6,7 @@ from __future__ import annotations
 import typer
 
 
-def _triage_forward(ctx) -> None:
+def _triage_forward(ctx: typer.Context) -> None:
     """The native door owns every triage action; the wheel keeps the route.
 
     The whole argv rides `fno-agents backlog triage` with stdio inherited
@@ -33,4 +33,5 @@ def register_triage_forward(cli) -> None:
     cli.command(
         "triage",
         context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+        add_help_option=False,
     )(_triage_forward)

@@ -36,7 +36,9 @@ pub(crate) fn echo_json(value: &Value) {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: fno backlog triage <context|propose|rank|validate|projects> [args]");
+    eprintln!(
+        "usage: fno backlog triage <context|propose|consistency|rank|validate|apply|projects|health|trend> [args]"
+    );
     2
 }
 
