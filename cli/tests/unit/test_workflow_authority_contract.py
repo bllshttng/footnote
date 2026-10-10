@@ -123,16 +123,17 @@ def test_law_supersession_rule_matches_the_cli_guard():
 # ---- wave 2: harness and terminal routes -------------------------------------
 
 
-def test_term_branches_on_harness_capability_before_arming():
+def test_term_arms_the_resolved_beat_before_arming():
     text = _skill("skills/lead/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
-    assert "Branch once on what the harness supports" in arm
+    assert "fno-agents harness-beat" in arm  # the capability row decides, not prose
+    assert "never branch on the harness name" in arm
     assert "lead_settle" in arm  # the daemon settle mail pushes on every harness
     assert "arms no watch" in arm  # the lead arms nothing; the daemon mails
-    assert "Codex uses provider-backed goal actions" in arm
+    assert "use provider-backed goal actions" in arm
     assert "positive `provider_goal` receipt" in arm
     assert "separate positive `stop` receipt" in arm
-    assert "Every Codex wake runs the check-in body" in arm
+    assert "Every goal wake runs the check-in body" in arm
 
 
 def test_lead_checkin_binds_worker_age_to_the_top_json_payload():
