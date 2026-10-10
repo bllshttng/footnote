@@ -34,11 +34,13 @@ pub mod doctor_update;
 #[cfg(test)]
 #[path = "doctor_update_tests.rs"]
 mod doctor_update_tests;
+pub mod effect_map;
 pub mod event_cli;
 mod event_signals;
 pub mod event_store;
 pub mod feed_overlay;
 pub(crate) mod first_check;
+pub mod footnote_transcript;
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
@@ -109,6 +111,7 @@ pub mod transcript_tail;
 pub mod transcript_transfer;
 pub mod tree;
 pub mod uninstall;
+pub(crate) mod update_prebuilt;
 pub mod version;
 pub mod view_store;
 pub mod vt;

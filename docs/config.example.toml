@@ -102,6 +102,10 @@ max_prs_per_epic = 4
 # Added lines a cli/src/fno Python change that does not shrink the tree may add under law d-a9cddc93 (default 30). The push-time tally in check-file-budget.sh passes a change whose Python tree net is negative (a port that deletes more than it adds); this budget binds a change whose net is zero or positive. Also read by the plan gate in validate-plan.sh.
 python_repair_added_lines = 30
 
+[plan]
+# Added lines a target session's branch may carry before the commit-time diff-budget guard (hooks/diff-budget-commit.sh) names the overrun; the bound plan's frontmatter diff_budget key overrides it per plan (default 300; 0 is off).
+default_diff_budget = 300
+
 [backlog]
 # Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).
 # id_prefix = <unset>   # optional; no default
@@ -423,6 +427,10 @@ route = {}
 model = {}
 # Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = "orange"). A row's own `color` field outranks this table for the same row.
 row = {}
+
+[split]
+# Where the mux row menu's Split Direction toggle starts: pane (default) | portal. The t key flips it inside the open menu, and the flip lands here.
+opens = "pane"
 
 [autonomy]
 # The one master switch over every autonomous session-starting spawner. Defaults true; shipping this changes nothing until explicitly disabled.

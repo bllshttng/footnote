@@ -250,7 +250,7 @@ Per-node driving is now owned by the Rust unified-loop runtime (`fno-agents loop
 
 | Primitive | Module | Role |
 |-----------|--------|------|
-| PreToolUse hook (`hooks/graph-write-protect.sh`) | hooks/ | Blocks Edit/Write on `~/.fno/graph.json` end-to-end (test fixtures bypassed) |
+| PreToolUse hook (`hooks/write-gate.sh`) | hooks/ | Blocks Edit/Write on `~/.fno/graph.json` end-to-end (test fixtures bypassed) |
 | HARD-GATE blocks (megawalk SKILL.md) | skills/ | LLM-side guard against direct mutation |
 | PID lock (`_acquire_pid_lock`) | megawalk.py | Prevents concurrent walker processes; reclaims stale locks |
 | Stale-approval pinning | `_check_review_approval` | Approves only if PR head SHA matches the approved review SHA |

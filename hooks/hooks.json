@@ -10,11 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/graph-write-protect.sh"
-          },
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/claude-config-write-guard.sh"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/write-gate.sh"
           }
         ]
       },
@@ -24,15 +20,6 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/worktree-write-protect.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/generated-write-guard.sh"
           }
         ]
       },
@@ -290,6 +277,11 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/merge-capture.sh",
+            "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/diff-budget-commit.sh",
             "timeout": 4
           },
           {

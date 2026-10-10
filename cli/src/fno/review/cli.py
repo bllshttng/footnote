@@ -108,6 +108,11 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
                         "each disposition needs finding_key, a disposition in "
                         f"{list(_DISPOSITIONS)}, and a non-empty reason"
                     )
+                if disposition == "declined" and '"' not in reason:
+                    raise RecordBuildError(
+                        "a declined disposition's reason must cite the finding: a double-quoted "
+                        "proving line at the current head, plus the failure scenario that does not hold"
+                    )
                 dispositions.append(
                     {
                         "finding_key": key,
@@ -141,7 +146,7 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
     # BLOCKING with the literal key "(truncated remainder)", which no
     # disposition can clear. Losing a sentence is recoverable; losing a
     # finding into an unclearable blocker is not.
-    for limit in (120, 60, 0):
+    for limit in (120, 60, 30, 0):
         if len(json.dumps(record, ensure_ascii=False)) <= _RECORD_BYTE_BUDGET:
             break
         for item in findings:

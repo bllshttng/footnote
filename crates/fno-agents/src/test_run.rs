@@ -90,7 +90,7 @@ fn agent_cargo() -> bool {
 
 /// The sanctioned queue lane: a whole-suite run (FNO_TEST_FULL=1) may queue,
 /// backgrounded, exactly as the test-run guard's refusal text documents.
-fn full_suite_lane() -> bool {
+pub(crate) fn full_suite_lane() -> bool {
     std::env::var_os("FNO_TEST_FULL").is_some_and(|v| v == "1")
 }
 
@@ -1097,6 +1097,7 @@ fn run_build_admit(args: &[String]) -> i32 {
         // The reason is decided inside the wait (a takeover) but read by opts,
         // so it travels through a RefCell the two closures share.
         let takeover_reason = std::cell::RefCell::new(None::<String>);
+        let owner = crate::cargo_orphans::owner_metadata(cargo_pid);
 
         let opts = |_: usize| crate::claims::AcquireOpts {
             pid: Some(cargo_pid),
@@ -1106,6 +1107,7 @@ fn run_build_admit(args: &[String]) -> i32 {
                     .clone()
                     .unwrap_or_else(|| "cargo build".to_string()),
             ),
+            metadata: owner.clone(),
             events_dir: Some(worktree.clone()),
             ..Default::default()
         };
@@ -1134,6 +1136,12 @@ fn run_build_admit(args: &[String]) -> i32 {
                 let mut scan = |table: &[crate::census::ProcRow],
                                 parent: &ParentMap|
                  -> Option<OnHeld> {
+                    // A holder whose owner session died frees the door now,
+                    // compiling or not; the next poll acquires.
+                    crate::cargo_orphans::release_orphan_holders(
+                        &[BUILD_CLAIM_KEY.to_string()],
+                        &worktree,
+                    );
                     let (h, pid, _) = rows.first()?;
                     let holder_pid = (*pid).filter(|p| *p > 0)?;
                     // A holder that has stopped compiling keeps the slot for no
@@ -1267,6 +1275,7 @@ fn admit_build_holder_free_slot(
     if rec.holder != holder {
         return None;
     }
+    let owner = crate::cargo_orphans::owner_metadata(cargo_pid);
     for key in keys {
         if let crate::claims::AcquireOutcome::Acquired(_) = crate::claims::acquire(
             key,
@@ -1274,6 +1283,7 @@ fn admit_build_holder_free_slot(
             crate::claims::AcquireOpts {
                 pid: Some(cargo_pid),
                 reason: Some("cargo run slot; build:cargo holder".to_string()),
+                metadata: owner.clone(),
                 events_dir: Some(worktree.to_path_buf()),
                 root: root.map(Path::to_path_buf),
                 ..Default::default()
@@ -1361,6 +1371,7 @@ fn steal_parked_slot(
                     reason: Some(
                         "cargo run slot; taken from a holder parked at the build door".to_string(),
                     ),
+                    metadata: crate::cargo_orphans::owner_metadata(cargo_pid),
                     events_dir: Some(worktree.to_path_buf()),
                     root: root.map(Path::to_path_buf),
                     ..Default::default()
@@ -1434,17 +1445,26 @@ fn admit_run_slot(cargo_pid: u32, new_worktree: &Path, reentry: bool) -> Result<
         return Ok(());
     }
 
+    // Slots held by a cargo whose owner session died free before the
+    // try-lock reads them: two such orphans fill the default pool, and every
+    // agent build then refuses for as long as they live.
+    let mut swept = keys.clone();
+    swept.push(BUILD_CLAIM_KEY.to_string());
+    crate::cargo_orphans::release_orphan_holders(&swept, &worktree);
+
     if admit_build_holder_free_slot(cargo_pid, &worktree, &holder, &keys, None).is_some() {
         return Ok(());
     }
 
     let started = Instant::now();
+    let owner = crate::cargo_orphans::owner_metadata(cargo_pid);
     let opts = |i: usize| crate::claims::AcquireOpts {
         pid: Some(cargo_pid),
         reason: Some(format!(
             "cargo run slot {i} of {cap}, waited {}s",
             started.elapsed().as_secs()
         )),
+        metadata: owner.clone(),
         events_dir: Some(worktree.clone()),
         ..Default::default()
     };

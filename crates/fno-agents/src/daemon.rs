@@ -49,7 +49,7 @@ use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
-mod list_rows;
+pub(crate) mod list_rows;
 use self::list_rows::{
     activity_basis_from_truth, apply_row_contradiction, attention_sort_key, basis_word_from_truth,
     handle_list, rendered_status_from_truth,

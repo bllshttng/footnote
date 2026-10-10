@@ -32,7 +32,7 @@
 # Known ceiling: this reads the write TOOLS agents create plans with (Write, and
 # apply_patch adds). A plan written by shelling a heredoc (`cat > x.md <<EOF`)
 # is not parsed and is not caught; extending it there means the shell-clause
-# grammar graph-write-protect.sh carries, and no observed plan write takes that
+# grammar the write gate carries, and no observed plan write takes that
 # route. `fno do plan reconcile-status` remains the backstop for a drifted save.
 #
 # Exit 0 always; the decision travels in the stdout JSON.
@@ -154,7 +154,7 @@ fi
 
 # _is_test_path PATH -> 0 for scaffolding that legitimately holds plan-shaped
 # docs outside the plans dir (fixtures, test trees). Mirrors the carve-out in
-# graph-write-protect.sh so the two guards agree on what "not real" means.
+# hooks/write-gate.sh so the two guards agree on what "not real" means.
 _is_test_path() {
     case "$1" in
         */test/*|*/tests/*|*/fixtures/*|*/testdata/*) return 0 ;;

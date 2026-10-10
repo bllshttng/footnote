@@ -76,6 +76,30 @@ fn codex_app_server_rows() -> Vec<Value> {
     vec![row]
 }
 
+/// Every process under `root` in one table read, found by walking each
+/// row's ppid chain (at most 64 hops).
+pub(crate) fn descendants(table: &[ProcRow], root: u32) -> Vec<u32> {
+    let parent: std::collections::HashMap<u32, u32> =
+        table.iter().map(|row| (row.pid, row.ppid)).collect();
+    table
+        .iter()
+        .filter(|row| {
+            let mut current = row.ppid;
+            for _ in 0..64 {
+                if current == root {
+                    return true;
+                }
+                match parent.get(&current) {
+                    Some(&next) if current > 1 => current = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
+        .map(|row| row.pid)
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
     ProcRow {
@@ -900,30 +924,9 @@ pub async fn census() -> Vec<Value> {
 /// Run the daemon-free census subcommand.  The process walk stays in Rust so
 /// Python callers and the machine sample share one table implementation.
 pub async fn run_verb(args: &[String]) -> i32 {
-    if args.iter().any(|arg| arg == "--tree-rss") {
-        let Some(index) = args.iter().position(|arg| arg == "--tree-rss") else {
-            unreachable!()
-        };
-        let Some(raw) = args.get(index + 1) else {
-            eprintln!("fno-agents census: --tree-rss needs a pid list");
-            return 2;
-        };
-        let mut pids = Vec::new();
-        for token in raw.split(',').filter(|token| !token.is_empty()) {
-            match token.parse::<u32>() {
-                Ok(pid) => pids.push(pid),
-                Err(_) => {
-                    eprintln!("fno-agents census: invalid pid {token}");
-                    return 2;
-                }
-            }
-        }
-        let (rows, _) = process_table_ps();
-        println!(
-            "{}",
-            json!({"rss_mb": crate::session_cost::tree_rss(&rows, &pids)})
-        );
-        return 0;
+    // `fno agents top`: the worker table, the census of live runs.
+    if args.first().map(String::as_str) == Some("--workers") {
+        return crate::agents_top::run(&args[1..]);
     }
     if args.iter().any(|arg| arg == "--ps") {
         let (rows, unreadable) = process_table();

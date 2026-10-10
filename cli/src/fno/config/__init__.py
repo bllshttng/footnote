@@ -2,32 +2,13 @@
 
 Settings are DEEP-MERGED across every candidate file that exists, higher
 priority overriding lower key-by-key (nested dicts merge recursively,
-scalars and lists replace wholesale). Candidate priority, highest first:
-  1. $FNO_CONFIG env var (explicit path; when set, the ONLY candidate)
-  2. <worktree_root>/.fno/settings.yaml  (project-local to this checkout)
-  3. <canonical_root>/.fno/settings.yaml  (the main checkout's config,
-     reached via the main worktree from `git worktree list`; lets a linked
-     worktree read shared project config with zero per-worktree setup;
-     deduped when 2 == 3)
-  4. ~/.fno/settings.yaml  (per-user global; shared defaults)
-
-A key absent from a higher-priority file falls through to the next file down,
-so the per-user global holds shared defaults while each project sets only its
-deltas. With no file, built-in defaults apply. This mirrors the shell reader
-(scripts/lib/config.sh, per-key local->global fallback) and the provider loader.
+scalars and lists replace wholesale). The candidate priority list, the per-key fallthrough, and the design decisions are locked in docs/path-config.md.
 
 Cache: load_settings() is an uncached wrapper over _load_settings_at(),
 keyed on the declaration (_settings_key: env overrides + HOME + resolved
 repo root) PLUS a stat fingerprint of every candidate file. A same-key
 settings rewrite changes the fingerprint, so the cache reparses on its
 own; no cache_clear is needed to see an edit in-process.
-
-Design decisions (locked in 2026-05-14-path-config.md):
-  - extra='ignore' for forward compatibility (do NOT change to 'forbid')
-  - Emit a startup WARNING for unknown keys (not an error)
-  - Reject glob chars (*?[) at validation time, not at resolve time
-  - Reject {vault} when obsidian.enabled is False
-  - PATH_MAX = 4096 bytes enforced on state_dir / plans_dir
 """
 from __future__ import annotations
 
@@ -53,6 +34,7 @@ from pydantic import (
 )
 
 from fno.user import UserBlock
+from fno.config.split_block import SplitBlock as SplitBlock
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle and re-exported
 # here; the redundant `X as X` aliases are the explicit-reexport idiom mypy's
@@ -278,6 +260,14 @@ class MaintainBlock(BaseModel):
         if v < 1:
             raise ValueError(f"config.backlog.maintain.{info.field_name} must be >= 1")
         return v
+
+
+class PlanBlock(BaseModel):
+    """Plan budgets (config.plan): default_diff_budget is the commit-time diff-budget ceiling (hooks/diff-budget-commit.sh), 0 is off; a plan's frontmatter diff_budget overrides."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    default_diff_budget: int = Field(default=300, ge=0)
 
 
 _RENDER_PROJECTIONS = ("backlog", "roadmap", "local")
@@ -3917,6 +3907,7 @@ class ConfigBlock(BaseModel):
     user: UserBlock = Field(default_factory=UserBlock)
     sandbox: SandboxBlock = Field(default_factory=SandboxBlock)
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
+    plan: PlanBlock = Field(default_factory=PlanBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
     batch: BatchBlock = Field(default_factory=BatchBlock)
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
@@ -3938,6 +3929,7 @@ class ConfigBlock(BaseModel):
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     routing: RoutingBlock = Field(default_factory=RoutingBlock)
     sideline: SidelineBlock = Field(default_factory=SidelineBlock)
+    split: SplitBlock = Field(default_factory=SplitBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)

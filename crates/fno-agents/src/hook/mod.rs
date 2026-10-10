@@ -10,6 +10,7 @@
 
 pub mod adapter;
 pub mod bin_install_guard;
+pub mod diff_budget;
 pub mod edit_integrity;
 pub mod lead_guard;
 pub mod lead_guard_wire;
@@ -22,6 +23,7 @@ pub mod session_state;
 pub mod stop;
 pub mod subagent_worktree_guard;
 pub mod test_run_guard;
+pub mod write_gate;
 
 use serde_json::json;
 use std::io::Read;
@@ -32,6 +34,7 @@ use std::path::{Path, PathBuf};
 pub fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("bin-install-guard") => bin_install_guard::run(&args[1..]),
+        Some("diff-budget") => diff_budget::run(&args[1..]),
         Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("effect-guard") => crate::effect_gate::run_hook(&args[1..]),
         Some("lead-guard") => lead_guard::run(&args[1..]),
@@ -45,9 +48,10 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("test-run-guard") => test_run_guard::run(&args[1..]),
         Some("stop") => stop::run(&args[1..]),
         Some("subagent-worktree-guard") => subagent_worktree_guard::run(&args[1..]),
+        Some("write-gate") => write_gate::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, edit-integrity, effect-guard, lead-guard, pipe-guard, posttooluse-bash, pretooluse-bash, prompt, rules, send-message-guard, session-state, subagent-worktree-guard, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected bin-install-guard, diff-budget, edit-integrity, effect-guard, lead-guard, pipe-guard, posttooluse-bash, pretooluse-bash, prompt, rules, send-message-guard, session-state, subagent-worktree-guard, test-run-guard, write-gate or stop"
             );
             2
         }
@@ -83,12 +87,16 @@ pub(crate) fn emit_allow() -> i32 {
 
 /// One `guard_decision` row into the space events file, the bounded appender
 /// `emit_to_both` uses, shared by every native guard so the rows stay
-/// byte-identical (as `hooks/lib/guard-mark.sh` did).
+/// byte-identical (as `hooks/lib/guard-mark.sh` did). The ts carries
+/// nanoseconds: the row's event id is the sha256 of the line, and two
+/// decisions from one gate (three guards per call) can land inside one
+/// millisecond - a line-level collision would dedup into one row and break
+/// the exactly-one-row liveness contract.
 pub(crate) fn emit_guard_decision(cwd: &Path, guard: &str, tool: &str, denied: bool) {
     let path =
         crate::state_path::resolve("events", cwd).unwrap_or_else(|| crate::paths::events_path(cwd));
     let event = json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         "type": "guard_decision",
         "data": {"guard": guard, "decision": if denied { "block" } else { "allow" }, "tool": tool},
         "source": "hook"

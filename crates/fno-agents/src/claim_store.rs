@@ -1001,10 +1001,20 @@ pub fn list_db(
     include_stale: bool,
     root: Option<&Path>,
 ) -> Result<Value, String> {
-    let records = records_in(&directory(root)?, prefix, include_stale)?;
+    let records = records_db(prefix, include_stale, root)?;
     Ok(
         json!({"rows": records.into_iter().map(|r| crate::claim_verbs::claim_status_value(&r)).collect::<Vec<_>>() }),
     )
+}
+
+/// The raw rows, for a reader that needs no liveness verdict: `list_db`
+/// probes each holder's session truth, which costs seconds on a busy fleet.
+pub(crate) fn records_db(
+    prefix: Option<&str>,
+    include_stale: bool,
+    root: Option<&Path>,
+) -> Result<Vec<ClaimRecord>, String> {
+    records_in(&directory(root)?, prefix, include_stale)
 }
 
 pub fn list_repo_space(prefix: &str, include_stale: bool) -> Result<Vec<ClaimRecord>, String> {

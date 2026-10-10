@@ -140,10 +140,8 @@ RUST_CLIENT_VERBS = frozenset(
         "adopt",
         "attach",
         "logs",
-        # The daemon-free read projections the top view and the spawn path
-        # call: the session-to-node join and the revival decision. Client-side
+        # The daemon-free revival decision the spawn path calls. Client-side
         # dispatch starts nothing.
-        "sessions-map",
         "revival-check",
         # registry-json: the daemon-free registry projection the hooks read.
         # Reads the registry file client-side (load_registry_entries) and
@@ -420,9 +418,9 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Listing it here is defensive/documentary: whoami is not in
     # RUST_CLIENT_VERBS, so AUTO_ROUTE_VERBS already excludes it.
     "whoami",
-    #: the spawn-gate audit surface — every live worker process with
-    # RSS via psutil, over the same union the gate counts. Python-only by
-    # design (LD8): no daemon involvement, no Rust port, never auto-routes.
+    #: the spawn-gate audit surface. The registered Python command is a shim
+    # that execs `fno-agents census --workers`; the `fno` front execs it
+    # directly. `top` is no client action, so it must never auto-route.
     "top",
     #: the read-only observe leg (twin of `fno agents mail send`). Reads a
     # peer's on-disk transcript / status events via fno.agents.peek. No Rust
@@ -538,7 +536,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "select-read": "One bounded backlog read (next|undispatched) under [auto_continue] select_timeout_s; prints an ok/unmeasured/error receipt JSON.",
     "feed": "Activity feed projection over questions.jsonl + graph.json (questions, decisions, node lifecycle): [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
-    "sessions-map": "One JSON read of the session-to-node join: the graph's sessions rows and the node claims, a live claim outranking the graph record; consumed by the top view.",
     "revival-check": "One JSON answer to whether a spawn --resume revives an existing row instead of forking: the row by name or by the resumed uuid, supervisor not live; consumed by the spawn path.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter: --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
@@ -559,7 +556,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; a `node_seed` field instead answers the node-verb check. Invoked by fno.agents.spawn_axes_client and the spawn seam, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
-    "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict; invoked by the native updater (crates/fno/src/doctor_update.rs), not `fno agents` routing.",
+    "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict; invoked by the native updater (crates/fno/src/doctor_update.rs), not `fno agents` routing. --workers [--json] [--subagents] [--pane-stats] answers `fno agents top`.",
     "fleet-incident": "Durable fleet incident breaker: stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it with its typed holds/admits reach (exit 0 clear, 1 stopped or unavailable); check [--scope spawns|tests|merges] is one scope's admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches, and the merge primitive refuses while merges are held. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
     "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or promoted agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts. The public surface is `fno agents mail team`; hooks call the binary directly.",
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",

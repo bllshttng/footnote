@@ -12,7 +12,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-GUARD="${REPO_ROOT}/hooks/claude-config-write-guard.sh"
+GUARD="${REPO_ROOT}/hooks/write-gate.sh"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); printf '[ccw] PASS: %s\n' "$*"; }

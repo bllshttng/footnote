@@ -80,8 +80,12 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CLAUDE_PLUGIN_ROOT",
     "CODEX_PLUGIN_ROOT",
     "CLAUDE_CONFIG_DIR",  # the account-alias channel; picks which bill is paid
+    "CLAUDE_JOB_DIR",  # the session job tmp dir the write gate names in refusals; a suite must not see the developer's
     "CLAUDE_DIR_OVERRIDE",  # redirects the Claude config root (the rule-file git repo the corrections hook watches); same category as CLAUDE_CONFIG_DIR
     "CODEX_HOME",  # 12 reads in source; a real per-developer setting
+    # `fno update` keeps a set wrapper and installs the admission wrapper only
+    # when it is unset, so a developer's value would change what a test runs.
+    "RUSTC_WRAPPER",
     "GEMINI_PROJECT_DIR",
     "GEMINI_SANDBOX",
     "OPENCODE_CONFIG_DIR",  # opencode's config root; same category as CODEX_HOME
@@ -172,9 +176,6 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # base URL, and the encounter verb reads it for vote provenance. A test
     # must not see the developer's effort value.
     "CLAUDE_EFFORT",
-    # A claude --bg job's state dir: the launch claim reads the job's name
-    # there, so a developer's own job must never name a test's child.
-    "CLAUDE_JOB_DIR",
     "DATABASE_URL",
     # Shell-prompt config the mux integration reads.
     "STARSHIP_CONFIG",

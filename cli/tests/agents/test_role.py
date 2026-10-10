@@ -533,55 +533,6 @@ def test_list_serialize_marks_the_role() -> None:
     assert serialize_entry(plain, None)["role"] is None
 
 
-def test_top_rows_join_the_role_by_name() -> None:
-    from fno.agents.spawn_gate import LiveWorker
-    from fno.agents.top import _rows
-
-    def worker(name: str) -> "LiveWorker":
-        return LiveWorker(
-            source="fno", name=name, harness="claude",
-            substrate="pane", pid=1, status="live",
-        )
-
-    # TWO workers and TWO roles, deliberately: with one of each, a _rows that
-    # ignored the name entirely and handed back the only role present would
-    # still pass. The join is only observable when a wrong one is available to
-    # pick.
-    rows = _rows(
-        [worker("lead-epic"), worker("lead-other"), worker("plain")],
-        {"lead-epic": "L1 epic-x", "lead-other": "L2 epic-y"},
-    )
-    by_name = {row["name"]: row["role"] for row in rows}
-    assert by_name["lead-epic"] == "L1 epic-x"
-    assert by_name["lead-other"] == "L2 epic-y"
-    assert by_name["plain"] is None
-    assert _rows([worker("lead-epic")], {})[0]["role"] is None
-
-
-def test_top_rows_join_the_role_through_session_id_when_names_differ(monkeypatch) -> None:
-    """AC3-HP: a foreign claude row is labelled by the FIRST 8 hex of its
-    session uuid, while the registry role map is keyed by the handle the
-    registry itself uses (the LAST 8) - the exact mismatch that read as
-    `None` for a promoted session before the join went through session_id."""
-    from fno.agents import top
-    from fno.agents.spawn_gate import LiveWorker
-
-    monkeypatch.setattr(
-        top, "_registry_maps", lambda: ({"full-session-uuid": "last8reg"}, {})
-    )
-    w = LiveWorker(
-        source="claude",
-        name="first8row",
-        harness="claude",
-        substrate="pane",
-        pid=1,
-        status="live",
-        session_id="full-session-uuid",
-    )
-    rows = top._rows([w], {"last8reg": "L2 epic-x"})
-    assert rows[0]["role"] == "L2 epic-x"
-
-
 # --- attended in-place role promotion --------------------------------------
 
 

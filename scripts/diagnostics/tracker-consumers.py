@@ -81,6 +81,10 @@ READ_ALLOWLIST = (
     # swapped to its db sibling; the read is of the registry table only.
     "crates/fno-agents/src/registry_read.rs",
     "crates/fno/src/registry_read.rs",  # the generated copy of the same door
+    # The PreToolUse write gate (the collapsed shell guards): it
+    # pattern-matches protected filenames in hook payloads to refuse
+    # writes; it never opens the store.
+    "crates/fno-agents/src/hook/write_gate.rs",
 )
 
 # Known-positive controls (task 4.2 / AC9): verbs the census must FIND in the
