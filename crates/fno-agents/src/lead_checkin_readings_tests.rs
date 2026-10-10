@@ -47,9 +47,10 @@ fn count_rows() {
 // both windows, and the beat data carries the flat newest-window keys.
 #[test]
 fn correction_rows() {
+    // correction_meter is not in the seeded fixture set, so the reading
+    // rows push directly.
     let mut readings = sample_readings(board0(), org0(), cap_ok(), workers_empty());
-    set_reading(
-        &mut readings,
+    readings.push(
         Reading::took(
             "correction_meter",
             json!({
@@ -80,13 +81,10 @@ fn correction_rows() {
     // AC5: a failed reading prints the READER FAILED line and no
     // self_correction line.
     let mut readings = sample_readings(board0(), org0(), cap_ok(), workers_empty());
-    set_reading(
-        &mut readings,
-        Reading::failed(
-            "correction_meter",
-            "transcript unreadable: gone".to_string(),
-        ),
-    );
+    readings.push(Reading::failed(
+        "correction_meter",
+        "transcript unreadable: gone".to_string(),
+    ));
     let data = build_data(&readings, "x-bbbb");
     let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
     assert!(
