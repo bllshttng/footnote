@@ -438,7 +438,7 @@ def _background_refusal(command):
         "Use the portable helper:\n"
         "  bash -c 'source scripts/lib/with-timeout.sh; "
         "with_timeout 1800 <command> [args...]'\n"
-        "or a native bounded wait such as `fno do pr wait <N> --timeout 30m`."
+        "or a native bounded wait such as `fno do pr wait <N> --timeout 15m`."
         % command
     )
 

@@ -62,8 +62,8 @@ pub(super) fn record_build_park(parsed: &super::LoopCheckArgs) {
 }
 
 /// Lease window for an idle watch: the declared timeout clamped to [5m, 2h]
-/// (never trust the tag for an unbounded hold) plus slack. Defaults to 30m when
-/// the tag omits or mangles `timeout`, giving the ~40m default lease.
+/// (never trust the tag for an unbounded hold) plus slack. Defaults to 15m when
+/// the tag omits or mangles `timeout`, giving the ~27m default lease.
 pub(super) fn watch_window_ms(timeout: Option<&str>) -> i64 {
     watch_timeout_ms(timeout) + WATCH_SLACK_MS
 }
@@ -72,7 +72,7 @@ pub(super) fn watch_window_ms(timeout: Option<&str>) -> i64 {
 pub(super) fn watch_timeout_ms(timeout: Option<&str>) -> i64 {
     timeout
         .and_then(crate::claims::parse_ttl_ms)
-        .unwrap_or(30 * 60_000)
+        .unwrap_or(15 * 60_000)
         .clamp(5 * 60_000, 2 * 3_600_000)
 }
 
@@ -105,11 +105,11 @@ pub(super) fn watch_target(reason: &str, pr: Option<&str>) -> (&'static str, Opt
 pub(super) const CONTINUE_WORKING: &str = "continue working; no completion signal. If you are \
 only waiting with nothing to do, arm a harness-tracked watcher with a hard timeout and end your \
 turn with the tag. A PR wait: background Bash `fno do pr wait <N> --until settled \
---timeout=30m` (REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, \
+--timeout=15m` (REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, \
 which spends the shared GraphQL quota; a review wait is `--until review`), then `<watching \
-reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">`. A local run (a test suite, a build, a review \
+reason=\"ci|review\" pr=\"<N>\" timeout=\"15m\">`. A local run (a test suite, a build, a review \
 fork) is its own background task; include its actual harness task id \
-(e.g. task-123) in `<watching reason=\"local\" task_id=\"task-123\" timeout=\"30m\">` with no \
+(e.g. task-123) in `<watching reason=\"local\" task_id=\"task-123\" timeout=\"15m\">` with no \
 pr: pr is a real PR number or left out, never 0. The session idles until the watcher exits \
 instead of re-waking every tick.";
 
@@ -610,7 +610,7 @@ mod tests {
             super::super::Intent::Watching {
                 reason: "local".into(),
                 pr: None,
-                timeout: Some("30m".into()),
+                timeout: Some("15m".into()),
                 task_id: Some("task-123".into()),
             }
         );
