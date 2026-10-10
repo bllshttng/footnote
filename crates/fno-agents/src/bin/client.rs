@@ -1511,36 +1511,9 @@ async fn run(args: Vec<String>) -> i32 {
             eprintln!("{message}");
             return 2;
         }
-        // Trust preflight: an untrusted workspace kills claude only
-        // AFTER the max_live queue and the routing have been paid, and the bg
-        // wrapper reports exit 0 over the harness's EXIT=1, so the refusal was
-        // easy to miss twice. Read the resolved config's trust flag BEFORE the
-        // gate queue and refuse here. Read-only: fno never flips the flag.
-        let spawn_provider = params
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("codex");
-        if let Ok(fno_agents::claude_workspace_trust::Verdict::Untrusted { ref config_json }) =
-            fno_agents::claude_workspace_trust::preflight(
-                spawn_provider,
-                substrate,
-                params.get("account").and_then(|v| v.as_str()),
-                params
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            )
-        {
-            eprintln!(
-                "Workspace not trusted. Run claude in {} once and accept the trust prompt, \
-                 then retry. (trust read from {config_json})",
-                params
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .filter(|c| !c.is_empty())
-                    .unwrap_or(".")
-            );
+        // Trust preflight: refuse an untrusted claude workspace before the
+        // gate queue, loudly, instead of a paid queue plus a silent exit 0.
+        if fno_agents::claude_workspace_trust::spawn_preflight_refuses(&params, substrate) {
             return 2;
         }
         // A DEFAULT never opens a view: a bare spawn is a paneless thread,
@@ -1684,10 +1657,9 @@ async fn run(args: Vec<String>) -> i32 {
     // param is absent (`handle_spawn`). A predicate requiring an explicit
     // "codex" here reads false for a spawn with no `-H`, while the daemon still
     // routes it to the codex thread lane - so the grant was never attached and
-    // the gate below never ran, on the exact lane this node exists to fix.
-    // Green gate, mute worker. Keep the two defaults identical. An unreadable
-    // contract answers false here: the daemon refuses the same spawn, so no
-    // grant or gate is skipped for a spawn the daemon would have served.
+    // the gate below never ran, on the exact lane this node exists to fix. An
+    // unreadable contract answers false here: the daemon refuses the same spawn,
+    // so no grant or gate is skipped for a spawn the daemon would have served.
     let spawn_provider = params
         .get("provider")
         .and_then(|v| v.as_str())
@@ -1700,20 +1672,17 @@ async fn run(args: Vec<String>) -> i32 {
                     && contract.attach_needs_server(spawn_provider)?)
             })
             .unwrap_or(false);
-    // Hop 1 of the state-root grant. The client inherits
-    // FNO_WORKER_ADD_DIRS from the Python seam across `os.execv`, so it reads
-    // the ALREADY-RESOLVED set with the same reader every other lane uses -
-    // one resolver, one published value, now three readers.
-    //
-    // It has to travel as a param rather than as environment because the
-    // daemon on the other end is long-lived and SHARED: it does not inherit
-    // this spawn's environment, so a `state_dirs_from_env()` call over there
+    // Hop 1 of the state-root grant. The client inherits FNO_WORKER_ADD_DIRS
+    // from the Python seam across `os.execv`, so it reads the ALREADY-RESOLVED
+    // set with the same reader every other lane uses. It travels as a param,
+    // never environment: the daemon is long-lived and SHARED and does not
+    // inherit this spawn's env, so a `state_dirs_from_env()` call over there
     // would read the daemon's own env instead of ours.
     if daemon_bound_thread_spawn {
         fno_agents::codex_thread::attach_codex_thread_state_dirs(&mut params);
     }
-    // Snapshot before `params` moves into the request: the relocated gate
-    // honors the same spawn-control flags the shared construction reads.
+    // Snapshot before `params` moves into the request; the relocated gate reads
+    // the same spawn-control flags the shared construction reads.
     let daemon_gate_flags = gate_flags_from_params(&params);
     let daemon_gate_seed = fno_agents::spawn_phase::params_seed(&params);
     let daemon_gate_route_provider = if daemon_bound_thread_spawn {
@@ -1721,8 +1690,7 @@ async fn run(args: Vec<String>) -> i32 {
     } else {
         None
     };
-    // Same snapshot for the portal placement: it rides the
-    // daemon's response, after the receipt.
+    // Same snapshot for the portal placement, after the receipt.
     let thread_portal_params = if method == "agent.spawn"
         && params.get("substrate").and_then(|v| v.as_str()) == Some("thread")
     {

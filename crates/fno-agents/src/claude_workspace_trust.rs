@@ -130,6 +130,42 @@ pub fn preflight(
     Ok(check(&root, &dir))
 }
 
+/// The spawn seam's one-line entry: `true` means the refusal is already
+/// printed and the caller must exit 2. Sits before the gate queue so an
+/// untrusted workspace costs no queue wait and no routing, and the refusal
+/// is one loud stderr line instead of a paid-then-silent harness death.
+pub fn spawn_preflight_refuses(
+    params: &serde_json::Map<String, serde_json::Value>,
+    substrate: &str,
+) -> bool {
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex");
+    let Ok(Verdict::Untrusted { config_json }) = preflight(
+        provider,
+        substrate,
+        params.get("account").and_then(|v| v.as_str()),
+        params
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    ) else {
+        return false;
+    };
+    eprintln!(
+        "Workspace not trusted. Run claude in {} once and accept the trust prompt, then retry. \
+         (trust read from {config_json})",
+        params
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.is_empty())
+            .unwrap_or(".")
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
