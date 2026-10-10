@@ -63,15 +63,12 @@ fn the_launcher_refuses_a_login_endpoint_and_a_missing_binary() {
     let missing = o;
     // A stand-in binary keeps the spec it read and refuses, as a stale
     // binary would.
-    let bin = tmp.path().join("footnote");
     let seen = tmp.path().join("spec.json");
-    std::fs::write(
-        &bin,
-        format!("#!/bin/sh\ncat > '{}'\nexit 2\n", seen.display()),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bin = crate::write_exec_stub(
+        tmp.path(),
+        "footnote",
+        &format!("#!/bin/sh\ncat > '{}'\nexit 2\n", seen.display()),
+    );
     std::env::set_var("FNO_FOOTNOTE_BIN", &bin);
     let refused = dispatch_once(
         &home,
