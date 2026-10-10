@@ -207,7 +207,7 @@ pub(crate) fn clear_mux_refs(
     registry: &std::path::Path,
     matches: &dyn Fn(&serde_json::Value) -> bool,
 ) -> Result<usize, String> {
-    if registry.is_dir() {
+    if crate::registry_read::table_owns(registry) {
         return clear_mux_refs_in_table(registry, matches);
     }
     let lock_path = registry

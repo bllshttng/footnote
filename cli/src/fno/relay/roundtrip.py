@@ -201,20 +201,11 @@ def _live_claude_rows(session_id: str):
     relay reads addressing from ``agents/registry.json``, not its own store), so it
     needs no registry-version coercion. A missing / unreadable / non-object /
     non-list registry yields nothing (the caller surfaces a deliver failure rather
-    than spawning)."""
-    reg = _agents_home() / "registry.json"
-    try:
-        data = json.loads(reg.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, dict):
-        return  # a corrupted/hand-edited registry that is valid JSON but not an object
-    rows = data.get("agents") or data.get("entries") or []
-    if not isinstance(rows, list):
-        return
-    for e in rows:
-        if not isinstance(e, dict):
-            continue
+    than spawning). Rows come through the registry table door: a stale pre-import
+    ``registry.json`` still holds rows ``rm`` removed."""
+    from fno.registry_door import read_registry_rows
+
+    for e in read_registry_rows(_agents_home() / "registry.json"):
         # v10 stores identity under harness_session_id (claude_session_uuid is
         # the legacy key, absent post-v10); read canonical-first so a raw-disk
         # match works across both shapes.
