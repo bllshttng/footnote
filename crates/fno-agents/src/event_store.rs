@@ -209,17 +209,37 @@ pub fn live_journal(journal: &Path) -> PathBuf {
 /// The store beside a journal: the live journal's `.jsonl` stem plus `.db`.
 /// A state-root journal (`events`, `decisions`, `questions`) resolves through
 /// the layout table instead, so a migrated root answers the `db/` store.
+/// An empty or name-less journal is refused (panic naming the call site);
+/// `try_store_path` is the degrading form.
+#[track_caller]
 pub fn store_path(journal: &Path) -> PathBuf {
+    match try_store_path(journal) {
+        Ok(store) => store,
+        Err(error) => panic!("{error}"),
+    }
+}
+
+/// [`store_path`] for callers that degrade instead of crashing: an empty or
+/// name-less journal comes back as an error naming the input, so a misused
+/// placeholder emitter fails its append instead of materializing `.db` in
+/// whatever directory the process happened to run from.
+pub fn try_store_path(journal: &Path) -> Result<PathBuf, String> {
     let live = live_journal(journal);
     let stem = live
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    if stem.is_empty() {
+        return Err(format!(
+            "empty or name-less journal path {:?}: refusing to derive a cwd-relative store",
+            journal
+        ));
+    }
     let stem = stem.strip_suffix(".jsonl").unwrap_or(&stem);
     if let Some(routed) = route_state_root_store(&live, stem) {
-        return routed;
+        return Ok(routed);
     }
-    live.with_file_name(format!("{stem}.db"))
+    Ok(live.with_file_name(format!("{stem}.db")))
 }
 
 /// The canonical state root, cached per env fingerprint: an emit pays one
@@ -1297,7 +1317,7 @@ pub fn append_envelope(
     envelope_json: &str,
     requested_event_id: Option<&str>,
 ) -> Result<AppendReceipt, String> {
-    let store = store_path(journal);
+    let store = try_store_path(journal)?;
     let line = envelope_json.trim();
     if line.contains('\n') || line.contains('\r') {
         return Err(format!(
