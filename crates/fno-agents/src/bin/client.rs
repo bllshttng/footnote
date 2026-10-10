@@ -189,10 +189,10 @@ fn main() {
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
     }
-    // `harness-probe` / `harness-matrix`: capability reader + renderers, transport-only.
+    // `harness-probe` / `harness-matrix` / `harness-beat`: capability reads, transport-only.
     if matches!(
         args.first().map(String::as_str),
-        Some("harness-probe" | "harness-matrix")
+        Some("harness-probe" | "harness-matrix" | "harness-beat")
     ) {
         std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }

@@ -597,6 +597,19 @@ pub fn headless_yolo_enabled(provider: &str, cwd: &Path) -> bool {
     resolve(cwd, |t| table_headless_yolo(t, provider)).unwrap_or(false)
 }
 
+/// `agents.<harness>.beat`, trimmed and lowercased; `None` when unset.
+pub fn agents_beat(harness: &str, cwd: &Path) -> Option<String> {
+    resolve(cwd, |t| {
+        let word = t
+            .get("agents")?
+            .as_table()?
+            .get(harness)?
+            .as_table()?
+            .get("beat")?;
+        Some(word.as_str()?.trim().to_lowercase())
+    })
+}
+
 /// Fold the headless default into an explicit `yolo` opt-in. An explicit
 /// `yolo=true` always wins; otherwise the headless default decides. Pure mirror
 /// of `gemini.py::_effective_yolo` / `codex.py::_effective_yolo`.

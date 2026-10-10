@@ -250,6 +250,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
     {
         "a2a",
         "auto_register_sessions",
+        "claude",
         "codex",
         "confirm",
         "defaults",

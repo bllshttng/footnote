@@ -1429,6 +1429,7 @@ pub fn transport_doors(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("harness-probe") => run_client(&args[1..]),
         Some("harness-matrix") => crate::harness_matrix::run_client(&args[1..]),
+        Some("harness-beat") => crate::harness_beat::run(&args[1..]),
         _ => 2,
     }
 }
