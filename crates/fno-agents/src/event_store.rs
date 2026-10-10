@@ -2137,13 +2137,22 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         Err(err) => return Err(format!("{}: {err}", live.display())),
     };
     let complete_end = tail.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    // The tail filter the loop below applies per line: the query's types
+    // expanded the way the store side expands them, plus whether typeless
+    // rows pass (they do only when the query asked for the empty type).
+    let tail_allowed = if q.types.is_empty() {
+        None
+    } else {
+        Some(query_types_with_aliases(&q.types))
+    };
+    let tail_typeless_ok = q.types.iter().any(|t| t.is_empty());
     // ponytail: a pre-store line no import took reads as newest; any import fixes it.
     for line_bytes in tail[..complete_end].split(|&b| b == b'\n') {
         let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
         if line_bytes.is_empty() {
             continue;
         }
-        if !tail_line_wanted(line_bytes, &q.types) {
+        if !tail_line_wanted(line_bytes, tail_allowed.as_deref(), tail_typeless_ok) {
             continue;
         }
         let hash = Sha256::digest(line_bytes).to_vec();
@@ -2193,21 +2202,22 @@ fn read_range(path: &Path, start: u64) -> std::io::Result<Vec<u8>> {
 /// two EXISTS probes per status read even when the fold wanted none of it. The
 /// tail now runs the store's own filter: no `types` filter keeps everything;
 /// otherwise a line survives when any `"type"` key in it carries one of the
-/// query's expanded types, and a line with no findable type rides the empty
-/// type entry exactly as a store row would. The scan is bytes, not a parse: a
-/// false keep only costs what the unfiltered path paid.
-fn tail_line_wanted(line: &[u8], types: &[String]) -> bool {
-    if types.is_empty() {
+/// query's expanded types, and a line whose type is present but unwanted drops
+/// even when typeless rows pass. The scan is bytes, not a parse: a false keep
+/// only costs what the unfiltered path paid.
+fn tail_line_wanted(line: &[u8], allowed: Option<&[String]>, typeless_ok: bool) -> bool {
+    let Some(allowed) = allowed else {
         return true;
-    }
-    let allowed = query_types_with_aliases(types);
+    };
+    let mut saw_type_value = false;
     let mut rest = line;
     loop {
         let Some(pos) = find_bytes(rest, b"\"type\"") else {
-            return types.iter().any(|t| t.is_empty());
+            return !saw_type_value && typeless_ok;
         };
         rest = &rest[pos + b"\"type\"".len()..];
         if let Some(value) = json_string_value_after_key(rest) {
+            saw_type_value = true;
             if allowed.iter().any(|t| t.as_bytes() == value) {
                 return true;
             }
