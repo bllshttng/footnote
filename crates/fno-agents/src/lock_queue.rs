@@ -111,14 +111,8 @@ mod tests {
         // i32::MAX as a pid, so the ticket reads as dead deterministically.
         let dead = queue_dir(&lock).join(format!("{:020}-{:07}-0000", 1u64, i32::MAX as u64));
         std::fs::File::create_new(&dead).unwrap();
-        assert!(
-            !am_head(&second),
-            "second still waits behind the live first ticket"
-        );
-        assert!(
-            am_head(&first),
-            "first is head once the dead ticket is gone"
-        );
+        assert!(!am_head(&second), "second waits behind the live first");
+        assert!(am_head(&first), "first is head once the dead one is gone");
         assert!(!dead.exists(), "the scan pruned the dead ticket");
     }
 }
