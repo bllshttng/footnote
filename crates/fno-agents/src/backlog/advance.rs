@@ -262,7 +262,7 @@ impl SpawnFailure {
 /// permanent, a human grants, never capacity; 85 is the sandbox probe; 86
 /// and 88 are the territory and blueprint caps, which free up when a slot
 /// frees; 87 is an unanswered gate.
-fn gate_refusal_reason(code: i32) -> Option<&'static str> {
+pub(crate) fn gate_refusal_reason(code: i32) -> Option<&'static str> {
     use crate::spawn_gate as g;
     let sandbox_unreachable = sandbox_probe_exit();
     match code {

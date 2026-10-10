@@ -51,6 +51,7 @@ pub struct VerbDescriptor {
     pub requires: String,
     pub takes_node_id: bool,
     pub asserts: String,
+    pub session_phase: String,
 }
 
 /// The dispatch config rung (the `_load_dispatch_cfg` dict): the caller
@@ -786,6 +787,7 @@ fn verb_descriptor(row: &toml::Value) -> VerbDescriptor {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         asserts: text("asserts"),
+        session_phase: text("session_phase"),
     }
 }
 
