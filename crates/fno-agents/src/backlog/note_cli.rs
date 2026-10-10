@@ -1248,8 +1248,8 @@ mod tests {
 
     #[test]
     fn read_one_resolves_the_id_and_slug_tiers_without_the_whole_graph() {
-        // x-8364 wave 2: the note child's entry read is one row, not the
-        // whole graph. The tiers match find_entry: exact id, then slug.
+        // The note child's entry read is one row, not the whole graph. The
+        // tiers match find_entry: exact id, then slug.
         let (_dir, graph) = fixture("read-one.json");
         seed_one_node(&graph);
         let by_id = crate::graph_store::read_one(&graph, "ab-one")

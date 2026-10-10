@@ -214,7 +214,7 @@ pub(crate) struct Write {
 
 pub(crate) fn begin(path: &Path) -> Result<Write, StateError> {
     // The registry lives in graph.db, so its writers queue on the same
-    // bounded flock the graph writers hold (x-8364). BEGIN IMMEDIATE under
+    // bounded flock the graph writers hold. BEGIN IMMEDIATE under
     // a held graph lock used to lose the 5 s busy race and die with
     // "database is locked" (spawn failure 2026-10-10). The json spelling is
     // the one graph_lock_path canonicalizes for every graph writer.

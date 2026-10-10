@@ -2076,7 +2076,7 @@ impl BoundedLock {
             }
             std::thread::sleep(LOCK_POLL);
         }
-        crate::lock_queue::withdraw(ticket.as_deref().unwrap_or(Path::new("")));
+        crate::lock_queue::withdraw(ticket.as_deref());
         Err(StoreError::LockTimeout(
             lock_path.display().to_string(),
             timeout,

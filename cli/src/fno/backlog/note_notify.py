@@ -223,7 +223,7 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
 
     try:
         # The by-id seam answers the exact id/slug tiers without reading
-        # every row (x-5557: the non-quiet path read the whole graph for one
+        # every row (the non-quiet path read the whole graph for one
         # node). The full read stays for a keeper that cannot answer, so a
         # fuzzy token or an older keeper keeps today's resolution.
         fast = read_nodes_by_ids(Path(graph_path), [task_id])
@@ -231,6 +231,11 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
         entry: dict | None = None
         if fast and (fast.get("entries") or []) and not (fast.get("missing") or []):
             entry = fast["entries"][0]
+            # The by-id read includes archived rows (the full read below
+            # does not), so an archived hit falls through to the archived
+            # refusal instead of writing to a retired node.
+            if entry.get("archived_at"):
+                entry = None
         if entry is None:
             rows = wire_rows(path=graph_path)
             entry = _find_node(rows, task_id) or next(  # the write path takes slugs too

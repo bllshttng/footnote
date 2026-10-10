@@ -1,4 +1,4 @@
-//! x-8364: a registry write queues on the graph flock instead of racing the
+//! A registry write queues on the graph flock instead of racing the
 //! 5 s busy handler. Parent helpers resolve through the glob.
 use super::*;
 

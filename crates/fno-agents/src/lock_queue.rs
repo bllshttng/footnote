@@ -1,14 +1,14 @@
 //! FIFO ordering for [`crate::graph_store::BoundedLock`] waiters.
 //!
 //! flock(2) wakes an arbitrary waiter, so under CPU starvation a poller can
-//! lose the wakeup race repeatedly and time out while the lock is free
-//! (x-8364: a waiter is served, not timed out). Tickets make the order
-//! explicit: each waiter writes one ticket file beside the lock and only the
-//! oldest live ticket may run `try_lock`. flock stays the source of truth -
-//! a ticketless writer (an older binary mid-rollout) can still take the lock
-//! out of order - so this is fairness, not correctness. A dead waiter's
-//! ticket is pruned by any scan (the same dead-pid contract the lock stamp's
-//! holder summary uses); a stalled head is bounded by its own deadline, and
+//! lose the wakeup race repeatedly and time out while the lock is free (a
+//! waiter is served, not timed out). Tickets make the order explicit: each
+//! waiter writes one ticket file beside the lock and only the oldest live
+//! ticket may run `try_lock`. flock stays the source of truth - a ticketless
+//! writer (an older binary mid-rollout) can still take the lock out of
+//! order - so this is fairness, not correctness. A dead waiter's ticket is
+//! pruned by any scan (the same dead-pid contract the lock stamp's holder
+//! summary uses); a stalled head is bounded by its own deadline, and
 //! withdrawing it serves the next ticket.
 
 use std::fs;
