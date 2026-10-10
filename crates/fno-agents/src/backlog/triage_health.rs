@@ -1050,9 +1050,7 @@ pub(crate) fn history_path(config: &Value) -> Option<PathBuf> {
     if let Some(pin) = std::env::var_os("FNO_HEALTH_HISTORY").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(pin));
     }
-    let configured = config["history"]["path"]
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let configured = config["history"]["path"].as_str().unwrap_or("");
     if !configured.is_empty() {
         return Some(PathBuf::from(configured));
     }
@@ -1533,6 +1531,8 @@ pub(crate) fn health_report(
         report.insert("triage_metrics".into(), t);
     }
     report.insert("idea_pile_depth".into(), json!(idea_count));
+    let stale_count = stale.len();
+    let failure_prone_count = failure_prone.len();
     report.insert("stale_ready_nodes".into(), Value::Array(stale));
     report.insert("failure_prone_nodes".into(), Value::Array(failure_prone));
     report.insert("collisions".into(), Value::Array(collisions.clone()));
@@ -1573,8 +1573,8 @@ pub(crate) fn health_report(
     report.insert("totals".into(), json!({
         "pending": pending_active.len(),
         "ideas": idea_count,
-        "stale": stale.len(),
-        "failure_prone": failure_prone.len(),
+        "stale": stale_count,
+        "failure_prone": failure_prone_count,
         "collisions": collisions.len(),
         "acknowledged_resolved": resolved_payload.len(),
         "project_cwd_mismatch": mismatch_ids.len(),
@@ -1638,9 +1638,7 @@ pub fn run_health(args: &[String]) -> i32 {
     }
     if check {
         let breaches = evaluate_thresholds(&report, &config);
-        let history_enabled = config["history"]["enabled"]
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let history_enabled = config["history"]["enabled"].as_bool().unwrap_or(true);
         if history_enabled {
             let mut retain = config["history"]["retain_days"].as_i64().unwrap_or(90);
             if retain < 0 {
