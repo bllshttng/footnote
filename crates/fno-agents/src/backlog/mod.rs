@@ -3,7 +3,9 @@
 //! `TABLE_OWNERS` names the owners and the table_ownership test enforces
 //! Every mutation writes only the changed nodes' rows in one transaction.
 
+pub mod advance;
 pub mod advance_fill;
+pub mod advance_settings;
 pub mod api;
 pub mod autolink;
 pub(crate) mod binding;
