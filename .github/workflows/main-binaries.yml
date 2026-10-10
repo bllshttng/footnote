@@ -9,6 +9,12 @@ name: main-binaries
 # fno-bin-<rev>-<platform>.tar.gz plus a .sha256 file. The reader is
 # crates/fno/src/update_prebuilt.rs. bin-cache is no release: no version, no
 # registry, no approval, the same posture as the nightly tag.
+#
+# The rebuild skip keys on the pair (crates rev, packaging rev). The two
+# workflow files in `paths:` are the packaging, so a workflow-only edit must
+# republish under the same crates rev: the tarballs bake in no trace of the
+# pack that built them, and reusing the old assets would ship stale packaging
+# forever. The pack marker is the fno-bin-<rev>-pack-<pack rev>.txt asset.
 
 on:
   push:
@@ -24,11 +30,12 @@ permissions:
 
 jobs:
   resolve:
-    name: resolve the crates/ rev
+    name: resolve the build key
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       crates_rev: ${{ steps.rev.outputs.crates_rev }}
+      pack_rev: ${{ steps.rev.outputs.pack_rev }}
       skip: ${{ steps.rev.outputs.skip }}
     steps:
       - name: Checkout
@@ -36,7 +43,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve the rev and skip a rev already published
+      - name: Resolve the build key and skip a key already published
         id: rev
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,12 +51,17 @@ jobs:
           set -euo pipefail
           rev="$(git log -1 --format=%H -- crates/)"
           echo "crates_rev=$rev" >> "$GITHUB_OUTPUT"
-          # A workflow-only edit or a rerun finds all four tarballs there.
+          pack="$(git log -1 --format=%H -- .github/workflows/main-binaries.yml .github/workflows/release-binaries.yml)"
+          echo "pack_rev=$pack" >> "$GITHUB_OUTPUT"
+          # A rerun of an unchanged key finds the four tarballs and their
+          # pack marker there. A workflow-only edit misses the marker and
+          # republishes.
           names="$(gh release view bin-cache --json assets --jq '.assets[].name' 2>/dev/null || true)"
           have="$(printf '%s\n' "$names" | grep -c "^fno-bin-${rev}-.*\.tar\.gz$" || true)"
-          if [ "$have" -ge 4 ]; then
+          marked="$(printf '%s\n' "$names" | grep -c "^fno-bin-${rev}-pack-${pack}\.txt$" || true)"
+          if [ "$have" -ge 4 ] && [ "$marked" -ge 1 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "crates rev $rev is already on bin-cache"
+            echo "crates rev $rev at packaging $pack is already on bin-cache"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -76,11 +88,12 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Upload under the crates/ rev and prune old revs
+      - name: Upload under the build key and prune old revs
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           REV: ${{ needs.resolve.outputs.crates_rev }}
+          PACK: ${{ needs.resolve.outputs.pack_rev }}
         run: |
           set -euo pipefail
           cd dist
@@ -91,6 +104,9 @@ jobs:
             mv "$f" "$name"
             sha256sum "$name" > "$name.sha256"
           done
+          # The pack marker records which packaging built these tarballs;
+          # the skip check reads it back by name.
+          printf '%s\n' "$PACK" > "fno-bin-${REV}-pack-${PACK}.txt"
           if ! gh release view bin-cache -R "$REPO" >/dev/null 2>&1; then
             # Two merges can race here; the loser's create fails and its
             # upload still lands on the winner's release.
@@ -99,9 +115,9 @@ jobs:
               --notes "Rolling cache of main-branch binaries for fno update, keyed by crates/ rev. Not a release." || true
           fi
           gh release upload bin-cache -R "$REPO" --clobber fno-bin-*
-          # Keep the newest 15 revs: 4 tarballs and 4 digests each.
+          # Keep the newest 15 revs: 4 tarballs, 4 digests and 1 pack marker each.
           release_id="$(gh api "repos/$REPO/releases/tags/bin-cache" --jq .id)"
           gh api --paginate "repos/$REPO/releases/$release_id/assets?per_page=100" \
-            --jq '.[] | "\(.created_at) \(.id)"' | sort -r | tail -n +121 | while read -r _ id; do
+            --jq '.[] | "\(.created_at) \(.id)"' | sort -r | tail -n +136 | while read -r _ id; do
             gh api -X DELETE "repos/$REPO/releases/assets/$id" || true
           done
