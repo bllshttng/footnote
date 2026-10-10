@@ -2,7 +2,8 @@ use super::*;
 
 /// A Claude.ai login never reaches api.anthropic.com; a route env does. A
 /// spawn whose footnote binary is missing refuses with the install command
-/// and leaves no registry row.
+/// and leaves no registry row. A spawn hands the binary a v2 spec that
+/// carries the node and the permission mode.
 #[test]
 fn the_launcher_refuses_a_login_endpoint_and_a_missing_binary() {
     let cwd = Path::new("/");
@@ -57,7 +58,30 @@ fn the_launcher_refuses_a_login_endpoint_and_a_missing_binary() {
         tmp.path(),
         Some("glm-test"),
         None,
+        &serde_json::json!({}),
+    );
+    let missing = o;
+    // A stand-in binary keeps the spec it read and refuses, as a stale
+    // binary would.
+    let bin = tmp.path().join("footnote");
+    let seen = tmp.path().join("spec.json");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\ncat > '{}'\nexit 2\n", seen.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("FNO_FOOTNOTE_BIN", &bin);
+    let refused = dispatch_once(
+        &home,
+        "fx-plan",
+        "hi",
+        "tester",
+        tmp.path(),
+        Some("glm-test"),
         None,
+        &serde_json::json!({"node": "x-1", "permission_mode": "plan"}),
     );
     for (k, v) in saved {
         match v {
@@ -65,13 +89,21 @@ fn the_launcher_refuses_a_login_endpoint_and_a_missing_binary() {
             None => std::env::remove_var(k),
         }
     }
-    assert_eq!(o.exit_code, 2, "{}", o.stderr);
+    assert_eq!(missing.exit_code, 2, "{}", missing.stderr);
     assert!(
-        o.stderr
+        missing
+            .stderr
             .contains("cargo install --locked --path ~/code/footnote/fnh"),
         "{}",
-        o.stderr
+        missing.stderr
     );
+    assert_eq!(refused.exit_code, 2, "{}", refused.stderr);
+    let spec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+    assert_eq!(spec["v"], 2);
+    assert_eq!(spec["node"], "x-1");
+    assert_eq!(spec["permission_mode"], "plan");
     let reg = load_registry(&home.registry_json()).unwrap();
     assert!(reg.find("fx-missing").is_none());
+    assert!(reg.find("fx-plan").is_none());
 }
