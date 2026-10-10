@@ -1903,8 +1903,9 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
     journal_call("started", &started_fields, None);
     std::env::set_var("FNO_INSTALL_BUILD", "1");
 
+    let mut rust_outcome: Option<String> = None;
     if !flags.no_rust {
-        refresh_rust_bins(&resolved, flags.rust, false, &mut failed);
+        rust_outcome = Some(refresh_rust_bins(&resolved, flags.rust, false, &mut failed));
         let built_fields: Vec<(&str, String)> = {
             let mut f: Vec<(&str, String)> = Vec::new();
             if let Some(r) = rust_subtree_rev(&resolved) {
@@ -1954,13 +1955,34 @@ pub fn run(rest: &[std::ffi::OsString]) -> i32 {
         run_inherit(Path::new(&cmd[0]), &cmd[1..]) == 0
     };
     if uv_ok {
-        // The marker records the rev we are about to have installed, so
-        // `fno doctor` can detect installed-vs-source skew; written only on
-        // a successful install.
-        if let Some(rev) = &rev {
-            if let Err(e) = write_marker(&installed_rev_file(), rev) {
-                eprintln!("fno doctor update: WARNING: marker write failed: {e}");
+        // The marker records the rev the binaries now carry, so `fno
+        // doctor` can detect installed-vs-source skew. Written only once
+        // every binary install proved out: a rust leg that failed, did not
+        // converge, or was skipped mid-refresh leaves the marker at the old
+        // rev, so the skew stays visible and the next update re-runs.
+        let rust_bins_proved = match rust_outcome.as_deref() {
+            None => true,
+            Some(outcome) => matches!(
+                outcome,
+                "refreshed"
+                    | "fresh"
+                    | "refreshed-no-marker"
+                    | "skipped-no-crate"
+                    | "skipped-no-binary"
+                    | "skipped-no-rev"
+            ),
+        };
+        if rust_bins_proved {
+            if let Some(rev) = &rev {
+                if let Err(e) = write_marker(&installed_rev_file(), rev) {
+                    eprintln!("fno doctor update: WARNING: marker write failed: {e}");
+                }
             }
+        } else {
+            eprintln!(
+                "fno doctor update: marker not written: rust bins did not prove current ({})",
+                rust_outcome.as_deref().unwrap_or_default()
+            );
         }
         // Retire the stale `installed-rust-rev` marker: nothing has written
         // or read it for verdicts in releases (the verdict keys on the
