@@ -953,3 +953,47 @@ fn every_retirement_door_wires_the_removal_cascade() {
         );
     }
 }
+
+/// AC-X4B27: retirement is a row drop, so it stamps the wake-name tombstone
+/// like the stop seams do: the dropped row's uuid wakes under its old name
+/// even though the row is gone and no stop record ever ran.
+#[test]
+fn a_retired_row_wakes_under_its_old_name() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_kept_row(
+        dir.path(),
+        &home,
+        "worker-named",
+        "abcd1234",
+        "abcd1234-1111-2222-3333-444444444444",
+    );
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+
+    let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
+
+    let summary = production_sweep(&home, quiet);
+
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    // The row is gone from the registry; the wake reads the tombstone and
+    // answers the name the board and mail knew.
+    let after = crate::state::load_registry(&home.registry_json()).unwrap();
+    assert!(
+        !after.entries.iter().any(|e| e.name == "worker-named"),
+        "the row dropped"
+    );
+    assert_eq!(
+        crate::reentry::wake_spawn_name(
+            &after,
+            &home.registry_json(),
+            "abcd1234-1111-2222-3333-444444444444",
+        ),
+        "worker-named",
+        "the retired row's uuid wakes under its old name",
+    );
+}

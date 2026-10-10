@@ -3356,6 +3356,18 @@ pub(crate) fn commit_retirements(
                     report.retired_names.remove(&e.name);
                     continue;
                 }
+                // The wake-name tombstone rides the drop: retirement is a row
+                // drop with no stop seam, so this stamp is what a later wake
+                // reads. Best-effort: a failed write costs a later wake its
+                // name, never the retirement.
+                if let Some(sid) = e
+                    .harness_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    crate::wake_name::record(home, sid, &e.name);
+                }
                 let (receipt_node, node_resolution) = match node_id.as_deref() {
                     Some(node) => (Some(node.to_string()), "name"),
                     None => graph_join

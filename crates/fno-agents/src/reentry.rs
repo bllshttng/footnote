@@ -850,13 +850,20 @@ pub fn resolve_reentry(
 /// The wake fork's spawn name: the session's LAST recorded registry name for
 /// this uuid, whatever the row's status or harness - a reaped, orphaned or
 /// non-claude row revives under the name the board and mail already know.
-/// A stopped row whose retirement dropped it answers from the wake-name
-/// tombstone. The `wake-<handle>` alias is only for a uuid that
-/// never named a row. The name is the worker-to-node join, so the rule must
-/// not gate it on status.
+/// A stopped or retired row whose drop removed it answers from the wake-name
+/// tombstone, then from the transcript's own naming records (the last
+/// non-wake customTitle or agentName). The `wake-<handle>` alias is only
+/// for a uuid that never named a row. The name is the worker-to-node join,
+/// so the rule must not gate it on status.
 pub fn wake_spawn_name(registry: &Registry, registry_path: &Path, session_id: &str) -> String {
     named_row(registry, session_id)
         .or_else(|| crate::wake_name::lookup_beside(registry_path, session_id))
+        .or_else(|| {
+            crate::wake_name::lookup_transcript(
+                &crate::claude_ask::ClaudeHome::from_env(),
+                session_id,
+            )
+        })
         .unwrap_or_else(|| format!("wake-{}", crate::identity::canonical_handle(session_id)))
 }
 
