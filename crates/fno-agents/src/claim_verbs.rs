@@ -60,6 +60,9 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "export" {
         return crate::store_export::run_store_export(&args[1..]);
     }
+    if op == "backlog" {
+        return crate::backlog_share::run(&args[1..]);
+    }
     if op == "root" {
         return run_claim_root(&args[1..]);
     }

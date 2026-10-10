@@ -80,7 +80,7 @@ clap_complete = "4"
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"
-rusqlite = { version = "0.40.2", features = ["bundled", "backup", "fallible_uint"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "fallible_uint", "functions"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 # `search_query.rs` names the nearest key on an unknown-key error (already
 # locked at 0.11.1 as a transitive dep, so no new download).

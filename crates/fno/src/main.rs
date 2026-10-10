@@ -173,6 +173,9 @@ enum Role {
     AgentsHistory(Vec<OsString>),
     /// `fno agents transcript ...`: the native session-bundle transfer.
     AgentsTranscript(Vec<OsString>),
+    /// `fno agents claim backlog|export ...`: the shared-store verbs, run
+    /// by `fno-agents claim`.
+    ClaimStore(Vec<OsString>),
     /// `fno agents top ...`: the native worker table (`fno-agents census
     /// --workers`), claimed here because the Python front alone cost seconds.
     AgentsTop(Vec<OsString>),
@@ -297,6 +300,20 @@ fn classify_group_verb(args: &[OsString], group: &str, verb: &str) -> Option<Vec
     Some(args[2..].to_vec())
 }
 
+/// `fno agents claim backlog|export ...`: the shared-store verbs live only
+/// in `fno-agents claim`, and the Python claim group names its actions one
+/// by one, so the front claims these two and execs the native binary.
+fn classify_claim_store(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.len() < 3
+        || args[0].to_str()? != "agents"
+        || args[1].to_str()? != "claim"
+        || !matches!(args[2].to_str()?, "backlog" | "export")
+    {
+        return None;
+    }
+    Some(args[2..].to_vec())
+}
+
 fn classify_mail_show(args: &[OsString]) -> Option<Role> {
     let (verb, tail): (&str, &[OsString]) = if args.len() >= 3
         && args[0].to_str() == Some("agents")
@@ -346,6 +363,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = classify_agents_transcript(args) {
         return Role::AgentsTranscript(rest);
+    }
+    if let Some(rest) = classify_claim_store(args) {
+        return Role::ClaimStore(rest);
     }
     if let Some(rest) = classify_agents_verb(args, "top") {
         return Role::AgentsTop(rest);
@@ -604,6 +624,9 @@ fn main() {
             &["test-run", "builds"],
             &rest,
         )),
+        Role::ClaimStore(rest) => {
+            std::process::exit(fno_agents_exec("fno agents claim", &["claim"], &rest))
+        }
         Role::MailViewRenamed => {
             eprintln!("fno agents mail view was renamed: use fno agents mail show");
             std::process::exit(2);
