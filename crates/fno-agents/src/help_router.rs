@@ -715,7 +715,7 @@ fn now_epoch() -> i64 {
 /// The generated routing page (docs/architecture/help-routing.md), rendered
 /// from the enum and the route table so the doc cannot drift. The
 /// completeness test blesses with HELP_ROUTING_BLESS=1.
-pub(crate) fn render_routing_page() -> String {
+pub fn render_routing_page() -> String {
     let all = [
         HelpClass::StalePlan,
         HelpClass::MissingPrereq,
