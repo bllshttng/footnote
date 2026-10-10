@@ -141,7 +141,7 @@ mod tests {
     /// zombie answers kill(pid,0) with 0, so pid_is_alive calls it alive
     /// while it can hold neither an fd nor a flock.
     fn zombie_child() -> std::process::Child {
-        let mut child = std::process::Command::new("/bin/sleep")
+        let child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .expect("sleep spawns");
