@@ -45,36 +45,36 @@ impl Default for QuotaConfig {
 impl QuotaConfig {
     /// One invalid leaf degrades only that leaf; valid leaves survive, so a
     /// bad global key never discards a healthy local setting.
-    pub fn from_block(block: &Value) -> QuotaConfig {
+    pub fn from_block(block: &toml::Value) -> QuotaConfig {
         let mut cfg = QuotaConfig::default();
-        if let Some(v) = block.get("observe").and_then(Value::as_bool) {
+        if let Some(v) = block.get("observe").and_then(|v| v.as_bool()) {
             cfg.observe = v;
         }
-        if let Some(v) = block.get("defer_dispatch").and_then(Value::as_bool) {
+        if let Some(v) = block.get("defer_dispatch").and_then(|v| v.as_bool()) {
             cfg.defer_dispatch = v;
         }
         if let Some(v) = block
             .get("defer_threshold_pct")
-            .and_then(Value::as_f64)
+            .and_then(|v| v.as_float())
             .filter(|v| (0.0..=100.0).contains(v))
         {
             cfg.defer_threshold_pct = v;
         }
         if let Some(v) = block
             .get("probe_ttl_seconds")
-            .and_then(Value::as_i64)
+            .and_then(|v| v.as_integer())
             .filter(|v| *v >= 1)
         {
             cfg.probe_ttl_seconds = v as f64;
         }
         if let Some(v) = block
             .get("defer_horizon_minutes")
-            .and_then(Value::as_i64)
+            .and_then(|v| v.as_integer())
             .filter(|v| *v >= 0)
         {
             cfg.defer_horizon_minutes = v as f64;
         }
-        if let Some(v) = block.get("pick_on_launch").and_then(Value::as_bool) {
+        if let Some(v) = block.get("pick_on_launch").and_then(|v| v.as_bool()) {
             cfg.pick_on_launch = v;
         }
         cfg
@@ -181,7 +181,7 @@ fn read_usage(
     let mut windows = Vec::new();
     for w in raw_windows {
         let obj = w.as_object()?;
-        let used_pct = clamp_pct(obj.get("used_pct")?.as_f64().ok()?);
+        let used_pct = clamp_pct(obj.get("used_pct")?.as_f64()?);
         let resets_at = match obj.get("resets_at") {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.as_f64()?),
@@ -212,7 +212,13 @@ fn read_lock(provider_id: &str, node_cwd: Option<&str>) -> (Option<f64>, Option<
     let Some(raw) = read_state_payload(node_cwd) else {
         return (None, None);
     };
-    let health = raw.get("health")?.get(provider_id)?.as_object()?;
+    let Some(health) = raw
+        .get("health")
+        .and_then(|h| h.get(provider_id))
+        .and_then(Value::as_object)
+    else {
+        return (None, None);
+    };
     let rlu = match health.get("rate_limited_until") {
         None | Some(Value::Null) => None,
         Some(v) => v.as_f64(),
@@ -467,8 +473,8 @@ pub fn select_destination(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
     let combo = crate::agents_config::config_lookup(cwd, &["providers", "combos"])?
-        .get(&combo_name)?
-        .as_object()?;
+        .get(combo_name.as_str())?
+        .as_table()?;
     let members = combo.get("providers")?.as_array()?;
     let records = crate::agents_config::config_lookup(cwd, &["providers", "records"])?;
     for member in members {
@@ -487,7 +493,7 @@ pub fn select_destination(
         let record = record_by_id(&records, pid)?;
         let harness = record
             .get("cli")
-            .and_then(Value::as_str)
+            .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())?;
         // A record with no harness cannot pick a --provider.
@@ -497,14 +503,14 @@ pub fn select_destination(
 }
 
 /// One provider record by id, from a records list (array of rows) or a map.
-fn record_by_id<'a>(records: &'a Value, pid: &str) -> Option<&'a serde_json::Map<String, Value>> {
+fn record_by_id<'a>(records: &'a toml::Value, pid: &str) -> Option<&'a toml::Table> {
     if let Some(rows) = records.as_array() {
         return rows
             .iter()
-            .find(|r| r.get("id").and_then(Value::as_str) == Some(pid))
-            .and_then(Value::as_object);
+            .find(|r| r.get("id").and_then(|v| v.as_str()) == Some(pid))
+            .and_then(toml::Value::as_table);
     }
-    records.get(pid).and_then(Value::as_object)
+    records.get(pid).and_then(toml::Value::as_table)
 }
 
 /// Whether launch-time account picking is armed AND has a live account.
@@ -534,7 +540,7 @@ fn healthy_alternate_exists(node_cwd: Option<&str>) -> bool {
     };
     let now = now_secs();
     records.iter().any(|rec| {
-        let Some(id) = rec.get("id").and_then(Value::as_str) else {
+        let Some(id) = rec.get("id").and_then(|v| v.as_str()) else {
             return false;
         };
         let sig = evaluate_quota_signal(id, None, 0.0, node_cwd, now);
@@ -562,7 +568,7 @@ pub fn select_autonomous_route(
     let cutover_low = {
         let cwd = node_cwd.map(Path::new).unwrap_or(Path::new("."));
         crate::agents_config::config_lookup(cwd, &["accounts", "cutover_low_after_minutes"])
-            .and_then(|v| v.as_i64())
+            .and_then(|v| v.as_integer())
             .unwrap_or(0) as f64
     };
     let _ = cfg;

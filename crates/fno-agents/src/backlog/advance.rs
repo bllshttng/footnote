@@ -1867,6 +1867,7 @@ pub struct AdvanceInput<'a> {
 /// journal the readouts fold. Best-effort; the emitter bounds one row.
 fn control_plane_tick(arm: &str, acted: u64, skip_reason: Option<&str>, detail: Option<&str>) {
     let scheduler = std::env::var("FNO_CONTROL_PLANE_SCHEDULER")
+        .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "session".to_string());
@@ -2080,7 +2081,9 @@ pub fn advance(input: &AdvanceInput) -> AdvanceResult {
 
     // 4. Already being worked? A live node claim means a worker is running;
     //    a live dispatch reservation means a peer advance is mid-flight.
-    if let Some(reason) = node_dispatch_block_reason(&node_id, node_cwd.as_deref()) {
+    if let Some(reason) =
+        node_dispatch_block_reason(&node_id, node_cwd.as_deref(), None, None, None)
+    {
         return skip(&reason, Some(&node_id), None, None, None, None);
     }
 
