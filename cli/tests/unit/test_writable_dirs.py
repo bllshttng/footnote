@@ -343,16 +343,6 @@ def test_computed_set_is_skipped_on_a_provider_with_no_additive_grant(
     assert capsys.readouterr().err == ""
 
 
-def test_explicit_add_dir_still_refuses_on_that_provider(tmp_path: Path) -> None:
-    """The computed-set skip must not weaken the operator-flag refusal."""
-    from fno.agents.dispatch import DispatchAskError
-    from fno.agents.mux_spawn import build_pane_argv
-
-    with pytest.raises(DispatchAskError, match="not supported for harness"):
-        build_pane_argv("opencode", "t", tmp_path, False, None, add_dir="/w")
-
-
-# --------------------------------------------------------------------------
 # The lane the Python token builders never see.
 # --------------------------------------------------------------------------
 

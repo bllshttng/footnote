@@ -1876,13 +1876,6 @@ fn opt_timeout(params: &Value) -> Option<std::time::Duration> {
 }
 
 /// Read the `yolo` param as a bool, defaulting to false when absent.
-fn flag_yolo(params: &Value) -> bool {
-    params
-        .get("yolo")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
 /// Route a claude `ask` to the client-side `claude --bg` path, bypassing the
 /// daemon. Returns `Some(exit_code)` when the target is claude
 /// (resolved from an existing registry row, else the `--provider` flag), or
@@ -1935,7 +1928,6 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
     let timeout = opt_timeout(params);
-    let yolo = flag_yolo(params);
 
     let claude_home = ClaudeHome::from_env();
     let outcome = dispatch_claude_ask(
@@ -1945,7 +1937,7 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
         message,
         from_name,
         &cwd,
-        yolo,
+        false,
         timeout,
         &[],
     );
@@ -2035,25 +2027,25 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
     // the parse arm, so a bad index never reaches this check.
     if portal.is_some() && substrate != "bg" {
         return Err(
-            "--portal applies only to --substrate thread; a pane hosts its \
+            "--portal applies only to the thread lane; a pane hosts its \
              own geometry and headless hosts no session at all"
                 .into(),
         );
     }
     if at.is_some() && substrate == "bg" {
-        return Err("--at applies only to --substrate pane (a thread has no calling pane)".into());
+        return Err("--at applies only to the pane lane (a thread has no calling pane)".into());
     }
     let placement_requested = squad.is_some() || split.is_some() || at.is_some() || tab.is_some();
     if placement_requested && substrate == "bg" && portal.is_none() {
-        return Err("--workspace/-s, --split/-x, and --tab on --substrate \
-             thread need --portal N: a thread hosts no pane until a portal \
+        return Err("--workspace/-s, --split/-x, and --tab on the \
+             thread lane need --portal N: a thread hosts no pane until a portal \
              opens one, so the placement has nothing to place"
             .into());
     }
     if placement_requested && portal.is_none() && substrate != "pane" {
         return Err(
-            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane \
-             (bg/headless have no pane geometry)"
+            "--workspace/-s, --split/-x, --at, and --tab apply only to the pane lane \
+             (thread/headless have no pane geometry)"
                 .into(),
         );
     }
@@ -2075,26 +2067,6 @@ fn effective_spawn_message(message: &str, substrate: &str) -> String {
     } else {
         fno_agents::spawn_payload::enrich_spawn_payload(message)
     }
-}
-
-fn validate_effort_for_spawn(
-    provider: &str,
-    substrate: &str,
-    effort: Option<&str>,
-) -> Result<(), String> {
-    if substrate == "pane" {
-        return Ok(());
-    }
-    let Some(value) = effort else {
-        return Ok(());
-    };
-    if value.is_empty() {
-        return Err("--effort must be non-empty".to_string());
-    }
-    // The one effort owner (effort_surface.rs) answers the whole deny set:
-    // gemini, cursor-agent and an undeclared harness refuse on the thread and
-    // headless lanes exactly as the Python lane's bridge refuses them.
-    fno_agents::effort_surface::effort_tokens(provider, value).map(|_| ())
 }
 
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
@@ -2207,8 +2179,8 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
 /// The Python seam (rust_runtime.make_context -> compose_spawn_argv) is
 /// the only reader of config.agents.profiles. A spawn that skipped it carries
 /// no configured route, model, effort or account, so it goes back to the
-/// front door; the marker asserts the crossing and is parsed beside `--yolo`.
-/// A marker is an upstream seam crossing, never proof a model is authorized -
+/// front door; the marker asserts the crossing and the door's own posture.
+/// A marker is an upstream seam crossing, never proof a route is authorized -
 /// the strict coordinate checks still own that.
 fn spawn_needs_python_seam(params: &Value) -> bool {
     // FNO_SPAWN_GATE=0 is the operator bypass both gate implementations honor
@@ -2234,18 +2206,6 @@ fn exec_python_front(args: &[String]) -> std::io::Error {
             .exec();
     }
     err
-}
-
-// The `--agent` refusal for codex names the native role form, not generic advice.
-fn agent_unsupported_line(provider: &str, agent: &str) -> Option<String> {
-    let role = agent.strip_prefix("fno:").unwrap_or(agent);
-    (provider == "codex").then(|| {
-        format!(
-            "--agent is not supported for harness 'codex': codex has no main-thread agent flag. \
-             Its native form is the agent role .codex/agents/{role}.toml: seed the session to \
-             call spawn_agent with agent_type {role}, or pass -H claude."
-        )
-    })
 }
 
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
@@ -2378,32 +2338,6 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         }
     };
     let timeout = opt_timeout(params);
-    let yolo = flag_yolo(params);
-    // Optional --model, forwarded as the provider's exact --model token.
-    let model = params.get("model").and_then(|v| v.as_str());
-    // permission mode for the bg/headless lanes. The pane substrate
-    // never reaches here (it re-execs the Python CLI, which owns pane mapping);
-    // this arm handles the claude and grok headless lanes plus mapped codex threads.
-    let permission_mode = params.get("permission_mode").and_then(|v| v.as_str());
-    let effort = params.get("effort").and_then(|v| v.as_str());
-    // Tier-3 harness-native passthrough. add_dir has 3 real cells
-    // (claude/codex/agy); agent/tools/deny_tools are claude-only on this
-    // bg/headless lane. Every non-equivalent cell fails closed below (mirrors
-    // --permission-mode /). The pane substrate re-execs the Python CLI,
-    // which owns its own per-provider mapping + fail-closed for these.
-    // Normalize empty-as-None once: an empty value is UNSET (the builders omit an
-    // empty flag), so the guard below must not trip on `--add-dir=""` and the
-    // bundle must carry None, not Some("").
-    let empty_as_none = |k: &str| {
-        params
-            .get(k)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-    };
-    let add_dir = empty_as_none("add_dir");
-    let agent = empty_as_none("agent");
-    let tools = empty_as_none("tools");
-    let deny_tools = empty_as_none("deny_tools");
 
     // Validate the provider FIRST so an unknown provider is a client-side
     // error (exit 2) for every substrate, never a fall-through to the daemon.
@@ -2416,143 +2350,6 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         return Some(2);
     }
 
-    // AC5-ERR: one knob at a time (pane enforces this in Python; here for
-    // bg/headless).
-    if permission_mode.is_some() && yolo {
-        eprintln!("--permission-mode and --yolo are mutually exclusive; pass one");
-        return Some(2);
-    }
-    // Fail closed: claude and the capability-mapped codex thread and grok
-    // headless lanes accept --permission-mode. gemini/agy one-shot lanes and opencode
-    // bg serve lane hardcode their own bypass form, so a mode here can't be
-    // honored without a silent downgrade - reject it, pointing at the pane
-    // substrate (which DOES map every provider's vocabulary). The codex
-    // THREAD lane (substrate "bg" after the thread normalization) is exempt:
-    // the shared app-server resolves the posture server-side
-    // (resolve_thread_posture), so a mapped mode is native there.
-    let mapped_permission_lane = (provider == "codex" || substrate == "headless")
-        && permission_mode
-            .map(|mode| {
-                // The capability table decides, through the one vocabulary
-                // (see codex_posture.rs); a resolution problem answers
-                // false, which degrades to the refusal below, never a
-                // guessed yes. Codex threads and declared headless mappings
-                // are the only non-claude lanes admitted here.
-                fno_agents::codex_posture::permission_mappable(provider, mode, substrate)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-    if permission_mode.is_some() && provider != "claude" && !mapped_permission_lane {
-        let remedy = match provider {
-            "codex" => "drop --permission-mode and pass -Y/--yolo",
-            "footnote" => "pass a mode its capability row lists in permission_modes",
-            _ => "use --substrate pane",
-        };
-        eprintln!(
-            "--permission-mode is not supported for harness {} on --substrate thread/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
-            py_repr(provider),
-        );
-        return Some(2);
-    }
-    if let Err(reason) = validate_effort_for_spawn(provider, substrate, effort) {
-        eprintln!("{reason}");
-        return Some(2);
-    }
-    // A fenced token naming a flag fno itself emits is two sources for one
-    // value; the pane lane refuses that by name (pane_passthrough_tokens) and
-    // so does this one, instead of letting argv order pick the winner.
-    let carries_axis = |flag: &str| -> bool {
-        let set = |k: &str| {
-            params
-                .get(k)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .is_some()
-        };
-        match flag {
-            "--permission-mode" => set("permission_mode"),
-            "--effort" => set("effort"),
-            "--add-dir" => set("add_dir"),
-            "--agent" => set("agent"),
-            "--tools" | "--allowedTools" => set("tools"),
-            "--deny-tools" | "--disallowedTools" => set("deny_tools"),
-            "--model" => set("model"),
-            _ => false,
-        }
-    };
-    for token in params
-        .get("harness_args")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str())
-    {
-        let Some(flag) = token.strip_prefix('-') else {
-            continue;
-        };
-        let flag = format!("--{}", flag.split('=').next().unwrap_or(flag));
-        if carries_axis(&flag) {
-            eprintln!(
-                "refusing {flag} on both sides: fno emitted it from its own flag \
-                 and the passthrough carries it too. Two sources for one value is \
-                 the defect, not the collision. Drop one."
-            );
-            return Some(2);
-        }
-    }
-
-    // fail-closed matrix for the client-owned bg/headless lanes (pane
-    // re-execs Python, which guards there). A flag with no equivalent for the
-    // resolved provider is a hard error BEFORE launch - never a silent drop.
-    // Message shape mirrors --permission-mode. (opencode's bg lane DOES reach
-    // these checks now: `--add-dir`/`--agent`-shaped flags on an opencode bg
-    // spawn refuse HERE - the serve lane grants writable dirs itself, through
-    // the per-session permission rules.)
-    if substrate != "pane" {
-        // No "use --substrate pane" advice: unlike --permission-mode, pane does
-        // NOT map these cells any wider than bg/headless does (gemini --add-dir,
-        // codex --agent fail closed on pane too), so that advice would mislead.
-        let unsupported = |flag: &str| {
-            eprintln!(
-                "{} is not supported for harness {}; drop it or use a harness that maps it",
-                flag,
-                py_repr(provider)
-            );
-        };
-        // --model: zcode has no model flag (the model is the account's own
-        // default; the row's model_switch_strategy is unsupported), so a
-        // requested model would silently no-op.
-        if model.is_some() && provider == "zcode" {
-            unsupported("--model");
-            return Some(2);
-        }
-        // --add-dir: claude/codex/agy map it; gemini has no verified equivalent.
-        // (The codex thread lane carries it too: the client puts it ahead of
-        // the state-root grant in params.state_dirs for the daemon.)
-        if add_dir.is_some() && !matches!(provider, "claude" | "codex" | "agy") {
-            unsupported("--add-dir");
-            return Some(2);
-        }
-        // --agent / --tools / --deny-tools: claude-only on this lane.
-        if agent.is_some() && provider != "claude" {
-            match agent
-                .as_deref()
-                .and_then(|a| agent_unsupported_line(provider, a))
-            {
-                Some(line) => eprintln!("{line}"),
-                None => unsupported("--agent"),
-            }
-            return Some(2);
-        }
-        if tools.is_some() && provider != "claude" {
-            unsupported("--tools");
-            return Some(2);
-        }
-        if deny_tools.is_some() && provider != "claude" {
-            unsupported("--deny-tools");
-            return Some(2);
-        }
-    }
     // fno's computed writable-dir set, published by the Python spawn seam. A
     // worker that cannot write ~/.fno takes no node claim, and the graph then
     // reads that node free while it works. Read once here so every lane below
@@ -2570,12 +2367,15 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         })
         .unwrap_or_default();
     // The claude-only bundle, resolved once for both claude lanes.
+    // The retired tier-3 bundle (add-dir/agent/tools/deny-tools) can no
+    // longer arrive: the parser refuses the spellings at the door. The
+    // builders keep their parameters; the call sites pass neutrals.
     let claude_flags = fno_agents::claude_ask::HarnessFlags {
-        add_dir,
+        add_dir: None,
         state_dirs: &state_dirs,
-        agent,
-        allowed_tools: tools,
-        disallowed_tools: deny_tools,
+        agent: None,
+        allowed_tools: None,
+        disallowed_tools: None,
         passthrough: &harness_args,
     };
 
@@ -2670,12 +2470,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &message,
                 from_name,
                 &cwd,
-                yolo,
+                false,
                 timeout,
                 &[],
-                model,
-                permission_mode,
-                effort,
+                None,
+                None,
+                None,
                 claude_flags,
                 surface_cwd,
             );
@@ -2743,18 +2543,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &message,
                 from_name,
                 &cwd,
-                yolo,
+                false,
                 timeout,
-                model,
-                permission_mode,
-                effort,
+                None,
+                None,
+                None,
                 claude_flags,
             ))
         }
 
         // codex/gemini/agy headless: the client-side one-shot (codex --exec /
-        // gemini -p / agy -p).: --model is forwarded to each (exact
-        // passthrough to the provider CLI's own --model).
+        // gemini -p / agy -p). Model selection rides each lane's own config.
         ("codex", "headless") => {
             // The daemon receipt is teardown telemetry for a one-shot spawn
             // (append_daemon_receipt only stamps stderr on success), never a
@@ -2777,11 +2576,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &message,
                 from_name,
                 &cwd,
-                yolo,
+                false,
                 timeout,
-                model,
-                effort,
-                add_dir,
+                None,
+                None,
+                None,
                 &harness_args,
             );
             if let Some(receipt) = daemon_receipt.as_ref() {
@@ -2790,7 +2589,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             emit!(outcome)
         }
         ("gemini", "headless") => emit!(dispatch_gemini_once(
-            home, name, &message, from_name, &cwd, yolo, timeout, model,
+            home, name, &message, from_name, &cwd, false, timeout, None,
         )),
         // opencode headless: the client-side one-shot
         // `opencode run --dangerously-skip-permissions` (wires the lane;
@@ -2804,10 +2603,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             &message,
             from_name,
             &cwd,
-            yolo,
+            false,
             timeout,
-            model,
-            effort,
+            None,
+            None,
             &harness_args,
         )),
 
@@ -2823,25 +2622,24 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             &message,
             from_name,
             &cwd,
-            model,
-            effort,
+            None,
+            None,
             params.get("node").and_then(|v| v.as_str()),
         )),
 
         ("agy", "headless") => {
-            // agy is stateless (plain text, no session id): a one-shot `agy -p`.
-            // It ignores `yolo` (headless create always passes
-            // --dangerously-skip-permissions) and honors optional effort/model.
+            // agy is stateless (plain text, no session id): a one-shot `agy -p`
+            // under its lane-default bypass posture.
             emit!(dispatch_agy_once_with_effort(
                 home,
                 name,
                 &message,
                 from_name,
                 &cwd,
-                model,
-                effort,
+                None,
+                None,
                 timeout,
-                add_dir,
+                None,
                 &harness_args,
             ))
         }
@@ -2852,10 +2650,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             &message,
             from_name,
             &cwd,
-            model,
-            effort,
-            yolo,
-            permission_mode,
+            None,
+            None,
+            false,
+            None,
             timeout,
             &harness_args,
         )),
@@ -2869,8 +2667,8 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             &message,
             from_name,
             &cwd,
-            yolo,
-            permission_mode,
+            false,
+            None,
             timeout,
             &harness_args,
             params.get("node").and_then(|v| v.as_str()),
@@ -2878,7 +2676,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 
         // footnote headless: footnote's own loop, run in this process.
         ("footnote", "headless") => emit!(fno_agents::footnote_harness::dispatch_once(
-            home, name, &message, from_name, &cwd, model, timeout, params,
+            home, name, &message, from_name, &cwd, None, timeout, params,
         )),
 
         // Codex thread is supervisor-hosted by the daemon. Returning `None`
@@ -2959,12 +2757,12 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
              Use `fno mux pane send <pane> --raw ...` for keystrokes (without --raw the payload is wrapped in an <fno_mail> envelope), or open `fno mux` and type into the pane.",
         ),
         "host" => Some(
-            "fno agents host was retired at G4: spawn a mux-hosted agent pane with \
-             `fno agents spawn --name <n> --substrate pane`.",
+            "fno agents host was retired at G4: open `fno mux` (the spawn verb \
+             launches in the mux itself; the lane template owns the placement).",
         ),
         "promote" => Some(
             "fno agents promote is now fno agents org promote <session> --scope <scope>; \
-             the old pane verb was retired at G4 (spawn with `fno agents spawn --name <n> --substrate pane`).",
+             the old pane verb was retired at G4 (a spawn lands in the mux by default).",
         ),
         _ => None,
     }
@@ -3789,24 +3587,20 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     } else {
         None
     };
-    // three orthogonal axes. --harness/-H names the CLI binary,
-    // --provider/-P the model VENDOR, --model the model at that vendor. The vendor
-    // is held aside so a harness name typed there fails closed after the loop
-    // (the historical confusion) rather than launching the wrong binary.
-    // (Non-spawn verbs still collect --harness/--provider through the loop.)
+    // Non-spawn verbs still collect --harness/-H through the loop (the resume
+    // verb keeps the spelling). On spawn the axis tokens never survive scan.
     let mut harness_val: Option<String> = None;
     let mut vendor_val: Option<String> = None;
     let mut it = normalized.into_iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             // --harness/-H is the CLI-binary axis, the --harness vocabulary the
-            // rest of fno uses. -H no longer means headless (that is
-            // --substrate headless / --headless / -p / --once now).
+            // rest of fno uses. -H has never meant headless here.
             "--harness" | "-H" => {
                 harness_val = Some(it.next().ok_or("--harness needs a value")?);
             }
-            // --provider/-P is the model-vendor axis. Capital P: -p is headless,
-            // mirroring the harnesses' own one-shot short.
+            // --provider/-P is a tombstone on every verb: the vendor axis only
+            // ever meant something alongside a routable spawn.
             "--provider" | "-P" => {
                 vendor_val = Some(it.next().ok_or("--provider needs a value")?);
             }
@@ -3932,17 +3726,16 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("no_wait".into(), Value::Bool(true));
             }
             "--model" | "-m" => {
-                // Exact model name forwarded to the provider CLI's own --model.
-                // -m is the mobile short. No fuzzy resolution.
-                params.insert("model".into(), str_arg(&mut it, "-m/--model")?);
+                // Spawn refuses this axis at scan; the arm dies here so a
+                // direct call on another verb cannot revive the spelling.
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis("--model"));
             }
             "--from-name" => {
                 // Forwarded for Python flag-parity; every ask path validates it.
                 params.insert("from_name".into(), str_arg(&mut it, "--from-name")?);
             }
             "--yolo" | "-Y" => {
-                // The daemon resolves yolo through resolve_thread_posture.
-                params.insert("yolo".into(), Value::Bool(true));
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis("--yolo"));
             }
             // The Python spawn seam (rust_runtime
             // make_context -> compose_spawn_argv) is the only reader of
@@ -3967,33 +3760,29 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("defaults_applied".into(), Value::String(v.into()));
             }
             "--permission-mode" => {
-                // provider permission/approval mode. Parsed here so the
-                // pane substrate (raw-arg re-exec to Python) is not blocked by an
-                // unknown-flag error; bg/headless read it in maybe_run_spawn.
-                // Mapping + fail-closed validation live at the spawn seam.
-                params.insert(
-                    "permission_mode".into(),
-                    str_arg(&mut it, "--permission-mode")?,
-                );
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis(
+                    "--permission-mode",
+                ));
             }
             "--effort" => {
-                params.insert("effort".into(), str_arg(&mut it, "--effort")?);
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis("--effort"));
             }
-            // Tier-3 harness-native passthrough. Parsed here (space +
-            // equals form via VALUE_FLAGS) so the pane re-exec is not blocked by
-            // an unknown-flag error; the mapping + fail-closed live at the spawn
-            // seam (maybe_run_spawn) and the Python pane builder.
+            // Tier-3 harness-native passthrough died with the axes: the
+            // harness's own flags ride --argv/--harness-arg now, and these
+            // spellings refuse by name instead of feeding the spawn bundle.
             "--add-dir" => {
-                params.insert("add_dir".into(), str_arg(&mut it, "--add-dir")?);
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis("--add-dir"));
             }
             "--agent" => {
-                params.insert("agent".into(), str_arg(&mut it, "--agent")?);
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis("--agent"));
             }
             "--tools" => {
-                params.insert("tools".into(), str_arg(&mut it, "--tools")?);
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis("--tools"));
             }
             "--deny-tools" => {
-                params.insert("deny_tools".into(), str_arg(&mut it, "--deny-tools")?);
+                return Err(fno_agents::cli_args::SpawnAxes::refused_axis(
+                    "--deny-tools",
+                ));
             }
             // The front door's carrier for a fenced `--` token a thread or
             // one-shot lane maps (codex: -c/--config/--add-dir). Repeatable;
@@ -4126,78 +3915,37 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         }
     }
 
-    // On `spawn` the two flags are different axes: --harness is the CLI binary,
-    // --provider the model vendor. Off spawn the vendor axis routes nothing, so
-    // --provider/-P (the retired harness spelling AND the vendor short) is a
-    // tombstone: exit 2 with the axis map, never silently forwarded.
-    if let Some(v) = vendor_val {
-        let v = v.trim().to_string();
-        if verb == "spawn" {
-            // A harness name on the vendor axis is refused BY NAME. This lane
-            // never re-execs Python cmd_spawn, so without this a `--provider
-            // claude` reaches the daemon as a vendor it cannot resolve.
-            if KNOWN_PROVIDERS.contains(&v.as_str()) || v == "agy" || v == "opencode" {
-                return Err(format!(
-                    "{v} is a harness, not a provider; use --harness {v}"
-                ));
-            }
-            // The vendor axis only means anything alongside a materialized route,
-            // and routing lives in the Python spawn path (the front door keeps
-            // every --provider spawn there). Reaching here means the binary was
-            // driven directly: say what to run instead of failing downstream.
-            return Err(format!(
-                "--provider {v} names a model vendor; routing is applied by the fno \
-                 CLI (`fno agents spawn ... --provider {v} --model <m>`), not by \
-                 fno-agents directly"
-            ));
-        }
-        return Err(format!(
-            "--provider/-P was split at the axis rename: the CLI binary is --harness/-H; \
-             a model vendor is only routable at spawn \
-             (`fno agents spawn --provider {v} --model <m>`)."
-        ));
+    // Off spawn the vendor axis routes nothing, so --provider/-P is a
+    // tombstone: exit 2 with the axis map, never silently forwarded. On spawn
+    // the token never survives scan (the retired-axis refusal fires first).
+    if vendor_val.is_some() {
+        return Err(
+            "--provider/-P was split at the axis rename: the CLI binary is \
+             --harness/-H; a model vendor is only routable at spawn via the \
+             lane template."
+                .to_string(),
+        );
     }
     if let Some(v) = harness_val {
         params.insert("provider".into(), Value::String(v));
     }
     if let Some(axes) = &axes {
         if let Some(v) = &axes.provider {
-            let v = v.trim().to_string();
-            if KNOWN_PROVIDERS.contains(&v.as_str()) || v == "agy" || v == "opencode" {
+            // Spawn never reaches here with a value (scan refuses the axis
+            // tokens up front); the arm stays a named refusal should the
+            // strip ever regress.
+            if KNOWN_PROVIDERS.contains(&v.as_str()) || v == "agy" || "opencode" == v {
                 return Err(format!(
                     "{v} is a harness, not a provider; use --harness {v}"
                 ));
             }
             return Err(format!(
-                "--provider {v} names a model vendor; routing is applied by the fno \
-                 CLI (`fno agents spawn ... --provider {v} --model <m>`), not by \
-                 fno-agents directly"
+                "--provider {v} names a model vendor; routing is applied by the \
+                 lane template, not by fno-agents directly"
             ));
-        }
-        if let Some(h) = &axes.harness {
-            params.insert("provider".into(), Value::String(h.clone()));
-        }
-        if let Some(m) = &axes.model {
-            params.insert("model".into(), Value::String(m.clone()));
-        }
-        if let Some(e) = &axes.effort {
-            params.insert("effort".into(), Value::String(e.clone()));
         }
         if let Some(a) = &axes.account {
             params.insert("account".into(), Value::String(a.clone()));
-        }
-        if let Some(sx) = &axes.substrate {
-            // if/else, not a match: an inner `"word" =>` arm reads as a
-            // phantom verb to the Python parity parser's arm scan.
-            if sx == "pane" || sx == "thread" || sx == "headless" {
-                params.insert("substrate".into(), Value::String(sx.clone()));
-            } else if sx == "bg" {
-                return Err("substrate 'bg' was retired; use --substrate thread".to_string());
-            } else {
-                return Err(format!(
-                    "--substrate must be one of: pane, thread, headless (got {sx})"
-                ));
-            }
         }
     }
 
@@ -4274,7 +4022,6 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if substrate == "pane" && pty_capable {
                 apply_interactive_defaults(&mut params)?;
             }
-            fno_agents::spawn_context::refuse_inherited_tier_remap(&params)?;
             fno_agents::spawn_context::stamp_spawn_lineage(&mut params)?;
             "agent.spawn"
         }

@@ -887,8 +887,8 @@ def _redispatch(
     non-zero force-release means the claim is still held → skip the spawn (it
     would refuse anyway) and let the caller nudge. Any miss returns False and the
     caller falls back to the bounded nudge, so the session is never left
-    dead-and-unnudged. Reuses the canonical ``fno agents spawn --substrate bg``
-    shape from dispatch-node.sh.
+    dead-and-unnudged. Reuses the canonical detached-thread spawn shape
+    from dispatch-node.sh.
     """
     import subprocess
 

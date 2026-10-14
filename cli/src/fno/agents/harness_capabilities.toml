@@ -326,6 +326,9 @@ headless = "argv-add-dir"
 # add-dir natively, and maps the fenced -c/--config/--add-dir spellings onto
 # thread/start config + state_dirs. role and the subagent selectors have no
 # spelling a shared daemon can see, so those demote to the pane.
+# No [harness.codex.launch]: the daemon-hosted app-server thread lane is the
+# one wrapper that stays (ruling d-5422710d, D2); codex has no native
+# paneless start.
 [harness.codex.thread]
 carries = ["model", "yolo", "permission_mode", "effort", "add_dir"]
 passthrough = ["-c", "--config", "--add-dir"]
@@ -624,12 +627,13 @@ supported = false
 rule_ids = []
 keys = []
 
-# Create and resume are the SAME launch once the id exists: the print-mode turn
-# mints it, every later process rejoins it. Bare `agy` would open a conversation
-# fno cannot name, which is the one thing a keeper thread may never do.
+# Create is a bare launch: agy mints its own conversation id, so a spawn
+# carries none and pays no launch-time mint turn. The session report promotes
+# the harness's own id onto the row (callee-minted-read-back); until it lands
+# the row's id is fno's provisional uuid. Resume rejoins by the row's id.
 [harness.agy.resume_strategy.forms.interactive_create]
-kind = "session_flag"
-tokens = ["agy", "--conversation", "{session_id}"]
+kind = "flag"
+tokens = ["agy"]
 
 # `--conversation <id>` resumes the conversation from any process state,
 # the same primitive the headless_resume row below records. Measured
@@ -787,6 +791,13 @@ headless = "unmeasured"
 carries = ["model", "effort"]
 passthrough = []
 
+# THE NATIVE BG LINE for the serve lane: opencode creates its own session
+# (the title names it), the turn runs on the shared serve, and the row binds
+# at the worker's session report - the same posture the claude native lane
+# holds. The {payload} hole marks the slot; the tail owns the tokens
+# (opencode_run_tail at dispatch). {serve_url} never drops.
+[harness.opencode.launch]
+argv = ["opencode", "run", "--attach", "{serve_url}", "--title", "{name}", "--dangerously-skip-permissions", "-m", "{model}", "{payload}"]
 [harness.opencode.permission_response.allow_once]
 supported = false
 rule_ids = ["permission_required"]

@@ -259,10 +259,22 @@ pub(crate) fn handle_session_report(
                 } else if related == session_id.as_str() {
                     // already held additively; the field stamps below still land
                 } else if related.is_empty() {
-                    r.entries[i].related_session_id = Some(session_id.clone());
-                    outcome = Outcome::Stored {
-                        related_filled: true,
-                    };
+                    // A callee-minted harness (agy) spawns on fno's provisional
+                    // uuid: the report's id is the harness's own and promotes
+                    // to primary instead of holding both.
+                    let callee_minted = crate::harness_capabilities::HarnessContract::packaged()
+                        .ok()
+                        .and_then(|c| c.harness.get(entry.harness_name()).cloned())
+                        .map(|arm| arm.session_binding.strategy == "callee-minted-read-back")
+                        .unwrap_or(false);
+                    if callee_minted {
+                        r.entries[i].harness_session_id = Some(session_id.clone());
+                    } else {
+                        r.entries[i].related_session_id = Some(session_id.clone());
+                        outcome = Outcome::Stored {
+                            related_filled: true,
+                        };
+                    }
                 } else {
                     // A third distinct id: nothing written, both ids named -
                     // the same cap record_session_observation enforces.
@@ -469,7 +481,8 @@ fn arm_role_manifest(
 // ---------------------------------------------------------------------------
 // client side: fno-agents session-report
 
-/// `--harness` (required), `--agent-self`, `--session-id`, `--wait-row`.
+/// `--harness` (required), `--agent-self`, `--launch-name`, `--session-id`,
+/// `--wait-row`.
 fn build_session_report_params(rest: &[String]) -> Result<Value, String> {
     let mut params = Map::new();
     let mut it = crate::client_verbs::expand_eq(rest).into_iter();
@@ -485,6 +498,12 @@ fn build_session_report_params(rest: &[String]) -> Result<Value, String> {
                 params.insert(
                     "agent_self".into(),
                     Value::String(it.next().ok_or("--agent-self needs a value")?),
+                );
+            }
+            "--launch-name" => {
+                params.insert(
+                    "launch_name".into(),
+                    Value::String(it.next().ok_or("--launch-name needs a value")?),
                 );
             }
             "--session-id" => {
@@ -721,7 +740,16 @@ fn claim_launch(
                 .map(|d| d.to_string_lossy().into_owned())
         })
         .unwrap_or_default();
-    let child_name = crate::launch_record::child_name_from_env();
+    // The child's name: the env identity, else the claim-only name a reporter
+    // with no env passes (the shared-serve title). It matches a NAMED record
+    // or nothing; it never flavors a mint - agent_self keeps that monopoly.
+    let child_name = crate::launch_record::child_name_from_env().or_else(|| {
+        params
+            .get("launch_name")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+    });
     let child = crate::launch_record::Child {
         harness: field("harness"),
         session_id,
@@ -771,7 +799,8 @@ pub async fn run_report_dispatch(rest: &[String], home: &AgentsHome) -> i32 {
 }
 
 /// `fno-agents report --kind session --harness <name> [--agent-self <row>]
-/// [--session-id <id>] [--wait-row]` - the thin SessionStart transport. The
+/// [--launch-name <record>] [--session-id <id>] [--wait-row]` - the thin
+/// SessionStart transport. The
 /// raw hook payload rides on stdin. Never lazy-starts a daemon; spools to a
 /// capped file when it is down. Always exits 0 on a delivered-or-spooled
 /// report, so a session start never blocks and never reds.
@@ -875,6 +904,26 @@ mod tests {
 
     fn response_json(resp: &Response) -> Value {
         serde_json::to_value(resp).expect("response json")
+    }
+
+    #[test]
+    fn a_claim_only_name_never_flavors_a_mint() {
+        // --launch-name with NO matching record: the session is the user's
+        // own. The row mints operator under the draw name, never the title.
+        let (_dir, home) = temp_home("claim_name_operator");
+        let resp = handle_session_report(
+            &home,
+            &emitter(&home),
+            &req(report_params(
+                "opencode",
+                "ses_strayown1",
+                json!({"launch_name": "wk-stray"}),
+            )),
+        );
+        let rows = read_rows(&home);
+        assert_eq!(rows.len(), 1, "one row mints: {}", response_json(&resp));
+        assert_eq!(rows[0].origin.as_deref(), Some("operator"));
+        assert_ne!(rows[0].name, "wk-stray");
     }
 
     fn claude_row() -> Value {

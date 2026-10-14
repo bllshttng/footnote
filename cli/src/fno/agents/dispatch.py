@@ -67,7 +67,7 @@ from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
-from fno.agents.keeper_thread import _mint_thread_session_id, complete_launch_argv
+from fno.agents.keeper_thread import _mint_thread_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
@@ -940,13 +940,7 @@ def _lane_b_thread_spawn(
     name: str,
     harness: str,
     cwd: Path,
-    model: Optional[str] = None,
-    yolo: bool = False,
-    permission_mode: Optional[str] = None,
-    add_dir: Optional[str] = None,
     resume_session_id: Optional[str] = None,
-    effort: Optional[str] = None,
-    tools: Optional[str] = None, deny_tools: Optional[str] = None,
     passthrough: Optional[Sequence[str]] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
@@ -1013,37 +1007,34 @@ def _lane_b_thread_spawn(
                 exit_code=2,
             )
 
-        session_id = _mint_thread_session_id(
-            harness,
-            cwd,
-            requested=resume_session_id,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
-            yolo=yolo,
-        )
+        session_id = _mint_thread_session_id(harness, cwd, requested=resume_session_id)
         try:
-            argv = render_session_argv(harness, "interactive_create", session_id)
+            # A typed --resume id rides the resume form; a fresh spawn renders
+            # the create form. agy's create is a bare launch (the id binds at
+            # the session report), so the two forms differ now.
+            argv = render_session_argv(
+                harness,
+                "interactive_resume" if resume_session_id else "interactive_create",
+                session_id,
+            )
         except DispatchResolveError as exc:
             raise DispatchAskError(
                 f"harness {harness!r} cannot render an interactive_create "
                 f"argv: {exc}",
                 exit_code=2,
             ) from exc
-        argv = complete_launch_argv(
-            harness,
-            argv,
-            cwd=cwd,
-            model=model,
-            yolo=yolo,
-            permission_mode=permission_mode,
-            add_dir=add_dir,
-            effort=effort, tools=tools, deny_tools=deny_tools,
-        )
-        if passthrough:
-            from fno.agents.mux_spawn import pane_passthrough_tokens
+        # The lane default posture (the row's bypass) is the Rust owner's
+        # answer; the axes that overrode it are retired. agy still needs the
+        # folder trusted before launch.
+        from fno.agents.spawn_axes_client import keeper_posture
 
-            argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
+        if harness == "agy":
+            from fno.agents.keeper_thread import trust_agy_folder
+
+            trust_agy_folder(cwd)
+        argv = [*argv, *keeper_posture(harness, "thread")]
+        if passthrough:
+            argv = [*argv, "--", *passthrough]
 
         from fno.agents.keeper_thread import _lane_b_keeper_socket
 
@@ -1078,6 +1069,9 @@ def _lane_b_thread_spawn(
         # global footnote extension gates only here and never hijacks a
         # native session that merely sits in a cwd with a stale manifest.
         env["FNO_AGENT_SESSION_ID"] = session_id
+        # The row name rides to the child (the keeper passes its env through):
+        # a callee-minted create form (agy) binds its report by name.
+        env["FNO_AGENT_SELF"] = name
         stderr_fh = open(log_path, "ab")
         try:
             proc = subprocess.Popen(

@@ -724,11 +724,6 @@ def test_generic_pane_arm_hosts_an_undeclared_harness(
     assert argv[0] == "nanoclaw"
     assert seed_rode_in_argv("say ready", argv) is False
     assert build_pane_argv("nanoclaw", "", tmp_path, False, None) == ["nanoclaw"]
-    # yolo/model/effort/permission carry no invented spelling on this arm: the
-    # spawn gate refuses them upstream (AC6-ERR) and the builder never guesses.
-    quiet = build_pane_argv("nanoclaw", "", tmp_path, True, None, model="m", effort="high")
-    assert quiet == ["nanoclaw"]
-
 
 def test_declared_pane_argv_is_byte_identical_after_the_generic_arm(
     no_state_grant: None, tmp_path: Path
@@ -740,7 +735,7 @@ def test_declared_pane_argv_is_byte_identical_after_the_generic_arm(
     from fno.agents.mux_spawn import build_pane_argv
 
     assert build_pane_argv("claude", "task", tmp_path, False, "uuid-1") == [
-        "claude", "--session-id", "uuid-1", "--", "task",
+        "claude", "--name", "uuid-1", "--", "task",
     ]
     agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
     assert agy == ["agy", "--dangerously-skip-permissions"]
@@ -902,35 +897,6 @@ def test_gemini_direct_slash_spawn_refuses_cleanly(tmp_path: Path, monkeypatch) 
     assert exc_info.value.exit_code == 2
 
 
-def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
-    # x-c772: an explicit --model reaches every pane provider's TUI flag
-    # (opencode included, now that it is spawnable). Exact passthrough; opencode
-    # uses the provider/model form and always carries a model
-    # (zai-coding-plan/glm-5.3 default).
-    from fno.agents.mux_spawn import _PER_HARNESS_MODEL_SPELLING, build_pane_argv
-
-    cases = [
-        ("claude", "u", "opus"),
-        ("codex", None, "gpt-5.5"),
-        ("gemini", None, "gemini-3-pro"),
-        ("agy", None, "some-model"),
-        ("opencode", None, "anthropic/claude-opus-4-8"),
-    ]
-    for provider, sid, model in cases:
-        argv = build_pane_argv(provider, "t", tmp_path, False, sid, model)
-        assert argv[argv.index("--model") + 1] == model, provider
-
-    # claude/codex/gemini/agy: None/empty model -> no --model flag.
-    for p in ("claude", "codex", "gemini", "agy"):
-        assert "--model" not in build_pane_argv(p, "t", tmp_path, False, None, None)
-        assert "--model" not in build_pane_argv(p, "t", tmp_path, False, None, "")
-
-    # opencode ALWAYS carries a model: None/empty falls back to the default.
-    for m in (None, ""):
-        argv = build_pane_argv("opencode", "t", tmp_path, False, None, m)
-        assert argv[argv.index("--model") + 1] == _PER_HARNESS_MODEL_SPELLING["opencode"]
-
-
 def test_ac1_hp_unrouted_codex_pane_stamps_model_vendor(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -963,44 +929,6 @@ def test_opencode_default_is_a_table_lookup(tmp_path: Path, monkeypatch) -> None
     # explicit --model overrides the (now empty) table
     argv = build_pane_argv("opencode", "t", tmp_path, False, None, "mine/y")
     assert argv[argv.index("--model") + 1] == "mine/y"
-
-
-def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
-    # x-b6e2: --add-dir/--agent/--tools/--deny-tools map to claude's own
-    # spellings in a fixed order; codex/agy map only --add-dir; opencode maps
-    # only --agent. Fixed order enforces the Rust/Python parity contract.
-    from fno.agents.mux_spawn import build_pane_argv
-
-    claude = build_pane_argv(
-        "claude", "t", tmp_path, False, "u",
-        add_dir="/work", agent="reviewer", tools="Read,Edit", deny_tools="Bash",
-    )
-    # tokens present, in order.
-    for a, b in [("--add-dir", "/work"), ("--agent", "reviewer"),
-                 ("--allowedTools", "Read,Edit"), ("--disallowedTools", "Bash")]:
-        assert claude[claude.index(a) + 1] == b
-    assert claude.index("--add-dir") < claude.index("--agent") < \
-        claude.index("--allowedTools") < claude.index("--disallowedTools")
-
-    codex = build_pane_argv("codex", "t", tmp_path, False, None, add_dir="/extra")
-    # The codex pane's only launch form rides --remote, and codex >= 0.156.1
-    # refuses --add-dir there, so even an operator-typed grant rides out with
-    # the strip (the codex --add-dir MAPPING is still pinned by the tier3
-    # refusal tests: an unmappable cell still fails closed).
-    assert "--add-dir" not in codex
-    agy = build_pane_argv("agy", "t", tmp_path, False, None, add_dir="/extra")
-    assert agy[agy.index("--add-dir") + 1] == "/extra"
-    opencode = build_pane_argv("opencode", "t", tmp_path, False, None, agent="build")
-    assert opencode[opencode.index("--agent") + 1] == "build"
-
-
-def _pane_repo(tmp_path: Path) -> Path:
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    return repo
 
 
 def test_build_pane_argv_codex_drops_the_git_grant_on_the_remote_launch(
@@ -1054,32 +982,6 @@ def no_state_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_build_pane_argv_codex_strip_covers_every_posture(tmp_path: Path) -> None:
-    """x-0a75, posture axis: the codex refusal of `--add-dir` beside `--remote`
-    is an argv-level check with no posture exception, so the strip covers the
-    bypass postures and the sandboxed ones alike. Asserted on the git common
-    dir rather than on the bare flag, so the grant under test is pinned to its
-    symbol and an absent state-root grant cannot fake a pass.
-    """
-    from fno.agents.harnesses.codex import _git_common_dir
-    from fno.agents.mux_spawn import build_pane_argv
-
-    repo = _pane_repo(tmp_path)
-    git_dir = _git_common_dir(repo)
-    assert git_dir, "fixture repo must resolve a git common dir"
-
-    assert git_dir not in build_pane_argv("codex", "t", repo, True, None)
-    assert git_dir not in build_pane_argv(
-        "codex", "t", repo, False, None, permission_mode="yolo"
-    )
-    assert git_dir not in build_pane_argv(
-        "codex", "t", repo, False, None, permission_mode="full-auto"
-    )
-    assert git_dir not in build_pane_argv(
-        "codex", "t", repo, False, None, permission_mode="workspace-write:on-request"
-    )
-
-
 def test_build_pane_argv_codex_strip_drops_the_user_grant_too(tmp_path: Path) -> None:
     """x-0a75, composition axis inverted: nothing composes on the codex pane
     any more, including a grant the operator typed. The spawn must still reach
@@ -1088,7 +990,9 @@ def test_build_pane_argv_codex_strip_drops_the_user_grant_too(tmp_path: Path) ->
     from fno.agents.mux_spawn import build_pane_argv
 
     repo = _pane_repo(tmp_path)
-    argv = build_pane_argv("codex", "seed text", repo, False, None, add_dir="/extra")
+    argv = build_pane_argv(
+        "codex", "seed text", repo, False, None, passthrough=["--add-dir", "/extra"]
+    )
 
     assert argv.count("--add-dir") == 0
     assert "/extra" not in argv
@@ -1753,8 +1657,8 @@ def test_cmd_spawn_parses_pr_watch_headless_json_argv(
     result = CliRunner().invoke(
         agents_cli.agents_app,
         [
-            "spawn", "--name", "pr-check-7", "--substrate", "headless",
-            "--harness", "claude", "--output-format", "json",
+            "spawn", "--name", "pr-check-7", "--once",
+            "--output-format", "json",
             "/fno:ship pr check 7",
         ],
     )
@@ -1996,7 +1900,7 @@ def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     result = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "--name", "peer", "--harness", "claude", "--tab", "id:12"],
+        ["spawn", "--name", "peer", "--tab", "id:12"],
     )
     assert result.exit_code == 0, result.output
     assert captured["tab"] == "id:12"
@@ -2026,7 +1930,7 @@ def test_cmd_spawn_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
 
     result = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "--name", "ordinary", "--harness", "claude", "--substrate", "pane", "do work"],
+        ["spawn", "--name", "ordinary", "--split", "left", "do work"],
     )
 
     assert result.exit_code == 0, result.output
@@ -2320,7 +2224,7 @@ def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "-x", "diagonal"],
+        ["spawn", "peer", "-x", "diagonal"],
     )
     assert res.exit_code == 2, res.output
     assert "left, right, up, or down" in res.output
@@ -2334,7 +2238,7 @@ def test_cmd_spawn_rejects_blank_squad_before_dispatch(tmp_path: Path, monkeypat
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "-s", ""],
+        ["spawn", "peer", "-s", ""],
     )
     assert res.exit_code == 2, res.output
     assert "--workspace/-s needs a nonblank workspace name" in res.output
@@ -2920,12 +2824,8 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
             "spawn",
             "--name",
             "peer",
-            "--harness",
-            "claude",
-            "--provider",
-            "zai",
-            "--model",
-            "glm-5.2",
+            "--route",
+            "zai,glm-5.2",
             "--monitor",
             "happy",
             "hello",
@@ -4062,49 +3962,6 @@ def test_ac3_passthrough_hits_the_happy_refusals(
         )
     assert exc.value.exit_code == 2
     assert runner.calls == []
-
-
-@pytest.mark.parametrize(
-    ("provider", "kwargs", "tok"),
-    [
-        ("claude", {"model": "opus"}, ["--model", "glm"]),
-        ("claude", {"permission_mode": "acceptEdits"}, ["--permission-mode", "yolo"]),
-        ("claude", {"name": "peer"}, ["--name", "reviewer"]),
-        ("gemini", {"yolo": True}, ["--yolo"]),
-        ("opencode", {"yolo": True}, ["--auto"]),
-        # Alias spellings of an axis fno already emitted: same defect, the
-        # exact-name check alone would let both ride (gemini always
-        # materializes one of --yolo/--approval-mode; --yolo is an alias of
-        # opencode's --auto).
-        ("gemini", {}, ["--yolo"]),
-        ("gemini", {"yolo": True}, ["--approval-mode", "yolo"]),
-        ("opencode", {"yolo": True}, ["--yolo"]),
-        # gemini's message rides behind `-i`, appended AFTER the splice: the
-        # emitted set must carry it or a passthrough -i adds a second prompt.
-        ("gemini", {}, ["-i", "joke"]),
-    ],
-)
-def test_ac4_duplicated_flag_is_a_named_refusal(
-    tmp_path: Path, provider: str, kwargs: dict, tok: list[str]
-) -> None:
-    """AC4-ERR: two sources for one value is the defect; never a silent
-    last-wins that would make the receipt disagree with the process."""
-    from fno.agents.dispatch import DispatchAskError
-    from fno.agents.mux_spawn import build_pane_argv
-
-    yolo = kwargs.pop("yolo", False)
-    with pytest.raises(DispatchAskError, match="on both sides") as exc:
-        build_pane_argv(
-            provider,
-            "task",
-            tmp_path,
-            yolo,
-            None,
-            passthrough=tok,
-            **kwargs,
-        )
-    assert exc.value.exit_code == 2
-    assert tok[0] in str(exc.value)
 
 
 @pytest.mark.parametrize(

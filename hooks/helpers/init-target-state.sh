@@ -1740,7 +1740,7 @@ PYEOF
             # Look for a delegated event for this node whose child_session is a
             # prefix of our session id (minimum 6 hex chars).
             #
-            # Verified relationship (2026-06-05): the claude create path (now spawn --provider claude; pre-Group-1: ask)
+            # Verified relationship (2026-06-05): the claude create path (the native spawn lane; pre-Group-1: ask)
             # prints a short-id via the "backgrounded · [0-9a-f]{8} ·" banner
             # (crates/fno-agents/src/claude_ask.rs:287). That 8-hex token is the
             # FIRST 8 HEX CHARS of the child's CLAUDE_CODE_SESSION_ID (= the full

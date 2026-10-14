@@ -18,7 +18,7 @@ Each line is one of `launched` / `already-running` / `parked` / `skipped-done` /
 
 Multi-CLI: `/target bg` preserves its Claude semantics and requires `claude --bg` + `fno agents`; on a CLI without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch). Separate Codex build dispatches use a prose brief through an owned-PTY (`pane`) or one-shot `headless` spawn, never a literal `/target`; unsupported non-Claude slash-command passthrough is rejected before spawn.
 
-**Spawn substrate axis.** `fno agents spawn --substrate <pane|thread|headless>` names where an off-thread `/target` runs. `pane` is an owned-PTY drivable pane and the default. `thread` is the detached interactive lane (claude's `claude --bg`) and what `/target bg` dispatches. `headless` is a one-shot `claude -p` / `codex --exec` / `agy -p`. `/target bg` is the autonomous-dispatch verb because only `thread` is both detached AND able to run the full multi-phase pipeline. For an attended drivable pane use `/agent spawn /target <node>` on substrate `pane`. `headless` does not fit a multi-phase `/target` run. It is a `/agent spawn headless` surface for cross-provider one-shots, not a `/target` dispatch verb.
+**Spawn lanes.** The native lane each harness templates names where an off-thread `/target` runs: an owned-PTY drivable pane, the detached interactive thread (claude's `claude --bg`, the `/target bg` dispatch lane), or the one-shot (`claude -p` / `codex --exec` / `agy -p`, `--once`). The substrate flags are retired; docs/HARNESSES.md names each native form. `/target bg` is the autonomous-dispatch verb because only the thread lane is both detached AND able to run the full multi-phase pipeline.
 
 ## Batched mode (`batched <node>`)
 

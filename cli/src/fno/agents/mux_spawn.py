@@ -1,6 +1,6 @@
 """Mux-pane spawn back half (4a-G2): host an agent's PTY as a mux pane.
 
-``fno agents spawn --substrate pane`` (the closable fallback lane) lands here: the
+``fno agents spawn`` (the closable pane lane) lands here: the
 front half - name validation, provider selection, per-agent flock, collision
 check, role routing, billing guard - is the same machinery the daemon/bg paths
 use; only the HOSTING call differs. Instead of the fno-agents daemon spawning
@@ -545,90 +545,8 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
         raise DispatchAskError(answer["refusal"], exit_code=2)
     return [str(token) for token in answer.get("tokens") or []]
 
-def tier3_pane_tokens(
-    provider: str,
-    *,
-    add_dir: Optional[str] = None,
-    computed_dirs: Sequence[str] = (),
-    agent: Optional[str] = None,
-    tools: Optional[str] = None,
-    deny_tools: Optional[str] = None,
-) -> list[str]:
-    """Map the Tier-3 harness-native passthrough flags to provider-native pane
-    argv tokens, in a fixed order (add-dir, agent, allowedTools,
-    disallowedTools). Fail-closed per cell: a set flag with no equivalent for
-    ``provider`` raises before spawn - never a silent drop. An empty/None value
-    is unset (no token). Mirrors the Rust HarnessFlags mapping + the client.rs
-    guard, so pane and bg/headless agree on which cells exist.
-
-    ``computed_dirs`` is fno's own writable-directory set and is the one cell
-    that degrades instead of raising; see :func:`add_dir_tokens`."""
-
-    def unsupported(flag: str) -> "list[str]":
-        raise DispatchAskError(
-            f"{flag} is not supported for harness {provider!r}; if it is the "
-            "harness's own flag, pass it after the -- fence",
-            exit_code=2,
-        )
-
-    out: list[str] = []
-    # --add-dir: claude/codex/agy grant extra write access. opencode --dir SETS
-    # cwd (not additive) and gemini is unverified, so both fail closed.
-    out += add_dir_tokens(provider, add_dir, computed_dirs, unsupported=unsupported)
-    # --agent: claude and opencode select a sub-agent by name.
-    if agent:
-        if provider in ("claude", "opencode"):
-            out += ["--agent", agent]
-        else:
-            unsupported("--agent")
-    # --tools / --deny-tools: claude only (--allowedTools / --disallowedTools).
-    # codex/opencode tool scope is a different axis (sandbox / config presets).
-    if tools:
-        if provider == "claude":
-            out += ["--allowedTools", tools]
-        elif provider == "pi":
-            # pi's own allowlist flag, spanning built-in, extension and custom
-            # tools in one comma-separated list.
-            out += ["--tools", tools]
-        else:
-            unsupported("--tools")
-    if deny_tools:
-        if provider == "claude":
-            out += ["--disallowedTools", deny_tools]
-        elif provider == "pi":
-            out += ["--exclude-tools", deny_tools]
-        else:
-            unsupported("--deny-tools")
-    return out
 
 
-def effort_tokens(harness: str, value: str) -> list[str]:
-    """Translate effort without maintaining a provider/model value catalog.
-
-    Keyed by HARNESS, not vendor: every branch of the owner is a CLI binary,
-    and the flag spelling that has to be translated is the binary's. The
-    vocabulary lives in Rust (crates/fno-agents/src/effort_surface.rs), so
-    this is a transport bridge: one subprocess round-trip, the shape of
-    `permission_pane_tokens`. The owner answers the whole deny set (gemini,
-    cursor-agent, an undeclared harness) with the same strings this module
-    used to raise."""
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        answer = verb_call(
-            "spawn-overlay",
-            {"kind": "compat", "harness": harness, "effort": value},
-            VerbUnavailable,
-        )
-    except VerbUnavailable as exc:
-        raise DispatchAskError(
-            f"the effort surface owner (fno-agents) is unavailable: ({exc})",
-            exit_code=2,
-        ) from exc
-    entry = answer.get("effort") or {}
-    if entry.get("refusal"):
-        raise DispatchAskError(entry["refusal"], exit_code=2)
-    return [str(token) for token in entry.get("tokens") or []]
 
 
 def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path] = None) -> None:
@@ -855,23 +773,21 @@ def _backfill_codex_session_id(
     return None
 
 
-def pane_passthrough_tokens(
+
+def refuse_passthrough_collision(
     passthrough: Optional[Sequence[str]],
     emitted: Sequence[str],
-) -> list[str]:
-    """Validate `--` passthrough tokens against what fno itself emitted, for
-    splicing into a provider arm.
+) -> None:
+    """Refuse a `--` passthrough token naming a flag fno itself emitted.
 
-    A passthrough token naming a flag the arm already carries is a named
-    refusal, never a silent last-wins: two sources for one value make the
-    spawn receipt disagree with the process. ``emitted`` is every option token
-    the arm will carry, INCLUDING the tail spliced after the passthrough
-    position (gemini/opencode permission tokens), minus the message. The
-    ``--`` fence itself and value tokens are not flags; an ``=``-joined flag
-    compares by its name.
+    Two sources for one value make the spawn receipt disagree with the
+    process; the refusal is named, never a silent last-wins. The ``--``
+    fence itself and value tokens are not flags; an ``=``-joined flag
+    compares by its name. (The splice half of the old pane_passthrough_tokens
+    died with the axes: the arms append the raw passthrough now.)
     """
     if not passthrough:
-        return []
+        return
     emitted_flags = {
         tok.split("=", 1)[0] for tok in emitted if tok.startswith("-") and tok != "--"
     }
@@ -886,7 +802,6 @@ def pane_passthrough_tokens(
                 "value is the defect, not the collision. Drop one.",
                 exit_code=2,
             )
-    return list(passthrough)
 
 
 _CURSOR_NATIVE_WORKTREE_FLAGS = frozenset({"-w", "--worktree", "--worktree-base"})
@@ -979,15 +894,7 @@ def build_pane_argv(
     provider: str,
     message: str,
     cwd: Path,
-    yolo: bool,
     session_uuid: Optional[str],
-    model: Optional[str] = None,
-    permission_mode: Optional[str] = None,
-    effort: Optional[str] = None,
-    add_dir: Optional[str] = None,
-    agent: Optional[str] = None,
-    tools: Optional[str] = None,
-    deny_tools: Optional[str] = None,
     name: Optional[str] = None,
     passthrough: Optional[Sequence[str]] = None,
     computed_dirs: Optional[Sequence[str]] = None,
@@ -1044,19 +951,17 @@ def build_pane_argv(
     # resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
     # an argv. Supported cells return the tokens; every arm splices them in below.
-    tier3 = tier3_pane_tokens(
+    # fno's own state directories: the one cell that survives the axis
+    # retirement. Computed here, at the ONE pane funnel, so the arms below
+    # cannot disagree about which spawn gets the grant.
+    dirs = worker_writable_dirs(cwd) if computed_dirs is None else computed_dirs
+    grant = add_dir_tokens(
         provider,
-        add_dir=add_dir,
-        # fno's own state directories. Computed here, at the ONE pane funnel, so
-        # the claude/codex/agy arms below cannot disagree about which spawn gets
-        # the grant. Without it a bounded worker cannot write ~/.fno/claims, so
-        # it holds no claim and the graph reads free while it works.
-        computed_dirs=(
-            worker_writable_dirs(cwd) if computed_dirs is None else computed_dirs
+        None,
+        dirs,
+        unsupported=lambda flag: (_ for _ in ()).throw(
+            DispatchAskError(f"{flag} is not supported for harness {provider!r}", exit_code=2)
         ),
-        agent=agent,
-        tools=tools,
-        deny_tools=deny_tools,
     )
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes
@@ -1065,17 +970,9 @@ def build_pane_argv(
         argv = identity
         if name:
             argv += ["--name", name]
-        if model:
-            argv += ["--model", model]
-        if permission_mode:
-            argv += permission_pane_tokens("claude", permission_mode)
-        elif yolo:
-            # AC4-HP: claude --yolo now means bypassPermissions (was a no-op).
-            argv += ["--permission-mode", "bypassPermissions"]
-        if effort:
-            argv += effort_tokens("claude", effort)
-        argv += tier3
-        argv += pane_passthrough_tokens(passthrough, argv)
+        argv += grant
+        if passthrough:
+            argv += list(passthrough)
         if message:
             # The seed rides behind `--` so a leading-flag seed ("--model x
             # ...") reaches claude as the prompt positional instead of dying
@@ -1085,18 +982,11 @@ def build_pane_argv(
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
         argv = [*identity, "-C", str(cwd)]
-        bypass_posture = permission_mode in ("yolo", "bypassPermissions") if permission_mode else yolo
-        if permission_mode:
-            argv += permission_pane_tokens("codex", permission_mode)
-        else:
-            argv += (
-                ["--dangerously-bypass-approvals-and-sandbox"]
-                if yolo
-                # The bounded default is the thread lane's own CodexPosture::bounded()
-                # pair, routed through the Rust owner so pane and thread cannot
-                # disagree about what "bounded" means.
-                else permission_pane_tokens("codex", "workspace-write:never")
-            )
+        # The bounded default is the thread lane's own CodexPosture::bounded()
+        # pair, routed through the Rust owner so pane and thread cannot
+        # disagree about what "bounded" means. The mode axis is retired; the
+        # lane default is the only answer left.
+        argv += permission_pane_tokens("codex", "workspace-write:never")
         # Codex 0.148 parks a pane on a `Hooks need review` modal for a new or
         # changed hook, and no posture clears it. Sandbox and approval stay.
         argv += codex_hook_trust_args()
@@ -1105,15 +995,13 @@ def build_pane_argv(
         # cannot commit without the grant. Only the two bypass postures skip it.
         from fno.agents.harnesses.codex import git_writable_args, plan_writable_args
 
-        if not bypass_posture:
-            argv += git_writable_args(cwd)
-            argv += plan_writable_args(cwd)
-        if model:
-            argv += ["--model", model]
-        if effort:
-            argv += effort_tokens("codex", effort)
-        argv += tier3
-        argv += pane_passthrough_tokens(passthrough, argv)
+        # The bounded posture never carries bypass, so the carveouts always
+        # ride now.
+        argv += git_writable_args(cwd)
+        argv += plan_writable_args(cwd)
+        argv += grant
+        if passthrough:
+            argv += list(passthrough)
         argv = strip_remote_add_dirs(argv)
         if message:
             # Same fence as the claude arm: clap itself prescribes `--` ("to
@@ -1122,13 +1010,10 @@ def build_pane_argv(
             argv += ["--", message]
         return argv
     if provider == "gemini":
-        if effort:
-            effort_tokens("gemini", effort)
         # `-i` executes the prompt then stays interactive; --skip-trust avoids
         # the workspace-trust modal blocking the TUI.
         argv = [*identity, "--skip-trust"]
-        if model:
-            argv += ["--model", model]
+        argv += grant
         # Permission tokens are computed before the passthrough splice so the
         # duplicate-flag refusal sees them (they append after the -i pair, past
         # the splice position). Output order is unchanged. The emitted set also
@@ -1137,40 +1022,28 @@ def build_pane_argv(
         # of the two names, so an alias-shaped passthrough (--yolo against an
         # --approval-mode arm or the reverse) is a named refusal, never a
         # silent last-wins.
-        perm = (
-            permission_pane_tokens("gemini", permission_mode)
-            if permission_mode
-            else (["--yolo"] if yolo else ["--approval-mode", "default"])
-        )
-        emitted = [*argv, *perm, "--yolo", "--approval-mode"]
-        if message:
-            emitted.append("-i")
-        argv += pane_passthrough_tokens(passthrough, emitted)
+        argv += ["--approval-mode", "default"]
+        if passthrough:
+            argv += list(passthrough)
         if message:
             # argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -i
             # value form is pinned by tests and left as-is).
             argv += ["-i", message]
-        argv += perm
         return argv
     if provider == "agy":
-        effort_argv = effort_tokens("agy", effort) if effort else []
         # agy (Antigravity) interactive pane (US1). Posture tokens are the
         # Rust owner's answer (agy_launch.keeper_posture, lane pane): the lane
-        # default is the never-prompt bypass and an explicit mode REPLACES it.
-        # This LANE mints no session id; `-p`/`--print` is agy's HEADLESS form
-        # and must NOT be used for a pane. The readiness gate submits the seed.
+        # default is the never-prompt bypass. This LANE mints no session id;
+        # `-p`/`--print` is agy's HEADLESS form and must NOT be used for a
+        # pane. The readiness gate submits the seed.
         from fno.agents.spawn_axes_client import keeper_posture
 
-        argv = ["agy", *keeper_posture("agy", "pane", permission_mode, yolo)]
-        argv += effort_argv
-        if model:
-            argv += ["--model", model]
-        argv += tier3
-        argv += pane_passthrough_tokens(passthrough, argv)
+        argv = ["agy", *keeper_posture("agy", "pane")]
+        argv += grant
+        if passthrough:
+            argv += list(passthrough)
         return argv
     if provider == "opencode":
-        if effort:
-            effort_tokens("opencode", effort)
         # Bare `opencode` is the TUI; `opencode run` is the HEADLESS
         # form and must not be pane-hosted. The positional is a PROJECT PATH,
         # not a prompt, so the message rides --prompt (argv pinned from
@@ -1187,25 +1060,12 @@ def build_pane_argv(
         # opencode expects the provider/model form. An explicit --model wins,
         # else the per-harness default table (opencode is the only entry);
         # inject nothing if the table has no entry for this provider.
-        _default_model = model or _PER_HARNESS_MODEL_SPELLING.get(provider)
+        _default_model = _PER_HARNESS_MODEL_SPELLING.get(provider)
         if _default_model:
             argv += ["--model", _default_model]
-        argv += tier3
-        # Computed before the splice (like gemini) so the duplicate refusal sees
-        # the permission tokens that append after the splice position. When the
-        # axis is set, --auto's hidden aliases (--yolo /
-        # --dangerously-skip-permissions, per the arm comment above) count as
-        # the same flag: a passthrough carrying one is a second source.
-        perm = (
-            permission_pane_tokens("opencode", permission_mode)
-            if permission_mode
-            else (["--auto"] if yolo else [])
-        )
-        emitted = [*argv, *perm]
-        if perm:
-            emitted += ["--yolo", "--dangerously-skip-permissions"]
-        argv += pane_passthrough_tokens(passthrough, emitted)
-        argv += perm
+        argv += grant
+        if passthrough:
+            argv += list(passthrough)
         return argv
     if provider == "pi":
         # pi's WATCHING lane: the plain interactive TUI, never `--mode rpc`
@@ -1217,14 +1077,16 @@ def build_pane_argv(
         # argv. The ONE pi route owner (keeper and pane share it). pi ships
         # no permission popups, so `yolo` maps to nothing.
         from fno.agents.spawn_axes_client import spawn_axes_call
-        from fno.agents.keeper_thread import _pi_axes
 
-        route = spawn_axes_call({"pi_route": _pi_axes(model, effort, None, None)})
+        # The one pi route owner (keeper and pane share it); the axes that
+        # fed it are retired, so the ask carries the ambient route only.
+        route = spawn_axes_call(
+            {"pi_route": {"model": "", "effort": "", "tools": "", "deny_tools": ""}}
+        )
         argv = [*identity, *(str(t) for t in route["tokens"])]
-        if permission_mode:
-            argv += permission_pane_tokens("pi", permission_mode)
-        argv += tier3
-        argv += pane_passthrough_tokens(passthrough, argv)
+        argv += grant
+        if passthrough:
+            argv += list(passthrough)
         if message:
             # argv-fence: exempt. Probed on pi 0.84.2: `pi -- --version` PRINTS
             # the version, so `--` is not an end-of-options marker here and a
@@ -1245,17 +1107,10 @@ def build_pane_argv(
         # work, and fno always spawns into a fresh worktree. -w/--worktree is
         # never passed; the worktree is fno's.
         argv = identity
-        if model:
-            argv += ["--model", model]
-        if permission_mode:
-            argv += permission_pane_tokens("cursor-agent", permission_mode)
-        elif yolo:
-            argv += ["--force"]
-        if effort:
-            argv += effort_tokens("cursor-agent", effort)
-        argv += tier3
+        argv += grant
         refuse_cursor_native_worktree_tokens(passthrough)
-        argv += pane_passthrough_tokens(passthrough, argv)
+        if passthrough:
+            argv += list(passthrough)
         return argv
     if provider == "grok":
         # grok's pane hosts the plain TUI; the declared interactive_create
@@ -1265,16 +1120,9 @@ def build_pane_argv(
         # grok maps no --add-dir, and its permission vocabulary is claude's,
         # so permission_pane_tokens passes it through exactly.
         argv = identity
-        if permission_mode:
-            argv += permission_pane_tokens("grok", permission_mode)
-        elif yolo:
-            argv += ["--always-approve"]
-        if model:
-            argv += ["--model", model]
-        if effort:
-            argv += effort_tokens("grok", effort)
-        argv += tier3
-        argv += pane_passthrough_tokens(passthrough, argv)
+        argv += grant
+        if passthrough:
+            argv += list(passthrough)
         return argv
     if not is_declared(provider):
         # The undeclared lane: fno is the VIEWPORT, nothing more. No identity
@@ -1287,7 +1135,8 @@ def build_pane_argv(
         # False and `_submit_spawn_seed` types it after readiness, the same path
         # agy already takes. Nothing new is written for it.
         argv = [provider]
-        argv += pane_passthrough_tokens(passthrough, argv)
+        if passthrough:
+            argv += list(passthrough)
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
@@ -3667,15 +3516,7 @@ def dispatch_spawn_pane(
         provider,
         message,
         cwd,
-        yolo,
         session_uuid,
-        model,
-        permission_mode,
-        effort,
-        add_dir=add_dir,
-        agent=agent,
-        tools=tools,
-        deny_tools=deny_tools,
         name=name,
         passthrough=passthrough,
         computed_dirs=computed_writable_dirs,
@@ -3690,7 +3531,7 @@ def dispatch_spawn_pane(
         from fno.agents.codex_pane import codex_shell_env_args
 
         env_config_args = codex_shell_env_args(mesh_pairs)
-        pane_passthrough_tokens(passthrough, env_config_args)
+        refuse_passthrough_collision(passthrough, env_config_args)
         argv = [argv[0], *env_config_args, *argv[1:]]
     elif provider == "codex" and argv:
         print(f"codex pane: identity leaves skipped; argv[0] is {argv[0]!r}", file=sys.stderr)
@@ -3700,7 +3541,7 @@ def dispatch_spawn_pane(
         # in-arm duplicate-flag check never saw them; re-run it against the
         # route tokens or a passthrough `-c`/`--model` flag is a silent
         # last-wins against the route's own setting.
-        pane_passthrough_tokens(passthrough, codex_route.config_args)
+        refuse_passthrough_collision(passthrough, codex_route.config_args)
     from fno.agents.spawn_defaults import resolve_lane_vendor
 
     resolved_lane_provider = route_provider or resolve_lane_vendor(

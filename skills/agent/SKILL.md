@@ -1,7 +1,7 @@
 ---
 name: agent
 description: Control Footnote workers by spawning, handing off, inspecting, messaging, driving, or stopping sessions.
-argument-hint: "<verb> [args]  |  [handoff] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
+argument-hint: "<verb> [args]  |  [handoff] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [as <name>] [merge]"
 metadata:
   internal: false
   requires:
@@ -102,7 +102,7 @@ never corrupt it. The user types barewords or natural language; you map them to
 the structured fields. The canonical form:
 
 ```
-<payload> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]
+<payload> [provider] [drive] [as <name>] [merge]
 ```
 
 The angle brackets are placeholder notation, not literal syntax. Infer the
@@ -127,27 +127,17 @@ see below):
 - **`drive`** (alias `interactive`, optional): route codex/agy to a drivable
   `host` session instead of an autonomous `spawn`. No-op for claude. "drive it"
   / "interactive" map here.
-- **`yolo`** (aliases `auto`, `-Y`, `--yolo`, optional): drops the sandbox for
-  this launch. You rarely need it: a headless codex/agy worker is already
-  BOUNDED - sandboxed AND never-prompt - without it. On claude it maps to
-  `--permission-mode bypassPermissions`; an explicit `--permission-mode` wins.
-  Deep behavior per provider: [references/workflow-routes.md](references/workflow-routes.md).
-- **`model <name>`** (optional): exact model for the worker, plumbed to `fno
-  agents spawn --model`. Two-word posture (`spawn ab-X model opus`). Default =
-  the provider's default. There is NO short flag: `-m` is `--allow-merge`, so a
-  bare `-m opus` would set merge, not the model - always write `model <name>`.
-- **`effort <value>`** (optional): reasoning-effort tier, plumbed to `fno
-  agents spawn --effort`. Orthogonal to `model`; the CLI validates the
-  provider-specific vocabulary before spawning.
 - **`as <name>`** (optional): explicit agent name. Default is derived
   (`<verb>-<node-id>-<slug>` / `<verb>-<slug>`). "call it X" / "name it X" map here.
 - **`merge`** (optional): do NOT inject the no-merge intent. Default injects it
   so a fire-from-phone autonomous worker lands a PR for review, not an
   auto-merge. (`merge` only omits the no-merge intent; true auto-merge stays a
   separate opt-in.) "let it merge" / "can merge" map here.
-- **`--permission-mode <v>`** (optional): the worker's harness permission posture,
-  passed straight to `fno agents spawn --permission-mode`. Value validation is
-  the CLI's (fail-closed), not the skill's.
+
+The model, effort, provider, harness, substrate, yolo and permission-mode
+postures are RETIRED: the spawn axes died and each lane template owns its own
+launch line (docs/HARNESSES.md names the native form per harness). A model
+pin rides the route; the lane default owns the permission posture.
 - **`-r`/`--role <role>`** (optional): per-spawn model-routing role
   (`coordinate|tidy|orient|consolidate` route to the secondary GLM; production
   roles stay primary). Model routing ONLY - it does not affect pane/layout.
@@ -391,7 +381,7 @@ bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
   [--permission-mode "$permission_mode"] [--role "$role"] [--timeout "$timeout"] [--fresh] [--here]
 ```
 
-Pass `--self "$self_holder"` only for a confirmed self-handoff (your `target_claim_holder` matched the live `.holder` in the collision pre-check); it makes the atomic re-check emit a `self-handoff` receipt that routes you to the sanctioned handoff, instead of a confusing foreign `already-running`. It neither spawns nor releases the claim. Pass `--model "$model"` only when normalize emitted a non-empty `model` (spawn.sh forwards it to `fno agents spawn --model`; omit it for the provider default). Pass `--effort "$effort"` only when normalize emitted a non-empty `effort`; `spawn.sh` forwards it to the fail-closed CLI mapper. Pass `--permission-mode "$permission_mode"` / `--role "$role"` / `--timeout "$timeout"` only when normalize emitted a non-empty value; pass `--fresh` only when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno agents spawn`, which validates values fail-closed). Pass `--yolo` only when normalize emitted `yolo=1`. Pass `--substrate "$substrate"` only when normalize emitted a non-empty `substrate` (`thread` -> a persistent thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
+Pass `--self "$self_holder"` only for a confirmed self-handoff (your `target_claim_holder` matched the live `.holder` in the collision pre-check); it makes the atomic re-check emit a `self-handoff` receipt that routes you to the sanctioned handoff, instead of a confusing foreign `already-running`. It neither spawns nor releases the claim. Pass `--role "$role"` / `--timeout "$timeout"` only when normalize emitted a non-empty value; pass `--fresh` only when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno agents spawn`, which validates values fail-closed). A normalized `substrate=headless` rides `--once` (the one-shot); thread and pane are the native lane's own defaults. The model/effort/yolo/permission-mode forwards are gone: those axes are retired and the lane template owns the launch line.
 
 An empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam. A spawn with no placement flag opens no view. A default never creates one. When the work needs a screen, the mux thread door tunes one.
 Pass `--node` whenever `node` is non-empty. The spawn derives the verb from the node, so a build message need not name one; a typed `/fno:target` or `/fno:blueprint` that disagrees with the node's verb is refused. Choose the `--cwd` source in this priority order, so launch cwd
@@ -680,7 +670,7 @@ STOP without stopping the worker.
    that the helper or `fno agents` command actually captured. "No receipt" is
    FAILED. This is the cardinal guard.
 2. **claude stays on the subscription lane.** claude spawns via
-   `fno agents spawn --harness claude` (-> client-side `claude --bg --name`).
+   `fno agents spawn` (-> client-side `claude --bg --name`; the harness axis is retired and the session's own harness seats it).
    NEVER `-p` / `--bare`, and NEVER route claude through `host`.
 3. **Obey `confirm-decision.sh`; never re-derive its decision.** Run the helper
    and follow its `confirm_required` field. spawn is a free lane: `auto`

@@ -47,14 +47,11 @@ SELF=""                # caller's own claim holder (target_claim_holder). Lets
 # (Group 1: ask never creates), so an old caller that passes none
 # of these still launches a persistent claude thread peer.
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
-MODEL=""               # exact model name, forwarded as `spawn --model` (each
-                       # provider's own --model). Empty = provider default.
-EFFORT=""              # reasoning effort forwarded as `spawn --effort`.
 PAYLOAD_MODE="build"   # build (node-id /target) | seed | handoff | passthrough
-SUBSTRATE=""           # ""|pane|thread|headless. The retired `bg` spelling
-                       # refuses (redirect to thread); headless -> one-shot.
-YOLO=0                 # 1 appends --yolo to the spawn/host argv
-PERMISSION_MODE=""     # forwarded as --permission-mode to the spawn verb
+SUBSTRATE=""           # ""|pane|thread|headless. INTERNAL selector only: the
+                       # spawn axis flags are retired, so this chooses the
+                       # one-shot (--once) and the receipt validation - the
+                       # launch line itself is the native lane's own.
 ROLE=""                # forwarded as --role to the spawn verb (model routing)
 TIMEOUT=""             # forwarded as --timeout to the spawn verb (per-spawn seconds)
 FRESH=0                # 1 appends --fresh (canonical-root cwd) to the spawn argv
@@ -100,12 +97,8 @@ while [[ $# -gt 0 ]]; do
     --self)         SELF="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --cwd)          CWD="${2:-}"; shift 2 ;;
     --mode)         MODE="${2:-}"; shift 2 ;;
-    --model)        MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --effort)       EFFORT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    -Y|--yolo)      YOLO=1; shift ;;
-    --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     -r|--role)      ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -t|--timeout)   TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --add-dir)      ADD_DIR="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
@@ -145,7 +138,7 @@ fi
 # --bg --name`, subscription lane, JSON receipt); a codex/gemini build/seed
 # routes to `spawn` (exec, autonomous) by default and `host` (interactive,
 # human-driven) under `-i`. A one-shot exchange is the `headless` substrate
-# (: subsumes the retired `ask` verb) -> `spawn --substrate headless`
+# (: subsumes the retired `ask` verb) -> `spawn --once`
 # (reply on stdout). A codex/gemini passthrough never reaches here (normalize.sh
 # refuses it); a claude passthrough runs the slash command via `spawn`.
 if [[ "$PROVIDER" == "claude" ]]; then
@@ -465,10 +458,6 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$CWD" ]] && cmd+=(--cwd "$CWD")
 [[ "$FRESH" -eq 1 ]] && cmd+=(--fresh)
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
-[[ "$YOLO" -eq 1 ]] && cmd+=(--yolo)
-[[ -n "$MODEL" ]] && cmd+=(--model "$MODEL")
-[[ -n "$EFFORT" ]] && cmd+=(--effort "$EFFORT")
-[[ -n "$PERMISSION_MODE" ]] && cmd+=(--permission-mode "$PERMISSION_MODE")
 [[ -n "$ROLE" ]] && cmd+=(--role "$ROLE")
 [[ -n "$TIMEOUT" ]] && cmd+=(--timeout "$TIMEOUT")
 [[ -n "$ADD_DIR" ]] && cmd+=(--add-dir "$ADD_DIR")
@@ -477,7 +466,9 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$DENY_TOOLS" ]] && cmd+=(--deny-tools "$DENY_TOOLS")
 # an explicit substrate emits --substrate (the canonical selector); the
 # `headless` value carries the one-shot lane the retired `ask` verb used to.
-[[ -n "$SUBSTRATE" ]] && cmd+=(--substrate "$SUBSTRATE")
+# headless is the one living substrate spelling on the CLI: it rides the
+# one-shot flag. pane/thread are the native lane's own defaults.
+[[ "$SUBSTRATE" == "headless" ]] && cmd+=(--once)
 # forward the node so a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
 # provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
 # --node and export nothing new. Harmless on thread/headless (the verb ignores it).

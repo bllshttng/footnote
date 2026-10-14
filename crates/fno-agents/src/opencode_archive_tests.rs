@@ -357,6 +357,23 @@ fn each_archive_outcome_maps_to_its_effect_word() {
 /// Re-measure [`ARCHIVE_MIN_VERSION`] against a real opencode serve. The
 /// version bound is a claim about a vendor binary, and only a live run can
 /// renew it. Ignored by default because it needs a serve:
+
+/// Percent-encode a directory path for the `?directory=` query value: every
+/// byte outside the RFC 3986 unreserved set plus `/` becomes `%XX`, so `&`
+/// cannot split the param and a stray `%` cannot decode into another byte.
+fn encode_query_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        let keep = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/');
+        if keep {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 ///
 /// ```text
 /// OPENCODE_SERVER_PASSWORD=tok opencode serve --port 45999 --hostname 127.0.0.1 &

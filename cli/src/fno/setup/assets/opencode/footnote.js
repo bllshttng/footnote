@@ -129,6 +129,39 @@ function normalizeV2Rows(rows) {
     }))
 }
 
+// The session.created report: env identity rides --agent-self; a reporter
+// with no env (the shared serve) falls to the session title as a CLAIM-ONLY
+// launch name - it matches a pending launch record or nothing, never a mint
+// flavor. Fire-and-forget: never awaited, never blocks the created handler.
+function reportCreated(io, dir, sid) {
+  const reportArgs = [
+    process.env.FNO_AGENTS_BIN || "fno-agents",
+    "report",
+    "--kind",
+    "session",
+    "--harness",
+    "opencode",
+    "--session-id",
+    sid,
+  ]
+  const send = () =>
+    io.run(reportArgs, dir).catch((e) =>
+      console.error(`[footnote] session report failed: ${e}`),
+    )
+  if (process.env.FNO_AGENT_SELF) {
+    reportArgs.push("--agent-self", process.env.FNO_AGENT_SELF)
+    send()
+    return
+  }
+  Promise.resolve(io.sessionInfo ? io.sessionInfo(sid) : null)
+    .then((info) => {
+      const title = (info && info.title) || ""
+      if (title) reportArgs.push("--launch-name", title)
+    })
+    .then(send)
+    .catch((e) => console.error(`[footnote] session report failed: ${e}`))
+}
+
 // The one gate body. Both arms adapt their version's I/O into `io` and hand
 // it here; neither holds a second copy of anything below (AC2-SHARED).
 function makeHandler(io, dir) {
@@ -145,23 +178,11 @@ function makeHandler(io, dir) {
     try {
       if (kind === "created") {
         // Report this session's id to the daemon (the registry holds it; mail
-        // and liveness stop guessing). Fire-and-forget, best-effort: never
-        // awaited, so the created handler never blocks on the RPC. A spawned
-        // pane carries FNO_AGENT_SELF: an interactive pane's row cannot hold
-        // the callee-minted id yet, so the name is what lets the daemon match.
+        // and liveness stop guessing). A spawned pane carries FNO_AGENT_SELF:
+        // an interactive pane's row cannot hold the callee-minted id yet, so
+        // the name is what lets the daemon match.
         if (sid) {
-          const reportArgs = [
-            process.env.FNO_AGENTS_BIN || "fno-agents",
-            "report", "--kind", "session",
-            "--harness", "opencode",
-            "--session-id", sid,
-          ]
-          if (process.env.FNO_AGENT_SELF) {
-            reportArgs.push("--agent-self", process.env.FNO_AGENT_SELF)
-          }
-          io.run(reportArgs, dir).catch((e) =>
-            console.error(`[footnote] session report failed: ${e}`),
-          )
+          reportCreated(io, dir, sid)
         }
         // Presence via the resolver: a plain native session pays nothing.
         if (sid && (await resolveManifest(dir, io))) {
@@ -714,6 +735,10 @@ async function server({ directory, worktree, client, $ }) {
     readAssistantTexts: async (sid) => {
       const res = await client.session.messages({ path: { id: sid } })
       return Array.isArray(res?.data) ? res.data : []
+    },
+    sessionInfo: async (sid) => {
+      const res = await client.session.get({ path: { id: sid } })
+      return res?.data
     },
     sendPrompt: (sid, text) =>
       client.session.prompt({

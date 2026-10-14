@@ -54,7 +54,6 @@ fn dispatch(dep: &Value, root: &Path, manifest: &Path, events: Option<&Path>) ->
         .and_then(|args| {
             super::advance_dispatch::launch_resolved(
                 id,
-                dep,
                 args,
                 Some((&key, &holder)),
                 "reconcile_dispatch",

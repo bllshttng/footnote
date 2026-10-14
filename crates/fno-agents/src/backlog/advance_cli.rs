@@ -775,7 +775,6 @@ fn run_request() -> i32 {
                 }
                 super::advance_dispatch::launch_resolved(
                     id,
-                    node,
                     args,
                     reservation,
                     v["caller"].as_str().unwrap_or("unknown"),

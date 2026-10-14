@@ -180,8 +180,7 @@ impl MailInjectHarness {
 /// `_flag_aliases.PROVIDER_AXIS_TOMBSTONE` (kept in lockstep).
 const PROVIDER_AXIS_TOMBSTONE: &str = concat!(
     "--provider was split at the axis rename: the CLI binary is --harness/-H; ",
-    "a model vendor is only routable at spawn ",
-    "(`fno agents spawn --provider <vendor> --model <m>`).",
+    "a model vendor is only routable at spawn via the lane template.",
 );
 
 /// Parsed `mail-inject` flags. The turn TEXT is read from STDIN (sidesteps the

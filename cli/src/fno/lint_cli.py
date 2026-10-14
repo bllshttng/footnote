@@ -940,6 +940,7 @@ def spawn_flag_owners() -> None:
         DEFAULT,
         ENV,
         FLAG_OWNERS,
+        RETIRED_SPAWN_FLAGS,
         SPAWN_FLAG_CAP,
         TRANSLATED,
     )
@@ -968,6 +969,17 @@ def spawn_flag_owners() -> None:
     }
 
     failures: list[str] = []
+    # The retired axes are refusal stubs: declared, hidden, refusing. Each
+    # must still exist (a silent re-add or a deleted stub both fail here).
+    stubs = set(RETIRED_SPAWN_FLAGS)
+    if missing_stubs := sorted(stubs - live):
+        failures.append(
+            f"{len(missing_stubs)} retired spawn flag stub(s) missing from the "
+            f"parser: {', '.join(missing_stubs)}.\n"
+            "  Remedy: keep the refusal stub (the callback names the native "
+            "form and exits 2); deleting it reopens the untaught door."
+        )
+    live -= stubs
     if unclassified := sorted(live - set(FLAG_OWNERS)):
         failures.append(
             f"{len(unclassified)} live spawn flag(s) have no owner row: "

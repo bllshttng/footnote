@@ -408,20 +408,17 @@ def tier_remap_conflict(
 
 
 def remap_conflict_message(alias: str, remapped: str) -> str:
-    """The one refusal text, shared by the CLI seam and the in-process APIs."""
+    """The one refusal text, shared by the in-process spawn APIs."""
     var = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
     return (
-        f"--model {alias} is ambiguous here. This session exports "
+        f"model {alias!r} is ambiguous here. This session exports "
         f"{var}={remapped}, so {alias!r} resolves to that vendor's model id, "
         "while the worker's endpoint and credential are resolved separately "
         'and would not match it. The spawn would report "live" and then fail '
         "on its first turn. No worker launched.\n"
         "Name the route instead, so endpoint, auth, and model are chosen as "
-        "one unit:\n"
-        f"  --account <id> --model {alias}      # Anthropic's {alias} "
-        "(ids from `fno config accounts list`)\n"
-        f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
-        "(vendors from `fno config route ls`)\n"
+        "one unit: --route <vendor>/<model>, or --account <id> for the "
+        "account's own default.\n"
         f"Or unset {var} for this command."
     )
 
@@ -588,7 +585,7 @@ def unrouted_model_clear_notice(cleared: Sequence[str]) -> str:
         "fno: cleared "
         + ", ".join(cleared)
         + " from this child's env: a model the launching shell exported never "
-        "reaches a child. The child's model comes from its --model flag, else "
+        "reaches a child. The child's model comes from its route, else "
         "its account's own default."
     )
 
@@ -750,9 +747,9 @@ def env_scrub_warning(
     return (
         f"fno agents spawn: {ENV_SCRUB_VAR} is set; it strips "
         "ANTHROPIC_AUTH_TOKEN but leaves ANTHROPIC_BASE_URL and the tier model "
-        "vars (a half-composition), and silently forces --permission-mode to "
-        "default over the one pinned here, so this worker may stall on "
-        f"approvals. Set {ENV_SCRUB_VAR}=0 to keep the pinned mode."
+        "vars (a half-composition), and silently forces the pinned permission "
+        "mode to default, so this worker may stall on approvals. Set "
+        f"{ENV_SCRUB_VAR}=0 to keep the pinned mode."
     )
 
 

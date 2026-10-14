@@ -412,7 +412,10 @@ mod tests {
 
         let reg = Registry::default();
         let err = stream_child_argv("a1b2c3d4-1111-4111-8111-111111111111", &reg).unwrap_err();
-        assert!(err.contains("-P zai -m 'glm-5.3-flash[1m]'"), "{err}");
+        assert!(
+            err.contains("seed a new session on a lane that names zai"),
+            "{err}"
+        );
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         std::fs::remove_dir_all(routes.parent().unwrap()).ok();

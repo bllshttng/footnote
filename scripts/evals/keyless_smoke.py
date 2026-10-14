@@ -169,6 +169,10 @@ esac
                 "FNO_CLAIMS_ROOT": str(claims_root),
                 "FNO_EVENTS_PATH": str(project / ".fno" / "events.jsonl"),
                 "FNO_AGENTS_RUNTIME": "python",
+                # The invoking-harness marker is how a spawn names its harness
+                # since the axis flags retired: the child infers codex from
+                # this marker, the way a real codex-hosted session would.
+                "CODEX_THREAD_ID": "keyless-smoke-thread",
                 "KEYLESS_ARGV_FILE": str(fake_argv),
                 "KEYLESS_SESSION_ID": session_id,
                 "KEYLESS_HEAD_SHA": head_sha,
@@ -180,7 +184,7 @@ esac
             [
                 "uv", "run", "--project", str(repo_root / "cli"), "fno-py",
                 "agents", "spawn", "--name", "keyless-smoke",
-                "--harness", "codex", "--substrate", "headless",
+                "--once",
                 "--cwd", str(project), "--timeout", "10", "--", "keyless seed",
             ],
             cwd=repo_root,

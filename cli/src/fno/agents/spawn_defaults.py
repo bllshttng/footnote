@@ -296,37 +296,6 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
     return idxs
 
 
-def _demote_thread_uncarried_passthrough(toks: List[str], err: IO[str]) -> None:
-    """Rewrite an explicit or injected thread/bg substrate to pane when the
-    harness's thread lane cannot carry the fenced `--` tokens. Runs on
-    operator argv and again after config injection, covering the Rust-routed
-    lane the Python resolver never sees; the daemon-side harness_args parser
-    stays the trust-boundary backstop. Headless keeps its tokens: the
-    one-shot lanes carry them.
-    """
-    fence = next((i for i, t in enumerate(toks) if t == "--"), None)
-    if fence is None:
-        return
-    if _has_explicit_substrate(toks) not in ("thread", "bg"):
-        return
-    from fno.agents.harness_map import thread_uncarried
-
-    harness = _flag_value(toks, "--harness", "-H") or "claude"
-    uncarried = thread_uncarried(harness, {}, toks[fence + 1 :])
-    if uncarried is None:
-        return
-    for i, t in enumerate(toks[:fence]):
-        if t == "--substrate" and i + 1 < len(toks):
-            toks[i + 1] = "pane"
-            break
-        if t.startswith("--substrate="):
-            toks[i] = "--substrate=pane"
-            break
-    print(
-        f"fno agents spawn: substrate: pane (the {harness} thread lane "
-        f"has no carrier for {uncarried})",
-        file=err,
-    )
 
 
 def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
@@ -480,90 +449,7 @@ def normalize_spawn_args(
     else:
         toks, payload = body, []
 
-    # Pass 1: trailing substrate token.
-    positions = _positional_indices(toks)
-    if positions:
-        last = positions[-1]
-        tok = toks[last]
-        if tok in _SUBSTRATES:
-            explicit = _has_explicit_substrate(toks)
-            if explicit is not None:
-                print(
-                    f"fno agents spawn: substrate given twice: positional {tok!r} "
-                    f"and --substrate {explicit!r}",
-                    file=err,
-                )
-                raise SystemExit(2)
-            del toks[last]
-            toks += ["--substrate", tok]
-
-    # Pass 2: -r / --resume id widening + implied bg. The scan sees only the
-    # pre-fence head: a fenced `--resume`/`-r` is the provider's flag,
-    # and reading it here would append an implied `--substrate bg` under a
-    # passthrough fence - or exit 2 on the provider's short-flag value.
-    _fence = next((i for i, t in enumerate(toks) if t == "--"), None)
-    head_toks = toks if _fence is None else toks[:_fence]
-    resume_idxs = [
-        i for i, t in enumerate(head_toks)
-        if t in ("-r", "--resume")
-        or t.startswith("--resume=")
-        or (t.startswith("-r") and len(t) > 2)  # -r=ID and the Click -rID attached form
-    ]
-    if len(resume_idxs) > 1:
-        print("fno agents spawn: resume given twice (-r / --resume)", file=err)
-        raise SystemExit(2)
-    if resume_idxs:
-        i = resume_idxs[0]
-        flag = toks[i]
-        if "=" in flag:
-            raw_value: Optional[str] = flag.split("=", 1)[1]
-            value_at = None
-        elif flag.startswith("-r") and len(flag) > 2:
-            # Click attached short: -r<id>. Value is the rest of the token.
-            raw_value = flag[2:]
-            value_at = None
-        else:
-            value_at = i + 1
-            raw_value = toks[value_at] if value_at < len(toks) else None
-        if not raw_value or raw_value.startswith("-"):
-            print("fno agents spawn: -r/--resume needs a session uuid or 8-hex short-id", file=err)
-            raise SystemExit(2)
-        low = raw_value.lower()
-        resolved: Optional[str]
-        if _UUID_RE.match(low):
-            resolved = low
-        elif _SHORT_ID_RE.match(low):
-            resolve = resolver if resolver is not None else _default_resolver
-            resolved = resolve(low)
-            if not resolved:
-                print(f"fno agents spawn: cannot resolve short-id {raw_value!r} to a session uuid", file=err)
-                raise SystemExit(2)
-        else:
-            print(
-                f"fno agents spawn: -r/--resume value {raw_value!r} is neither a "
-                "full session uuid (8-4-4-4-12) nor an 8-hex short-id",
-                file=err,
-            )
-            raise SystemExit(2)
-        # Rewrite in place to the canonical `--resume <uuid>` form. Leave an
-        # already-canonical `--resume <lowercase-uuid>` untouched so a fully
-        # explicit argv passes through byte-identically (AC1-EDGE).
-        if value_at is None:
-            toks[i] = f"--resume={resolved}"
-        elif not (flag == "--resume" and raw_value == resolved):
-            toks[i] = "--resume"
-            toks[value_at] = resolved
-        # `--resume` implies thread; the splice lands BEFORE any `--` fence, never past it.
-        if _has_explicit_substrate(toks) is None:
-            cut = _fence if _fence is not None else len(toks)
-            toks = toks[:cut] + ["--substrate", "thread"] + toks[cut:]
-
-    # A thread lane carries only what its contract row maps: a spawn pinning
-    # thread/bg with an unmapped fenced token demotes to the pane here, on
-    # both runtimes (the Rust-routed lane never reaches the CLI's resolver).
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
-    if fence is not None:
-        _demote_thread_uncarried_passthrough(toks, err)
 
     # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
     # the agent name is a handle the caller rarely picks, so it is minted unless
@@ -940,14 +826,6 @@ def compose_spawn_argv(
         )
         return out
 
-    # The billing gate declared it needs the role answer (config model, free
-    # axis, a role named): resolve ONCE and ask again. Common case: one verb
-    # call, zero seam resolves; cmd_spawn's own resolve is the one.
-    if answer.get("role_gate_needed"):
-        facts["role_resolves"] = _role_resolves(scan["role"], None, env)
-        payload["facts"] = facts
-        answer = spawn_overlay_call(payload, timeout=90)
-
     for line in answer.get("stderr") or []:
         print(line, file=err)
     exit_code = int(answer.get("exit") or 0)
@@ -960,11 +838,6 @@ def compose_spawn_argv(
 
         events.emit("model_vendor_mismatch", **event)
     answer_argv = [str(t) for t in answer.get("argv") or out]
-    # Injection can pin the substrate the operator left open, and the
-    # Rust-routed lane never reaches the Python CLI's own refusal, so the
-    # post-injection demote re-runs on the composed argv.
-    if answer.get("injected"):
-        _demote_thread_uncarried_passthrough(answer_argv, err)
     return answer_argv
 
 

@@ -114,7 +114,7 @@ You are running in a **subagent context** with limited resources. Be efficient:
 | `color` | string | No | Terminal color for agent output |
 | `tools` | list | Yes | Allowed tools (whitelist) |
 | `disallowedTools` | list | No | Explicitly blocked tools (blacklist) |
-| `skills` | list | No | Do not use. `claude --agent` and `fno agents spawn --agent` load nothing from it. Load a skill from the body with the Skill tool, and list `Skill` in `tools`. |
+| `skills` | list | No | Do not use. `claude --agent` loads nothing from it. Load a skill from the body with the Skill tool, and list `Skill` in `tools`. |
 
 ### Model Selection by Agent Role
 

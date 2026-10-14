@@ -2421,12 +2421,8 @@ mod tests {
         .unwrap_err();
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
         std::fs::remove_dir_all(&routes).ok();
-        assert!(
-            err.contains(
-                "fno agents spawn --resume 77770008-2222-3333-4444-555555555555 -P zai -m 'glm-5.3-flash[1m]'"
-            ),
-            "{err}"
-        );
+        assert!(err.contains("this resume restores no route"), "{err}");
+        assert!(err.contains("fno agents spawn --account <id>"), "{err}");
     }
 
     #[test]

@@ -1,6 +1,5 @@
 cli/src/fno/adapters/providers/test_cli.py::TestTestCommand.test_test_valid_record_returns_zero::pytest.skip  # on main before this ratchet
 cli/tests/_native_door.py::run_native::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_agy_conversation_mint.py::rust_door::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_agy_spawn_journey.py::test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_ask_e2e_dispatch.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_ask_e2e_dispatch.py::test_ask_followup_e2e_registry_seeded::marker.requires_rust  # on main before this ratchet
@@ -64,7 +63,6 @@ cli/tests/agents/test_spawn_lost_verb.py::test_a_real_shell_mangling_is_refused:
 cli/tests/agents/test_pane_journeys.py::test_codex_autonomous_pane_journey_completes_without_operator_input::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_pane_journeys.py::test_late_codex_identity_composes_across_every_peer_surface::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_spawn_permission_mode.py::rust_door::pytest.skip  # on main before this ratchet
-cli/tests/agents/test_spawn_permission_mode.py::test_spawn_sh_forwards_permission_mode::mark.skipif  # on main before this ratchet
 cli/tests/agents/test_store_fallback.py::test_real_unreadable_directory_refuses_partial_store_answer::pytest.skip  # on main before this ratchet
 cli/tests/agents/test_thread_keeper_journey.py::test_AC1_HP_the_restart_journey_on_a_real_pi_thread::mark.skipif  # on main before this ratchet
 cli/tests/conftest.py::native_backlog_door::pytest.skip  # on main before this ratchet

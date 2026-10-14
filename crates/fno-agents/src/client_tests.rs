@@ -2350,45 +2350,6 @@ fn render_list_rows() {
     );
 }
 
-#[test]
-fn effort_rows() {
-    assert_eq!(
-        validate_effort_for_spawn("claude", "headless", Some("")),
-        Err("--effort must be non-empty".to_string())
-    );
-    assert_eq!(
-        validate_effort_for_spawn("codex", "bg", Some("")),
-        Err("--effort must be non-empty".to_string())
-    );
-    assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
-
-    assert!(validate_effort_for_spawn("agy", "headless", Some("high")).is_ok());
-    assert!(validate_effort_for_spawn("agy", "bg", Some("low")).is_ok());
-    assert!(validate_effort_for_spawn("agy", "pane", Some("nonsense-still-forwarded")).is_ok());
-    assert!(validate_effort_for_spawn("gemini", "headless", Some("high")).is_err());
-
-    // The deny set is the ONE owner's (effort_surface.rs): cursor-agent and
-    // an undeclared harness refuse on the thread and headless lanes too,
-    // with the same string the Python bridge raises. The pane lane forwards.
-    let cursor = validate_effort_for_spawn("cursor-agent", "headless", Some("high"));
-    assert!(cursor.unwrap_err().contains("cursor-agent"));
-    let undeclared = validate_effort_for_spawn("ghosth", "bg", Some("high"));
-    assert!(undeclared
-        .unwrap_err()
-        .starts_with("--effort is not available for harness"));
-    assert!(validate_effort_for_spawn("cursor-agent", "pane", Some("high")).is_ok());
-    assert_eq!(
-        validate_effort_for_spawn("gemini", "thread", Some("high")),
-        Err("harness 'gemini' has no reasoning-effort surface; omit --effort".to_string())
-    );
-}
-
-/// The effort deny set must be the same in both spelling maps: the Python
-/// lane (`effort_tokens`, `--substrate pane`) allows agy, so the Rust lane
-/// refusing it made one harness two-valued by substrate. agy carries its
-/// own `--effort (low|medium|high)`; gemini genuinely has no surface. The
-/// FLAG_OWNERS row for `--effort` names both maps.
-
 /// ab-098967b4: render_list_json folds in the discovered lane (additive
 /// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
 
@@ -2907,82 +2868,6 @@ fn resume_by_predecessor_full_id_refuses_13() {
             "77770003-2222-3333-4444-555555555555".into(),
         ]));
     assert_eq!(code, 13);
-}
-
-mod tier_remap_guard {
-    // The native tier-remap refusal: a direct native
-    // claude spawn naming a tier alias the ambient env redefines refuses
-    // before launch, matching the Python seam's semantics.
-
-    use super::*;
-    use fno_agents::spawn_context::refuse_inherited_tier_remap_with;
-
-    fn params_of(model: Option<&str>, provider: Option<&str>) -> serde_json::Map<String, Value> {
-        let mut m = serde_json::Map::new();
-        if let Some(model) = model {
-            m.insert("model".to_string(), Value::String(model.to_string()));
-        }
-        if let Some(provider) = provider {
-            m.insert("provider".to_string(), Value::String(provider.to_string()));
-        }
-        m
-    }
-
-    #[test]
-    fn foreign_remap_refuses_before_launch() {
-        let params = params_of(Some("opus"), Some("claude"));
-        let env =
-            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
-        let err = refuse_inherited_tier_remap_with(&params, env).expect_err("must refuse");
-        assert!(err.contains("No worker launched"), "{err}");
-    }
-
-    #[test]
-    fn anthropic_pin_is_not_a_conflict() {
-        let params = params_of(Some("opus"), Some("claude"));
-        let env =
-            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "claude-opus-4-1".to_string());
-        refuse_inherited_tier_remap_with(&params, env).expect("anthropic pin passes");
-    }
-
-    #[test]
-    fn absent_remap_passes() {
-        let params = params_of(Some("sonnet"), Some("claude"));
-        refuse_inherited_tier_remap_with(&params, |_| None).expect("no remap passes");
-    }
-
-    #[test]
-    fn composed_route_is_exempt() {
-        let mut params = params_of(Some("opus"), Some("claude"));
-        params.insert("account".to_string(), Value::String("work".to_string()));
-        let env =
-            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
-        refuse_inherited_tier_remap_with(&params, env)
-            .expect("a pinned account composes endpoint+model as one unit");
-    }
-
-    #[test]
-    fn non_claude_harness_is_exempt() {
-        let params = params_of(Some("opus"), Some("codex"));
-        let env =
-            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
-        refuse_inherited_tier_remap_with(&params, env).expect("non-claude unaffected");
-    }
-}
-
-#[test]
-fn agent_refusal_names_the_codex_role_form() {
-    let line = agent_unsupported_line("codex", "fno:architect").expect("codex refusal");
-    assert!(line.contains(".codex/agents/architect.toml"));
-    assert!(line.contains("agent_type architect"));
-    assert!(
-        agent_unsupported_line("agy", "fno:architect").is_none(),
-        "agy keeps the generic refusal"
-    );
-    assert!(
-        agent_unsupported_line("opencode", "fno:architect").is_none(),
-        "opencode keeps the generic refusal"
-    );
 }
 
 // -----------------------------------------------------------------------

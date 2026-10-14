@@ -10,7 +10,7 @@ The loop closes through the `footnote.ts` extension in the pi agent dir. If that
 
 Known refusals:
 
-- `spawn --resume` on the thread lane. Revive the same row by name with `fno agents resume <name>`.
+- The spawn `--resume` fork door is retired. Revive the same row by name with `fno agents resume <name>`.
 - An unmeasured substrate. The spawn names it and stops.
 
 Back to [the harness index](beat-by-harness.md#spawn-by-harness).

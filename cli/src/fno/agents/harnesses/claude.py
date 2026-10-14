@@ -412,9 +412,10 @@ def headless_create(
     if output_format:
         argv += ["--output-format", output_format]
     if passthrough:
-        from fno.agents.mux_spawn import pane_passthrough_tokens
+        from fno.agents.mux_spawn import refuse_passthrough_collision
 
-        argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
+        refuse_passthrough_collision(passthrough, argv)
+        argv = [*argv, *passthrough]
     # Behind `--` like every other claude seed: a leading-flag seed must be
     # the prompt positional, not a claude flag.
     argv += ["--", message or "hello"]
@@ -634,9 +635,10 @@ def bg_create(
         cwd=cwd,
     )
     if passthrough:
-        from fno.agents.mux_spawn import pane_passthrough_tokens
+        from fno.agents.mux_spawn import refuse_passthrough_collision
 
-        argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
+        refuse_passthrough_collision(passthrough, argv)
+        argv = [*argv, *passthrough]
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside the spawned agent attribute back to this parent.

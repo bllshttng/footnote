@@ -473,7 +473,7 @@ _SPAWN_EFFORT_ARGS=()
 _ASK_RC=0
 _ASK_OUT=""
 _ASK_ERR_FILE="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/handoff-spawn-$$.err")"
-_ASK_OUT="$(fno agents spawn --substrate pane \
+_ASK_OUT="$(fno agents spawn \
   --harness "$DEST_HARNESS" --model "$DEST_MODEL" \
   ${_SPAWN_ACCOUNT_ARGS[@]+"${_SPAWN_ACCOUNT_ARGS[@]}"} \
   ${_SPAWN_EFFORT_ARGS[@]+"${_SPAWN_EFFORT_ARGS[@]}"} \

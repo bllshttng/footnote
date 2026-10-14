@@ -200,19 +200,15 @@ fn agents_history_route_tag_compares_normalized_model_but_resumes_exact_request(
     assert!(lines.contains("provider:   zai (registry row)"));
     assert!(lines.contains("route:      routes/zai.toml (registry row)"));
     assert!(!lines.contains("spawned asking for"));
-    assert!(lines.contains(&format!(
-        "resume:     fno agents spawn --resume {SID} -P zai -m 'glm-5.3-flash[1m]'"
-    )));
+    assert!(lines.contains(&format!("resume:     fno agents resume {SID}")));
 }
 
 #[test]
-fn agents_history_routed_resume_quotes_apostrophes_in_model_ids() {
+fn agents_history_routed_resume_hints_the_resume_verb() {
     let sources = specimen_sources(Some("zai"), "model'variant");
     let lines = card(SID, &sources, None).join("\n");
 
-    assert!(lines.contains(&format!(
-        "resume:     fno agents spawn --resume {SID} -P zai -m 'model'\"'\"'variant'"
-    )));
+    assert!(lines.contains(&format!("resume:     fno agents resume {SID}")));
 }
 
 #[test]

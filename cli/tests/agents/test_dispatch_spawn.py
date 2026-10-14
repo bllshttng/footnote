@@ -50,6 +50,15 @@ def _graphless_seed_resolver(monkeypatch):
     monkeypatch.setattr("fno.graph.load.load_graph", _unreadable)
 
 
+@pytest.fixture(autouse=True)
+def _python_door(monkeypatch):
+    """These tests pin the PYTHON door's receipts and refusals. The axis
+    flags that used to route their argvs to Python are retired, so an argv
+    with no Python-only marker would exec the Rust client instead; the
+    sanctioned fallback pins the door under test. The gate stays live."""
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -159,7 +168,8 @@ def test_spawn_once_codex_happy_path(workdir, fake_codex_create_once, monkeypatc
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "tmp1", "-H", "codex", "--once", "summarize X"],
+        ["spawn", "--name", "tmp1", "--once", "summarize X"],
+        env={"CODEX_THREAD_ID": "019f0000-0000-7000-8000-00000000000a"},
         catch_exceptions=False,
     )
 
@@ -242,7 +252,8 @@ def test_spawn_once_receipt_format(workdir, fake_codex_create_once) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "myagent", "-H", "codex", "--once", "do something"],
+        ["spawn", "--name", "myagent", "--once", "do something"],
+        env={"CODEX_THREAD_ID": "019f0000-0000-7000-8000-00000000000a"},
         catch_exceptions=False,
     )
 
@@ -310,7 +321,8 @@ def test_spawn_once_teardown_failure(workdir, fake_codex_create_once, monkeypatc
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "teardown-victim", "-H", "codex", "--once", "hello"],
+        ["spawn", "--name", "teardown-victim", "--once", "hello"],
+        env={"CODEX_THREAD_ID": "019f0000-0000-7000-8000-00000000000a"},
         catch_exceptions=False,
     )
 
@@ -342,7 +354,7 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "myagent-c", "-H", "claude", "hello", "--substrate", "thread"],
+        ["spawn", "--name", "myagent-c", "hello"],
         catch_exceptions=False,
     )
 
@@ -388,7 +400,7 @@ def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) ->
         agents_app,
         [
             "spawn", "--name", "command-c", "-H", "claude",
-            "/fno:ship pr check 7", "--substrate", "thread",
+            "/fno:ship pr check 7",
         ],
         catch_exceptions=False,
     )
@@ -435,7 +447,7 @@ def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) ->
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "moved-c", "-H", "claude", "hello", "--substrate", "thread"],
+        ["spawn", "--name", "moved-c", "hello"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -461,7 +473,7 @@ def test_spawn_claude_receipt_cwd_json_encoded(workdir_claude, monkeypatch) -> N
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "bs-c", "-H", "claude", "hello", "--substrate", "thread"],
+        ["spawn", "--name", "bs-c", "hello"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -829,7 +841,7 @@ def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) ->
     monkeypatch.setattr(dispatch, "_keeper_seed_submit", _fake_seed)
 
     result = dispatch.dispatch_spawn(
-        name="wkagy", message="hello", harness="agy", cwd=workdir, model="gemini-3-pro"
+        name="wkagy", message="hello", harness="agy", cwd=workdir
     )
 
     assert result.kind == "created"
@@ -837,7 +849,6 @@ def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) ->
     assert result.short_id == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
     assert len(calls) == 1, "the agy branch must drive the keeper lane exactly once"
     assert calls[0]["harness"] == "agy"
-    assert calls[0]["model"] == "gemini-3-pro", "the model axis rides the lane"
     assert len(seeds) == 1, f"exactly one seed paste, got {seeds!r}"
     assert seeds[0]["session_id"] == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
     assert seeds[0]["message"].startswith("hello")

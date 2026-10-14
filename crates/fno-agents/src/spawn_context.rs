@@ -1275,69 +1275,6 @@ pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Resul
     Ok(())
 }
 
-/// The tier-remap refusal, native: a claude
-/// spawn naming a tier alias the ambient env redefines to a FOREIGN vendor's
-/// model id refuses before launch. Endpoint and credential resolve separately
-/// from the alias, so the worker would report live and die on its first turn.
-/// The Python seam (`rust_runtime.inherited_tier_remap`) enforces the same
-/// rule for Python-routed spawns; this closes the direct-native entry, which
-/// previously had no guard.
-pub fn refuse_inherited_tier_remap(params: &serde_json::Map<String, Value>) -> Result<(), String> {
-    refuse_inherited_tier_remap_with(params, |k| std::env::var(k).ok())
-}
-
-pub fn refuse_inherited_tier_remap_with(
-    params: &serde_json::Map<String, Value>,
-    env_get: impl Fn(&str) -> Option<String>,
-) -> Result<(), String> {
-    const TIER_ALIASES: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
-    let harness = params
-        .get("provider")
-        .and_then(Value::as_str)
-        .unwrap_or("claude")
-        .trim()
-        .to_lowercase();
-    if harness != "claude" {
-        return Ok(());
-    }
-    // A composed route (route named, or an account pinned) chooses endpoint,
-    // auth and model as one unit and is exempt, same as the Python seam.
-    if params.contains_key("route") || params.contains_key("account") {
-        return Ok(());
-    }
-    let model = params
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    if !TIER_ALIASES.contains(&model.as_str()) {
-        return Ok(());
-    }
-    let var = format!("ANTHROPIC_DEFAULT_{}_MODEL", model.to_uppercase());
-    let remapped = env_get(&var).unwrap_or_default().trim().to_string();
-    if remapped.is_empty() {
-        return Ok(());
-    }
-    // Pinning the tier to a specific Anthropic model is a supported
-    // customization, not a conflict.
-    let name = remapped.to_lowercase();
-    let anthropic = name.starts_with("claude-") || TIER_ALIASES.contains(&name.as_str());
-    if anthropic {
-        return Ok(());
-    }
-    Err(format!(
-        "--model {model} is ambiguous here. This session exports {var}={remapped}, so '{model}' \
-         resolves to that vendor's model id, while the worker's endpoint and credential are \
-         resolved separately and would not match it. The spawn would report \"live\" and then \
-         fail on its first turn. No worker launched.\n\
-         Name the route instead, so endpoint, auth, and model are chosen as one unit:\n\
-           --account <id> --model {model}      # Anthropic's {model} (ids from `fno config accounts list`)\n\
-           -P <vendor> --model {remapped}   # stay on the routed vendor (vendors from `fno config route ls`)\n\
-         Or unset {var} for this command."
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

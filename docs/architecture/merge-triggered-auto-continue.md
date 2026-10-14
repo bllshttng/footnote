@@ -22,7 +22,7 @@ SessionStart hook -> fno backlog reconcile (detached, throttled ~15 min)
               |
               +-- armed? walker free? -> fno backlog next --project P -> ab-G2
               +-- reserve dispatch:ab-G2 (TTL bridge token)
-              +-- fno agents spawn --harness claude -> /target --no-merge ab-G2
+              +-- fno agents spawn -> /target --no-merge ab-G2
               +-- emit advance_dispatched{node: ab-G2}
         |
    worker builds G2, ships a no-merge PR ... human merges G2 ... repeat for G3

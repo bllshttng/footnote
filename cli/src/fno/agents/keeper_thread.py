@@ -10,47 +10,9 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from fno import paths
-
-#: Every launch axis a spawn can carry, as (flag an operator types, the row's
-#: ``carries`` name). A row that omits the name refuses the flag; a row that
-#: names an axis ``_lane_b_thread_spawn`` has no parameter for raises a
-#: TypeError naming it, which only an operator override can produce.
-LAUNCH_AXES: tuple[tuple[str, str], ...] = (
-    ("--model", "model"),
-    ("--yolo", "yolo"),
-    ("--permission-mode", "permission_mode"),
-    ("--effort", "effort"),
-    ("--add-dir", "add_dir"),
-    ("--role", "launch_role"),
-    ("--agent", "agent"),
-    ("--tools", "tools"),
-    ("--deny-tools", "deny_tools"),
-)
-
-
-def _agy_finish(argv: list[str], cwd: Path) -> list[str]:
-    """agy takes no extra tokens; it needs the folder TRUSTED before launch. A
-    resume id skips the mint that upserts the grant, so the upsert happens here
-    too. A refused write is not fatal: the seed submit answers the modal."""
-    _trust_agy_folder(cwd)
-    return argv
-
-
-#: The one completion per harness the contract cannot express. pi's route is
-#: not here: it carries the user's axes, so it runs in complete_launch_argv
-#: before the generic model/effort adds.
-_FINISH_ARGV: dict[str, Callable[[list[str], Path], list[str]]] = {
-    "agy": _agy_finish,
-}
-
-
-def _pi_axes(model, effort, tools, deny_tools) -> dict:
-    """The pi_route ask; empty string means "unset" on the Rust side."""
-    return {"model": model or "", "effort": effort or "",
-            "tools": tools or "", "deny_tools": deny_tools or ""}
 
 
 def keeper_arm(harness: str) -> Optional[dict]:
@@ -60,7 +22,9 @@ def keeper_arm(harness: str) -> Optional[dict]:
     return (_HARNESS_CAPS.get(harness) or {}).get("keeper")
 
 
-def _trust_agy_folder(cwd: Path) -> bool:
+def trust_agy_folder(cwd: Path) -> bool:
+    """agy needs the folder TRUSTED before launch; the upsert is idempotent.
+    A refused write is not fatal: the seed submit answers the modal."""
     from fno.agents.mux_spawn import _ensure_agy_folder_trusted
 
     return _ensure_agy_folder_trusted(cwd)
@@ -70,37 +34,22 @@ def mint_session_id(
     harness: str,
     cwd: Path,
     requested: Optional[str],
-    *,
-    model: Optional[str] = None,
-    effort: Optional[str] = None,
-    permission_mode: Optional[str] = None,
-    yolo: bool = False,
 ) -> Optional[str]:
     """The harness-minted id for a keeper thread, or ``None`` for the
     caller-assigned default. The row's ``session_binding.strategy`` says
     whether a mint is REQUIRED and the mint itself is per-harness code. A
-    requested id is VALIDATED, never minted. The agy mint is a real turn,
-    so it carries the spawn's axes.
+    requested id is VALIDATED, never minted. agy runs no mint turn: its row
+    binds the conversation id at the session report, so a spawn pays no
+    launch-time model call.
     """
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import _require_chat_id, create_chat
 
         return _require_chat_id(requested) if requested is not None else create_chat(cwd)
     if harness == "agy":
-        from fno.agents.harnesses.agy import create_conversation, require_conversation_id
+        from fno.agents.harnesses.agy import require_conversation_id
 
-        if requested is not None:
-            return require_conversation_id(requested)
-        # The mint runs a real turn in the spawn's own cwd, so an untrusted
-        # folder would put a modal in front of the mint too.
-        _trust_agy_folder(Path(cwd))
-        return create_conversation(
-            cwd,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
-            yolo=yolo,
-        )
+        return require_conversation_id(requested) if requested is not None else None
     from fno.agents.harness_map import capabilities
 
     binding = capabilities(harness).get("session_binding") or {}
@@ -121,82 +70,11 @@ def _mint_thread_session_id(
     harness: str,
     cwd: Path,
     requested: Optional[str] = None,
-    *,
-    model: Optional[str] = None,
-    effort: Optional[str] = None,
-    permission_mode: Optional[str] = None,
-    yolo: bool = False,
 ) -> str:
     """The harness session id a keeper thread launches on, fixed BEFORE
-    launch: :func:`mint_session_id` plus the caller-assigned UUIDv4 default.
-    The launch axes ride along because a harness whose mint is a real model
-    turn (agy) launches it on the spawn's selected axes."""
-    minted = mint_session_id(
-        harness,
-        cwd,
-        requested,
-        model=model,
-        effort=effort,
-        permission_mode=permission_mode,
-        yolo=yolo,
-    )
+    launch: :func:`mint_session_id` plus the caller-assigned UUIDv4 default."""
+    minted = mint_session_id(harness, cwd, requested)
     return minted if minted is not None else str(uuid.uuid4())
-
-
-def complete_launch_argv(
-    harness: str,
-    argv: list[str],
-    *,
-    cwd: Path,
-    model: Optional[str],
-    yolo: bool,
-    permission_mode: Optional[str],
-    add_dir: Optional[str],
-    effort: Optional[str],
-    tools: Optional[str] = None,
-    deny_tools: Optional[str] = None,
-) -> list[str]:
-    """The declared create form plus the axes this harness's PANE arm appends.
-    One ORDER serves every lane: flag order is not how a binary launches."""
-    from fno.agents.dispatch import DispatchAskError
-    from fno.agents.mux_spawn import effort_tokens
-    from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
-
-    arm = keeper_arm(harness)
-    if arm is None:
-        return argv
-    # The bypass/mode decision is the Rust owner's: an explicit mode REPLACES
-    # an always-on bypass; the lane default is the row's bypass posture.
-    from fno.agents.spawn_axes_client import keeper_posture
-
-    argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
-    if harness == "pi":
-        # One route owner for keeper and pane; the generic adds would misname it.
-        from fno.agents.spawn_axes_client import spawn_axes_call
-
-        route = spawn_axes_call({"pi_route": _pi_axes(model, effort, tools, deny_tools)})
-        return [*argv, *(str(t) for t in route["tokens"])]
-    if arm.get("takes_model") and model:
-        argv = [*argv, "--model", model]
-    if arm.get("takes_effort") and effort:
-        argv = [*argv, *effort_tokens(harness, effort)]
-    if arm.get("takes_add_dir"):
-        argv = [
-            *argv,
-            *add_dir_tokens(
-                harness,
-                add_dir,
-                worker_writable_dirs(cwd),
-                unsupported=lambda flag: (_ for _ in ()).throw(
-                    DispatchAskError(
-                        f"{flag} is not supported on the {harness} thread lane",
-                        exit_code=2,
-                    )
-                ),
-            ),
-        ]
-    finish = _FINISH_ARGV.get(harness)
-    return finish(argv, cwd) if finish is not None else argv
 
 
 def keeper_thread_spawn(
@@ -235,25 +113,12 @@ def keeper_thread_spawn(
     if once:
         raise DispatchAskError(arm["once_refusal"], exit_code=2)
 
-    carries = tuple(arm.get("carries") or ())
-    # The front door demoted every uncarried axis to the pane, so `carries`
-    # only decides which kwargs the lane builder takes.
-    resume_session_id = options.get("resume_session_id")
-    if resume_session_id and arm.get("resume_refusal"):
-        raise DispatchAskError(
-            f"--resume {resume_session_id} {arm['resume_refusal']}", exit_code=2
-        )
-
-    lane_kwargs: dict[str, Any] = {key: options.get(key) for key in carries}
-    if "yolo" in lane_kwargs:
-        lane_kwargs["yolo"] = bool(lane_kwargs["yolo"])
     receipt = _lane_b_thread_spawn(
         name=name,
         harness=harness,
         cwd=cwd,
         lock_timeout=lock_timeout,
         passthrough=options.get("passthrough"),
-        **lane_kwargs,
     )
     session_id = receipt["session_id"]
     if options.get("promotion") is not None:

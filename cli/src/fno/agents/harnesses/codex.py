@@ -829,9 +829,10 @@ def create(
         *codex_hook_trust_args(),
     ]
     if passthrough:
-        from fno.agents.mux_spawn import pane_passthrough_tokens
+        from fno.agents.mux_spawn import refuse_passthrough_collision
 
-        argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
+        refuse_passthrough_collision(passthrough, argv)
+        argv = [*argv, *passthrough]
     argv += [
         # Behind `--` (codex's own clap tip): a leading-flag seed must be the
         # prompt positional, not a codex flag.

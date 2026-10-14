@@ -14,7 +14,6 @@
 //! module's launch step with an `interactive_create` form and delete the
 //! Python leg.
 
-use crate::harness_capabilities::HarnessContract;
 use crate::state::RegistryEntry;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -44,42 +43,13 @@ pub(crate) struct LaunchSpec {
 /// the model axis are the only additions, so the revival relaunches the same
 /// conversation the contract names instead of re-deriving the row's extras.
 pub(crate) fn revival_argv(
-    contract: &HarnessContract,
     harness: &str,
-    row: &RegistryEntry,
     base: &[String],
 ) -> Result<(Vec<String>, String), String> {
     let mut argv = base.to_vec();
-    let posture = crate::agy_launch::keeper_posture(
-        harness,
-        "thread",
-        row.requested_permission_mode.as_deref(),
-        false,
-    )?;
+    let posture = crate::agy_launch::keeper_posture(harness, "thread")?;
     argv.extend(posture.tokens);
-    if let Some(model) = revival_model(contract, harness, row) {
-        argv.push("--model".to_string());
-        argv.push(model);
-    }
     Ok((argv, posture.effective))
-}
-
-/// The model axis the keeper lane takes, the row's requested model first -
-/// the same precedence a fresh spawn resolves. Empty answers never ride.
-fn revival_model(contract: &HarnessContract, harness: &str, row: &RegistryEntry) -> Option<String> {
-    let takes_model = contract
-        .capabilities(harness)
-        .ok()
-        .and_then(|caps| caps.keeper.as_ref())
-        .map(|keeper| keeper.takes_model)
-        .unwrap_or(false);
-    if !takes_model {
-        return None;
-    }
-    row.requested_model
-        .clone()
-        .or_else(|| row.model.clone())
-        .filter(|m| !m.is_empty())
 }
 
 /// The production wrapper: real gate, real probe, real launcher. Loads the
@@ -144,15 +114,7 @@ where
     K: Fn(u32),
 {
     let row_name = &row.name;
-    let contract = match HarnessContract::packaged() {
-        Ok(contract) => contract,
-        Err(error) => {
-            eprintln!("fno agents resume: resume contract is unavailable: {error}");
-            crate::resume_gate::release_revival_claims(session_id);
-            return 13;
-        }
-    };
-    let (completed_argv, posture_word) = match revival_argv(&contract, harness, row, base_argv) {
+    let (completed_argv, posture_word) = match revival_argv(harness, base_argv) {
         Ok(completed) => completed,
         Err(reason) => {
             eprintln!("fno agents resume: {row_name}: {reason}");
@@ -554,10 +516,6 @@ mod tests {
         ]
     }
 
-    fn harness() -> HarnessContract {
-        HarnessContract::packaged().expect("packaged harness contract")
-    }
-
     fn home() -> (tempfile::TempDir, crate::paths::AgentsHome) {
         let dir = tempfile::tempdir().unwrap();
         let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
@@ -695,41 +653,26 @@ mod tests {
     }
 
     #[test]
-    fn revival_argv_carries_the_model_and_the_recorded_mode() {
-        // AC2-HP
-        let contract = harness();
-        let mut cursor_row = agy_row();
-        cursor_row.harness = Some("cursor-agent".to_string());
-        cursor_row.requested_model = Some("gpt-5".to_string());
+    fn revival_argv_rides_the_lane_default_posture() {
+        // AC2-HP: the axes are retired, so the revival adds only the lane
+        // default - no row pin can reach the argv.
         let base = vec![
             "cursor-agent".to_string(),
             "--resume".to_string(),
             SID.to_string(),
             "--trust".to_string(),
         ];
-        let (argv, word) = revival_argv(&contract, "cursor-agent", &cursor_row, &base).unwrap();
-        assert_eq!(
-            argv,
-            vec![
-                "cursor-agent".to_string(),
-                "--resume".to_string(),
-                SID.to_string(),
-                "--trust".to_string(),
-                "--model".to_string(),
-                "gpt-5".to_string(),
-            ]
-        );
+        let (argv, word) = revival_argv("cursor-agent", &base).unwrap();
+        assert_eq!(argv, base);
         assert_eq!(word, "default");
 
-        let mut agy = agy_row();
-        agy.requested_permission_mode = Some("plan".to_string());
-        let (argv, word) = revival_argv(&contract, "agy", &agy, &base_argv()).unwrap();
+        let (argv, word) = revival_argv("agy", &base_argv()).unwrap();
         assert!(
-            !argv.iter().any(|t| t == "--dangerously-skip-permissions"),
+            argv.windows(2)
+                .any(|w| w == ["--dangerously-skip-permissions"]),
             "{argv:?}"
         );
-        assert!(argv.windows(2).any(|w| w == ["--mode", "plan"]), "{argv:?}");
-        assert_eq!(word, "plan");
+        assert_eq!(word, "bypass");
     }
 
     #[test]

@@ -35,7 +35,7 @@ prompt (the watcher passes an `autonomous` token; a manual headless run sets
 - Run `fno do pr ritual <n> --autonomous` (the flag also turns on under
   `POST_MERGE_NONINTERACTIVE=1`).
 - The verb spawns the judgment leg itself as ONE headless one-shot
-  (`fno agents spawn --substrate headless`) when its inputs are non-empty, never
+  (`fno agents spawn --once`) when its inputs are non-empty, never
   a `claude --bg` thread (epic Locked Decision 9).
 - **Never call `AskUserQuestion`** in autonomous mode. Every judgment slot below
   has a no-prompt branch; self-end after the report.

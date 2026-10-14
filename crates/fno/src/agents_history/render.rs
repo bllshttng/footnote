@@ -508,7 +508,7 @@ fn resume_line(
     registry: Option<&Value>,
     receipt: Option<&Receipt>,
     harness: Option<&str>,
-    spawn_model: &str,
+    _spawn_model: &str,
 ) -> String {
     if let Some(resume) = receipt.and_then(|r| str_at(&r.value, "resume")) {
         return resume.to_string();
@@ -517,15 +517,9 @@ fn resume_line(
     if provider.is_none() {
         return "unknown (the provider is not recorded, so a plain resume could run the account default)".into();
     }
-    if let Some(provider) = provider.filter(|provider| !provider.eq_ignore_ascii_case("anthropic"))
+    if let Some(_provider) = provider.filter(|provider| !provider.eq_ignore_ascii_case("anthropic"))
     {
-        if spawn_model != "unknown" {
-            return format!(
-                "fno agents spawn --resume {sid} -P {provider} -m {}",
-                shell_single_quote(spawn_model)
-            );
-        }
-        return "unknown (the registry records a provider but no spawn model)".into();
+        return format!("fno agents resume {sid}");
     }
     if provider.is_some_and(|value| value.eq_ignore_ascii_case("anthropic")) {
         if let Some(harness) = harness {
@@ -545,10 +539,6 @@ fn resume_line(
         }
     }
     "unknown (the harness has no declared resume form)".into()
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn normalize_model(model: &str) -> &str {

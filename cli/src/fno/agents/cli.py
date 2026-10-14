@@ -19,7 +19,6 @@ import typer
 
 from fno.agents import launch_provenance
 from fno.agents.harness_map import (
-    PERMISSION_MODE_HELP,
     spawn_seed_receipt_fields,
     spawn_seed_receipt_fragment,
 )
@@ -1049,7 +1048,33 @@ def _parse_wait_seconds(raw: str) -> float:
 
 
 
-@agents_app.command("spawn")
+def _retired_axis(flag: str):
+    """The refusal for one retired spawn axis: exit 2 naming the native form.
+    The lane template (routing.models launch / the harness contract) owns the
+    value now; docs/HARNESSES.md carries each harness's own launch line."""
+
+    def _refuse(ctx, param, value):
+        if value:
+            typer.echo(
+                f"refused: {flag} is retired; the lane template owns it. "
+                "Native form: docs/HARNESSES.md (launch each harness its own way)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        return None
+
+    return _refuse
+
+
+@agents_app.command(
+    "spawn",
+    epilog=(
+        "The harness lane is chosen, not flagged: placement args imply the pane "
+        "lane, --once means headless, everything else seats a thread. Declared "
+        "harnesses: claude, codex, opencode, pi, agy, cursor-agent, grok "
+        "(docs/HARNESSES.md)."
+    ),
+)
 def cmd_spawn(
     ctx: typer.Context,
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
@@ -1071,20 +1096,15 @@ def cmd_spawn(
         None,
         "--harness",
         "-H",
-        help=(
-            "The CLI binary to launch; default: the invoking harness, then "
-            "claude. Any other binary on PATH also spawns, into a pane with "
-            "fno as the viewport; pass its init flags after '--'."
-        ),
+        hidden=True,
+        callback=_retired_axis("--harness"),
     ),
     vendor: str | None = typer.Option(
         None,
         "--provider",
         "-P",
-        help=(
-            "The model VENDOR (zai or a model_routing.providers name), paired "
-            "with --model. NOT the CLI binary (-H)."
-        ),
+        hidden=True,
+        callback=_retired_axis("--provider"),
     ),
     recorded_provider: str | None = typer.Option(
         None,
@@ -1108,10 +1128,8 @@ def cmd_spawn(
     substrate: str = typer.Option(
         "",
         "--substrate",
-        help=(
-            "thread (default where the harness seats one) | pane (mux PTY) | "
-            "headless (one-shot). Placement flags and a `--` fence imply pane."
-        ),
+        hidden=True,
+        callback=_retired_axis("--substrate"),
     ),
     print_mode: bool = typer.Option(
         False,
@@ -1151,11 +1169,8 @@ def cmd_spawn(
         False,
         "--yolo",
         "-Y",
-        help=(
-            "Provider dangerous-mode bypass: codex --dangerously-bypass-"
-            "approvals-and-sandbox; claude bypassPermissions. Conflicts with "
-            "--permission-mode."
-        ),
+        hidden=True,
+        callback=_retired_axis("--yolo"),
     ),
     fresh: bool = typer.Option(
         False,
@@ -1208,60 +1223,51 @@ def cmd_spawn(
         None,
         "--model",
         "-m",
-        help="Forwarded as --model <m> to the harness CLI. With no -H, the routing.models row that declares <m> names the harness; unset = provider default.",
+        hidden=True,
+        callback=_retired_axis("--model"),
     ),
     permission_mode: str | None = typer.Option(
         None,
         "--permission-mode",
-        help=PERMISSION_MODE_HELP,
+        hidden=True,
+        callback=_retired_axis("--permission-mode"),
     ),
     effort: str | None = typer.Option(
         None,
         "--effort",
-        help=(
-            "Reasoning effort, passed through to the selected provider/model; "
-            "unset uses its default."
-        ),
+        hidden=True,
+        callback=_retired_axis("--effort"),
     ),
     resume: str | None = typer.Option(
         None,
         "--resume",
         "-r",
-        help=(
-            "Seed a NEW claude session from a transcript: content carries "
-            "over, the id does NOT. Same-id revival: fno agents resume."
-        ),
+        hidden=True,
+        callback=_retired_axis("--resume"),
     ),
     add_dir: str | None = typer.Option(
         None,
         "--add-dir",
-        help=(
-            "Extra write access for the worker; opencode/gemini reject it."
-        ),
+        hidden=True,
+        callback=_retired_axis("--add-dir"),
     ),
     agent: str | None = typer.Option(
         None,
         "--agent",
-        help=(
-            "Pin the worker's sub-agent by name. Maps to --agent on "
-            "claude/opencode; codex/agy/gemini reject it (fail-closed)."
-        ),
+        hidden=True,
+        callback=_retired_axis("--agent"),
     ),
     tools: str | None = typer.Option(
         None,
         "--tools",
-        help=(
-            "Scope the worker's allowed tools. Opaque list forwarded to "
-            "claude --allowedTools; other providers reject it (fail-closed)."
-        ),
+        hidden=True,
+        callback=_retired_axis("--tools"),
     ),
     deny_tools: str | None = typer.Option(
         None,
         "--deny-tools",
-        help=(
-            "Scope the worker's disallowed tools. Opaque list forwarded "
-            "to claude --disallowedTools; other providers reject it (fail-closed)."
-        ),
+        hidden=True,
+        callback=_retired_axis("--deny-tools"),
     ),
     output_format: str | None = typer.Option(
         None,
@@ -1275,7 +1281,7 @@ def cmd_spawn(
         "-s",
         help=(
             "Pane placement: send the new pane to a workspace by its visible "
-            "name instead of the cwd-derived default. --substrate pane only."
+            "name instead of the cwd-derived default. Pane lane only."
         ),
     ),
     squad_compat: str | None = typer.Option(
@@ -1290,7 +1296,7 @@ def cmd_spawn(
         "-x",
         help=(
             "Pane placement: tile the new pane left|right|up|down of the "
-            "squad's focused pane instead of a new tab. --substrate pane only."
+            "squad's focused pane instead of a new tab. Pane lane only."
         ),
     ),
     at: str | None = typer.Option(
@@ -1414,7 +1420,6 @@ def cmd_spawn(
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
     from fno.dispatch_flags import (
         DispatchFlagError,
-        reject_empty_model,
         resolve_dispatch_harness,
     )
 
@@ -1436,96 +1441,24 @@ def cmd_spawn(
     # byte-identical for explicit-cwd and stay-put spawns (AC1-EDGE).
     _moved_cwd = str(workdir) if not cwd and workdir != Path(os.getcwd()).resolve() else None
 
-    # Three orthogonal axes: --harness names the CLI binary, --provider the model
-    # vendor that binary talks to, --model the model at that vendor. The local
-    # carrying the harness is now spelled for its own axis: 40-odd refusals below
-    # read from it, and each one taught the operator the wrong word for the thing
-    # they had to change. The dispatch_spawn/dispatch_ask kwargs moved with it;
-    # the RECEIPT key stays `provider` until wave 4 moves it with its consumers,
-    # which is why a `provider=harness` call survives at the pane seam below.
-    # The caller's own spelling of the route, for refusal messages further
-    # down: a route only the claude harness can carry may get refused after
-    # the vendor+model collapse below, and naming the collapsed `--route`
-    # form there would send the operator looking for a flag they never typed
-    # (AC5-HP).
+    # The axes retired: the lane template owns the values. The route spelling
+    # stays for the refusals below; the harness resolves from the default
+    # rung; vendor and recorded-provider retired with the flags.
     route_spelling = f"--route {route}" if route is not None else None
-    if vendor is not None:
-        vendor = vendor.strip()
-        # The historical confusion, refused by name rather than silently launching
-        # the wrong thing: `--provider claude` used to select the CLI binary.
-        from fno.agents.harnesses import READABLE_PROVIDERS
-
-        if vendor in READABLE_PROVIDERS:
-            print(
-                f"{vendor} is a harness, not a provider; use --harness {vendor}",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if route is not None:
-            print(
-                "--provider/--model and --route are two spellings of one route; pass one",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if not model:
-            print(
-                f"--provider {vendor!r} names a vendor, not a model; add --model "
-                "(the vendor's own model id, e.g. --model glm-5.3)",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        # The model belongs to the route from here: it reaches the worker as the
-        # routed ANTHROPIC_MODEL, never as a `claude --model` token (which would
-        # hand the claude CLI a vendor model id it cannot resolve).
-        route_spelling = f"--provider {vendor} --model {model}"
-        route, model = f"{vendor}/{model}", None
-
-    # --harness is optional: resolve it (explicit > invoking harness > claude)
-    # and reject an empty --model before anything spawns. Every rung of that
-    # chain is a harness, which is why the resolver is spelled for that axis.
-    # The value is a concrete string from here down; the harness-name set is
-    # validated substrate-aware further in.
+    model = None
     try:
         harness, harness_source = resolve_dispatch_harness(harness)
-        model = reject_empty_model(model)
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
-    if recorded_provider is not None:
-        recorded_provider = recorded_provider.strip()
-        if not recorded_provider or model is None:
-            print(
-                "--recorded-provider requires a non-empty --model",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if vendor is not None and recorded_provider != vendor:
-            print(
-                "--recorded-provider must match --provider when both are supplied",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
     # Provenance rides the pane receipt's harness_source field below - it is
     # the HARNESS axis's provenance, not the vendor's. The bg/once stdout
     # receipts stay byte-parity-locked with the Rust client, so they skip it.
 
     # The substrate axis: an empty value resolves to the built-in default
     # (thread where seated).
-    from fno.agents.harness_map import DispatchResolveError, thread_seatable, thread_uncarried
-
-    # A flag the harness's thread lane cannot carry (a typed axis or a fenced
-    # token) resolves pane, the same way pane geometry does. One fenced token
-    # with no message is the legacy seed idiom; the pane is where that seed
-    # has ever been read, so it demotes there too.
-    uncarried = thread_uncarried(
-        harness,
-        {
-            "model": model, "yolo": yolo, "permission_mode": permission_mode,
-            "effort": effort, "add_dir": add_dir, "launch_role": role,
-            "agent": agent, "tools": tools, "deny_tools": deny_tools,
-        },
-        passthrough,
-    )
+    from fno.agents.harness_map import DispatchResolveError, fence_uncarried, thread_seatable
+    uncarried = fence_uncarried(harness, passthrough)
     defaulted = False
     if not substrate and once:  # --once always means a one-shot
         substrate = "headless"
@@ -1534,7 +1467,8 @@ def cmd_spawn(
         defaulted = True
         pane_implied = bool(
             passthrough or split or at or tab or bounded_placement or squad
-            or pane is not None or monitor is not None or uncarried is not None
+            or pane is not None or monitor is not None or mux_session is not None
+            or uncarried is not None
         )
         try:
             seatable = thread_seatable(harness)
@@ -1610,7 +1544,7 @@ def cmd_spawn(
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
     seedless = seedless_thread_refusal(
-        harness, substrate, message, resume=resume, role=bool(promote), name=name, node=node
+        harness, substrate, message, role=bool(promote), name=name, node=node
     )
     if seedless:
         print(f"fno agents spawn: {seedless}", file=sys.stderr)
@@ -1633,60 +1567,6 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
-    # US4 revival: --resume continues an existing claude --bg transcript, so it
-    # only applies to the claude bg lane (the Python bg_create path forwards
-    # --resume <uuid>). An unset harness defaults to claude downstream.
-    if resume is not None and (substrate != "bg" or harness not in (None, "claude")):
-        print(
-            "--resume requires --substrate thread on harness claude (it continues an existing claude thread session)",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    if effort is not None:
-        from fno.agents.mux_spawn import effort_tokens
-
-        try:
-            effort_tokens(harness, effort)
-        except DispatchAskError as exc:
-            print(str(exc), file=sys.stderr)
-            raise typer.Exit(code=exc.exit_code) from exc
-
-    # AC5-ERR: --permission-mode and --yolo are one knob at a time.
-    if permission_mode is not None and yolo:
-        print(
-            "--permission-mode and --yolo are mutually exclusive; pass one",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    #: Tier-3 fail-closed for the bg/headless lanes (the pane substrate
-    # maps every provider via build_pane_argv, so it's exempt and validated
-    # there). Mirrors the --permission-mode guard above; the same per-cell matrix
-    # as the Rust client. Validate BEFORE any spawn.
-    if substrate != "pane" or once:
-        # Truthiness, not `is not None`: an empty value is UNSET (the builders
-        # omit an empty flag), so `--add-dir=""` must NOT trip the guard.
-        bad = None
-        if add_dir and harness not in ("claude", "codex", "agy"):
-            bad = "--add-dir"
-        elif agent and harness != "claude":
-            bad = "--agent"
-        elif tools and harness != "claude":
-            bad = "--tools"
-        elif deny_tools and harness != "claude":
-            bad = "--deny-tools"
-        if bad is not None:
-            # No "use --substrate pane" advice: pane rejects the same tier3 cells
-            # (gemini --add-dir, codex --agent), so it would mislead. The fence
-            # is the one carrier for the harness's own flag spelling.
-            print(
-                f"{bad} is not supported for harness {harness!r}; if it is the "
-                "harness's own flag, pass it after the -- fence",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-
     from fno.agents.spawn_defaults import placement_refusal
 
     if pane is not None:
@@ -1699,7 +1579,7 @@ def cmd_spawn(
             print(conflict, file=sys.stderr)
             raise typer.Exit(code=2)
         if substrate != "pane" or once:
-            print("--pane applies only to --substrate pane (thread/headless have no existing mux pane target)", file=sys.stderr)
+            print("--pane applies only to the pane lane (thread/headless have no existing mux pane target)", file=sys.stderr)
             raise typer.Exit(code=2)
 
     refusal = placement_refusal(
@@ -1723,7 +1603,7 @@ def cmd_spawn(
             print(
                 "--promote needs a session that outlives the grant; headless is a "
                 "one-shot that exits after one answer, so its role would be "
-                "orphaned at birth. Use --substrate pane or --substrate thread.",
+                "orphaned at birth. Give the spawn a pane lane (placement) or let it seat a thread.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -1822,13 +1702,6 @@ def cmd_spawn(
         if monitor == "happy" and route_provider != "zai":
             print("--monitor happy currently supports only the zai provider", file=sys.stderr)
             raise typer.Exit(code=2)
-        if monitor == "happy" and model is not None:
-            print(
-                "--monitor happy refuses a separate --model override; put the "
-                "Z.ai model in --route or use --provider zai --model <model>",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
         notes: list[str] = []
         route_env = resolve_explicit_route(route_provider or "", route_model or "", notice=notes.append)
         if not route_env:
@@ -1840,13 +1713,6 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
         route_env = bind_route_provider(route_env, route_provider or "")
-
-    if monitor == "happy" and route_provider != "zai":
-        print(
-            "--monitor happy currently requires --provider zai with --model",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
 
     # Resolve/validate the route once before pane/bg/headless fan out. The same
     # helper is called by the in-process spawn APIs, so bypassing the CLI cannot
@@ -2119,51 +1985,6 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-    # A resume may restore a recorded route inside dispatch_spawn. Resolve its
-    # separately stored provider axis before admission so the gate judges the
-    # destination the revived worker will actually use.
-    if resume is not None and route_provider is None:
-        from fno.agents.registry import load_registry
-
-        try:
-            loaded = load_registry()
-            if getattr(loaded, "complete", True) is not True:
-                raise RuntimeError("registry forward read is incomplete")
-        except Exception as exc:
-            print(
-                f"resume provider unreadable ({exc}); refusing because its provider "
-                "cap cannot be evaluated; no worker launched",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2) from exc
-        source_row = next(
-            (
-                row
-                for row in loaded
-                if row.name == name and getattr(row, "route_settings_path", None)
-            ),
-            None,
-        ) or next(
-            (
-                row
-                for row in loaded
-                if getattr(row, "harness_session_id", None) == resume
-                and getattr(row, "route_settings_path", None)
-            ),
-            None,
-        )
-        if source_row is not None:
-            recorded_provider = getattr(source_row, "provider", None)
-            if not recorded_provider:
-                print(
-                    f"route recorded for {source_row.name!r} has no model-provider "
-                    "axis; refusing because its provider cap cannot be evaluated; "
-                    "no worker launched",
-                    file=sys.stderr,
-                )
-                raise typer.Exit(code=2)
-            route_provider = recorded_provider
-
     # The write policy resolves BEFORE the substrate branch so a pane spawn
     # refuses instead of silently dropping the enforcement it was handed.
     # Claude-only for the same reason: the sandbox block composes into the
@@ -2391,15 +2212,6 @@ def cmd_spawn(
                     provider=harness,
                     cwd=workdir,
                     session=mux_session,
-                    yolo=yolo,
-                    role=role,
-                    model=model,
-                    permission_mode=permission_mode,
-                    effort=effort,
-                    add_dir=add_dir,
-                    agent=agent,
-                    tools=tools,
-                    deny_tools=deny_tools,
                     split=split,
                     at=at,
                     tab=tab,
@@ -2414,7 +2226,7 @@ def cmd_spawn(
                     monitor=monitor,
                     route_provider=route_provider,
                     provider_gate=gate,
-                    route_provider_id=route_provider or recorded_provider,
+                    route_provider_id=route_provider,
                     model_name=model or route_model,
                     account_record_id=dispatch_account or account,
                     passthrough=passthrough,
@@ -2496,8 +2308,8 @@ def cmd_spawn(
             # Reporting only route_model here would re-introduce the
             # receipt-can-lie defect: a `--route zai,glm-5.3 --model opus` spawn
             # would name glm-5.3 in the receipt while the worker runs opus.
-            if route_provider is not None or recorded_provider is not None:
-                receipt_obj["provider"] = route_provider or recorded_provider
+            if route_provider is not None:
+                receipt_obj["provider"] = route_provider
             receipt_model = model or route_model
             if receipt_model is not None:
                 # v23: the label is the point. At receipt time this
@@ -2532,8 +2344,6 @@ def cmd_spawn(
             # the outcome (a forced-default environment ignores the flag while
             # the old key read as an applied grant). Only when set, so the
             # unset receipt is unchanged.
-            if permission_mode is not None:
-                receipt_obj["permission_mode_requested"] = permission_mode
             #: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
             #: the account fact carries WHO chose it.
@@ -2574,7 +2384,7 @@ def cmd_spawn(
                 node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
                 worker_name=pane_result.name, worker_harness=pane_result.provider,
                 worker_session_uuid=pane_result.session_uuid,
-                worker_effort=effort,
+        worker_effort=None,
             )
             _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
             # Exit 22 means one thing: a receipt WAS written and something on it
@@ -2646,16 +2456,18 @@ def cmd_spawn(
             native_lane = (
                 harness == "claude"
                 and substrate == "bg"
-                and not (once or resume)
+                and not once
                 and bool(route_env)
                 and role_level is None
-                and not (model or add_dir or agent or tools
-                         or deny_tools or passthrough or yolo or monitor)
+                and not (passthrough or monitor)
             )
             if native_lane:
                 from fno.agents.spawn_lineage import _capture_parent_edge
 
                 launcher_session, launcher_harness, launcher_cwd = _capture_parent_edge()
+                from fno.agents.spawn_defaults import SPAWN_PERMISSION_BUILTIN
+                from fno.config._dispatch_verbs import is_verb_seed
+
                 if not launcher_session:
                     print("spawn: the native lane needs this session's own identity (the launch record names the parent); a spawn from outside any session keeps the dispatcher path.", file=sys.stderr)
                 else:
@@ -2667,7 +2479,14 @@ def cmd_spawn(
                         "harness": harness, "name": name, "payload": message or "",
                         "route_env": route_env or {}, "account_env": account_env or {},
                         "sandbox": sandbox_settings,
-                        "model": route_model or "", "effort": effort or "", "permission_mode": permission_mode or "",
+                        "model": route_model or "",
+                        "effort": "",
+                        # The autonomous-seed bypass rides the template hole now:
+                        # a compose-injected flag would die at the retired-flag
+                        # stubs, and the lane template owns the posture.
+                        "permission_mode": (
+                            SPAWN_PERMISSION_BUILTIN if is_verb_seed(message or "") else ""
+                        ),
                         "cwd": str(workdir), "provider": route_provider or "",
                         "node": (prov_env or {}).get("FNO_NODE") or "",
                         "launcher_session": launcher_session,
@@ -2703,23 +2522,12 @@ def cmd_spawn(
                 once=once,
                 timeout=timeout,
                 from_name=from_name,
-                yolo=yolo,
-                role=role,
-                route_env=route_env,
-                model=model,
-                permission_mode=permission_mode,
-                effort=effort,
-                add_dir=add_dir,
-                agent=agent,
-                tools=tools,
-                deny_tools=deny_tools,
                 passthrough=list(passthrough) if passthrough else None,
                 headless=substrate == "headless",
                 output_format=output_format,
-                resume_session_id=resume,
                 account_env=account_env,
                 launch_account=account or dispatch_account,
-                route_provider_id=route_provider or recorded_provider,
+                route_provider_id=route_provider,
                 model_name=model or route_model,
                 account_record_id=dispatch_account or account,
                 role_level=role_level,
@@ -2774,7 +2582,7 @@ def cmd_spawn(
         worker_name=getattr(result, "name", None),
         worker_harness=getattr(result, "provider", None),
         worker_session_uuid=None,
-        worker_effort=effort,
+        worker_effort=None,
     )
     _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
@@ -2794,12 +2602,6 @@ def cmd_spawn(
         # closed set before it lands here, so a config-sourced mode carrying a
         # backslash or control char would otherwise emit invalid JSON. Matches
         # Rust's json_string_ascii byte-for-byte for every ordinary mode.
-        eff_mode = permission_mode or (("yolo" if "codex" in (harness, getattr(result, "provider", "")) else "bypassPermissions") if yolo else None)
-        perm_field = (
-            f', "permission_mode_requested": {json.dumps(eff_mode)}'
-            if eff_mode
-            else ""
-        )
         #: append the effective cwd only on the default move. json.dumps
         # (not a bare `"`-escape) so a path with a backslash or control char stays
         # valid JSON for receipt consumers (review); it matches Rust's
@@ -2823,7 +2625,7 @@ def cmd_spawn(
         message_field = spawn_seed_receipt_fragment(effective_message)
         # provider/model appear only for an explicit route or model. provider is the
         # vendor, never a harness; `model` is the EFFECTIVE model (--model wins).
-        receipt_provider = route_provider or recorded_provider
+        receipt_provider = route_provider
         provider_field = (
             f", \"provider\": {json.dumps(receipt_provider)}" if receipt_provider else ""
         )
@@ -2852,7 +2654,7 @@ def cmd_spawn(
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
             f'"harness": "{result.provider}"{provider_field}{model_field}, '
             f'"status": "{"spawning" if seed else "live"}"'
-            f"{perm_field}{cwd_field}{account_field}{cred_field}{message_field}{seed_field}}}"
+            f"{cwd_field}{account_field}{cred_field}{message_field}{seed_field}}}"
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()

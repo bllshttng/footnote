@@ -94,7 +94,7 @@ from fno.agents.mux_spawn import build_pane_argv
 # Interactive composer mode (no -p / exec one-shot): we want the idle prompt.
 # The capability table and pane argv builder are the only sources of harness
 # forms; this pinner must not grow a second provider map.
-argv = build_pane_argv(provider, "", Path.cwd(), False, None)
+argv = build_pane_argv(provider, "", Path.cwd(), None)
 
 pid, fd = pty.fork()
 if pid == 0:  # child

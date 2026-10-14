@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from typing import IO, TYPE_CHECKING, Callable, Mapping, NoReturn, Optional, Sequence
+from typing import IO, TYPE_CHECKING, Callable, NoReturn, Optional, Sequence
 
 # The binary lookup itself is stdlib-only and has callers below this layer, so
 # it lives at fno.rust_binary; this module keeps the dispatch/routing half.
@@ -151,7 +151,7 @@ RUST_CLIENT_VERBS = frozenset(
         # sat in the never-route set).
         "registry-json",
         # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
-        #; spawn a mux-hosted pane with `spawn --substrate pane`.
+        #; spawn a mux-hosted pane with `spawn` (the pane lane is the native default where no thread seats).
         # Stop-hook decision verb (control-plane collapse wedge, ).
         # The bash shim in hooks/target-stop-hook.sh calls the binary DIRECTLY
         # (explicit resolution order, no Python routing); this entry exists so
@@ -541,7 +541,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "select-read": "One bounded backlog read (next|undispatched) under [auto_continue] select_timeout_s; prints an ok/unmeasured/error receipt JSON.",
     "feed": "Activity feed projection over questions.jsonl + graph.json (questions, decisions, node lifecycle): [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
-    "revival-check": "One JSON answer to whether a spawn --resume revives an existing row instead of forking: the row by name or by the resumed uuid, supervisor not live; consumed by the spawn path.",
+    "revival-check": "One JSON answer to whether a resume revives an existing row instead of forking: the row by name or by the resumed uuid, supervisor not live; consumed by the spawn path.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter: --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
     "attest": "Review-attestation carrier over the shared primary: push reads one envelope line on stdin, pull prints this repo's rows (unset store.remote_url is a no-op).",
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
@@ -1213,19 +1213,6 @@ def _with_seam_marker(args: "list[str]", verb: str) -> "list[str]":
     return [args[0], spawn_seam_marker(), *args[1:]]
 
 
-#: Flags that compose a COMPLETE route (endpoint + auth + model) before any
-#: worker is born, so an inherited tier remap is no longer ambiguous.
-#: ``-P``/``--provider``/``--route`` are fail-CLOSED at the CLI (an unresolvable
-#: route exits 2 before spawning) and ``--account`` is resolved and scrubbed by
-#: :func:`_scrub_account_auth_at_seam`.
-#:
-#: ``--role`` is deliberately NOT here: `resolve_route` is fail-SAFE, returning
-#: None for a protected role, a disabled block, an unconfigured provider, or a
-#: missing key, which leaves the ambient environment untouched. A role is
-#: exempted below only once it resolves to a real route.
-_ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--account")
-
-
 def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
     """The value of the first of ``names`` present in ``args`` (``--f v``,
     ``--f=v``, or the glued short ``-Hv``), or None. Scans only the fno-arg
@@ -1237,38 +1224,6 @@ def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
     from fno.agents.spawn_defaults import _flag_value
 
     return _flag_value(args, *names)
-
-
-def inherited_tier_remap(
-    args: Sequence[str], env: Optional[Mapping[str, str]] = None
-) -> Optional[tuple[str, str]]:
-    """Argv adapter over :func:`model_routing.tier_remap_conflict`, returning
-    ``(alias, remapped_model)`` for a spawn whose ``--model`` tier alias the
-    ambient env silently redefines, or None.
-
-    The shared checker owns the invariant; this only maps CLI flags onto it so
-    the same rule is enforced at the seam and at the in-process spawn APIs.
-    """
-    from fno.agents.model_routing import resolve_route, tier_remap_conflict
-
-    head = list(_args_before_argv(args))
-    if any(
-        a in _ROUTE_NAMING_FLAGS
-        or a.startswith(("--route=", "--provider=", "--account="))
-        for a in head
-    ):
-        return None
-    # The remap vars are claude-only; an explicit non-claude harness is unaffected.
-    harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
-    if harness != "claude":
-        return None
-    found = tier_remap_conflict(_spawn_flag_value(args, "--model", "-m"), env)
-    if found is None:
-        return None
-    role = _spawn_flag_value(args, "--role")
-    if role and resolve_route(role, env=env):
-        return None
-    return found
 
 
 def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
@@ -1429,69 +1384,46 @@ def _scrub_ambient_identity_at_exec(verb: str) -> None:
     scrub_ambient_identity()
 
 
-def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
-    """Exit 2 rather than launch a worker whose model alias the ambient env
-    redefines. Runs at the routing seam, BEFORE the Rust/Python fork, so this
-    one call covers both runtimes (the Rust client has no ANTHROPIC_* handling
-    at all, so a Python-only guard would be decorative). The in-process spawn
-    APIs enforce the same invariant via ``check_spawn_tier_remap``."""
-    from fno.agents.model_routing import RouteCompositionError
+#: The spawn axis flags retired at the door: each spelling routes the spawn to
+#: the Python parse, where the per-flag stub refuses naming the native form.
+#: The binary's own parser refuses the same set (cli_args.rs SpawnAxes::scan
+#: and the client loop arms), so a direct fno-agents call cannot carry one
+#: either. Only tokens before the --argv payload boundary count, so a fenced
+#: seed naming a flag is prompt text, never a routed spawn.
+_RETIRED_AXIS_LONGS = (
+    "--harness",
+    "--provider",
+    "--model",
+    "--substrate",
+    "--yolo",
+    "--permission-mode",
+    "--effort",
+    "--resume",
+    "--add-dir",
+    "--agent",
+    "--tools",
+    "--deny-tools",
+)
 
-    try:
-        found = inherited_tier_remap(args)
-    except RouteCompositionError as exc:
-        print(f"fno agents spawn: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
-    if found is None:
-        return
-    from fno.agents.model_routing import remap_conflict_message
 
-    print(f"fno agents spawn: {remap_conflict_message(*found)}", file=sys.stderr)
-    raise SystemExit(2)
+def _is_retired_axis_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying a retired axis flag in any spelling.
 
-
-def env_scrub_spawn_warning(
-    args: Sequence[str], env: Optional[Mapping[str, str]] = None
-) -> Optional[str]:
-    """Argv adapter over :func:`model_routing.env_scrub_warning` for the CLI
-    spawn seam, returning the warning when the spawn pins a permission mode
-    under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, else None.
-
-    Resolves the harness the way ``spawn`` does: an explicit ``-H`` wins, else
-    the invoking harness (``CODEX_THREAD_ID`` -> codex, ...), else claude. The
-    seam runs BEFORE Typer resolves the option default, so resolving it here
-    avoids a false positive on a non-claude invoking session. Reuses
-    ``spawn_defaults._has_permission_mode`` (the one knob the spawn parser
-    treats as mutually exclusive, including ``--yolo``) rather than a parallel
-    flag scan.
+    Each retired axis refuses at the Python door (``cmd_spawn``'s stub
+    callbacks name the native form), so a spawn that auto-routed to the binary
+    would either launch on the axis (the binary's legacy arms) or refuse with
+    another door's line. Routing the argv here keeps every refusal on one door
+    with one message shape. ``-r`` is deliberately absent: the short is the
+    standalone resume verb's, never spawn's.
     """
-    explicit = _spawn_flag_value(args, "--harness", "-H")
-    if explicit:
-        provider = explicit
-    else:
-        from fno.harness_identity import resolve_harness_identity
-
-        # READ-ONLY: branches on the ambient harness to pick a
-        # default provider. Nothing durable carries this value.
-        provider = resolve_harness_identity(env).harness or "claude"
-    from fno.agents.model_routing import env_scrub_warning
-    from fno.agents.spawn_defaults import _has_permission_mode
-
-    return env_scrub_warning(
-        provider,
-        permission_pinned=_has_permission_mode(_args_before_argv(args)),
-        env=env,
+    if verb != "spawn":
+        return False
+    head = _args_before_argv(args)
+    return any(
+        a == flag or a.startswith(flag + "=")
+        for a in head
+        for flag in _RETIRED_AXIS_LONGS
     )
-
-
-def _warn_env_scrub_spawn(args: Sequence[str]) -> None:
-    """Surface the env-scrub warning at the spawn seam, never a refusal.
-
-    Pairs with _refuse_inherited_tier_remap at the same seam (both runtimes see
-    this one edit) and runs AFTER it, so a refused spawn stays quiet."""
-    msg = env_scrub_spawn_warning(args)
-    if msg is not None:
-        print(msg, file=sys.stderr)
 
 
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -1772,7 +1704,6 @@ def make_agents_group_cls() -> type:
                         _refuse_codex_spawn_with_unreachable_tools(args)
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
-                    _refuse_inherited_tier_remap(args)
                 elif verb == "rm":
                     if not _gate_rm_at_seam(args):
                         raise SystemExit(RM_DECLINED_EXIT)
@@ -1786,6 +1717,7 @@ def make_agents_group_cls() -> type:
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
                     or _is_keeper_thread_spawn(verb, args)
+                    or _is_retired_axis_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)
                     or _is_resume_bearing_spawn(verb, args)
                     or _is_output_format_bearing_spawn(verb, args)
@@ -1793,14 +1725,12 @@ def make_agents_group_cls() -> type:
                     or _is_anycast_ask(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
-                    _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     _pin = _worktree_policy_pin_at_seam(args)
                     _scrub_ambient_identity_at_exec(verb)
                     route_to_rust(_with_seam_marker(list(args), verb), env_pin=_pin or None)  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
-                        _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         _pin = _worktree_policy_pin_at_seam(args)
                         _scrub_ambient_identity_at_exec(verb)
                         route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs

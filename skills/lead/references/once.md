@@ -121,7 +121,7 @@ The band is an intrinsic property of the work (expected time, edge cases, unknow
 **Authority for the worker you role.**
 `--yolo` means "full auto, no gates", and the *skill* surface translates it per provider: through `/fno:agent spawn` it maps to `--permission-mode bypassPermissions` on claude, while codex gets its literal bypass flag.
 An explicit `--permission-mode` you pass always wins over the mapping.
-The trap is that this translation lives in the skill's normalize step, so `fno agents spawn --yolo` called directly on claude is a genuine no-op with only a stderr note.
+The trap was that this translation lived in the skill's normalize step; the axis is retired now and the lane default owns the bypass.
 Prefer the skill surface, or pass your provider's own posture flag when you go straight to the CLI.
 
 ## Two lead shapes: pass and org
@@ -426,7 +426,7 @@ Everything above ships a pass. Org adds the duties below and runs them until the
 
 Before you reach for any CLI verb, load [cli-commands.md](cli-commands.md).
 
-The whole of org is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn --substrate pane` accepts `--workspace` and `--split left|right|up|down` end to end, with a min-size fallback to a tab in the same workspace. What follows is the contract that makes you use it.
+The whole of org is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn` (the pane lane) accepts `--workspace` and `--split left|right|up|down` end to end, with a min-size fallback to a tab in the same workspace. What follows is the contract that makes you use it.
 
 ### Spawn each teammate into your mission workspace
 

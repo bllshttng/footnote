@@ -3313,7 +3313,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
 
     try:
         prompt = "fno codex bind canary: reply READY and take no other action."
-        argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
+        argv = build_pane_argv("codex", prompt, cwd, None, name=name)
         argv = ["env", f"CODEX_HOME={codex_home}", *argv]
         # None (daemon unreachable at this instant) is passed through as-is; the
         # ordinary production probe refuses to correlate against a fabricated

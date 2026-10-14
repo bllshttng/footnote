@@ -497,7 +497,7 @@ Every door that re-enters or re-launches a Claude session, and what fno does at 
 | `fno agents resume`, live arm (`claude attach` wake) | yes | restore + wake + verify, or refuse (exit 2). Rust delegates to the Python implementation |
 | mux attach gestures (`AttachAgent`, open-here, split/drop, restore, picker) | yes | resolve through the same re-entry plan. A resolver refusal starts no pane. |
 | mux `ResumeAgent` gesture | yes | run the same re-entry plan in the selected pane, never bare provider argv |
-| `fno agents spawn --resume <uuid>` (revive) | yes | restore the recorded route, or refuse (exit 2). The revived row inherits the source row's `launch_account`. |
+| `fno agents resume <name>` (revive) | yes | restore the recorded route, or refuse (exit 2). The revived row inherits the source row's `launch_account`. The spawn `--resume` fork door is retired. |
 | `fno agents recover <agent> [--session <id>]` | yes | restore the selected id under the row's account and route, or refuse. With two recorded ids the verb refuses until `--session` names one. |
 | native background / left-arrow fork (Claude-owned) | yes, Claude's own | not blockable pre-transition. SessionStart observes and records the second id. |
 | explicit `--fork-session` / SessionStart `source=fork` | yes, Claude's own | same: apply the row's binding on any fno re-entry, and record the id |

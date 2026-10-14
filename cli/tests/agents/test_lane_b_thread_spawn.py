@@ -29,7 +29,6 @@ from fno.agents.dispatch import (
 )
 from fno.agents.harness_map import (
     DispatchResolveError,
-    capabilities,
     render_session_argv,
     resolve_dispatch,
     thread_lane,
@@ -975,21 +974,23 @@ def test_lane_b_cursor_agent_refuses_a_truncated_resume_id(lane_b_home) -> None:
 # agy: the second callee-minted keeper harness
 # ---------------------------------------------------------------------------
 
-def test_lane_b_agy_mints_through_a_print_mode_turn(lane_b_home, monkeypatch) -> None:
-    """agy's id is CALLEE-minted: the print-mode envelope returns it before
-    launch, and it is never fno's uuid4."""
+def test_lane_b_agy_runs_no_mint_and_binds_at_the_report(lane_b_home, monkeypatch) -> None:
+    """agy's id binds at the session report: a spawn carries no conversation
+    id, runs no mint turn, and the row's id is fno's provisional uuid until
+    the report promotes the harness's own."""
     _fake_keeper(monkeypatch, lane_b_home)
-    minted = "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
 
-    from fno.agents.harnesses import agy
 
-    monkeypatch.setattr(agy, "create_conversation", lambda cwd, **kw: minted)
+    def _no_mint(payload):
+        raise AssertionError(f"no door ask may run at agy spawn: {payload}")
+
+    monkeypatch.setattr("fno.agents.spawn_axes_client.spawn_axes_call", _no_mint)
     receipt = _lane_b_thread_spawn(name="wk-agy", harness="agy", cwd=lane_b_home)
 
-    assert receipt["session_id"] == minted
+    assert receipt["session_id"]
     row = next(e for e in load_registry() if e.name == "wk-agy")
     assert row.harness == "agy"
-    assert row.harness_session_id == minted
+    assert row.harness_session_id == receipt["session_id"]
 
 
 def test_lane_b_agy_keeper_argv_matches_the_pane_lane_completion(
@@ -1016,7 +1017,8 @@ def test_lane_b_agy_keeper_argv_matches_the_pane_lane_completion(
     )
     argv = list(recorded["argv"])  # type: ignore[arg-type]
     tail = argv[argv.index("--") + 1 :]
-    assert tail[:3] == ["agy", "--conversation", minted]
+    assert tail[:1] == ["agy"], "the create form is a bare launch; the id binds at the report"
+    assert "--conversation" not in tail, "a fresh agy spawn names no conversation"
     # An unattended keeper has nobody to answer a tool approval, so the bypass
     # is not optional here.
     assert "--dangerously-skip-permissions" in tail
@@ -1044,7 +1046,8 @@ def test_lane_b_agy_default_argv_unchanged(lane_b_home, monkeypatch, capsys) -> 
     _lane_b_thread_spawn(name="wk-agy-def", harness="agy", cwd=lane_b_home)
     argv = list(recorded["argv"])  # type: ignore[arg-type]
     tail = argv[argv.index("--") + 1 :]
-    assert tail[:2] == ["agy", "--conversation", minted][:2]
+    assert tail[:1] == ["agy"]
+    assert "--conversation" not in tail
     assert "--dangerously-skip-permissions" in tail
     assert "--mode" not in tail and "--sandbox" not in tail
     err = capsys.readouterr().err

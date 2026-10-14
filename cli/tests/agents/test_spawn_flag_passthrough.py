@@ -180,22 +180,6 @@ def test_legacy_flag_shaped_seed_fence_rides_the_thread_as_the_prompt(
 # Flags no substrate carries refuse by name, naming the -- fence (AC4-EDGE)
 # ---------------------------------------------------------------------------
 
-
-def test_codex_agent_refuses_on_the_pane_naming_the_fence() -> None:
-    # --agent has no codex spelling on ANY substrate; the pane lane's own
-    # token builder refuses, and the text names the -- fence as the way to
-    # pass the harness's own flag.
-    import pytest as _pytest
-
-    from fno.agents.dispatch import DispatchAskError
-    from fno.agents.mux_spawn import tier3_pane_tokens
-
-    with _pytest.raises(DispatchAskError) as excinfo:
-        tier3_pane_tokens("codex", agent="reviewer")
-    assert "--agent" in str(excinfo.value)
-    assert "fence" in str(excinfo.value)
-
-
 def test_codex_agent_refuses_on_headless_naming_the_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

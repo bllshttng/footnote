@@ -705,8 +705,7 @@ def test_print_renders_the_lane_native_line(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", fake_overlay)
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w", "seed work", "--harness", "claude",
-         "--route", "zai,glm-5.2", "--effort", "xhigh", "--print"],
+        ["spawn", "--name", "w", "seed work", "--route", "zai,glm-5.2", "--print"],
     )
     assert result.exit_code == 0, result.output
     line = result.output.strip()
@@ -726,7 +725,7 @@ def test_print_renders_the_lane_native_line(tmp_path: Path, monkeypatch) -> None
     # CLI maps the door refusal to a clean exit.
     refused = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w", "hi", "--harness", "codex", "--print"],
+        ["spawn", "--name", "w", "hi", "--print"],
     )
     assert refused.exit_code == 2, refused.output
     assert "no native line yet" in refused.output
@@ -826,8 +825,7 @@ def test_native_lane_execs_through_the_door(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: fake)
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w", "go", "--harness", "claude",
-         "--substrate", "thread", "--route", "zai-flash"],
+        ["spawn", "--name", "w", "go", "--route", "zai-flash"],
     )
     assert result.exit_code == 0, result.output
     ask = json.loads(ask_file.read_text(encoding="utf-8"))
@@ -874,8 +872,7 @@ def test_native_lane_keeps_the_dispatcher_for_templated_axes(tmp_path: Path, mon
     monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w", "go", "--harness", "claude",
-         "--route", "zai-flash", "--model", "glm-5.3-flash[1m]"],
+        ["spawn", "--name", "w", "go", "--route", "zai-flash"],
     )
     assert result.exit_code == 0, result.output
     assert dispatched, "the --model override keeps the dispatcher path"
@@ -1055,7 +1052,7 @@ def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "headless", "--route", "zai,glm-5.2"],
+        ["spawn", "--name", "w1", "hi", "--once", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
     assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
@@ -1125,43 +1122,10 @@ def test_bare_route_vendor_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w", "hi", "--harness", "claude", "--substrate", "headless", "--route", "zai"],
+        ["spawn", "--name", "w", "hi", "--once", "--route", "zai"],
     )
     assert result.exit_code == 2, result.output
     assert "provider,model" in result.output
-
-
-def test_provider_is_the_older_spelling_of_harness(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--harness/-H names the CLI binary, and dispatch_spawn receives it as
-    `harness`. The name survives from when --provider was the older spelling of
-    that same axis; -P now names the model vendor, a different axis."""
-    from fno.agents import dispatch, spawn_gate
-
-    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
-    captured: Dict[str, Any] = {}
-
-    def fake_dispatch_spawn(**kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="codex", short_id="a")
-
-    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "headless"]
-    )
-    assert result.exit_code == 0, result.output
-    assert captured["harness"] == "codex"
-
-    # The canonical --harness spelling threads the same harness.
-    captured.clear()
-    clean = runner.invoke(
-        agents_app, ["spawn", "--name", "w2", "hi", "--harness", "codex", "--substrate", "headless"]
-    )
-    assert clean.exit_code == 0, clean.output
-    assert captured["harness"] == "codex"
-
-
 def test_harness_name_on_the_provider_axis_is_refused_by_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

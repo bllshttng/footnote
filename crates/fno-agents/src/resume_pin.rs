@@ -187,9 +187,9 @@ pub fn resolve(
         Some(p) if p != "anthropic" => Err(Unpinned {
             text: format!(
                 "session {session_id} last ran {candidate}, which only route {p} serves, \
-                 and this resume restores no route; resume it with: \
-                 fno agents spawn --resume {session_id} -P {p} -m {}",
-                crate::spawn_axes::repr(&candidate)
+                 and this resume restores no route. The lane template owns the vendor \
+                 choice now: seed a new session on a lane that names {p}, or pin an \
+                 account with `fno agents spawn --account <id>`."
             ),
             lost_route: Some((p, candidate.clone())),
             model: Some(candidate),
@@ -218,9 +218,9 @@ pub fn resolve(
                     model: Some(candidate.clone()),
                     text: format!(
                         "session {session_id} last ran {candidate}, but no recorded route names \
-                         its provider and this resume restores no route; resume it with: \
-                         fno agents spawn --resume {session_id} -P <provider> -m {}",
-                        crate::spawn_axes::repr(&candidate)
+                         its provider and this resume restores no route. The lane template \
+                         owns the vendor choice now: seed a new session on a lane that \
+                         names it, or pin an account with `fno agents spawn --account <id>`."
                     ),
                 });
             }
@@ -524,9 +524,7 @@ mod tests {
         assert!(unpinned.lost_route.is_none());
         assert_eq!(unpinned.model.as_deref(), Some("glm-5.3-flash[1m]"));
         assert!(
-            unpinned
-                .text
-                .contains("fno agents spawn --resume 77770002-2222-3333-4444-555555555555"),
+            unpinned.text.contains("this resume restores no route"),
             "{}",
             unpinned.text
         );

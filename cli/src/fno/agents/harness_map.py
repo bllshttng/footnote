@@ -1117,28 +1117,19 @@ def thread_seatable(harness: str) -> bool:
     return spawn_state(harness) == "native"
 
 
-def thread_uncarried(
-    harness: str,
-    axes: dict[str, object],
-    passthrough: list[str] | None,
-) -> str | None:
-    """The first launch flag this harness's thread lane cannot carry, or None.
+def fence_uncarried(harness: str, passthrough: list[str] | None) -> str | None:
+    """The first fenced ``--`` token this harness's thread lane cannot carry,
+    or None.
 
     Reads the ``[harness.<name>.thread]`` carrier row, else the ``keeper``
-    row. ``axes`` maps ``keeper_thread.LAUNCH_AXES`` axis names to set values;
-    ``passthrough`` is the fenced ``--`` token list. A non-None answer
-    demotes the spawn to the pane; it never refuses on the substrate.
+    row. The spawn axis flags are retired (the lane template owns the
+    values), so the fence is the only uncarried input left. A non-None
+    answer demotes the spawn to the pane; it never refuses on the substrate.
     """
     caps = _BUNDLED_CAPS.get(harness) or {}
     arm = caps.get("thread") or caps.get("keeper")
     if not arm:
         return None
-    carries = set(arm.get("carries") or [])
-    from fno.agents.keeper_thread import LAUNCH_AXES
-
-    for flag, axis in LAUNCH_AXES:
-        if axis not in carries and axes.get(axis):
-            return flag
     covered = set(arm.get("passthrough") or [])
     if "*" in covered:
         return None

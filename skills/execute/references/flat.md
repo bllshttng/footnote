@@ -70,7 +70,7 @@ Backward compat: plans without `kill_criteria:` frontmatter (most focused
 plans will not have one) return exit 0 (no abort). Malformed predicates
 log WARN to stderr and are skipped.
 
-**Session-project invariant:** a flat plan is single-project by construction. If a numbered change targets a file **outside this session's project repo root**, STOP - do NOT `cd` into the other repo and edit it. Surface that work as a backlog node and spawn a worker into its project (`fno agents spawn --harness claude --cwd <root> --name "target-<node>" "/target <node>"`), or, if no node exists yet, report it so the user can `/blueprint` it. See [session-project-invariant.md](session-project-invariant.md).
+**Session-project invariant:** a flat plan is single-project by construction. If a numbered change targets a file **outside this session's project repo root**, STOP - do NOT `cd` into the other repo and edit it. Surface that work as a backlog node and spawn a worker into its project (`fno agents spawn --cwd <root> --name "target-<node>" "/target <node>"`; the spawning session's own harness seats it), or, if no node exists yet, report it so the user can `/blueprint` it. See [session-project-invariant.md](session-project-invariant.md).
 
 For each numbered change under `## Changes`:
 

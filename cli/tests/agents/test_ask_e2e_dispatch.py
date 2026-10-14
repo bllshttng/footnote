@@ -208,7 +208,8 @@ def test_spawn_once_python_vs_rust_parity(
     """A `spawn --once` (the de-overloaded home of the old ask-create
     exchange, Task 1.3) produces the same stdout + exit code regardless of
     whether the dispatch runs through Python (`dispatch_spawn`) or the Rust
-    client (`fno-agents spawn --harness <h> --once`) for codex."""
+    client (`fno-agents spawn --once`, harness inferred from the ambient
+    codex marker) for codex."""
     install_fake, env_for = _PROVIDER_FAKES[provider]
     bin_dir = tmp_path / "bin"
     install_fake(bin_dir)
@@ -254,10 +255,13 @@ def test_spawn_once_python_vs_rust_parity(
         **os.environ,
         "FNO_AGENTS_HOME": str(rs_home),
         "PATH": fake_path,
+        # The harness axis retired: the ambient codex marker is how the door
+        # names the harness now, the way a codex-hosted session would.
+        "CODEX_THREAD_ID": _SESSION_ID,
         **env_for(_SESSION_ID, _REPLY),
     }
     completed = subprocess.run(
-        [str(RUST_BIN), "spawn", "--name", "parity-agent", "hi", "--harness", provider, "--once"],
+        [str(RUST_BIN), "spawn", "--name", "parity-agent", "hi", "--once"],
         env=env,
         capture_output=True,
         text=True,
@@ -336,6 +340,9 @@ def test_codex_ask_short_flags_match_long_through_rust_binary(
             **os.environ,
             "FNO_AGENTS_HOME": str(home),
             "PATH": fake_path,
+            # The harness axis retired: the ambient codex marker names the
+            # harness, the way a codex-hosted session would.
+            "CODEX_THREAD_ID": _SESSION_ID,
             "FAKE_CODEX_SESSION_ID": _SESSION_ID,
             "FAKE_CODEX_REPLY": _REPLY,
         }
@@ -349,9 +356,9 @@ def test_codex_ask_short_flags_match_long_through_rust_binary(
             timeout=30,
         )
 
-    short = _run(["-H", "codex", "-c", str(cwd), "-t", "10", "-o"], tmp_path / "short-home")
+    short = _run(["-c", str(cwd), "-t", "10", "-o"], tmp_path / "short-home")
     long = _run(
-        ["--harness", "codex", "--cwd", str(cwd), "--timeout", "10", "--once"],
+        ["--cwd", str(cwd), "--timeout", "10", "--once"],
         tmp_path / "long-home",
     )
 

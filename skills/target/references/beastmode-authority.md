@@ -11,7 +11,7 @@ So under authority, a judgment call is *decided and recorded* instead of stoppin
 It grants no new powers: merge stays on the auto-merge axis, and destructive or credential-blocked work still stops.
 
 **Why this is not called `yolo`.** `--yolo` is already taken, codebase-wide: it sits in the CLI's GLOBAL short-flag register (`-Y --yolo`) whose whole contract is that a global short "means the same thing on every command and never carries a per-command meaning".
-Its one meaning is the provider dangerous-mode bypass (`fno agents spawn --yolo` -> codex `--dangerously-bypass-approvals-and-sandbox`, claude `bypassPermissions`).
+Its one meaning is the provider dangerous-mode bypass: each lane's own never-prompt posture (codex `--dangerously-bypass-approvals-and-sandbox`, claude `bypassPermissions`); the spawn axis that chose it is retired.
 A judgment grant is a different axis entirely, so it gets a different word and deliberately carries **no short flag** at all.
 This matters most when spawning: in `/agent spawn /target <node> beastmode yolo`, `beastmode` binds to the target session's judgment and `yolo` to the spawn's permissions, with no token doing double duty.
 A beastmode session still asks the harness for permission exactly as before, and a yolo-spawned worker still stops on an architecture fork unless it also holds an authority grant.

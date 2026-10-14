@@ -154,14 +154,9 @@ pub(crate) async fn run_fno_captured_full(
 /// journaled server-side).
 pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &str) -> Vec<String> {
     let mut argv: Vec<String> = vec![fno.to_string(), "agents".to_string(), "spawn".to_string()];
-    // A model picked from a routing row rides as a MODEL-ONLY pin: with
-    // --harness typed, the door would take --model as a plain override and
-    // launch the row's model id against the WRONG provider. Omitting
-    // --harness lets the door resolve the row's harness, route, account
-    // and effort itself.
-    if !req.model_names_harness || req.provider.is_some() {
-        argv.extend(["--harness".to_string(), req.harness.clone()]);
-    }
+    // The harness axis is retired: the door infers the workspace's own
+    // harness, and the request's harness/model/provider pins are vestigial
+    // (the picker still fills them; the door reads none).
     argv.extend(["--cwd".to_string(), req.cwd.clone()]);
     // A board prefill binds the launch to its node: the roster row joins
     // it, the card reads live, and the door's dispatch guard judges it.
@@ -170,14 +165,9 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if let Some(id) = &req.node {
         argv.extend(["--node".to_string(), id.clone()]);
     }
-    // An EMPTY substrate means the door's default (thread where the harness
-    // seats one); only an explicit lane rides the argv, in the same
-    // position it always has, so a pane request stays byte-identical.
-    if !req.substrate.is_empty() {
-        argv.extend(["--substrate".to_string(), req.substrate.clone()]);
-    }
-    // The mux session anchors a PANE placement; the door refuses the flag on
-    // any other substrate, so a thread launch (the default) never sends it.
+    // The mux session anchors a PANE placement and implies the pane lane
+    // at the door (--substrate is retired); a thread launch (the default)
+    // never sends it.
     if req.substrate == "pane" {
         argv.extend(["--mux-session".to_string(), session.to_string()]);
     }
@@ -194,18 +184,8 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if let Some(r) = &req.route {
         argv.extend(["--route".to_string(), r.clone()]);
     }
-    if let Some(m) = &req.model {
-        argv.extend(["--model".to_string(), m.clone()]);
-    }
-    if let Some(provider) = &req.provider {
-        argv.extend(["--provider".to_string(), provider.clone()]);
-    }
-    if let Some(e) = &req.effort {
-        argv.extend(["--effort".to_string(), e.clone()]);
-    }
-    if let Some(p) = &req.permission_mode {
-        argv.extend(["--permission-mode".to_string(), p.clone()]);
-    }
+    // The request's model/provider/effort/permission pins are vestigial
+    // (the popup still fills them); their flags are retired at the door.
     // Explicit placement rides ANY substrate: an explicit flag creates a
     // portal, human or agent, so the door forwards what the caller named
     // and the spawn CLI opens it after the receipt. A bare launch names
@@ -234,16 +214,8 @@ pub(crate) fn validate_extra_flags(flags: &[String]) -> Result<(), String> {
         return Err("extra launch flags exceed 64 argv values".to_string());
     }
     const COMPOSER_FLAGS: &[&str] = &[
-        "--harness",
         "--cwd",
-        "--substrate",
-        "--model",
-        "-m",
-        "--provider",
-        "-P",
         "--route",
-        "--effort",
-        "--permission-mode",
         "--tab",
         "--portal",
         "--split",
@@ -258,7 +230,7 @@ pub(crate) fn validate_extra_flags(flags: &[String]) -> Result<(), String> {
         }
         if arg.starts_with('-') {
             let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
-            if COMPOSER_FLAGS.contains(&name) || arg.starts_with("-m") || arg.starts_with("-P") {
+            if COMPOSER_FLAGS.contains(&name) {
                 return Err(format!("{name} is controlled by a composer chip"));
             }
         }
@@ -767,13 +739,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("FNO_AGENTS_HOME", &dir);
-        let argv = ["fno", "agents", "spawn", "--harness", "claude"];
+        let argv = ["fno", "agents", "spawn", "--name", "w"];
         note_spawn_refused(
             &argv,
             2,
             "",
             "fno agents spawn: applied slot=operator-pin-override (routing)\n\
-             fno agents spawn: --route owns the model; not injecting agents.profiles.target.lanes",
+             fno agents spawn: refusing; no worker launched",
         );
         // The door row commits to the store beside the anchored journal, so
         // the reads go through the store reader, never the raw file.
@@ -797,7 +769,7 @@ mod tests {
         assert!(row["data"]["reason"]
             .as_str()
             .unwrap()
-            .contains("--route owns the model"));
+            .contains("refusing; no worker launched"));
         // A gate refusal: the verdict marker is on the stderr and the gate
         // already wrote the row; a door row would double the feed.
         for suffix in ["db", "db-wal", "db-shm"] {
@@ -940,21 +912,11 @@ mod tests {
                 "fno",
                 "agents",
                 "spawn",
-                "--harness",
-                "codex",
                 "--cwd",
                 "/tmp/proj",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "work",
                 "--no-wait",
-                "--model",
-                "gpt-5.6-luna",
-                "--effort",
-                "high",
-                "--permission-mode",
-                "workspace-write:on-request",
                 "--tab",
                 "name:work",
                 "--prompt-file",
@@ -1008,13 +970,9 @@ mod tests {
                 "fno",
                 "agents",
                 "spawn",
-                "--harness",
-                "opencode",
                 "--cwd",
                 "/tmp/open-models",
                 "--no-wait",
-                "--model",
-                "openrouter/qwen/qwen3-coder",
                 "--agent",
                 "abc",
                 "--name",
@@ -1054,8 +1012,6 @@ mod tests {
                 "fno",
                 "agents",
                 "spawn",
-                "--harness",
-                "claude",
                 "--cwd",
                 "/tmp/p2",
                 "--no-wait",
@@ -1097,12 +1053,8 @@ mod tests {
                 "fno",
                 "agents",
                 "spawn",
-                "--harness",
-                "claude",
                 "--cwd",
                 "/tmp/p6",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "s",
                 "--no-wait",
@@ -1140,13 +1092,8 @@ mod tests {
         };
         let argv = launch_spawn_argv("fno", &row_pinned, "s");
         assert!(
-            !argv.contains(&"--harness".to_string()),
-            "a model-only pin omits --harness: {argv:?}"
-        );
-        assert!(
-            argv.contains(&"--model".to_string())
-                && argv.contains(&"glm-5.3-flash[1m]".to_string()),
-            "the model id rides: {argv:?}"
+            !argv.contains(&"--model".to_string()),
+            "the model pin is vestigial and emits nothing: {argv:?}"
         );
         // The composer's routing-row pick rides the ROW'S ROUTE alone: a
         // route owns the model, so --model and --provider never join it,
@@ -1215,12 +1162,8 @@ mod tests {
                 "fno",
                 "agents",
                 "spawn",
-                "--harness",
-                "claude",
                 "--cwd",
                 "/tmp/p4",
-                "--substrate",
-                "thread",
                 "--no-wait",
                 "--tab",
                 "new",
@@ -1265,8 +1208,6 @@ mod tests {
                 "fno",
                 "agents",
                 "spawn",
-                "--harness",
-                "claude",
                 "--cwd",
                 "/tmp/proj",
                 "--node",

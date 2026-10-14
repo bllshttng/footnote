@@ -285,28 +285,16 @@ pub fn node_spawn_argv(
     cwd: Option<&str>,
     extra: &[(&str, String)],
 ) -> Vec<String> {
-    // Claude lanes first: a named lane resolves its whole row at the spawn
-    // door, so the substrate drops for a named claude lane. Every other
-    // lane keeps today's spellings until wave 5 templates it.
-    let lane_pinned = args.lane.is_some() && args.resolved_harness == "claude";
+    // The lane pin IS the harness now: every lane is templated, so
+    // `--route <row>` resolves harness, substrate and model at the spawn
+    // door. An unnamed dispatch infers the invoking session's harness, and
+    // the substrate rides the door's native-lane default. The harness/
+    // substrate/vendor/model/permission fields on NodeSpawnArgs stay
+    // vestigial (the resolver fills them; nothing reads them here).
+    let lane_pinned = args.lane.is_some();
     let mut cmd: Vec<String> = Vec::new();
-    // The harness axis always emits: the door refuses --route on any other
-    // harness, and without the flag it infers the invoking session's, so a
-    // codex-originated dispatch of a claude lane would die at the door.
-    if lane_pinned {
-        cmd.extend(["--harness".to_string(), args.resolved_harness.clone()]);
-    } else {
-        cmd.extend([
-            "--harness".to_string(),
-            args.harness.clone(),
-            "--substrate".to_string(),
-            args.substrate.clone(),
-        ]);
-    }
     if lane_pinned {
         cmd.extend(["--route".to_string(), args.lane.clone().unwrap_or_default()]);
-    } else if let Some(vendor) = &args.vendor {
-        cmd.extend(["--provider".to_string(), vendor.clone()]);
     } else if let Some(route) = &args.route {
         // The row's route owns vendor AND model as one fact; an explicit
         // dispatch-time vendor pin outranks it and is never replaced.
@@ -331,19 +319,6 @@ pub fn node_spawn_argv(
         cmd.extend(["--cwd".to_string(), cwd.to_string()]);
     } else {
         cmd.push("--fresh".to_string());
-    }
-    if let Some(model) = args.model.as_ref().filter(|_| !lane_pinned) {
-        cmd.extend(["--model".to_string(), model.clone()]);
-    }
-    // CLAUDE-ONLY: gate on the RESOLVED harness, so a claude ACCOUNT record
-    // (ccm/ccr) still gets the flag - without it the account-pinned worker
-    // hangs on a prompt. A lane pin resolves the row's own effort, and the
-    // template fills from the route, so the flag drops with the rest.
-    if !args.permission_mode.is_empty() && args.resolved_harness == "claude" && !lane_pinned {
-        cmd.extend([
-            "--permission-mode".to_string(),
-            args.permission_mode.clone(),
-        ]);
     }
     // A cutover's destination account rides argv as a RECORD ID, never env:
     // the front door applies the overlay where the harness is exec'd, and a
@@ -404,7 +379,6 @@ pub fn spawn_worker(
     .map_err(SpawnOutcome::Failed)?;
     launch_resolved(
         node_id,
-        node,
         args,
         dispatch_reservation,
         caller,
@@ -415,7 +389,6 @@ pub fn spawn_worker(
 
 pub fn launch_resolved(
     node_id: &str,
-    node: &Value,
     args: NodeSpawnArgs,
     dispatch_reservation: Option<(&str, &str)>,
     caller: &str,
@@ -455,20 +428,8 @@ pub fn launch_resolved(
         obj.insert("territory".to_string(), territory.unwrap_or(Value::Null));
         obj.insert("kingless".to_string(), kingless.unwrap_or(Value::Null));
     }
-    // The node's effort pin rides the typed-flag path; the door validates it.
-    let pin = node
-        .get("effort")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("");
     let mut argv = vec!["agents".to_string(), "spawn".to_string()];
-    let extra: Vec<(&str, String)> = if pin.is_empty() {
-        Vec::new()
-    } else {
-        vec![("--effort", pin.to_string())]
-    };
-    argv.extend(node_spawn_argv(&args, args.node_cwd.as_deref(), &extra));
+    argv.extend(node_spawn_argv(&args, args.node_cwd.as_deref(), &[]));
     // The caller's dispatch reservation and the spawn door's own family-2
     // guard collide - the door acquires the SAME key, sees a foreign holder
     // it must never clear, and refuses. Hand the reservation over: release
@@ -600,8 +561,6 @@ pub fn launch_resolved(
                 "worker": {
                     "name": args.agent_name,
                     "harness": args.resolved_harness,
-                    "model": args.model.clone().unwrap_or_default(),
-                    "effort": pin,
                 },
             }
         });

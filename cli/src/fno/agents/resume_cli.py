@@ -296,8 +296,7 @@ def resume_logic(
         return ResumeResult(exit_code=13, stderr=(
             f"fno agents resume: {session_id} is a predecessor of claude row "
             f"{entry.name!r}, and this runtime cannot restore its model or route. "
-            f"Seed a new session from it with `fno agents spawn --resume {session_id}`, "
-            "or resume the row by name.\n"))
+            f"Resume the row by name; `fno agents resume {entry.name}`.\n"))
 
     # Check harness support BEFORE session_id so an unknown harness
     # surfaces the right error ("not supported") rather than a

@@ -161,9 +161,11 @@ fn launcher_journey_model_only_pin_omits_harness() {
         !argv.contains(&"--harness".to_string()),
         "a model-only pin omits --harness: {argv:?}"
     );
+    // The model pins are vestigial at the door: the axis flags retired, so
+    // the pin rides nothing here (a routing row would ride --route instead).
     assert!(
-        argv.contains(&"--model".to_string()),
-        "the model id rides: {argv:?}"
+        !argv.contains(&"--model".to_string()),
+        "a model-only pin emits no axis flag: {argv:?}"
     );
 }
 
@@ -240,12 +242,8 @@ fn launcher_journey_argv_stdin_and_birth_decode() {
     let expect = [
         "agents",
         "spawn",
-        "--harness",
-        "claude",
         "--cwd",
         home_cwd.as_str(),
-        "--substrate",
-        "pane",
         "--mux-session",
         "main",
         "--no-wait",
@@ -319,8 +317,6 @@ fn launcher_journey_empty_substrate_takes_the_door_default() {
     let expect = [
         "agents",
         "spawn",
-        "--harness",
-        "claude",
         "--cwd",
         home_cwd.as_str(),
         "--no-wait",

@@ -1847,7 +1847,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                     );
                 } else {
                     eprintln!(
-                        "fno agents resume: {matched} is a predecessor of claude row {row:?}, and this runtime cannot restore its model or route. Seed a new session from it with `fno agents spawn --resume {matched}`, or resume the row by name."
+                        "fno agents resume: {matched} is a predecessor of claude row {row:?}, and this runtime cannot restore its model or route. Resume the row by name, or seed a new session on the lane template you want."
                     );
                 }
                 return 13;

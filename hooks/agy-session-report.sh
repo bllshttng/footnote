@@ -14,6 +14,13 @@ for b in "$(command -v fno-agents 2>/dev/null)" "${FNO_AGENTS_BIN:-}"; do
     break
 done
 if [[ -n "$bin" && -n "$sid" ]]; then
-    "$bin" report --kind session --harness agy --session-id "$sid" >/dev/null 2>&1 || true
+    args=(report --kind session --harness agy --session-id "$sid")
+    # A keeper-hosted spawn stamps FNO_AGENT_SELF on the child (the keeper
+    # passes its env through): the create form mints no id fno can predict,
+    # so the row name is what binds this report to the spawned row.
+    if [[ -n "${FNO_AGENT_SELF:-}" ]]; then
+        args+=(--agent-self "$FNO_AGENT_SELF")
+    fi
+    "$bin" "${args[@]}" >/dev/null 2>&1 || true
 fi
 printf '{}\n'

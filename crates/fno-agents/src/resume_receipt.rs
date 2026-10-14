@@ -139,25 +139,13 @@ mod tests {
         // session-id change a copied command causes.
         let mut receipt = receipt_value(
             SID,
-            "fno agents spawn --resume 11111111-2222-3333-4444-555555555555 -P zai -m 'glm-5.3-flash[1m]'",
+            "fno agents resume 11111111-2222-3333-4444-555555555555",
         );
-        receipt["resume_argv"] = serde_json::json!([
-            "fno",
-            "agents",
-            "spawn",
-            "--resume",
-            SID,
-            "-P",
-            "zai",
-            "-m",
-            "glm-5.3-flash[1m]"
-        ]);
+        receipt["resume_argv"] = serde_json::json!(["fno", "agents", "resume", SID]);
         let (_dir, home) = home_with_receipt(receipt);
         let hint = resume_hint(&home, SID).unwrap();
         assert!(
-            hint.contains(&format!(
-                "  resume: fno agents spawn --resume {SID} -P zai -m 'glm-5.3-flash[1m]'\n"
-            )),
+            hint.contains(&format!("  resume: fno agents resume {SID}\n")),
             "{hint}"
         );
         assert!(hint.contains("the session id changes"), "{hint}");

@@ -73,7 +73,7 @@ case "$STATUS" in
     if [[ -z "$WORKER_NAME" ]]; then
       echo "do: REFUSE foreign wave for '$WAVE_NODE' - the canonical name mint refused " >&2
     else
-      fno agents spawn --harness claude --cwd "$ROOT" --name "$WORKER_NAME" "/target $WAVE_NODE"
+      fno agents spawn --cwd "$ROOT" --name "$WORKER_NAME" "/target $WAVE_NODE"
       echo "do: spawned $WORKER_NAME --cwd $ROOT"   # receipt (AC3-UI)
     fi
     # mark the wave DELEGATED in STATE.md; continue the session's own waves

@@ -207,7 +207,7 @@ Run the genuine one-shot via your **Bash tool** (never instruct the user to type
 it). Name is positional, message is the trailing positional, reply is on stdout:
 
 ```bash
-fno agents spawn --harness "$PROVIDER" --once -t 300 --name "peer-$TARGET" "$(cat "$BRIEF")"
+fno agents spawn --once -t 300 --name "peer-$TARGET" "$(cat "$BRIEF")"
 ```
 
 - `--harness "$PROVIDER"` (short `-H`) selects the CLI binary (codex/gemini). It is the canonical spelling of the axis. The old `--provider` spelling still works but is deprecated. NOTE: `-H` now carries the harness value, not headless.

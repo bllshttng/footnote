@@ -56,3 +56,16 @@ target start !--provider
 worker external !--pr
 do pr publish-review !--pr
 pr publish-review !--pr
+# the spawn axis stubs: hidden options whose only job is the refusal
+agents spawn !--add-dir
+agents spawn !--agent
+agents spawn !--deny-tools
+agents spawn !--effort
+agents spawn !--harness
+agents spawn !--model
+agents spawn !--permission-mode
+agents spawn !--provider
+agents spawn !--resume
+agents spawn !--substrate
+agents spawn !--tools
+agents spawn !--yolo

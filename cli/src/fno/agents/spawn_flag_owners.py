@@ -60,26 +60,34 @@ class FlagOwner(NamedTuple):
     sources: tuple[str, ...] = (CALLER, DEFAULT)
 
 
+#: The retired spawn axes. Each stays DECLARED on the parser as a hidden
+#: refusal stub (the callback names the native form and exits 2); the lint
+#: pins that the stub survives and that no other row comes back.
+RETIRED_SPAWN_FLAGS: tuple[str, ...] = (
+    "--harness",
+    "--provider",
+    "--recorded-provider",
+    "--substrate",
+    "--yolo",
+    "--model",
+    "--permission-mode",
+    "--effort",
+    "--resume",
+    "--add-dir",
+    "--agent",
+    "--tools",
+    "--deny-tools",
+)
+
+
 FLAG_OWNERS: dict[str, FlagOwner] = {
     "--name": FlagOwner(FNO, "registry-row handle; slug minted when omitted"),
-    "--harness": FlagOwner(
-        FNO, "names the binary; fno resolves and gates on it",
-        sources=(CALLER, ENV, DEFAULT),
-    ),
-    "--provider": FlagOwner(FNO, "vendor axis; fno routes on it, refuses harness names"),
-    "--recorded-provider": FlagOwner(FNO, "machine-recorded vendor for recovery; never routes"),
     "--once": FlagOwner(FNO, "selects the create+exchange+teardown lifecycle"),
-    "--substrate": FlagOwner(FNO, "selects the argv builder itself"),
     "--print": FlagOwner(FNO, "renders the lane's native line; launches nothing"),
     "--sandbox-write-policy": FlagOwner(FNO, "composes the one settings file; refused on panes"),
     "--cwd": FlagOwner(FNO, "launch-dir policy; pairs with --fresh/--here"),
     "--timeout": FlagOwner(FNO, "per-spawn budget fno enforces"),
     "--from-name": FlagOwner(FNO, "mail-envelope identity"),
-    "--yolo": FlagOwner(
-        TRANSLATED, "dangerous-mode bypass; spelling differs per harness",
-        site="mux_spawn.py:build_pane_argv + dispatch.py:_claude_create_path"
-        " + dispatch.py:dispatch_spawn",
-    ),
     "--fresh": FlagOwner(FNO, "workdir-policy alias fno reads"),
     "--here": FlagOwner(FNO, "workdir policy: stay in the caller's cwd"),
     "--role": FlagOwner(FNO, "routing role for per-spawn model selection"),
@@ -92,35 +100,6 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--dispatch-account": FlagOwner(
         FNO, "quota-cutover record; fno stages its env, fail-closed",
         sources=(CALLER,),
-    ),
-    "--model": FlagOwner(FNO, "fno routes on it and stamps model_basis"),
-    "--permission-mode": FlagOwner(
-        TRANSLATED, "approval mode; spelling is per harness",
-        site="crates/fno-agents/src/codex_posture.rs:permission_pane_tokens",
-    ),
-    "--effort": FlagOwner(
-        TRANSLATED, "reasoning effort; one map, Python and Rust bridge it",
-        site="crates/fno-agents/src/effort_surface.rs:effort_tokens",
-    ),
-    "--resume": FlagOwner(
-        TRANSLATED, "claude-only; refusal dies when resume crosses the separator",
-        site="cli.py:cmd_spawn",
-    ),
-    "--add-dir": FlagOwner(
-        TRANSLATED, "workspace grant; four harnesses map it, the rest refuse",
-        site="mux_spawn.py:tier3_pane_tokens",
-    ),
-    "--agent": FlagOwner(
-        TRANSLATED, "sub-agent pin; two harnesses map it",
-        site="mux_spawn.py:tier3_pane_tokens",
-    ),
-    "--tools": FlagOwner(
-        TRANSLATED, "allowed-tools scope; claude maps it",
-        site="mux_spawn.py:tier3_pane_tokens",
-    ),
-    "--deny-tools": FlagOwner(
-        TRANSLATED, "disallowed-tools scope; claude and pi map it",
-        site="mux_spawn.py:tier3_pane_tokens",
     ),
     "--output-format": FlagOwner(FNO, "headless JSON contract fno parses the reply out of"),
     "--workspace": FlagOwner(FNO, "mux pane placement; fno owns the mux"),
@@ -144,4 +123,4 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
 
 #: Growth ratchet, measured at merge: 45 flags (44 + --mux-session, the
 #: dispatch-next lane pin; change 6 trades --headless for --print).
-SPAWN_FLAG_CAP = 46
+SPAWN_FLAG_CAP = 33

@@ -132,33 +132,34 @@ pub struct ReviewSummaryArgs {
     disable_version_flag = true
 )]
 pub struct SpawnAxes {
-    /// Vendor/model route (vendor/model); the vendor pin outranks --provider
+    /// Vendor/model route (vendor/model)
     #[arg(long)]
     pub route: Option<String>,
-    /// Model vendor (routing is applied by the fno CLI seam)
-    #[arg(short = 'P', long)]
-    pub provider: Option<String>,
-    /// CLI binary axis
-    #[arg(short = 'H', long)]
-    pub harness: Option<String>,
-    /// Model name handed to the provider CLI's own --model
-    #[arg(short = 'm', long)]
-    pub model: Option<String>,
-    /// Reasoning effort for the spawned worker
-    #[arg(long)]
-    pub effort: Option<String>,
     /// Per-spawn account selection
     #[arg(long)]
     pub account: Option<String>,
-    /// Session substrate (pane | thread | headless)
+    /// The retired axis fields stay declared because the spawn-overlay verb's
+    /// inspection shape names them; `scan` refuses the spellings and never
+    /// fills them, so every live read answers None.
+    #[arg(short = 'P', long)]
+    pub provider: Option<String>,
+    #[arg(short = 'H', long)]
+    pub harness: Option<String>,
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+    #[arg(long)]
+    pub effort: Option<String>,
     #[arg(long)]
     pub substrate: Option<String>,
 }
 
 impl SpawnAxes {
-    /// The axis flag spellings this schema owns, short aliases included.
+    /// The axis flag spellings this schema owns, short aliases included. The
+    /// retired spellings stay listed so `scan` sees and refuses each one
+    /// before the loop's legacy arms could accept it.
     pub const AXIS_FLAGS: &'static [&'static str] = &[
         "--route",
+        "--account",
         "--provider",
         "-P",
         "--harness",
@@ -166,32 +167,63 @@ impl SpawnAxes {
         "--model",
         "-m",
         "--effort",
-        "--account",
         "--substrate",
     ];
+
+    /// The one refusal for a retired spawn axis at the binary door: the same
+    /// line the Python stubs print, so both doors teach one native form.
+    pub fn refused_axis(flag: &str) -> String {
+        format!(
+            "refused: {flag} is retired; the lane template owns it. \
+             Native form: docs/HARNESSES.md (launch each harness its own way)"
+        )
+    }
 
     /// Parse the axis flags out of a spawn argv, stopping at the provider
     /// argv fence (`--argv` or bare `--`). Non-axis tokens belong to the rest
     /// of the spawn grammar and are ignored here, but the axes themselves are
-    /// strict: a valueless axis flag is an error in the voice the old cursor
-    /// parser used, and a repeated axis flag is refused so the client and the
-    /// overlay can never read different values from the same argv.
+    /// strict: a valueless live axis flag is an error in the voice the old
+    /// cursor parser used, and a repeated live axis flag is refused so the
+    /// client and the overlay can never read different values from the same
+    /// argv. A retired spelling refuses by name, never parses.
     pub fn scan(toks: &[String]) -> Result<(SpawnAxes, usize), String> {
         let fence = toks.iter().position(|t| t == "--argv" || t == "--");
         let head_len = fence.unwrap_or(toks.len());
         let head = &toks[..head_len];
-        // Collect only the axis flag/value pairs, so the strict clap parse
-        // never sees the non-axis flags the rest of the grammar owns.
+        // Collect only the live axis flag/value pairs, so the strict clap
+        // parse never sees the non-axis flags the rest of the grammar owns.
         let mut pairs: Vec<String> = Vec::new();
         let mut i = 0;
         while i < head.len() {
-            if Self::AXIS_FLAGS.contains(&head[i].as_str()) {
-                if i + 1 >= head.len() || Self::looks_like_flag(&head[i + 1]) {
-                    return Err(format!("{} needs a value", head[i]));
+            let tok = head[i].as_str();
+            // Equals-form is a live spelling of the value axes (`--account=x`);
+            // split it here so the strict clap parse sees flag and value.
+            let (long, inline) = match tok.split_once('=') {
+                Some((f, v)) if f.starts_with("--") && Self::AXIS_FLAGS.contains(&f) => {
+                    (f, Some(v.to_string()))
                 }
-                pairs.push(head[i].clone());
-                pairs.push(head[i + 1].clone());
-                i += 2;
+                _ => (tok, None),
+            };
+            if Self::AXIS_FLAGS.contains(&long) {
+                if matches!(long, "--route" | "--account") {
+                    match inline {
+                        Some(v) => {
+                            pairs.push(long.to_string());
+                            pairs.push(v);
+                            i += 1;
+                        }
+                        None => {
+                            if i + 1 >= head.len() || Self::looks_like_flag(&head[i + 1]) {
+                                return Err(format!("{long} needs a value"));
+                            }
+                            pairs.push(long.to_string());
+                            pairs.push(head[i + 1].clone());
+                            i += 2;
+                        }
+                    }
+                } else {
+                    return Err(Self::refused_axis(&long));
+                }
             } else {
                 i += 1;
             }
@@ -202,12 +234,13 @@ impl SpawnAxes {
             .map_err(|e| refusal_line("fno-agents spawn", &e))?;
         let axes = SpawnAxes {
             route: matches.get_one::<String>("route").cloned(),
-            provider: matches.get_one::<String>("provider").cloned(),
-            harness: matches.get_one::<String>("harness").cloned(),
-            model: matches.get_one::<String>("model").cloned(),
-            effort: matches.get_one::<String>("effort").cloned(),
             account: matches.get_one::<String>("account").cloned(),
-            substrate: matches.get_one::<String>("substrate").cloned(),
+            // The retired fields never fill: scan refused the spellings above.
+            provider: None,
+            harness: None,
+            model: None,
+            effort: None,
+            substrate: None,
         };
         Ok((axes, head_len))
     }
@@ -445,27 +478,55 @@ mod tests {
     }
 
     #[test]
-    fn spawn_axes_parse_all_supported_spellings() {
-        let toks: Vec<String> = ["--provider", "zai", "--model=glm", "-m", "luna"]
+    fn spawn_axes_parse_the_live_spellings() {
+        let toks: Vec<String> = ["--route", "zai/glm", "--account=makers"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (axes, fence) = SpawnAxes::scan(&toks).expect("mixed spellings parse");
-        assert_eq!(axes.provider.as_deref(), Some("zai"));
-        assert_eq!(axes.model.as_deref(), Some("luna"));
+        let (axes, fence) = SpawnAxes::scan(&toks).expect("live axes parse");
+        assert_eq!(axes.route.as_deref(), Some("zai/glm"));
+        assert_eq!(axes.account.as_deref(), Some("makers"));
         assert_eq!(fence, toks.len());
+    }
+
+    #[test]
+    fn spawn_axes_retired_spellings_refuse_by_name() {
+        // Every retired spelling refuses with the same line the Python
+        // stubs print, so both doors teach one native form.
+        for flag in [
+            "--provider",
+            "-P",
+            "--harness",
+            "-H",
+            "--model",
+            "-m",
+            "--effort",
+            "--substrate",
+        ] {
+            let toks: Vec<String> = [flag, "x"].iter().map(|s| s.to_string()).collect();
+            let err = SpawnAxes::scan(&toks).expect_err("retired axis refuses");
+            assert!(err.starts_with("refused: "), "{err}");
+            assert!(err.contains("is retired"), "{err}");
+            assert!(err.contains("HARNESSES.md"), "{err}");
+        }
     }
 
     #[test]
     fn spawn_axes_fence_keeps_provider_payload_opaque() {
         let toks: Vec<String> = [
-            "--model", "luna", "--argv", "--", "claude", "--model", "sonnet",
+            "--account",
+            "makers",
+            "--argv",
+            "--",
+            "claude",
+            "--model",
+            "sonnet",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         let (axes, fence) = SpawnAxes::scan(&toks).expect("fenced argv parses");
-        assert_eq!(axes.model.as_deref(), Some("luna"));
+        assert_eq!(axes.account.as_deref(), Some("makers"));
         assert_eq!(fence, 2);
         // strip_axes keeps the fence and the payload byte-exact.
         let stripped = SpawnAxes::strip_axes(&toks, fence);
@@ -481,9 +542,9 @@ mod tests {
     #[test]
     fn spawn_axes_missing_value_refuses() {
         for bad in [
-            vec!["--model"],
-            vec!["--model", "--force"],
-            vec!["-P", "--argv", "--", "claude"],
+            vec!["--account"],
+            vec!["--account", "--force"],
+            vec!["--route", "--argv", "--", "claude"],
         ] {
             let toks: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
             let err = SpawnAxes::scan(&toks).expect_err("missing value refuses");
@@ -494,20 +555,13 @@ mod tests {
     #[test]
     fn spawn_axes_ignores_non_axis_tokens() {
         let toks: Vec<String> = [
-            "--name",
-            "wk",
-            "--portal",
-            "1",
-            "--provider",
-            "zai",
-            "--cwd",
-            "/x",
+            "--name", "wk", "--portal", "1", "--route", "zai/glm", "--cwd", "/x",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         let (axes, _) = SpawnAxes::scan(&toks).expect("non-axis tokens are ignored");
-        assert_eq!(axes.provider.as_deref(), Some("zai"));
-        assert_eq!(axes.model, None);
+        assert_eq!(axes.route.as_deref(), Some("zai/glm"));
+        assert_eq!(axes.account, None);
     }
 }

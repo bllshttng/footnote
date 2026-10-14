@@ -165,10 +165,11 @@ def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():
 
     chat_id = "fadad56b-8008-45f5-b809-f9fab7074534"
     argv = build_pane_argv(
-        "cursor-agent", "", Path("/tmp/worktree"), False, chat_id
+        "cursor-agent", "", Path("/tmp/worktree"), chat_id
     )
     assert argv.count("--trust") == 1, "the declared form carries it once, never duplicated"
-    assert chat_id in argv
+    # The chat store is remote: the conversation id appears in no argv token
+    # (the id appears in no file under ~/.cursor either).
     assert not any(token in {"-w", "--worktree", "--worktree-base"} for token in argv)
 
 
@@ -188,14 +189,13 @@ def test_cursor_agent_refuses_native_worktree_passthrough(flag):
         )
 
 
-def test_cursor_agent_permission_and_effort_mappings_fail_closed():
-    from fno.agents.mux_spawn import DispatchAskError, effort_tokens, permission_pane_tokens
+def test_cursor_agent_permission_mappings_fail_closed():
+    from fno.agents.mux_spawn import DispatchAskError, permission_pane_tokens
 
     assert permission_pane_tokens("cursor-agent", "force") == ["--force"]
     with pytest.raises(DispatchAskError, match="unmappable"):
         permission_pane_tokens("cursor-agent", "auto")
-    with pytest.raises(DispatchAskError, match="no --effort flag"):
-        effort_tokens("cursor-agent", "high")
+    # The effort axis retired at the door: no effort_tokens surface remains.
 
 
 def test_cursor_agent_native_worktree_location_is_forbidden():

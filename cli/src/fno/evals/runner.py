@@ -133,7 +133,7 @@ def _default_spawn(
     prompt: str, workdir: Path, timeout_s: int, *,
     provider: Optional[str] = None, lane: Optional[Any] = None
 ) -> SpawnResult:
-    """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
+    """Run the worker via ``fno agents spawn --once`` in *workdir*.
     A non-zero exit, missing binary, or timeout is a graded failure, never a
     sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*.
     The worker name is the ``ev-th-evals-<run>``: typed non-node identity,

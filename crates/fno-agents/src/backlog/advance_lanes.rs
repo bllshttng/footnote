@@ -222,7 +222,6 @@ fn lanes(
             }
             let (identity, row) = super::advance_dispatch::launch_resolved(
                 id,
-                &node,
                 resolved,
                 Some((&key, &holder)),
                 "dispatch_lanes",

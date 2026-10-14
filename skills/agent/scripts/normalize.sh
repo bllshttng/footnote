@@ -43,7 +43,6 @@ set -uo pipefail
 export LC_ALL=C
 
 # Mirrors the Rust KNOWN_PROVIDERS source of truth (crates/fno-agents provider.rs):
-# the set `fno agents spawn --harness` accepts. Widen both together. (hermes /
 # openclaw are megawalk drivers, a different axis, not spawn providers.)
 VALID_PROVIDERS="claude codex gemini agy opencode"
 
@@ -51,10 +50,8 @@ INPUT=""
 NAME=""
 NAME_SET=0         # 1 = -n/--name was passed (even if empty -> empty-name error)
 PROVIDER=""
-MODEL=""           # exact model name forwarded to `fno agents spawn --model`
                    # (each provider's own --model). Dashless: `model <name>`.
                    # No short flag: `-m` is taken by --allow-merge.
-EFFORT=""          # reasoning effort forwarded to `fno agents spawn --effort`.
                    # Dashless: `effort <value>`; the CLI validates per provider.
 EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
 # tri-state: "" = unset (resolve from config.auto_merge.grant after
@@ -72,6 +69,10 @@ PROJECT=""         # cross-project target: a registry project name/short_name to
 PROJECT_SET=0      # 1 = -C/--project was passed (empty value -> loud error, never
                    # a silent caller-cwd launch when a cross-project hop was asked)
 FORCE=0            # 1 = -f/--force: let --project win over a node's own cwd
+MODEL=""           # exact model name; the spawn door refuses it (axis retired),
+                   # normalize still reports what the caller asked for
+EFFORT=""          # reasoning-effort pin; the spawn door refuses it (axis retired),
+                   # normalize still reports what the caller asked for
 PERMISSION_MODE="" # forwarded to spawn.sh --permission-mode (provider-native, CLI fails closed)
 ROLE=""            # per-spawn model-routing role; forwarded to spawn.sh --role
 TIMEOUT=""         # per-spawn timeout seconds; forwarded to spawn.sh --timeout

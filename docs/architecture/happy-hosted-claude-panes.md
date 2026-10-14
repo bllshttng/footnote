@@ -1,6 +1,6 @@
 # Happy-hosted claude panes: who owns the session id
 
-`fno agents spawn --harness claude --monitor happy ...` puts the `happy` wrapper between fno and claude.
+`fno agents spawn --monitor happy ...` puts the `happy` wrapper between fno and claude.
 That one hop changes who owns the session id, and getting it wrong produced a worker that reported `live` for about 55 minutes with no session behind it.
 
 ## happy discards a pinned `--session-id`

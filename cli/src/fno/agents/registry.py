@@ -528,7 +528,7 @@ class AgentEntry:
     # fno's own stop (v32): ``{"by", "at", "reason"?}``; Rust stamps, Python custodies (X3).
     stop: Optional[dict] = None
     # Mux hosting ref (4a-G2): ``{"session": <mux session>, "pane_id": <u64>}``
-    # for an agent whose PTY is a mux pane (``fno agents spawn --substrate
+    # for an agent whose PTY is a mux pane (``fno agents spawn``,
     # pane``); ``None`` for daemon-worker, bg-thread, and headless rows. The
     # Python spawn back half writes it; the mux server's sideline reader and
     # ``fno agents mail`` live-inject dispatch on it (a row carries exactly ONE live

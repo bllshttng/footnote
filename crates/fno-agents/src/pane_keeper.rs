@@ -486,10 +486,11 @@ pub(crate) fn session_id_from_argv(argv: &[String]) -> Option<String> {
                 .filter(|s| is_full_uuid(s))
                 .map(str::to_string);
         }
-        // agy's create form, the other callee-minted-read-back shape: the
+        // agy's RESUME form, the callee-minted-read-back shape: the
         // conversation id rides `--conversation <uuid>`. Same shape filter,
         // and for the same reason - agy resumes by EXACT id, so a truncated
-        // one opens a different conversation rather than failing.
+        // one opens a different conversation rather than failing. The create
+        // form names no session: the row binds at the session report.
         if arg == "--conversation" {
             return it
                 .next()
