@@ -5,7 +5,7 @@
 //! authority: a failed announce or retro never undoes the transfer.
 
 use crate::team_names::{PendingSuccession, RevertedSuccession};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
 
@@ -74,6 +74,62 @@ pub(crate) fn transferred(scope: &str, pending: &PendingSuccession) {
                 "predecessor_name": pending.predecessor_name,
             }),
         );
+    }
+}
+
+/// The take-over step's journal: one `team_succession_taken_over` row naming
+/// who moved the team and why, then one durable envelope per predecessor.
+/// A failed mail prints one stderr line and emits
+/// `team_succession_take_over_mail_failed`; it never undoes the transfer,
+/// the same contract as [`announce`]. `take_over` is the plan answer's
+/// `take_over` block (`by`, `reason`, `predecessors`).
+pub(crate) fn taken_over(scope: &str, pending: &PendingSuccession, take_over: &Value) {
+    let by = take_over
+        .get("by")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let reason = take_over
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let predecessors = take_over
+        .get("predecessors")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    if let Some(events) = emitter() {
+        let _ = events.emit(
+            "team_succession_taken_over",
+            &json!({
+                "succession_id": succession_id(pending, scope),
+                "scope": scope,
+                "by": by,
+                "reason": reason,
+                "predecessors": predecessors,
+                "successor": pending.successor_name,
+            }),
+        );
+    }
+    for pred in predecessors.as_array().into_iter().flatten() {
+        let Some(name) = pred.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let body = format!(
+            "{by} moved your team over {scope} to {succ}: {reason}. You no longer lead it. Your workers now report to {succ}.",
+            succ = pending.successor_name,
+        );
+        if let Err(e) = crate::lead_mail::send_to_name(by, name, &body) {
+            eprintln!("succession: take-over mail to {name} failed: {e}");
+            if let Some(events) = emitter() {
+                let _ = events.emit(
+                    "team_succession_take_over_mail_failed",
+                    &json!({
+                        "succession_id": succession_id(pending, scope),
+                        "scope": scope,
+                        "to": name,
+                    }),
+                );
+            }
+        }
     }
 }
 
@@ -356,5 +412,51 @@ mod tests {
             "{raw}"
         );
         assert!(raw.contains("sess-old"), "{raw}");
+    }
+
+    /// AC6-HP: a succeeded take-over journals one taken_over row carrying
+    /// by, reason and predecessors, and mails each predecessor by name.
+    #[test]
+    fn a_succeeded_take_over_journals_and_mails_the_old_lead_by_name() {
+        let (_guard, home) = pin_txn_home();
+        registry_seeded(home.path(), "sess-maya");
+        let pending = PendingSuccession {
+            successor_name: "maya".into(),
+            successor_session: Some("sess-maya".into()),
+            predecessor_name: "alder".into(),
+            predecessor_session: Some("sess-alder".into()),
+            ts: "2026-10-16T12:00:00Z".into(),
+        };
+        let take_over = json!({
+            "by": "vellum",
+            "reason": "Alder paused since 10:00 on the x-6004 bug",
+            "predecessors": [
+                {"name": "alder", "status": "busy", "harness": "codex",
+                 "harness_session_id": "sess-alder"}
+            ],
+        });
+        taken_over("x-aaaa,x-bbbb", &pending, &take_over);
+        let raw = read_events_raw(home.path());
+        assert_eq!(
+            raw.matches("team_succession_taken_over").count(),
+            1,
+            "{raw}"
+        );
+        assert!(raw.contains("vellum"), "{raw}");
+        assert!(raw.contains("Alder paused since 10:00"), "{raw}");
+        // The mail rides by name (to_kind name), addressed to the old lead.
+        let bus = std::fs::read_to_string(home.path().join("../bus/messages.jsonl")).unwrap();
+        let row: serde_json::Value = serde_json::from_str(bus.lines().last().unwrap()).unwrap();
+        assert_eq!(row["to"], json!("alder"));
+        assert_eq!(row["to_kind"], json!("name"));
+        assert_eq!(row["from"], json!("vellum"));
+        assert!(
+            row["body"]
+                .as_str()
+                .unwrap()
+                .contains("moved your team over x-aaaa,x-bbbb to maya"),
+            "{}",
+            row["body"]
+        );
     }
 }

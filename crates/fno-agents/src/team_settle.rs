@@ -148,6 +148,15 @@ fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
                 crate::succession_txn::announce(scope, p);
                 crate::succession_txn::transferred(scope, p);
             }
+            if let (Some(p), Some(take_over)) = (
+                result.as_ref().ok().flatten(),
+                payload
+                    .get("plan")
+                    .and_then(|plan| plan.get("take_over"))
+                    .filter(|t| t.is_object()),
+            ) {
+                crate::succession_txn::taken_over(scope, p, take_over);
+            }
             result.map(|_| ())
         }
         Some("granted") => {

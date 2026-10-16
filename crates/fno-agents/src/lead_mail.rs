@@ -119,6 +119,29 @@ pub fn send(sender: &str, scope: &str, text: &str) -> Result<Vec<String>, String
     )
 }
 
+/// Send one durable envelope addressed to one row BY NAME, resolving the
+/// home the way [`send`] does. The take-over's old lead no longer answers
+/// the scope after the commit, so resolution by team would bounce; a
+/// failed append answers Err and the caller journals the failure without
+/// undoing the transfer.
+pub(crate) fn send_to_name(sender: &str, to: &str, text: &str) -> Result<(), String> {
+    let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
+        return Err("lead mail: no agents home; nothing is addressable".to_string());
+    };
+    let dot_fno = home
+        .root()
+        .parent()
+        .unwrap_or_else(|| home.root())
+        .to_path_buf();
+    append_mail(
+        &dot_fno.join("bus").join("messages.jsonl"),
+        &crate::chats::chats_dir(),
+        sender,
+        to,
+        text,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

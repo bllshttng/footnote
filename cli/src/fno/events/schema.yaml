@@ -3205,6 +3205,36 @@ event_types:
           type: string
         succession_id:
           type: string
+  - name: team_succession_taken_over
+    description: "The take-over step's journal: a superior lead moved a contained sub-team from its live holder to a spawned colleague, with the reason and the predecessors' row fields at the moment of the move. The registry commit stays the authority; the mail never undoes it."
+    sources: [agents]
+    data:
+      required: [scope, by, reason, predecessors, successor]
+      properties:
+        scope:
+          type: string
+        by:
+          type: string
+        reason:
+          type: string
+        predecessors:
+          type: array
+        successor:
+          type: string
+        succession_id:
+          type: string
+  - name: team_succession_take_over_mail_failed
+    description: "The take-over step could not append the old lead's envelope: one stderr line carries the error and the transfer stands."
+    sources: [agents]
+    data:
+      required: [scope, to]
+      properties:
+        scope:
+          type: string
+        to:
+          type: string
+        succession_id:
+          type: string
   - name: team_succession_verified
     description: "The successor's first beat bound the carried name: the verify step of the succession transaction, keyed by succession_id."
     sources: [agents, daemon]
