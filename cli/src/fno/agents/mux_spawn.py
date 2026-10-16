@@ -3371,7 +3371,7 @@ def dispatch_spawn_pane(
     enforce_tab_capacity: bool = False,
     role_level: Optional[int] = None,
     role_scope: Optional[str] = None,
-    succession: bool = False,
+    succession: bool = False, take_over: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
@@ -3417,7 +3417,7 @@ def dispatch_spawn_pane(
         # successor from launching unpromoted. Both doors check, either is a door.
         role_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
         role_refusal, role_plan = plan_spawn_role(
-            role_scope or "", caller_row, succession, proposed_name=name,
+            role_scope or "", caller_row, succession, proposed_name=name, take_over=take_over,
         )
         if role_refusal is not None:
             raise DispatchAskError(f"--promote: {role_refusal}", exit_code=2)

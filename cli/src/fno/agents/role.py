@@ -731,6 +731,7 @@ def plan_spawn_role(
     succession: bool,
     exclude_name: Optional[str] = None,
     proposed_name: Optional[str] = None,
+    take_over: Optional[str] = None,
 ) -> "tuple[Optional[str], Optional[dict]]":
     """Check authority, then ask team_settle for a pre-launch occupancy plan.
     Return the refusal and native answer. A failed read refuses before launch;
@@ -765,6 +766,8 @@ def plan_spawn_role(
         "exclude_name": exclude_name,
         "rows": [asdict(row) for row in rows],
     }
+    if take_over is not None:
+        payload["take_over"] = {"reason": take_over}
     try:
         answer = spawn_overlay_call(payload)
     except SpawnOverlayUnavailable as exc:

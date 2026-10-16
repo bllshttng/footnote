@@ -372,6 +372,21 @@ def test_settle_spawn_role_outcomes(tmp_path: Path, monkeypatch, native_backlog_
     )
     assert outcome == "declined"
     assert rows[0].role_scope == "epic-x", "a declined spawn leaves the holder alone"
+
+    # AC8: a take-over ask rides the payload as take_over.reason and the
+    # plan answer carries it back with the acting caller and the old
+    # holder's row fields at the moment of the move.
+    alder = _role_row("alder")
+    update_registry(lambda _: [alder])
+    refusal, plan = plan_spawn_role("epic-x", None, False, proposed_name="Maya", take_over="Alder paused since 10:00")
+    assert refusal is None
+    assert plan is not None
+    assert plan["outcome"] == "succeeded"
+    assert plan["vacate"] == ["alder"]
+    assert plan["take_over"]["by"] == "the user"
+    assert plan["take_over"]["reason"] == "Alder paused since 10:00"
+    assert [p["name"] for p in plan["take_over"]["predecessors"]] == ["alder"]
+    assert plan["take_over"]["predecessors"][0]["harness_session_id"] == "alder-sess"
     assert rows[1].spawn_provenance["owner"]["session_id"] == "caller-sess", (
         "a declined succession re-homes nobody"
     )

@@ -361,6 +361,10 @@ pub struct Answer {
     pub stdout: Option<Value>,
     pub events: Vec<Value>,
     pub injected: bool,
+    /// The take-over reason the compose consumed from the argv, carried in
+    /// the answer to the in-process seam - never the environment, which a
+    /// child inherits and any process can set.
+    pub take_over: String,
     /// The billing gate needs `facts.role_resolves` and the ask carried no
     /// answer: nothing applied, nothing journaled; the transport resolves
     /// the role once and asks again.
@@ -376,6 +380,7 @@ impl Answer {
             "stdout": self.stdout.clone().unwrap_or(Value::Null),
             "events": self.events,
             "injected": self.injected,
+            "take_over": self.take_over,
             "role_gate_needed": self.role_gate_needed,
         })
     }
@@ -395,6 +400,7 @@ struct Seam {
     argv: Option<Vec<String>>,
     injected: bool,
     role_gate_needed: bool,
+    take_over: String,
 }
 
 impl Seam {
@@ -490,6 +496,7 @@ pub fn compose(inputs: &Inputs) -> Answer {
         stdout: seam.stdout.take(),
         events: seam.events,
         injected: seam.injected,
+        take_over: std::mem::take(&mut seam.take_over),
         role_gate_needed: seam.role_gate_needed,
     }
 }
@@ -506,18 +513,62 @@ fn compose_body(inputs: &Inputs, scan: Axes, seam: &mut Seam) {
     if inputs.argv.first().map(String::as_str) != Some("spawn") || help_rides {
         return;
     }
-    // The take-over front door: the ask is only legal shaped as
-    // `spawn --promote <scope> --take-over "<why>"`. Refusing here keeps
-    // the shape check in Rust, out of the Python parser.
-    if argv_has_take_over(&inputs.argv)
-        && (!argv_has_team(&inputs.argv) || argv_has_hand_off(&inputs.argv))
-    {
+    // The take-over reason travels inside the answer, in process. A value
+    // in the environment is a forgery or a stale leak: nothing sets it, so
+    // any spawn under one refuses.
+    if std::env::var_os("FNO_SPAWN_TAKE_OVER").is_some() {
         seam.refuse(
-            "--take-over moves a sub-team to the new colleague and needs --promote <scope>; \
-             it cannot be combined with --hand-off."
+            "spawn: FNO_SPAWN_TAKE_OVER is set in this process's environment. The \
+             take-over reason travels inside the compose answer, never the \
+             environment; a child must never inherit it. Clear it and re-run."
                 .to_string(),
         );
         return;
+    }
+    // The take-over front door: the ask is only legal shaped as
+    // `spawn --promote <scope> --take-over "<why>"`. Refusing here keeps
+    // the shape check in Rust. On the legal shape the flag is CONSUMED
+    // here and its reason rides the answer to the in-process seam, so the
+    // Python flag surface stays at net zero (lead ruling 2026-10-16):
+    // typer never declares --take-over.
+    if argv_has_take_over(&inputs.argv) {
+        if !argv_has_team(&inputs.argv) || argv_has_hand_off(&inputs.argv) {
+            seam.refuse(
+                "--take-over moves a sub-team to the new colleague and needs --promote <scope>; \
+                 it cannot be combined with --hand-off."
+                    .to_string(),
+            );
+            return;
+        }
+        if let Some(argv) = seam.argv.as_mut() {
+            let mut reason = String::new();
+            loop {
+                let cut = argv
+                    .iter()
+                    .position(|t| t.as_str() == "--argv" || t.as_str() == "--")
+                    .unwrap_or(argv.len());
+                match argv[1..cut]
+                    .iter()
+                    .position(|t| t == "--take-over" || t.starts_with("--take-over="))
+                {
+                    Some(at) => {
+                        let i = at + 1;
+                        if argv[i].starts_with("--take-over=") {
+                            reason = argv[i]["--take-over=".len()..].to_string();
+                            argv.remove(i);
+                        } else {
+                            reason = argv.get(i + 1).cloned().unwrap_or_default();
+                            argv.remove(i);
+                            if i < argv.len() {
+                                argv.remove(i);
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            seam.take_over = reason.trim().to_string();
+        }
     }
     let (verb, profile_verb, profile) = match resolve_profile(inputs, &scan) {
         Ok(found) => found,
@@ -2098,6 +2149,58 @@ mod tests {
             !ok.stderr.iter().any(|line| line.contains(front_door_line)),
             "{:?}",
             ok.stderr
+        );
+        // The flag is carried here: the answer argv drops it and the
+        // reason rides the answer to the in-process seam.
+        assert!(!ok.argv.iter().any(|t| t == "--take-over"), "{:?}", ok.argv);
+        assert_eq!(ok.take_over, "why");
+    }
+
+    /// A take-over reason in the environment is a forgery or a stale
+    /// leak: nothing sets it, so any spawn under one refuses.
+    #[test]
+    fn an_inherited_take_over_var_refuses_the_spawn() {
+        let (guard, root, saved) = hermetic();
+        std::env::set_var("FNO_SPAWN_TAKE_OVER", "forged");
+        let inputs = Inputs {
+            argv: vec![
+                "spawn".to_string(),
+                "--name".to_string(),
+                "w".to_string(),
+                "work".to_string(),
+            ],
+            defaults: toml::Value::Table(toml::map::Map::new()),
+            profiles: String::new(),
+            dispatch_verbs: toml::Value::Table(toml::map::Map::new()),
+            roster: vec!["target".to_string()],
+            node_verb: None,
+            env_node: None,
+            ambient_harness: "claude".to_string(),
+            apply_permission_builtin: true,
+            scan: serde_json::json!({
+                "has_harness": false, "explicit_harness": null,
+                "has_model": false, "has_effort": false,
+                "explicit_route": false, "role": null,
+                "has_permission": false, "seed": null,
+                "name": "w", "positional_present": true
+            }),
+            facts: serde_json::json!({"role_resolves": null}),
+            node: None,
+            node_row: None,
+            verbose: false,
+        };
+        let answer = compose(&inputs);
+        std::env::remove_var("FNO_SPAWN_TAKE_OVER");
+        drop(guard);
+        clear_hermetic(&root, saved);
+        assert_eq!(answer.exit, 2, "{:?}", answer.stderr);
+        assert!(
+            answer
+                .stderr
+                .iter()
+                .any(|line| line.contains("FNO_SPAWN_TAKE_OVER is set")),
+            "{:?}",
+            answer.stderr
         );
     }
 }
