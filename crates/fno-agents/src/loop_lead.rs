@@ -619,6 +619,34 @@ pub(crate) fn team_answers_to(
         && asked.is_subset(&canonical_members(held, projects))
 }
 
+/// Strict containment for the take-over floor in `team_settle`: `target`'s
+/// members are a strict subset of `mine`'s, or `mine`'s derived rung sits
+/// above `target`'s (a portfolio over projects, a project over an epic set).
+/// Reads no graph - the Python guard's strict containment already refused
+/// the graph-precise misses before team-settle ran, so this floor checks
+/// scope shape only and cannot refine that answer.
+pub(crate) fn scope_strictly_contains(
+    mine: &str,
+    target: &str,
+    projects: &HashMap<String, String>,
+) -> bool {
+    let sup = canonical_members(mine, projects);
+    let sub = canonical_members(target, projects);
+    if sup.is_empty() || sub.is_empty() {
+        return false;
+    }
+    if sub != sup && sub.is_subset(&sup) {
+        return true;
+    }
+    match (
+        derived_scope_level(mine, projects),
+        derived_scope_level(target, projects),
+    ) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    }
+}
+
 /// `team_rivals` for sibling modules (`lead`'s multiple-holders warning).
 pub(crate) fn team_rivals_pub(
     held: &str,
