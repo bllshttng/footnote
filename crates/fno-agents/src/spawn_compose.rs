@@ -557,9 +557,16 @@ fn compose_body(inputs: &Inputs, scan: Axes, seam: &mut Seam) {
                             reason = argv[i]["--take-over=".len()..].to_string();
                             argv.remove(i);
                         } else {
-                            reason = argv.get(i + 1).cloned().unwrap_or_default();
+                            // A separate value must sit inside the fence: with
+                            // --take-over last, the next token is the --argv
+                            // fence or a payload word, and neither is a reason.
+                            reason = if i + 1 < cut {
+                                argv[i + 1].clone()
+                            } else {
+                                String::new()
+                            };
                             argv.remove(i);
-                            if i < argv.len() {
+                            if i + 1 < cut {
                                 argv.remove(i);
                             }
                         }
@@ -2154,6 +2161,27 @@ mod tests {
         // reason rides the answer to the in-process seam.
         assert!(!ok.argv.iter().any(|t| t == "--take-over"), "{:?}", ok.argv);
         assert_eq!(ok.take_over, "why");
+        // With the flag last before the fence, the fence and the payload
+        // survive: the next token is never a reason.
+        let fenced = compose(&make_inputs(&[
+            "--promote",
+            "x-aaaa",
+            "--take-over",
+            "--",
+            "review the ledger",
+        ]));
+        assert_ne!(fenced.exit, 2, "{:?}", fenced.stderr);
+        assert_eq!(fenced.take_over, "", "{:?}", fenced.argv);
+        assert!(
+            fenced.argv.iter().any(|t| t == "--"),
+            "fence eaten: {:?}",
+            fenced.argv
+        );
+        assert!(
+            fenced.argv.iter().any(|t| t == "review the ledger"),
+            "payload eaten: {:?}",
+            fenced.argv
+        );
     }
 
     /// A take-over reason in the environment is a forgery or a stale
