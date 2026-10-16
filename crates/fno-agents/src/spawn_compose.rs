@@ -506,6 +506,19 @@ fn compose_body(inputs: &Inputs, scan: Axes, seam: &mut Seam) {
     if inputs.argv.first().map(String::as_str) != Some("spawn") || help_rides {
         return;
     }
+    // The take-over front door: the ask is only legal shaped as
+    // `spawn --promote <scope> --take-over "<why>"`. Refusing here keeps
+    // the shape check in Rust, out of the Python parser.
+    if argv_has_take_over(&inputs.argv)
+        && (!argv_has_team(&inputs.argv) || argv_has_hand_off(&inputs.argv))
+    {
+        seam.refuse(
+            "--take-over moves a sub-team to the new colleague and needs --promote <scope>; \
+             it cannot be combined with --hand-off."
+                .to_string(),
+        );
+        return;
+    }
     let (verb, profile_verb, profile) = match resolve_profile(inputs, &scan) {
         Ok(found) => found,
         Err(lines) => {
@@ -894,6 +907,29 @@ fn argv_has_team(argv: &[String]) -> bool {
                 || t == "-k"
                 || t.starts_with("-k=")
                 || (t.starts_with("-k") && t.len() > 2 && !t.starts_with("--"))
+        })
+}
+
+/// Whether the argv carries `--take-over` (or `--take-over=...`) before the
+/// `--argv` boundary or a `--` fence.
+fn argv_has_take_over(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
+        .any(|t| t == "--take-over" || t.starts_with("--take-over="))
+}
+
+/// Whether the argv carries `--hand-off` or its retired `--succeed`
+/// spelling before the boundary.
+fn argv_has_hand_off(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .take_while(|t| t.as_str() != "--argv" && t.as_str() != "--")
+        .any(|t| {
+            t == "--hand-off"
+                || t.starts_with("--hand-off=")
+                || t == "--succeed"
+                || t.starts_with("--succeed=")
         })
 }
 
@@ -1982,6 +2018,86 @@ mod tests {
         assert!(
             answer.argv.iter().any(|t| t == "--model"),
             "an unresolved role lets the config model inject"
+        );
+    }
+
+    /// AC7-ERR: the take-over front door refuses `--take-over` without
+    /// `--promote` or combined with `--hand-off`/`--succeed` (exit 2, the
+    /// front-door line), and lets the legal shape compose through.
+    #[test]
+    fn the_take_over_front_door_refuses_the_illegal_shapes() {
+        let (guard, root, saved) = hermetic();
+        let make_inputs = |tokens: &[&str]| -> Inputs {
+            Inputs {
+                argv: std::iter::once("spawn".to_string())
+                    .chain(tokens.iter().map(|t| t.to_string()))
+                    .collect(),
+                defaults: toml::Value::Table(toml::map::Map::new()),
+                profiles: String::new(),
+                dispatch_verbs: toml::Value::Table(toml::map::Map::new()),
+                roster: vec!["target".to_string()],
+                node_verb: None,
+                env_node: None,
+                ambient_harness: "claude".to_string(),
+                apply_permission_builtin: true,
+                scan: serde_json::json!({
+                    "has_harness": false, "explicit_harness": null,
+                    "has_model": false, "has_effort": false,
+                    "explicit_route": false, "role": null,
+                    "has_permission": false, "seed": null,
+                    "name": "Maya", "positional_present": false
+                }),
+                facts: serde_json::json!({"role_resolves": null}),
+                node: None,
+                node_row: None,
+                verbose: false,
+            }
+        };
+        let front_door_line =
+            "--take-over moves a sub-team to the new colleague and needs --promote <scope>;";
+        let refused = compose(&make_inputs(&["--take-over", "why", "--name", "Maya"]));
+        assert_eq!(refused.exit, 2, "{:?}", refused.stderr);
+        assert!(
+            refused
+                .stderr
+                .iter()
+                .any(|line| line.contains(front_door_line)),
+            "{:?}",
+            refused.stderr
+        );
+        let refused = compose(&make_inputs(&[
+            "--promote",
+            "x-aaaa",
+            "--take-over",
+            "why",
+            "--hand-off",
+            "--name",
+            "Maya",
+        ]));
+        assert_eq!(refused.exit, 2, "{:?}", refused.stderr);
+        assert!(
+            refused
+                .stderr
+                .iter()
+                .any(|line| line.contains(front_door_line)),
+            "{:?}",
+            refused.stderr
+        );
+        let ok = compose(&make_inputs(&[
+            "--promote",
+            "x-aaaa",
+            "--take-over",
+            "why",
+            "--name",
+            "Maya",
+        ]));
+        drop(guard);
+        clear_hermetic(&root, saved);
+        assert_ne!(ok.exit, 2, "{:?}", ok.stderr);
+        assert!(
+            !ok.stderr.iter().any(|line| line.contains(front_door_line)),
+            "{:?}",
+            ok.stderr
         );
     }
 }
