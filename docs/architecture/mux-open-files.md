@@ -68,15 +68,13 @@ On a terminal with only half-blocks, page text is hard to read. The page still s
 
 ## 5. Markdown
 
-Markdown rendering comes later, as the user asked. Until then a `.md` file shows as plain text in the viewer. With `mux.open_with = obsidian`, it opens in Obsidian.
-
-The slice will be small. `md_lines` (`crates/fno/src/client/backlog_md.rs:7`) already renders markdown to styled lines for the backlog detail pane, with no new dependency. The markdown slice feeds the viewer through it and adds no parser.
+A `.md` file renders in the viewer through `md_lines` (`crates/fno/src/client/backlog_md.rs:7`), the renderer the backlog detail pane already uses. No new parser and no new dependency: frontmatter folds to one line, and headings, lists, fenced code, tables and blockquotes take the backlog pane's styling. The doc renders at paint width, so a panel resize re-wraps the prose. A rendered doc has no source rows, so a `path:line` click on a markdown file does not highlight a line. With `mux.open_with = obsidian`, it still opens in Obsidian instead.
 
 ## 6. Outside handoff and the open router
 
 `mux.open_with` picks where a clicked file goes: `inmux` (the default), `obsidian`, or `system`.
 
-- `inmux` sends text, markdown, images and PDFs to the viewer. Other types go to `system`. Today the viewer shows text and source files. Images, PDFs, archives, audio, video and office documents, and any directory, still go to `system` (`OUTSIDE_EXTS` and `viewable` in `crates/fno/src/open_router.rs`). Each of those joins the viewer with its own slice. A file with no telling extension goes to the viewer, which says "no preview" for a binary.
+- `inmux` sends text, markdown, images and PDFs to the viewer. Other types go to `system`. Today the viewer shows text, source and markdown files. Images, PDFs, archives, audio, video and office documents, and any directory, still go to `system` (`OUTSIDE_EXTS` and `viewable` in `crates/fno/src/open_router.rs`). Each of those joins the viewer with its own slice. A file with no telling extension goes to the viewer, which says "no preview" for a binary.
 - `obsidian` covers files under the vault root. For such a file the router builds an `obsidian://open` URI. It uses the existing builder `obsidian_open_uri` (`crates/fno/src/link.rs:690`) and the root that `resolve_vault_root` gives (`crates/fno/src/link.rs:681`). Move the vault-relative step out of `plan_link` (`crates/fno/src/link.rs:625`) into one shared function. Then `plan_link` and the router call the same code. The URI opens through `open_fno_uri` (`crates/fno/src/link.rs:719`). A file outside the vault, or `obsidian.enabled = false` (`ObsidianCfg`, `crates/fno/src/digest_overlay.rs:1202`), falls back to `system`.
 - `system` calls `open_fno_path` (`crates/fno/src/link.rs:739`), the behavior today.
 
@@ -91,6 +89,6 @@ Both keys need two Python edits. One is a field on `MuxBlock` (`cli/src/fno/conf
 3. The viewer surface: panel or modal, the keys, and the text preview (section 2). Shipped.
 4. Images through `ratatui-image`, drawn as a layer after the cell frame (section 3). It starts with the spike.
 5. PDF pages through `hayro` and the image path (section 4).
-6. Markdown in the viewer through `md_lines` (section 5). It can start once slice 3 lands, and it does not wait for slices 4 or 5.
+6. Markdown in the viewer through `md_lines` (section 5). Shipped.
 
 Each slice is one PR. Every slice that paints puts before and after screenshots, dark and light, in the internal `fno/mux` folder and links them in the PR body.

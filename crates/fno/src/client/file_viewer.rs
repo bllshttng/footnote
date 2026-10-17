@@ -8,9 +8,12 @@
 //! takes its columns from the content area (the server resizes the panes), and
 //! the feed panel yields the right edge while the viewer holds it.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+use super::backlog_style::{to_body_line, BLine};
 use super::input_folds::{fold_modal_keys, ModalKey};
+use super::node_detail::backlog_md::md_lines;
 use super::overlay_paint::{draw_overlay_layout, family_b_origin, OverlayAnchor, OverlayLayout};
 use super::*;
 use crate::chrome;
@@ -31,7 +34,17 @@ const WHEEL_ROWS: isize = 3;
 
 /// What the viewer shows for one file.
 pub(crate) enum Body {
-    Text { lines: Vec<String>, truncated: bool },
+    Text {
+        lines: Vec<String>,
+        truncated: bool,
+    },
+    /// A `.md` file: the cleaned source is kept whole and rendered through
+    /// the backlog pane's markdown renderer at paint width, so a resize
+    /// re-wraps the prose.
+    Markdown {
+        src: String,
+        truncated: bool,
+    },
     Binary,
     Failed(String),
 }
@@ -73,6 +86,16 @@ fn read_body(path: &Path) -> Body {
         return Body::Binary;
     }
     let text = String::from_utf8_lossy(&buf);
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+    {
+        // The renderer wraps at paint width, so the cleaned source lines are
+        // kept whole instead of pre-split.
+        let src = text.lines().map(clean).collect::<Vec<_>>().join("\n");
+        return Body::Markdown { src, truncated };
+    }
     Body::Text {
         lines: text.lines().map(clean).collect(),
         truncated,
@@ -123,6 +146,10 @@ struct FileViewer {
     target: Option<usize>,
     /// Whether the viewer takes keys. A click on a pane takes them back.
     focused: bool,
+    /// The markdown body rendered at the last paint width. Paint paths hold
+    /// `&View`, so the cache sits in a `RefCell`; nothing re-enters it while
+    /// a borrow is out, and a resize re-renders once.
+    md: RefCell<Option<(usize, Vec<BLine>)>>,
     esc: Vec<u8>,
 }
 
@@ -141,7 +168,7 @@ impl FileViewer {
     /// The rows a body with no numbered lines prints.
     fn notes(&self) -> Vec<String> {
         match &self.body {
-            Body::Text { .. } => vec!["(empty file)".into()],
+            Body::Text { .. } | Body::Markdown { .. } => vec!["(empty file)".into()],
             Body::Binary => vec![
                 "no preview: this is a binary file".into(),
                 String::new(),
@@ -244,6 +271,9 @@ fn chrome_for(v: &FileViewer, w: usize, panel: bool) -> chrome::Chrome {
         Body::Text {
             truncated: true,
             ..
+        } | Body::Markdown {
+            truncated: true,
+            ..
         }
     );
     let first = if cut { "first 1 MiB · " } else { "" };
@@ -299,8 +329,41 @@ struct Window {
     started: usize,
 }
 
-fn window(v: &FileViewer, plan: &Plan) -> Window {
+/// The markdown body rendered at the paint width, cached per width; none for
+/// other bodies.
+fn rendered<'a>(v: &'a FileViewer, plan: &Plan) -> Option<std::cell::Ref<'a, [BLine]>> {
+    let Body::Markdown { src, .. } = &v.body else {
+        return None;
+    };
+    // Refresh the cache in a scoped mutable borrow so the returned read
+    // borrow starts after it ends (RefMut::downgrade is nightly-only).
+    {
+        let mut cache = v.md.borrow_mut();
+        if cache.as_ref().is_none_or(|(w, _)| *w != plan.text_w) {
+            *cache = Some((plan.text_w, md_lines(src, plan.text_w)));
+        }
+    }
+    let slot = std::cell::Ref::filter_map(v.md.borrow(), Option::as_ref);
+    slot.map(|c| std::cell::Ref::map(c, |p| p.1.as_slice()))
+        .ok()
+}
+
+fn window(v: &FileViewer, plan: &Plan, md: Option<&[BLine]>) -> Window {
     let mut rows = Vec::new();
+    if let Some(rendered) = md.filter(|r| !r.is_empty()) {
+        let first = v.scroll.min(rendered.len() - 1);
+        let mut started = 0;
+        for line in rendered.iter().skip(first) {
+            if rows.len() >= plan.budget {
+                break;
+            }
+            // md_lines wrapped every row at paint width, so one rendered row
+            // is one painted row and no line-number gutter applies.
+            rows.push(to_body_line(line));
+            started += 1;
+        }
+        return Window { rows, started };
+    }
     let Some(lines) = v.lines() else {
         for note in v.notes() {
             for piece in hard_wrap(&note, plan.text_w) {
@@ -338,9 +401,9 @@ fn window(v: &FileViewer, plan: &Plan) -> Window {
     Window { rows, started }
 }
 
-fn layout(plan: &Plan, v: &FileViewer) -> OverlayLayout {
-    let win = window(v, plan);
-    let total = v.count();
+fn layout(plan: &Plan, v: &FileViewer, md: Option<&[BLine]>) -> OverlayLayout {
+    let win = window(v, plan, md);
+    let total = md.map_or_else(|| v.count(), <[BLine]>::len);
     let first = v.scroll.min(total.saturating_sub(1));
     let has_scroll = first > 0 || first + win.started < total;
     let mut body = win.rows;
@@ -368,7 +431,9 @@ pub(super) fn draw(view: &View, cells: &mut [Cell], rows: usize, cols: usize) {
     let Some(v) = &view.viewer.open else {
         return;
     };
-    let layout = layout(&plan(view, v), v);
+    let p = plan(view, v);
+    let md = rendered(v, &p);
+    let layout = layout(&p, v, md.as_deref());
     draw_overlay_layout(cells, rows, cols, &layout, &view.theme);
 }
 
@@ -377,6 +442,9 @@ fn max_for(view: &View) -> usize {
         return 0;
     };
     let plan = plan(view, v);
+    if let Some(rendered) = rendered(v, &plan) {
+        return rendered.len().saturating_sub(plan.budget);
+    }
     v.lines()
         .map_or(0, |lines| max_scroll(lines, plan.area(v), plan.budget))
 }
@@ -412,13 +480,20 @@ pub(super) async fn open(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
     let was_panel = view.viewer_panel_w() > 0;
+    // A rendered markdown doc has no source rows, so a `path:line` hint on a
+    // `.md` click cannot name a row to highlight.
+    let target = match &loaded.body {
+        Body::Markdown { .. } => None,
+        _ => loaded.line.map(|l| (l as usize).saturating_sub(1)),
+    };
     view.viewer.open = Some(FileViewer {
         path: loaded.path,
         shape: loaded.shape,
         body: loaded.body,
         scroll: 0,
-        target: loaded.line.map(|l| (l as usize).saturating_sub(1)),
+        target,
         focused: true,
+        md: RefCell::new(None),
         esc: Vec::new(),
     });
     view.region_owner = region_focus::RegionOwner::Pane;
@@ -616,6 +691,7 @@ mod tests {
             _ => panic!("text"),
         }
         assert!(matches!(read("b.bin", b"MZ\0\0\x01"), Body::Binary));
+        assert!(matches!(read("c.md", b"# title\n"), Body::Markdown { .. }));
         match read("big.txt", &vec![b'x'; READ_CAP + 10]) {
             Body::Text { truncated, .. } => assert!(truncated),
             _ => panic!("big"),
@@ -681,6 +757,46 @@ mod tests {
             l.body = body;
             assert!(screen(&opened(l).await.0).contains(shown));
         }
+    }
+
+    #[tokio::test]
+    async fn a_markdown_doc_renders_through_md_lines_and_scrolls_as_rendered() {
+        let doc = format!(
+            "# Title\n\nintro **bold** [link](http://x/y)\n\n- one\n- two\n\n\
+             ```rust\nlet x = 1;\n```\n\n{}tail marker\n",
+            "mid paragraph\n\n".repeat(20)
+        );
+        let mut l = file(0);
+        l.body = Body::Markdown {
+            src: doc,
+            truncated: false,
+        };
+        let (mut v, mut sock) = opened(l).await;
+        assert!(
+            v.viewer.open.as_ref().unwrap().target.is_none(),
+            "a line hint names no rendered row"
+        );
+        let s = screen(&v);
+        assert!(s.contains("Title") && !s.contains("# Title"), "{s}");
+        assert!(s.contains("intro bold link"), "{s}");
+        assert!(s.contains('\u{2022}') && s.contains("one"), "{s}");
+        assert!(s.contains("let x = 1;") && !s.contains("```"), "{s}");
+        assert!(!s.contains("tail marker"), "the tail is past the window");
+        let mut key = async |v: &mut View, b: &[u8]| {
+            keys(v, b, &mut sock).await.unwrap();
+        };
+        key(&mut v, b"G").await;
+        assert!(screen(&v).contains("tail marker"), "G reaches the tail");
+    }
+
+    #[tokio::test]
+    async fn an_empty_markdown_file_says_so() {
+        let mut l = file(0);
+        l.body = Body::Markdown {
+            src: String::new(),
+            truncated: false,
+        };
+        assert!(screen(&opened(l).await.0).contains("(empty file)"));
     }
 
     #[tokio::test]
