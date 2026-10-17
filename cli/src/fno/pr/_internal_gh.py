@@ -290,7 +290,7 @@ def execute(
             return _quota.execute_graphql(
                 purpose, args, runner=runner, real_gh=gh, cwd=cwd
             )
-        return runner([gh, *args], cwd=cwd, env=_quota.delegate_environment())
+        return _rest_runner(gh, runner)([gh, *args], cwd=cwd)
     except _quota.ProxyIdentityError as exc:
         return Result(2, "", _quota.proxy_identity_refusal(exc))
 

@@ -349,7 +349,7 @@ fn probe_reports_spawn_trouble_not_absent_for_a_non_executable_file() {
 #[cfg(target_os = "linux")]
 #[test]
 fn probe_reports_spawn_trouble_for_a_busy_text_file() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
     let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 0\n");
     let _held = std::fs::OpenOptions::new().write(true).open(&gh).unwrap();
     let outcome = probe_gh_bin(gh.as_os_str(), tmp.path());
@@ -360,4 +360,46 @@ fn probe_reports_spawn_trouble_for_a_busy_text_file() {
             kind: std::io::ErrorKind::ExecutableFileBusy
         }
     );
+}
+
+#[test]
+fn bounded_read_maps_a_child_exit_75_budget_line_to_budget_refused() {
+    // A stood-down transport lets the consulting child refuse. The
+    // transport's own refusal exits 75; a child refusing on a caller's
+    // behalf can surface at its own exit code too (the conditional-door
+    // path exits 1). Every refusal line says "held locally", or "refusing
+    // while" in the reader-killed form; the same `gh budget:` prefix also
+    // carries admit notices, which are not refusals. The in-process
+    // consult is disarmed under cfg(test), so no ledger is touched.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = std::env::temp_dir();
+    for code in [75, 1] {
+        let adapter = write_exec(
+            tmp.path(),
+            "fno-gh-loopcheck",
+            format!(
+                "#!/bin/sh\necho 'gh budget: fleet GitHub rate limit held locally' 1>&2\nexit {code}\n"
+            )
+            .as_str(),
+        );
+        let err = match bounded_read(adapter.as_os_str(), &[], &cwd, "coverage", PROBE_TIMEOUT) {
+            Err(err) => err,
+            Ok(_) => panic!("a child budget refusal is a BudgetRefused"),
+        };
+        assert_eq!(err.outcome(), "budget_refused");
+        assert_eq!(err.waited_on(), "budget_lock");
+    }
+
+    // An admit notice on a genuinely failed read stays a failed read: the
+    // notice's "admitting" vocabulary is not refusal vocabulary.
+    let notice = write_exec(
+        tmp.path(),
+        "fno-gh-loopcheck",
+        "#!/bin/sh\necho 'gh budget: ledger unavailable, admitting: boom' 1>&2\nexit 1\n",
+    );
+    let out = match bounded_read(notice.as_os_str(), &[], &cwd, "coverage", PROBE_TIMEOUT) {
+        Ok(out) => out,
+        Err(e) => panic!("an admit notice is not a refusal: {}", e.render()),
+    };
+    assert!(!out.status.success());
 }

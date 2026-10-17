@@ -285,6 +285,33 @@ def test_a_held_budget_stops_the_coverage_read_after_two_runner_calls(monkeypatc
     ]
 
 
+def test_pass_through_reads_consult_the_budget_once(monkeypatch):
+    # The adapter's pass-through leg consults once through _rest_runner: a
+    # refusal returns 75 with no spawn, and admit sees the bare subcommand
+    # argv exactly once.
+    calls: list[list[str]] = []
+    seen: list[list[str]] = []
+
+    def admit(argv):
+        seen.append(list(argv))
+        return "gh budget: fleet GitHub rate limit held locally (budget: 1/1 points in 60s)"
+
+    def runner(cmd, **kwargs):
+        calls.append(list(cmd))
+        return Result(0, "ok", "")
+
+    monkeypatch.setattr(_internal_gh._quota, "admit", admit)
+    result = _internal_gh.execute(
+        "discretionary",
+        ["run", "view", "5", "--json", "jobs"],
+        runner=runner,
+        real_gh="/x/gh",
+    )
+    assert result.returncode == _quota.REFUSED
+    assert seen == [["run", "view", "5", "--json", "jobs"]]
+    assert calls == []
+
+
 def test_coverage_review_read_empty_collections_are_known_empty(monkeypatch):
     def runner(cmd, **kwargs):
         endpoint = cmd[-1]

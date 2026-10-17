@@ -590,20 +590,6 @@ fn admit_for_origin(path: &Path, argv: &[String], now: i64, cap: u32, agent: boo
     admit(path, argv, now, cap)
 }
 
-/// The one-door admission for Rust-side callers: `Some(refusal line)` when
-/// the fleet budget refuses this argv, None when it admits (including every
-/// ledger-trouble fail-open). Daemon reads carry no worker identity, so the
-/// Python proxy door exempts them by design; the consult happens here, at
-/// the transport every Rust gh read already passes.
-pub fn admit_fleet(argv: &[String]) -> Option<String> {
-    let verdict = admit(&ledger_path(), argv, now_ms(), cap_from_env());
-    if verdict.admitted {
-        None
-    } else {
-        verdict.refusal
-    }
-}
-
 /// GitHub traffic is gh itself or a loop-check adapter that wraps it.
 pub(crate) fn is_github_program(program: &OsStr) -> bool {
     let Some(name) = std::path::Path::new(program)
@@ -615,11 +601,94 @@ pub(crate) fn is_github_program(program: &OsStr) -> bool {
     name == "gh" || crate::loopcheck::internal_gh_adapter(name)
 }
 
+/// The child stamps each real request for an agent origin, so a transport
+/// stamp too charged one call 1+N; this names the spawns whose child
+/// consults, and the transport stands down for them. Any unresolved shape
+/// reads false, so the transport keeps charging: unknown always means
+/// charge.
+pub(crate) fn child_charges_at(
+    program: &OsStr,
+    agent: bool,
+    proxy_dir: Option<&Path>,
+    path_var: Option<&OsStr>,
+) -> bool {
+    if !agent {
+        return false;
+    }
+    let Some(name) = std::path::Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+    else {
+        return false;
+    };
+    if name == "fno-gh-proxy" || crate::loopcheck::internal_gh_adapter(name) {
+        return true;
+    }
+    if name != "gh" {
+        return false;
+    }
+    let Some(proxy_dir) = proxy_dir else {
+        return false;
+    };
+    let explicit = std::path::Path::new(program)
+        .parent()
+        .is_some_and(|p| !p.as_os_str().is_empty());
+    let resolved = if explicit {
+        Some(std::path::PathBuf::from(program))
+    } else {
+        first_executable_on_path(name, path_var)
+    };
+    let Some(resolved) = resolved else {
+        return false;
+    };
+    let Some(parent) = resolved.parent() else {
+        return false;
+    };
+    match (parent.canonicalize(), proxy_dir.canonicalize()) {
+        (Ok(child), Ok(proxy)) => child == proxy,
+        _ => false,
+    }
+}
+
+/// A bare program name resolves to its first executable hit on `path_var`;
+/// no executable hit resolves to None.
+fn first_executable_on_path(name: &str, path_var: Option<&OsStr>) -> Option<std::path::PathBuf> {
+    let pv = path_var?;
+    std::env::split_paths(pv)
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.is_file() && m.permissions().mode() & 0o111 != 0
+                })
+                .unwrap_or(false)
+        })
+}
+
+/// The env-reading form the spawn doors call: the origin judge, the proxy
+/// dir and PATH all come from this process's environment.
+pub(crate) fn child_charges(program: &OsStr) -> bool {
+    let proxy_dir = std::env::var_os("FNO_GH_PROXY_DIR").map(std::path::PathBuf::from);
+    let path_var = std::env::var_os("PATH");
+    child_charges_at(
+        program,
+        crate::spawn_gate_admission::gate_agent_origin(),
+        proxy_dir.as_deref(),
+        path_var.as_deref(),
+    )
+}
+
 /// Some(refusal line) when `program args` is GitHub traffic the fleet budget
 /// refuses now. None for every other program, every admit, and every
 /// disarmed unit-test build (admission_armed).
 pub(crate) fn admit_spawn<S: AsRef<OsStr>>(program: &OsStr, args: &[S]) -> Option<String> {
     if !admission_armed() {
+        return None;
+    }
+    // The transport stands down only where the child consults; a user or
+    // daemon spawn, and every unresolvable shape, keeps the stamp here.
+    if child_charges(program) {
         return None;
     }
     let argv: Vec<String> = args
@@ -635,6 +704,9 @@ pub(crate) fn admit_spawn<S: AsRef<OsStr>>(program: &OsStr, args: &[S]) -> Optio
 /// admission inside `bounded_read`.
 pub(crate) fn admit_spawn_for_origin(argv: &[String]) -> Option<String> {
     if !admission_armed() {
+        return None;
+    }
+    if child_charges(std::ffi::OsStr::new("gh")) {
         return None;
     }
     let verdict = admit_for_origin(
@@ -653,8 +725,7 @@ pub(crate) fn admit_spawn_for_origin(argv: &[String]) -> Option<String> {
 
 /// The same question with the ledger path, clock and cap injected, so tests
 /// pass a temp ledger. The argv carries the subcommand and arguments, NOT
-/// the program name - the shape admit_fleet already takes and points_for
-/// prices.
+/// the program name - the shape `admit` takes and `points_for` prices.
 pub(crate) fn admit_spawn_at(
     path: &Path,
     now: i64,
@@ -679,6 +750,11 @@ pub(crate) fn admit_spawn_at(
 /// git read too, and those must stay allocation-free.
 pub(crate) fn admit_command(cmd: &std::process::Command) -> Option<String> {
     if !admission_armed() || !is_github_program(cmd.get_program()) {
+        return None;
+    }
+    // The same stand-down rule as admit_spawn: only a spawn whose child
+    // consults skips this layer; user and daemon reads keep the stamp.
+    if child_charges(cmd.get_program()) {
         return None;
     }
     let args: Vec<String> = cmd
@@ -943,8 +1019,8 @@ fn dispatch_op(payload: &Value) -> i32 {
                 })
                 .unwrap_or_default();
             // The op is the one place the Python doors' origin is judged;
-            // Rust transports keep charging daemon reads through
-            // admit/admit_fleet unchanged.
+            // the Rust transports stamp only the spawns whose child does
+            // not consult (child_charges).
             let v = admit_for_origin(
                 &ledger_path(),
                 &argv,
@@ -1235,6 +1311,223 @@ mod tests {
         assert!(admit_spawn_at(&path, now, 450, git, &["status".to_string()]).is_none());
         assert!(admit_spawn_at(&path, now, 450, gh, &["--version".to_string()]).is_none());
         assert_eq!(std::fs::read(&path).unwrap(), before, "no stamp for either");
+    }
+
+    #[test]
+    fn child_charges_names_consulting_children_for_agents_only() {
+        // The stand-down table: an adapter name is a consulting child for an
+        // agent and never for anyone else; a bare gh stands down only when
+        // its first PATH hit resolves inside the proxy dir; every
+        // unresolvable or outside shape charges.
+        let tmp = tempfile::tempdir().unwrap();
+        let proxy_dir = tmp.path().join("proxy");
+        let other_dir = tmp.path().join("other");
+        std::fs::create_dir(&proxy_dir).unwrap();
+        std::fs::create_dir(&other_dir).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for stub in [
+            proxy_dir.join("gh"),
+            other_dir.join("gh"),
+            proxy_dir.join("fno-gh-proxy"),
+        ] {
+            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let proxy_path: std::ffi::OsString = proxy_dir.clone().into_os_string();
+        let other_path: std::ffi::OsString = other_dir.clone().into_os_string();
+        let adapter = std::ffi::OsStr::new("fno-gh-coverage");
+        let shim = std::ffi::OsStr::new("fno-gh-proxy");
+        let gh = std::ffi::OsStr::new("gh");
+        let abs = std::ffi::OsStr::new("/opt/homebrew/bin/gh");
+
+        // An adapter stands down for an agent and charges for everyone else.
+        assert!(child_charges_at(
+            adapter,
+            true,
+            Some(&proxy_dir),
+            Some(&proxy_path)
+        ));
+        assert!(!child_charges_at(
+            adapter,
+            false,
+            Some(&proxy_dir),
+            Some(&proxy_path)
+        ));
+        // The proxy shim itself consults through the Python doors.
+        assert!(child_charges_at(
+            shim,
+            true,
+            Some(&proxy_dir),
+            Some(&proxy_path)
+        ));
+        // A bare gh whose first PATH hit is the proxy shim is a consulting
+        // child; the same bare gh found elsewhere is unknown traffic.
+        assert!(child_charges_at(
+            gh,
+            true,
+            Some(&proxy_dir),
+            Some(&proxy_path)
+        ));
+        assert!(!child_charges_at(
+            gh,
+            true,
+            Some(&proxy_dir),
+            Some(&other_path)
+        ));
+        // No proxy dir, no resolution, and any absolute gh outside the
+        // proxy dir all charge: unknown always means charge.
+        assert!(!child_charges_at(gh, true, None, Some(&proxy_path)));
+        assert!(!child_charges_at(
+            abs,
+            true,
+            Some(&proxy_dir),
+            Some(&proxy_path)
+        ));
+        assert!(!child_charges_at(gh, true, Some(&proxy_dir), None));
+    }
+
+    /// Sets one env var for a door test and restores the previous value on
+    /// drop, so a failing assert cannot poison the process env for sibling
+    /// tests. Caller-kind tests must hold the shared env lock first.
+    struct DoorEnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl DoorEnvGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let guard = DoorEnvGuard(vec![(key, std::env::var_os(key))]);
+            std::env::set_var(key, value);
+            guard
+        }
+    }
+    impl Drop for DoorEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Seeds a hermetic ledger (FNO_STATE_DIR) with a live backoff, so any
+    /// consult refuses: Some from a door proves the consult happened, None
+    /// under the same ledger proves the stand-down, and a foreign consult
+    /// from a sibling test thread cannot flip either observable.
+    fn seed_backoff_ledger(state: &std::path::Path) -> std::path::PathBuf {
+        let locks = state.join("locks");
+        std::fs::create_dir_all(&locks).unwrap();
+        let path = locks.join("github-request-budget.json");
+        let now_ms = now_ms();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"stamps":[],"backoff_until_ms":{},"backoff_step":0,"last_refusal_ms":{},"last_half_open_ms":0}}"#,
+                now_ms + 120_000,
+                now_ms - 1_000
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn admit_spawn_charges_by_caller_kind() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proxy = tmp.path().join("proxy");
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&proxy).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for stub in [proxy.join("gh"), other.join("gh")] {
+            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _state = DoorEnvGuard::set("FNO_STATE_DIR", tmp.path().join("state").as_os_str());
+        let _armed = DoorEnvGuard::set("FNO_GH_BUDGET_TEST_ARMED", std::ffi::OsStr::new("1"));
+        let _proxy = DoorEnvGuard::set("FNO_GH_PROXY_DIR", proxy.as_os_str());
+        seed_backoff_ledger(&tmp.path().join("state"));
+        let args = &["api".to_string(), "user".to_string()];
+        let gh = std::ffi::OsStr::new("gh");
+
+        // User origin: the transport charges regardless of where gh sits.
+        let _attended =
+            DoorEnvGuard::set("CLAUDE_CODE_SESSION_ATTENDED", std::ffi::OsStr::new("1"));
+        let _path = DoorEnvGuard::set("PATH", proxy.as_os_str());
+        assert!(
+            admit_spawn(gh, args).is_some(),
+            "a user-origin spawn keeps the transport consult"
+        );
+        drop(_path);
+
+        // Agent origin, bare gh first hit inside the proxy: the child
+        // consults, so the transport stands down under a live backoff.
+        let _agent = crate::spawn_gate_admission::AgentSelfFixture::set();
+        let _path = DoorEnvGuard::set("PATH", proxy.as_os_str());
+        assert!(
+            admit_spawn(gh, args).is_none(),
+            "a consulting child stands the transport down"
+        );
+        // An adapter name is a consulting child at any PATH.
+        let adapter = std::ffi::OsStr::new("fno-gh-coverage");
+        assert!(
+            admit_spawn(adapter, args).is_none(),
+            "an adapter spawn stands the transport down"
+        );
+        drop(_path);
+
+        // Agent origin, gh resolving outside the proxy: unknown means the
+        // transport charges, and the seeded backoff refuses it.
+        let _path = DoorEnvGuard::set("PATH", other.as_os_str());
+        assert!(
+            admit_spawn(gh, args).is_some(),
+            "an unresolvable-as-child spawn keeps the consult"
+        );
+    }
+
+    #[test]
+    fn admit_command_charges_by_caller_kind() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proxy = tmp.path().join("proxy");
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&proxy).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for stub in [proxy.join("gh"), other.join("gh")] {
+            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _state = DoorEnvGuard::set("FNO_STATE_DIR", tmp.path().join("state").as_os_str());
+        let _armed = DoorEnvGuard::set("FNO_GH_BUDGET_TEST_ARMED", std::ffi::OsStr::new("1"));
+        let _proxy = DoorEnvGuard::set("FNO_GH_PROXY_DIR", proxy.as_os_str());
+        seed_backoff_ledger(&tmp.path().join("state"));
+
+        // User origin: an absolute gh outside the proxy keeps the consult.
+        let _attended =
+            DoorEnvGuard::set("CLAUDE_CODE_SESSION_ATTENDED", std::ffi::OsStr::new("1"));
+        let cmd = std::process::Command::new(other.join("gh"));
+        assert!(
+            admit_command(&cmd).is_some(),
+            "a user-origin Command keeps the transport consult"
+        );
+
+        // Agent origin: an absolute gh inside the proxy stands down; the
+        // same shape outside it consults and refuses.
+        let _agent = crate::spawn_gate_admission::AgentSelfFixture::set();
+        let inside = std::process::Command::new(proxy.join("gh"));
+        assert!(
+            admit_command(&inside).is_none(),
+            "a proxy-shim Command stands the transport down"
+        );
+        let outside = std::process::Command::new(other.join("gh"));
+        assert!(
+            admit_command(&outside).is_some(),
+            "a gh outside the proxy keeps the consult"
+        );
     }
 
     #[test]
