@@ -113,8 +113,8 @@ fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
     crate::pr_push::read_checks(&a.gh_bin, &a.cwd, head)
 }
 
-fn gh_api_pages(a: &Args, path: &str) -> Result<Vec<Value>, String> {
-    crate::pr_push::gh_api_pages(&a.gh_bin, &a.cwd, path)
+fn gh_api_pages_conditional(a: &Args, path: &str) -> Result<Vec<Value>, String> {
+    crate::pr_push::gh_api_pages_conditional(&a.gh_bin, &a.cwd, path)
 }
 
 fn porcelain(a: &Args) -> String {
@@ -1363,13 +1363,14 @@ pub fn run_heal(argv: &[String]) -> i32 {
 /// One heal per red open PR, report-only. Uses the REST listing for the same
 /// reason [`read_checks`] does: `gh pr list` is GraphQL and gets routed away.
 fn run_all(a: &Args) -> i32 {
-    let pages = match gh_api_pages(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
-        Ok(pages) => pages,
-        Err(msg) => {
-            eprintln!("pr-heal: {msg}");
-            return EXIT_READ_ERROR;
-        }
-    };
+    let pages =
+        match gh_api_pages_conditional(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
+            Ok(pages) => pages,
+            Err(msg) => {
+                eprintln!("pr-heal: {msg}");
+                return EXIT_READ_ERROR;
+            }
+        };
     let mut worst = EXIT_CLEAN;
     for num in open_pr_numbers(&pages) {
         println!("── PR {num}");
@@ -2306,6 +2307,18 @@ fn roots_in_heal_order(a: &Args) -> Vec<std::path::PathBuf> {
 /// `run_all_apply` writes its own `pr_heal_tick` row, and `root` on the
 /// row names whose.
 fn run_roots_apply(a: &Args, dry_run: bool) -> i32 {
+    // Scope the sweep to roots that are real local worktrees: a sidecar's
+    // cwd with no clone here (a project this machine has never checked
+    // out) still arrives as a `--cwd`, and driving it pays a full
+    // open-pulls read for nothing to heal.
+    let mut a = a.clone();
+    for root in &a.roots {
+        if !root.join(".git").exists() {
+            eprintln!("pr-heal: skipping {} (no local worktree)", root.display());
+        }
+    }
+    a.roots.retain(|root| root.join(".git").exists());
+    let a = &a;
     let deadline = a
         .deadline
         .unwrap_or_else(|| std::time::Instant::now() + DRIVE_BUDGET);
@@ -2338,13 +2351,14 @@ fn run_roots_apply(a: &Args, dry_run: bool) -> i32 {
 /// refusal and prints the plan without touching a worktree or the inbox.
 fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
     let t0 = std::time::Instant::now();
-    let pages = match gh_api_pages(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("pr-heal: {msg}");
-            return EXIT_READ_ERROR;
-        }
-    };
+    let pages =
+        match gh_api_pages_conditional(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("pr-heal: {msg}");
+                return EXIT_READ_ERROR;
+            }
+        };
     let worktrees = worktrees_by_branch(&a.git_bin, &a.cwd);
     // One main-HEAD read per invocation, shared by every PR that reaches
     // classification -- computed on first need, so an all-unchanged sweep

@@ -40,7 +40,9 @@
 //! moves.
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// A `gh` read. Generous next to the stop gate's 30s because a paginated
@@ -80,15 +82,72 @@ pub(crate) fn run_labeled(
     }
 }
 
+/// Process-wide memo of each cwd's resolved `owner/repo`, so a heal tick
+/// that reads several PRs from one root pays `git remote get-url` once.
+/// `None` means resolution was tried and failed - a stable negative, not a
+/// retry target, since a dead origin remote does not start working mid-run.
+static SLUG_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<String>>>> = OnceLock::new();
+
+fn resolved_slug(cwd: &Path) -> Option<String> {
+    let cache = SLUG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(cached) = guard.get(cwd) {
+        return cached.clone();
+    }
+    let slug = crate::pr_list::origin_slug(cwd, None).ok();
+    guard.insert(cwd.to_path_buf(), slug.clone());
+    slug
+}
+
+/// Swap gh's own `{owner}`/`{repo}` template for this cwd's literal origin
+/// slug, so the resulting path carries no `{` and can qualify for
+/// `gh_etag::eligible`. An unresolvable origin leaves `path` unchanged -
+/// today's behavior, where gh substitutes the placeholder itself.
+fn literalize(cwd: &Path, path: &str) -> String {
+    match resolved_slug(cwd) {
+        Some(slug) => match slug.split_once('/') {
+            Some((owner, repo)) => path.replace("{owner}", owner).replace("{repo}", repo),
+            None => path.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
+/// The literalized path's door key, when it qualifies for `gh_etag`'s
+/// conditional-GET door - shared by [`gh_api`]'s single-page branch and
+/// [`gh_api_pages_conditional`], so a future change to what qualifies has
+/// one call site to update instead of two silently drifting apart.
+fn door_path(cwd: &Path, path: &str) -> Option<String> {
+    let literal = literalize(cwd, path);
+    let eligibility_args = ["api".to_string(), literal];
+    crate::gh_etag::eligible(&eligibility_args).map(str::to_string)
+}
+
 /// `gh api` against the current repo. `{owner}` unexpanded: gh resolves
 /// owner/repo from the checkout. `--allow-escape-sequences` with a retry
-/// without it covers an older gh, exactly as heal's twin did.
+/// without it covers an older gh, exactly as heal's twin did. A plain
+/// single-page read (`extra` empty) first tries the literal slug against
+/// `gh_etag`'s conditional-GET door: an unchanged resource then costs no
+/// fresh core point. A path the door rejects, or an unresolvable origin,
+/// falls straight through to the unconditional read below, unchanged.
 pub(crate) fn gh_api(
     gh_bin: &str,
     cwd: &Path,
     path: &str,
     extra: &[&str],
 ) -> Result<String, String> {
+    if extra.is_empty() {
+        if let Some(door_path) = door_path(cwd, path) {
+            let (ok, body, err) = crate::gh_etag::conditional_api_get(cwd, &door_path, |args| {
+                let (ok, out, err) = run_labeled("pr-push", gh_bin, args, cwd, READ_TIMEOUT)?;
+                Ok((ok, out.into_bytes(), err))
+            })?;
+            if ok {
+                return Ok(body);
+            }
+            return Err(format!("gh api {path} failed: {}", err.trim()));
+        }
+    }
     let mut args: Vec<&str> = vec!["api", "--allow-escape-sequences", path];
     args.extend_from_slice(extra);
     let (ok, out, err) = run_labeled("pr-push", gh_bin, &args, cwd, READ_TIMEOUT)?;
@@ -118,6 +177,43 @@ pub(crate) fn gh_api_pages(gh_bin: &str, cwd: &Path, path: &str) -> Result<Vec<V
     }
 }
 
+/// Like [`gh_api_pages`], but an unchanged resource skips the whole
+/// re-fetch: page 1 goes out through `gh_etag`'s conditional-GET door
+/// (`conditional_paginated_get`), and a 304 there replays the FULL cached
+/// page vector rather than paying every page again. An ineligible path
+/// (a `{owner}`/`{repo}` placeholder the slug could not resolve, a write,
+/// a `page=` past 1) falls straight through to [`gh_api_pages`], unchanged.
+pub(crate) fn gh_api_pages_conditional(
+    gh_bin: &str,
+    cwd: &Path,
+    path: &str,
+) -> Result<Vec<Value>, String> {
+    let Some(door_path) = door_path(cwd, path) else {
+        return gh_api_pages(gh_bin, cwd, path);
+    };
+    let fetch_all = || -> Result<String, String> {
+        let pages = gh_api_pages(gh_bin, cwd, path)?;
+        serde_json::to_string(&Value::Array(pages))
+            .map_err(|e| format!("gh api {path} pages unserializable: {e}"))
+    };
+    let spawn = |args: &[&str]| -> Result<(bool, Vec<u8>, String), String> {
+        let (ok, out, err) = run_labeled("pr-push", gh_bin, args, cwd, READ_TIMEOUT)?;
+        Ok((ok, out.into_bytes(), err))
+    };
+    let (ok, raw, err) =
+        crate::gh_etag::conditional_paginated_get(cwd, &door_path, fetch_all, spawn)?;
+    if !ok {
+        return Err(format!("gh api {path} failed: {}", err.trim()));
+    }
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(pages)) => Ok(pages),
+        Ok(other) => Ok(vec![other]),
+        Err(e) => Err(format!(
+            "gh api {path} returned unparseable cached pages: {e}"
+        )),
+    }
+}
+
 /// The head's check runs plus StatusContexts, in the `bucket`/`link` shape
 /// [`crate::check_supersession::latest_per_name`] speaks. REST: `gh pr
 /// checks` is GraphQL and the quota broker routes it away unconditionally.
@@ -125,7 +221,7 @@ pub(crate) fn gh_api_pages(gh_bin: &str, cwd: &Path, path: &str) -> Result<Vec<V
 /// yet registered) is a legitimate answer, not an error. Callers that need
 /// the old fail-closed-on-empty shape use [`read_checks`].
 pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<Vec<Value>, String> {
-    let pages = gh_api_pages(
+    let pages = gh_api_pages_conditional(
         gh_bin,
         cwd,
         &format!("repos/{{owner}}/{{repo}}/commits/{head}/check-runs"),
@@ -148,7 +244,7 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
                 run.get("id")
                     .and_then(Value::as_u64)
                     .and_then(|id| {
-                        gh_api_pages(
+                        gh_api_pages_conditional(
                             gh_bin,
                             cwd,
                             &format!("repos/{{owner}}/{{repo}}/check-runs/{id}/annotations"),
