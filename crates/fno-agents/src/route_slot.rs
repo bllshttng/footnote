@@ -2384,59 +2384,10 @@ fn read_route_slot_payload(args: &[String]) -> Result<Value, (i32, String, Strin
         .map_err(|e| (2, String::new(), format!("route-slot: bad payload: {e}\n")))
 }
 
-/// The append half every journal write shares: stamp ts and kind, serialize
-/// one flat envelope line (`kind` plus flattened fields), create the parent
-/// dir, append. The journal op passes `spawn_defaults_applied` and surfaces
-/// every failure; the refusal emit passes its own kind and ignores them.
-fn append_journal_line(
-    path: &std::path::Path,
-    mut record: serde_json::Map<String, Value>,
-    kind: &str,
-) -> Result<(), (i32, String, String)> {
-    record.insert("ts".into(), Value::String(crate::events::now_rfc3339()));
-    record.insert("kind".into(), Value::String(kind.to_string()));
-    let mut line = match serde_json::to_string(&Value::Object(record)) {
-        Ok(l) => l,
-        Err(e) => {
-            return Err((
-                1,
-                String::new(),
-                format!("route-slot journal: serialize failed: {e}\n"),
-            ))
-        }
-    };
-    line.push('\n');
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            return Err((
-                1,
-                String::new(),
-                format!("route-slot journal: open failed: {e}\n"),
-            ))
-        }
-    };
-    match std::io::Write::write_all(&mut file, line.as_bytes()) {
-        Ok(()) => Ok(()),
-        Err(e) => Err((
-            1,
-            String::new(),
-            format!("route-slot journal: write failed: {e}\n"),
-        )),
-    }
-}
-
-/// `route-slot journal`: append one spawn_defaults_applied receipt to the
-/// agents event journal. The WRITE belongs to the verb; the row keeps
-/// the flat envelope (`kind` plus flattened fields) every reader of this event
-/// parses, so the emitter here is a plain appender, not the framing.
+/// `route-slot journal`: commit one spawn_defaults_applied receipt to the
+/// event store behind the journal address. The WRITE belongs to the verb;
+/// the payload's fields ride nested in `data`, typed per the event schema.
+/// No file is created: the store is the only surface the receipt lands on.
 /// The caller passes the resolved journal path: the binary reads no config.
 pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
     let path = match payload.get("path").and_then(Value::as_str) {
@@ -2449,8 +2400,8 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
             )
         }
     };
-    let record = match payload.get("event").and_then(Value::as_object) {
-        Some(m) => m.clone(),
+    let data = match payload.get("event").and_then(Value::as_object) {
+        Some(m) => Value::Object(m.clone()),
         None => {
             return (
                 2,
@@ -2459,13 +2410,36 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
             )
         }
     };
-    match append_journal_line(&path, record, "spawn_defaults_applied") {
-        Ok(()) => (
+    let envelope = serde_json::json!({
+        "ts": crate::events::now_rfc3339(),
+        "type": "spawn_defaults_applied",
+        "source": "agents",
+        "data": data,
+    });
+    let line = match serde_json::to_string(&envelope) {
+        Ok(l) => l,
+        Err(e) => {
+            return (
+                1,
+                String::new(),
+                format!("route-slot journal: serialize failed: {e}\n"),
+            )
+        }
+    };
+    match crate::event_store::append_envelope(&path, &line, None) {
+        Ok(receipt) => (
             0,
-            format!("journal: spawn_defaults_applied -> {}\n", path.display()),
+            format!(
+                "journal: spawn_defaults_applied -> {}\n",
+                receipt.store.display()
+            ),
             String::new(),
         ),
-        Err(fail) => fail,
+        Err(e) => (
+            1,
+            String::new(),
+            format!("route-slot journal: store refused: {e}\n"),
+        ),
     }
 }
 
@@ -2518,20 +2492,21 @@ pub(crate) fn journal_routing_refusal(payload: &Value, out: &Value) {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let mut record = serde_json::Map::new();
-    record.insert("reason".into(), json!(reason));
-    record.insert("detail".into(), json!(detail));
-    record.insert("gate".into(), json!("routing"));
+    let mut fields: Vec<(&str, Value)> = vec![
+        ("reason", json!(reason)),
+        ("detail", json!(detail)),
+        ("gate", json!("routing")),
+    ];
     if let Some(vb) = payload.get("rung_base").and_then(Value::as_str) {
-        record.insert(
-            "verb".into(),
+        fields.push((
+            "verb",
             json!(vb.strip_prefix("agents.profiles.").unwrap_or(vb)),
-        );
+        ));
     }
-    record.insert("lanes".into(), Value::Array(lanes_from_chain(chain)));
-    record.insert("exit_code".into(), json!(if queue { 78 } else { 2 }));
+    fields.push(("lanes", Value::Array(lanes_from_chain(chain))));
+    fields.push(("exit_code", json!(if queue { 78 } else { 2 })));
     if let Some(v) = payload.get("substrate").filter(|v| !v.is_null()) {
-        record.insert("substrate".into(), v.clone());
+        fields.push(("substrate", v.clone()));
     }
     // plan_path rides nested in node_payload, not at the payload top level.
     if let Some(v) = payload
@@ -2540,9 +2515,9 @@ pub(crate) fn journal_routing_refusal(payload: &Value, out: &Value) {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
-        record.insert("plan_path".into(), json!(v));
+        fields.push(("plan_path", json!(v)));
     }
-    let _ = append_journal_line(&path, record, "spawn_gate_refused");
+    crate::agents_event::append_agents_event(&path, "spawn_gate_refused", &fields);
 }
 
 /// `route-slot audit`: read-only completion evidence for the routing policy
@@ -2940,28 +2915,47 @@ pub(crate) fn audit_load_snapshot(
     };
 
     // Spawn decision receipts: the newest fingerprint per spawn name inside
-    // the window.
+    // the window. The store owns the rows; the window rides the query so the
+    // committed rows are filtered in SQL (durable rows never rotate), and
+    // `within` stays for the live tail the store does not hold yet.
     let mut receipts: BTreeMap<String, String> = BTreeMap::new();
-    match std::fs::read_to_string(state_root.join("events.jsonl")) {
-        Ok(text) => {
-            for line in text.lines() {
-                let Ok(row) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                if row.get("kind").and_then(Value::as_str) != Some("spawn_defaults_applied") {
-                    continue;
-                }
-                if !within(row.get("ts").and_then(Value::as_str).unwrap_or("")) {
-                    continue;
-                }
-                let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-                let fp = row.get("fingerprint").and_then(Value::as_str).unwrap_or("");
-                if !name.is_empty() && !fp.is_empty() {
-                    receipts.insert(name.to_string(), fp.to_string());
-                }
-            }
+    let text = crate::event_store::journal_text_checked(
+        &state_root.join("events.jsonl"),
+        &crate::event_store::EventQuery {
+            types: vec!["spawn_defaults_applied".to_string()],
+            since_ms: Some(cutoff.timestamp_millis()),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
+    for line in text.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        // Envelope rows type the row; the imported flat rows carry `kind`.
+        if row
+            .get("type")
+            .or_else(|| row.get("kind"))
+            .and_then(Value::as_str)
+            != Some("spawn_defaults_applied")
+        {
+            continue;
         }
-        Err(_) => {} // no journal: no receipts, the verifier names the boundary
+        if !within(row.get("ts").and_then(Value::as_str).unwrap_or("")) {
+            continue;
+        }
+        let data = row.get("data");
+        let field = |key: &str| -> &str {
+            data.and_then(|d| d.get(key))
+                .or_else(|| row.get(key))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        };
+        let name = field("name");
+        let fp = field("fingerprint");
+        if !name.is_empty() && !fp.is_empty() {
+            receipts.insert(name.to_string(), fp.to_string());
+        }
     }
 
     // View records: one row per subject prefix routing-view:. Retirement
@@ -3144,11 +3138,10 @@ mod tests {
     }
 
     fn journal_rows(journal: &std::path::Path) -> Vec<Value> {
-        std::fs::read_to_string(journal)
-            .unwrap_or_default()
+        crate::events::committed_journal_text(journal)
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).expect("journal line parses"))
+            .map(|l| serde_json::from_str(l).expect("committed row parses"))
             .collect()
     }
 
@@ -3225,17 +3218,17 @@ mod tests {
         let rows = journal_rows(&journal);
         assert_eq!(rows.len(), 1, "exactly one row per refusal: {rows:?}");
         let row = &rows[0];
-        assert_eq!(row["kind"], "spawn_gate_refused");
-        assert_eq!(row["gate"], "routing");
-        assert_eq!(row["reason"], "exhausted-refuse");
-        assert_eq!(row["verb"], "target");
-        assert_eq!(row["exit_code"], 2);
-        let detail = row["detail"].as_str().unwrap_or("");
+        assert_eq!(row["type"], "spawn_gate_refused");
+        assert_eq!(row["data"]["gate"], "routing");
+        assert_eq!(row["data"]["reason"], "exhausted-refuse");
+        assert_eq!(row["data"]["verb"], "target");
+        assert_eq!(row["data"]["exit_code"], 2);
+        let detail = row["data"]["detail"].as_str().unwrap_or("");
         assert!(
             detail.contains("every configured lane is exhausted"),
             "detail: {detail}"
         );
-        let lanes = row["lanes"].as_array().expect("lanes array");
+        let lanes = row["data"]["lanes"].as_array().expect("lanes array");
         assert_eq!(lanes.len(), 2, "one entry per slot-skip line: {lanes:?}");
         assert!(
             lanes.iter().all(|l| l["reason"]
@@ -3268,9 +3261,10 @@ mod tests {
 
         let rows = journal_rows(&journal);
         assert_eq!(rows.len(), 1, "rows: {rows:?}");
-        assert_eq!(rows[0]["exit_code"], 78);
-        assert_eq!(rows[0]["reason"], "slot_exhausted");
-        assert_eq!(rows[0]["gate"], "routing");
+        assert_eq!(rows[0]["type"], "spawn_gate_refused");
+        assert_eq!(rows[0]["data"]["exit_code"], 78);
+        assert_eq!(rows[0]["data"]["reason"], "slot_exhausted");
+        assert_eq!(rows[0]["data"]["gate"], "routing");
     }
 
     #[test]
@@ -3330,7 +3324,7 @@ mod tests {
     }
 
     #[test]
-    fn the_journal_op_keeps_its_spawn_defaults_applied_kind() {
+    fn the_journal_op_commits_one_typed_row_and_creates_no_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let journal = dir.path().join("j.jsonl");
         let (code, stdout, _) = capture_file(
@@ -3348,7 +3342,9 @@ mod tests {
         );
         let rows = journal_rows(&journal);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["kind"], "spawn_defaults_applied");
+        assert_eq!(rows[0]["type"], "spawn_defaults_applied");
+        assert_eq!(rows[0]["data"]["verb"], "target");
+        assert!(!journal.exists(), "the journal op must not create the file");
     }
 
     #[test]
@@ -4520,10 +4516,11 @@ mod tests {
         let state_root = dir.clone();
 
         let fresh = chrono::Utc::now().to_rfc3339();
+        let fresh2 = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
         let stale = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
-        let entry = |sid: &str, created: String, node_v: &str| RegistryEntry {
+        let entry = |sid: &str, created: String, node_v: &str, name: &str| RegistryEntry {
             node: Some(node_v.to_string()),
-            name: "worker-1".into(),
+            name: name.to_string(),
             harness: Some("claude".into()),
             cwd: "/tmp/proj".into(),
             project_root: "/tmp/proj".into(),
@@ -4538,8 +4535,9 @@ mod tests {
         };
         let registry = crate::state::Registry {
             entries: vec![
-                entry("sid-1", fresh.clone(), "x-aaaa"),
-                entry("sid-old", stale, "x-aaaa"),
+                entry("sid-1", fresh.clone(), "x-aaaa", "worker-1"),
+                entry("sid-2", fresh2.clone(), "x-aaaa", "worker-2"),
+                entry("sid-old", stale, "x-aaaa", "worker-1"),
             ],
             ..crate::state::Registry::default()
         };
@@ -4549,6 +4547,21 @@ mod tests {
         )
         .unwrap();
 
+        // One typed row through the store beside the journal address; the raw
+        // file below keeps one flat legacy row, so the audit window must fold
+        // both shapes.
+        let envelope = json!({
+            "ts": fresh2,
+            "type": "spawn_defaults_applied",
+            "source": "agents",
+            "data": {"name": "worker-2", "fingerprint": "fp2"},
+        });
+        crate::event_store::append_envelope(
+            &state_root.join("events.jsonl"),
+            &envelope.to_string(),
+            None,
+        )
+        .expect("the spawn receipt store accepted the typed row");
         std::fs::write(
             state_root.join("events.jsonl"),
             format!(
@@ -4610,11 +4623,30 @@ mod tests {
         .unwrap();
         assert_eq!(snap["fingerprint"], "fp1");
         let sessions = snap["sessions"].as_array().unwrap();
-        assert_eq!(sessions.len(), 1, "{sessions:?}");
-        assert_eq!(sessions[0]["session_id"], "sid-1");
-        assert_eq!(sessions[0]["account"], "zai-main");
-        assert_eq!(sessions[0]["receipt_fingerprint"], "fp1");
-        assert_eq!(sessions[0]["view_records"].as_array().unwrap().len(), 1);
+        assert_eq!(sessions.len(), 2, "{sessions:?}");
+        let prints: Vec<(&str, &str)> = sessions
+            .iter()
+            .map(|s| {
+                (
+                    s["session_id"].as_str().unwrap_or(""),
+                    s["receipt_fingerprint"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert!(
+            prints.contains(&("sid-1", "fp1")),
+            "flat legacy row folds in: {prints:?}"
+        );
+        assert!(
+            prints.contains(&("sid-2", "fp2")),
+            "typed store row folds in: {prints:?}"
+        );
+        let sid1 = sessions
+            .iter()
+            .find(|s| s["session_id"] == "sid-1")
+            .expect("sid-1 session");
+        assert_eq!(sid1["account"], "zai-main");
+        assert_eq!(sid1["view_records"].as_array().unwrap().len(), 1);
     }
 
     // --- computed capacity + the refresh gate --------------------------------

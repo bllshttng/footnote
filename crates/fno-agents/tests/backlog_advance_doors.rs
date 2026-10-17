@@ -659,3 +659,75 @@ fn closed_project_drives_dependents_even_when_next_selection_has_another_scope()
         .iter()
         .any(|r| r["type"] == "advance_dispatched" && r["data"]["node_id"] == "x-bbbb"));
 }
+
+#[test]
+fn an_auto_continue_tick_commits_to_the_store_and_creates_no_root_file() {
+    let w = World::new(json!([]));
+    let out = w.run(&["backlog", "advance"], None);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "skipped reason=disabled\n"
+    );
+    let ticks: Vec<&Value> = w
+        .events()
+        .iter()
+        .filter(|r| r["type"] == "control_plane_tick")
+        .collect();
+    assert_eq!(ticks.len(), 1, "ticks: {ticks:?}");
+    assert_eq!(ticks[0]["data"]["arm"], "auto_continue");
+    assert!(
+        !w.root.join("events.jsonl").exists(),
+        "the tick must not create the root journal file"
+    );
+}
+
+#[test]
+fn a_live_claim_with_a_recent_loop_check_reads_working() {
+    let w = World::new(json!([row("x-aaaa", json!({}))]));
+    let pid = std::process::id().to_string();
+    let acquired = w.run(
+        &[
+            "claim",
+            "acquire",
+            "node:x-aaaa",
+            "--holder",
+            "target-session:tok-1",
+            "--pid",
+            &pid,
+            "--ttl-ms",
+            "180000",
+        ],
+        None,
+    );
+    assert!(
+        acquired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&acquired.stderr)
+    );
+    let claim_op = || {
+        decode(&w.run(
+            &["backlog", "advance", "--stdin"],
+            Some(&json!({"op":"claim","node_id":"x-aaaa","emit_events":false})),
+        ))
+    };
+    // With no loop_check row the live claim reads waiting.
+    let none = claim_op();
+    assert_eq!(none["verdict"], "ours");
+    assert_eq!(none["truth_status"], "waiting");
+    // One committed loop_check row for the session flips it to working.
+    let envelope = json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": "loop_check",
+        "source": "agents",
+        "data": {"session_id": "tok-1"},
+    });
+    fno_agents::event_store::append_envelope(
+        &w.root.join("events.jsonl"),
+        &envelope.to_string(),
+        None,
+    )
+    .expect("the store beside the journal opened");
+    let working = claim_op();
+    assert_eq!(working["truth_status"], "working");
+}

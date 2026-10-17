@@ -17,13 +17,16 @@
     ],
     "exit": 2,
     "journal": {
-      "detail": "slot agents.profiles.target declares no lanes; strict routing refuses the harness default; declare agents.profiles.target.lanes or type --model, -P or --route to pin (strict routing: config routing.enforce_inventory)",
-      "exit_code": 2,
-      "gate": "routing",
-      "kind": "spawn_gate_refused",
-      "lanes": [],
-      "reason": "strict",
-      "verb": "target"
+      "type": "spawn_gate_refused",
+      "source": "agents",
+      "data": {
+        "detail": "slot agents.profiles.target declares no lanes; strict routing refuses the harness default; declare agents.profiles.target.lanes or type --model, -P or --route to pin (strict routing: config routing.enforce_inventory)",
+        "exit_code": 2,
+        "gate": "routing",
+        "lanes": [],
+        "reason": "strict",
+        "verb": "target"
+      }
     },
     "stderr": [
       "fno agents spawn: slot agents.profiles.target declares no lanes; strict routing refuses the harness default; declare agents.profiles.target.lanes or type --model, -P or --route to pin (strict routing: config routing.enforce_inventory)",

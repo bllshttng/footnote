@@ -8431,6 +8431,11 @@ event_types:
     sources: [daemon, agents]
     data:
       required: []
+  - name: spawn_defaults_applied
+    description: "Spawn compose: the defaults one spawn resolved, by axis and rung, with the config fingerprint."
+    sources: [agents]
+    data:
+      required: [name, fingerprint]
   - name: spawn_first_turn
     description: "The first-turn watch saw a launched worker's first assistant line: latency_ms from the spawn call, row_ms to its registry row, with harness, substrate and machine."
     sources: [daemon]

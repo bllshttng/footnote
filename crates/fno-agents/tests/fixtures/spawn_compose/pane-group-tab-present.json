@@ -23,53 +23,56 @@
     ],
     "exit": 0,
     "journal": {
-      "applied": [
-        [
-          "permission_mode",
-          "bypassPermissions",
-          "builtin.autonomous.permission_mode"
-        ]
-      ],
-      "fingerprint": "",
-      "kind": "spawn_defaults_applied",
-      "name": "w27",
-      "resolved": {
-        "account": {
-          "rung": null,
-          "value": ""
+      "type": "spawn_defaults_applied",
+      "source": "agents",
+      "data": {
+        "applied": [
+          [
+            "permission_mode",
+            "bypassPermissions",
+            "builtin.autonomous.permission_mode"
+          ]
+        ],
+        "fingerprint": "",
+        "name": "w27",
+        "resolved": {
+          "account": {
+            "rung": null,
+            "value": ""
+          },
+          "effort": {
+            "rung": null,
+            "value": ""
+          },
+          "model": {
+            "rung": null,
+            "value": ""
+          },
+          "pane_group": {
+            "rung": "agents.profiles.target",
+            "value": "grid-a"
+          },
+          "permission_mode": {
+            "rung": "builtin.autonomous",
+            "value": "bypassPermissions"
+          },
+          "provider": {
+            "rung": null,
+            "value": ""
+          },
+          "route": {
+            "rung": null,
+            "value": ""
+          },
+          "substrate": {
+            "rung": null,
+            "value": ""
+          }
         },
-        "effort": {
-          "rung": null,
-          "value": ""
-        },
-        "model": {
-          "rung": null,
-          "value": ""
-        },
-        "pane_group": {
-          "rung": "agents.profiles.target",
-          "value": "grid-a"
-        },
-        "permission_mode": {
-          "rung": "builtin.autonomous",
-          "value": "bypassPermissions"
-        },
-        "provider": {
-          "rung": null,
-          "value": ""
-        },
-        "route": {
-          "rung": null,
-          "value": ""
-        },
-        "substrate": {
-          "rung": null,
-          "value": ""
-        }
-      },
-      "seed": "/fno:target x-25",
-      "suppressed": [],
-      "verb": "target"
+        "seed": "/fno:target x-25",
+        "suppressed": [],
+        "verb": "target"
+      }
     },
     "stderr": [
       "fno agents spawn: applied permission_mode=bypassPermissions (builtin.autonomous.permission_mode)"

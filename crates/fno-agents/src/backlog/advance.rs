@@ -938,8 +938,10 @@ fn resolve_truth_status_word(node_id: &str) -> String {
     }
 }
 
-/// Seconds since the newest loop_check fire for `sid`, from a bounded tail
-/// of the state root's events journal. None when nothing fired.
+/// Seconds since the newest loop_check fire for `sid`, from the event store
+/// behind the state root's journal address. None when nothing fired inside
+/// the 1,800 s window the caller applies anyway, or when the store cannot be
+/// read (a missing journal reads the same today).
 fn loop_check_age(sid: &str) -> Option<f64> {
     let path = std::env::var_os("FNO_EVENTS_PATH")
         .filter(|v| !v.is_empty())
@@ -948,43 +950,20 @@ fn loop_check_age(sid: &str) -> Option<f64> {
             let cwd = std::env::current_dir().ok()?;
             crate::agents_config::state_dir(&cwd).map(|root| root.join("events.jsonl"))
         })?;
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return None;
-    };
-    let size = meta.len();
-    let start = size.saturating_sub(256 * 1024);
-    let mut file = std::fs::File::open(&path).ok()?;
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut text = String::new();
-    file.read_to_string(&mut text).ok()?;
-    let now = now_ms_i64() as f64 / 1000.0;
-    let mut newest: Option<f64> = None;
-    for line in text.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() || !line.contains("\"loop_check\"") {
-            continue;
-        }
-        let Ok(rec) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if rec.get("type").and_then(Value::as_str) != Some("loop_check") {
-            continue;
-        }
-        let row_sid = rec
-            .get("data")
-            .and_then(|d| d.get("session_id"))
-            .and_then(Value::as_str)?;
-        if row_sid != sid {
-            continue;
-        }
-        let ts = rec.get("ts").and_then(Value::as_str)?;
-        let epoch = rfc3339_to_epoch(ts)?;
-        newest = Some(now - epoch);
-        break;
-        // newest fire per session is always near the end (append-ordered)
-    }
-    newest
+    let now_ms = now_ms_i64();
+    let rows = crate::event_store::query_events(
+        &path,
+        &crate::event_store::EventQuery {
+            types: vec!["loop_check".into()],
+            session_id: Some(sid.to_string()),
+            since_ms: Some(now_ms - 1_800_000),
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    let rec: Value = serde_json::from_str(&rows.last()?.line).ok()?;
+    let ts = rec.get("ts").and_then(Value::as_str)?;
+    Some(now_ms as f64 / 1000.0 - rfc3339_to_epoch(ts)?)
 }
 
 /// RFC3339 `ts` -> epoch seconds; None when unparsable.
@@ -1868,41 +1847,24 @@ pub struct AdvanceInput<'a> {
     pub source: Option<&'a str>,
 }
 
-/// The control-plane tick row: one auto-continue arm line in the loop
-/// journal the readouts fold. Best-effort; the emitter bounds one row.
+/// The control-plane tick row: one auto-continue arm line committed through
+/// the event store behind the loop journal address. Best-effort; the store
+/// is the only surface the row lands on and no file is created.
 fn control_plane_tick(arm: &str, acted: u64, skip_reason: Option<&str>, detail: Option<&str>) {
     let scheduler = std::env::var("FNO_CONTROL_PLANE_SCHEDULER")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "session".to_string());
-    let mut data = json!({
-        "arm": arm,
-        "scheduler": scheduler,
-        "acted": acted,
-        "interval_s": 1800,
-    });
-    if let Some(obj) = data.as_object_mut() {
-        match skip_reason {
-            Some(reason) => {
-                obj.insert("skip_reason".to_string(), Value::from(reason));
-            }
-            None => {
-                obj.insert("skip_reason".to_string(), Value::Null);
-            }
-        }
-        match detail {
-            Some(text) => {
-                obj.insert(
-                    "detail".to_string(),
-                    Value::from(text.chars().take(4000).collect::<String>()),
-                );
-            }
-            None => {
-                obj.insert("detail".to_string(), Value::Null);
-            }
-        }
-    }
+    let bounded = detail.map(|text| text.chars().take(4000).collect::<String>());
+    let data = crate::tick_ledger::tick_data(
+        arm,
+        &scheduler,
+        acted,
+        skip_reason,
+        bounded.as_deref(),
+        1800,
+    );
     let path = match std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
         Some(pin) => PathBuf::from(pin),
         None => {
@@ -1912,25 +1874,11 @@ fn control_plane_tick(arm: &str, acted: u64, skip_reason: Option<&str>, detail: 
             dir.join("events.jsonl")
         }
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let row = json!({
-        "ts": crate::provider_cap::epoch_to_rfc3339(now_ms_i64() / 1000),
-        "type": "control_plane_tick",
-        "source": "daemon",
-        "data": data,
-    });
-    let mut line = row.to_string();
-    line.push('\n');
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        use std::io::Write as _;
-        let _ = f.write_all(line.as_bytes());
-    }
+    let emitter = crate::events::EventEmitter::new(path, "daemon");
+    let _ = emitter.emit_fields(
+        "control_plane_tick",
+        data.as_object().cloned().unwrap_or_default(),
+    );
 }
 
 /// Best-effort touch of the daemon's wake nudge sentinel: a successor may

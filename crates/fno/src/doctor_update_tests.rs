@@ -333,6 +333,66 @@ fn rev_on_origin_main_reads_merged_local_and_unanswered() {
 }
 
 #[test]
+fn the_check_readback_finds_an_update_row_in_the_store() {
+    let _g = crate::model_catalog::state_env_lock();
+    let tmp = std::env::temp_dir().join(format!("fno-du-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let prior = std::env::var_os("FNO_STATE_DIR");
+    std::env::set_var("FNO_STATE_DIR", &tmp);
+    let envelope = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": "fno_update_installed",
+        "source": "daemon",
+        "data": {"version": "0.4.0"},
+    });
+    crate::event_store::append_envelope(&tmp.join("events.jsonl"), &envelope.to_string(), None)
+        .expect("the store beside the journal opened");
+    let found = last_update_event().expect("the store row answers");
+    assert_eq!(found["type"], "fno_update_installed");
+    assert_eq!(found["data"]["version"], "0.4.0");
+    match prior {
+        Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+        None => std::env::remove_var("FNO_STATE_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn the_check_readback_skips_a_corrupt_row_after_the_install() {
+    let _g = crate::model_catalog::state_env_lock();
+    let tmp = std::env::temp_dir().join(format!("fno-du-corrupt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let prior = std::env::var_os("FNO_STATE_DIR");
+    std::env::set_var("FNO_STATE_DIR", &tmp);
+    let installed = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "type": "fno_update_installed",
+        "source": "daemon",
+        "data": {"version": "0.4.0"},
+    });
+    // A legacy journal imports the install row, then a corrupt line and a
+    // typeless row land after it. The rejected and empty-type rows those
+    // become must stay out of the strict typed window: the newest stray row
+    // must never read as the update outcome.
+    let legacy = format!(
+        "{}\nnot json at all\n{{\"note\":\"no type or kind\"}}\n",
+        installed
+    );
+    std::fs::write(tmp.join("events.jsonl"), legacy).unwrap();
+    crate::event_store::import_all(&tmp.join("events.jsonl")).expect("legacy import");
+    let found = last_update_event().expect("the install row answers past the strays");
+    assert_eq!(found["type"], "fno_update_installed");
+    assert_eq!(found["data"]["version"], "0.4.0");
+    match prior {
+        Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+        None => std::env::remove_var("FNO_STATE_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn python_holds_whenever_rust_trails_the_source() {
     // The 2026-10-14 iMac shape: no tarball for the merged rev, so the wheel
     // must not move ahead of the bins it talks to.
