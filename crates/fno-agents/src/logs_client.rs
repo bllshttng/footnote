@@ -38,7 +38,7 @@ pub async fn follow(
         return 1;
     }
 
-    let mut conn = match UnixStream::connect(home.supervisor_sock()).await {
+    let mut conn = match UnixStream::connect(crate::client::client_sock(home)).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("fno agents logs: cannot reach daemon: {e}");
