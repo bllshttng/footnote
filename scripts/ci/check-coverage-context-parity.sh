@@ -35,25 +35,25 @@ expect_line() { # <file> <ERE anchored to a full line> <surface>
   fi
 }
 
-# The canonical strings are the Python consts: the publisher is the writer
-# every other surface certifies. An unreadable const is a hard failure, never
-# an empty comparison that would pass vacuously.
-py_ctx="$(grep -oE 'COVERAGE_STATUS_CONTEXT = "[^"]+"' \
-  "$ROOT/cli/src/fno/pr/_reviews.py" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+# The canonical strings are the Rust consts: the native publisher is the
+# writer every other surface certifies. An unreadable const is a hard
+# failure, never an empty comparison that would pass vacuously.
+py_ctx="$(grep -oE 'const COVERAGE_STATUS_CONTEXT: &str = "[^"]+"' \
+  "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" | head -1 | sed 's/.*"\(.*\)"/\1/')"
 if [ -z "$py_ctx" ]; then
-  echo "FAIL: cannot read COVERAGE_STATUS_CONTEXT from cli/src/fno/pr/_reviews.py" >&2
+  echo "FAIL: cannot read COVERAGE_STATUS_CONTEXT from crates/fno-agents/src/loopcheck/coverage_status.rs" >&2
   exit 1
 fi
-py_unavailable_ctx="$(grep -oE 'COVERAGE_UNAVAILABLE_STATUS_CONTEXT = "[^"]+"' \
-  "$ROOT/cli/src/fno/pr/_reviews.py" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+py_unavailable_ctx="$(grep -oE 'const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "[^"]+"' \
+  "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" | head -1 | sed 's/.*"\(.*\)"/\1/')"
 if [ -z "$py_unavailable_ctx" ]; then
-  echo "FAIL: cannot read COVERAGE_UNAVAILABLE_STATUS_CONTEXT from cli/src/fno/pr/_reviews.py" >&2
+  echo "FAIL: cannot read COVERAGE_UNAVAILABLE_STATUS_CONTEXT from crates/fno-agents/src/loopcheck/coverage_status.rs" >&2
   exit 1
 fi
-py_label="$(grep -oE 'COVERAGE_OVERRIDE_LABEL = "[^"]+"' \
-  "$ROOT/cli/src/fno/pr/_reviews.py" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+py_label="$(grep -oE 'index\(\\"[a-z-]+\\"' \
+  "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" | head -1 | sed 's/^index(\\"//; s/\\"$//')"
 if [ -z "$py_label" ]; then
-  echo "FAIL: cannot read COVERAGE_OVERRIDE_LABEL from cli/src/fno/pr/_reviews.py" >&2
+  echo "FAIL: cannot read the override label from crates/fno-agents/src/loopcheck/coverage_status.rs" >&2
   exit 1
 fi
 
@@ -116,14 +116,12 @@ expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
 # prefixes are an ABI like the context and the label - a wording change on
 # any writer side would make the next push clobber a green verdict while
 # every other check stays green. Each needle anchors at the CONSTRUCTION
-# site (f"covered / format!("covered), stable across renames inside the
-# braces) so a variable rename cannot false-red the pin.
-expect_fixed "$ROOT/cli/src/fno/pr/_reviews.py" \
-  'f"covered' "the Python publisher (covered description prefix)"
-expect_fixed "$ROOT/cli/src/fno/pr/_reviews.py" \
-  '"no review lane configured; merge ungated"' "the Python publisher (no-lane description)"
+# site (format!("covered), stable across renames inside the braces) so a
+# variable rename cannot false-red the pin.
 expect_fixed "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" \
-  'format!("covered' "the Rust publisher (covered description prefix)"
+  'format!("covered' "the native publisher (covered description prefix)"
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck/coverage_gate/publish.rs" \
+  '"no review lane configured; merge ungated"' "the native publisher (no-lane description)"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   'covered\*\|"no review lane"\*' "the refresher preserve list"
 expect_line "$ROOT/scripts/ci/coverage-carry.sh" \

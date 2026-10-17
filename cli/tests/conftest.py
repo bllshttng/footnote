@@ -1183,26 +1183,6 @@ def _closure_leg_hermetic(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_review_coverage_recompute(monkeypatch):
-    """Hermetic default for the coverage recompute (x-3a3f).
-
-    `fno do pr merge`/`status` recompute a missing coverage row by shelling out to
-    the `fno-agents review-coverage` verb. In the test environment that
-    resolver can find a real installed binary (PATH or the cargo dev target),
-    so an unstubbbed no-event path would spawn it against real gh. This stub
-    makes the recompute report "unavailable" by default - the fail-closed
-    branch, which is also the pre-recompute behavior, so only tests that
-    explicitly exercise the recompute (they re-monkeypatch
-    `fno.pr._reviews._fire_review_coverage_verb`) see one.
-    """
-    from fno.pr import _reviews
-
-    monkeypatch.setattr(
-        _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "disabled in test")
-    )
-
-
-@pytest.fixture(autouse=True)
 def _no_live_evidence_gate(monkeypatch):
     """Hermetic default for the evidence gate.
 
@@ -1482,6 +1462,23 @@ def _no_status_ci_door(monkeypatch):
             return []
         if verb == "authorized-merge" and op == "status-rerun":
             raise unavailable(f"fno-agents {verb} {op} unavailable in tests")
+        if verb == ["review-coverage", "op"] and isinstance(payload, dict):
+            # The native gate's op door, hermetic defaults: covered (the
+            # fresh-install no-lane answer the retired Python gate gave),
+            # an empty chain, no lane. Tests pinning a refusal re-stub
+            # `fno.rust_binary.verb_call`.
+            if op == "verdict":
+                return {
+                    "state": 0,
+                    "refusal": "",
+                    "covered_head": "",
+                    "note": "",
+                    "line": "",
+                }
+            if op == "chain":
+                return {"rounds_used": 0, "max_rounds": 2, "last": None}
+            if op == "lane":
+                return {"lane": False}
         if verb == "authorized-merge" and op == "pr-head":
             from fno.pr import _merge
             from fno.pr._rest import fetch_pr_info_rest
@@ -1493,16 +1490,3 @@ def _no_status_ci_door(monkeypatch):
     monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)
 
 
-@pytest.fixture(autouse=True)
-def _no_review_lane_by_default(monkeypatch):
-    """Hermetic default: no review lane is configured (a fresh install).
-
-    The coverage gate's lane probe reads the real claims store when left
-    alone, so a worker whose own branch carries live review:branch claims
-    leaks them into unit tests that never staged coverage rows. Tests
-    pinning a lane set `fno.pr._merge._review_lane_configured` themselves
-    (the merge-world stub does).
-    """
-    from fno.pr import _merge
-
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)

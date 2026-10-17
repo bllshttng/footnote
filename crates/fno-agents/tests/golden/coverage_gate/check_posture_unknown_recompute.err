@@ -1,0 +1,1 @@
+review posture unknown: a fresh coverage recompute resolved no review.posture, so the ladder cannot answer what review the rung demands. Remedy: refresh the fno-agents binary (`fno doctor update`) and re-run the merge [recomputed]

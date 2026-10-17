@@ -401,7 +401,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Specimen.** The standing two-review law says a scoped fix and its verify is not a round. A reviewer was asked to verify a three-commit fix delta and post dispositions. It verified all three fixes and then refused to emit, because the branch diff was 456 lines and it had read the delta. The script's own header says running it over unresolved findings "makes the gate the whole board trusts tell a lie, and nothing downstream can tell that apart from a real pass." The reviewer was right to refuse. The honest action and the mechanically available action were different actions.
 
-**The half that costs more.** A findings chain is keyed by branch NAME. A DIFFERENT reviewer on the same PR worked from a locally fetched copy, so its attestation recorded a review-only branch name. That row carried four findings the PR's own chain never saw, while that chain carried six of its own. `_coverage_gate.py` builds `findings_by_key` from the chain, so disposing findings against the wrong chain is inert rather than wrong. That is worse, because it looks like progress.
+**The half that costs more.** A findings chain is keyed by branch NAME. A DIFFERENT reviewer on the same PR worked from a locally fetched copy, so its attestation recorded a review-only branch name. That row carried four findings the PR's own chain never saw, while that chain carried six of its own. The gate builds `findings_by_key` from the chain, so disposing findings against the wrong chain is inert rather than wrong. That is worse, because it looks like progress.
 
 Review on the PR's own branch, in a worktree that has it checked out. A review done on a fetched copy is invisible to the gate forever.
 

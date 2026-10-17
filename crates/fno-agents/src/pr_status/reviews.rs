@@ -493,6 +493,16 @@ fn latest_coverage_row(_cwd: &Path, inputs: &ReviewInputs, pr: u64) -> (Option<V
     (best, best_ts)
 }
 
+/// The overtaken read on timestamps: parse both sides, and when either
+/// fails to parse, fall back to the raw strings - a malformed line fails
+/// quiet, never panics, and the lexical order still decides.
+fn ts_after(ts: &str, row_ts: &str, row_at: Option<i64>) -> bool {
+    match (row_at, crate::event_store::parse_rfc3339_ms(ts)) {
+        (Some(base), Some(other)) => other > base,
+        _ => ts > row_ts,
+    }
+}
+
 /// Whether a head-matching stored NO row was overtaken by a later in-scope
 /// attestation at the same head. Any verdict overtakes: a later fail moved
 /// the round and the count the row reports.
@@ -529,10 +539,7 @@ fn uncovered_row_overtaken(data: &Value, row_ts: &str, inputs: &ReviewInputs, he
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            let after = match (row_at, crate::event_store::parse_rfc3339_ms(&ts)) {
-                (Some(base), Some(other)) => other > base,
-                _ => ts.as_str() > row_ts,
-            };
+            let after = ts_after(&ts, row_ts, row_at);
             if after {
                 return true;
             }
@@ -759,11 +766,30 @@ pub(crate) fn review_lane(cwd: &Path, pr: u64) -> bool {
     inputs.self_review_floor_on && floor_applies && payload_is_code(cwd, pr)
 }
 
+/// The lane answer for the `lane` op. With `code_payload` set it answers for
+/// a HYPOTHETICAL code payload and probes no PR: the config half and the
+/// floor engagement only, which is what a caller that has no PR to classify
+/// (the doctor pair check) needs.
+pub(crate) fn lane_answer(cwd: &Path, code_payload: bool) -> bool {
+    if !code_payload {
+        return review_lane(cwd, 0);
+    }
+    let inputs = resolve_review_inputs(cwd, None, None, None, None, None);
+    if inputs.lane_configured || inputs.code_review_configured {
+        return true;
+    }
+    let floor_applies = crate::loopcheck::self_review_floor_applies(
+        inputs.author_harness.as_deref(),
+        inputs.author_harness_pinned_none,
+    );
+    inputs.self_review_floor_on && floor_applies
+}
+
 /// Whether the PR's diff carries a code payload: CODE iff any changed file
 /// is not documentation. Fails closed: a failed read classifies as code, so
 /// a degraded probe cannot bypass the floor. An empty surfaced diff is not
 /// code: nothing to review, no gate.
-fn payload_is_code(cwd: &Path, pr: u64) -> bool {
+pub(crate) fn payload_is_code(cwd: &Path, pr: u64) -> bool {
     let Some(url) = git_origin_url(cwd) else {
         return true;
     };
@@ -800,13 +826,13 @@ fn payload_is_code(cwd: &Path, pr: u64) -> bool {
             break;
         }
     }
-    names.is_empty()
-        || names
+    !names.is_empty()
+        && names
             .iter()
             .any(|p| !crate::loopcheck::is_documentation_path(p))
 }
 
-fn git_origin_url(cwd: &Path) -> Option<String> {
+pub(crate) fn git_origin_url(cwd: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(cwd)
@@ -1070,4 +1096,150 @@ fn bound_manifest_reading(matched_path: &str) -> Value {
         }
     }
     reading
+}
+
+#[cfg(test)]
+mod shape_review_coverage_tests {
+    use super::*;
+
+    /// The row shape the producer writes: one reviewed verdict whose
+    /// freshness and chain membership the shaper re-derives from.
+    fn row(
+        freshness: &str,
+        reviewed_sha: &str,
+        tiling: Option<(bool, Vec<&str>)>,
+        spent: Option<bool>,
+    ) -> Value {
+        let mut data = json!({
+            "pr": 1,
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": reviewed_sha,
+            "verdicts": [{
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": reviewed_sha,
+                "freshness": freshness,
+                "scope": "attested_branch",
+            }],
+        });
+        if let Some((tiled, chain)) = tiling {
+            data["range_tiling"] = json!({
+                "tiled": tiled,
+                "gaps": if tiled { json!([]) } else { json!(["c1..c3"]) },
+                "dropped": [],
+                "chain_heads": chain,
+            });
+        }
+        if let Some(spent) = spent {
+            data["rounds_exhausted"] = json!(spent);
+        }
+        data
+    }
+
+    #[test]
+    fn stale_verdict_inside_the_tiled_chain_stays_covered() {
+        let shaped = shape_review_coverage(
+            &row("stale", "c3", Some((true, vec!["c3"])), None),
+            None,
+            false,
+        );
+        assert_eq!(shaped["coverage"], "covered");
+        assert_eq!(shaped["review_state"], "reviewed");
+        assert_eq!(shaped["reviewed_count"], 1);
+    }
+
+    #[test]
+    fn stale_verdict_without_tiling_reads_uncovered() {
+        let shaped = shape_review_coverage(&row("stale", "c3", None, None), None, false);
+        assert_eq!(shaped["coverage"], "uncovered");
+        assert_eq!(shaped["review_state"], "unreviewed");
+    }
+
+    #[test]
+    fn verdict_outside_the_chain_is_not_rescued() {
+        let shaped = shape_review_coverage(
+            &row("stale", "c3", Some((true, vec!["c9"])), None),
+            None,
+            false,
+        );
+        assert_eq!(shaped["coverage"], "uncovered");
+    }
+
+    #[test]
+    fn spent_row_keeps_the_producers_covered_word_and_names_it_reviewed() {
+        let shaped = shape_review_coverage(&row("stale", "c3", None, Some(true)), None, false);
+        assert_eq!(shaped["coverage"], "covered");
+        assert_eq!(shaped["review_state"], "reviewed");
+    }
+
+    #[test]
+    fn the_same_row_unspent_reads_uncovered() {
+        let shaped = shape_review_coverage(&row("stale", "c3", None, Some(false)), None, false);
+        assert_eq!(shaped["coverage"], "uncovered");
+        assert_eq!(shaped["review_state"], "unreviewed");
+        assert_eq!(shaped["reviewed_count"], 1);
+    }
+
+    #[test]
+    fn malformed_verdict_names_no_state() {
+        let mut data = row("stale", "c3", None, Some(true));
+        data["verdicts"] = json!([{"producer": "local_attestation", "verdict": "junk"}]);
+        let shaped = shape_review_coverage(&data, None, false);
+        assert!(shaped.get("review_state").is_none());
+    }
+
+    #[test]
+    fn fresh_verdict_counts_without_any_chain() {
+        let shaped = shape_review_coverage(&row("fresh", "head", None, None), None, false);
+        assert_eq!(shaped["coverage"], "covered");
+    }
+
+    #[test]
+    fn malformed_tiling_reads_an_empty_chain() {
+        assert!(tiling_chain(&json!({"range_tiling": {"tiled": "yes"}})).is_empty());
+        assert!(tiling_chain(&json!({"range_tiling": null})).is_empty());
+        assert!(
+            tiling_chain(&json!({"range_tiling": {"tiled": true, "chain_heads": "c1"}})).is_empty()
+        );
+        assert_eq!(
+            tiling_chain(&json!({
+                "range_tiling": {"tiled": true, "chain_heads": ["c1", 7, null, ""]}
+            })),
+            vec!["c1".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod overtaken_ts_tests {
+    use super::*;
+
+    #[test]
+    fn an_unparseable_timestamp_still_overtakes_by_string_compare() {
+        // The Python pin this port carried: a malformed line fails quiet
+        // and the lexical order decides, so "zzz" is after "aaa" whatever
+        // the parse says - and a lexically earlier garbage ts does not
+        // overtake.
+        assert!(ts_after("zzz", "aaa", None));
+        assert!(!ts_after("aaa", "zzz", None));
+    }
+
+    #[test]
+    fn parsed_timestamps_compare_by_instant_not_string() {
+        // Both sides parseable: the instant wins, so 09:00 on the 2nd
+        // sorts after 23:00 on the 1st even though the string sorts first.
+        let base = crate::event_store::parse_rfc3339_ms("2026-10-01T23:00:00Z");
+        assert!(ts_after(
+            "2026-10-02T09:00:00Z",
+            "2026-10-01T23:00:00Z",
+            base
+        ));
+        assert!(!ts_after(
+            "2026-10-01T10:00:00Z",
+            "2026-10-01T23:00:00Z",
+            base
+        ));
+    }
 }

@@ -148,6 +148,10 @@ mod budget;
 mod ci_checks;
 mod coverage;
 mod coverage_classify;
+pub(crate) mod coverage_gate;
+// The verdict rides the pub `Probes::coverage_verdict` surface, so external
+// Probes implementors must be able to name its types.
+pub use coverage_gate::{GateState, GateVerdict};
 pub(crate) mod coverage_status;
 mod findings;
 mod fire_history;

@@ -977,7 +977,6 @@ K6	cli/tests/unit/test_config_post_merge.py	py	18
 K6	cli/tests/unit/test_config_post_merge_activity.py	py	2
 K6	cli/tests/unit/test_config_review.py	py	70
 K6	cli/tests/unit/test_config_reviewers.py	py	28
-K6	cli/tests/unit/test_coverage_gate.py	py	4
 K6	cli/tests/unit/test_decisions_in_db.py	py	1
 K6	cli/tests/unit/test_difficulty_coverage_grid_input.py	py	9
 K6	cli/tests/unit/test_event_global_mirror.py	py	7

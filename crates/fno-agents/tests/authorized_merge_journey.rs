@@ -107,9 +107,21 @@ impl Probes for FakeGitHub {
     fn fno_shell(
         &self,
         _cwd: &Path,
-        _args: &[String],
+        args: &[String],
     ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
-        Ok((Some(0), Vec::new(), Vec::new()))
+        // The plan-fidelity probe is the one fno-shell ask the merge decision
+        // still shells; answer it clear so the coverage gate is the only arm
+        // under test.
+        let _ = args;
+        Ok((Some(0), br#"{"refused": false}"#.to_vec(), Vec::new()))
+    }
+    fn coverage_verdict(&self, _cwd: &Path, _pr: u64) -> fno_agents::loopcheck::GateVerdict {
+        fno_agents::loopcheck::GateVerdict {
+            state: fno_agents::loopcheck::GateState::Covered,
+            refusal: String::new(),
+            covered_head: self.head.borrow().clone(),
+            note: String::new(),
+        }
     }
     fn covered_head(&self, _cwd: &Path) -> Option<String> {
         Some(self.head.borrow().clone())

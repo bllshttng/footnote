@@ -20,7 +20,7 @@ set -euo pipefail
 FNO_BIN="${FNO:-fno}"
 OWNER_NODE="x-aaaa"
 CAUSE="vented at the round cap; the vent is deleted"
-SURFACE="cli/src/fno/pr/_coverage_gate.py"
+SURFACE="crates/fno-agents/src/loopcheck/coverage_gate.rs"
 TITLE_PREFIX="review finding filed at round cap:"
 APPLY=0
 [[ "${1:-}" == "--apply" ]] && APPLY=1

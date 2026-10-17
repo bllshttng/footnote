@@ -125,9 +125,8 @@ pub fn disposition_blockers(
 /// followed by a max() would have under-counted (law d-608344c1: a round is
 /// keyed by head). Scoped exactly like
 /// the tiling and disposition scans: branch match, with the legacy
-/// exact-head admission. Pure: scans its inputs, no IO. The Python
-/// gate-side mirror is `rounds_since_last_pass` in `_coverage_gate.py`; the
-/// two are held equal by the shared corpus.
+/// exact-head admission. Pure: scans its inputs, no IO. The shared
+/// coverage_gate corpus pins the counting.
 pub fn rounds_since_last_pass(
     events_text: &str,
     head_branch: &str,

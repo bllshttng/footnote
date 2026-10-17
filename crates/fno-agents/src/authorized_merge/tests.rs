@@ -30,7 +30,8 @@ struct Fake {
     optional_unresolved: Option<Option<i64>>,
     /// Rerun-recovery answer for the PR under decision.
     rerun_recovered: Option<bool>,
-    /// The coverage verb's exit for the PR under decision; None reads 0.
+    /// The coverage verdict's exit for the PR under decision, armed into
+    /// `coverage_verdict`; None reads 0.
     coverage_exit: Option<i32>,
     /// The plan-fidelity gate's verdict for a test-armable refusal.
     plan_fidelity_refused: bool,
@@ -409,23 +410,37 @@ impl Probes for Fake {
                 Vec::new(),
             ));
         }
+        // The only other fno-shell ask in these tests is the plan-fidelity
+        // probe: the verdict answer reads `refused` from the test arm.
         let covered = if self.plan_fidelity_refused {
             br#"{"refused": true, "reason": "test"}"#.to_vec()
         } else {
             br#"{"refused": false}"#.to_vec()
         };
-        // The coverage ask is the `do pr coverage-check` shell; any other
-        // fno-shell call is a fidelity ask in these tests.
-        let is_coverage = args.len() >= 3 && args[2] == "coverage-check";
-        Ok((
-            if is_coverage {
-                self.coverage_exit.or(Some(0))
-            } else {
-                Some(0)
-            },
-            if is_coverage { Vec::new() } else { covered },
-            Vec::new(),
-        ))
+        Ok((Some(0), covered, Vec::new()))
+    }
+
+    fn coverage_verdict(
+        &self,
+        _cwd: &Path,
+        _pr: u64,
+    ) -> crate::loopcheck::coverage_gate::GateVerdict {
+        use crate::loopcheck::coverage_gate::{GateState, GateVerdict};
+        let (state, refusal, note) = match self.coverage_exit {
+            None | Some(0) => (GateState::Covered, "", ""),
+            Some(3) => (
+                GateState::Refused,
+                "no review coverage row at this head",
+                "",
+            ),
+            _ => (GateState::Unanswered, "", "coverage read unavailable"),
+        };
+        GateVerdict {
+            state,
+            refusal: refusal.to_string(),
+            covered_head: String::new(),
+            note: note.to_string(),
+        }
     }
 }
 

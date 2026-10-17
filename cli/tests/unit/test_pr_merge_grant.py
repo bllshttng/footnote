@@ -105,32 +105,16 @@ def test_unreachable_resolver_reads_unknown(monkeypatch, tmp_path):
 def _stub_merge_world(monkeypatch, tmp_path):
     """The `enabled` fixture's hermetic stubs from test_pr_merge, narrowed to
     what the durable-arm cases need: gh present, no lane holds, coverage
-    covered. Merge-behaviour beyond the authority arm is owned there."""
+    covered (the verdict door answers covered below). Merge-behaviour beyond
+    the authority arm is owned there."""
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: (
-            {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1},
-            "",
-        ),
-    )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
-    monkeypatch.setattr(
-        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
-    )
-    monkeypatch.setattr(
-        "fno.pr._reviews._override_label_actor", lambda pr, repo, r: (False, None)
-    )
-    monkeypatch.setattr(
-        "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
-    )
     from fno.rust_binary import VerbUnavailable
 
     def _fake(verb, payload, **kw):
+        if verb == ["review-coverage", "op"] and payload.get("op") == "verdict":
+            return {"state": 0, "refusal": "", "covered_head": "", "note": "", "line": ""}
         if payload.get("op") == "status-rerun":
             return {"recovered": False, "failed": []}
         raise VerbUnavailable("door op unavailable in tests")
@@ -224,15 +208,9 @@ def test_manifest_arm_ignores_the_durable_receipt(tmp_path, monkeypatch, capsys)
     # between the posture read and the owner are other nodes' and are stubbed
     # to their clear answers here. Base lineage probes inside the Rust
     # authorized-merge, which `_authorized` replaces wholesale below.
-    from fno.pr import _coverage_gate
 
     monkeypatch.setattr(
         _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x", "abc123", "OPEN")
-    )
-    monkeypatch.setattr(
-        _coverage_gate,
-        "coverage_verdict",
-        lambda pr, repo, recompute=False: (_coverage_gate.COVERED, "", "abc123", ""),
     )
 
     seen: dict = {}

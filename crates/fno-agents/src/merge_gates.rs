@@ -7,107 +7,50 @@
 use crate::authorized_merge::{
     node_carries_tag, pr_bound_entry, Blocker, PrFacts, ProbeOutcome, Probes, MAIN_REPAIR_TAG,
 };
+use crate::loopcheck::coverage_gate::{refusal_line, GateState};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// `fno do pr coverage-check <n> --recompute`'s exit contract (the verb's
-/// own help text is the source of truth).
-pub(crate) const COVERAGE_CLEAR: i32 = 0;
-pub(crate) const COVERAGE_UNCOVERED: i32 = 3;
-pub(crate) const COVERAGE_IMPOSSIBLE: i32 = 5;
-
-/// The coverage gate, exit-code polarity kept. The verb runs the operator
-/// waiver overlay inside itself: a waived PR exits 0 here, and the verb
-/// prints its `override: ` note on stdout, so the waiver travels with the
-/// gate's answer instead of a caller re-deriving it.
+/// The coverage gate, polarity kept. The native verdict is the one
+/// computation: it applies the operator waiver overlay inside itself, so a
+/// waived PR reads Covered with the `override: ` note, and the waiver
+/// travels with the gate's answer instead of a caller re-deriving it.
 /// Returns (blocker, waiver).
 pub(crate) fn coverage_gate<P: Probes>(
     probes: &P,
     cwd: &Path,
     pr: u64,
 ) -> (Option<Blocker>, Option<String>) {
-    let args = vec![
-        "do".to_string(),
-        "pr".to_string(),
-        "coverage-check".to_string(),
-        pr.to_string(),
-        "--recompute".to_string(),
-    ];
-    match probes.fno_shell(cwd, &args) {
-        Ok((Some(code), stdout, stderr)) => {
-            let detail = {
-                let err = String::from_utf8_lossy(&stderr).trim().to_string();
-                if err.is_empty() {
-                    String::from_utf8_lossy(&stdout).trim().to_string()
-                } else {
-                    err
-                }
-            };
-            match code {
-                COVERAGE_CLEAR => {
-                    let line = String::from_utf8_lossy(&stdout).trim().to_string();
-                    // The prefix literal matches Python's OVERRIDE_NOTE_PREFIX.
-                    let waiver = line.strip_prefix("override: ").map(str::to_string);
-                    (None, waiver)
-                }
-                COVERAGE_UNCOVERED => (
-                    Some(Blocker::held(
-                        "review_coverage_uncovered",
-                        if detail.is_empty() {
-                            "unreviewed merge refused".to_string()
-                        } else {
-                            format!("unreviewed merge refused: {detail}")
-                        },
-                    )),
-                    None,
-                ),
-                COVERAGE_IMPOSSIBLE => (
-                    Some(Blocker::held(
-                        "review_coverage_impossible",
-                        if detail.is_empty() {
-                            "review coverage impossible at this head".to_string()
-                        } else {
-                            format!("unreviewed merge refused: {detail}")
-                        },
-                    )),
-                    None,
-                ),
-                other => (
-                    Some(Blocker::unknown(
-                        "review_coverage_unknown",
-                        if detail.is_empty() {
-                            format!("coverage probe failed, merge refused (exit {other})")
-                        } else {
-                            format!("coverage probe failed, merge refused: {detail}")
-                        },
-                    )),
-                    None,
-                ),
-            }
+    let v = probes.coverage_verdict(cwd, pr);
+    match v.state {
+        GateState::Covered => {
+            // The prefix literal matches Python's OVERRIDE_NOTE_PREFIX.
+            (None, v.note.strip_prefix("override: ").map(str::to_string))
         }
-        Ok((None, stdout, stderr)) => {
-            let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+        GateState::Refused => {
+            let line = refusal_line(&v.refusal, &v.note);
             (
-                Some(Blocker::unknown(
-                    "review_coverage_unknown",
-                    if detail.is_empty() {
-                        format!(
-                            "coverage probe failed, merge refused: {}",
-                            String::from_utf8_lossy(&stdout).trim()
-                        )
+                Some(Blocker::held(
+                    "review_coverage_uncovered",
+                    if line.is_empty() {
+                        "unreviewed merge refused".to_string()
                     } else {
-                        format!("coverage probe failed, merge refused: {detail}")
+                        format!("unreviewed merge refused: {line}")
                     },
                 )),
                 None,
             )
         }
-        Err(error) => (
+        GateState::Unanswered => (
             Some(Blocker::unknown(
                 "review_coverage_unknown",
-                format!("coverage probe failed, merge refused: {error}"),
+                if v.note.is_empty() {
+                    "coverage probe failed, merge refused".to_string()
+                } else {
+                    format!("coverage probe failed, merge refused: {}", v.note)
+                },
             )),
             None,
         ),

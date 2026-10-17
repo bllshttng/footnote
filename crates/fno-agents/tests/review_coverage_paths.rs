@@ -61,12 +61,13 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
         ),
         (
             "fno do pr merge <n>",
-            "recompute-once in _review_coverage_for_pr",
+            "recompute-once in the native merge gate: authorized-merge reads the \
+             verdict with recompute on",
             ProducerReach::Reachable,
         ),
         (
             "fno do pr status <n>",
-            "read through the shared recompute helper",
+            "the Rust status composer reads the row through the shared reader",
             ProducerReach::Reachable,
         ),
         (
@@ -373,8 +374,7 @@ fn new_reader_sites_must_join_the_table() {
             continue;
         }
         let text = fs::read_to_string(entry.path()).unwrap();
-        if text.contains("review_coverage_for_gate")
-            || text.contains("review_coverage_for_head(")
+        if text.contains("review_coverage_for_head(")
             // The no-recompute surface reads the row and its pinned-input note
             // in one scan. A separate needle, not a paren-less prefix: the
             // parens are what keep a prose mention out of the reader table.
@@ -387,24 +387,16 @@ fn new_reader_sites_must_join_the_table() {
             reader_files.push(name);
         }
     }
-    // _reviews.py owns the reader itself; _merge.py and _status.py are the
-    // gate rows. Anything else reading the event is a NEW path: it must join
-    // the table here (and get a producer or a safe-direction reason).
+    // _reviews.py owns the last Python reader surface (the sidecar log and
+    // graph reads). The gates are native: the merge decision reads the
+    // verdict in process (merge_gates::coverage_gate) and the coverage-check
+    // verb forwards to the native operand, so this scan sweeps Python only
+    // for NEW readers. Anything else reading the event is a NEW path: it
+    // must join the table here (and get a producer or a safe-direction
+    // reason).
     for name in &reader_files {
         let known = match name.as_str() {
             "_reviews.py" => true, // the shared reader/helper itself
-            // The merge guard's predicate, lifted out of `run_merge` unchanged so
-            // `fno do pr merge` and `fno do pr coverage-check` ask it through one copy.
-            // Whitelisted for the same reason `_reviews.py` is: it is the shared
-            // body, not a new path. Unlike `_reviews.py`, its row is enforced:
-            // exact equality, so no renamed or split sibling row satisfies the arm.
-            "_coverage_gate.py" => table_names.iter().any(|n| {
-                *n == "fno do pr coverage-check <n> without --recompute (and the git-protection hook through it)"
-            }),
-            "_merge.py" => table_names.iter().any(|n| *n == "fno do pr merge <n>"),
-            // _status.py was deleted by the pr-status port; its status read
-            // is the Rust composer's now (pr_status/reviews.rs), which this
-            // scan does not sweep.
             _ => false,
         };
         assert!(
@@ -412,30 +404,6 @@ fn new_reader_sites_must_join_the_table() {
             "{name} reads review_coverage but has no row in the x-3a3f path table"
         );
     }
-    assert!(
-        reader_files.contains(&"_merge.py".to_string())
-            && reader_files.contains(&"_coverage_gate.py".to_string()),
-        "a gate row stopped reading coverage"
-    );
-
-    // And the gates route through the recompute: both files name the shared
-    // helper, which is the only path to the verb. The status row passed
-    // `recompute=review_lane` (not a bare True); that reader is the Rust
-    // composer's now (pr_status/reviews.rs), so only merge's Python row is
-    // pinned here.
-    for (file, needle) in [("_merge.py", "review_coverage_for_gate")] {
-        let text = fs::read_to_string(pr_dir.join(file)).unwrap();
-        assert!(
-            text.contains(needle),
-            "{file} stopped routing through the shared recompute helper"
-        );
-    }
-    // The helper itself fires the verb - the producer's one Python doorway.
-    let reviews = fs::read_to_string(pr_dir.join("_reviews.py")).unwrap();
-    assert!(
-        reviews.contains("\"review-coverage\""),
-        "the recompute helper no longer invokes the review-coverage verb"
-    );
 
     let adapter = fs::read_to_string(pr_dir.join("_internal_gh.py")).unwrap();
     assert!(
@@ -449,19 +417,9 @@ fn new_reader_sites_must_join_the_table() {
         finalize.contains("fno-gh-coverage") && finalize.contains("bot_verdict"),
         "finalize fallback stopped consuming the shared normalized evidence and predicate"
     );
-    // _status.py was deleted by the pr-status port; its reviewer-refused
-    // consumption is the Rust composer's now.
-    for consumer in ["_merge.py"] {
-        let source = fs::read_to_string(pr_dir.join(consumer)).unwrap();
-        assert!(
-            source.contains("reviewer_refused"),
-            "{consumer} does not consume the aggregate reviewer-refused state"
-        );
-        assert!(
-            !source.contains("usage limits for code reviews"),
-            "{consumer} grew a second body classifier instead of consuming review_state"
-        );
-    }
+    // The reviewer-refused consumption is the Rust composer's (the merge
+    // verdict and the status surface both read the aggregate), so no Python
+    // file is pinned to it here.
 }
 
 /// Row-to-path: a row may not name a path that does not exist. The other two
@@ -533,28 +491,19 @@ fn make_script_publishes_an_immediately_executable_script() {
     );
 }
 
-/// The operator-law waiver surface is ONE law on both sides: the same
+/// The operator-law waiver surface is ONE law with ONE reader now: the same
 /// standing subject, the same canonical CLI query, the same affirmative
 /// decision value, and only the `current_law.status` verdict as the deciding
-/// shape. Either side renaming its seam alone fails here, which is the drift
-/// the dual-gate shape risks.
+/// shape. The gate the seam served retired with its port, so the pin guards
+/// the one remaining reader against growing a second spelling.
 #[test]
-fn operator_waiver_law_surface_is_pinned_across_both_gates() {
+fn operator_waiver_law_surface_is_pinned() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .ancestors()
-        .nth(2)
-        .expect("crate sits at <repo>/crates/fno-agents");
     let rust = loopcheck_source(manifest_dir);
-    let python = fs::read_to_string(repo_root.join("cli/src/fno/pr/_coverage_gate.py")).unwrap();
-    // One standing subject, spelled identically on both sides.
+    // One standing subject.
     assert!(
         rust.contains("const STANDING_WAIVER_SUBJECT: &str = \"review-coverage-waiver\""),
-        "the Rust standing subject moved"
-    );
-    assert!(
-        python.contains("STANDING_WAIVER_SUBJECT = \"review-coverage-waiver\""),
-        "the Python standing subject moved"
+        "the standing subject moved"
     );
     // The Rust probe shells the canonical CLI query - lane law, live only -
     // never reading the index file.
@@ -572,16 +521,6 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         rust.contains("== WAIVER_DECISION => LawStatus::Single"),
         "the Rust reader stopped checking the row's decision value"
     );
-    assert!(
-        python.contains("WAIVER_DECISION = \"review coverage waived for this head\""),
-        "the Python affirmative waiver value moved"
-    );
-    assert!(
-        python.contains("\"mode\": \"decisions\"")
-            && python.contains("\"--lane\", \"law\"")
-            && python.contains("\"--state\", \"live\""),
-        "the Python gate grew a second law reader"
-    );
     // Only operator authority counts as waiver evidence: a chat_attested row
     // cannot carry the person-at-a-terminal fact a waiver asserts, and the
     // law door is open to any harness-descended process. Both gates filter
@@ -594,9 +533,5 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
     assert!(
         rust.contains("r.get(\"authority_source\").and_then(|a| a.as_str()) == Some(\"operator\")"),
         "the Rust reader stopped filtering waiver rows to operator authority"
-    );
-    assert!(
-        python.contains("row.get(\"authority_source\") or \"\") == \"operator\""),
-        "the Python gate stopped filtering waiver rows to operator authority"
     );
 }

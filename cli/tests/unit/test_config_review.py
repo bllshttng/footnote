@@ -684,62 +684,6 @@ def test_github_approval_registry_row_documents_the_key() -> None:
     assert "review.github_approval_satisfies" in FIELD_META
 
 
-def _verdict(name: str, author_approval: bool | None) -> dict:
-    row = {
-        "producer": "github_app",
-        "name": name,
-        "verdict": "reviewed",
-        "human_approval": True,
-        "reviewed_sha": "h1",
-        "freshness": "fresh",
-    }
-    if author_approval is not None:
-        row["author_approval"] = author_approval
-    return row
-
-
-def test_ac6_hp_non_author_approval_derives_reviewed() -> None:
-    """bob's approval on alice's PR, flag on: the state derivation counts it."""
-    from fno.pr._reviews import _derive_review_state
-
-    assert (
-        _derive_review_state("covered", [_verdict("bob", False)], set(), True) == "reviewed"
-    )
-
-
-def test_ac6_err_author_approval_is_never_counted() -> None:
-    """alice approving her own PR stays recorded and never derives reviewed,
-    so a run where no approval was collected at all cannot pass this either."""
-    from fno.pr._reviews import _derive_review_state
-
-    assert (
-        _derive_review_state("covered", [_verdict("alice", True)], set(), True)
-        == "unreviewed"
-    )
-
-
-def test_ac6_edge_flag_off_keeps_todays_exclusion() -> None:
-    """Flag off: bob is still on the verdict list (recorded) and still
-    excluded from the count - exactly today's behavior."""
-    from fno.pr._reviews import _derive_review_state
-
-    assert (
-        _derive_review_state("covered", [_verdict("bob", False)], set(), False)
-        == "unreviewed"
-    )
-
-
-def test_ac6_pre_field_row_stays_excluded_even_with_flag_on() -> None:
-    """A verdict serialized before author_approval existed carries no marker;
-    the absent marker reads as the exclude side (fail-closed), flag or not."""
-    from fno.pr._reviews import _derive_review_state
-
-    assert (
-        _derive_review_state("covered", [_verdict("bob", None)], set(), True)
-        == "unreviewed"
-    )
-
-
 # --- AC7: the round budget config ---
 
 

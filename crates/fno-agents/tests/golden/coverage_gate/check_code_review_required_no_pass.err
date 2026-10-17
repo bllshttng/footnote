@@ -1,0 +1,1 @@
+required code-review has no head-pinned local pass attestation; run the harness review verb at HEAD - `<hint>`, then emit the code-review attestation

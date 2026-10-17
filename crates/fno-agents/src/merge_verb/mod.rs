@@ -1078,10 +1078,12 @@ fn do_merge(
         // "flake override accepted: <checks>" stderr note.
     }
 
-    // Server-visible receipt of the verdict the gate acted on. Staged port:
-    // only the head resolution survives here (the same verb hop the captured
-    // goldens record); the gh status write itself lands with the follow-ups
-    // stage, so a resolvable head publishes nothing at this stage.
+    // Server-visible receipt of the verdict the gate acted on, posted to the
+    // head GitHub names for the PR. The head resolution stays the staged verb
+    // hop the captured goldens record - the fold parity reads it - and the
+    // POST rides the in-process publisher. Best-effort: the durable verdict
+    // is the event row, and a failed POST leaves the status absent, which the
+    // ruleset reads as not-passing.
     let publish_head = match verb_call(
         "authorized-merge",
         &json!({"op": "pr-head", "pr": pr, "cwd": repo.to_string_lossy()}),
@@ -1094,10 +1096,20 @@ fn do_merge(
             .to_string(),
         Err(_) => String::new(),
     };
-    if publish_head.is_empty() {
+    let (posted, note) = if publish_head.is_empty() {
+        (false, "no PR head to publish a status on".to_string())
+    } else {
+        match u64::try_from(pr) {
+            Ok(pr_u64) => {
+                crate::loopcheck::coverage_gate::publish::publish(repo, pr_u64, Some(&publish_head))
+            }
+            Err(_) => (false, format!("pr number {pr} is not a u64")),
+        }
+    };
+    if !posted {
         flow.lines.push((
             true,
-            "pr-merge: coverage status not posted: no PR head to publish a status on\n".into(),
+            format!("pr-merge: coverage status not posted: {note}\n"),
         ));
     }
 

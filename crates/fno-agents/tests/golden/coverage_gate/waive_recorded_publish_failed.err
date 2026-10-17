@@ -1,0 +1,1 @@
+coverage-waive: status publish failed (fno/review-coverage: boom; fno/review-coverage-unavailable: stub gh: no answer for shape api (call 7)); the waiver is recorded and the next publisher run will post it.

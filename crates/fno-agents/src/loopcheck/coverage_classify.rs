@@ -496,8 +496,8 @@ pub fn classify_coverage_tiled(
     // it. `config.review.max_rounds = 2` means "this PR gets two rounds, then
     // review is DONE" - a budget you spend, not a bar you clear.
     //
-    // This is the mirror of the same discharge in `_coverage_gate`, and it has
-    // to live at the coverage decision rather than at any one consumer: this
+    // The discharge lives at the coverage decision rather than at any one
+    // consumer: this
     // value feeds the published fno/review-coverage status, the stop-hook
     // receipt, and the emitted row alike. Fixing only the merge verb left the
     // status red and the hook still asking for another round, which is what

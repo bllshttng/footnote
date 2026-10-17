@@ -1666,10 +1666,11 @@ def _auto_merge_review_gap(
     Doctor already prints the armed half (the silent-switch lines) and stays
     silent on lanes. The combination is the defect: armed with a lane is
     operator policy, armed with zero lanes merges unreviewed code and nothing
-    says so. The verdict comes from ``_review_lane_configured`` itself, asked
-    about a hypothetical code payload - a doctor-side recount of its lane
-    logic would be the same bug one level up, the reason the predicate already
-    mirrors loopcheck.rs. The pairing reads the two layers the merge path
+    says so. The verdict comes from the native lane door (``review-coverage
+    op`` with ``op: lane``) asked about a hypothetical code payload - a
+    doctor-side recount of its lane logic would be the same bug one level up,
+    the reason the predicate already mirrors loopcheck.rs. The pairing reads
+    the two layers the merge path
     reads: repo-resolved ``auto_merge.enabled`` (``_load_auto_merge``) and the
     INVOKING project's repo-resolved review config (the same cwd-to-toplevel
     resolution ``fno do pr status`` uses), never the fno source checkout. A
@@ -1693,10 +1694,17 @@ def _auto_merge_review_gap(
         # the lanes that matter are the invoking repo's, and an install with
         # no source checkout at all (plugin, PyPI) is exactly the install
         # this check protects - a source-rooted read no-ops there.
-        from fno.pr._merge import _repo_state_dir, _review_lane_configured
+        from fno.pr._merge import _repo_state_dir
 
         root = Path(_repo_state_dir(os.getcwd())).parent
-        if _review_lane_configured(str(root), code_payload=True):
+        from fno.rust_binary import verb_call
+
+        lane = verb_call(
+            ["review-coverage", "op"],
+            {"op": "lane", "cwd": str(root), "code_payload": True},
+            timeout=30,
+        ).get("lane")
+        if lane:
             return None
         from fno.config import load_settings_for_repo
 
@@ -3678,7 +3686,7 @@ def _stale_dead_letters(
             meta = getattr(m, "meta", None) or {}
             if meta.get("owner") or _a2a_handle_re().match(to):
                 recips.add(to)
-    except Exception:  # noqa: BLE001 — a torn bus contributes no findings
+    except Exception:  # noqa: BLE001 - a torn bus contributes no findings
         return []
 
     # Positive drain marker (W1.1): a message whose id has an agent_mail_drained

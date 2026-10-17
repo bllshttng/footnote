@@ -16,6 +16,21 @@ use super::*;
 /// `unknown` unless a pass attested at this exact head makes it known;
 /// 2 = bad arguments. stdout is one JSON object.
 pub fn run_review_coverage(args: &[String]) -> i32 {
+    // The gate operands share the verb: `review-coverage check|publish|waive|op
+    // ...`. The bare spelling stays the row producer. The name-list router (not
+    // "first positional = operand") keeps `review-coverage <pr>` falling through
+    // to the producer's "--cwd is required" contract instead of parsing a PR
+    // number as an operand name.
+    let stripped: &[String] = if args.first().map(|s| s.as_str()) == Some("review-coverage") {
+        &args[1..]
+    } else {
+        args
+    };
+    if let Some(first) = stripped.first() {
+        if matches!(first.as_str(), "check" | "publish" | "waive" | "op") {
+            return super::coverage_gate::run_operand(stripped);
+        }
+    }
     let (code, json) = decide_review_coverage(args);
     if code != 0 {
         if let Ok(payload) = serde_json::from_str::<Value>(&json) {

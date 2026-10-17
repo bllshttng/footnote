@@ -22,7 +22,7 @@ from fno.pr.cli import pr_app
         ),
         ("base-lineage-check", ["42"], "fno.pr.cli._forward_to_binary"),
         ("merge-result-check", ["42"], "fno.pr.cli._forward_to_binary"),
-        ("coverage-check", ["42"], "fno.pr._coverage_gate.run_coverage_check"),
+        ("coverage-check", ["42"], "fno.pr.cli._forward_to_binary"),
         ("status", ["42"], "fno.pr.cli._forward_to_binary"),
     ],
 )

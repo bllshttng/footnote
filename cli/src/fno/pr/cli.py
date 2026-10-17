@@ -227,16 +227,12 @@ def coverage_publish(
         None, "--repo", help="Directory whose git remote names the repository."
     ),
 ) -> None:
-    from fno.pr import _reviews
-
-    posted, note = _reviews.publish_coverage_status(pr_number, head, cwd=repo, repo=repo)
-    typer.echo(
-        json.dumps(
-            {"pr": pr_number, "posted": posted, "note": note},
-            separators=(",", ":"),
-        )
-    )
-    raise typer.Exit(code=0 if posted else 1)
+    args = [str(pr_number)]
+    if head:
+        args += ["--head", head]
+    if repo:
+        args += ["--cwd", repo]
+    _forward_to_binary("review-coverage", ["publish", *args])
 
 
 @pr_app.command(
@@ -459,9 +455,7 @@ def merge_result_check(pr_number: int = typer.Argument(..., help="GitHub PR numb
         "The merge guard's coverage predicate, for callers that cannot import "
         "it (the stdlib-only git-protection hook shells this verb on a bare "
         "gh pr merge). Exit 0 covered, 3 uncovered (the guard's refusal on "
-        "stderr), 4 unanswered (a named instrument failure), 5 impossible "
-        "(round budget spent with blocking findings non-terminal; the "
-        "refusal names the remedies that can still clear it)."
+        "stderr), 4 unanswered (a named instrument failure)."
     ),
 )
 def coverage_check(
@@ -469,12 +463,13 @@ def coverage_check(
     recompute: bool = typer.Option(
         False,
         "--recompute",
-        help="Fire the Rust producer once when no row describes this head.",
+        help="Recompute once when no row describes this head.",
     ),
 ) -> None:
-    from fno.pr import _coverage_gate
-
-    raise typer.Exit(code=_coverage_gate.run_coverage_check(pr_number, recompute=recompute))
+    args = [str(pr_number)]
+    if recompute:
+        args.append("--recompute")
+    _forward_to_binary("review-coverage", ["check", *args])
 
 
 @pr_app.command(
@@ -498,9 +493,9 @@ def coverage_waive(
         help="Why coverage is waived for this exact head (required, recorded).",
     ),
 ) -> None:
-    from fno.pr import _coverage_gate
-
-    raise typer.Exit(code=_coverage_gate.run_coverage_waive(pr_number, reason))
+    _forward_to_binary(
+        "review-coverage", ["waive", str(pr_number), "--reason", reason]
+    )
 
 
 def _parse_flags(flags_json: Optional[str]) -> Optional[List[str]]:

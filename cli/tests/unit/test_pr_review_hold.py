@@ -607,33 +607,58 @@ def _spent_chain(last_head: str) -> list[dict]:
     ]
 
 
+def _door_answer_from_chain(chain: list) -> dict:
+    """The chain op door's answer shape, built from a chain fixture: rounds
+    since the last pass (a declared round wins), the last row's verdict
+    facts, budget pinned at 2."""
+    rounds = 0
+    for row in chain:
+        declared = row.get("review_round")
+        rounds = declared if declared else rounds + 1
+    last = None
+    if chain:
+        row = chain[-1]
+        blocking = sum(
+            1
+            for f in (row.get("findings") or [])
+            if isinstance(f, dict) and f.get("blocking") is True
+        )
+        last = {
+            "head_sha": row.get("head_sha", ""),
+            "reviewed_base_sha": row.get("reviewed_base_sha", ""),
+            "blocking": blocking,
+            "findings_truncated": row.get("findings_truncated") is True,
+        }
+    return {"rounds_used": rounds, "max_rounds": 2, "last": last}
+
+
 @pytest.fixture()
 def spent_gate(monkeypatch):
     """Point the gate's chain read at a fixture and pin the budget at 2."""
 
     def install(chain: list[dict]) -> None:
-        import fno.pr._coverage_gate as gate
-
-        monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
-        monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+        monkeypatch.setattr(
+            _review_hold, "_chain_read",
+            lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+        )
 
     return install
 
 
 def test_fresh_budget_does_not_refuse(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain("b" * 40)[:1])
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(_spent_chain("b" * 40)[:1]),
+    )
     assert _review_hold.review_invocation_refusal("feature/x", "b" * 40, cwd=str(tmp_path)) == ""
 
 
 def test_spent_cap_refuses_a_new_round_at_the_same_head(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
     last = "b" * 40
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(_spent_chain(last)),
+    )
     refusal = _review_hold.review_invocation_refusal("feature/x", last, cwd=str(tmp_path))
     assert "the configured round cap is spent" in refusal
     assert "merge on green CI" in refusal
@@ -641,32 +666,32 @@ def test_spent_cap_refuses_a_new_round_at_the_same_head(monkeypatch, tmp_path: P
 
 
 def test_verify_fixes_flag_passes_at_the_cap(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
     last = "b" * 40
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(_spent_chain(last)),
+    )
     flags = ["--verify-fixes"]
     assert _review_hold.review_invocation_refusal("feature/x", last, flags=flags, cwd=str(tmp_path)) == ""
 
 
 def test_rebase_delta_over_the_budget_passes_at_the_cap(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
     last = "b" * 40
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(_spent_chain(last)),
+    )
     monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: 250)
     moved = "c" * 40
     assert _review_hold.review_invocation_refusal("feature/x", moved, cwd=str(tmp_path)) == ""
 
 
 def test_rebase_delta_under_the_budget_still_refuses(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
     last = "b" * 40
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(_spent_chain(last)),
+    )
     # A one-line fix commit moved the head: that is a round by any honest
     # reading, and a sub-budget interdiff must not mint a free one.
     monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: 6)
@@ -677,11 +702,11 @@ def test_rebase_delta_under_the_budget_still_refuses(monkeypatch, tmp_path: Path
 
 
 def test_unmeasurable_interdiff_fails_open(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
     last = "b" * 40
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(_spent_chain(last)),
+    )
     # The gate blocks policy, not git problems: an unreadable measure must
     # never wedge the review lane shut.
     monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: None)
@@ -697,29 +722,32 @@ def _fail_event(head: str, base: str) -> dict:
 
 def test_verify_round_names_the_round_behind_the_fix(monkeypatch, tmp_path: Path) -> None:
     """One fail at head A, fix moved to head B: the verify pass verifies round 1."""
-    import fno.pr._coverage_gate as gate
-
     chain = [_fail_event("a" * 40, "b" * 40)]
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     assert _review_hold.scoped_verify_round("feature/x", "c" * 40, cwd=str(tmp_path)) == 1
 
 
 def test_verify_round_is_floored_at_one_on_an_empty_chain(monkeypatch, tmp_path: Path) -> None:
     """A verify with no round behind it still names a round: a declared row can
     never read the chain down to zero."""
-    import fno.pr._coverage_gate as gate
-
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [])
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain([]),
+    )
     assert _review_hold.scoped_verify_round("feature/x", "a" * 40, cwd=str(tmp_path)) == 1
 
 
 def test_verify_round_follows_a_declared_round(monkeypatch, tmp_path: Path) -> None:
-    import fno.pr._coverage_gate as gate
-
     second = _fail_event("b" * 40, "c" * 40)
     second["review_round"] = 2
     chain = [_fail_event("a" * 40, "b" * 40), second]
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     assert _review_hold.scoped_verify_round("feature/x", "d" * 40, cwd=str(tmp_path)) == 2
 
 
@@ -728,12 +756,14 @@ def _round_runner(monkeypatch, tmp_path: Path, chain: list[dict]):
     from typer.testing import CliRunner
 
     from fno.pr import pr_app
-    import fno.pr._coverage_gate as gate
     import fno.pr._reviews as reviews
 
     journal = tmp_path / "events.jsonl"
     journal.write_text("")
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     monkeypatch.setattr(
         reviews, "_coverage_logs", lambda cwd=None, project_events=None: (journal, None, None)
     )
@@ -751,13 +781,15 @@ def test_round_action_prints_the_integer(monkeypatch, tmp_path: Path) -> None:
 
 def test_round_action_fails_closed_with_no_journal(monkeypatch, tmp_path: Path) -> None:
     """No readable events journal: print nothing, exit non-zero, stamp nothing."""
-    import fno.pr._coverage_gate as gate
     import fno.pr._reviews as reviews
     from typer.testing import CliRunner
 
     from fno.pr import pr_app
 
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [])
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain([]),
+    )
     monkeypatch.setattr(
         reviews,
         "_coverage_logs",
@@ -794,10 +826,11 @@ def _fail_event_with_finding(head: str, base: str) -> dict:
 def test_advisory_names_the_flag_when_the_head_moved_past_blockers(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import fno.pr._coverage_gate as gate
-
     chain = [_fail_event_with_finding("a" * 40, "b" * 40)]
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     adv = _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path))
     assert "--verify-fixes" in adv
     assert "1 blocking finding" in adv
@@ -807,20 +840,22 @@ def test_advisory_names_the_flag_when_the_head_moved_past_blockers(
 def test_advisory_stays_silent_when_the_head_is_unchanged(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import fno.pr._coverage_gate as gate
-
     chain = [_fail_event_with_finding("a" * 40, "b" * 40)]
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     assert _review_hold.verify_fixes_advisory("feature/x", "a" * 40, cwd=str(tmp_path)) == ""
 
 
 def test_advisory_stays_silent_without_blocking_findings(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import fno.pr._coverage_gate as gate
-
     chain = [_fail_event("a" * 40, "b" * 40)]
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     assert _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path)) == ""
 
 
@@ -829,11 +864,12 @@ def test_advisory_names_truncated_blockers_without_a_count(
 ) -> None:
     """A shed findings array hides the blockers it carried: the advisory says
     so instead of going silent on exactly the row a driver most needs."""
-    import fno.pr._coverage_gate as gate
-
     event = _fail_event("a" * 40, "b" * 40)
     event["findings_truncated"] = True
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [event])
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain([event]),
+    )
     adv = _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path))
     assert "--verify-fixes" in adv
     assert "could not carry" in adv
@@ -844,14 +880,15 @@ def test_acquire_below_the_cap_advises_and_still_acquires(
 ) -> None:
     """AC6: the acquire prints the advisory naming --verify-fixes and what it
     costs, then acquires anyway. The advisory never classifies the pass."""
-    import fno.pr._coverage_gate as gate
     from typer.testing import CliRunner
 
     from fno.pr import pr_app
 
     chain = [_fail_event_with_finding("a" * 40, "b" * 40)]
-    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
-    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(
+        _review_hold, "_chain_read",
+        lambda branch, head, cwd=None: _door_answer_from_chain(chain),
+    )
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     r = CliRunner().invoke(
         pr_app,

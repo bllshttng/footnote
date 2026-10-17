@@ -393,13 +393,19 @@ pub trait Probes {
     /// Run `gh` with these arguments. `Ok((success, combined_output))`.
     fn run_gh(&self, cwd: &Path, args: &[String]) -> Result<(bool, String), String>;
     /// Shell the `fno` CLI for a gate probe: `Ok((exit_code, stdout, stderr))`,
-    /// None code = signal death. The coverage and fidelity gates ride this, so
-    /// Fake-based tests answer the gates without a network.
+    /// None code = signal death. The fidelity gate rides this, so Fake-based
+    /// tests answer the gate without a network.
     fn fno_shell(
         &self,
         cwd: &Path,
         args: &[String],
     ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String>;
+    /// The review-coverage verdict for one PR, answered in process. The merge
+    /// gate reads the verdict instead of shelling the coverage-check verb: one
+    /// computation now serves the verb, the publisher and the merge, and a
+    /// fake answers it directly so tests need no network.
+    fn coverage_verdict(&self, cwd: &Path, pr: u64)
+        -> crate::loopcheck::coverage_gate::GateVerdict;
     /// Live parallel-lane claims. The default 0 keeps the overlap gate
     /// disarmed wherever an impl does not count lanes (the sequential default).
     fn live_lanes(&self, _cwd: &Path) -> usize {
@@ -1604,6 +1610,14 @@ impl RealProbes {
 impl Probes for RealProbes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String> {
         head_probe::read(cwd, pr)
+    }
+
+    fn coverage_verdict(
+        &self,
+        cwd: &Path,
+        pr: u64,
+    ) -> crate::loopcheck::coverage_gate::GateVerdict {
+        crate::loopcheck::coverage_gate::verdict(self, cwd, pr, true)
     }
 
     fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {

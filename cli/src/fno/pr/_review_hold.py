@@ -213,6 +213,25 @@ def _interdiff_lines(cwd: str, base: str, old_sha: str, new_sha: str) -> Optiona
     return sum(abs(c) for c in counts.values())
 
 
+def _chain_read(
+    branch: str, head: str, cwd: Optional[str] = None
+) -> Optional[dict]:
+    """The attestation-chain read the three round-cap surfaces share, through
+    the native chain op door. ``None`` when the door cannot answer: the
+    refusal path reads it as "no refusal" (round 1), the advisory path as no
+    advisory, fail-open the way an advisory instrument owes."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        return verb_call(
+            ["review-coverage", "op"],
+            {"op": "chain", "branch": branch, "head": head, "cwd": cwd or os.getcwd()},
+            timeout=30,
+        )
+    except VerbUnavailable:
+        return None
+
+
 def review_invocation_refusal(
     branch: str, head: str, flags: Optional[list[str]] = None, cwd: Optional[str] = None
 ) -> str:
@@ -220,19 +239,20 @@ def review_invocation_refusal(
     both the law's own: ``--verify-fixes`` is a scoped fix-verification (not a
     round) and a rebase delta at or over ``review.carry_interdiff_lines``; an
     unmeasurable interdiff fails open."""
-    from fno.pr._coverage_gate import attestation_chain, resolved_max_rounds, rounds_since_last_pass
-
     where = cwd or os.getcwd()
-    chain = attestation_chain(where, head_branch=branch, head=head)
-    rounds_used = rounds_since_last_pass(chain)
-    max_rounds = resolved_max_rounds(where)
+    answer = _chain_read(branch, head, cwd)
+    if answer is None:
+        return ""
+    rounds_used = answer.get("rounds_used") or 0
+    max_rounds = answer.get("max_rounds") or 0
     if rounds_used < max_rounds:
         return ""
     if flags and VERIFY_FIXES_FLAG in flags:
         return ""
-    last_head = chain[-1].get("head_sha", "") if chain else ""
+    last = answer.get("last") or {}
+    last_head = last.get("head_sha", "")
     if last_head and head and last_head != head:
-        base = chain[-1].get("reviewed_base_sha", "")
+        base = last.get("reviewed_base_sha", "")
         if base:
             carry = 100
             with suppress(Exception):
@@ -256,10 +276,8 @@ def scoped_verify_round(branch: str, head: str, cwd: Optional[str] = None) -> in
     Floored at 1: a verify with no round behind it still names a round, so a
     declared row can never read the chain down to zero.
     """
-    from fno.pr._coverage_gate import attestation_chain, rounds_since_last_pass
-
-    where = cwd or os.getcwd()
-    return max(1, rounds_since_last_pass(attestation_chain(where, head_branch=branch, head=head)))
+    answer = _chain_read(branch, head, cwd)
+    return max(1, (answer or {}).get("rounds_used") or 0)
 
 
 def verify_fixes_advisory(branch: str, head: str, cwd: Optional[str] = None) -> str:
@@ -269,21 +287,14 @@ def verify_fixes_advisory(branch: str, head: str, cwd: Optional[str] = None) -> 
     and never classifies the pass, because a fresh hunting round after a fix
     looks identical from here and silently counting it as a verify would
     under-spend a cap the operator set."""
-    from fno.pr._coverage_gate import attestation_chain
-
-    where = cwd or os.getcwd()
-    chain = attestation_chain(where, head_branch=branch, head=head)
-    if not chain:
+    answer = _chain_read(branch, head, cwd)
+    if not answer:
         return ""
-    last = chain[-1]
+    last = answer.get("last") or {}
     last_head = last.get("head_sha") or ""
     if not last_head or last_head == head:
         return ""
-    blocking = sum(
-        1
-        for f in (last.get("findings") or [])
-        if isinstance(f, dict) and f.get("blocking") is True
-    )
+    blocking = last.get("blocking") or 0
     if blocking > 0:
         detail = f"raised {blocking} blocking finding(s)"
     elif last.get("findings_truncated") is True:

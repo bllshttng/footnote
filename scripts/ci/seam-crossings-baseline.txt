@@ -56,6 +56,8 @@ crossing	crates/fno-agents/src/loopcheck.rs	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/loopcheck.rs	let fno_bin = std::ffi::OsString::from(loopcheck_fno_bin());
 crossing	crates/fno-agents/src/loopcheck.rs	&loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck/args.rs	let mut fno_bin = super::loopcheck_fno_bin();
+crossing	crates/fno-agents/src/loopcheck/coverage_gate.rs	let fno_bin = loopcheck_fno_bin();
+crossing	crates/fno-agents/src/loopcheck/coverage_gate/waive.rs	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/loopcheck/review_coverage_verb.rs	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/machine_load.rs	let bin = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/machine_mail.rs	let mut command = Command::new(crate::scrape::fno_bin());

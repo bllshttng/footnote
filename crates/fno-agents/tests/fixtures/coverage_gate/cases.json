@@ -1,0 +1,590 @@
+[
+  {
+    "label": "check no lane",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "gh": {"api-1": {"json": []}}
+  },
+  {
+    "label": "check covered at head",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}}
+  },
+  {
+    "label": "check override label non author",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {
+      "view-1": {"json": {"labels": [{"name": "coverage-override"}]}},
+      "view-jq-1": {"stdout": "true\n"},
+      "api-jq-1": {"stdout": "maintainer\n"},
+      "api-1": {"json": {"number": 7, "user": {"login": "pr-author"}, "head": {"sha": "__HEAD_SHA__", "ref": "feature/x"}, "base": {"ref": "main"}, "state": "open"}}
+    }
+  },
+  {
+    "label": "check override label by author",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "gh": {
+      "view-1": {"json": {"labels": [{"name": "coverage-override"}]}},
+      "view-jq-1": {"stdout": "true\n"},
+      "view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}},
+      "api-jq-1": {"stdout": "pr-author\n"},
+      "api-1": {"json": {"number": 7, "user": {"login": "pr-author"}, "head": {"sha": "__HEAD_SHA__", "ref": "feature/x"}, "base": {"ref": "main"}, "state": "open"}},
+      "api-2": {"json": []}
+    }
+  },
+  {
+    "label": "check override label actor unreadable",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "gh": {
+      "view-1": {"json": {"labels": [{"name": "coverage-override"}]}},
+      "view-jq-1": {"stdout": "true\n"},
+      "view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}},
+      "api-jq-1": {"stdout": ""},
+      "api-1": {"json": []}
+    }
+  },
+  {
+    "label": "check no row",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check stale head",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 2, "review_state": "reviewed", "head_sha": "1111111111111111111111111111111111111111", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check reviewer refused",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 1, "review_state": "reviewer_refused", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "claude", "verdict": "refused"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check reviewer absent and stale",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 1, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [{"name": "code-review"}], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}, {"name": "code-review", "verdict": "stale"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check code review required no pass",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"reviewers": ["code-review"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check blocking finding open",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"], "max_rounds": 2},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "1111111111111111111111111111111111111111", "verdict": "fail", "review_round": 1, "findings": [{"finding_key": "F1", "verdict": "confirmed", "category": "correctness", "has_required_fields": true, "blocking": true}, {"finding_key": "F2", "verdict": "unconfirmed", "category": "style", "has_required_fields": true, "blocking": false}], "findings_truncated": false, "dispositions": []}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check findings truncated",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"], "max_rounds": 2},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "1111111111111111111111111111111111111111", "verdict": "fail", "review_round": 1, "findings": [], "findings_truncated": true, "dispositions": []}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check posture unsatisfied",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}], "review_posture": {"posture": "standard", "rank": 2, "posture_satisfied": false, "posture_gaps": ["no human review"]}}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}}
+  },
+  {
+    "label": "check posture unknown recompute",
+    "entry": "check",
+    "pr": 7,
+    "recompute": true,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [],
+    "answers": {
+      "review-coverage": {"exit": 0, "json": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}, "events_row": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}], "ts": "2026-10-13T00:07:00Z"}},
+      "pr-head": {"json": {"head": "__HEAD_SHA__"}},
+      "review-level": {"json": {"invocation": "fno do review --level medium --reviewer code-review"}}
+    },
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}}
+  },
+  {
+    "label": "check stale verdict waiver guidance",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 1, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [{"name": "code-review"}], "verdicts": [{"name": "code-review", "verdict": "stale"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check head fetch failed",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [],
+    "answers": {"pr-head": {"json": {"head": null}}}
+  },
+  {
+    "label": "check standing waiver",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"law": {"review-coverage-waiver": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check head pinned waiver",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"law": {"review-coverage-waiver:acme/widget#7@__HEAD_SHA__": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "check standing waiver hard finding",
+    "entry": "check",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "1111111111111111111111111111111111111111", "verdict": "fail", "review_round": 1, "findings": [{"finding_key": "H1", "verdict": "confirmed", "category": "security", "has_required_fields": true, "blocking": true}], "findings_truncated": false, "dispositions": []}}
+    ],
+    "front": {"law": {"review-coverage-waiver": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict cwd not a directory",
+    "entry": "verdict",
+    "pr": 7,
+    "cwd": "/nonexistent-fno-coverage-gate-cwd",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]}
+  },
+  {
+    "label": "verdict no lane",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "gh": {"api-1": {"json": []}}
+  },
+  {
+    "label": "verdict covered at head",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}}
+  },
+  {
+    "label": "verdict budget discharged at cap",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"], "max_rounds": 2},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 2, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}], "rounds_used": 2, "rounds_exhausted": true}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}}
+  },
+  {
+    "label": "verdict override label non author",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {
+      "view-1": {"json": {"labels": [{"name": "coverage-override"}]}},
+      "view-jq-1": {"stdout": "true\n"},
+      "api-jq-1": {"stdout": "maintainer\n"},
+      "api-1": {"json": {"number": 7, "user": {"login": "maintainer"}, "head": {"sha": "__HEAD_SHA__", "ref": "feature/x"}, "base": {"ref": "main"}, "state": "open"}}
+    }
+  },
+  {
+    "label": "verdict override label by author",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "gh": {
+      "view-1": {"json": {"labels": [{"name": "coverage-override"}]}},
+      "view-jq-1": {"stdout": "true\n"},
+      "view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}},
+      "api-jq-1": {"stdout": "pr-author\n"},
+      "api-1": {"json": {"number": 7, "user": {"login": "pr-author"}, "head": {"sha": "__HEAD_SHA__", "ref": "feature/x"}, "base": {"ref": "main"}, "state": "open"}},
+      "api-2": {"json": []}
+    }
+  },
+  {
+    "label": "verdict no row",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict stale head",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 2, "review_state": "reviewed", "head_sha": "1111111111111111111111111111111111111111", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict reviewer refused",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 1, "review_state": "reviewer_refused", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "claude", "verdict": "refused"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict blocking finding open",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"], "max_rounds": 2},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "1111111111111111111111111111111111111111", "verdict": "fail", "review_round": 1, "findings": [{"finding_key": "F1", "verdict": "confirmed", "category": "correctness", "has_required_fields": true, "blocking": true}], "findings_truncated": false, "dispositions": []}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict posture unsatisfied",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}], "review_posture": {"posture": "standard", "rank": 2, "posture_satisfied": false, "posture_gaps": ["no human review"]}}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}}
+  },
+  {
+    "label": "verdict head fetch failed",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [],
+    "answers": {"pr-head": {"json": {"head": null}}}
+  },
+  {
+    "label": "verdict standing waiver",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"law": {"review-coverage-waiver": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict head pinned waiver",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"law": {"review-coverage-waiver:acme/widget#7@__HEAD_SHA__": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict standing waiver hard finding",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "1111111111111111111111111111111111111111", "verdict": "fail", "review_round": 1, "findings": [{"finding_key": "H1", "verdict": "confirmed", "category": "security", "has_required_fields": true, "blocking": true}], "findings_truncated": false, "dispositions": []}}
+    ],
+    "front": {"law": {"review-coverage-waiver": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "verdict rounds two axes",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"], "max_rounds": 2},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "2222222222222222222222222222222222222222", "reviewed_base_sha": "3333333333333333333333333333333333333333", "verdict": "fail", "findings": [{"finding_key": "F1", "verdict": "confirmed", "category": "correctness", "has_required_fields": true, "blocking": true}], "findings_truncated": false, "dispositions": []}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": [{"state": "CHANGES_REQUESTED", "commit": {"oid": "4444444444444444444444444444444444444444"}}]}}
+  },
+  {
+    "label": "verdict waiver authority unknown",
+    "entry": "verdict",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"law": {"default": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}, {"decision": "do not waive", "authority_source": "operator"}], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}}
+  },
+  {
+    "label": "publish covered",
+    "entry": "publish",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 2, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"exit": 0}, "api-2": {"exit": 0}}
+  },
+  {
+    "label": "publish refused",
+    "entry": "publish",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}, "api-2": {"exit": 0}, "api-3": {"exit": 0}}
+  },
+  {
+    "label": "publish unanswered",
+    "entry": "publish",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"exit": 1, "stderr": "refs read failed"}, "api-1": {"exit": 0}, "api-2": {"exit": 0}}
+  },
+  {
+    "label": "publish no lane",
+    "entry": "publish",
+    "pr": 7,
+    "origin": true,
+    "gh": {"api-1": {"json": []}, "api-2": {"exit": 0}, "api-3": {"exit": 0}}
+  },
+  {
+    "label": "publish post fails",
+    "entry": "publish",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 2, "review_state": "reviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "reviewed", "producer": "github_app", "freshness": "fresh"}]}}
+    ],
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"exit": 1, "stderr": "boom"}, "api-2": {"exit": 1, "stderr": "boom"}, "api-3": {"exit": 1, "stderr": "boom"}, "api-4": {"exit": 1, "stderr": "boom"}, "api-5": {"exit": 1, "stderr": "boom"}, "api-6": {"exit": 1, "stderr": "boom"}}
+  },
+  {
+    "label": "publish no head",
+    "entry": "publish",
+    "pr": 7,
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [],
+    "answers": {"pr-head": {"json": {"head": null}}}
+  },
+  {
+    "label": "waive empty reason",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "   ",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]}
+  },
+  {
+    "label": "waive slug unreadable",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "operator ruled",
+    "origin": false,
+    "review": {"required_bots": ["chatgpt-codex-connector"]}
+  },
+  {
+    "label": "waive head not hex",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "operator ruled",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "answers": {"pr-head": {"json": {"head": "shortsha"}}}
+  },
+  {
+    "label": "waive decide refused",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "operator ruled",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "front": {"decide": {"exit": 3, "stderr": "provenance refused: not an attended operator terminal"}}
+  },
+  {
+    "label": "waive decide failed",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "operator ruled",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "front": {"decide": {"exit": 1, "stderr": "disk full"}}
+  },
+  {
+    "label": "waive recorded",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "operator ruled",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"decide": {"exit": 0}, "law": {"review-coverage-waiver:acme/widget#7@__HEAD_SHA__": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}, "api-2": {"exit": 0}, "api-3": {"exit": 0}}
+  },
+  {
+    "label": "waive recorded publish failed",
+    "entry": "waive",
+    "pr": 7,
+    "reason": "operator ruled",
+    "origin": true,
+    "review": {"required_bots": ["chatgpt-codex-connector"]},
+    "events": [
+      {"type": "review_coverage", "ts": "2026-10-13T00:05:00Z", "data": {"pr": 7, "coverage": "uncovered", "reviewed_count": 0, "review_state": "unreviewed", "head_sha": "__HEAD_SHA__", "stale_verdicts": [], "verdicts": [{"name": "chatgpt-codex-connector", "verdict": "absent"}]}}
+    ],
+    "front": {"decide": {"exit": 0}, "law": {"review-coverage-waiver:acme/widget#7@__HEAD_SHA__": {"json": {"decisions": [{"decision": "review coverage waived for this head", "authority_source": "operator"}], "damaged": 0}}, "default": {"json": {"decisions": [], "damaged": 0}}}},
+    "gh": {"view-2": {"json": {"baseRefName": "main", "headRefName": "feature/x"}}, "api-1": {"json": []}, "api-2": {"exit": 1, "stderr": "boom"}, "api-3": {"exit": 1, "stderr": "boom"}, "api-4": {"exit": 1, "stderr": "boom"}, "api-5": {"exit": 1, "stderr": "boom"}, "api-6": {"exit": 1, "stderr": "boom"}}
+  },
+  {
+    "label": "chain empty",
+    "entry": "chain",
+    "pr": 7,
+    "branch": "feature/x",
+    "head": "__HEAD_SHA__",
+    "origin": true,
+    "review": {"max_rounds": 2},
+    "events": []
+  },
+  {
+    "label": "chain two rounds",
+    "entry": "chain",
+    "pr": 7,
+    "branch": "feature/x",
+    "head": "__HEAD_SHA__",
+    "origin": true,
+    "review": {"max_rounds": 2},
+    "events": [
+      {"type": "review_attestation", "ts": "2026-10-13T00:04:00Z", "data": {"branch": "feature/x", "head_sha": "2222222222222222222222222222222222222222", "reviewed_base_sha": "3333333333333333333333333333333333333333", "verdict": "pass", "review_round": 1, "findings": [], "findings_truncated": false, "dispositions": []}},
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "2222222222222222222222222222222222222222", "verdict": "pass", "review_round": 2, "findings": [], "findings_truncated": false, "dispositions": []}}
+    ]
+  },
+  {
+    "label": "chain blocking tail",
+    "entry": "chain",
+    "pr": 7,
+    "branch": "feature/x",
+    "head": "__HEAD_SHA__",
+    "origin": true,
+    "review": {"max_rounds": 2},
+    "events": [
+      {"type": "review_attestation", "ts": "2026-10-13T00:06:00Z", "data": {"branch": "feature/x", "head_sha": "__HEAD_SHA__", "reviewed_base_sha": "1111111111111111111111111111111111111111", "verdict": "fail", "review_round": 1, "findings": [{"finding_key": "F1", "verdict": "confirmed", "category": "correctness", "has_required_fields": true, "blocking": true}, {"finding_key": "F2", "verdict": "unconfirmed", "category": "style", "has_required_fields": true, "blocking": false}], "findings_truncated": false, "dispositions": []}}
+    ]
+  }
+]

@@ -39,10 +39,9 @@ import sys
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import Callable, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import run
-from fno.pr._rest import fetch_pr_file_paths_rest
 
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
@@ -233,38 +232,8 @@ def _read_state_field(state_file: str, field: str) -> str:
     return ""
 
 
-def _review_coverage_for_pr(
-    pr_number: int, repo: str, head: Optional[str] = None
-) -> "tuple[Optional[dict], str]":
-    """The ``review_coverage`` event data for ``pr_number``, recomputed once
-    when there is no usable row, or ``(None, note)``.
-
-    loop-check emits one every gate eval ; a session with no manifest
-    never does, which made the gate unsatisfiable for that shape - so a missing
-    or head-mismatched row now fires the standalone producer once.
-    Python still consumes the event rather than recomputing coverage itself
-    (Ownership: Rust computes, Python reads). Any failure degrades to the
-    original row (or None) plus a note naming the recompute's outcome, which
-    the caller treats as Unknown and refuses - never a pass.
-    """
-    try:
-        from fno.pr._reviews import review_coverage_for_gate
-    except Exception:  # noqa: BLE001 - events module unavailable -> Unknown
-        return None, ""
-    try:
-        return review_coverage_for_gate(pr_number, repo, head)
-    except Exception:  # noqa: BLE001 - corrupt log -> Unknown, not a crash
-        return None, ""
 
 
-def _coverage_sources(repo: str) -> list[str]:
-    """The events logs a coverage read consults, for the refusal text."""
-    try:
-        from fno.pr._reviews import coverage_sources
-
-        return coverage_sources(repo)
-    except Exception:  # noqa: BLE001 - naming the location is best-effort
-        return []
 
 
 def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
@@ -282,8 +251,8 @@ def _pr_head_ref_and_oid(
 ) -> Optional[Tuple[str, str, str]]:
     """``(branch, head_sha, state)`` for a PR, or None when the read failed.
 
-    One REST request answers all three. Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr
-    view``, which bills the per-user GraphQL quota every watcher on the machine
+    One REST request answers all three, and never through ``gh pr view``,
+    which bills the per-user GraphQL quota every watcher on the machine
     shares. The state rides along because it is already in the payload, and the
     in-flight guard needs it to exempt a terminal PR. ``runner`` is injectable
     so the acquire verb, which runs inside a PreToolUse hook, can bound the
@@ -301,133 +270,6 @@ def _pr_head_ref_and_oid(
     return branch, sha, str(info.get("state") or "").upper()
 
 
-def _coverage_refused_reason(
-    cov: Optional[dict],
-    head: Optional[str] = None,
-    sources: Optional[list[str]] = None,
-    self_review_hint: Optional[str] = None,
-) -> str:
-    """Why a coverage guard refused, for the blocked receipt line.
-
-    Names the CAUSE and the next action, not just the count. A refusal that
-    reports a bare number leaves the reader to explain it, and the nearest
-    exclusion-flavoured vocabulary in this repo is ``attestation_origin``, which
-    gates nothing - two workers escalated green PRs to the operator on that
-    inference while actually looking at a head that had moved.
-
-    ``head`` is the PR's observed head, passed only when the caller fetched it.
-    Its absence is why the staleness branch cannot fire on an unobserved head:
-    without it the reason falls back to the count, and the caller only refuses
-    on a *confirmed* mismatch, so ``0 reviewed`` stays true wherever it prints.
-
-    ``self_review_hint`` is the sized invocation from
-    ``render_self_review_invocation``; None keeps the levelless line, so
-    direct-call tests and a broken render read identically to a build without
-    the hint.
-    """
-    if cov is None:
-        # Name WHERE it looked, not just that it found nothing. The absence is
-        # the one refusal a reader cannot diagnose from a count, and two workers
-        # read the bare count as a policy problem and set about designing around
-        # a gate that was already green somewhere else.
-        where = f" (searched: {', '.join(sources)})" if sources else ""
-        return f"no review_coverage event for this PR{where}"
-    cov_word = str(cov.get("coverage"))
-    # `uncovered` is a real known zero - the exact case that used to
-    # serialize as `covered` with `reviewed_count: 0`. It has to reach the
-    # naming branches below: short-circuiting on it here would send every
-    # zero-coverage refusal - the most common one there is - back to the bare
-    # word this function exists to replace. Only `unknown` (and anything a
-    # future producer invents) stops here.
-    if cov_word not in ("covered", "uncovered"):
-        return f"coverage {cov_word}"
-    # Say the word once when it is not the legacy `covered`, then let the
-    # actionable half of the message stand unchanged.
-    prefix = f"coverage {cov_word}: " if cov_word != "covered" else ""
-    ev_head = cov.get("head_sha")
-    if head and ev_head and head != ev_head:
-        # Pre-branch-field attestations (scope legacy_head_match) admitted on
-        # exact head equality die the moment the head moves: the scoping scan
-        # in local_latest_passes skips an unbranchable line rather than emit a
-        # verdict it cannot attribute, so no row a recompute just built
-        # carries one. A targeted "unscoped attestation at <sha>" branch here
-        # could fire only on a degraded recompute that returned a PRE-move row
-        # still holding such a verdict - an instrument-failure corner on a
-        # transitional cohort - while implying the producer names a shape it
-        # no longer emits. The generic line prescribes the same action, and
-        # for the legacy cohort it is also the honest story: the pass cannot
-        # be scoped to this PR, so re-run the verb at HEAD.
-        suffix = f" - `{self_review_hint}`" if self_review_hint else ""
-        return (
-            f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
-            "attestations are head-pinned by design - re-run the review verb at HEAD"
-            f"{suffix}"
-        )
-    # Same rule as the Rust receipt, and this time the sameness is correct: the
-    # rule no longer depends on which gate prints it. Never prescribe the local
-    # verb while a reviewer is outstanding (it may be REQUIRED, and this gate
-    # reads coverage alone, so nothing downstream catches a self-attest past
-    # one), and never leave a bare wait either (an optional App that is never
-    # installed sits absent forever). Name who, and point at the move that is
-    # safe whichever they are.
-    raw = cov.get("verdicts")
-    verdicts = raw if isinstance(raw, list) else []
-    refused = [
-        str(v.get("name") or "")
-        for v in verdicts
-        if isinstance(v, dict) and v.get("verdict") == "refused" and v.get("name")
-    ]
-    if cov.get("review_state") == "reviewer_refused":
-        who = ", ".join(refused) or "configured reviewer"
-        suffix = f" - `{self_review_hint}`" if self_review_hint else ""
-        return (
-            prefix
-            + f"reviewer-refused: {who} declined to review; run the review verb at HEAD"
-            + suffix
-        )
-    absent = [
-        str(v.get("name") or "")
-        for v in verdicts
-        if isinstance(v, dict) and v.get("verdict") == "absent" and v.get("name")
-    ]
-    # A reviewer that read an OLDER commit is not absent and not refused, and
-    # "run the review verb at HEAD" is the wrong instruction for it: the move is
-    # a re-read by that reviewer. Naming it is the whole reason a stale verdict
-    # is recorded rather than dropped.
-    stale = [
-        str(v.get("name") or "")
-        for v in verdicts
-        if isinstance(v, dict) and v.get("verdict") == "stale" and v.get("name")
-    ]
-    if absent or stale:
-        waits = []
-        if absent:
-            waits.append(f"waiting on {', '.join(absent)}")
-        if stale:
-            waits.append(
-                f"{', '.join(stale)} reviewed an older commit and must re-read"
-            )
-        return (
-            prefix + f"{_safe_int(cov.get('reviewed_count'))} reviewed "
-            "(no head-pinned pass attestation; "
-            f"{'; '.join(waits)} - if a reviewer there is uninstalled or no "
-            "longer configured, check config.review)"
-        )
-    # Same state, same remedy as the stop gate. `REVIEW_ORDER` in
-    # `crates/fno-agents/src/loopcheck.rs` is the other copy of this sentence.
-    # A worker that meets the merge guard first and the stop gate second must
-    # not be told two different things about how to clear one uncovered head.
-    # The `<reviewer>` argument is part of the command, not decoration: the
-    # emitter's second line is `reviewer="${1:?reviewer name required}"`, so
-    # the bare path exits 1 for anyone who copies it verbatim.
-    return (
-        prefix
-        + f"{_safe_int(cov.get('reviewed_count'))} reviewed "
-        + "(no head-pinned pass attestation - run the review verb at HEAD"
-        + (f" - `{self_review_hint}`" if self_review_hint else "")
-        + " - close every finding, commit and push first, then attest at the "
-        + "final head with `bash skills/review/scripts/emit-attestation.sh <reviewer>`)"
-    )
 
 
 def _safe_int(val, default=0):
@@ -438,11 +280,6 @@ def _safe_int(val, default=0):
         return default
 
 
-def _peer_is_identity_free(entry: Any) -> bool:
-    """A peer counts as a local-attestation lane only if it has no posting identity."""
-    if isinstance(entry, str):
-        return True
-    return isinstance(entry, dict) and not entry.get("identity")
 
 
 def _is_documentation_path(path: str) -> bool:
@@ -472,157 +309,12 @@ _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 _CACHE_BOUND = 256
 
-def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
-    """Whether the PR's diff carries a code payload.
-
-    CODE iff any changed file is not documentation. Fails CLOSED - a missing gh,
-    a failed read, or an unparseable file list all classify as code, so a
-    degraded probe cannot bypass the coverage guard. An empty file list (no diff
-    surfaced) is not code: nothing to review, no gate."""
-    if not shutil.which("gh"):
-        return True
-    key = (repo, pr_number)
-    now = time.monotonic()
-    hit = _PAYLOAD_CACHE.get(key)
-    if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:
-        names = hit[1]
-    else:
-        names, _paths_reason = fetch_pr_file_paths_rest(str(pr_number), repo=repo, runner=run)
-        if names is None or any(not _is_documentation_path(p) for p in names):
-            # Only a CODE answer (or a failed read, which fails closed to
-            # code) memoizes: the cached key is (repo, pr), not the head, so
-            # a cached docs-only answer could suppress the floor for up to
-            # the TTL after new code lands on the PR. A stale code answer
-            # only demands a review that a fresh read would also demand.
-            if len(_PAYLOAD_CACHE) >= _CACHE_BOUND:
-                _PAYLOAD_CACHE.pop(next(iter(_PAYLOAD_CACHE)))
-            _PAYLOAD_CACHE[key] = (now, names)
-    if names is None:
-        return True
-    if not names:
-        return False
-    return any(not _is_documentation_path(p) for p in names)
 
 
-def _review_lane_configured(
-    repo: str, pr_number: int = 0, *, code_payload: bool = False
-) -> bool:
-    """Whether review is required for this PR: a configured lane, OR a code
-    payload on a stock install (the self-review floor).
-
-    Fail-closed (True) on config error: a misread config must not bypass the
-    coverage guard. A stock install with no lane opts out of review UNLESS the
-    payload is code and config.review.self_review_required is on (default), in
-    which case the floor engages so the merge gate agrees with the stop gate.
-
-    Peers form a local lane only via identity-free entries. A shared
-    peer_identity, or a per-peer identity, means the review posts as a GitHub
-    login already matched by the bot sets, not a distinct local lane. This
-    mirrors resolved_local_peer_reviewers_for_author in loopcheck.rs so the
-    merge gate and the loop-check gate agree on whether a lane exists for one
-    PR - otherwise the loop ships DonePRGreen (no lane) while merge refuses as
-    unreviewed (lane), wedging the pipeline on the same config.
-
-    code_payload=True answers a HYPOTHETICAL code payload (no PR to probe, no
-    pr_number): the doctor pair check asks this gate whether auto_merge
-    is armed with zero lanes, instead of a second lane implementation that can
-    drift from this one. The lane logic is untouched, so the loopcheck.rs
-    mirror still holds; the stop gate always has a real PR and never passes it.
-    """
-    # Outside the try on purpose: this is caller misuse, not a degraded read,
-    # and the try's fail-closed True would misread it as "review required".
-    if code_payload and pr_number:
-        raise ValueError(
-            "code_payload=True answers a hypothetical payload; pass it with "
-            "no pr_number, or probe a real PR with code_payload=False"
-        )
-    try:
-        from pathlib import Path
-
-        from fno.config import load_settings_for_repo
-
-        # Resolve the git toplevel first: load_settings_for_repo reads
-        # <arg>/.fno/ with NO upward walk, so a merge invoked from a
-        # subdirectory would see only the global layer, report "no lane", and
-        # short-circuit the coverage guard - letting an unreviewed PR merge.
-        # _repo_state_dir already does rev-parse --show-toplevel with a cwd
-        # fallback, and the manifest and events reads in this file resolve the
-        # root the same way.
-        root = Path(_repo_state_dir(repo)).parent
-        r = load_settings_for_repo(root).review
-        if r.required_bots or r.optional_apps or r.reviewers:
-            return True
-        if r.peer_identity:
-            return False
-        if any(_peer_is_identity_free(p) for p in (r.peers or [])):
-            return True
-        # No configured lane: a code payload still requires review (the
-        # self-review floor), unless the install opted out with
-        # config.review.self_review_required = false. Mirrors the loop-check
-        # floor so a stock install cannot merge a code PR the stop gate
-        # would have demanded review for.
-        if (
-            getattr(r, "self_review_required", True)
-            and (pr_number or code_payload)
-            and (code_payload or _pr_payload_is_code(repo, pr_number))
-        ):
-            return True
-        return False
-    except Exception:
-        return True
 
 
-def _code_review_attestation_required(repo: str, pr_number: int = 0) -> bool:
-    """Whether this PR specifically requires a local ``code-review`` pass.
-
-    Coverage answers whether anyone reviewed; it does not prove that a required
-    local reviewer ran. Keep that second requirement explicit so an unrelated
-    GitHub App review cannot satisfy the self-review gate on a direct merge.
-    """
-    try:
-        from pathlib import Path
-
-        from fno.config import load_settings_for_repo
-
-        root = Path(_repo_state_dir(repo)).parent
-        review = load_settings_for_repo(root).review
-        configured = {
-            str(name).strip().lstrip("/") for name in (review.reviewers or [])
-        }
-        if "code-review" in configured:
-            return True
-        lane_configured = bool(
-            review.required_bots
-            or review.optional_apps
-            or review.reviewers
-            or review.peer_identity
-            or any(_peer_is_identity_free(p) for p in (review.peers or []))
-        )
-        return bool(
-            not lane_configured
-            and getattr(review, "self_review_required", True)
-            and pr_number
-            and _pr_payload_is_code(repo, pr_number)
-        )
-    except Exception:
-        return True
 
 
-def _coverage_has_local_pass(cov: Optional[dict], reviewer: str) -> bool:
-    """Whether coverage carries this head-pinned local reviewer pass."""
-    if not isinstance(cov, dict):
-        return False
-    verdicts = cov.get("verdicts")
-    if not isinstance(verdicts, list):
-        return False
-    target = reviewer.strip().lstrip("/")
-    return any(
-        isinstance(v, dict)
-        and str(v.get("name") or "").strip().lstrip("/") == target
-        and v.get("producer") == "local_attestation"
-        and v.get("verdict") == "reviewed"
-        for v in verdicts
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1536,27 +1228,6 @@ def _merge_lock(pr_number: int) -> Iterator[_MergeLockYield]:
                 pass
 
 
-def _pr_base_head_refs(pr_number: int, cwd: str) -> Optional[Tuple[str, str]]:
-    """(base, head) ref names for a PR, or None on any read miss."""
-    try:
-        view = _gh(
-            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
-        )
-        if not view.ok:
-            return None
-        try:
-            refs = json.loads(view.stdout or "{}")
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(refs, dict):
-            return None
-        base = refs.get("baseRefName")
-        head = refs.get("headRefName")
-        if not base or not head:
-            return None
-        return str(base), str(head)
-    except Exception:  # noqa: BLE001 - callers carry their own miss semantics
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1734,20 +1405,29 @@ def run_merge(
 
     # (2a) Coverage read: the pin and the published receipt. The refusal is
     # decide's now.
-    from fno.pr import _coverage_gate
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
-        pr_number, repo, recompute=True
-    )
-    if note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX):
+    try:
+        gate = verb_call(
+            ["review-coverage", "op"],
+            {"op": "verdict", "pr": int(pr_number), "cwd": repo, "recompute": True},
+            timeout=300,
+        )
+    except VerbUnavailable as exc:
+        gate = {
+            "state": 4,
+            "refusal": "",
+            "covered_head": "",
+            "note": "",
+            "line": f"coverage verdict unavailable: {exc}",
+        }
+    covered_head = gate.get("covered_head") or ""
+    note = gate.get("note") or ""
+    if note.startswith("override: "):
         # A waived merge says so on its own receipt. A covered merge and an
         # overridden one both exit 0, and a receipt that cannot tell them apart
         # is how a 3am override disappears from the record.
-        print(
-            "coverage waived: "
-            + note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :],
-            file=sys.stderr,
-        )
+        print("coverage waived: " + note[len("override: ") :], file=sys.stderr)
 
     # (2b) The flake probe, pinned to covered_head (immutable history at that
     # SHA, and outside the lock so the reads never stretch the merge window).
@@ -1788,7 +1468,6 @@ def run_merge(
             auto_merge,
             repo,
             covered_head,
-            (state, refusal, covered_head, note),
             approved=posture_approved,
             auto_merge_source=posture_source,
             release_lock=release_now,
@@ -1917,7 +1596,6 @@ def _do_merge(
     auto_merge,
     repo: str,
     covered_head: str = "",
-    gate_verdict: Optional[tuple] = None,
     approved: Optional[bool] = None,
     auto_merge_source: str = "",
     release_lock: Optional[Callable[[], None]] = None,
@@ -1972,27 +1650,9 @@ def _do_merge(
             )
         sys.stderr.write(f"flake override accepted: {failed}\n")
 
-    # Server-visible receipt of the verdict the gate acted on, written from the
-    # SAME answer that satisfied the gate here (gate_verdict, threaded down)
-    # rather than a fresh read: the row can change while this merge waits on the
-    # lock, and a receipt that flips to failure on a head the merge then lands
-    # leaves a false-red status on a merge that passed the gate. Best-effort and
-    # reported, never blocking: on the GitHub side a missing status already
-    # reads as not-passing.
-    try:
-        from fno.pr._reviews import publish_coverage_status
-
-        _posted, _note = publish_coverage_status(
-            pr_number,
-            head=covered_head or None,
-            cwd=repo,
-            repo=repo,
-            gate_verdict=gate_verdict,
-        )
-        if not _posted:
-            sys.stderr.write(f"pr-merge: coverage status not posted: {_note}\n")
-    except Exception as exc:  # noqa: BLE001 - a receipt must never block the merge
-        sys.stderr.write(f"pr-merge: coverage status publish failed: {exc}\n")
+    # Server-visible receipt: the native owner posts the verdict's two
+    # statuses itself, in process, right after authorize, so nothing here
+    # re-shells the retired Python publisher.
 
     # The effect re-runs the whole decision, so the window the receipt opened is
     # closed again by the same guards, and the merge stays pinned to the head

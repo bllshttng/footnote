@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from fno.config import AutoMergeBlock
-from fno.pr import _coverage_gate, _merge
+from fno.pr import _merge
 from fno.pr._proc import Result
 from fno.graph.store import read_graph_strict
 
@@ -287,34 +287,10 @@ def enabled(monkeypatch, tmp_path):
     # probe) to a tmp claims root so tests never touch the repo's .fno/claims
     # or contend with a real in-flight merge.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-    # x-0eaf: default to a covered review so existing merge-behavior tests
-    # proceed past the coverage guard. No head_sha -> covered_head is empty, so
-    # the --match-head-commit pin (and the head-pin tests' own verified_head)
-    # are undisturbed; the pin is exercised by its own test below.
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1}, ""),
-    )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
-    # x-129b flipped the unattributable default to fail-closed, so a hermetic
-    # (markerless, manifestless) test env now floors the self-review
-    # attestation. Merge-behavior tests below are not about that gate; tests
-    # that exercise it override this with their own monkeypatch.
-    monkeypatch.setattr(
-        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
-    )
-    # No 3am valve by default. The gate reads the override label on every
-    # verdict, and an unstubbed read is a real `gh pr view` per merge case.
-    monkeypatch.setattr(
-        "fno.pr._reviews._override_label_actor", lambda pr, repo, r: (False, None)
-    )
-    # The merge's server receipt is best-effort; hermetic tests stub the
-    # publisher so no real gh spawn rides along with every merge case.
-    monkeypatch.setattr(
-        "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
-    )
+    # The coverage gate is the native op door now: conftest's hermetic fake
+    # answers it covered with no covered head (the fresh-install no-lane
+    # answer), so merge-behavior tests proceed past the guard and the
+    # --match-head-commit pin stays undisturbed; the pin has its own test.
     # Same hermeticity for the flake hold: no merge case here is about rerun
     # recovery, so the probe is UNAVAILABLE (flake None, hold skipped); the
     # rerun tests override with their own answer.
@@ -327,15 +303,23 @@ def enabled(monkeypatch, tmp_path):
     # authorized-merge door this suite stubs above.
 
 
-def _door_stub(answer):
-    """A verb_call fake answering only the status-rerun ask (None = the
-    probe is unavailable, the fail-open old default); every other ask rides
-    the real transport."""
+def _door_stub(answer, verdict=None):
+    """A verb_call fake answering the status-rerun ask (None = the probe is
+    unavailable, the fail-open old default) and, when `verdict` is given, the
+    native coverage gate's verdict door; every other ask rides the real
+    transport."""
     import fno.rust_binary as rust_binary
 
     real = rust_binary.verb_call
 
     def _fake(verb, payload, unavailable=None, **kw):
+        if (
+            verdict is not None
+            and verb == ["review-coverage", "op"]
+            and isinstance(payload, dict)
+            and payload.get("op") == "verdict"
+        ):
+            return verdict
         if isinstance(payload, dict) and payload.get("op") == "status-rerun":
             if answer is None:
                 raise (unavailable or rust_binary.VerbUnavailable)(
@@ -347,14 +331,9 @@ def _door_stub(answer):
     return _fake
 
 
-_real_lane_configured = _merge._review_lane_configured
-
-
-@pytest.fixture(autouse=True)
-def _real_review_lane(monkeypatch):
-    """These tests exercise the lane predicate itself; restore it over the
-    conftest hermetic default (which suites that merely traverse a merge need)."""
-    monkeypatch.setattr(_merge, "_review_lane_configured", _real_lane_configured)
+def _gate_verdict(head: str) -> dict:
+    """A native gate verdict answer: covered, pinned to `head`."""
+    return {"state": 0, "refusal": "", "covered_head": head, "note": "", "line": ""}
 
 
 @pytest.fixture(autouse=True)
@@ -491,38 +470,6 @@ def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tm
     assert args[0] == "other"
     assert "incarnation-fence" in (kwargs.get("detail") or "")
     assert kwargs.get("pr") == 42
-
-
-def _stub_owner_from_row(monkeypatch, tmp_path):
-    """The refusal is decide's now: ask the real gate for its line against the
-    seeded row and hand it back as the held receipt the verb renders. The
-    conftest's own autouse stub owns the covered default, so a covered row
-    patches nothing."""
-    from fno.pr import _coverage_gate
-
-    state, refusal, _covered, note = _coverage_gate.coverage_verdict(
-        42, str(tmp_path), recompute=True
-    )
-    if state == _coverage_gate.COVERED:
-        return None
-    line = _coverage_gate.refusal_line(refusal, note)
-    # Same sentence the Rust gate composes per exit code, so the render pin
-    # is the wire shape, not a test-local dialect. The gate module answers
-    # three states; its uncovered arm is the unreviewed-refusal sentence.
-    if state == _coverage_gate.UNANSWERED:
-        detail = f"coverage probe failed, merge refused: {line}" if line else (
-            "coverage probe failed, merge refused"
-        )
-    else:
-        detail = f"unreviewed merge refused: {line}" if line else (
-            "unreviewed merge refused"
-        )
-    monkeypatch.setattr(
-        _merge,
-        "_authorized_merge",
-        lambda pr, repo, **kw: {"outcome": "held", "detail": detail},
-    )
-    return detail
 
 
 # ---- rerun-recovery flake hold ----
@@ -958,142 +905,6 @@ def test_held_receipt_names_holder_age_and_wait(monkeypatch, capsys, tmp_path):
     assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
 
 
-def _point_lane_read_at(monkeypatch, **fields):
-    # _review_lane_configured imports load_settings_for_repo at call time, so
-    # patching the module attribute is seen by the local import.
-    from types import SimpleNamespace
-
-    import fno.config as cfg
-
-    review_fields = dict(
-        required_bots=None,
-        optional_apps=None,
-        reviewers=None,
-        peers=[],
-        peer_identity=None,
-    )
-    review_fields.update(fields)
-    review = SimpleNamespace(**review_fields)
-    monkeypatch.setattr(
-        cfg, "load_settings_for_repo", lambda _path: SimpleNamespace(review=review)
-    )
-
-
-@pytest.mark.parametrize(
-    "fields,expected",
-    [
-        # Stock install: no lane, so the coverage guard does not apply.
-        (dict(), False),
-        # peers present but peer_identity set: peers post under the shared
-        # login, not a distinct local lane. Rust agrees (loopcheck.rs:2492).
-        (dict(peers=["codex"], peer_identity="fno-peer-bot"), False),
-        # Every peer carries its own identity: GitHub logins, not a local lane.
-        (dict(peers=[{"provider": "openai", "identity": "codex-bot"}]), False),
-        # An identity-free peer (bare string) is a local-attestation lane.
-        (dict(peers=["codex"]), True),
-        # An identity-free peer (dict without identity) is a local-attestation lane.
-        (dict(peers=[{"provider": "openai"}]), True),
-        # An explicit reviewer lane.
-        (dict(reviewers=["code-review"]), True),
-    ],
-)
-def test_review_lane_configured_matches_loopcheck_gate(
-    monkeypatch, fields, expected, tmp_path
-):
-    _point_lane_read_at(monkeypatch, **fields)
-    assert _merge._review_lane_configured(str(tmp_path)) is expected
-
-
-def test_review_lane_configured_resolves_toplevel_from_a_subdirectory(
-    monkeypatch, tmp_path
-):
-    """A lane declared at the project root is still seen from a subdirectory.
-
-    load_settings_for_repo reads ``<arg>/.fno/`` with NO upward walk, so passing
-    the raw invocation directory made ``fno do pr merge`` run from ``cli/`` report
-    "no lane" - which short-circuits ``covered`` to True and lets an unreviewed
-    PR merge. The guard was decorative on that path.
-
-    The parametrized test above cannot catch this: it monkeypatches
-    load_settings_for_repo, so it pins the predicate while stubbing out the path
-    resolution the bug lives in. This one uses the REAL loader against real
-    files, and isolates the global layer via FNO_GLOBAL_SETTINGS_PATH
-    (``/dev/null`` is the documented disable hook) - without that the
-    developer's own ~/.fno lane leaks in and masks the failure entirely.
-    """
-    import subprocess
-
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
-    repo = tmp_path / "repo"
-    (repo / ".fno").mkdir(parents=True)
-    (repo / "sub").mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    # The lane exists ONLY at the project root.
-    (repo / ".fno" / "config.toml").write_text(
-        '[review]\ngithub_apps = ["chatgpt-codex-connector"]\n'
-    )
-
-    assert _merge._review_lane_configured(str(repo)) is True
-    assert _merge._review_lane_configured(str(repo / "sub")) is True
-
-
-def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
-    """A code payload on a lane-less stock install requires review (the
-    self-review floor), so the merge coverage guard engages for the same PR the
-    stop gate holds. Mirrors floor_self_review in loopcheck.rs."""
-    from fno.harness_identity import HARNESS_SESSION_MARKERS
-
-    for marker, _harness in HARNESS_SESSION_MARKERS:
-        monkeypatch.delenv(marker, raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-test-session")
-    # Stock install: no lane. A code payload + pr_number -> floored to True.
-    _point_lane_read_at(monkeypatch)
-    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
-    assert _merge._review_lane_configured(str(tmp_path), 42) is True
-    # Opt-out: self_review_required=false restores unreviewed code-PR shipping.
-    _point_lane_read_at(monkeypatch, self_review_required=False)
-    assert _merge._review_lane_configured(str(tmp_path), 42) is False
-    # A docs payload -> no floor.
-    _point_lane_read_at(monkeypatch)
-    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: False)
-    assert _merge._review_lane_configured(str(tmp_path), 42) is False
-
-
-def test_review_lane_configured_answers_a_hypothetical_code_payload(
-    monkeypatch, tmp_path
-):
-    """code_payload=True answers the doctor pair check (x-0888): the floor for
-    a payload KNOWN to be code, with no PR to probe and no pr_number. The
-    incident shape (zero lanes + self_review_required=false) must read False so
-    doctor can warn; a verbful harness with the floor on must read True."""
-    from fno.harness_identity import HARNESS_SESSION_MARKERS
-
-    for marker, _harness in HARNESS_SESSION_MARKERS:
-        monkeypatch.delenv(marker, raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-test-session")
-    # Incident shape: no lane, floor opted out -> the gate demands no review.
-    _point_lane_read_at(monkeypatch, self_review_required=False)
-    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is False
-    # Floor on + verbful harness: a code payload is floored with no PR probe.
-    _point_lane_read_at(monkeypatch)
-    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is True
-    # A configured lane answers True regardless of the payload assumption.
-    _point_lane_read_at(monkeypatch, reviewers=["code-review"])
-    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is True
-    # Default off: with no pr_number the floor stays unengaged, as today.
-    _point_lane_read_at(monkeypatch)
-    assert _merge._review_lane_configured(str(tmp_path)) is False
-
-
-def test_review_lane_configured_refuses_pr_number_with_code_payload(tmp_path):
-    """code_payload=True answers a HYPOTHETICAL payload; combined with a real
-    pr_number it would silently skip the payload probe and floor a docs-only
-    PR. The ValueError sits outside the fail-closed try so misuse surfaces
-    instead of reading as 'review required'."""
-    with pytest.raises(ValueError):
-        _merge._review_lane_configured(str(tmp_path), 42, code_payload=True)
-
-
 def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
     tmp_path,
 ):
@@ -1130,99 +941,6 @@ def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
         encoding="utf-8",
     )
     assert _merge._read_state_field(manifest, "harness") == ""
-
-
-def test_review_floor_is_caller_independent_across_env_shapes(
-    monkeypatch, tmp_path
-):
-    """x-129b: the same PR owes the same review whatever process asks.
-
-    Measured on PR 1108: a claude session started from a codex shell resolves
-    two harness families, and the pre-fix predicate read that ambiguity as
-    'no floor', silently disengaging the only review a stock install demands.
-    Ambiguity is not permission - every unattributable shape floors, and
-    with the verbless-release shape retired no manifest/ambient shape
-    releases at all."""
-    from fno.harness_identity import HARNESS_SESSION_MARKERS
-
-    for marker, _harness in HARNESS_SESSION_MARKERS:
-        monkeypatch.delenv(marker, raising=False)
-    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
-
-    def requires_review():
-        _point_lane_read_at(monkeypatch)
-        return (
-            _merge._review_lane_configured(str(tmp_path), 42),
-            _merge._code_review_attestation_required(str(tmp_path), 42),
-        )
-
-    # Clean env (a plain shell merging by hand): unattributable, floors.
-    assert requires_review() == (True, True)
-    # The defect's default state: claude session started from a codex shell.
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
-    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
-    monkeypatch.setenv("CODEX_SESSION_ID", "s1")
-    assert requires_review() == (True, True)
-    # A multi-marker exotic shape, and the manifest-less poisoned env.
-    monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
-    assert requires_review() == (True, True)
-    monkeypatch.delenv("GEMINI_SESSION_ID")
-    assert requires_review() == (True, True)
-
-    # A verbless manifest cannot release alone: it is an init-time snapshot
-    # that outlives its run, and nothing ties it to the PR being merged, so
-    # under the poisoned multi-family ambient above it is an unattributable
-    # shape and floors.
-    state = tmp_path / ".fno"
-    state.mkdir(exist_ok=True)
-    (state / "target-state.md").write_text(
-        "---\nharness: agy\n---\n", encoding="utf-8"
-    )
-    assert requires_review() == (True, True)
-    (state / "target-state.md").write_text(
-        "---\nharness: claude\n---\n", encoding="utf-8"
-    )
-    assert requires_review() == (True, True)
-    # Same verdict for a verbless manifest under a poisoned claude ambient
-    # (ambiguous, so no agreeing second read).
-    (state / "target-state.md").write_text(
-        "---\nharness: gemini\n---\n", encoding="utf-8"
-    )
-    assert requires_review() == (True, True)
-    # No release exists any more: with the verbless-release shape retired,
-    # even a clean single-family gemini ambient agreeing with a gemini
-    # manifest still floors.
-    monkeypatch.delenv("CODEX_THREAD_ID")
-    monkeypatch.delenv("CODEX_SESSION_ID")
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
-    monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
-    assert requires_review() == (True, True)
-    # A verbless manifest that CONTRADICTS a clean verbful ambient read
-    # floors too: the manifest is an init-time snapshot that outlives its
-    # run, and a dead run's verbless stamp must not disengage the floor for
-    # a verbful PR merged from that checkout.
-    monkeypatch.delenv("GEMINI_SESSION_ID")
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
-    assert requires_review() == (True, True)
-    # The unknown sentinel is no attribution: ambient alone decides, and a
-    # poisoned ambient therefore floors.
-    (state / "target-state.md").write_text(
-        "---\nharness: unknown\n---\n", encoding="utf-8"
-    )
-    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
-    monkeypatch.setenv("CODEX_SESSION_ID", "s1")
-    assert requires_review() == (True, True)
-
-
-def test_pr_payload_classifier_is_documentation_aware_and_fail_closed(monkeypatch):
-    """The merge-side classifier matches loopcheck's notion of documentation and
-    fails closed on a missing gh (a degraded probe must not bypass the guard)."""
-    assert _merge._is_documentation_path("docs/a.md") is True
-    assert _merge._is_documentation_path("README.md") is True
-    assert _merge._is_documentation_path("src/lib.rs") is False
-    assert _merge._is_documentation_path(".fno/config.toml") is False
-    monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
-    assert _merge._pr_payload_is_code("/nope", 42) is True
 
 
 def test_merge_lock_released_when_merge_body_raises(enabled, monkeypatch, tmp_path, capsys):
@@ -1564,367 +1282,12 @@ def test_a_pending_hold_does_not_mark_the_node_failed(
 # ---- coverage guard (x-0eaf) ----
 
 
-def test_coverage_override_is_not_vetoed_by_its_stale_failure_status(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    (tmp_path / ".fno").mkdir()
-    _checks_enabled(monkeypatch)
-    monkeypatch.setattr(
-        "fno.pr._reviews._override_label_actor",
-        lambda pr, repo, runner: (True, "maintainer"),
-    )
-    rollup = {
-        "state": "OPEN",
-        "headRefOid": "deadbeefcafe",
-        "statusCheckRollup": [
-            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
-            {"context": "fno/review-coverage", "state": "FAILURE"},
-        ],
-    }
-    fake = _AutoMergeRejectingRun(rollup=rollup, toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
-    assert _last_json(capsys)["outcome"] == "merged"
-
-
-def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):
-    """No review_coverage event -> Unknown -> the sanctioned merge refuses."""
-    # Pin the head the stubbed (absent) row would describe: the gate refuses a
-    # head it could not fetch, and this test pins the missing-ROW refusal.
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
-    monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo, head=None: (None, ""))
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys)  # a held receipt renders on stdout
-    assert obj["outcome"] == "held"
-    assert "unreviewed" in obj["reason"]
-
-
-def test_coverage_zero_refuses(enabled, monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}, ""),
-    )
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    assert _last_json(capsys)["outcome"] == "held"
-
-
-def test_reviewed_state_proceeds_when_diagnostic_count_is_zero(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    (tmp_path / ".fno").mkdir()
-    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: (
-            {
-                "coverage": "covered",
-                "review_state": "reviewed",
-                "reviewed_count": 0,
-                "head_sha": "abc",
-            },
-            "",
-        ),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
-    assert _last_json(capsys)["outcome"] == "merged"
-
-
-def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "unknown", "head_sha": "abc"}, ""),
-    )
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    assert _last_json(capsys)["outcome"] == "held"
-
-
-def test_coverage_reviewer_refused_names_the_reviewer(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: (
-            {
-                "coverage": "uncovered",
-                "review_state": "reviewer_refused",
-                "reviewed_count": 99,
-                "head_sha": "abc",
-                "verdicts": [
-                    {
-                        "producer": "github_app",
-                        "name": "chatgpt-codex-connector",
-                        "verdict": "refused",
-                    }
-                ],
-            },
-            "",
-        ),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys)["reason"]
-    assert "reviewer-refused" in reason
-    assert "chatgpt-codex-connector" in reason
-
-
 def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: (
-            {
-                "coverage": "covered",
-                "review_state": "reviewed",
-                "reviewed_count": 1,
-                "head_sha": "abc",
-            },
-            "",
-        ),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
-
-
-def test_covered_merge_publishes_coverage_status(enabled, monkeypatch, capsys, tmp_path):
-    """A covered merge leaves the server-visible receipt behind.
-
-    The commit status the repo ruleset requires is written from the same
-    predicate that satisfied the gate here, so the sanctioned path can never be
-    the one missing the green marker GitHub judges merges by. The receipt is
-    pinned to the covered head: the sha the verdict describes, and the sha the
-    merge itself is pinned to.
-    """
-    (tmp_path / ".fno").mkdir()
-    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: (
-            {
-                "coverage": "covered",
-                "review_state": "reviewed",
-                "reviewed_count": 1,
-                "head_sha": "abc",
-            },
-            "",
-        ),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
-    monkeypatch.setattr(
-        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
-    )
-    published = []
-    monkeypatch.setattr(
-        "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: published.append(
-            (pr, head, gate_verdict)
-        )
-        or (True, ""),
-    )
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
-    assert _last_json(capsys)["outcome"] == "merged"
-    assert published and published[0][:2] == (42, "abc"), (
-        "covered merge must publish the status on the covered head"
-    )
-    verdict = published[0][2]
-    assert verdict is not None and verdict[0] == _coverage_gate.COVERED, (
-        "the receipt must carry the gate's own verdict tuple, never a fresh "
-        "read that may have flipped between the gate and the stamp"
-    )
-
-
-def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    """x-5b99: the exact hole, at the gate that was supposed to catch it.
-
-    The staleness check below the coverage guard compares the EVAL head against
-    the current PR head, and it works. It just answers a different question: a
-    coverage event computed thirty seconds ago is fresh by that measure while
-    the only verdict inside it came from a bot that read a commit two commits
-    back. A fresh eval carrying a stale bot verdict walked straight through.
-
-    What closes it is upstream (loop-check no longer counts a stale verdict, so
-    the count arrives at zero and the word arrives as "uncovered"), which is why
-    the merge logic here is UNCHANGED. This test pins that the shape now
-    refuses, so a later change that restores the old serialization cannot
-    quietly reopen the door.
-    """
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({
-            "coverage": "uncovered",
-            "reviewed_count": 0,
-            # Fresh eval: this IS the PR's current head, so the staleness check
-            # has nothing to object to.
-            "head_sha": "89bc0b91",
-            "verdicts": [
-                {
-                    "producer": "github_app",
-                    "name": "chatgpt-codex-connector",
-                    "verdict": "stale",
-                    "reviewed_sha": "8e557ccd",
-                    "freshness": "stale",
-                }
-            ],
-        }, ""),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "89bc0b91")
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys)
-    assert obj["outcome"] == "held"
-    # The refusal names coverage, not staleness: the eval was not stale.
-    assert "uncovered" in obj["reason"]
-
-
-def test_carried_local_attestation_still_satisfies_the_code_review_gate(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    """x-62a1: a verdict carried across a rebase is a `reviewed` verdict here.
-
-    The merge gate reads the verdict enum, not the freshness, so the carry has
-    to arrive as `reviewed` for the required code-review entry to stay
-    satisfied. If a future change records a carry as its own verdict value
-    instead, this fails loudly rather than silently demanding a re-review at
-    the one moment losing an attestation costs most.
-    """
-    state = tmp_path / ".fno"
-    state.mkdir()
-    (state / "config.toml").write_text(
-        '[review]\nreviewers = ["code-review"]\n', encoding="utf-8"
-    )
-    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({
-            "coverage": "covered",
-            "review_state": "reviewed",
-            "reviewed_count": 1,
-            "head_sha": "abc",
-            "verdicts": [
-                {
-                    "producer": "local_attestation",
-                    "name": "code-review",
-                    "verdict": "reviewed",
-                    "reviewed_sha": "oldhead",
-                    "freshness": "carried_base_sync",
-                }
-            ],
-        }, ""),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
-    assert _last_json(capsys)["outcome"] == "merged"
-
-
-def test_code_review_gate_rejects_unrelated_github_app_coverage(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    """A required local code-review cannot be replaced by an unrelated App review."""
-    # This test IS about the attestation gate, so restore the real predicate
-    # the `enabled` fixture defaults off (hermetic-env floor release).
-    monkeypatch.setattr(
-        _merge,
-        "_code_review_attestation_required",
-        lambda repo, pr_number=0: True,
-    )
-    state = tmp_path / ".fno"
-    state.mkdir()
-    (state / "config.toml").write_text(
-        '[review]\nreviewers = ["code-review"]\n', encoding="utf-8"
-    )
-    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({
-            "coverage": "covered",
-            "review_state": "reviewed",
-            "reviewed_count": 1,
-            "head_sha": "abc",
-            "verdicts": [
-                {
-                    "name": "chatgpt-codex-connector",
-                    "producer": "github_app",
-                    "verdict": "reviewed",
-                }
-            ],
-        }, ""),
-    )
-
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys)
-    assert obj["outcome"] == "held"
-    assert "code-review" in obj["reason"]
-    assert not any(c[:3] == ["gh", "pr", "merge"] for c in fake.calls)
-
-
-def test_code_review_gate_accepts_its_head_pinned_local_attestation(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    state = tmp_path / ".fno"
-    state.mkdir()
-    (state / "config.toml").write_text(
-        '[review]\nreviewers = ["code-review"]\n', encoding="utf-8"
-    )
-    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({
-            "coverage": "covered",
-            "review_state": "reviewed",
-            "reviewed_count": 1,
-            "head_sha": "abc",
-            "verdicts": [
-                {
-                    "name": "code-review",
-                    "producer": "local_attestation",
-                    "verdict": "reviewed",
-                }
-            ],
-        }, ""),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
-
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
-    assert _last_json(capsys)["outcome"] == "merged"
-
-
-def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
-    """Coverage pinned a head that no longer matches the PR head -> stale -> refuse."""
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead"}, ""),
-    )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    assert _last_json(capsys)["outcome"] == "held"
 
 
 def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
@@ -1940,19 +1303,11 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     # before any merge command is recorded.
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    # The native gate answers covered, pinned to the covered head, so the pin
+    # rides down to the merge ask.
     monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "coveredSHA"}, ""),
-    )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
-    # Fresh coverage: the live PR head IS the covered head, so the gate passes
-    # and the covered head reaches the merge command.
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
-    # The gate's chain read scopes by the PR's refs; an unstubbed probe here
-    # answered UNANSWERED off the real transport and wiped the pin.
-    monkeypatch.setattr(
-        _merge, "_pr_base_head_refs", lambda pr, repo: ("main", "feature/x")
+        "fno.rust_binary.verb_call",
+        _door_stub(None, _gate_verdict("coveredSHA")),
     )
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
@@ -1978,382 +1333,35 @@ def test_fake_run_raises_on_an_unmatched_gh_shape():
         fake(["gh", "auth", "status"])
 
 
-# ── refusal reasons name the cause ───────────────────────────────────────────
-#
-# A refusal that reports only a count leaves the reader to invent the cause, and
-# the nearest exclusion-flavoured vocabulary in the repo is `attestation_origin`,
-# which gates nothing. Two workers escalated green, unblocked PRs to the operator
-# on exactly that inference; both were looking at a head that had moved. These
-# pin the cause into the message so the vacuum is not there to fill.
-
-
-def test_stale_head_refusal_names_both_shas_and_the_action():
-    """The staleness branch flips `covered` False in run_merge, but the reason
-    function knew nothing about it and reported the count instead. Its output
-    for a moved head was the self-contradiction `0 reviewed (covered count=2)`.
-    Name the real cause and the fix instead."""
-    cov = {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead0deadbeef"}
-    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
-    assert "oldhead0" in reason
-    assert "newhead0" in reason
-    assert "re-run the review verb" in reason
-
-
-def test_refusal_reason_never_claims_zero_when_the_count_is_positive():
-    """The contradiction guard. `0 reviewed (covered count=2)` is not a message
-    a reader can act on; it is a message a reader has to explain away."""
-    cov = {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead"}
-    assert "0 reviewed" not in _merge._coverage_refused_reason(cov, "newhead")
-
-
-def test_moved_head_keeps_the_generic_message_for_legacy_attestations_too():
-    """x-e601: a pre-branch-field pass dies with the head move it cannot be
-    scoped past, and the producer emits no verdict for it (an unbranchable
-    line is skipped, never guessed onto this PR's row). The refusal therefore
-    keeps ONE staleness message for every cohort: a targeted legacy branch
-    here could fire only on a degraded recompute returning a pre-move row,
-    and implied the producer names a shape it no longer emits."""
-    cov = {
-        "coverage": "covered",
-        "reviewed_count": 0,
-        "head_sha": "oldhead0deadbeef",
-        "verdicts": [
-            {
-                "producer": "local_attestation",
-                "name": "code-review",
-                "verdict": "reviewed",
-                "reviewed_sha": "oldhead0deadbeef",
-                "scope": "legacy_head_match",
-            }
-        ],
-    }
-    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
-    assert "unscoped attestation" not in reason
-    assert "head-pinned by design" in reason
-    assert "re-run the review verb" in reason
-
-
-def test_moved_head_keeps_the_generic_message_for_branch_scoped_passes():
-    """A branch-scoped pass under a moved head is the ordinary staleness case
-    and keeps the ordinary message; no cohort gets a special-case branch."""
-    cov = {
-        "coverage": "covered",
-        "reviewed_count": 0,
-        "head_sha": "oldhead0deadbeef",
-        "verdicts": [
-            {
-                "producer": "local_attestation",
-                "name": "code-review",
-                "verdict": "reviewed",
-                "reviewed_sha": "oldhead0deadbeef",
-                "scope": "attested_branch",
-            }
-        ],
-    }
-    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
-    assert "unscoped attestation" not in reason
-    assert "head-pinned by design" in reason
-
-
-def test_genuine_zero_refusal_names_the_missing_evidence():
-    """A true zero says WHAT is missing (a head-pinned pass) and what to do, not
-    just that the number is zero. It must not mention attestation origin:
-    volunteering it here is what put the idea in the reader's head."""
-    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}
-    reason = _merge._coverage_refused_reason(cov)
-    assert "head-pinned" in reason
-    assert "review verb" in reason
-    assert "origin" not in reason
-
-
-def test_genuine_zero_names_an_absent_reviewer_and_its_consequence():
-    """Parity with the Rust receipt, and this is the twin that matters more: the
-    merge gate here reads coverage only, so a worker who follows a bare "run the
-    review verb" while a configured reviewer is still out self-attests and merges
-    ahead of a bot that never spoke. Name who is outstanding, and say what
-    covering locally would do - do not steer to either."""
-    cov = {
-        "coverage": "covered",
-        "reviewed_count": 0,
-        "head_sha": "abc",
-        "verdicts": [
-            {"producer": "github_app", "name": "gemini-code-assist", "verdict": "absent"},
-            {"producer": "github_app", "name": "chatgpt-codex-connector", "verdict": "refused"},
-        ],
-    }
-    reason = _merge._coverage_refused_reason(cov)
-    assert "waiting on gemini-code-assist" in reason
-    # Never prescribes a local re-attest while someone is outstanding: this gate
-    # reads coverage alone, so a worker that self-attests past a REQUIRED bot
-    # lands the PR before its blocking finding posts, and this line cannot tell
-    # required from optional.
-    assert "review verb" not in reason
-    # But it is not a bare wait either - an absent App that is never installed
-    # would strand the PR - so a safe move is always named.
-    assert "check config.review" in reason
-    # The refused reviewer is not misreported as something we are waiting for.
-    assert "chatgpt-codex-connector" not in reason
-
-
-def test_uncovered_still_names_the_cause_and_the_next_move():
-    """x-5b99 renamed a zero count from `covered` to `uncovered`, which sent the
-    most common refusal there is down the early-return that prints only the
-    word. Every test above pins the rich message against the LEGACY shape, so
-    nothing caught it. The word is now a prefix, not a replacement."""
-    cov = {
-        "coverage": "uncovered",
-        "reviewed_count": 0,
-        "head_sha": "abc",
-        "verdicts": [
-            {"producer": "github_app", "name": "gemini-code-assist", "verdict": "absent"}
-        ],
-    }
-    reason = _merge._coverage_refused_reason(cov)
-    assert "uncovered" in reason
-    assert "waiting on gemini-code-assist" in reason
-    assert "check config.review" in reason
-
-
-def test_a_stale_reviewer_is_named_and_asked_to_re_read():
-    """A reviewer that read an older commit is neither absent nor refused, and
-    "run the review verb at HEAD" is the one instruction that does not get it to
-    look again. Four zeros and a wrong next step is the absence-shaped lie the
-    stale verdict exists to delete."""
-    cov = {
-        "coverage": "uncovered",
-        "reviewed_count": 0,
-        "head_sha": "abc",
-        "verdicts": [
-            {
-                "producer": "github_app",
-                "name": "chatgpt-codex-connector",
-                "verdict": "stale",
-                "reviewed_sha": "8e557ccd",
-                "freshness": "stale",
-            }
-        ],
-    }
-    reason = _merge._coverage_refused_reason(cov)
-    assert "chatgpt-codex-connector reviewed an older commit" in reason
-    assert "review verb" not in reason
-
-
-def test_malformed_verdicts_do_not_raise():
-    """Every other event-log read in this file is defensive; a truncated or
-    hand-edited log must still produce a blocked receipt, not a traceback."""
-    for bad in ({"a": 1}, ["nope", 3], None, "verdicts"):
-        cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": bad}
-        assert "0 reviewed" in _merge._coverage_refused_reason(cov)
-
-
-def test_genuine_zero_prescribes_the_verb_when_nobody_is_outstanding():
-    """No absent verdict -> the local verb is the unqualified next step."""
-    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": []}
-    reason = _merge._coverage_refused_reason(cov)
-    assert "run the review verb at HEAD" in reason
-    assert "waiting on" not in reason
-
-
-def test_coverage_refusal_appends_the_sized_invocation_hint():
-    """The refusal hands the worker the exact invocation (rendered by the
-    Python single source), verbatim and backticked, after the instruction.
-    Without a hint the line reads exactly as before - a broken render must
-    never read as a different verdict."""
-    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": []}
-    hint = "/verb-from-the-builder --flags"
-    reason = _merge._coverage_refused_reason(cov, self_review_hint=hint)
-    assert "run the review verb at HEAD" in reason
-    assert f"- `{hint}`" in reason
-    bare = _merge._coverage_refused_reason(cov)
-    assert "verb-from-the-builder" not in bare
-    # The ordering and the producer ride on both arms, hint or no hint: the
-    # stop gate says the same thing about the same uncovered head.
-    for line in (reason, bare):
-        assert "close every finding, commit and push first" in line
-        assert "skills/review/scripts/emit-attestation.sh" in line
-    # The emitter refuses a call with no reviewer name, so the rendered command
-    # carries the argument. A bare path here would exit 1 for whoever copies it.
-    assert "`bash skills/review/scripts/emit-attestation.sh <reviewer>`" in bare
-    assert bare.endswith("<reviewer>`)")
-
-    # The stale-head arm carries the hint the same way.
-    stale = {"coverage": "covered", "reviewed_count": 0, "head_sha": "zzz", "verdicts": []}
-    moved = _merge._coverage_refused_reason(stale, head="abc", self_review_hint=hint)
-    assert "re-run the review verb at HEAD" in moved
-    assert f"- `{hint}`" in moved
-
-
-def test_refusal_reason_names_where_it_searched():
-    """x-f43c: the absence branch names the logs it read.
-
-    It used to assert "no gate evaluated this PR", a conclusion the code cannot
-    support - the gate may well have evaluated it, into a different worktree's
-    events log. Two workers read that line as a policy problem and set about
-    designing around a gate that was already green.
-    """
-    reason = _merge._coverage_refused_reason(None, None, ["/a/.fno/events.jsonl"])
-    assert "no review_coverage event" in reason
-    assert "/a/.fno/events.jsonl" in reason
-    assert "no gate evaluated" not in reason
-    # sources is optional: every existing caller still type-checks.
-    assert "no review_coverage event" in _merge._coverage_refused_reason(None)
-    assert "unknown" in _merge._coverage_refused_reason({"coverage": "unknown"})
-
-
-def test_stale_head_blocked_receipt_carries_the_cause(enabled, monkeypatch, capsys, tmp_path):
-    """End to end through run_merge: the emitted blocked receipt - the line a
-    worker actually reads - names the moved head, not a bare count."""
+def test_populated_graph_closure_fetch_does_not_hold_the_merge(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """A populated graph must not hold the merge. The dispatch hold is the
+    owner's read now (`fno do pr hold-check`, its own suite), so run_merge
+    consults no closure itself: a done entry in the graph only feeds the
+    post-merge reconcile this test keeps hermetic, and the merge still lands
+    pinned to the covered head the verdict door answers."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    # The native gate answers covered, pinned to the covered head the merge
+    # ask carries down.
     monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead0"}, ""),
+        "fno.rust_binary.verb_call",
+        _door_stub(None, _gate_verdict("coveredSHA")),
     )
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead0")
-    _stub_owner_from_row(monkeypatch, tmp_path)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys)["reason"]
-    assert "0 reviewed" not in reason
-    assert "oldhead0" in reason and "newhead0" in reason
-
-
-# ---- x-f43c: coverage attested in a worktree, merge run from canonical ----
-
-
-def _git_repo(root, remote):
-    """A checkout with a remote, so the coverage reader can resolve its slug."""
-    import subprocess
-
-    root.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(root), check=True)
-    subprocess.run(["git", "remote", "add", "origin", remote], cwd=str(root), check=True)
-    (root / ".fno").mkdir(exist_ok=True)
-    return root
-
-
-def _global_events_at(monkeypatch, root):
-    """Point the global events journal at a tmp dir and return it.
-
-    Patches the resolver the code actually calls rather than an env var:
-    an env pin moves only the readers that honor it (``FNO_STATE_DIR`` moves
-    ``state_dir``/``locks_dir``, not every journal path), so patching the
-    resolver is the strict way to keep a negative assertion honest.
-    """
-    from fno import paths
-
-    root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(paths, "global_events_json", lambda: root / "events.jsonl")
-    return root
-
-
-def _write_coverage(events_path, pr, *, repo=None, ts="2026-08-08T02:35:30Z", count=1):
-    data = {
-        "pr": pr,
-        "coverage": "covered",
-        "review_state": "reviewed",
-        "reviewed_count": count,
-        "head_sha": "a3f4b413b",
-        "verdicts": [{
-            "name": "code-review",
-            "producer": "local_attestation",
-            "verdict": "reviewed",
-            "reviewed_sha": "a3f4b413b",
-            "freshness": "fresh",
-        }],
-    }
-    if repo is not None:
-        data["repo"] = repo
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(events_path, "a", encoding="utf-8") as fh:
-        fh.write(
-            json.dumps({"ts": ts, "type": "review_coverage", "source": "hook", "data": data})
-            + "\n"
-        )
-
-
-def test_worktree_attestation_is_visible_from_canonical(monkeypatch, tmp_path):
-    """THE REPRO (PR #781). A worker attests coverage inside a worktree, then
-    runs the merge gate from canonical. That refused, because the stop hook
-    writes the events file of the directory it runs in while the gate reads the
-    events file of the directory the merge runs in - so a satisfied gate read as
-    an unsatisfiable one, and the worker escalated a green PR.
-    """
-    remote = "git@github.com:bllshttng/footnote.git"
-    canonical = _git_repo(tmp_path / "canonical", remote)
-    worktree = _git_repo(tmp_path / "wt-x-4c98", remote)
-    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    # The review ran in the worktree; emit_to_both writes its project log and
-    # the one global log.
-    _write_coverage(worktree / ".fno" / "events.jsonl", 781, repo="github.com/bllshttng/footnote")
-    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/bllshttng/footnote")
-
-    # Canonical's own log never saw it. That absence is the whole specimen.
-    assert not (canonical / ".fno" / "events.jsonl").exists()
-
-    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
-    assert cov is not None, "coverage attested in a worktree must be visible from canonical"
-    assert cov["coverage"] == "covered"
-    assert cov["reviewed_count"] == 1
-
-
-def test_global_coverage_is_scoped_to_this_repo(monkeypatch, tmp_path):
-    """~/.fno/events.jsonl is cross-project, so `pr` alone is not a key: another
-    repo's PR 781 must not satisfy this repo's gate."""
-    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
-    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/other/repo")
-    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is None
-
-
-def test_global_coverage_without_repo_field_is_not_matched(monkeypatch, tmp_path):
-    """Events predating the `repo` field carry no attribution, so they cannot be
-    claimed by any repo scanning the shared log. Fail closed, not by guess."""
-    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
-    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    _write_coverage(global_dir / "events.jsonl", 781, repo=None)
-    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is None
-
-
-def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
-    """A project-only event from an older binary must not be shadowed by a stale
-    global one: newest ts wins across the two logs."""
-    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
-    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    _write_coverage(
-        global_dir / "events.jsonl", 781, repo="github.com/bllshttng/footnote", ts="2026-08-08T01:00:00Z", count=1
+    # One cwd-less done entry: enough to make the graph non-empty for every
+    # reader that looks, none of which may hold the merge on it.
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
     )
-    # The project log the gate reads is the space journal (x-d2e9); the legacy
-    # checkout path is only a migration source now, so seed the real one.
-    from fno.paths import project_log
+    monkeypatch.setattr(_merge, "run", fake)
 
-    project_journal = project_log("events.jsonl", project_root=canonical)
-    project_journal.parent.mkdir(parents=True, exist_ok=True)
-    _write_coverage(project_journal, 781, ts="2026-08-08T02:00:00Z", count=5)
-
-    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
-    assert cov is not None and cov["reviewed_count"] == 5
-
-
-def test_same_named_repos_under_different_owners_do_not_share_coverage(monkeypatch, tmp_path):
-    """codex P1: the global log key must be the FULL repo identity.
-
-    `org-a/widget` and `org-b/widget` both reduce to `widget` under a last-path-
-    segment slug. With a shared PR number that let one repo's coverage satisfy
-    the other's auto-merge guard, and a fork shares head SHAs so the staleness
-    check would not catch it either.
-    """
-    canonical = _git_repo(tmp_path / "canonical", "git@github.com:org-a/widget.git")
-    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/org-b/widget")
-    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is None
-
-    # The same repo's own identity still resolves.
-    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/org-a/widget")
-    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is not None
+    seen = _capture_posture(monkeypatch)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    assert seen["covered_head"] == "coveredSHA"
 
 
 def test_repo_identity_agrees_across_remote_forms():
@@ -2378,81 +1386,6 @@ def test_repo_identity_agrees_across_remote_forms():
     assert ident("") is None
 
 
-def test_equal_timestamps_take_the_safer_verdict(monkeypatch, tmp_path):
-    """codex P2: timestamps are second-precision and emit_to_both writes both
-    logs in the same instant, so a strict `>` made "project log wins" a silent
-    tiebreak - letting a stale covered event outrank a same-second unknown and
-    clear a guard whose whole job is to fail closed."""
-    canonical = _git_repo(tmp_path / "canonical", "git@github.com:org-a/widget.git")
-    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    ts = "2026-08-08T02:35:30Z"
-    _write_coverage(canonical / ".fno" / "events.jsonl", 781, ts=ts, count=1)
-    events = global_dir / "events.jsonl"
-    events.write_text(
-        json.dumps({
-            "ts": ts,
-            "type": "review_coverage",
-            "data": {
-                "pr": 781, "coverage": "unknown", "head_sha": "a3f4b413b",
-                "repo": "github.com/org-a/widget",
-            },
-        }) + "\n",
-        encoding="utf-8",
-    )
-
-    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
-    assert cov is not None and cov["coverage"] == "unknown"
-
-
-def test_repo_rooted_at_the_global_log_still_scopes(monkeypatch, tmp_path):
-    """Two repos rooted under the SAME home must not satisfy each other's
-    guards. The space move replaced the old same-file hazard (a `git init ~`
-    checkout where the project log WAS the global journal) with slug-keyed
-    journals: each repo's space path carries its own slug, so a foreign row
-    cannot even be addressed. The scoping that survives is the GLOBAL log's,
-    which is still one cross-project file - a foreign row there must refuse,
-    and the repo's own row must cover."""
-    from fno import paths
-
-    home = tmp_path / "home"
-    root = _git_repo(home / "widget", "git@github.com:org-a/widget.git")
-    foreign = _git_repo(home / "gadget", "git@github.com:org-b/gadget.git")
-    monkeypatch.setattr(paths, "global_events_json", lambda: root / ".fno" / "events.jsonl")
-
-    # A foreign repo's row lands in the FOREIGN repo's space journal; repo A's
-    # guard reads only its own journal (empty) plus the scoped global (no row).
-    foreign_events = foreign / ".fno" / "events.jsonl"
-    _write_coverage(foreign_events, 781, repo="github.com/org-b/gadget")
-    assert _merge._review_coverage_for_pr(781, str(root))[0] is None, (
-        "a foreign repo's event must not satisfy this repo's guard"
-    )
-
-    # The repo's own row in its own journal covers.
-    _write_coverage(root / ".fno" / "events.jsonl", 781, repo="github.com/org-a/widget")
-    assert _merge._review_coverage_for_pr(781, str(root))[0] is not None
-
-
-def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
-    """A malformed line in a months-old append-only log must not hide a real
-    attestation: read_events raised on the first bad line, and every caller
-    turns an exception into a refusal, so one corrupt byte would have wedged
-    merges permanently and without explanation."""
-    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
-    _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
-
-    # The project log the gate reads is the space journal (x-d2e9).
-    from fno.paths import project_log
-
-    events = project_log("events.jsonl", project_root=canonical)
-    events.parent.mkdir(parents=True, exist_ok=True)
-    events.write_text('{"type": "review_coverage", TRUNCATED\n', encoding="utf-8")
-    _write_coverage(events, 781)
-
-    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
-    assert cov is not None and cov["coverage"] == "covered"
-
-
 # ---- plan fidelity guard (x-cbab) -------------------------------------------
 #
 # The merge-gate half of AC5: a plan whose declared deliverables did not all ship
@@ -2466,8 +1399,6 @@ def test_fidelity_guard_blocks_an_uncovered_shortfall(enabled, monkeypatch, caps
     """AC5: an unjoined planned row with no covering carveout refuses the merge."""
     import fno.plan.fidelity as fid
 
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
-    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
     monkeypatch.setattr(
         fid, "compute_plan_fidelity",
         lambda *, plan_path, **k: {"refused": True, "reason": "1 unjoined, 0 carveouts"},
@@ -2491,7 +1422,6 @@ def test_fidelity_guard_proceeds_when_the_shortfall_is_covered(enabled, monkeypa
     """The same plan with a covering carveout (refused=False) reaches the merge."""
     import fno.plan.fidelity as fid
 
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
     monkeypatch.setattr(
         fid, "compute_plan_fidelity", lambda *, plan_path, **k: {"refused": False},
     )
@@ -2505,7 +1435,6 @@ def test_fidelity_guard_skipped_when_the_pr_carries_no_plan(enabled, monkeypatch
     """No plan_path -> no denominator to check -> the guard is a no-op."""
     import fno.plan.fidelity as fid
 
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
     monkeypatch.setattr(
         fid, "compute_plan_fidelity",
         lambda *a, **k: pytest.fail("fidelity must not run without a plan"),
@@ -2520,8 +1449,6 @@ def test_fidelity_guard_degrades_open_on_a_probe_crash(enabled, monkeypatch, cap
     """A broken fidelity probe must not wedge a green merge: fail open, not block."""
     import fno.plan.fidelity as fid
 
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
-    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
 
     def _boom(*a, **k):
         raise RuntimeError("fidelity exploded")
@@ -2674,9 +1601,9 @@ def test_a_closed_pr_takes_the_same_terminal_exemption(enabled, monkeypatch, cap
     assert "already closed" in obj["reason"]
 
 
-def test_an_open_pr_still_faces_the_coverage_gate(enabled, monkeypatch, capsys, tmp_path):
+def test_an_open_pr_still_holds_as_unreviewed(enabled, monkeypatch, capsys, tmp_path):
     """The exemption must not become a hole: an OPEN uncovered PR still holds
-    as unreviewed - by decide's coverage gate now (x-53c5), whose receipt the
+    as unreviewed - by decide's review verdict now (x-53c5), whose receipt the
     verb renders verbatim."""
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
@@ -2728,25 +1655,6 @@ def test_a_waiver_does_not_bypass_red_ci(
     _checks_enabled(monkeypatch)
     head = "a" * 40
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: head)
-    monkeypatch.setattr(_merge, "_pr_base_head_refs", lambda pr, cwd: ("main", "feature/x"))
-    monkeypatch.setattr(
-        _merge,
-        "_review_coverage_for_pr",
-        lambda pr, repo, head=None: (
-            {"coverage": "uncovered", "review_state": "reviewed", "reviewed_count": 0},
-            "",
-        ),
-    )
-    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
-    monkeypatch.setattr(
-        _coverage_gate,
-        "law_authority",
-        lambda subject: (
-            ("single", "")
-            if subject == _coverage_gate.STANDING_WAIVER_SUBJECT
-            else ("none", "")
-        ),
-    )
     fake = _AutoMergeRejectingRun(rollup=_rollup("FAILURE", "FAILURE"), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     _owner_answers(
@@ -2759,80 +1667,6 @@ def test_a_waiver_does_not_bypass_red_ci(
     failed = _last_json(capsys, stream="err")
     assert failed["outcome"] == "failed"
     assert "require_checks_pass" in failed["reason"]
-
-
-# --- review posture verdict : the gate reads the Rust verdict ---
-
-
-def _covered_row(posture):
-    row = {
-        "coverage": "covered",
-        "reviewed_count": 1,
-        "head_sha": "a" * 40,
-        "verdicts": [
-            {
-                "producer": "local_attestation",
-                "name": "code-review",
-                "verdict": "reviewed",
-                "reviewed_sha": "a" * 40,
-                "freshness": "fresh",
-            }
-        ],
-    }
-    if posture is not None:
-        row["review_posture"] = posture
-    return row
-
-
-def test_posture_refusal_none_when_satisfied_or_not_covered():
-    from fno.pr._coverage_gate import posture_refusal
-
-    satisfied = {
-        "posture": "self_review",
-        "rank": 3,
-        "source": "default",
-        "cost": "one review",
-        "freshness": "same context sufficient",
-        "diversity": "same model allowed",
-        "posture_satisfied": True,
-        "posture_gaps": [],
-    }
-    assert posture_refusal(_covered_row(satisfied)) is None
-    # Not-covered rows answer through their own conjuncts, never posture.
-    assert posture_refusal({"coverage": "unknown"}) is None
-    assert posture_refusal(None) is None
-    # A STORED pre-posture row (no recompute this read) passes through: the
-    # pre-posture corpus merges under its own evidence.
-    assert posture_refusal(_covered_row(None), recomputed=False) is None
-
-
-def test_posture_refusal_names_the_rung_and_gaps_when_unsatisfied():
-    from fno.pr._coverage_gate import posture_refusal
-
-    unsatisfied = {
-        "posture": "peer_review",
-        "rank": 6,
-        "source": "explicit",
-        "cost": "one peer review",
-        "posture_satisfied": False,
-        "posture_gaps": ["peer: no cross-model peer verdict at this head"],
-    }
-    refusal = posture_refusal(_covered_row(unsatisfied))
-    assert refusal is not None
-    assert "peer_review" in refusal
-    assert "rank 6" in refusal
-    assert "no cross-model peer verdict" in refusal
-
-
-def test_posture_refusal_refuses_a_fresh_row_that_names_no_rung():
-    """A fresh recompute with no posture proves the producer binary predates
-    the field; the refusal names the upgrade."""
-    from fno.pr._coverage_gate import posture_refusal
-
-    refusal = posture_refusal(_covered_row(None), recomputed=True)
-    assert refusal is not None
-    assert "unknown" in refusal
-    assert "fno doctor update" in refusal
 
 
 # ---- the COVERED pin (external review round, P1) ----

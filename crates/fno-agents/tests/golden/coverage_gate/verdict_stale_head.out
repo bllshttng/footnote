@@ -1,0 +1,1 @@
+{"covered_head": "", "line": "coverage was computed at 11111111 but HEAD is 162e652e; attestations are head-pinned by design - re-run the review verb at HEAD - `<hint>`", "note": "", "refusal": "coverage was computed at 11111111 but HEAD is 162e652e; attestations are head-pinned by design - re-run the review verb at HEAD - `<hint>`", "state": 3}

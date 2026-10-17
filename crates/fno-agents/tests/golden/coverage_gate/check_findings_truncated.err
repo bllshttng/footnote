@@ -1,0 +1,1 @@
+attestation chain findings were truncated (findings_truncated); the truncated remainder is non-terminal, so the gate refuses rather than trust a count it cannot re-derive [1/2 review rounds used; the next round is the last the budget funds]

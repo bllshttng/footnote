@@ -10,9 +10,9 @@ use super::*;
 /// messages render where `fno` does not resolve, so nothing else in the line
 /// tells the reader what actually produces the event.
 ///
-/// `_coverage_refused_reason` in `cli/src/fno/pr/_merge.py` carries the sentence
-/// for the merge guard. Two gates refuse the same uncovered head, so they must
-/// not teach two different remedies.
+/// `refusal_line` in `loopcheck/coverage_gate.rs` carries the sentence for the
+/// merge guard. Two gates refuse the same uncovered head, so they must not
+/// teach two different remedies.
 pub(super) const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
      review and attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
      <reviewer>` is recovery if a confirmed clean native review hook failed)";

@@ -1,8 +1,7 @@
 """Integration: a parked granted worker's PR merges through the watcher.
 
 The journey this file proves (end to end through the REAL canonical merge
-core - only gh, git, the Rust verdict transport, and the coverage producer
-are faked):
+core - only gh, git and the Rust verdict transports are faked):
 
 1. CI pending                              -> the merge core is invoked and
                                               HELD by the checks gate; no
@@ -61,7 +60,6 @@ def _arm_world(
     """The real merge core over a faked gh/git transport and a stubbed
     Rust verdict."""
     from fno.config import AutoMergeBlock
-    import fno.pr._coverage_gate as coverage_gate
     import fno.pr._merge as merge_mod
 
     monkeypatch.setattr(
@@ -74,29 +72,8 @@ def _arm_world(
     monkeypatch.setattr(merge_mod, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(merge_mod.shutil, "which", lambda _x: "/usr/bin/gh")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    # The journey is about grant/CI sequencing, not the coverage
-    # producer (owned by the coverage suite): serve a covered row at the
-    # merge gate's own seam.
-    monkeypatch.setattr(
-        coverage_gate,
-        "coverage_verdict",
-        lambda pr, repo, recompute=False, head=None: (
-            coverage_gate.COVERED, "", "", "",
-        ),
-    )
     # Reuse-over-reimplement, and merge-blocking test seams from the unit
     # suite keep this journey about the watcher.
-    monkeypatch.setattr(merge_mod, "_review_lane_configured", lambda repo, pr_number=0: True)
-    monkeypatch.setattr(
-        merge_mod, "_code_review_attestation_required", lambda repo, pr_number=0: False
-    )
-    monkeypatch.setattr(
-        "fno.pr._reviews._override_label_actor", lambda pr, repo, r: (False, None)
-    )
-    monkeypatch.setattr(
-        "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
-    )
     rollup = [
         {"name": "ci", "status": "COMPLETED",
          "conclusion": "PENDING" if checks_pending else "SUCCESS"},
@@ -134,6 +111,10 @@ def _arm_world(
     # which runs through the stubbed owner above, and flatten the flow
     # receipt the way the native door answers.
     def _operand_door(verb, payload, timeout=None):
+        if verb == ["review-coverage", "op"] and payload.get("op") == "verdict":
+            # The journey is about grant/CI sequencing, not the coverage gate
+            # (owned by the coverage suites): answer covered, no pinned head.
+            return {"state": 0, "refusal": "", "covered_head": "", "note": "", "line": ""}
         if verb == "authorized-merge" and payload.get("op") == "merge":
             rc = merge_mod.run_merge(
                 list(payload.get("argv") or []),
@@ -173,7 +154,9 @@ class _NullTickClaim:
 def _drain(tmp_path: Path, store_path: Path) -> list[dict]:
     """The merge phase's half of the journey: one granted queue row, drained."""
     events: list[dict] = []
-    emit = lambda kind, data: events.append({"type": kind, "data": data})
+
+    def emit(kind, data):
+        events.append({"type": kind, "data": data})
     run_execute_queue(
         [(_candidate(tmp_path), f"{SLUG}#{PR}", dict(GRANT))],
         store_path=store_path, emit=emit,

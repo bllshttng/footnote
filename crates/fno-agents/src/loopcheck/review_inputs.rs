@@ -33,7 +33,7 @@ pub(crate) struct ReviewInputs {
     /// logins plus every peer posting identity.
     pub(crate) optional_reviewer_names: Vec<String>,
     /// The config half of the merge gate's lane predicate
-    /// (`_review_lane_configured` before the payload floor): any configured
+    /// (the lane predicate, before the payload floor): any configured
     /// login/reviewer lane, or identity-free peers. `peer_identity` alone
     /// answers False (a shared identity posts under an existing login, not a
     /// distinct local lane).

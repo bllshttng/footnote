@@ -7,9 +7,8 @@
 //! state only when the verdict was OWED. An optional GitHub App is honored
 //! when it responds and owed nothing when it does not, so its quota bounce
 //! must not rename an uncovered row after a reviewer nobody was waiting on.
-//! Both derivations (this one and `_derive_review_state` in
-//! `cli/src/fno/pr/_reviews.py`) are pinned against the same golden table,
-//! `cli/tests/config/review_state_table.json`.
+//! Both derivations (this one and the Python one it replaced) were pinned
+//! against the same golden table, `cli/tests/config/review_state_table.json`.
 
 use super::*;
 
@@ -79,6 +78,63 @@ mod tests {
             required,
             passed: false,
         }
+    }
+
+    fn human_github_approval(name: &str, author: bool) -> ReviewerVerdict {
+        ReviewerVerdict {
+            producer: CoverageProducer::GithubApp,
+            name: name.to_string(),
+            verdict: CoverageVerdict::Reviewed,
+            human_approval: true,
+            author_approval: author,
+            attestation_origin: AttestationOrigin::Unknown,
+            reviewed_sha: "h1".to_string(),
+            freshness: Some(Freshness::Fresh),
+            scope: None,
+            refusal_reason: None,
+            reviewer_context: None,
+            attest_machine: None,
+            required: true,
+            passed: true,
+        }
+    }
+
+    #[test]
+    fn a_non_author_approval_counts_once_the_flag_is_on() {
+        // The github_approval_satisfies contract, carried over from the
+        // retired Python derivation: bob approving alice's PR reads
+        // reviewed, so the flag widens who can satisfy the review gate.
+        let rep = CoverageReport {
+            github_approval_satisfies: true,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![human_github_approval("bob", false)],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+    }
+
+    #[test]
+    fn an_author_approval_is_never_counted_even_with_the_flag_on() {
+        // alice approving her own PR stays recorded and never derives
+        // reviewed, so a run that collected no approval at all cannot
+        // pass on the strength of the author's own.
+        let rep = CoverageReport {
+            github_approval_satisfies: true,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![human_github_approval("alice", true)],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+    }
+
+    #[test]
+    fn flag_off_keeps_the_exclusion_of_human_approvals() {
+        // With the flag off every human approval is excluded, exactly the
+        // pre-flag semantics: the flag only ever widens the count.
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![human_github_approval("bob", false)],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
     }
 
     #[test]
@@ -164,10 +220,10 @@ mod tests {
 
     #[test]
     fn review_state_table_rows_match_between_both_legs() {
-        // One oracle, two readers (the optional_apps_default.json pattern):
-        // `CoverageReport::review_state` here and `_derive_review_state` in
-        // cli/src/fno/pr/_reviews.py both answer these rows, so a drift on
-        // either side fails its own test against the SAME file. A row that
+        // One oracle (the optional_apps_default.json pattern): the golden
+        // table answers these rows against `CoverageReport::review_state`,
+        // and the retired Python derivation answered the SAME file, so a
+        // drift on either side fails its own test against it. A row that
         // carries `rounds_exhausted` is read at that budget, mirroring the
         // Python golden's `rounds_exhausted` pass-through.
         let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

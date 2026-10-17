@@ -468,7 +468,7 @@ pub(super) fn read_pr_info(
         // reached the external arm's refresh, so rounds the connector posted
         // read 0 here and the cap could not fire on exactly the lane that
         // spun (PR #1225: five real rounds, counter 0/2). The read mirrors
-        // the Python merge gate's own gating (_coverage_gate._pr_reviews):
+        // the merge gate's own review read:
         // pay it only where it can change the answer - the row is uncovered,
         // or findings are in play - never on a healthy covered PR. A
         // no_external session reads nothing, whatever the gate says. A

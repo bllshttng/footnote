@@ -1,0 +1,9 @@
+no-row-check: the Python gate answered a missing row with the searched-paths
+sentence ("no review_coverage event for this PR (searched: <state-root
+paths>)"); the native read returns the unknown sentinel row instead of None,
+so the same answer renders as the bare word ("coverage unknown"). The
+searched list is also the state-root fingerprint: the port moved state from
+the FNO_STATE_DIR convention to the agents-home convention, so the paths in
+the sentence cannot match. The state and exit stay the contract; parity
+compares exit, stdout, the stderr refusal word and the stub-call folds only
+for this case.

@@ -266,10 +266,6 @@ def _patch_gap(
     armed_value = armed if isinstance(armed, dict) else {"config": armed}
     calls: list[dict] = []
 
-    def fake_lane(repo_arg, pr_number=0, code_payload=False):
-        calls.append({"repo": repo_arg, "pr_number": pr_number, "code_payload": code_payload})
-        return lane
-
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
     # The gap resolves the INVOKING repo (cwd -> toplevel), never the fno
     # source checkout: point _resolve_source somewhere wrong and require the
@@ -281,7 +277,17 @@ def _patch_gap(
     monkeypatch.setattr(
         "fno.pr._merge._repo_state_dir", lambda _cwd: str(repo / ".fno")
     )
-    monkeypatch.setattr("fno.pr._merge._review_lane_configured", fake_lane)
+    import fno.rust_binary as rust_binary
+
+    def fake_lane_door(verb, payload, unavailable=None, **kw):
+        if isinstance(payload, dict) and payload.get("op") == "lane":
+            calls.append(
+                {"cwd": payload.get("cwd"), "code_payload": payload.get("code_payload")}
+            )
+            return {"lane": lane}
+        raise AssertionError(f"unexpected door call {verb} {payload}")
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake_lane_door)
     if review is not None:
         monkeypatch.setattr(
             "fno.config.load_settings_for_repo",
@@ -308,7 +314,7 @@ def test_gap_fires_on_armed_with_zero_lanes(
     # Reuse contract: the verdict is the merge gate's own predicate, asked
     # about a hypothetical code payload - never a doctor-side lane recount.
     # And the repo is the INVOKING project, never the fno source checkout.
-    assert calls == [{"repo": str(tmp_path), "pr_number": 0, "code_payload": True}]
+    assert calls == [{"cwd": str(tmp_path), "code_payload": True}]
     assert gap is not None
     assert gap["keys"] == [
         "review.self_review_required=False",

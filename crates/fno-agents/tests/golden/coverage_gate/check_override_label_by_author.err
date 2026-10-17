@@ -1,0 +1,1 @@
+coverage-override label applied by pr-author, the PR author; refused (an author cannot override its own review gate); coverage uncovered: 0 reviewed (no head-pinned pass attestation; waiting on chatgpt-codex-connector - if a reviewer there is uninstalled or no longer configured, check config.review) [coverage row pinned to 162e652e1 at 2026-10-13T00:05:00Z]

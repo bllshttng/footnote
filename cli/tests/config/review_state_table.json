@@ -1,5 +1,5 @@
 {
-  "comment": "The shared oracle for review_state derivation from per-reviewer verdicts. The Python test (_derive_review_state) and the Rust test (CoverageReport::review_state) both walk these rows, so the two derivations cannot drift on which refusals name the state. A verdict without a `required` key reads REQUIRED on both sides: that is every row emitted before the field existed.",
+  "comment": "The shared oracle for review_state derivation from per-reviewer verdicts. The Rust test (CoverageReport::review_state) walks these rows; the Python derivation this table once pinned beside it is retired. A verdict without a `required` key reads REQUIRED: that is every row emitted before the field existed.",
   "rows": [
     {
       "name": "optional_refused_only_is_unreviewed",

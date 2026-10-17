@@ -1,0 +1,1 @@
+rounds-two-axes: the Python gate counts two axes (attestation chain, reviews payload) and answers their max; the native verdict counts ONE shared head set across both axes (law d-608344c1: a round is keyed by head). This case reads 1/2 rounds in Python and 2/2 natively, so the rounds note inside the refusal differs; parity compares state and exit only for this case.
