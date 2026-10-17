@@ -1949,9 +1949,10 @@ fn base_command(
     cmd.env("FNO_SERVER", session);
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());
-    // Unique per pane-host spawn: descendants (incl. a nested claude) inherit
-    // the same value, so the hook's first-writer pin is keyed to THIS host and
-    // a recycled pane_id after a server restart gets a fresh key.
+    // Unique per pane-host spawn: every session in this pane (this host and
+    // any harness typed into it later) computes the hook's ancestry-verdict
+    // pin paths under the SAME key, and a recycled pane_id after a server
+    // restart gets a fresh key.
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -2842,7 +2843,8 @@ mod tests {
         // 4a-G2: FNO_PANE joins FNO_SESSION in every pane child env, so a
         // hosted agent can name its own pane and an in-pane spawn inherits
         // the session. FNO_PANE_EPOCH rides along, non-empty, so the
-        // turn-marker hook's first-writer pin has a per-spawn freshness key.
+        // turn-marker hook's ancestry-verdict pins have a per-spawn
+        // freshness key.
         let _gate = pty_gate_async().await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);

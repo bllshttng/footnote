@@ -296,7 +296,67 @@ fn the_transition_gate_collapses_repeats_not_reason_changes() {
     let _ = std::fs::remove_dir_all(&rt);
 }
 
-// --- the first-writer pin (the marker identity gate) ---
+// --- the marker identity gate (ancestry verdict + v1 first-writer fallback) ---
+
+/// A census row builder for the synthetic ancestry tables the verdict tests
+/// install through `set_test_ancestry_table` (cleared with `None`).
+fn census_row(pid: u32, ppid: u32, command: &str) -> (u32, crate::census::ProcRow) {
+    (
+        pid,
+        crate::census::ProcRow {
+            pid,
+            ppid,
+            state: 'S',
+            elapsed_s: 0,
+            cpu_pct: 0.0,
+            rss_kb: 0,
+            command: command.to_string(),
+        },
+    )
+}
+
+/// Install a synthetic census table (or clear the override with `None`).
+fn install_ancestry(rows: &[(u32, u32, &str)]) {
+    let table: std::collections::BTreeMap<u32, crate::census::ProcRow> = rows
+        .iter()
+        .copied()
+        .map(|(pid, ppid, cmd)| census_row(pid, ppid, cmd))
+        .collect();
+    crate::spawn_context::set_test_ancestry_table(Some(table));
+}
+
+/// The real ppid of the test binary, so a synthetic table can name the walk
+/// start the hook would see.
+fn test_ppid() -> u32 {
+    (unsafe { libc::getppid() }) as u32
+}
+
+/// Host-shaped ancestry: test binary -> zsh -> fno mux -> launchd. The
+/// nearest harness ancestor is the test binary row itself.
+fn host_ancestry() -> Vec<(u32, u32, &'static str)> {
+    let ppid = test_ppid();
+    vec![
+        (1, 0, "/sbin/launchd"),
+        (5, 1, "fno mux serve"),
+        (10, 5, "/bin/zsh -il"),
+        (ppid, 10, "claude"),
+    ]
+}
+
+/// Guest-shaped ancestry: the test binary's nearest harness ancestor sits
+/// under ANOTHER harness (a Bash tool running `claude -p` inside a pane
+/// claude).
+fn nested_ancestry() -> Vec<(u32, u32, &'static str)> {
+    let ppid = test_ppid();
+    vec![
+        (1, 0, "/sbin/launchd"),
+        (5, 1, "fno mux serve"),
+        (10, 5, "/bin/zsh -il"),
+        (20, 10, "claude"),
+        (30, 20, "bash /some/hook.sh"),
+        (ppid, 30, "claude"),
+    ]
+}
 
 fn set_pane_env(pane: &str, epoch: &str, server: &str, rt: &std::path::Path) {
     std::env::set_var("FNO_PANE", pane);
@@ -317,23 +377,29 @@ fn clear_pane_env() {
     }
 }
 
-/// mT1/mT2/mT13: the pane host wins the pin and emits; a nested session
-/// (same pane/epoch/server, different id) stays silent; FNO_SERVER and the
-/// legacy FNO_SESSION spelling compute the same pin.
+/// mT1/mT2/mT13, updated for the ancestry verdict: the pane's harness is a
+/// host, a harness nested under the pane's harness is a guest, and
+/// FNO_SERVER vs the legacy FNO_SESSION spelling decide the same. The
+/// census-unavailable first-writer fallback keeps its own test below.
 #[test]
 fn the_pane_host_wins_the_pin_and_a_nested_session_stays_silent() {
     let _g = env_lock();
     let rt = runtime_dir("pin");
-    std::env::set_var("FNO_SERVER", "main");
-    std::env::set_var("FNO_SESSION", "main");
     set_pane_env("1", "1000", "main", &rt);
+    install_ancestry(&host_ancestry());
     assert!(is_pane_host("host-1"));
+    install_ancestry(&nested_ancestry());
     assert!(!is_pane_host("nested-2"));
-    // The legacy spelling computes the same pin: the host still emits, the
-    // nested session still stays silent.
+    // The legacy FNO_SESSION spelling decides the same: seed it, drop
+    // FNO_SERVER, and the verdict cache written by the first host-1 call
+    // still answers.
+    std::env::set_var("FNO_SESSION", "main");
     std::env::remove_var("FNO_SERVER");
+    install_ancestry(&host_ancestry());
     assert!(is_pane_host("host-1"));
+    install_ancestry(&nested_ancestry());
     assert!(!is_pane_host("nested-2"));
+    crate::spawn_context::set_test_ancestry_table(None);
     clear_pane_env();
     let _ = std::fs::remove_dir_all(&rt);
 }
@@ -358,11 +424,9 @@ fn the_pin_degrades_to_emit_on_every_broken_key() {
     // Non-numeric pane (a traversal shape).
     std::env::set_var("FNO_PANE", "../../pwn");
     assert!(is_pane_host("h"));
-    // Empty pin pre-seeded.
-    set_pane_env("7", "7000", "main", &rt);
-    let dir = runtime_pin_dir().unwrap();
-    std::fs::write(dir.join("main-7-7000"), "").unwrap();
-    assert!(is_pane_host("h"));
+    // (The empty-pin degrade moved to the census-unavailable fallback test:
+    // with a census present the verdict cache decides, so an empty v1 pin
+    // no longer reaches the latch.)
     // Symlinked rendezvous dir: refused, degrade to emit, target untouched.
     let rt2 = runtime_dir("degrade2");
     std::fs::create_dir_all(rt2.join("hijack-target")).unwrap();
@@ -389,6 +453,9 @@ fn a_traversal_server_name_stays_in_the_pin_dir() {
     let _g = env_lock();
     let rt = runtime_dir("traversal");
     set_pane_env("9", "9000", "", &rt);
+    // An empty census sends the gate to the v1 latch, whose sanitization
+    // this test pins; the ancestry path needs a census to answer at all.
+    crate::spawn_context::set_test_ancestry_table(Some(std::collections::BTreeMap::new()));
     std::env::remove_var("FNO_SERVER");
     std::env::set_var("FNO_SESSION", "../../escape");
     assert!(is_pane_host("h"));
@@ -402,6 +469,72 @@ fn a_traversal_server_name_stays_in_the_pin_dir() {
                 || n.contains("fno-turn-pins-") && n.contains("..")
         });
     assert!(!escaped, "a pin escaped the rendezvous dir: {escaped}");
+    crate::spawn_context::set_test_ancestry_table(None);
+    clear_pane_env();
+    let _ = std::fs::remove_dir_all(&rt);
+}
+
+/// The fix itself: a second harness typed into the same pane after the
+/// first one exited is ALSO a host - the ancestry proof decides, not a pin
+/// the first harness happened to win. A harness nested under the pane's
+/// harness (a Bash tool running `claude -p` in the same pane) stays a guest.
+#[test]
+fn a_second_harness_in_the_same_pane_is_also_a_host() {
+    let _g = env_lock();
+    let rt = runtime_dir("second-harness");
+    set_pane_env("3", "3000", "main", &rt);
+    install_ancestry(&host_ancestry());
+    assert!(is_pane_host("codex-sess"));
+    assert!(is_pane_host("claude-sess"));
+    install_ancestry(&nested_ancestry());
+    assert!(!is_pane_host("nested-sess"));
+    crate::spawn_context::set_test_ancestry_table(None);
+    clear_pane_env();
+    let _ = std::fs::remove_dir_all(&rt);
+}
+
+/// The session-keyed verdict cache: once written, the cache answers without
+/// touching the census, in both directions.
+#[test]
+fn the_verdict_cache_answers_without_the_census() {
+    let _g = env_lock();
+    let rt = runtime_dir("verdict-cache");
+    set_pane_env("4", "4000", "main", &rt);
+    let dir = runtime_pin_dir().unwrap();
+    // A cached guest wins over a host-shaped census.
+    install_ancestry(&host_ancestry());
+    std::fs::write(dir.join("main-4-4000-cached-a"), "guest\n").unwrap();
+    assert!(!is_pane_host("cached-a"));
+    // A cached host wins over the REAL census (no injection): the test
+    // runner's ancestry proves no harness above it, so only the cache can
+    // be answering host here.
+    crate::spawn_context::set_test_ancestry_table(None);
+    std::fs::write(dir.join("main-4-4000-cached-b"), "host\n").unwrap();
+    assert!(is_pane_host("cached-b"));
+    clear_pane_env();
+    let _ = std::fs::remove_dir_all(&rt);
+}
+
+/// Census unavailable (an empty table): the ancestry answer would be a
+/// guess, so the v1 first-writer latch decides, the empty-pin degrade
+/// stands, and no verdict file is cached on this path.
+#[test]
+fn census_unavailable_falls_back_to_the_first_writer_latch() {
+    let _g = env_lock();
+    let rt = runtime_dir("no-census");
+    set_pane_env("6", "6000", "main", &rt);
+    crate::spawn_context::set_test_ancestry_table(Some(std::collections::BTreeMap::new()));
+    // The v1 latch: first writer emits, a different session in the epoch
+    // stays silent.
+    assert!(is_pane_host("host-1"));
+    assert!(!is_pane_host("nested-2"));
+    // No verdict file is written on the fallback path.
+    let dir = runtime_pin_dir().unwrap();
+    assert!(!dir.join("main-6-6000-host-1").exists());
+    // The v1 degrade stands: an empty pin from a half-failed create emits.
+    std::fs::write(dir.join("main-6-6000"), "").unwrap();
+    assert!(is_pane_host("h"));
+    crate::spawn_context::set_test_ancestry_table(None);
     clear_pane_env();
     let _ = std::fs::remove_dir_all(&rt);
 }

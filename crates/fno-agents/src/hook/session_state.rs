@@ -10,8 +10,10 @@
 //!   blocked, naming what the session is waiting on),
 //! - a monotonic seq (`MonotonicTimestamp`, boot-global, never steps back
 //!   within one boot; the daemon drops `seq <= last_seq`),
-//! - OSC 133 turn-block markers gated on FNO_PANE plus the first-writer pin
-//!   under the 0700 runtime dir, the continuation re-open when a `/target`
+//! - OSC 133 turn-block markers gated on FNO_PANE plus the pane_claim
+//!   ancestry verdict (computed once per session, cached in a pin file; the
+//!   v1 first-writer pin survives as the census-unavailable fallback) under
+//!   the 0700 runtime dir, the continuation re-open when a `/target`
 //!   manifest exists,
 //! - the 120 s transition gate with mark-after-send (a failed send never
 //!   suppresses a retry),
@@ -236,11 +238,16 @@ fn runtime_pin_dir() -> Option<std::path::PathBuf> {
 fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
-/// First-writer session-identity gate: only the pty.rs process spawned INTO
-/// the pane emits. It fires its first marker at turn start, BEFORE it can
-/// spawn a nested session, so it always wins the pin; a nested session
-/// (which inherits FNO_PANE + the ctty) reads a different pinned id and
-/// stays silent instead of splitting the outer turn. Degrades to the v1
+/// Pane-host gate for the marker lane. Host-ness is the pane_claim ancestry
+/// proof ([`crate::pane_claim::from_parts`]): the nearest harness ancestor,
+/// claude pool machinery refused above it, a real (non-detached) parent, and
+/// no other harness above that. A second harness typed into the same pane
+/// after the first one exited proves the same way, so it emits where the v1
+/// first-writer pin left it silent for its whole session. The verdict is
+/// computed once per session and cached in a session-keyed pin file, so the
+/// per-event hot path is one file read, never a census walk. The v1
+/// first-writer latch survives only as the fallback when the census is
+/// unavailable or the env cannot name the server. Degrades to the v1
 /// presence gate (emit) when there is no recycle-safe key: no
 /// FNO_PANE_EPOCH, or no session id. The key carries FNO_PANE_EPOCH because
 /// pane ids recycle across server restarts.
@@ -254,9 +261,9 @@ fn is_pane_host(session_id: &str) -> bool {
     // Every pin path component is env-controlled, so a hostile env could
     // smuggle `/` or `..` out of the dir. FNO_PANE/FNO_PANE_EPOCH are
     // numeric by contract (pty.rs), so require digits (degrade-to-emit
-    // otherwise); FNO_SERVER (FNO_SESSION on pre-rename panes) is free-form,
-    // so sanitize its separators. Deterministic, so a host and its nested
-    // session still compute the same pin path.
+    // otherwise); FNO_SERVER (FNO_SESSION on pre-rename panes) and the
+    // session id are free-form, so sanitize their separators. Deterministic,
+    // so a session always computes the same cache path.
     let numeric = |k: &str| {
         std::env::var(k).is_ok_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
     };
@@ -265,23 +272,93 @@ fn is_pane_host(session_id: &str) -> bool {
     if !pane_ok || !epoch_ok {
         return true;
     }
+    let sanitize = |v: &str| -> String {
+        if v.is_empty() {
+            "_".to_string()
+        } else {
+            v.chars()
+                .map(|c| if c == '/' || c == '.' { '_' } else { c })
+                .collect()
+        }
+    };
     let server = std::env::var("FNO_SERVER").unwrap_or_default();
     let server = if server.is_empty() {
         std::env::var("FNO_SESSION").unwrap_or_default()
     } else {
         server
     };
-    let safe_server: String = if server.is_empty() {
-        "_".to_string()
-    } else {
-        server
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '_' } else { c })
-            .collect()
-    };
     let pane = std::env::var("FNO_PANE").unwrap_or_default();
     let epoch = std::env::var("FNO_PANE_EPOCH").unwrap_or_default();
-    let pin = dir.join(format!("{safe_server}-{pane}-{epoch}"));
+    if server.is_empty() {
+        // from_parts needs the env to name the pane's session; pre-rename
+        // panes cannot, so they stay on the v1 latch exactly as they were.
+        return first_writer_latch(session_id, &dir, "_", &pane, &epoch);
+    }
+    let verdict_pin = dir.join(format!(
+        "{}-{pane}-{epoch}-{}",
+        sanitize(&server),
+        sanitize(session_id)
+    ));
+    // Cache hit: this session's verdict was computed once already. An empty
+    // or unreadable file falls through to recompute (never answers guest on
+    // a read failure).
+    if let Ok(cached) = std::fs::read_to_string(&verdict_pin) {
+        let cached = cached.lines().next().unwrap_or("");
+        if !cached.is_empty() {
+            return cached == "host";
+        }
+    }
+    // An empty census table means the walk cannot see processes at all: the
+    // ancestry answer would be a guess, so fall back to the v1 latch and
+    // cache nothing.
+    let table = crate::spawn_context::ancestry_table();
+    if table.is_empty() {
+        return first_writer_latch(session_id, &dir, &sanitize(&server), &pane, &epoch);
+    }
+    let host =
+        crate::pane_claim::from_parts(
+            |k| std::env::var(k).ok(),
+            &table,
+            unsafe { libc::getppid() } as u32,
+        )
+        .is_some();
+    let word = if host { "host" } else { "guest" };
+    // noclobber: concurrent first events of one session compute the same
+    // deterministic verdict, so the loser just reads the winner's word.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&verdict_pin)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            let _ = writeln!(f, "{word}");
+            host
+        }
+        Err(_) => {
+            let pinned = std::fs::read_to_string(&verdict_pin).unwrap_or_default();
+            let pinned = pinned.lines().next().unwrap_or("");
+            // Half-failed create or unreadable winner: degrade to the
+            // presence gate (emit), never latch the host silent on a read
+            // failure.
+            pinned.is_empty() || pinned == "host"
+        }
+    }
+}
+
+/// The v1 gate, kept as the fallback path only: the pty.rs process spawned
+/// INTO the pane wins the noclobber pin and emits; every later session in
+/// that pane epoch reads the winner's id and stays silent. Wrong for a
+/// second harness typed into the same pane, but right when no census exists
+/// to prove ancestry, and fail-open on every broken read.
+fn first_writer_latch(
+    session_id: &str,
+    dir: &std::path::Path,
+    server: &str,
+    pane: &str,
+    epoch: &str,
+) -> bool {
+    let pin = dir.join(format!("{server}-{pane}-{epoch}"));
     // noclobber: the create fails when the pin exists -> exactly one winner.
     match std::fs::OpenOptions::new()
         .write(true)
