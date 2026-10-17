@@ -87,6 +87,18 @@ pub fn find_transcript(session_uuid: &str) -> Option<PathBuf> {
     find_transcript_in(&claude_projects_dir(), session_uuid)
 }
 
+/// Same discovery under the isolated account's config dir: a row the roster
+/// read from a `[[accounts.records]]` root keeps its transcripts under that
+/// root, so the ambient scan would miss it. `None` or an unknown account id
+/// yields `None` (the caller falls back to the ambient scan).
+pub fn find_transcript_for_account(session_uuid: &str, account: Option<&str>) -> Option<PathBuf> {
+    let id = account?;
+    let (_, dir) = crate::claude_roster::isolated_account_dirs()
+        .into_iter()
+        .find(|(aid, _)| aid == id)?;
+    find_transcript_in(&dir.join("projects"), session_uuid)
+}
+
 /// Same discovery under an explicit projects base, for callers that resolve
 /// the root themselves (tests, or the cap actor's injected scan).
 pub fn find_transcript_in(base: &Path, session_uuid: &str) -> Option<PathBuf> {

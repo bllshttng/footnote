@@ -71,6 +71,34 @@ gates:
 
 event_types:
 
+  - name: native_bg_mint_failed
+    description: "The native-bg roster adopt's registry write failed; a `claude --bg` row did not mint this beat. The write closure re-decides absence, so the next beat retries; this names a failed birth, never a silent zero."
+    sources: [daemon]
+    data:
+      required: [error]
+      properties:
+        error: { type: string, description: "The registry write failure" }
+    consumers: [operator]
+
+  - name: native_bg_node_backfilled
+    description: "A native-bg registry row born before its transcript existed gained its node on a later beat. One row per fill."
+    sources: [daemon]
+    data:
+      required: [name, node]
+      properties:
+        name: { type: string, description: "The registry row's name" }
+        node: { type: string, description: "The node id read from the launch prompt" }
+    consumers: [operator]
+
+  - name: native_bg_mint_deferred
+    description: "The native-bg roster adopt hit its per-beat budget; the remaining candidates wait for later beats."
+    sources: [daemon]
+    data:
+      required: [budget]
+      properties:
+        budget: { type: integer, description: "The per-beat cap on mint and backfill candidates" }
+    consumers: [operator]
+
   - name: version_skew
     description: "A spawn gate refused because the registry writer floor is newer than this reader."
     sources: [rust]

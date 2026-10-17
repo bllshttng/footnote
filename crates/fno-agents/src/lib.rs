@@ -323,6 +323,7 @@ pub mod model_price;
 pub mod name_draw;
 pub mod naming;
 pub mod native_adopt;
+pub mod native_bg_mint;
 pub mod needs;
 pub mod node_branch;
 pub mod node_origin;
@@ -1576,6 +1577,12 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The native-bg roster adopt (native_bg_mint.rs): a failed registry
+    // birth write, a node filled on a later beat, and the per-beat budget
+    // deferral.
+    "native_bg_mint_failed",
+    "native_bg_node_backfilled",
+    "native_bg_mint_deferred",
     // The sandbox-denial ingester: codex transcript refusals -> one row per
     // (session, class, path) with a hit count, plus the pass summary row.
     // The claude half rides another node; harness is the seam.

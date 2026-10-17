@@ -6310,12 +6310,12 @@ pub(crate) fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
-    // Liveness for a `claude --substrate bg` thread reads the daemon roster
-    // and the claude listing: see liveness_sweep::BgRoster. A MISSING roster
-    // parses as zero workers and reaps as before; an UNREADABLE one is
-    // unknown liveness, where we refuse to declare death.
+    // Liveness witness for bg claude rows; the missing/unreadable-roster
+    // contract lives on liveness_sweep::BgRoster's own doc. Native adopt
+    // (births + node backfills) rides this same listing, on both sweep modes.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
+    crate::native_bg_mint::mint_missing_native_bg(home, witness.listing(), emitter);
     let codex_index = crate::client_verbs::codex_rollout_index(None);
     let rollout_exists = |e: &RegistryEntry| -> bool {
         crate::codex_store::codex_rollout_exists(

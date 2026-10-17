@@ -1085,9 +1085,11 @@ pub struct RegistryEntry {
     /// assertion input on read-modify-write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keeper_child_pid: Option<u32>,
-    /// The substrate this row was spawned on: "pane", "thread" or "headless".
-    /// `None` on a row whose writer cannot know (adopt, manifest synthesis) -
-    /// ABSENCE MEANS UNKNOWN, never "pane", because a silent default would tell
+    /// The substrate this row was spawned on: "pane", "thread", "headless",
+    /// or "native-bg" (a session claude's own daemon hosts, adopted from the
+    /// harness listing - never pane/thread-hosted by fno). `None` on a row
+    /// whose writer cannot know (adopt, manifest synthesis) - ABSENCE MEANS
+    /// UNKNOWN, never "pane", because a silent default would tell
     /// restore to resurrect a session that exited on purpose. Mirrors Python's
     /// `AgentEntry.substrate`; gated by the v23 schema bump so an older writer
     /// refuses the store rather than erasing a stamp on read-modify-write.

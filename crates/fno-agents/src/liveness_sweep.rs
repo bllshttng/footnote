@@ -99,6 +99,12 @@ impl BgRoster {
         self.readable
     }
 
+    /// The harness listing this witness already read, so the adopt pass does
+    /// not shell `claude agents --json` a second time per beat.
+    pub(crate) fn listing(&self) -> &crate::claude_roster::ClaudeAgentsSnapshot {
+        &self.listing
+    }
+
     /// The exact-holder lookup: full recorded session id first, then the
     /// row's short id.
     fn find(&self, e: &RegistryEntry) -> Option<&crate::claude_roster::RosterWorker> {
