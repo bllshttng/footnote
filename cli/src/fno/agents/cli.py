@@ -4562,18 +4562,13 @@ def cmd_stop(
 ) -> None:
     """Stop an agent's underlying session.
 
-    Claude agents: shells out to ``claude stop`` on the short id and prints
-    ``stopped: <name> (<short_id>)`` on success. Codex / gemini agents
-    are synchronous between asks - the verb is a no-op with an
-    explanatory stderr line.
+    The ``fno-agents`` client owns this verb; the argument above documents
+    its surface. There is no Python stop lane left: a missing binary is
+    refused.
     """
-    from fno.agents.dispatch import DispatchAskError, stop_agent
+    from fno.agents.rust_runtime import refuse_without_binary
 
-    try:
-        stop_agent(name)
-    except DispatchAskError as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
+    refuse_without_binary("stop")
 
 
 @agents_app.command("rm", hidden=True)

@@ -529,10 +529,13 @@ def test_AC1_HP_the_restart_journey_on_a_real_pi_thread(tmp_path, monkeypatch, c
         # stop arm drives the SAME socket the journey proved survives, and the
         # child goes with it. A lane that cannot be stopped is the leak class
         # that nearly cost the operator the machine.
-        from fno.agents.dispatch import stop_agent
-
-        result = stop_agent(session_name)
-        assert result.name == session_name
+        stop = subprocess.run(
+            [str(_client_bin), "stop", session_name],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert stop.returncode == 0, f"keeper stop failed: {stop.stdout} {stop.stderr}"
         deadline = time.monotonic() + 10
         while _alive(child_pid) and time.monotonic() < deadline:
             time.sleep(0.2)

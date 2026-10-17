@@ -2,15 +2,12 @@
 
 Three independent fixes bundled into one PR:
 
-1. ``stop_agent`` flips registry status to ``"orphaned"`` on successful
-   ``claude stop`` so the Phase 8 TUI doesn't keep the row coloured
-   ``live`` until the next reconcile.
-2. ``_stamp_status`` accepts a ``Callable[[], str]`` for
+1. ``_stamp_status`` accepts a ``Callable[[], str]`` for
    ``last_message_at`` so the timestamp is generated INSIDE the
    ``update_registry`` lock — making concurrent followups strictly
    monotonic instead of last-lock-winner-wins on a possibly-earlier
    pre-lock timestamp.
-3. ``reconcile_agents`` preserves the current entry's ``last_message_at``
+2. ``reconcile_agents`` preserves the current entry's ``last_message_at``
    when its batched ``_apply`` writes a status flip. Pre-fix, the
    pending-updates dict captured the WHOLE snapshot entry so a
    dispatch_ask interleaving between the probe loop and the atomic
@@ -71,86 +68,7 @@ def _load_entry(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: stop_agent flips status to "orphaned" on successful claude stop
-# ---------------------------------------------------------------------------
-
-
-def test_stop_claude_flips_status_to_orphaned(tmp_path: Path, monkeypatch) -> None:
-    """After ``claude stop`` exits 0, the registry row reads ``status=orphaned``.
-
-    Pre-fix the row kept ``status="live"`` until the next reconcile, so
-    ``fno agents list`` would lie about reachability for any window
-    between the stop and the next reconcile pass. Important for the
-    Phase 8 TUI's status colouring. Handoff sigma-review H6.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(
-            name="worker-claude",
-            provider="claude",
-            short_id="7c5dcf5d",
-            status="live",
-            last_message_at="2026-05-20T12:00:00Z",
-        ),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-
-    monkeypatch.setattr(
-        claude_mod,
-        "claude_stop",
-        lambda short_id, *, timeout=30.0: (0, ""),
-    )
-
-    dispatch.stop_agent("worker-claude")
-
-    entry = _load_entry("worker-claude")
-    assert entry.status == "orphaned"
-    # ``last_message_at`` must be preserved across the stop — the stop
-    # flag does not invalidate the historical timestamp.
-    assert entry.last_message_at == "2026-05-20T12:00:00Z"
-
-
-def test_stop_claude_nonzero_exit_leaves_status_untouched(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A failed ``claude stop`` (non-zero exit) does NOT flip status.
-
-    The status flip is the success-path forensic signal; a stop that
-    surfaces stderr to the operator (e.g. "session already stopped") must
-    not silently rewrite the registry to a state that wasn't earned.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(
-            name="worker-claude",
-            provider="claude",
-            short_id="7c5dcf5d",
-            status="live",
-        ),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-
-    monkeypatch.setattr(
-        claude_mod,
-        "claude_stop",
-        lambda short_id, *, timeout=30.0: (5, "claude stop: session already stopped\n"),
-    )
-
-    with pytest.raises(dispatch.DispatchAskError):
-        dispatch.stop_agent("worker-claude")
-
-    entry = _load_entry("worker-claude")
-    assert entry.status == "live"
-
-
-# ---------------------------------------------------------------------------
-# Fix 2: _stamp_status accepts Callable[[], str] for last_message_at
+# Fix 1: _stamp_status accepts Callable[[], str] for last_message_at
 # ---------------------------------------------------------------------------
 
 

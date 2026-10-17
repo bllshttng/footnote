@@ -266,7 +266,6 @@ A	stale >30d, drained by maintain	py=cli/src/fno/graph/_constants.py;rs=crates/f
 A	stale-quarantine (guard)	py=cli/src/fno/graph/_constants.py;rs=crates/fno-agents/src/backlog/maintenance.rs|crates/fno-agents/src/backlog/patch.rs	# CLASSIFY protocol|msg-twin|data
 A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# CLASSIFY protocol|msg-twin|data
 A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# CLASSIFY protocol|msg-twin|data
-A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# CLASSIFY protocol|msg-twin|data
 A	stub-manifest-{node_id}.json	py=cli/src/fno/stub_manifest.py;rs=crates/fno-agents/src/merge_gates.rs	# CLASSIFY protocol|msg-twin|data
 A	substrate 'bg' was retired; set substrate = thread	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/backlog/dispatch_resolve.rs	# CLASSIFY protocol|msg-twin|data advance.py port in flight: byte-matched twins, the python leg deletes when the port lands
 A	substrate 'bg' was retired; use --substrate thread	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs	# CLASSIFY protocol|msg-twin|data

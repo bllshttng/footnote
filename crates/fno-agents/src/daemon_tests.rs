@@ -826,7 +826,7 @@ mod gc_mux_member;
 #[path = "daemon/tests/gc_receipts.rs"]
 mod gc_receipts;
 #[path = "daemon/tests/keeper_sweep.rs"]
-mod keeper_sweep;
+pub(in crate::daemon) mod keeper_sweep;
 #[path = "daemon/tests/reap_holds.rs"]
 mod reap_holds;
 #[path = "daemon/tests/reap_session.rs"]

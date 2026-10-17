@@ -1,9 +1,9 @@
 """Typer CliRunner tests for the US4-lifecycle CLI verbs.
 
-Covers ``fno agents stop``, ``fno agents rm``, ``fno agents reconcile``,
-and ``fno agents attach``. Dispatch is monkeypatched per-test so the
-CLI layer is exercised in isolation; the dispatch layer has its own
-test in ``test_dispatch_lifecycle.py``.
+Covers ``fno agents rm``, ``fno agents reconcile``, and ``fno agents
+attach``. Dispatch is monkeypatched per-test so the CLI layer is
+exercised in isolation; the dispatch layer has its own test in
+``test_dispatch_lifecycle.py``.
 
 Also pins the ``ping`` informational-stub conversion from US4-lifecycle
 task 2.2 (the last ``_NOT_IMPLEMENTED`` placeholder is gone).
@@ -20,53 +20,6 @@ from typer.testing import CliRunner
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
-
-
-# ---------------------------------------------------------------------------
-# stop
-# ---------------------------------------------------------------------------
-
-
-def test_cli_stop_happy_path(monkeypatch, runner: CliRunner) -> None:
-    """cmd_stop wires to dispatch.stop_agent and returns exit 0 on success."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
-
-    called: list[str] = []
-
-    def fake_stop_agent(name: str):
-        called.append(name)
-        return dispatch.StopResult(name=name, provider="claude", claude_exit=0)
-
-    monkeypatch.setattr(dispatch, "stop_agent", fake_stop_agent)
-    monkeypatch.setattr(
-        "fno.agents.cli.__import__",
-        __builtins__["__import__"],
-        raising=False,
-    )
-
-    result = runner.invoke(agents_app, ["stop", "worker-claude"])
-    assert result.exit_code == 0, result.output
-    assert called == ["worker-claude"]
-
-
-def test_cli_stop_propagates_dispatch_exit_code(
-    monkeypatch, runner: CliRunner
-) -> None:
-    """A DispatchAskError raised by stop_agent surfaces as Typer's exit code."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
-
-    def fake_stop_agent(name: str):
-        raise dispatch.DispatchAskError(
-            f"agent {name!r} not found in registry", exit_code=2
-        )
-
-    monkeypatch.setattr(dispatch, "stop_agent", fake_stop_agent)
-
-    result = runner.invoke(agents_app, ["stop", "ghost"])
-    assert result.exit_code == 2
-    assert "not found in registry" in result.output
 
 
 # ---------------------------------------------------------------------------

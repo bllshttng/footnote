@@ -26,7 +26,7 @@ Provider matrix:
 
 | Verb | claude | codex | gemini |
 |------|--------|-------|--------|
-| stop | `claude stop <id>` shellout (30s timeout) <!-- retired-ok: a reference table of what each harness teardown invokes, not steps to run. --> | no-op + info on stderr (synchronous between asks) | no-op + info on stderr |
+| stop | the fno-agents client's `agent.stop` daemon RPC; `stop_claude` proves the worker set from claude's own roster and ends survivors itself | no-op + info on stderr (synchronous between asks) | no-op + info on stderr |
 | rm | `claude rm <id>` then registry-row removal (atomicity invariant); `--force` overrides <!-- retired-ok: a reference table of what each harness teardown invokes, not steps to run. --> | registry-only; on-disk session files stay (operator cleans manually) | registry-only |
 | reconcile | `claude logs <id> --tail 1` exit-code (10s timeout) | presence in `~/.codex/session_index.jsonl` | tri-state reachability probe (see [fno-agents-gemini-commands.md](fno-agents-gemini-commands.md)) |
 | attach | `claude attach <id>` with inherited stdio | exit 13 (interactive attach not supported) | exit 13 (interactive attach not supported) |
@@ -35,14 +35,14 @@ Provider matrix:
 
 ```
 cli.py
-   ├─ cmd_stop(name)         → dispatch.stop_agent(name)
+   ├─ cmd_stop(name)         → Rust runtime only (no Python stop; refuses by name
+   │                           without the fno-agents binary)
    ├─ cmd_rm(name, --force)  → Rust runtime only (no Python rm; refuses by name
    │                           without the fno-agents binary)
    ├─ cmd_reconcile(--json)  → dispatch.reconcile_agents()
    └─ cmd_attach(name)       → dispatch.attach_agent(name)
 
 dispatch.py
-   ├─ stop_agent     ─ per-agent flock → claude_stop → events.agent_stopped
    └─ reconcile_agents ─ no flock; per-entry update_registry; one-shot capability checks (claude-on-PATH, codex-session-index)
 
 harnesses/claude.py

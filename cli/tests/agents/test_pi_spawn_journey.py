@@ -51,13 +51,11 @@ import shutil
 import signal
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
-from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses.pi import lookup_sessions
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
@@ -233,7 +231,6 @@ def _write_loopcheck_wrapper(short_state: Path) -> Path:
     synth transcript names .pi-loopcheck-) invoked loop-check; the exec
     keeps loop-check's own decision honest rather than staged."""
     wrapper = short_state / "loopcheck-wrapper.sh"
-    log = short_state / "loopcheck.log"
     wrapper.write_text(
         "#!/bin/sh\n"
         'echo "$@" >> "$FNO_LOOPCHECK_LOG"\n'
@@ -286,7 +283,6 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_pi_thread(
     from fno.setup import integration as I
 
     dest = I._pi_extension_dest()
-    pre_installed = I._pi_is_installed()
     pre_text = dest.read_text(encoding="utf-8") if dest.exists() else None
     install_res = I._pi_install()
     assert install_res.ok, f"the pi extension install failed: {install_res.note}"
@@ -433,17 +429,18 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_pi_thread(
             f"child_pid={row.keeper_child_pid} "
             f"keeper_pid={row.pid} session_id={session_id}"
         )
-        from fno.agents.dispatch import stop_agent
-
         child_pid = row.keeper_child_pid
         # A stop refusal under load is not a strand: pi's own exit can outlast
         # the stop grace window while the Kill contract still completes. The
         # gate is the child's DEATH, verified, never the verb's receipt.
-        try:
-            stopped = stop_agent(_JOURNEY_NAME)
-            assert stopped.name == _JOURNEY_NAME
-        except DispatchAskError as stop_refusal:
-            print(f"stop refused (grace window), verifying death directly: {stop_refusal}")
+        stopped = subprocess.run(
+            [str(_client_bin), "stop", _JOURNEY_NAME],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if stopped.returncode != 0:
+            print(f"stop refused (grace window), verifying death directly: {stopped.stderr}")
         deadline = time.monotonic() + 15
         while _alive(child_pid) and time.monotonic() < deadline:
             time.sleep(0.2)

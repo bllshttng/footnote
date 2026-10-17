@@ -30,6 +30,7 @@ use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership chec
 
 mod blocking_bound;
 mod claude_stop;
+mod keeper_stop;
 mod terminal_stop_sweep;
 pub(super) use terminal_stop_sweep::terminal_stop_sweep;
 mod fleet_arms;
@@ -45,6 +46,7 @@ pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::stop_claude;
+use self::keeper_stop::stop_keeper_row;
 use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone, row_death_reason};
@@ -4550,40 +4552,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     // would report a stop that stopped nothing. Kill goes over the row's own
     // socket and is CONFIRMED before the row goes terminal.
     if let Some(sock) = keeper_thread_sock(&entry) {
-        if !stop_keeper_confirmed(&sock).await {
-            let _ = ctx.emitter.emit(
-                "agent_stop_refused",
-                &json!({"name": name, "backend": "keeper-thread"}),
-            );
-            return Response::err(
-                req.id,
-                ErrorCode::Internal,
-                format!("agent {name}: keeper did not confirm shutdown; it may still be running"),
-            );
-        }
-        let stop_name = name.clone();
-        let wake_home = ctx.home.clone();
-        if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
-            if let Some(entry) = registry.find_mut(&stop_name) {
-                entry.status = AgentStatus::Exited;
-                entry.exited_at = Some(now_rfc3339_like());
-                crate::state::record_stop(entry, "stop-verb", Some("keeper-thread".into()));
-                crate::wake_name::stamp_from_row(&wake_home, entry);
-            }
-        })
-        .await
-        {
-            return Response::err(
-                req.id,
-                state_error_code(&error),
-                format!("keeper thread {name} stopped but registry write failed: {error}"),
-            );
-        }
-        let _ = ctx.emitter.emit(
-            "agent_stopped",
-            &json!({"name": name, "backend": "keeper-thread"}),
-        );
-        return Response::ok(req.id, json!({"stopped": true, "backend": "keeper-thread"}));
+        return stop_keeper_row(ctx, req, &name, &entry, &sock).await;
     }
     // A headless footnote child is a plain process in its own group. End it
     // before the row goes terminal, or the stop reports a pid still running.
@@ -6905,6 +6874,9 @@ mod tests;
 #[cfg(test)]
 #[path = "daemon/tests/adopt_pin_tests.rs"]
 mod adopt_pin_tests;
+#[cfg(test)]
+#[path = "daemon/tests/keeper_stop.rs"]
+mod keeper_stop_tests;
 #[cfg(test)]
 #[path = "daemon/tests/pid_zombie_tests.rs"]
 mod pid_zombie_tests;

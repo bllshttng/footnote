@@ -43,7 +43,7 @@ A mail-based fleet warning is therefore not a cap mitigation, and that is a reco
 | Emit `worker_refused` above the staleness gate | an event write | `recovery.recovery_sweep` |
 | Run the fleet leg first and heartbeat it | a file write on a launchd tick | `pr_watch/cli.py`, `fleet_state.py` |
 | Project a probe-less window's close | local reads | `runtime_state.project_window`, `fno config accounts window` |
-| Stop out of band | a signal | `dispatch._stop_by_pid` via `stop_agent`'s escalation |
+| Stop out of band | a signal | `stop_claude`'s survivor end in `crates/fno-agents/src/daemon/claude_stop.rs` |
 | Re-dispatch across the harness axis | a fresh process | `config.agents.fallback`, `recovery._default_failover` |
 | Turn silence into a finding | a read and an event write | `agents/sweep.py`, `fno agents sweep` |
 | Cool the account at the refusal, before the next spawn | a file write | `recovery.recovery_sweep` via `quota_lock.record_quota_lock`, read by `spawn_gate.run_gate` |

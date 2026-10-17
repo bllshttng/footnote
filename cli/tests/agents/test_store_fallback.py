@@ -555,31 +555,6 @@ def test_resume_refuses_registry_hit_that_collides_with_store_session(
     assert store_only_id in result.stderr
 
 
-def test_lifecycle_refuses_registry_name_that_collides_with_store_session(
-    _registry_home,
-):
-    from fno.agents import dispatch
-    from fno.agents.registry import AgentEntry, write_registry
-
-    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
-    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
-    write_registry([
-        AgentEntry(
-            name="deadbeef",
-            cwd="/registered",
-            log_path="",
-            harness="codex",
-            harness_session_id=registered_id,
-        )
-    ])
-    _write_codex_session(_registry_home, store_only_id)
-
-    with pytest.raises(dispatch.DispatchAskError) as exc:
-        dispatch.stop_agent("deadbeef")
-
-    assert exc.value.exit_code == 2
-    assert registered_id in str(exc.value)
-    assert store_only_id in str(exc.value)
 
 
 def test_dispatch_send_refuses_registry_name_colliding_with_store_session(

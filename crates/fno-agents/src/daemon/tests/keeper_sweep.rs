@@ -12,7 +12,7 @@ use super::*;
 /// An agents home under a UNIQUE short base dir, so `mux/threads/` (the
 /// sweep's directory, derived from the agents root's parent) never collides
 /// between parallel tests the way a shared `/tmp/mux` would.
-pub(super) fn keeper_sweep_home(tag: &str) -> AgentsHome {
+pub(in crate::daemon) fn keeper_sweep_home(tag: &str) -> AgentsHome {
     use std::sync::atomic::{AtomicU32, Ordering};
     static C: AtomicU32 = AtomicU32::new(0);
     let n = C.fetch_add(1, Ordering::Relaxed);
@@ -171,7 +171,7 @@ fn spawn_silent_keeper(
 /// its socket and stops serving, the way the real keeper exits after
 /// SIGKILLing its child (pane_keeper.rs). Parks until `stop` flips so the
 /// test can end the thread deterministically even on refusal paths.
-fn spawn_killable_keeper(
+pub(in crate::daemon) fn spawn_killable_keeper(
     sock: &Path,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<()> {

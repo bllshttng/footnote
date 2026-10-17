@@ -76,18 +76,7 @@ class ReachabilityProbeError(RuntimeError):
 
 Previously, `stop_agent` and `rm_agent` open-coded the pre-flock + `hold_agent_lock` + post-flock re-read pattern. The pre-flock snapshot was a TOCTOU seed — a future contributor that forgot the post-lock re-read would silently operate on stale `provider` / `short_id`.
 
-The new context manager encapsulates the correct shape:
-
-```python
-@contextmanager
-def with_agent_lock_and_entry(name: str, ...) -> Iterator[tuple[LockHandle, AgentEntry]]:
-    _resolve_registry_entry(name)          # pre-flock validation; result discarded
-    with hold_agent_lock(name, ...) as lh:
-        existing = _resolve_registry_entry(name)  # post-lock re-read
-        yield (lh, existing)
-```
-
-The pre-flock snapshot is intentionally NOT yielded; callers MUST use the post-lock entry. The CI lint at `scripts/lint-flock-pattern.sh` forbids `hold_agent_lock` + `_resolve_registry_entry` co-occurrence in any `dispatch.py` function outside the helper.
+The new context manager encapsulated the shape: pre-flock validation, `hold_agent_lock` for the block, and a post-flock re-read as the one value yielded. The pre-flock snapshot was intentionally NOT yielded. Callers used the post-lock entry. The CI lint at `scripts/lint-flock-pattern.sh` forbade co-occurrence outside the helper. The helper was deleted with the Python stop leg (2026-10-16, the stop-twin retirement). `scripts/lint-flock-pattern.sh` remains until its own lint-leaf retirement PR.
 
 ### 3. Batched `reconcile_agents`
 

@@ -69,7 +69,6 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses.agy import conversation_store_path
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
@@ -454,17 +453,18 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
             f"child_pid={row.keeper_child_pid} "
             f"keeper_pid={row.pid} session_id={session_id}"
         )
-        from fno.agents.dispatch import stop_agent
-
         child_pid = row.keeper_child_pid
         # A stop refusal under load is not a strand: agy's own exit can outlast
         # the stop grace window while the Kill contract still completes. The
         # gate is the child's DEATH, verified, never the verb's receipt.
-        try:
-            stopped = stop_agent(_JOURNEY_NAME)
-            assert stopped.name == _JOURNEY_NAME
-        except DispatchAskError as stop_refusal:
-            print(f"stop refused (grace window), verifying death directly: {stop_refusal}")
+        stopped = subprocess.run(
+            [str(_client_bin), "stop", _JOURNEY_NAME],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if stopped.returncode != 0:
+            print(f"stop refused (grace window), verifying death directly: {stopped.stderr}")
         deadline = time.monotonic() + 15
         while _alive(child_pid) and time.monotonic() < deadline:
             time.sleep(0.2)
@@ -486,9 +486,9 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
         # Restore whatever hooks.json carried before the journey.
         try:
             if pre_hooks is not None:
-                hooks_json.write_text(pre_hooks, encoding="utf-8")
-            elif hooks_json.exists():
-                hooks_json.unlink()
+                workspace_hooks.write_text(pre_hooks, encoding="utf-8")
+            elif workspace_hooks.exists():
+                workspace_hooks.unlink()
         except OSError:
             pass
         shutil.rmtree(short_state, ignore_errors=True)
