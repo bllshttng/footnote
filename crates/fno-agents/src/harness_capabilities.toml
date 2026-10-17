@@ -1711,7 +1711,11 @@ command_surface = "slash"
 slash_prefix = "fno:"
 ready_marker = "unsupported"
 ready_rule_ids = []
-manifest_rules = []
+# Only the blocked vocabulary belongs here: the TUI's y/n ask band. The
+# working rule that outranks it lives in manifests/footnote.toml, where the
+# arbitration happens. ready_marker stays unsupported: the TUI queue holds
+# a seed typed before session/new answers.
+manifest_rules = [{ id = "permission_ask", state = "blocked" }]
 send_keys_enter_delay_ms = 0
 submit_keys = ["enter"]
 stop_strategy = "registry-noop"

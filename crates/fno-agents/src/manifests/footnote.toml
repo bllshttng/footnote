@@ -1,7 +1,48 @@
-# footnote readiness manifest - deliberately rule-free.
+# footnote readiness manifest. MEASURED AGAINST THE FNH TUI SOURCE, not a
+# live pane: fnh src/tui/view.rs draws the ask band and the busy line, and
+# a fnh TUI test pins both strings (fn-99c4 pane plan, 2026-10-17). The
+# draw strings are the TUI's own, not transcript content a reply could
+# print, which is why the regexes can pin them whole.
 #
-# The validator requires every capability-row harness to bundle a manifest.
-# footnote's pane hosts a TUI that paints a terminal grid, but no readiness
-# rule is measured against it yet, so the manifest pins none.
+# WHAT WAS READ, in fnh src/tui/view.rs and src/tui/app.rs:
+#
+#   ask band    " allow {title}?  [y] yes  [n] no", drawn only while an ask
+#               is up, in the band directly above the status line.
+#   busy line   "Churning… {n}s  (esc to interrupt)", drawn only while a
+#               turn runs; the ellipsis is U+2026 and the count moves every
+#               second.
+#   idle        the status line reads "Churned for {n}s · done {time} ..."
+#               and matches neither rule.
+#
+# WHY THE BLOCKED RULE MATTERS MORE HERE THAN ELSEWHERE: with `ask` set the
+# TUI reads the FIRST y or n in any typed text as the answer
+# (fnh src/tui/app.rs). A mail typed over an open permission ask would
+# answer it by accident. ARBITRATION: `permission_ask` outranks
+# `working_status` (960 over 900) because the ask band and the busy line
+# can be on screen together - a tool that asked is a tool still running.
+#
+# A false `blocked` only refuses the send and the mail falls to the durable
+# bus. A missed `blocked` types over the live ask. The regexes lean toward
+# blocked on purpose.
 #
 # State vocabulary + arbitration: see codex.toml.
+
+[[rule]]
+id = "permission_ask"
+state = "blocked"
+priority = 960
+region = "bottom_non_empty_lines(8)"
+# The band pads to the pane width, so the line starts with the band's own
+# space and the y/n grammar ends it. No `$` anchor: the band's trailing
+# padding is width-dependent.
+gate = { line_regex = '^\s*allow .*\?\s+\[y\] yes\s+\[n\] no' }
+
+[[rule]]
+id = "working_status"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(8)"
+# The count and the esc hint are required: "Churning" alone is text a model
+# reply could print, and the bottom-eight-line region does not exclude an
+# assistant message. No `$` anchor: a queued-submit suffix may follow.
+gate = { line_regex = 'Churning… [0-9]+s\s+\(esc to interrupt\)' }

@@ -1167,6 +1167,27 @@ fn resolve_confirm(
                 LaneConfirm::Refused("session-store-unreadable")
             }
         },
+        // footnote's per-turn record is its own transcript under the fno
+        // sessions root: fnh appends a user_input record per submitted
+        // prompt, so the confirm greps that record. A pane whose session
+        // has not written yet confirms through the pending store instead.
+        "footnote" => {
+            match crate::footnote_harness::transcript::find_session_dir(
+                &crate::footnote_harness::transcript::sessions_root(),
+                session,
+            ) {
+                Some(dir) => {
+                    let file = crate::footnote_harness::transcript::transcript_file(&dir, session);
+                    LaneConfirm::Transcript {
+                        baseline: transcript_len(&file),
+                        path: file,
+                    }
+                }
+                None => LaneConfirm::PendingStore {
+                    harness: "footnote".to_string(),
+                },
+            }
+        }
         _ => LaneConfirm::Refused("no-confirm-source"),
     }
 }
@@ -1304,6 +1325,18 @@ pub fn deliver_via_keeper_socket_in(
                 },
                 "codex" => match crate::codex_store::codex_rollout_path(None, session) {
                     Some(file) => confirm_content_after(&file, &marker, 0).unwrap_or(false),
+                    None => false,
+                },
+                "footnote" => match crate::footnote_harness::transcript::find_session_dir(
+                    &crate::footnote_harness::transcript::sessions_root(),
+                    session,
+                ) {
+                    Some(dir) => confirm_content_after(
+                        &crate::footnote_harness::transcript::transcript_file(&dir, session),
+                        &marker,
+                        0,
+                    )
+                    .unwrap_or(false),
                     None => false,
                 },
                 _ => match crate::grok_store::lookup_session(grok_root, session) {
@@ -2063,6 +2096,11 @@ pub(crate) fn deliver_via_pane(
                         session,
                     ),
                     "codex" => crate::codex_store::codex_rollout_path(None, session),
+                    "footnote" => crate::footnote_harness::transcript::find_session_dir(
+                        &crate::footnote_harness::transcript::sessions_root(),
+                        session,
+                    )
+                    .map(|dir| crate::footnote_harness::transcript::transcript_file(&dir, session)),
                     _ => None,
                 };
                 file.and_then(|f| confirm_content_after(&f, &marker, 0).ok())
@@ -4244,6 +4282,90 @@ mod tests {
             None => std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV),
         }
         drop(guard);
+    }
+
+    /// footnote's confirm target: its own transcript under the fno sessions
+    /// root, else the pending store - never a refusal. The TUI's user_input
+    /// record is what the content confirm greps (AC5-HP of the pane plan).
+    #[test]
+    fn resolve_confirm_reads_footnote_transcripts_and_pending_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::AgentsHomeEnvGuard::set(&temp.path().join("agents-home"));
+        let session = "0b73a1c0-aaaa-4bbb-8ccc-ddddeeee1111";
+        let target = resolve_confirm(
+            "footnote",
+            session,
+            Path::new("/nowhere"),
+            None,
+            Path::new("/nowhere"),
+        );
+        assert!(
+            matches!(target, LaneConfirm::PendingStore { ref harness } if harness == "footnote"),
+            "{target:?}"
+        );
+        let dir = crate::footnote_harness::transcript::sessions_root()
+            .join("proj")
+            .join(session);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = crate::footnote_harness::transcript::transcript_file(&dir, session);
+        std::fs::write(&record, b"{}\n").unwrap();
+        let target = resolve_confirm(
+            "footnote",
+            session,
+            Path::new("/nowhere"),
+            None,
+            Path::new("/nowhere"),
+        );
+        match target {
+            LaneConfirm::Transcript { path, .. } => assert_eq!(path, record),
+            other => panic!("expected a footnote transcript confirm target, got {other:?}"),
+        }
+    }
+
+    /// The pane lane delivers to a footnote pane and confirms on the TUI's
+    /// user_input record: the fake fno records the typed bytes and appends
+    /// the record the content confirm greps (AC6-HP of the pane plan). The
+    /// stub writes the record on its first invocation, so the confirm lands
+    /// on its first poll with no thread or sleep race.
+    #[test]
+    fn the_pane_lane_delivers_to_a_footnote_pane_and_confirms_on_the_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let _home = crate::AgentsHomeEnvGuard::set(&temp.path().join("agents-home"));
+        let session = "0b73a1c0-aaaa-4bbb-8ccc-ddddeeee1111";
+        let dir = crate::footnote_harness::transcript::sessions_root()
+            .join("proj")
+            .join(session);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = crate::footnote_harness::transcript::transcript_file(&dir, session);
+        std::fs::write(&record, b"{}\n").unwrap();
+        let script = [
+            "#!/bin/sh",
+            "cat >> '__D__/sends.log'",
+            "printf '\\n' >> '__D__/sends.log'",
+            "echo '{\"type\":\"user_input\",\"data\":{\"text\":\"hello\"}}' >> '__R__'",
+            "exit 0",
+            "",
+        ]
+        .join("\n")
+        .replace("__D__", scratch.to_str().unwrap())
+        .replace("__R__", record.to_str().unwrap());
+        let fake = crate::write_exec_stub(&scratch, "fno", &script);
+        // _home holds the crate env lock for this whole scope (it set
+        // FNO_AGENTS_HOME under it); the FNO_BIN swap rides that same held
+        // lock, so no second acquisition here: the mutex is not reentrant.
+        let prior_bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_BIN", &fake);
+        let delivered = deliver_via_pane(session, "srv:3", Some("footnote"), "hello", 4, 5, 0);
+        match prior_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert!(delivered.is_ok(), "{delivered:?}");
+        let sends = std::fs::read_to_string(scratch.join("sends.log")).unwrap();
+        assert!(sends.contains("hello"), "{sends}");
+        assert!(sends.contains('\r'), "{sends}");
     }
 
     #[test]

@@ -924,6 +924,32 @@ pub fn run_manifest_eval(rest: &[String]) -> i32 {
 mod tests {
     use super::*;
 
+    /// The footnote manifest reads the fnh TUI's own draw strings: the ask
+    /// band blocks, the busy line reads working, and an idle status line
+    /// matches nothing (AC7-ERR of the pane plan). A missed `blocked` types
+    /// over a live y/n ask; a false one only refuses the send.
+    #[test]
+    fn footnote_screen_rules_read_the_tui_ask_band_and_busy_line() {
+        let ask = evaluate_screen_json(
+            "footnote",
+            "transcript scroll\n allow Bash ls?  [y] yes  [n] no",
+        )
+        .unwrap();
+        assert_eq!(ask["state"], "blocked");
+        assert_eq!(ask["rule_id"], "permission_ask");
+        let busy =
+            evaluate_screen_json("footnote", "model reply\nChurning… 12s  (esc to interrupt)")
+                .unwrap();
+        assert_eq!(busy["state"], "working");
+        assert_eq!(busy["rule_id"], "working_status");
+        let idle = evaluate_screen_json(
+            "footnote",
+            "Churned for 4s · done 3:04 PM · 1.2k in · 300 out",
+        )
+        .unwrap();
+        assert_eq!(idle["matched"], false);
+    }
+
     fn view(text: &str) -> ScreenView<'_> {
         ScreenView {
             visible_text: text,
