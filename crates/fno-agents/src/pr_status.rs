@@ -935,7 +935,7 @@ pub(crate) fn status_payload<P: GhProbe>(
             None,
         )
     } else {
-        let reviews_input = reviews::optional_reviews(cwd, pr);
+        let reviews_input = reviews::optional_reviews(probe, cwd, pr, slug);
         let lane = reviews::review_lane(cwd, pr);
         let coverage = reviews::read_review_coverage(cwd, pr, Some(&head_sha), lane, false);
         // The cache layer passes the probe it already ran for the key

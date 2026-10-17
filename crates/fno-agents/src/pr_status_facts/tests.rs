@@ -688,3 +688,149 @@ fn rest_get_op_reads_eligible_paths_and_leaves_the_rest_to_the_caller() {
     assert!(out["stderr"].as_str().unwrap().contains("gh budget:"));
     assert_eq!(probes.calls.borrow().len(), 1, "a held read spawns nothing");
 }
+
+// --- status-pr-activity ------------------------------------------------------
+
+/// A path-keyed fake: the first matching needle answers; anything else is an
+/// empty JSON array, so an unplanned read reads "no more pages".
+struct ActivityGh {
+    answers: Vec<(&'static str, bool, String, String)>,
+    calls: RefCell<Vec<String>>,
+}
+
+impl GhProbe for ActivityGh {
+    fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
+        let cmd = args.join(" ");
+        self.calls.borrow_mut().push(cmd.clone());
+        for (needle, ok, body, stderr) in &self.answers {
+            if cmd.contains(needle) {
+                return Ok((*ok, body.clone(), stderr.clone()));
+            }
+        }
+        Ok((true, "[]".to_string(), String::new()))
+    }
+}
+
+#[test]
+fn pr_activity_takes_newest_matched_review_or_comment() {
+    let probes = ActivityGh {
+        answers: vec![
+            (
+                "/pulls/7/reviews",
+                true,
+                json!([
+                    {"user": {"login": "codex-reviewer[bot]"},
+                     "submitted_at": "2026-10-15T09:00:00Z", "state": "COMMENTED"},
+                    {"user": {"login": "unconfigured"}, "submitted_at": "2026-10-16T09:00:00Z"},
+                    {"user": {"login": "pending-bot"}, "state": "PENDING"}
+                ])
+                .to_string(),
+                String::new(),
+            ),
+            (
+                "/pulls/7",
+                true,
+                json!({"created_at": "2026-10-01T10:00:00Z", "draft": false}).to_string(),
+                String::new(),
+            ),
+            (
+                "/issues/7/comments",
+                true,
+                json!([
+                    {"user": {"login": "codex-reviewer"}, "created_at": "2026-10-16T12:00:00Z"},
+                    {"user": {"login": "unconfigured"}, "created_at": "2026-10-16T13:00:00Z"}
+                ])
+                .to_string(),
+                String::new(),
+            ),
+        ],
+        calls: RefCell::new(Vec::new()),
+    };
+    let out = pr_activity_op(
+        &probes,
+        &json!({"cwd": "/repo", "slug": "o/r", "pr": 7, "reviewers": ["codex"]}),
+    );
+    assert_eq!(out["opened_at"], json!("2026-10-01T10:00:00Z"));
+    assert_eq!(out["is_draft"], json!(false));
+    assert_eq!(
+        out["latest_review_ts"],
+        json!("2026-10-16T12:00:00Z"),
+        "the newest MATCHED row wins; the unconfigured 13:00 comment does not"
+    );
+    let calls = probes.calls.borrow();
+    assert_eq!(
+        calls.len(),
+        3,
+        "one pulls + one reviews page + one comments page"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("/pulls/7/reviews?per_page=100&page=1")),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("/issues/7/comments?per_page=100&page=1")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn pr_activity_failed_read_answers_error() {
+    let probes = ActivityGh {
+        answers: vec![(
+            "/issues/7/comments",
+            false,
+            String::new(),
+            "HTTP 404: Not Found\n(second line)".to_string(),
+        )],
+        calls: RefCell::new(Vec::new()),
+    };
+    let out = pr_activity_op(
+        &probes,
+        &json!({"cwd": "/repo", "slug": "o/r", "pr": 7, "reviewers": ["codex"]}),
+    );
+    assert!(out.get("error").is_some(), "{out}");
+    assert!(
+        out["error"].as_str().unwrap().contains(
+            "repos/o/r/issues/7/comments?per_page=100&page=1 failed: HTTP 404: Not Found"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.get("latest_review_ts").is_none(),
+        "an error carries no activity fields: {out}"
+    );
+}
+
+#[test]
+fn pr_activity_empty_reviewers_skip_the_activity_reads() {
+    let probes = ActivityGh {
+        answers: vec![(
+            "/pulls/7",
+            true,
+            json!({"created_at": "2026-10-01T10:00:00Z", "draft": true}).to_string(),
+            String::new(),
+        )],
+        calls: RefCell::new(Vec::new()),
+    };
+    let out = pr_activity_op(
+        &probes,
+        &json!({"cwd": "/repo", "slug": "o/r", "pr": 7, "reviewers": []}),
+    );
+    assert_eq!(out["opened_at"], json!("2026-10-01T10:00:00Z"));
+    assert_eq!(out["is_draft"], json!(true));
+    assert_eq!(
+        out["latest_review_ts"],
+        Value::Null,
+        "no configured reviewers: null without the reads"
+    );
+    let calls = probes.calls.borrow();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the review and comment reads are skipped, not spent: {calls:?}"
+    );
+}

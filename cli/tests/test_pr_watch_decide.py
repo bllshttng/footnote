@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Optional
-from unittest.mock import MagicMock
+from typing import Optional
 
 import pytest
 
@@ -332,16 +329,6 @@ def _make_candidate(pr_number: int = 42, repo_slug: str = "owner/repo") -> PrCan
     )
 
 
-def _stub_runner_fail(*args, **kwargs) -> subprocess.CompletedProcess:
-    """Stub runner that returns rc=1 (gh failure)."""
-    return subprocess.CompletedProcess(
-        args=args[0],
-        returncode=1,
-        stdout="",
-        stderr="authentication error",
-    )
-
-
 def _stub_runner_ok_merge_state(*args, **kwargs) -> subprocess.CompletedProcess:
     """Stub runner returning a valid OPEN pr state for the merge-state call."""
     payload = json.dumps({
@@ -358,176 +345,59 @@ def _stub_runner_ok_merge_state(*args, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=payload, stderr="")
 
 
-def _stub_runner_ok_with_reviews(*args, **kwargs) -> subprocess.CompletedProcess:
-    """Stub runner that handles the REST merge-state and reviews calls."""
-    cmd = args[0] if args else kwargs.get("args", [])
-    if isinstance(cmd, list) and "api" in cmd:
-        payload = json.dumps({
-            "number": 42,
-            "state": "open",
-            "merged": False,
-            "html_url": "https://github.com/owner/repo/pull/42",
-            "created_at": "2026-06-01T00:00:00Z",
-            "merged_at": None,
-            "merge_commit_sha": None,
-            "head": {"sha": "head-sha", "ref": "feature/test"},
-            "base": {"ref": "main"},
-        })
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
-    # The review/comments call remains on the legacy `gh pr view --json` seam.
-    if isinstance(cmd, list) and "reviews" in " ".join(cmd):
-        payload = json.dumps({
-            "number": 42,
-            "state": "OPEN",
-            "url": "https://github.com/owner/repo/pull/42",
-            "mergedAt": None,
-            "createdAt": "2026-06-01T00:00:00Z",
-            "reviews": [
-                {
-                    "author": {"login": "codex"},
-                    "submittedAt": "2026-06-14T10:00:00Z",
-                    "state": "APPROVED",
-                }
-            ],
-        })
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
-    # Default: merge-state query
-    payload = json.dumps({
-        "number": 42,
-        "state": "OPEN",
-        "url": "https://github.com/owner/repo/pull/42",
-        "mergedAt": None,
-        "createdAt": "2026-06-01T00:00:00Z",
-    })
-    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
-
-
-def test_ac1_err_read_pr_state_raises_reconcile_error_on_gh_failure():
-    """AC1-ERR: read_pr_state with stubbed runner returning rc!=0 raises ReconcileError."""
+def test_ac1_err_read_pr_state_raises_reconcile_error_on_gh_failure(monkeypatch):
+    """AC1-ERR: an op error answer raises ReconcileError; a missing binary or
+    a timeout raises the same exception through verb_call."""
     cand = _make_candidate()
+
+    def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+        return {"error": "repos/owner/repo/pulls/42/reviews failed: HTTP 404: Not Found"}
+
+    monkeypatch.setattr("fno.pr_watch._discover.verb_call", fake_verb_call)
     with pytest.raises(ReconcileError):
-        read_pr_state(cand, reviewers=["codex"], runner=_stub_runner_fail)
+        read_pr_state(cand, reviewers=["codex"], runner=_stub_runner_ok_merge_state)
 
 
-def test_ac1_err_passing_candidate_returns_observation():
-    """AC1-ERR: a sibling candidate with passing runner produces a valid PrObservation."""
+def test_ac1_err_passing_candidate_returns_observation(monkeypatch):
+    """AC1-ERR: a passing merge leg plus an op answer build a valid PrObservation."""
     cand = _make_candidate()
-    obs = read_pr_state(cand, reviewers=["codex"], runner=_stub_runner_ok_with_reviews)
+
+    def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+        assert verb == "authorized-merge"
+        assert payload["op"] == "status-pr-activity"
+        return {
+            "opened_at": "2026-06-01T00:00:00Z",
+            "is_draft": None,
+            "latest_review_ts": "2026-06-14T10:00:00Z",
+        }
+
+    monkeypatch.setattr("fno.pr_watch._discover.verb_call", fake_verb_call)
+    obs = read_pr_state(cand, reviewers=["codex"], runner=_stub_runner_ok_merge_state)
     assert isinstance(obs, PrObservation)
     assert obs.pr_number == 42
     assert obs.state in {"OPEN", "CLOSED", "MERGED", "UNKNOWN"}
+    assert obs.latest_review_ts == "2026-06-14T10:00:00Z"
 
 
-def test_is_draft_rides_the_reviews_leg_call():
-    """The draft bit comes off the same `gh pr view --json` payload - no extra
-    network call - and a missing/non-bool isDraft reads None, never a guess."""
+def test_is_draft_rides_the_reviews_leg_call(monkeypatch):
+    """The draft bit comes off the op answer - no extra network call - and a
+    missing or non-bool is_draft reads None, never a guess."""
     cand = _make_candidate()
 
-    def runner(*args, **kwargs):
-        cmd = args[0] if args else kwargs.get("args", [])
-        if isinstance(cmd, list) and "api" in cmd:
-            payload = json.dumps({
-                "number": 42, "state": "OPEN", "merged": False,
-                "html_url": "https://github.com/owner/repo/pull/42",
-                "created_at": "2026-06-01T00:00:00Z", "merged_at": None,
-                "merge_commit_sha": None,
-                "head": {"sha": "head-sha", "ref": "feature/test"},
-                "base": {"ref": "main"},
-            })
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
-        payload = json.dumps({
-            "number": 42, "state": "OPEN",
-            "url": "https://github.com/owner/repo/pull/42",
-            "mergedAt": None, "createdAt": "2026-06-01T00:00:00Z",
-            "isDraft": True, "reviews": [],
-        })
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
+    def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+        return {"opened_at": None, "is_draft": True, "latest_review_ts": None}
 
-    obs = read_pr_state(cand, reviewers=[], runner=runner)
+    monkeypatch.setattr("fno.pr_watch._discover.verb_call", fake_verb_call)
+    obs = read_pr_state(cand, reviewers=[], runner=_stub_runner_ok_merge_state)
     assert obs.is_draft is True
-    # The sibling stub's payload omits isDraft entirely.
-    obs_plain = read_pr_state(cand, reviewers=[], runner=_stub_runner_ok_with_reviews)
+
+    # A non-bool answer reads None.
+    def fake_non_bool(verb, payload, unavailable=None, timeout=30):
+        return {"opened_at": None, "is_draft": "yes", "latest_review_ts": None}
+
+    monkeypatch.setattr("fno.pr_watch._discover.verb_call", fake_non_bool)
+    obs_plain = read_pr_state(cand, reviewers=[], runner=_stub_runner_ok_merge_state)
     assert obs_plain.is_draft is None
-
-
-# ---------------------------------------------------------------------------
-# [bot] matching: reviewer substring match, case-insensitive, strip [bot]
-# ---------------------------------------------------------------------------
-
-def _stub_runner_with_bot_review(
-    login: str, ts: str
-) -> Callable[..., subprocess.CompletedProcess]:
-    """Return a runner stub for REST merge state plus a review by `login`."""
-    def runner(*args, **kwargs):
-        cmd = args[0] if args else kwargs.get("args", [])
-        if isinstance(cmd, list) and "api" in cmd:
-            payload = json.dumps({
-                "number": 42,
-                "state": "open",
-                "merged": False,
-                "html_url": "https://github.com/owner/repo/pull/42",
-                "created_at": "2026-06-01T00:00:00Z",
-                "merged_at": None,
-                "merge_commit_sha": None,
-                "head": {"sha": "head-sha", "ref": "feature/test"},
-                "base": {"ref": "main"},
-            })
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout=json.dumps({
-                "number": 42,
-                "state": "OPEN",
-                "url": "https://github.com/owner/repo/pull/42",
-                "mergedAt": None,
-                "createdAt": "2026-06-01T00:00:00Z",
-                "reviews": [
-                    {
-                        "author": {"login": login},
-                        "submittedAt": ts,
-                        "state": "COMMENTED",
-                    }
-                ],
-            }),
-            stderr="",
-        )
-    return runner
-
-
-def test_bot_login_matched_by_substring(monkeypatch):
-    """[bot] matching: 'codex' reviewer matches 'chatgpt-codex-connector[bot]' login."""
-    # We need to test the bot-matching logic inside read_pr_state indirectly
-    # by verifying the latest_review_ts is set correctly.
-    cand = _make_candidate()
-
-    def stubbed_runner(*args, **kwargs):
-        return _stub_runner_with_bot_review("chatgpt-codex-connector[bot]", "2026-06-14T09:00:00Z")(*args, **kwargs)
-
-    obs = read_pr_state(cand, reviewers=["codex"], runner=stubbed_runner)
-    assert obs.latest_review_ts == "2026-06-14T09:00:00Z"
-
-
-def test_non_reviewer_login_does_not_advance_latest_review_ts(monkeypatch):
-    """[bot] matching: a non-reviewer login's activity does NOT advance latest_review_ts."""
-    cand = _make_candidate()
-
-    def stubbed_runner(*args, **kwargs):
-        return _stub_runner_with_bot_review("random-user", "2026-06-14T09:00:00Z")(*args, **kwargs)
-
-    obs = read_pr_state(cand, reviewers=["codex"], runner=stubbed_runner)
-    assert obs.latest_review_ts is None
-
-
-def test_bot_matching_is_case_insensitive(monkeypatch):
-    """[bot] matching: match is case-insensitive (e.g. 'Codex' reviewer vs 'CODEX-bot[bot]')."""
-    cand = _make_candidate()
-
-    def stubbed_runner(*args, **kwargs):
-        return _stub_runner_with_bot_review("CODEX-BOT[bot]", "2026-06-14T11:00:00Z")(*args, **kwargs)
-
-    obs = read_pr_state(cand, reviewers=["codex"], runner=stubbed_runner)
-    assert obs.latest_review_ts == "2026-06-14T11:00:00Z"
 
 
 # ---------------------------------------------------------------------------

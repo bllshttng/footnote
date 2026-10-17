@@ -21,6 +21,8 @@ struct FakeGh {
     log_args: std::sync::Mutex<Vec<String>>,
     /// Force the pulls read to fail with this stderr (refusal scenarios).
     pulls_fail: Option<String>,
+    /// Every probe call's args, oldest first, for asked-path assertions.
+    calls: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl FakeGh {
@@ -31,6 +33,7 @@ impl FakeGh {
             log_reads: AtomicUsize::new(0),
             log_args: std::sync::Mutex::new(Vec::new()),
             pulls_fail: None,
+            calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -38,11 +41,29 @@ impl FakeGh {
 impl GhProbe for FakeGh {
     fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
         let cmd = args.join(" ");
+        self.calls.lock().unwrap().push(args.to_vec());
         let serve = |v: &Value| (true, v.to_string(), String::new());
+        // A forced failure wins over serving: the reviews path also contains
+        // "/pulls/", so this arm is checked first.
         if let Some(stderr) = &self.pulls_fail {
             if cmd.contains("/pulls/") {
                 return Ok((false, String::new(), stderr.clone()));
             }
+        }
+        if cmd.contains("/reviews?per_page=") {
+            let page: usize = cmd
+                .rsplit("page=")
+                .next()
+                .unwrap_or("1")
+                .trim()
+                .parse()
+                .unwrap_or(1);
+            let pages = self.raw["review_pages"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let body = pages.get(page - 1).cloned().unwrap_or_else(|| json!([]));
+            return Ok(serve(&body));
         }
         if cmd.contains("/pulls/") {
             return Ok(serve(&self.raw["pulls"]));
@@ -406,6 +427,7 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
         log_reads: AtomicUsize::new(0),
         log_args: std::sync::Mutex::new(Vec::new()),
         pulls_fail: None,
+        calls: std::sync::Mutex::new(Vec::new()),
     };
     let stripped = job_log(&colored_fake, cwd, "Owner--Repo", "Owner", "Repo", "3001").unwrap();
     assert!(!stripped.contains('\u{1b}'), "escape-free: {stripped:?}");
@@ -442,6 +464,7 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
         log_reads: AtomicUsize::new(0),
         log_args: std::sync::Mutex::new(Vec::new()),
         pulls_fail: None,
+        calls: std::sync::Mutex::new(Vec::new()),
     };
     let from_legacy = job_log(&empty_fake, cwd, "Owner--Repo", "Owner", "Repo", "4001").unwrap();
     assert!(
@@ -720,4 +743,68 @@ fn finished_pr_with_no_live_holder_reports_no_lander() {
         absent_free,
     ));
     assert_eq!(stderr.len(), 1, "only the verdict line: {stderr:?}");
+}
+
+/// The optional-reviews read walks REST pages through the probe and composes
+/// from the REST author key; a failed page is the unknown sentinel, never an
+/// empty list.
+#[test]
+fn optional_reviews_list_reads_rest_pages_and_keys_on_user_login() {
+    let cwd = Path::new("/tmp");
+    let page_row = |n: usize| {
+        json!({
+            "user": {"login": format!("reviewer-{n}")},
+            "state": "COMMENTED",
+        })
+    };
+    let page1: Vec<Value> = (1..=100).map(page_row).collect();
+    let page2: Vec<Value> = (101..=102).map(page_row).collect();
+    let fake = FakeGh {
+        raw: json!({ "review_pages": [page1, page2] }),
+        log_reads: AtomicUsize::new(0),
+        log_args: std::sync::Mutex::new(Vec::new()),
+        pulls_fail: None,
+        calls: std::sync::Mutex::new(Vec::new()),
+    };
+    let rows =
+        reviews::fetch_reviews(&fake, cwd, "octocat/wordplay", 7).expect("both REST pages read");
+    assert_eq!(rows.len(), 102, "100-row page 1 + 2-row page 2");
+    let calls = fake.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "page 2 is short: the walk stops");
+    assert!(
+        calls.iter().any(|a| a
+            .join(" ")
+            .contains("repos/octocat/wordplay/pulls/7/reviews?per_page=100&page=1")),
+        "page 1 rides the door: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|a| a
+            .join(" ")
+            .contains("repos/octocat/wordplay/pulls/7/reviews?per_page=100&page=2")),
+        "a full page 1 asks for page 2: {calls:?}"
+    );
+    drop(calls);
+
+    // The compose keys the author at the REST /user/login and strips [bot].
+    let rows = vec![json!({
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "state": "COMMENTED",
+    })];
+    let composed = reviews::compose_reviews(&rows, &["codex".to_string()], &[]);
+    let list = composed["optional_reviews"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "one author row: {composed}");
+    assert_eq!(list[0]["author"], json!("chatgpt-codex-connector"));
+    assert_eq!(list[0]["state"], json!("COMMENTED"));
+
+    // A failed read is the unknown sentinel, distinct from an empty list.
+    let failed = FakeGh {
+        raw: json!({}),
+        log_reads: AtomicUsize::new(0),
+        log_args: std::sync::Mutex::new(Vec::new()),
+        pulls_fail: Some("boom".to_string()),
+        calls: std::sync::Mutex::new(Vec::new()),
+    };
+    assert!(reviews::fetch_reviews(&failed, cwd, "octocat/wordplay", 7).is_none());
+    let out = reviews::optional_reviews(&failed, cwd, 7, "octocat/wordplay");
+    assert_eq!(out["optional_reviews"], json!("unknown"));
 }

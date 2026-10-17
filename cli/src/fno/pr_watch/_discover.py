@@ -10,13 +10,15 @@ The public surface is two pure dataclasses plus two functions:
 
 Both are designed for easy testing: discovery accepts an ``entries`` list
 rather than reading the graph directly, and ``read_pr_state`` accepts an
-injectable ``runner`` so tests can stub gh without a live network call.
+injectable ``runner`` so tests can stub the merge-state leg without a live
+network call; the reviews leg answers through the ``status-pr-activity``
+op on the authorized-merge door (tests stub ``fno.rust_binary.verb_call``).
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import subprocess
 import time
 from collections import defaultdict
@@ -34,6 +36,7 @@ from fno.graph._reconcile import (
 )
 from fno.pr._proc import ToolMissing
 from fno.pr._proc import run as _rest_run
+from fno.rust_binary import verb_call
 
 log = logging.getLogger(__name__)
 
@@ -85,8 +88,9 @@ class PrCandidate:
 class PrObservation:
     """Everything the watcher needs to make a dispatch decision for one PR.
 
-    Produced by ``read_pr_state`` from a combination of ``gh pr view`` and
-    the review/comment listing. The ``latest_review_ts`` carries the newest
+    Produced by ``read_pr_state`` from the ``query_pr_merge_state`` merge leg
+    plus the ``status-pr-activity`` op (reviews and issue comments over REST
+    through the conditional door). The ``latest_review_ts`` carries the newest
     ISO-8601 timestamp among activity authored by a *configured reviewer*
     (matched case-insensitively, stripping a trailing ``[bot]`` suffix), so
     the ``decide()`` function can compare it to the stored watermark without
@@ -149,29 +153,6 @@ def _reviewer_matches(login: str, reviewers: list[str]) -> bool:
     if stripped.endswith("[bot]"):
         stripped = stripped[:-5]  # remove "[bot]"
     return any(r.lower() in stripped for r in reviewers)
-
-
-def _max_review_ts(reviews: list[dict], reviewers: list[str]) -> Optional[str]:
-    """Return the newest ``submittedAt`` or ``createdAt`` among reviews/comments from configured reviewers.
-
-    Returns None when no reviews match. Lexical ISO-8601 string comparison is
-    correct for UTC timestamps (the format is monotone-sortable).
-    """
-    best: Optional[str] = None
-    for review in reviews:
-        if not isinstance(review, dict):
-            continue
-        author = review.get("author") or {}
-        login = author.get("login") or ""
-        # Reviews use 'submittedAt'; comments use 'createdAt'
-        ts = review.get("submittedAt") or review.get("createdAt") or ""
-        if not ts:
-            continue
-        if not _reviewer_matches(login, reviewers):
-            continue
-        if best is None or ts > best:
-            best = ts
-    return best
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +264,9 @@ def read_pr_state(
     """Query gh for the current state of a single PR candidate.
 
     Uses ``query_pr_merge_state`` (injected ``runner``) for the authoritative
-    merge state. Additionally reads reviews from ``gh pr view --json
-    reviews,createdAt`` to compute ``latest_review_ts``.
+    merge state. Takes ``latest_review_ts``, ``opened_at`` and ``is_draft``
+    from the ``status-pr-activity`` op, which reads the review list, the issue
+    comments and the PR row over REST through the conditional door.
 
     ``timeout_s`` is the budget for the WHOLE call, not for each leg. It used
     to bound each leg separately, so one candidate could spend twice the
@@ -293,10 +275,10 @@ def read_pr_state(
     ``_rest._REASON_DIAGNOSTIC_TIMEOUT_S`` to decorate its own fast error.
 
     Raises ``ReconcileError`` on any gh failure (non-zero returncode, timeout,
-    parse failure, missing binary) and on a budget that the merge-state leg
-    consumed on its own. The caller is responsible for catching and skipping
-    this candidate; the error is NOT swallowed here so the tick loop can
-    record it cleanly.
+    parse failure, missing binary), on a budget that the merge-state leg
+    consumed on its own, and on an op error answer. The caller is responsible
+    for catching and skipping this candidate; the error is NOT swallowed here
+    so the tick loop can record it cleanly.
     """
     repo_slug = candidate.repo_slug
     cwd_str = str(candidate.repo_dir) if candidate.repo_dir else None
@@ -320,61 +302,32 @@ def read_pr_state(
             f"{REVIEWS_LEG_FLOOR_S:.1f}s the reviews read costs; it was not started"
         )
 
-    # Step 2: Get reviews + comments + PR metadata for latest_review_ts and opened_at.
-    # We include 'comments' (issue/review comments) in addition to 'reviews' so
-    # that bot activity posted as a comment (not a formal review submission) is
-    # reflected in latest_review_ts.  Single round-trip; runner is injectable.
-    cmd = ["gh", "pr", "view", str(candidate.pr_number)]
-    if repo_slug:
-        cmd += ["--repo", repo_slug]
-    cmd += ["--json", "reviews,comments,createdAt,number,state,url,mergedAt,isDraft"]
-
-    try:
-        result = runner(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=remaining,
-            cwd=cwd_str,
-        )
-    except subprocess.TimeoutExpired as exc:
+    # Step 2: the reviews leg through the status-pr-activity op. It reads
+    # reviews, issue comments and the PR row over REST through the
+    # conditional door (comments, so bot activity posted as a comment and not
+    # a formal review still advances the watermark). A missing binary, a
+    # timeout or an error answer raises ReconcileError like the gh leg it
+    # replaced; there is no Python fallback, so there is no second leg.
+    payload = {
+        "op": "status-pr-activity",
+        "cwd": cwd_str or os.getcwd(),
+        "slug": repo_slug or "",
+        "pr": candidate.pr_number,
+        "reviewers": list(reviewers),
+    }
+    answer = verb_call("authorized-merge", payload, ReconcileError, timeout=remaining)
+    if answer.get("error"):
         raise ReconcileError(
-            f"gh pr view #{candidate.pr_number} (reviews) timed out after {remaining:.1f}s, "
-            f"what was left of a {timeout_s:.1f}s call budget"
-        ) from exc
-    except OSError as exc:
-        raise ReconcileError(f"gh subprocess failed to launch: {exc}") from exc
-
-    if result.returncode != 0:
-        raise ReconcileError(
-            f"gh pr view #{candidate.pr_number} (reviews) failed "
-            f"(rc={result.returncode}): {(result.stderr or '').strip()}"
+            f"read_pr_state #{candidate.pr_number} (reviews) failed: {answer['error']}"
         )
-
-    try:
-        row = json.loads(result.stdout or "{}")
-        if not isinstance(row, dict):
-            raise ReconcileError("gh reviews stdout was not a JSON object")
-    except json.JSONDecodeError as exc:
-        raise ReconcileError(f"gh reviews stdout was not JSON: {exc}") from exc
-
-    reviews_raw = row.get("reviews")
-    reviews: list[dict] = reviews_raw if isinstance(reviews_raw, list) else []
-    comments_raw = row.get("comments")
-    comments: list[dict] = comments_raw if isinstance(comments_raw, list) else []
-    # Merge reviews and comments into one activity list for timestamp scanning.
-    all_activity = reviews + comments
-    opened_at: Optional[str] = row.get("createdAt")
-    latest_review_ts = _max_review_ts(all_activity, reviewers) if reviewers else None
 
     return PrObservation(
         pr_number=candidate.pr_number,
         state=merge_state.state,
-        latest_review_ts=latest_review_ts,
-        opened_at=opened_at,
+        latest_review_ts=answer.get("latest_review_ts"),
+        opened_at=answer.get("opened_at"),
         merge_sha=merge_state.merge_sha,
-        is_draft=row.get("isDraft") if isinstance(row.get("isDraft"), bool) else None,
+        is_draft=answer.get("is_draft") if isinstance(answer.get("is_draft"), bool) else None,
     )
 
 

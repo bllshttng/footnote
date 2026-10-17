@@ -1548,109 +1548,6 @@ class TestJsonLoadsGuards:
         assert result == {}, f"expected empty dict after {root} root, got: {result!r}"
 
 
-class TestReadPrStateJsonGuards:
-    """AC-gemini-HIGH _discover.py:240 + medium :243: gh returns null/non-dict JSON."""
-
-    def _make_cand(self, tmp_path):
-        from fno.pr_watch._discover import PrCandidate
-        return PrCandidate(
-            node_id="x-abc",
-            pr_number=1,
-            pr_url="https://github.com/owner/repo/pull/1",
-            repo_dir=tmp_path,
-            repo_slug="owner/repo",
-        )
-
-    def _merged_state_runner(self, merge_rc=0, merge_stdout=None, view_rc=0, view_stdout=None):
-        """Build a runner that handles both query_pr_merge_state calls and gh pr view."""
-        call_count = [0]
-
-        def runner(cmd, **kw):
-            call_count[0] += 1
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "mergedAt" in cmd_str:
-                # gh pr view call (reviews+createdAt)
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=view_rc,
-                    stdout=view_stdout or '{"reviews":[],"createdAt":"2026-06-01T00:00:00Z","number":1,"state":"OPEN","url":"","mergedAt":null}',
-                    stderr=""
-                )
-            # merge state call (query_pr_merge_state)
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=merge_rc,
-                stdout=merge_stdout or '{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
-                stderr=""
-            )
-
-        return runner
-
-    def test_null_gh_view_response_raises_reconcile_error(self, tmp_path):
-        """AC-gemini-HIGH _discover:240: gh pr view (reviews+comments) returns 'null' -> ReconcileError, no AttributeError."""
-        from fno.graph._reconcile import ReconcileError
-        from fno.pr_watch._discover import read_pr_state
-
-        cand = self._make_cand(tmp_path)
-
-        call_count = [0]
-
-        def runner(cmd, **kw):
-            call_count[0] += 1
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "comments" in cmd_str:
-                # This is the second gh pr view with reviews+comments+mergedAt -> return null
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="null", stderr="")
-            # First call: merge state check (query_pr_merge_state) - must succeed
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0,
-                stdout=json.dumps({
-                    "state": "open",
-                    "number": 1,
-                    "html_url": "https://github.com/owner/repo/pull/1",
-                    "merged": False,
-                    "merged_at": None,
-                    "head": {"sha": "head", "ref": "feature/test"},
-                    "base": {"ref": "main"},
-                }),
-                stderr=""
-            )
-
-        with pytest.raises(ReconcileError):
-            read_pr_state(cand, reviewers=[], runner=runner)
-
-    def test_non_list_reviews_field_is_safe(self, tmp_path):
-        """AC-gemini-medium _discover:243: reviews field is not a list -> treated as []."""
-        from fno.pr_watch._discover import read_pr_state
-
-        cand = self._make_cand(tmp_path)
-
-        def runner(cmd, **kw):
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "mergedAt" in cmd_str:
-                # reviews is a string instead of a list
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0,
-                    stdout='{"reviews":"unexpected-string","createdAt":"2026-06-01T00:00:00Z","number":1,"state":"OPEN","url":"","mergedAt":null}',
-                    stderr=""
-                )
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0,
-                stdout=json.dumps({
-                    "state": "open",
-                    "number": 1,
-                    "html_url": "https://github.com/owner/repo/pull/1",
-                    "merged": False,
-                    "merged_at": None,
-                    "head": {"sha": "head", "ref": "feature/test"},
-                    "base": {"ref": "main"},
-                }),
-                stderr=""
-            )
-
-        # Should not raise; latest_review_ts should be None
-        obs = read_pr_state(cand, reviewers=["some-bot"], runner=runner)
-        assert obs.latest_review_ts is None
-
-
 class TestReadPrStateBudget:
     """One read spends one budget. Measured 2026-09-03 over eight real open
     PRs: the merge-state leg means 1.07s and the reviews leg 1.42s, so neither
@@ -1683,13 +1580,6 @@ class TestReadPrStateBudget:
             }
         )
 
-    @staticmethod
-    def _view_stdout():
-        return (
-            '{"reviews":[],"comments":[],"createdAt":"2026-06-01T00:00:00Z",'
-            '"number":7,"state":"OPEN","url":"","mergedAt":null}'
-        )
-
     def test_reviews_leg_gets_only_what_the_merge_leg_left(self, tmp_path, monkeypatch):
         from fno.pr_watch import _discover
         from fno.pr_watch._discover import read_pr_state
@@ -1699,18 +1589,17 @@ class TestReadPrStateBudget:
         seen = {}
 
         def runner(cmd, **kw):
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "comments" in cmd_str:
-                seen["reviews_timeout"] = kw.get("timeout")
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
-                )
             seen["merge_timeout"] = kw.get("timeout")
             clock[0] += 4.0  # the merge leg burns 4 of the 10s budget
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
             )
 
+        def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+            seen["reviews_timeout"] = timeout
+            return {"opened_at": None, "is_draft": None, "latest_review_ts": None}
+
+        monkeypatch.setattr(_discover, "verb_call", fake_verb_call)
         read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
 
         assert seen["merge_timeout"] == pytest.approx(10.0)
@@ -1727,26 +1616,24 @@ class TestReadPrStateBudget:
         launched = []
 
         def runner(cmd, **kw):
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "comments" in cmd_str:
-                launched.append(cmd_str)
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
-                )
             clock[0] += 10.0  # the merge leg eats the entire budget
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
             )
 
+        def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+            launched.append(verb)
+
+        monkeypatch.setattr(_discover, "verb_call", fake_verb_call)
         with pytest.raises(ReconcileError) as exc:
             read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
 
         assert "budget" in str(exc.value).lower()
-        assert launched == [], "gh pr view ran with no budget left to bound it"
+        assert launched == [], "the op ran with no budget left to bound it"
 
     def test_a_sliver_of_budget_refuses_the_second_leg_too(self, tmp_path, monkeypatch):
         """A floor, not a zero check. A remaining budget under what the leg
-        costs spawns a gh process certain to time out, spending the deadline
+        costs would start a read certain to time out, spending the deadline
         to learn nothing."""
         from fno.graph._reconcile import ReconcileError
         from fno.pr_watch import _discover
@@ -1757,41 +1644,39 @@ class TestReadPrStateBudget:
         launched = []
 
         def runner(cmd, **kw):
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "comments" in cmd_str:
-                launched.append(cmd_str)
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
-                )
             # Leaves a positive sliver, strictly under the floor.
             clock[0] += 10.0 - (REVIEWS_LEG_FLOOR_S / 2)
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
             )
 
+        def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+            launched.append(verb)
+
+        monkeypatch.setattr(_discover, "verb_call", fake_verb_call)
         with pytest.raises(ReconcileError):
             read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
 
-        assert launched == [], "gh pr view ran on a budget it cannot finish in"
+        assert launched == [], "the op ran on a budget it cannot finish in"
 
-    def test_the_default_path_still_reads(self, tmp_path):
+    def test_the_default_path_still_reads(self, tmp_path, monkeypatch):
         """A fast merge leg leaves nearly the whole default budget, so the
         ordinary case keeps working and is only capped in total."""
+        from fno.pr_watch import _discover
         from fno.pr_watch._discover import read_pr_state
 
         seen = {}
 
         def runner(cmd, **kw):
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "comments" in cmd_str:
-                seen["reviews_timeout"] = kw.get("timeout")
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
-                )
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
             )
 
+        def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+            seen["reviews_timeout"] = timeout
+            return {"opened_at": "2026-06-01T00:00:00Z", "is_draft": None, "latest_review_ts": None}
+
+        monkeypatch.setattr(_discover, "verb_call", fake_verb_call)
         obs = read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner)
 
         assert obs.state == "OPEN"
@@ -1880,17 +1765,17 @@ class TestDispatchEntryGuards:
 
 
 class TestCommentsInActivity:
-    """AC-P2-comments: bot COMMENT (not formal review) triggers review dispatch."""
+    """AC-P2-comments: a bot COMMENT (not a formal review) advances the watermark."""
 
-    def test_comment_newer_than_watermark_triggers_review_dispatch(self, tmp_path):
-        """AC-P2-comments: a bot comment newer than watermark fires /fno:ship pr check.
+    def test_comment_newer_than_watermark_triggers_review_dispatch(self, tmp_path, monkeypatch):
+        """AC-P2-comments: a configured reviewer's comment lands in
+        latest_review_ts, and the op payload carries the configured reviewers.
 
-        Codex P2 _discover.py:212: read_pr_state only inspects 'reviews';
-        comments from configured reviewers must also be included.
-        After the fix, latest_review_ts reflects the comment timestamp.
+        The activity scan (reviews + issue comments) lives in the
+        status-pr-activity op now; the stub answers its shape.
         """
-        import subprocess
-        from fno.pr_watch._discover import read_pr_state, PrCandidate
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import PrCandidate, read_pr_state
 
         cand = PrCandidate(
             node_id="x-abc",
@@ -1900,30 +1785,7 @@ class TestCommentsInActivity:
             repo_slug="owner/repo",
         )
 
-        # gh pr view returns: no formal reviews, but a comment from codex-bot
         def runner(cmd, **kw):
-            cmd_str = " ".join(str(c) for c in cmd)
-            if "mergedAt" in cmd_str or "comments" in cmd_str:
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=0,
-                    stdout=json.dumps({
-                        "reviews": [],
-                        "comments": [
-                            {
-                                "author": {"login": "chatgpt-codex-connector[bot]"},
-                                "createdAt": "2026-06-14T02:00:00Z",
-                                "body": "P1: fix this",
-                            }
-                        ],
-                        "createdAt": "2026-06-01T00:00:00Z",
-                        "number": 1,
-                        "state": "OPEN",
-                        "url": "https://github.com/owner/repo/pull/1",
-                        "mergedAt": None,
-                    }),
-                    stderr=""
-                )
-            # merge state
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
                 stdout=json.dumps({
@@ -1938,10 +1800,24 @@ class TestCommentsInActivity:
                 stderr=""
             )
 
+        seen = {}
+
+        def fake_verb_call(verb, payload, unavailable=None, timeout=30):
+            seen["payload"] = payload
+            return {
+                "opened_at": "2026-06-01T00:00:00Z",
+                "is_draft": None,
+                "latest_review_ts": "2026-06-14T02:00:00Z",
+            }
+
+        monkeypatch.setattr(_discover, "verb_call", fake_verb_call)
         obs = read_pr_state(cand, reviewers=["codex"], runner=runner)
-        # Comment timestamp from codex-bot should be reflected in latest_review_ts
+
         assert obs.latest_review_ts == "2026-06-14T02:00:00Z", (
             f"expected comment ts in latest_review_ts, got: {obs.latest_review_ts!r}"
+        )
+        assert seen["payload"]["reviewers"] == ["codex"], (
+            f"the op payload must carry the configured reviewers, got: {seen['payload']}"
         )
 
 

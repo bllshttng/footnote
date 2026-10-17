@@ -1,13 +1,15 @@
-//! The review-side seams the composer composes: optional reviews (GraphQL
-//! through the sanctioned `fno do pr graphql-exec` lane), the review-coverage
-//! row (journal reads plus at one recompute through the producer verb), the
-//! review-lane predicate, and review activity (the claims hold plus the
-//! worktree probe). Ported from `fno.pr._reviews` and `fno.pr._review_hold`;
-//! both Python modules stay for the merge and review verbs that still import
-//! them.
+//! The review-side seams the composer composes: optional reviews (the review
+//! list over REST through the conditional door; review threads stay on
+//! GraphQL because REST carries no resolved or outdated state), the
+//! review-coverage row (journal reads plus at one recompute through the
+//! producer verb), the review-lane predicate, and review activity (the
+//! claims hold plus the worktree probe). The `fno.pr._reviews` optional-review
+//! twin is deleted; the module still serves the merge and review verbs that
+//! import its survivors.
 
 use crate::loopcheck::{resolve_review_inputs, ReviewInputs};
 use crate::merge_grant::{parse_worktree_list, read_bound_manifest, BoundRead};
+use crate::pr_status_facts::GhProbe;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -67,7 +69,7 @@ fn strip_bot(login: &str) -> String {
 
 /// Case-insensitive substring match after dropping a `[bot]` suffix: the
 /// `_reviewer_matches` rule.
-fn reviewer_matches(login: &str, names: &[String]) -> bool {
+pub(crate) fn reviewer_matches(login: &str, names: &[String]) -> bool {
     if login.is_empty() {
         return false;
     }
@@ -80,63 +82,68 @@ fn reviewer_matches(login: &str, names: &[String]) -> bool {
         .any(|n| !n.is_empty() && stripped.contains(&n.to_lowercase()))
 }
 
-/// `owner/repo` from a `pr view --json url` value.
-fn slug_from_url(url: &str) -> Option<String> {
-    let rest = url.split("github.com/").nth(1)?;
-    let mut parts = rest.split('/');
-    let owner = parts.next()?.trim();
-    let name = parts.next()?.trim();
-    if owner.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some(format!("{owner}/{}", name.trim_end_matches(".git")))
-}
-
 /// Optional-review presence and thread counts for one PR. Any read failure
 /// answers the unknown sentinel and never touches the CI verdict.
-pub(crate) fn optional_reviews(cwd: &Path, pr: u64) -> Value {
+pub(crate) fn optional_reviews<P: GhProbe>(probe: &P, cwd: &Path, pr: u64, slug: &str) -> Value {
     let inputs = resolve_review_inputs(cwd, None, None, None, None, None);
     let names = inputs.optional_reviewer_names.clone();
-    let Some(raw) = graphql_exec(
-        cwd,
-        &[
-            "pr".into(),
-            "view".into(),
-            pr.to_string(),
-            "--json".into(),
-            "reviews,url".into(),
-        ],
-    ) else {
+    let Some(reviews) = fetch_reviews(probe, cwd, slug, pr) else {
         return reviews_unknown();
     };
-    let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+    let Some(threads) = fetch_threads(cwd, pr, slug) else {
         return reviews_unknown();
     };
-    if !data.is_object() {
-        return reviews_unknown();
+    compose_reviews(&reviews, &names, &threads)
+}
+
+/// The PR's review list over REST, paged; None on any failed read, a non-zero
+/// `ok`, or a body that is not a JSON array. Page 1 rides the conditional
+/// door (a stored ETag answers 304 at no point cost); later pages are plain
+/// reads, which the door's eligibility already decides. A page shorter than
+/// 100 ends the walk, capped at 20 pages like the PR lister.
+pub(crate) fn fetch_reviews<P: GhProbe>(
+    probe: &P,
+    cwd: &Path,
+    slug: &str,
+    pr: u64,
+) -> Option<Vec<Value>> {
+    let mut reviews: Vec<Value> = Vec::new();
+    for page in 1..=20 {
+        let args = vec![
+            "api".to_string(),
+            format!("repos/{slug}/pulls/{pr}/reviews?per_page=100&page={page}"),
+        ];
+        let (ok, stdout, _stderr) = probe.run_gh(cwd, &args).ok()?;
+        if !ok {
+            return None;
+        }
+        let rows: Value = serde_json::from_str(&stdout).ok()?;
+        let Some(rows) = rows.as_array() else {
+            return None;
+        };
+        let full = rows.len() >= 100;
+        reviews.extend(rows.iter().cloned());
+        if !full {
+            break;
+        }
     }
-    let url = data.get("url").and_then(Value::as_str).unwrap_or("");
-    let Some(slug) = slug_from_url(url) else {
-        return reviews_unknown();
-    };
-    let Some(threads) = fetch_threads(cwd, pr, &slug) else {
-        return reviews_unknown();
-    };
-    compose_reviews(&data, &names, &threads)
+    Some(reviews)
 }
 
 /// Review-level presence plus thread counts, composed from the two reads.
-fn compose_reviews(data: &Value, names: &[String], threads: &[(String, bool, bool)]) -> Value {
+/// REST rows key the author at `/user/login`; `state` values match the
+/// GraphQL enum, and REST returns reviews oldest first like gh did, so the
+/// last non-empty state still wins.
+pub(crate) fn compose_reviews(
+    reviews: &[Value],
+    names: &[String],
+    threads: &[(String, bool, bool)],
+) -> Value {
     let mut by_author: std::collections::BTreeMap<String, Value> =
         std::collections::BTreeMap::new();
-    for review in data
-        .get("reviews")
-        .and_then(Value::as_array)
-        .map(|a| a.as_slice())
-        .unwrap_or_default()
-    {
+    for review in reviews {
         let login = review
-            .pointer("/author/login")
+            .pointer("/user/login")
             .and_then(Value::as_str)
             .unwrap_or("");
         if !reviewer_matches(login, names) {
