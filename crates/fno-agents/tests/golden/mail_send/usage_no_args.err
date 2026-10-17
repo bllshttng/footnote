@@ -1,0 +1,1 @@
+usage: fno agents mail send <name> <message>  (or --to-project <project> <message>)

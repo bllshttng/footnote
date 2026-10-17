@@ -1,0 +1,1 @@
+error: --check applies to --raw (the keystroke lane); a wrapped send always has the durable fallback

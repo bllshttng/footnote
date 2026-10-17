@@ -68,13 +68,13 @@ def test_pr_scan_class_reads_sidecar_not_graph(external_store, contradictory_gra
                    additional_prs=[{"number": 7, "url": "https://ext/7b"}])
     _write_sidecar(external_store, "N-3", pr_number=None)
 
-    from fno.mail.job_address import _node_ids_for_pr
+    from fno.tracker import sidecar as sidecar_store
 
-    ids = _node_ids_for_pr(7)
+    ids = [nid for nid, sc in sidecar_store.load_all().items() if sc.carries_pr(7)]
     # Both PR-bearing sidecars found (primary + additional); the graph's 999s
     # are invisible, and a PR the store does not carry resolves to nothing.
     assert set(ids) == {"n-000001", "n-000002"}
-    assert _node_ids_for_pr(999) == []
+    assert [nid for nid, sc in sidecar_store.load_all().items() if sc.carries_pr(999)] == []
 
 
 def test_pr_node_resolver_runs_over_sidecar_rows(external_store, contradictory_graph):
@@ -183,10 +183,10 @@ def test_graph_mode_scans_project_from_the_store(tmp_path, monkeypatch):
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
 
-    from fno.mail.job_address import _node_ids_for_pr
     from fno.tracker import sidecar as sidecar_store
 
-    assert _node_ids_for_pr(42) == ["ab-00000001"]
+    ids = [nid for nid, sc in sidecar_store.load_all().items() if sc.carries_pr(42)]
+    assert ids == ["ab-00000001"]
     all_loaded = sidecar_store.load_all()
     assert all_loaded["ab-00000001"].cwd == "/repo"
     # The size pin is footnote-minted metadata, NOT a sidecar field: the

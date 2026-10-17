@@ -1,0 +1,1 @@
+refused: raw is for running a command only: the payload must start with / or $. Drop --raw and send the message wrapped.

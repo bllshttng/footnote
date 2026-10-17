@@ -1,0 +1,1 @@
+error: mail body contains an <fno_mail> tag. The envelope frames peer mail; a body cannot contain one.

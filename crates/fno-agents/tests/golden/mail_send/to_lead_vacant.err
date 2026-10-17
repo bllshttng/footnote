@@ -1,0 +1,1 @@
+--to-lead 'lead' refused: no live row holds this role right now, and nothing was queued. Run `fno agents team` to see who does, or address a specific handle.

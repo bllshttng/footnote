@@ -1,0 +1,2 @@
+mail: node:fno-cafe has no live holder (claim state: free); not queued.
+  a job address with no holder would strand. Retry when a /target session holds node:fno-cafe.

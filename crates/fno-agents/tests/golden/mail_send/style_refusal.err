@@ -1,0 +1,7 @@
+message blocked by the style rules.
+
+rule 1 (length): sentence 1 is 36 words. The cap is 25. "This single sentence deliberately pads itself with one filler word after another ..."
+
+add a style-exception line with a reason, or pass --style-exception.
+
+run "fno doctor lint style --stdin --surface pr-body" to check a rewrite first.

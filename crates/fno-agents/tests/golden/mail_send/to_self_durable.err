@@ -1,0 +1,8 @@
+fno-agents a2a: no TTY to confirm autonomous relay; applying the conservative fallback (autonomous relay OFF, single observed hop). Run `fno config set config.agents.a2a.auto true` to opt in.
+mail-inject: not-injectable means no roster entry, or no control socket to write into. It is NOT a liveness verdict: the session may be alive and mid-turn. Ask `fno agents truth <handle>` for reachability. A session with no injection path can still act: its operator can type the command at its prompt.
+mail: liveness of HEX8 could not be established; queued durably as recovery only - the recipient must drain its inbox to read this, and may never do so
+  live delivery NOT confirmed - do not wait for a reply, recover:
+    fno agents peek HEX8     # did it land? a busy peer may have queued it
+    fno agents resume HEX8   # wakes it (claude) or resumes it (other harnesses), then re-send
+    fno agents attach HEX8   # drive it yourself (claude)
+    fno agents mail withdraw <id>      # none of the above? retract it

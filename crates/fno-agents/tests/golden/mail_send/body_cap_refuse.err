@@ -1,0 +1,1 @@
+error: mail body is 5100 bytes (cap 5000). Relay mail is re-read every turn; put the detail in a node or doc and send a short pointer. Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0.

@@ -1100,7 +1100,7 @@ fn resolve_codex_review_target(payload: &str, default_base: Option<&str>) -> Opt
     None
 }
 
-fn agents_binary() -> String {
+pub(crate) fn agents_binary() -> String {
     if let Ok(value) = std::env::var("FNO_AGENTS_BIN") {
         if !value.is_empty() {
             return value;
@@ -1111,18 +1111,18 @@ fn agents_binary() -> String {
         .unwrap_or_else(|_| "fno-agents".to_string())
 }
 
-struct Captured {
-    status: Option<i32>,
-    stdout: String,
-    timed_out: bool,
-    spawn_failed: bool,
+pub(crate) struct Captured {
+    pub(crate) status: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) timed_out: bool,
+    pub(crate) spawn_failed: bool,
 }
 
 /// Bounded spawn: stdin always piped (fed and closed by a writer thread),
 /// stdout captured by a reader thread, stderr either inherited (the real-send
 /// lanes freeze the child's teaching text) or drained by a thread so a chatty
 /// child cannot deadlock on a full pipe. Kills at the deadline.
-fn run_captured(
+pub(crate) fn run_captured(
     argv: &[String],
     stdin_text: &str,
     inherit_stderr: bool,

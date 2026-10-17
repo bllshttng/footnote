@@ -1,0 +1,2 @@
+mail: project inbox quiet-proj has no live drain; queued durably as recovery only - a session must drain the project inbox to read this, and may never do so
+  this is NOT delivery. Address a live session instead: `fno agents top` to find one, then `fno agents mail send <short-id>`

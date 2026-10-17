@@ -370,38 +370,6 @@ def test_concurrent_sends_serialize_on_the_pair_ledger():
     assert len(stored["entries"]) == 1, "exactly one live reservation for the pair"
 
 
-def test_job_lane_durable_failure_releases_the_control_reservation(monkeypatch):
-    from fno.mail import job_lane
-    from fno.mail.job_address import JobHolder
-
-    job = JobHolder(
-        node_id="work-1234",
-        address="node:work-1234",
-        state="live",
-        session_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-        harness="claude",
-    )
-    monkeypatch.setattr(
-        "fno.mail.job_address.resolve_job_address", lambda _token: job
-    )
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude",
-        lambda _sid, _body, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        "fno.inbox.store.write_new_thread",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    body = "control: " + words(50)
-
-    with pytest.raises(typer.Exit) as failed:
-        job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
-    assert failed.value.exit_code == 12
-
-    retry = control_send("sender", "node:work-1234", 50, "msg-retry")
-    assert retry.running_before == 0, "the proven non-delivery released its words"
-
-
 # --- window expiry and release --------------------------------------------
 
 def test_entries_older_than_the_window_are_pruned():

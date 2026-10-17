@@ -10,6 +10,7 @@ pub mod drain_self;
 pub mod hold;
 pub mod pane_prepare;
 pub mod seed_provenance;
+pub mod send;
 pub mod send_raw;
 pub mod sent;
 pub mod team;
@@ -29,7 +30,7 @@ pub fn run(rest: &[String]) -> i32 {
         "team" => team::run_team(&rest[1..]),
         "withdraw" => withdraw::run(&rest[1..]),
         "sent" => sent::run_sent(&rest[1..]),
-        "send" => send_raw::run(&rest[1..]),
+        "send" => send::run(&rest[1..]),
         "pane-prepare" => pane_prepare::run(&rest[1..]),
         "unread" => unread::run(&rest[1..]),
         "ack" => ack::run_ack(&rest[1..]),

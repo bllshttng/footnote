@@ -1,0 +1,1 @@
+error: --to-lead and --to-project are mutually exclusive. Run `fno agents team` and address that handle for the other lane.

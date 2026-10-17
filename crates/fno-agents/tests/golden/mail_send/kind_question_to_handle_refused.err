@@ -1,0 +1,1 @@
+error: --kind question to a session handle (worker-1) has no drain that reads it. Drop --kind to inject it live, or add --to-project <project> to file it as a durable question note.

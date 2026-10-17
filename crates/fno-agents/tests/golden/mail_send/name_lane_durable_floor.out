@@ -1,0 +1,3 @@
+{"msg_id":"fmail-HEX","subject":null,"to":"worker-1","status":"queued (durable) [not-injectable;waited-0s] - typically drains within ~6h - an empty unread before then is not a failure"}
+fmail-HEX NOT LANDED - not claimed on the bus, not in the recipient transcript
+  verify:                 fno agents peek worker-1 --grep fmail-HEX

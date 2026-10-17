@@ -32,7 +32,7 @@ const LIVE_LANE_REASONS: [&str; 6] = [
     "no-confirm-source",
 ];
 
-fn is_live_lane_failure(reason: Option<&str>) -> bool {
+pub(crate) fn is_live_lane_failure(reason: Option<&str>) -> bool {
     let Some(reason) = reason else {
         return false;
     };
@@ -58,7 +58,7 @@ fn py_round(x: f64) -> i64 {
     }
 }
 
-fn window_clause(ttl_hours: f64) -> String {
+pub(crate) fn window_clause(ttl_hours: f64) -> String {
     if ttl_hours <= 0.0 {
         return String::new();
     }
@@ -73,7 +73,7 @@ fn window_clause(ttl_hours: f64) -> String {
 /// The positive-stdout wording for a live-lane failure demotion. `age_of`
 /// is the coalesced age recipient (age_target or target): the suffix rides
 /// only when it is present.
-fn durable_leg_story(
+pub(crate) fn durable_leg_story(
     reason: Option<&str>,
     suffix: Option<&str>,
     age_of: Option<&str>,
@@ -96,7 +96,7 @@ fn durable_leg_story(
     Some(format!("{story}; durable leg holds"))
 }
 
-fn json_line(msg_id: &str, subject: Option<&str>, to: &str, status: &str) -> String {
+pub(crate) fn json_line(msg_id: &str, subject: Option<&str>, to: &str, status: &str) -> String {
     json!({
         "msg_id": msg_id,
         "subject": subject,
@@ -106,7 +106,7 @@ fn json_line(msg_id: &str, subject: Option<&str>, to: &str, status: &str) -> Str
     .to_string()
 }
 
-fn demotion(
+pub(crate) fn demotion(
     msg_id: &str,
     reason: Option<&str>,
     ttl_hours: f64,
@@ -137,7 +137,7 @@ fn demotion(
     json_line(msg_id, subject, target.or(project).unwrap_or(""), &status)
 }
 
-fn not_landed(
+pub(crate) fn not_landed(
     msg_id: &str,
     pane: Option<i64>,
     target: &str,
@@ -218,7 +218,12 @@ const PLAIN_ARM: &str = concat!(
     "   # drive it yourself (claude)\n    fno agents mail withdraw <id>      # none of the above? retract it",
 );
 
-fn warn_deferred(target: &str, arm: &str, reason: Option<&str>, head: Option<&str>) -> String {
+pub(crate) fn warn_deferred(
+    target: &str,
+    arm: &str,
+    reason: Option<&str>,
+    head: Option<&str>,
+) -> String {
     let arm_text = match arm {
         "project" => PROJECT_ARM,
         "lock" => LOCK_ARM,
@@ -370,7 +375,7 @@ fn filetime_refresh(marker: &std::path::Path) -> std::io::Result<()> {
 /// stale one refreshes and claims. The window runs from the last claim, not
 /// the first send. A marker create failure just re-notifies; it never
 /// suppresses the durable write.
-fn escalate_debounce(dir: &std::path::Path, pair: &str, window: u64) -> &'static str {
+pub(crate) fn escalate_debounce(dir: &std::path::Path, pair: &str, window: u64) -> &'static str {
     if std::fs::create_dir_all(dir).is_err() {
         return "claim";
     }
