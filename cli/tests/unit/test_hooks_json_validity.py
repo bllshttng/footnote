@@ -280,7 +280,7 @@ def test_release_codex_marketplace_points_at_shared_plugin_branch() -> None:
     assert entry["name"] == "fno"
     assert entry["source"] == {
         "source": "url",
-        "url": "https://github.com/bllshttng/footnote.git",
+        "url": "https://github.com/bllshttng/fno.git",
         "ref": "stable",
     }
     claude = json.loads((REPO_ROOT / ".claude-plugin/marketplace.json").read_text())

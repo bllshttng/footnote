@@ -2,7 +2,7 @@
   "name": "footnote",
   "owner": {
     "name": "Jason Noah Choi",
-    "url": "https://github.com/bllshttng/footnote"
+    "url": "https://github.com/bllshttng/fno"
   },
   "metadata": {
     "description": "Set a target and walk away. Say f[no] to mostly done.",
@@ -13,7 +13,7 @@
       "name": "fno",
       "source": {
         "source": "github",
-        "repo": "bllshttng/footnote",
+        "repo": "bllshttng/fno",
         "ref": "stable"
       },
       "description": "Set a target and walk away. Say f[no] to mostly done.",
@@ -24,7 +24,7 @@
       "name": "fno-nightly",
       "source": {
         "source": "github",
-        "repo": "bllshttng/footnote",
+        "repo": "bllshttng/fno",
         "ref": "plugin-nightly"
       },
       "description": "Footnote nightly: yesterday's green main, rolling and replaceable.",
@@ -35,7 +35,7 @@
       "name": "buddy",
       "source": {
         "source": "git-subdir",
-        "url": "https://github.com/bllshttng/footnote.git",
+        "url": "https://github.com/bllshttng/fno.git",
         "path": "plugins/buddy",
         "ref": "main"
       },

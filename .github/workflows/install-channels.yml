@@ -45,7 +45,7 @@ jobs:
             runs-on: ubuntu-latest
             expect: pass
             node: ''
-            readme: ['/plugin marketplace add bllshttng/footnote', '/plugin install fno@footnote']
+            readme: ['/plugin marketplace add bllshttng/fno', '/plugin install fno@footnote']
           - id: claude-plugin-session
             runs-on: ubuntu-latest
             expect: pass
@@ -60,7 +60,7 @@ jobs:
             runs-on: ubuntu-latest
             expect: pass
             node: ''
-            readme: ['codex plugin marketplace add bllshttng/footnote', 'codex plugin add fno@footnote']
+            readme: ['codex plugin marketplace add bllshttng/fno', 'codex plugin add fno@footnote']
           - id: fno-sh-served
             runs-on: ubuntu-latest
             expect: pass
@@ -120,7 +120,7 @@ jobs:
             runs-on: ubuntu-latest
             expect: pass
             node: ''
-            readme: ['npx skills add bllshttng/footnote --skill tdd']
+            readme: ['npx skills add bllshttng/fno --skill tdd']
           - id: clone-setup
             runs-on: ubuntu-latest
             expect: pass

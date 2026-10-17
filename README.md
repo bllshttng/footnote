@@ -1,8 +1,8 @@
-# footnote - f[no]
+# fno
 
 **Set a target and walk away. Say f[no] to mostly done.**
 
-footnote is an orchestration loop that ships software. It plans, builds, reviews, and opens a green PR, and it does not stop until external truth says so. It runs as a plugin on any harness that accepts plugins and hooks (Claude Code, Codex, OpenCode, and agy are wired today), with a standalone CLI underneath.
+fno is an orchestration loop that ships software. It plans, builds, reviews, and opens a green PR, and it does not stop until external truth says so. It runs as a plugin on any harness that accepts plugins and hooks. Claude Code, Codex, OpenCode, and agy are wired today, with a standalone CLI underneath.
 
 ![The fno mux with four agent panes working fno tasks, a sideline roster, and a live status row](docs/images/ux-shot-live-fleet.png)
 
@@ -23,20 +23,20 @@ When `uv` is missing the script installs it first. The install lands the `fno` C
 Claude Code:
 
 ```
-/plugin marketplace add bllshttng/footnote
+/plugin marketplace add bllshttng/fno
 /plugin install fno@footnote
 ```
 
 Codex CLI:
 
 ```
-codex plugin marketplace add bllshttng/footnote
+codex plugin marketplace add bllshttng/fno
 codex plugin add fno@footnote
 ```
 
 The plugin-only route gets its CLI on the next session: the first session you start after installing runs the installer. Until then `fno` is not on PATH and the `/fno:` skills cannot run.
 
-CLI only, for scripting, CI, or driving footnote yourself:
+CLI only, for scripting, CI, or driving fno yourself:
 
 ```
 uv tool install fno
@@ -46,7 +46,7 @@ cargo install fno
 From a clone, `bash scripts/setup.sh` installs the CLI and scaffolds the project. One skill runs without the CLI at all:
 
 ```
-npx skills add bllshttng/footnote --skill tdd
+npx skills add bllshttng/fno --skill tdd
 ```
 
 Other harnesses (opencode, agy, gemini, pi): see [docs/HARNESSES.md](docs/HARNESSES.md). Then run `/fno:setup` (or `fno do wizard` in a terminal), and point `/fno:target` at a feature.

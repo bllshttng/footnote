@@ -68,7 +68,7 @@ for channel in ("fno", "fno-nightly"):
         fail.append(f"{channel} entry missing")
         continue
     src = entry.get("source") or {}
-    if src.get("source") != "github" or src.get("repo") != "bllshttng/footnote":
+    if src.get("source") != "github" or src.get("repo") != "bllshttng/fno":
         fail.append(f"{channel} source is not the github repo")
     if "version" in entry:
         fail.append(f"{channel} entry carries a version field; plugin.json is the one version")

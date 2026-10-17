@@ -31,7 +31,7 @@
 # homebrew-core submission would require - out of scope for the own tap.)
 class Fno < Formula
   desc "Autonomous delivery pipeline CLI (footnote)"
-  homepage "https://github.com/bllshttng/footnote"
+  homepage "https://github.com/bllshttng/fno"
 
   # The x86_64 wheel (macosx_10_12) is the top-level default so a `url` is ALWAYS
   # defined - including on Linux, where the on_macos block is skipped. Homebrew

@@ -8,7 +8,7 @@
       "name": "fno",
       "source": {
         "source": "url",
-        "url": "https://github.com/bllshttng/footnote.git",
+        "url": "https://github.com/bllshttng/fno.git",
         "ref": "stable"
       },
       "policy": {

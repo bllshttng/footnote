@@ -200,7 +200,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_RECLAIM_STATE_ROOT` | rs | unclear: crates/fno-agents/src/plugin_install.rs:22 |
 | `FNO_RECLAIM_TEMP_ROOT` | rs | unclear: crates/fno-agents/src/reclaim.rs:80 |
 | `FNO_REGISTRY_ALLOW_ROW_LOSS` | py | unclear: cli/src/fno/agents/registry.py:1342 |
-| `FNO_RELEASE_REPO` | rs | The `owner/repo` whose `bin-cache` pre-release `fno update` downloads the CI-built binaries from; the default is bllshttng/footnote. The curl installer reads the same name for the nightly. |
+| `FNO_RELEASE_REPO` | rs | The `owner/repo` whose `bin-cache` pre-release `fno update` downloads the CI-built binaries from; the default is bllshttng/footnote (`crates/fno/src/update_prebuilt.rs`, `crates/fno-agents/src/sync_canonical.rs`, `scripts/install/fno.sh`), pending the GitHub repo rename. The curl installer reads the same name for the nightly. |
 | `FNO_REPO_ROOT` | py+rs | unclear: cli/src/fno/outstanding/cli.py:38; the law matcher reads it to place the project events journal (crates/fno-agents/src/law_match.rs). |
 | `FNO_REVIEW_INVOCATION_ID` | rs | unclear: crates/fno/src/mux_cli.rs:6090 |
 | `FNO_REVIEW_ROUND` | rs | The verified round a --verify-fixes pass declares, carried to the disposition comment when the shell producer emits; the attest flow's function argument outranks it. Set by skills/review/scripts/emit-attestation.sh, read in crates/fno-agents/src/review_findings.rs `resolve_round`. |
