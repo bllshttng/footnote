@@ -36,11 +36,11 @@ Each is reversible or additive, which is what makes an unattended daily pass saf
 | `fno backlog supersede <new-id> --replaces <old-id> --cause "..." --surface <path>` | A node genuinely replaced by another (dedup families, retitles). `--cause` and `--surface` are required: the old node stays open until a merged PR covers every surface |
 | `fno backlog defer <id>... --reason "..."` | Work that should stop being selected, with the why recorded |
 | `fno backlog undefer <id>...` | A deferred node whose blocker is demonstrably gone |
-| `fno backlog update <id> --priority <p0..p3>` | A priority the evidence contradicts. Say the evidence in the same breath |
+| `fno backlog update <id> priority=<p0..p3>` | A priority the evidence contradicts. Say the evidence in the same breath |
 | `fno backlog encounter <id> --evidence "..."` | A node that cost this pass time. One vote per voter, and it is what the drain reads |
 | `fno backlog idea "..."` | File genuinely NEW follow-up work you noticed |
 | `fno backlog intake <plan-path>` | Promote a demonstrably blueprint-complete plan into a tracked node |
-| `fno backlog update <id> --blocked-by <ids>` | Encode the order a track must run in (see Auto-convene) |
+| `fno backlog update <id> blocked_by=<ids>` | Encode the order a track must run in (see Auto-convene) |
 
 The table is the whole contract: if an action you want is not on it, it is not yours to take - file the question instead.
 
@@ -60,7 +60,7 @@ A `PreToolUse` hook blocks direct edits as a backstop, but the rule is yours to 
 
 Priority is the proposal, and it is the only ordering field you write. It is bounded to four values, so two writers disagreeing produce a visible conflict on the demand table instead of a silent stack. Rank is the user's pin, and `fno backlog rank` refuses this session by design.
 
-Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> --priority p1`. p0 needs `--blocks-everything` and means the fleet is down. Put the evidence in the report line, so the user can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
+Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> priority=p1`. p0 needs `--blocks-everything` and means the fleet is down. Put the evidence in the report line, so the user can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
 
 ## The decision rule
 
@@ -79,7 +79,7 @@ fno backlog defer <id> --reason "question: <the one line you need answered>"
 Use `fno backlog idea` only for genuinely new work you noticed in passing; an idea-status node is NOT in the pile and will not surface in the triage view.
 The pile is the pressure-release valve that lets grooming stay unattended: an honest question costs a line, a wrong supersede costs real work.
 
-**Auto-convene:** when a track has several `ready` nodes but no encoded order (no `blocked_by` edges expressing the sequence a human clearly intended), you MAY encode that order yourself with `fno backlog update <id> --blocked-by <ids>`, one edge per node whose predecessor is unambiguous.
+When a track has several `ready` nodes but no encoded order, you MAY encode the order yourself. No encoded order means no `blocked_by` edges expressing the sequence a human clearly intended. Encode one edge per node whose predecessor is unambiguous with `fno backlog update <id> blocked_by=<ids>`. This move is auto-convene.
 Its entire output is `blocked_by` edges plus a line each in the report.
 Do this at most once per run, and only for a track where the ready depth is real and the intended order is evident from the plan - an order you would have to guess is a question for the pile, not an edge.
 

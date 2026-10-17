@@ -377,7 +377,7 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
             f"fno do target init: {nid} is marked as shipping inside {owner}, but "
             f"no node {owner} exists.\n"
             f"That containment is stale and nothing will clear it automatically. "
-            f"Clear it with `fno backlog update {nid} --parent null`, then "
+            f"Clear it with `fno backlog update {nid} parent=null`, then "
             "dispatch this node on its own. Nothing was claimed.",
             err=True,
         )
@@ -394,7 +394,7 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
             f"fno do target init: {nid} is marked as shipping inside {owner}, but "
             f"{owner} is {_state} and will never ship it.\n"
             f"That containment is stale. Clear it with `fno backlog update {nid} "
-            "--parent null`, then dispatch this node on its own. Nothing was claimed.",
+            "parent=null`, then dispatch this node on its own. Nothing was claimed.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -466,7 +466,7 @@ def _refuse_dispatch_hold(node: Optional[dict], entries: Optional[list] = None) 
         # does not exist.
         _missing = "missing under its existing plan root" in (hold.detail or "")
         _remedy = (
-            "Repair the node with: fno backlog update <id> --plan-path <path>, "
+            "Repair the node with: fno backlog update <id> plan_path=<path>, "
             "or restore the plan file."
             if _missing
             else "fix or remove the declaration, then retry."

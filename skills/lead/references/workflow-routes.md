@@ -23,7 +23,7 @@ The continuity contract assumes you held the handle from the start; a pass lead 
 3. If both are empty, `ls ~/.claude/projects/*<branch-or-node>*`, keyed on the worktree path; confirm liveness by the transcript file's mtime and tail, the one probe that has not lied.
 4. Only then recover: for a registered row, `fno agents resume <name> --print-command` is sufficient. For a store-only session or a pruned worktree, retain the full `sessions[].session_id` UUID and run `fno agents resume <full-session-id> --cross-project --cwd <existing-checkout>`; use `fno agents adopt <full-session-id> --cross-project` when only registry re-adoption is wanted. `--cwd` selects an existing checkout for the surviving transcript. It does not reconstruct deleted worktree files or uncommitted contents. Eight-character handles remain supported only when the store can prove them unique.
 
-Resume is the common case in writing and the rare one in practice: of the agents behind four open PRs at last measure, one was still alive. So the default end of the ladder is **spawn and record**, not resume. Spawn the successor, then `fno backlog update <node> --dispatch-brief "..."` so the next lead is not in the same position; the brief is the durable channel that survives the session.
+Resume is the common case in writing and the rare one in practice: of four open PRs at last measure, one agent was still alive. So the default end of the ladder is **spawn and record**, not resume. Spawn the successor, then `fno backlog update <node> 'dispatch_brief=...'` so the next lead is not in the same position. The brief is the durable channel that survives the session.
 
 ## The wake arm: report first, sweep as backstop
 

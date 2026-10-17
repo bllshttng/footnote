@@ -1970,10 +1970,8 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
             "backlog",
             "update",
             node,
-            "--pr-number",
-            &number.to_string(),
-            "--pr-url",
-            &url,
+            &format!("pr_number={number}"),
+            &format!("pr_url={url}"),
         ])
         .current_dir(cwd)
         .status()

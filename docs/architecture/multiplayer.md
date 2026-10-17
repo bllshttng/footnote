@@ -68,7 +68,7 @@ To build a node on this machine, follow these steps in order:
 To lead a scope on this machine, follow these steps in order:
 
 1. Run `fno agents register`, so this session has a row in this machine's registry.
-2. Check that the scope is an epic. If it is mistyped, `fno backlog update <id> --type epic` fixes it.
+2. Check that the scope is an epic. If it is mistyped, `fno backlog update <id> type=epic` fixes it.
 3. Run `fno config set lead.enabled true`. While it is false, a grant gives the role and arms no lead loop.
 4. A person at an attended shell on this machine runs `fno agents org promote <handle> --scope <scope>`. A lead on another machine cannot grant here, because its role is not in this registry.
 5. If the grant armed no manifest, run `fno agents org init --scope <scope> --harness-session-id <full session id>`.

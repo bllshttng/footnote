@@ -207,7 +207,7 @@ def test_deliver_with_no_node_binds_nothing(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_deliver_with_node_binds_plan_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A node in scope: deliver shells out to `fno backlog update --plan-path`."""
+    """A node in scope: deliver shells out to `fno backlog update plan_path=<doc>`."""
     cache = tmp_path / "c" / "topic.sources.jsonl"
     _write_sources(cache, [_verified("https://a.example/p", "finding p")])
     calls: list[list[str]] = []
@@ -223,7 +223,7 @@ def test_deliver_with_node_binds_plan_path(tmp_path: Path, monkeypatch: pytest.M
     )
 
     assert res.bind_warning is None
-    assert calls == [["fno", "backlog", "update", "x-abcd", "--plan-path", res.brief_path]]
+    assert calls == [["fno", "backlog", "update", "x-abcd", f"plan_path={res.brief_path}"]]
 
 
 def test_deliver_bind_failure_warns_but_keeps_the_document(

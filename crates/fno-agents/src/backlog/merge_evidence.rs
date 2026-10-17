@@ -168,7 +168,7 @@ impl PrReadError {
                     .unwrap_or_else(|| format!("PR #{pr_number}"));
                 format!(
                     "Stored PR reference {stored} was not found. Repair it with \
-                     `fno backlog update <node> --pr-url <correct-url>`; do not \
+                     `fno backlog update <node> pr_url=<correct-url>`; do not \
                      retry against the ambient repository."
                 )
             }

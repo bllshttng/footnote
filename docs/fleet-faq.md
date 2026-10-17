@@ -106,7 +106,7 @@ Two channels, and they answer different questions.
 
 `fno agents mail send <name> "<text>"` can reach a **live** worker. Read its receipt. `delivered (hosted)` and `delivered (woken)` mean the inject was accepted. Neither proves the agent read it. A `queued` message waits until the agent looks up or a human presses ESC. Any other receipt means the worker still has its old instructions. A failed injection falls back to the durable queue, where the message can remain unread.
 
-`fno backlog update <id> --dispatch-brief "..."` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
+`fno backlog update <id> 'dispatch_brief+=...'` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
 
 A brief that still says "hold for the operator ruling" will park a fresh worker on arrival, and the grant you just received will look like it never landed. Two separate sessions hit this in one day: the graph keeps issuing the old order until you change the graph.
 
@@ -217,11 +217,11 @@ Holding is cheap and reversible. A worker killed to satisfy the wrong side of an
 
 ## A node is blocked and I cannot unblock it
 
-**Answer.** You can edit the blocker list. `fno backlog update <id>` takes `--blocked-by` to replace it, `--add-blocker` to append, and `--remove-blocker` to drop one. Use those first.
+**Answer.** You can edit the blocker list. `fno backlog update <id>` teaches `blocked_by=` to replace, `blocked_by+=` to append, and `blocked_by-=` to drop one. Use those first.
 
 What has no pair is the STATE. Every other side state is paired. The pairs: defer/undefer, supersede/unsupersede, queue/unqueue, claim/unclaim, done/reopen, archive/unarchive. Blocked has no entry verb and no exit verb. Emptying the blocker list does not by itself return a node to ready. `requeue` is the near miss and it only covers a node wedged `in_progress` by a dead worker.
 
-**Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `--status`. It answers `No such option: --status (Possible options: --tag)`. One node has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
+**Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `status=`. It answers `No such option: --status (Possible options: --tag)`. One node has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
 
 *Graduates to:* Give blocked its pair, or widen `requeue` to a node whose worker died before it reached `in_progress`.
 

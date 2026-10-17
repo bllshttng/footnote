@@ -1156,7 +1156,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             }
             // A driver on ANOTHER node that binds one of this node's PRs is
             // still a driver: the team dispatched the worker elsewhere and
-            // bound the PR there (`fno backlog update <node> --add-pr`). The
+            // bound the PR there (`fno backlog update <node> additional_prs+=<n>`). The
             // resume gate reads the same binding.
             let bound_entry = s_str(node, "id")
                 .and_then(|id| by_id.get(id))

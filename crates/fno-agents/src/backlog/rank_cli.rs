@@ -122,7 +122,7 @@ fn agent_rank_refusal(task_id: &str, harness: &str) -> String {
          Every --top writes min(rank) - 1, so agent pins form a stack in which \
          the last writer wins and importance is never computed.\nVote instead:\n\
          \x20 fno backlog encounter {task_id} --evidence \"what it cost you\"\n\
-         \x20 fno backlog update {task_id} --priority p1|p2|p3\n\
+         \x20 fno backlog update {task_id} priority=p1|p2|p3\n\
          The graph records no writer for a rank, so nothing downstream could \
          tell yours from the operator's. The escape hatch in --help is theirs."
     )

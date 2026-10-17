@@ -369,7 +369,7 @@ def evaluate_thresholds(
             threshold=0,
             kind="presence",
             hint=("a deferred or missing blocker holds this node; undefer the blocker, "
-                  "drop the edge with fno backlog update <node> --blocked-by ..., or "
+                  "drop the edge with fno backlog update <node> blocked_by=<ids>, or "
                   "defer the dependent too."),
         ))
 

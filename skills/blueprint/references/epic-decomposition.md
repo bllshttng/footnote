@@ -225,7 +225,7 @@ is known):
    - Validate, THEN link (link LAST, after the content is real):
      ```bash
      bash "${SKILL_DIR}/scripts/validate-plan.sh" <child-plan> \
-       && fno backlog update <child-id> --plan-path <child-plan>
+       && fno backlog update <child-id> plan_path=<child-plan>
      ```
    The validator REFUSES a plan still carrying any stub marker, an empty
    `## Why (from epic)`, or an `idea` rung, so a half-filled child can never be

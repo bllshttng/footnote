@@ -2650,7 +2650,7 @@ _print_bind_hint() {
     local abs_path
     abs_path="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
     echo "validate-plan.sh: plan validated for $bind_target. Bind it so the graph can see it:" >&2
-    echo "  fno backlog update $bind_target --plan-path $abs_path" >&2
+    echo "  fno backlog update $bind_target plan_path=$abs_path" >&2
 }
 
 # -------------------------------------------------------------------

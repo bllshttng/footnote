@@ -16,7 +16,7 @@ The auto-continue daemon (`crates/fno-agents/src/active_backlog.rs`, the keep-se
    - `join` → reuse the open batch's recorded worktree/branch.
    On batch, the daemon dispatches `/target batched <id>` with `TARGET_BATCHED=1` + `TARGET_BATCH_WORKTREE`/`TARGET_BATCH_BRANCH`. Prepare is fail-safe: any error degrades to solo.
 
-2. **Batched member run.** `/target batched` skips cold-start (uses the provided worktree), inits with `batched: true` in the manifest, implements + commits atomically to the shared branch, `fno backlog batch join`s + marks the graph node (`fno backlog update --batch <id>`, which `next`/`ready` then exclude), and returns **without** a PR.
+2. **Batched member run.** `/target batched` skips cold-start (uses the provided worktree). It inits with `batched: true` in the manifest. It implements and commits atomically to the shared branch. It runs `fno backlog batch join` and marks the graph node (`fno backlog update batch=<id>`). `next` and `ready` then exclude the node. It returns **without** a PR.
 
 3. **DoneBatched terminal.** `loopcheck.rs` reads the `batched: true` manifest flag and terminates the member as `DoneBatched` on its promise - not a hang waiting for a per-node PR. `DoneBatched` is deliberately **not** in finalize's `SHIP_REASONS`, so a member finalizes to a ledger record only and never stamps/graduates the plan (the batch PR does that once, for all members). In `active_backlog.rs`, `map_outcome` treats a `DoneBatched` unit as a successful dispatch so batched members never trip the circuit breaker.
 

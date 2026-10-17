@@ -119,7 +119,7 @@ def _is_batched_member(e: dict) -> bool:
     part of the batch PR, not its own. It must NOT be re-selected for dispatch
     (else the daemon would spawn a second worker for work already on the branch).
     The mark is the graph `batch` field, set by `/target batched` via
-    `fno backlog update --batch <id>` and cleared (`--batch null`) on abandon so
+    `fno backlog update batch=<id>` and cleared (`batch=null`) on abandon so
     the node resurfaces for an individual ship. Mirrors `_has_unmerged_open_pr`:
     an in-flight signal that survives the builder session's PID-claim dying.
     """
@@ -1435,7 +1435,7 @@ def cmd_unqueue(
 @cli.command(
     "contain",
     hidden=True,
-    epilog="Inverse: `fno backlog update <id> --parent null` un-contains a node - a verb the native binary serves after the python update leg retired.",
+    epilog="Inverse: `fno backlog update <id> parent=null` un-contains a node - a verb the native binary serves after the python update leg retired.",
 )
 def cmd_contain(
     ctx: typer.Context,

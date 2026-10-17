@@ -800,7 +800,7 @@ pub(crate) fn evaluate_thresholds(report: &Value, config: &Value) -> Vec<Value> 
         .map(Vec::len)
         .unwrap_or(0) as f64;
     if bh_n > 0.0 {
-        breaches.push(breach("blocked_by_held", bh_n, 0.0, "presence", "a deferred or missing blocker holds this node; undefer the blocker, drop the edge with fno backlog update <node> --blocked-by ..., or defer the dependent too."));
+        breaches.push(breach("blocked_by_held", bh_n, 0.0, "presence", "a deferred or missing blocker holds this node; undefer the blocker, drop the edge with fno backlog update <node> blocked_by=<ids>, or defer the dependent too."));
     }
     breaches
 }

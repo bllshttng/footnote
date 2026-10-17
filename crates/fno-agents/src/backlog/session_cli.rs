@@ -853,7 +853,7 @@ matching on the bare PR number (skips on cross-repo ambiguity).",
             let repair = if ids.is_empty() {
                 format!(
                     " A node whose PR was never stamped is invisible here. \
-Link it with `fno backlog update <node-id> --pr-number {pr}`, or pass the \
+Link it with `fno backlog update <node-id> pr_number={pr}`, or pass the \
 node id directly: `fno backlog session add <node-id> --phase {phase}`."
                 )
             } else {

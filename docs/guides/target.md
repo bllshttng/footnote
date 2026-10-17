@@ -181,7 +181,7 @@ The backlog graph (`~/.fno/graph.json`) stores features with `blocked_by` depend
 
 ### Size Routing
 
-Each backlog node has a `size` field (S/M/L, set via `fno backlog update <id> --size`):
+Each backlog node has a `size` field (S/M/L, set via `fno backlog update <id> size=<s>`):
 
 - **Estimated points 1-3** or **1 phase plan**: `/fno:target -S`
 - **Estimated points 4-8** or **2-3 phase plan**: `/fno:target -M`

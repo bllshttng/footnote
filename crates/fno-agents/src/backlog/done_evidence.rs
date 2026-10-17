@@ -82,7 +82,7 @@ pub fn enforce(pre: &[Value], post: &[Value]) -> Result<(), String> {
              artifact_url. Nothing was written. Close it with one of: \
              fno backlog done {id} --pr-number <n>, --note \"<why it is done>\", \
              or --link <artifact url>. To stamp the note before a bare close, use \
-             the native door: fno-agents backlog update {id} --completion-note \"<why>\"."
+             the native door: fno-agents backlog update {id} completion_note+=\"<why>\"."
         ));
     }
     Ok(())
@@ -110,7 +110,7 @@ mod tests {
         let post = vec![closed_row("ab-evd0001")];
         let error = enforce(&pre, &post).unwrap_err();
         assert!(error.contains("refused: ab-evd0001"), "{error}");
-        for flag in ["--pr-number", "--note", "--link", "--completion-note"] {
+        for flag in ["--pr-number", "--note", "--link", "completion_note+="] {
             assert!(error.contains(flag), "{flag} must appear: {error}");
         }
         // The remedy must name the door every caller can run: the typer

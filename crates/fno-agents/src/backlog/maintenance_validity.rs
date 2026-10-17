@@ -808,7 +808,7 @@ pub(crate) fn render_command(
     target: Option<&str>,
 ) -> Option<String> {
     match (classification, target) {
-        ("promote", _) => Some(format!("fno backlog update {node_id} --priority p3")),
+        ("promote", _) => Some(format!("fno backlog update {node_id} priority=p3")),
         ("supersede", Some(t)) => Some(format!(
             "fno backlog supersede {t} --replaces {node_id} --reason 'validity sweep: superseded by {t}'"
         )),

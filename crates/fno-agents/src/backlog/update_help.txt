@@ -5,7 +5,22 @@ Field operators (the argument carries the operator):
   field+=value   add to a list, or append a paragraph to text
   field-=value   remove from a list
 
-  Fields: details, dispatch_brief (text); tags, blocked_by, related (lists).
+  Fields (the kind fixes which operators a field takes):
+    text     details, dispatch_brief, completion_note
+             = sets ('null' clears), += appends a paragraph
+    list     tags, blocked_by, related
+             = replaces, += adds, -= removes
+    records  additional_prs
+             += adds one entry, -= removes it
+    scalar   title, domain, size, model, type, batch, orphan_ok,
+             priority, project, cwd, difficulty, dispatch_verb,
+             locked_by, plan_path, parent, caused_by, pr_number,
+             pr_url, collisions_acknowledged, source_node_id
+             (= only; 'null' clears)
+    integer  fixes_pr  (= only; 0 clears)
+    flag     public, reverted, has_brief  (= true|false)
+  Modifiers that write no field stay flags: --force, --blocks-everything,
+  --repo, --add-pr-url, --add-pr-note.
   A list value is one id or a comma list. Appending text the field
   already ends with changes nothing.
 

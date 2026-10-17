@@ -49,7 +49,7 @@ Phase 2 rolls the lowercase map across the everyday commands. Purely additive, s
 | `backlog add` | `-p` priority, `-c` cwd, `-d` details, `-t` type | - |
 | `backlog idea` | `-d` description, `-p` priority, `-c` cwd | - |
 | `backlog intake` | `-t` title, `-p` priority | `-N` |
-| `backlog update` | `-p` priority, `-c` cwd, `-t` title | - |
+| `backlog update` | (field operators carry the field name; no field short flags) | - |
 | `backlog next` / `ready` | `-p` project | `-A`, `-I` |
 | `backlog find` | `-p` project, `-s` status, `-d` domain | `-J` |
 | `backlog capture add` | `-s` source, `-w` where, `-p` priority | - |

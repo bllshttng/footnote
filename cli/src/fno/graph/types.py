@@ -298,7 +298,7 @@ class Node(BaseModel):
     merge_status: Optional[str] = None
     # Causal links (W4 telemetry): survival math needs a fix node to
     # point back at what it fixes and a reverted ship to stop counting as a
-    # survival. Writers: `backlog update --caused-by/--fixes-pr/--reverted`
+    # survival. Writers: `backlog update caused_by=<id> fixes_pr=<n> reverted=<bool>`
     # (manual), retro-harvest node creation (auto caused_by), reconcile's
     # best-effort revert stamp.
     caused_by: Optional[str] = None

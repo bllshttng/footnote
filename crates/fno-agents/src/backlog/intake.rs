@@ -1510,7 +1510,7 @@ fn prepare_intake(
                 "plan {plan_path} is already the delivery unit of {owner} (a plan \
                  is one PR is one node, tracked under another roadmap); point the \
                  work at {owner}, or repoint deliberately with `fno backlog update \
-                 <id> --plan-path {plan_path} --force`"
+                 <id> plan_path={plan_path} --force`"
             ));
         }
     }

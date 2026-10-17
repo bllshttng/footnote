@@ -70,7 +70,7 @@ consolidation:
   #     reason: <why this node is a wave of this deliverable>
   # reversal: fno backlog unsupersede x-0000
   # outcome: append - THIS content belongs on the OTHER node; no plan is
-  # written and the content goes via fno backlog update <id> --details ...
+  # written and the content goes via fno backlog update <id> details=...
   # appended_to:
   #   - id: x-0000
   #     reason: <why this content belongs on that node>

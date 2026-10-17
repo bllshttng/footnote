@@ -204,7 +204,7 @@ fn retired_band(row: &Value) -> Option<String> {
 /// the retired handler's leftovers look like), or a garbage retired key
 /// under a live difficulty. Needs a decision: a divergent pair, a garbage
 /// band with no canonical field, or a garbage canonical band, all fixed by
-/// `fno backlog update <id> --difficulty <band>`.
+/// `fno backlog update <id> difficulty=<band>`.
 pub(crate) fn split_retired_tier_rows(rows: &[Value]) -> (Vec<String>, Vec<String>) {
     let mut drainable = Vec::new();
     let mut needs_decision = Vec::new();
@@ -260,7 +260,7 @@ pub(crate) fn migrate_model_tier(rows: &mut [Value], apply: bool) -> Result<Valu
         };
         return Err(format!(
             "rows need a hand-picked band before migrating; pick it with \
-             `fno backlog update <id> --difficulty <band>` (which also clears \
+             `fno backlog update <id> difficulty=<band>` (which also clears \
              the retired key): {}{more}",
             named[..named.len().min(8)].join(", ")
         ));

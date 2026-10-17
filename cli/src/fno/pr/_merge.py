@@ -699,7 +699,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
     # ran `fno do pr merge`. That names the merger, not the implementer, and a merge
     # that lands out-of-band (gh, the web UI, or GitHub's native auto-merge)
     # bypasses this primitive entirely - so it served neither consumer. The ship
-    # row now lands at `fno backlog update --pr-number` (the PR-link choke point
+    # row now lands at `fno backlog update pr_number=<n>` (the PR-link choke point
     # every shipped node passes through), which records the implementer.
 
 

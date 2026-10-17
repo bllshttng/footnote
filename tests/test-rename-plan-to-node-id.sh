@@ -36,7 +36,7 @@ NEW1="$SBX1/plans/2026-07-11-my-feature-x-8af8.md"
 check_contains "T1: renamed line names the node-bearing path" "renamed $NEW1" "$OUT1"
 check_file "$NEW1" "T1: node-bearing file exists"
 check_nofile "$P1" "T1: id-less original is gone"
-check_contains "T1: plan_path repoint issued" "backlog update x-8af8 --plan-path $NEW1" "$(cat "$SBX1/fno-log")"
+check_contains "T1: plan_path repoint issued" "backlog update x-8af8 plan_path=$NEW1" "$(cat "$SBX1/fno-log")"
 check_contains "T1: frontmatter keyed with the minted id" "node: x-8af8" "$(cat "$NEW1")"
 
 # --- Test 2: idempotent - a plan already ending -<node>.md is a no-op ---

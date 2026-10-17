@@ -70,7 +70,7 @@ fi
 # Repoint the node. Non-fatal: the file already moved, and a stale plan_path is
 # recoverable, so a CLI hiccup must not fail the blueprint handoff.
 if command -v fno >/dev/null 2>&1; then
-  fno backlog update "$NODE" --plan-path "$new" >/dev/null 2>&1 \
+  fno backlog update "$NODE" "plan_path=$new" >/dev/null 2>&1 \
     || echo "warn: plan_path update failed for $NODE (file renamed to $new)" >&2
 fi
 

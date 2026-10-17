@@ -300,7 +300,7 @@ pub fn receipt_lines(resolution: &Resolution, node_id: &str, entries: &[Value]) 
         "linked" => {
             let eid = resolution.epic_id.as_deref().unwrap_or_default();
             vec![format!(
-                "rollup: auto-linked {node_id} -> {eid} \"{}\" (score {}); undo: fno backlog update {node_id} --parent null",
+                "rollup: auto-linked {node_id} -> {eid} \"{}\" (score {}); undo: fno backlog update {node_id} parent=null",
                 title(entries, eid),
                 fmt(resolution.score)
             )]
@@ -308,7 +308,7 @@ pub fn receipt_lines(resolution: &Resolution, node_id: &str, entries: &[Value]) 
         "team" => {
             let eid = resolution.epic_id.as_deref().unwrap_or_default();
             vec![format!(
-                "rollup: team-linked {node_id} -> {eid} \"{}\" (filing session team scope); undo: fno backlog update {node_id} --parent null",
+                "rollup: team-linked {node_id} -> {eid} \"{}\" (filing session team scope); undo: fno backlog update {node_id} parent=null",
                 title(entries, eid)
             )]
         }
@@ -316,7 +316,7 @@ pub fn receipt_lines(resolution: &Resolution, node_id: &str, entries: &[Value]) 
             let mut lines = vec![format!("rollup: no clear mission edge for {node_id}; candidates:")];
             for (eid, score, _reason) in &resolution.candidates {
                 lines.push(format!(
-                    "  {}  {}  \"{}\"  -> fno backlog update {node_id} --parent {eid}",
+                    "  {}  {}  \"{}\"  -> fno backlog update {node_id} parent={eid}",
                     fmt(*score),
                     eid,
                     title(entries, eid)
@@ -325,7 +325,7 @@ pub fn receipt_lines(resolution: &Resolution, node_id: &str, entries: &[Value]) 
             lines
         }
         "orphan" => vec![format!(
-            "rollup: no mission edge (orphan); mark deliberate with: fno backlog update {node_id} --orphan-ok \"<reason>\""
+            "rollup: no mission edge (orphan); mark deliberate with: fno backlog update {node_id} orphan_ok=\"<reason>\""
         )],
         _ => Vec::new(),
     }
@@ -360,7 +360,7 @@ mod tests {
         let lines = receipt_lines(&r, "ab-new", &entries);
         assert_eq!(
             lines[0],
-            "rollup: auto-linked ab-new -> x-e0aa0001 \"Deployment pipeline hardening\" (score 0.70); undo: fno backlog update ab-new --parent null"
+            "rollup: auto-linked ab-new -> x-e0aa0001 \"Deployment pipeline hardening\" (score 0.70); undo: fno backlog update ab-new parent=null"
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
         let r = resolve(&node, &entries, None);
         assert_eq!(r.kind, "orphan");
         let lines = receipt_lines(&r, "ab-new", &entries);
-        assert!(lines[0].contains("--orphan-ok"), "{lines:?}");
+        assert!(lines[0].contains("orphan_ok="), "{lines:?}");
     }
 
     #[test]

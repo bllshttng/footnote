@@ -1149,11 +1149,11 @@ fn an_unreadable_body_or_graph_refuses_to_assume_bound() {
     };
     assert!(reason.contains("msg-447f8f"), "{reason}");
     assert!(
-        reason.contains("fno backlog update x-aaaa --pr-number null --pr-url null"),
+        reason.contains("fno backlog update x-aaaa pr_number=null pr_url=null"),
         "{reason}"
     );
     assert!(
-        reason.contains("fno backlog update x-bbbb --pr-number 7 --pr-url"),
+        reason.contains("fno backlog update x-bbbb pr_number=7 pr_url"),
         "{reason}"
     );
 
@@ -2230,7 +2230,7 @@ fn the_main_red_gate_refuses_red_and_exempts_only_the_declared_repair() {
     // Reproduction of 2026-09-30 (four merges landed on a red main): the
     // merge preview walks a stubbed red main verdict, never a live merge.
     let lane = "no node is declared the repair lane; tag the repair node \
-                (fno backlog update <node> --tag main-repair)";
+                (fno backlog update <node> tags+=main-repair)";
     let refusing = Fake {
         main_ci: Some(Ok(red_main())),
         main_repair: Some(Some(lane.to_string())),
@@ -2316,7 +2316,7 @@ fn the_repair_lane_sentence_never_names_a_done_node() {
     let done = main_repair_hold_from_entries(&entries("done"), &facts);
     assert_eq!(
         done.as_deref(),
-        Some("no node is declared the repair lane; tag the repair node: fno backlog update <node> --tag main-repair")
+        Some("no node is declared the repair lane; tag the repair node: fno backlog update <node> tags+=main-repair")
     );
 }
 

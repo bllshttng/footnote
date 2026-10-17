@@ -250,7 +250,7 @@ def test_wrong_stored_repository_refuses_without_ambient_fallback(tmp_path, monk
     if gh_log.exists():
         assert any("jasonnoahchoi/.claude" in line for line in gh_log.read_text().splitlines())
     assert "Stored PR reference jasonnoahchoi/.claude#1140" in err
-    assert "fno backlog update <node> --pr-url <correct-url>" in err
+    assert "fno backlog update <node> pr_url=<correct-url>" in err
     assert "retryable once gh is available again" not in err
 
 

@@ -2137,7 +2137,7 @@ def test_agent_caller_with_a_wrongly_typed_scope_sees_the_type_refusal_not_ident
     result = _invoke_role("worker", "--scope", "n-1")
 
     assert result.exit_code == 2
-    assert "fno backlog update n-1 --type epic" in result.output
+    assert "fno backlog update n-1 type=epic" in result.output
     assert [asdict(row) for row in load_registry()] == before
 
 

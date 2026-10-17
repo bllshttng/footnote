@@ -254,7 +254,7 @@ def _epic_or_refuse(raw: str, *, graph_entry=None) -> str:
         raise RoleScopeError(
             f"{raw!r} is a {entry.get('type') or 'node'}, not an epic. "
             "Implementers get no roles - a single node is work, not a territory. "
-            f"If {raw} IS meant to be an epic: fno backlog update {raw} --type epic. "
+            f"If {raw} IS meant to be an epic: fno backlog update {raw} type=epic. "
             "Otherwise role the epic above it, or its project."
         )
     return raw

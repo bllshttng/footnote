@@ -1292,7 +1292,7 @@ fn refuse_dispatch_hold(node: Option<&Value>, entries: Option<&[Value]>) -> Resu
             .detail
             .contains("missing under its existing plan root");
         let remedy = if missing {
-            "Repair the node with: fno backlog update <id> --plan-path <path>, or \
+            "Repair the node with: fno backlog update <id> plan_path=<path>, or \
              restore the plan file."
         } else {
             "fix or remove the declaration, then retry."
@@ -1349,7 +1349,7 @@ fn redirect_if_contained(node: Option<&Value>, entries: Option<&[Value]>) -> Res
                 "fno do target init: {nid} is marked as shipping inside {owner}, but \
                  no node {owner} exists.\nThat containment is stale and nothing will \
                  clear it automatically. Clear it with `fno backlog update {nid} \
-                 --parent null`, then dispatch this node on its own. Nothing was \
+                 parent=null`, then dispatch this node on its own. Nothing was \
                  claimed."
             ),
             2,
@@ -1364,7 +1364,7 @@ fn redirect_if_contained(node: Option<&Value>, entries: Option<&[Value]>) -> Res
             format!(
                 "fno do target init: {nid} is marked as shipping inside {owner}, but \
                  {owner} is {state} and will never ship it.\nThat containment is \
-                 stale. Clear it with `fno backlog update {nid} --parent null`, then \
+                 stale. Clear it with `fno backlog update {nid} parent=null`, then \
                  dispatch this node on its own. Nothing was claimed."
             ),
             2,

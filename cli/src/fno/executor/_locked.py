@@ -224,7 +224,7 @@ def parse_locked_executor(text: str) -> str:
 # Decisions. Capturing only the first token would silently truncate a malformed
 # spaced value like ``opus 4.8`` to ``opus`` and transcribe a wrong-but-valid
 # pin (codex review PR #150); the whole value is validated below so a multi-token
-# value is REJECTED instead, matching ``fno backlog update --model``. The ``\**``
+# value is REJECTED instead, matching ``fno backlog update model=<id>``. The ``\**``
 # around the key tolerate a bold ``**Model**:`` head WITHOUT eating a ``*`` in the
 # value (so a metacharacter value stays intact and is rejected, not sanitized).
 # Anchored to line start (after an optional list marker) with re.MULTILINE so a

@@ -569,8 +569,8 @@ pub fn is_blueprint_doc(entry: &Value) -> bool {
 pub const DEFAULT_BLUEPRINT_FLOOR: &str = "high";
 
 /// The node tag that marks an open premise question blocking dispatch - the
-/// third blueprint clause. Set with `fno backlog update <id> --tag
-/// premise-question` when the node's premise itself is what is in doubt.
+/// third blueprint clause. Set with `fno backlog update <id> tags+=premise-question`
+/// when the node's premise itself is what is in doubt.
 pub const PREMISE_QUESTION_TAG: &str = "premise-question";
 
 /// Whether the row carries the open-premise-question tag.

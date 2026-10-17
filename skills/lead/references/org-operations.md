@@ -77,7 +77,7 @@ Drop `--print` to have spawn run the same line. If you hold the node's claim, do
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
 | End a thread/daemon worker | `fno agents stop <name>` |
 | Halt the fleet, a scope, or one role | `fno agents incident stop --reason "<why>"` arms the fleet breaker: new spawns, dispatch ticks, and `fno doctor test` admissions refuse fleet-wide (a suite started outside that path is not gated) until `fno agents incident clear --reason "<why>"`; a default stop holds live loops at their next turn end, `--hold spawns` keeps them running, and `--session <id>` or `--territory <scope>` applies a bounded halt. Matching watchdog wakes and PR nudges refuse until clear or expiry; mail stays open, `fno agents incident status` reads the generation. Arming is outward and no standing law grants an agent the authority, so escalate with evidence and arm on user order. `fno agents org cancel --scope <scope>` cancels one scope's walk; `fno agents org done` ends one role |
-| Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
+| Encode a ruling | `fno backlog update <id> dispatch_verb=/fno:... 'dispatch_brief=...' blocked_by+=<up>` |
 | Land a green child | `fno do pr merge <n>` (only when config permits) |
 
 **Anointing on the thread substrate.**
@@ -156,8 +156,8 @@ gh pr list --head feature/     # already shipped?
 
 ```bash
 # read the artifact, rule, then:
-fno backlog update --dispatch-verb /fno:target --dispatch-brief "Blueprint approved; ship the org section + short_id fix."
-fno backlog update --add-blocker   # if a merge-order constraint applies
+fno backlog update dispatch_verb=/fno:target 'dispatch_brief=Blueprint approved; ship the org section + short_id fix.'
+fno backlog update blocked_by+=<up>  # if a merge-order constraint applies
 ```
 
 ## Caveats

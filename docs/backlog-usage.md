@@ -69,30 +69,30 @@ Every node-birth path states its difficulty. `add`, `idea`, `new`, `intake`, `de
 recreating via `idea` (which produces duplicates). Editable fields:
 
 ```bash
-fno backlog update <id> --title "..."          # rename
-fno backlog update <id> --details "..."        # rationale ('null' clears)
-fno backlog update <id> --priority p1          # see "Moving cards"
-fno backlog update <id> --domain code          # domain
-fno backlog update <id> --size L               # S | M | L
-fno backlog update <id> --type epic            # feature | epic | bug
-fno backlog update <id> --project fno --cwd /path   # reproject (move swimlane)
-fno backlog update <id> --plan-path path/to/plan.md
-fno backlog update <id> --no-public            # exclude from public projections
-fno backlog update <id> --source-node x-aaaa   # origin edge (see "Node-to-node edges")
-fno backlog update <id> --related x-bbbb       # affinity edge, symmetric
+fno backlog update <id> title="..."            # rename
+fno backlog update <id> details="..."          # rationale ('null' clears)
+fno backlog update <id> priority=p1            # see "Moving cards"
+fno backlog update <id> domain=code            # domain
+fno backlog update <id> size=L                 # S | M | L
+fno backlog update <id> type=epic              # feature | epic | bug
+fno backlog update <id> project=fno cwd=/path  # reproject (move swimlane)
+fno backlog update <id> plan_path=path/to/plan.md
+fno backlog update <id> public=false           # exclude from public projections
+fno backlog update <id> source_node_id=x-aaaa  # origin edge (see "Node-to-node edges")
+fno backlog update <id> related=x-bbbb         # affinity edge, symmetric
 fno backlog update <id> 'details+=<paragraph>' # append without re-reading the node
 fno backlog update <id> blocked_by+=<id>       # add one blocker
 fno backlog update <id> blocked_by-=<id>       # remove one blocker
 fno backlog update <id> tags+=<tag>            # add one tag (lowercase-kebab)
 ```
 
-The operator form (`field=value`, `field+=value`, `field-=value`) covers five fields: `details` and `dispatch_brief` (text), `tags`, `blocked_by`, `related` (lists). It is the new spelling. The flags stay until every field has one.
+The operator form (`field=value`, `field+=value`, `field-=value`) covers every field. `fno backlog update --help` lists them by kind.
 
 
 `<id>` resolves by canonical id (`ab-1a2b3c4d`), title-derived slug
 (`dashless-spawn`), or bare hex (`1a2b3c4d`).
 
-When a PR opens outside the Footnote PR path, acquire the owner claim with `fno agents claim acquire node:<id> --holder <worker>`, then record the primary PR with `fno backlog update <id> --pr-number <n>`. The claim lockfile is the owner source, and the update receipt reports its owner, PR, and status. `--add-pr` records only an additional PR and can leave a ready node offered for dispatch. Without a claim lockfile, the owner reads as `unknown`.
+When a PR opens outside the Footnote PR path, acquire the owner claim with `fno agents claim acquire node:<id> --holder <worker>`, then record the primary PR with `fno backlog update <id> pr_number=<n>`. The claim lockfile is the owner source, and the update receipt reports its owner, PR, and status. `--add-pr` records only an additional PR and can leave a ready node offered for dispatch. Without a claim lockfile, the owner reads as `unknown`.
 
 ## Demand signal: what the agents keep hitting
 
@@ -145,9 +145,9 @@ Columns are derived, so change the driving field:
 
 | Target column | How |
 |---------------|-----|
-| **Now** | `fno backlog update <id> --priority p1` (p0/p1 -> Now), or it auto-moves when a live session claims it |
-| **Next** | `fno backlog update <id> --priority p2` |
-| **Later** | `fno backlog update <id> --priority p3` |
+| **Now** | `fno backlog update <id> priority=p1` (p0/p1 -> Now), or it auto-moves when a live session claims it |
+| **Next** | `fno backlog update <id> priority=p2` |
+| **Later** | `fno backlog update <id> priority=p3` |
 | **Triage** | the queued / pick flow (queued = awaiting human ack); not a priority |
 | **Done** | `fno backlog done <id>` |
 | **Off-board** | `fno backlog defer <id> --reason "..."` (deferred and superseded leave the board) |
@@ -157,7 +157,7 @@ Columns are derived, so change the driving field:
 The swimlane is the project cluster, so reproject the node:
 
 ```bash
-fno backlog update <id> --project <name> --cwd <path>
+fno backlog update <id> project=<name> cwd=<path>
 ```
 
 ### Reorder within a lane (operator only)
@@ -179,7 +179,7 @@ An agent session is refused. `--top` writes `min(rank) - 1`. With several caller
 
 ```bash
 fno backlog encounter <id> --evidence "what this cost me"   # the vote
-fno backlog update <id> --priority p1                        # the proposal
+fno backlog update <id> priority=p1                        # the proposal
 ```
 
 Priority is bounded to four values, so two agents disagreeing about a node produce a visible split on `fno backlog demand` instead of a silent stack. The pin stays with the operator, and it outranks every vote.
@@ -307,15 +307,15 @@ The two paths fail in opposite directions on purpose. Ambient capture that resol
 
 ```bash
 fno backlog idea "follow-up" --source-node x-aaaa    # or a slug, or bare hex
-fno backlog update <id> --source-node null           # clear it
+fno backlog update <id> source_node_id=null           # clear it
 ```
 
 **`related` is symmetric and stored on both endpoints.** Declaring it on one node writes the inverse on each peer, in the same locked write, so the two sides cannot disagree. It replaces the list rather than appending, and a dropped peer loses its inverse edge too.
 
 ```bash
-fno backlog update x-aaaa --related x-bbbb,x-cccc   # sets both directions
+fno backlog update x-aaaa related=x-bbbb,x-cccc   # sets both directions
 fno backlog idea "co-delivered work" --related x-bbbb
-fno backlog update x-aaaa --related null            # clears both sides
+fno backlog update x-aaaa related=null            # clears both sides
 ```
 
 Not to be confused with `fno backlog relatedness`, which builds a *computed* similarity sidecar from token overlap and shared domain/epic. That sidecar is regenerable and rebuilt from scratch on every `relatedness build`; `related` is an assertion and lives on the node so it survives.
@@ -498,7 +498,7 @@ fno agents workspace worktree policy --repo <path> [--harness claude]
 A curated view for advertising an OSS project's roadmap. Qualifying nodes are public by default. Use `--no-public` for an explicit exclusion. One fail-closed title gate protects both public projections.
 
 ```bash
-fno backlog update <id> --no-public
+fno backlog update <id> public=false
 fno backlog roadmap --project fno --out ROADMAP.md
 ```
 

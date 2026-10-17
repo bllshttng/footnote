@@ -162,7 +162,7 @@ done
 # the operator's own tool, writing a graph that dies with the shot.
 mkdir -p "$ROOT/code/checkout/plans"
 printf -- '---\nstatus: ready\n---\n# Rate limit the checkout api per key\n' >"$ROOT/code/checkout/plans/rate-limit.md"
-"$FNO" backlog update "${IDS[0]}" --plan-path '~/code/checkout/plans/rate-limit.md' >/dev/null
+"$FNO" backlog update "${IDS[0]}" 'plan_path=~/code/checkout/plans/rate-limit.md' >/dev/null
 "$FNO" backlog rank "${IDS[0]}" --top --operator >/dev/null
 
 # Pane text: an invented transcript per harness, shown by a process that

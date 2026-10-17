@@ -1032,7 +1032,12 @@ fn bind_node_plan_path(node: &serde_json::Value, plan_path: &str) {
         return;
     };
     let result = Command::new(self_exe)
-        .args(["backlog", "update", &node_id, "--plan-path", plan_path])
+        .args([
+            "backlog",
+            "update",
+            &node_id,
+            &format!("plan_path={plan_path}"),
+        ])
         .stdin(Stdio::null())
         .output();
     match result {

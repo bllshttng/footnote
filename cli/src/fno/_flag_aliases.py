@@ -107,14 +107,14 @@ def refuse_retired_provider(value: object) -> None:
 
 #: The difficulty-axis tombstone. ``model_tier`` was the retired
 #: spelling of the work-difficulty axis; ``difficulty`` is the one spelling
-#: (``fno backlog update <id> --difficulty low|medium|high``). A refusing
+#: (``fno backlog update <id> difficulty=<band>``). A refusing
 #: tombstone, not an alias: a silent alias is how a retired spelling survives
 #: another release, and the old handler wrote BOTH keys while skipping
 #: ``difficulty_history`` - an untracked band.
 MODEL_TIER_TOMBSTONE = (
-    "--model-tier was retired: the work-difficulty axis is --difficulty "
-    "low|medium|high, an intrinsic property of the work "
-    "(`fno backlog update <id> --difficulty <band>`)."
+    "--model-tier was retired: the work-difficulty axis is difficulty=<band> "
+    "(low|medium|high), an intrinsic property of the work "
+    "(`fno backlog update <id> difficulty=<band>`)."
 )
 
 

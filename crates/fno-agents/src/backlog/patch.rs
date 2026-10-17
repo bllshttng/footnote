@@ -436,7 +436,7 @@ fn target_owner(word: &str, id: &str) -> Option<String> {
     let owned = match word {
         "superseded" => format!("fno backlog supersede <new-id> --replaces {id} --cause --surface"),
         "done" => format!("fno backlog done {id}"),
-        "in_review" => format!("fno backlog update {id} --pr-number <n>"),
+        "in_review" => format!("fno backlog update {id} pr_number=<n>"),
         "in_progress" => format!("fno do target start {id}"),
         "blocked" => {
             "derived on read from blocked_by; supply it with --add-blocker <id>".to_string()
@@ -467,7 +467,7 @@ fn holding_fact(entry: &Value, id: &str) -> Option<String> {
     }
     if truthy("pr_number") {
         return Some(format!(
-            "pr_number holds. Supply it with: fno backlog update {id} --pr-number null"
+            "pr_number holds. Supply it with: fno backlog update {id} pr_number=null"
         ));
     }
     if truthy("locked_by") {
@@ -1656,7 +1656,7 @@ mod tests {
         for (word, owner) in [
             ("superseded", "fno backlog supersede"),
             ("done", "fno backlog done"),
-            ("in_review", "--pr-number"),
+            ("in_review", "pr_number=<n>"),
             ("in_progress", "fno do target start"),
             ("blocked", "--add-blocker"),
         ] {

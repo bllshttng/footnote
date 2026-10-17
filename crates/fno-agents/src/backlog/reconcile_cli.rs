@@ -1789,7 +1789,7 @@ struct LegOutcomes {
 /// W4 causal links: a merged "Revert ..." PR referencing a PR carried by a
 /// graph node flips that node's `reverted` flag so survival math stops
 /// counting it. Full sweep only; strictly non-fatal; misses fall back to
-/// `fno backlog update --reverted`.
+/// `fno backlog update reverted=true`.
 fn revert_leg(
     entries: &[Value],
     graph_path: &Path,

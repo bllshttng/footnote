@@ -60,7 +60,7 @@ run_case() {
         return
     fi
     pass "$name: validator passes"
-    if grep -q "fno backlog update $expect_id --plan-path $file" "$err"; then
+    if grep -q "fno backlog update $expect_id plan_path=$file" "$err"; then
         pass "$name: stderr names the bind command for $expect_id"
     else
         fail "$name: no bind command for $expect_id on stderr"

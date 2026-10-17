@@ -134,7 +134,7 @@ def _bind_plan_path(node: str, brief_path: Path) -> Optional[str]:
 
     : an advisory brief with no bound node is unreachable from the work
     it answers - the exact hole a second, worse spike walked into. One
-    `fno backlog update <id> --plan-path <doc>` call closes it, the same way
+    `fno backlog update <id> plan_path=<doc>` call closes it, the same way
     it was closed by hand after the fact. Shells out to the CLI rather than a
     graph-internal call: `backlog update` is the one choke point every write
     to plan_path already goes through (graph/cli.py:713), and duplicating its
@@ -142,7 +142,7 @@ def _bind_plan_path(node: str, brief_path: Path) -> Optional[str]:
     """
     try:
         result = subprocess.run(
-            ["fno", "backlog", "update", node, "--plan-path", str(brief_path)],
+            ["fno", "backlog", "update", node, f"plan_path={brief_path}"],
             capture_output=True,
             text=True,
             timeout=30,

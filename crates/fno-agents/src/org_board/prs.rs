@@ -396,8 +396,8 @@ pub(crate) fn retarget_binding_refusal(
         Some(format!(
             "the Retarget line hands {from} to {to} (approval {approval}), but the graph \
              binding has not moved: {from} still carries this PR, or {to} does not yet. \
-             Move it first: fno backlog update {from} --pr-number null --pr-url null, \
-             then fno backlog update {to} --pr-number {number} --pr-url {url}. Stop and \
+             Move it first: fno backlog update {from} pr_number=null pr_url=null, \
+             then fno backlog update {to} pr_number={number} pr_url={url}. Stop and \
              ask instead if {to} already carries another PR.",
             from = r.from,
             to = r.to,

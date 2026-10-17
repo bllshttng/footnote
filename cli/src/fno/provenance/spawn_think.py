@@ -574,7 +574,7 @@ def assemble_seed(
             f"{node_id} (that link is what flips this child `ready` for dispatch). "
             f"A design pass that ends without a linked plan_path is a FAILED pass; "
             f"if /blueprint did not link it, run "
-            f"`fno backlog update {node_id} --plan-path <doc>` yourself.\n"
+            f"`fno backlog update {node_id} plan_path=<doc>` yourself.\n"
             if chain_blueprint
             else ""
         )

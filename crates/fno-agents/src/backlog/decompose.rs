@@ -2636,7 +2636,7 @@ fn fanout_spawn_think(child: &Value, why_digest: &str, lane: &'static str) -> Fa
          links it to node {node_id} (that link is what flips this child ready \
          for dispatch). A design pass that ends without a linked plan_path is a \
          FAILED pass; if /blueprint did not link it, run `fno backlog update \
-         {node_id} --plan-path <doc>` yourself.\n",
+         {node_id} plan_path=<doc>` yourself.\n",
         if slug.is_empty() {
             String::new()
         } else {

@@ -2135,7 +2135,7 @@ fn main_repair_hold_probe(cwd: &Path, facts: &PrFacts) -> Option<String> {
     match backlog_api::rows(&store) {
         Err(e) => Some(format!(
             "the graph is unreadable ({}) so no repair lane can be named; tag \
-             the repair node: fno backlog update <node> --tag {MAIN_REPAIR_TAG}",
+             the repair node: fno backlog update <node> tags+={MAIN_REPAIR_TAG}",
             e.0
         )),
         Ok(entries) => main_repair_hold_from_entries(&entries, facts),
@@ -2189,7 +2189,7 @@ fn main_repair_hold_from_entries(entries: &[Value], facts: &PrFacts) -> Option<S
     Some(if lanes.is_empty() {
         format!(
             "no node is declared the repair lane; tag the repair node: \
-             fno backlog update <node> --tag {MAIN_REPAIR_TAG}"
+             fno backlog update <node> tags+={MAIN_REPAIR_TAG}"
         )
     } else {
         format!("the declared repair lane is {}", lanes.join(", "))

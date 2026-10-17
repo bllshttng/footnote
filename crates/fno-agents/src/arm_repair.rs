@@ -399,7 +399,7 @@ fn node_from_detail(detail: &str) -> Option<&str> {
 /// literal: the right checkout is a human judgment, not a resolver guess.
 fn cwd_not_checkout_repair(detail: &str) -> String {
     let id = node_from_detail(detail).unwrap_or("<id>");
-    format!("fno backlog update {id} --project <p> --cwd <checkout>")
+    format!("fno backlog update {id} project=<p> cwd=<checkout>")
 }
 
 fn suffix(row: &ArmStatus) -> String {
@@ -934,7 +934,7 @@ mod tests {
         assert!(mc.line.contains("cause=cwd_not_checkout"), "{}", mc.line);
         assert!(
             mc.line
-                .contains("repair: fno backlog update x-cccc --project <p> --cwd <checkout>"),
+                .contains("repair: fno backlog update x-cccc project=<p> cwd=<checkout>"),
             "{}",
             mc.line
         );

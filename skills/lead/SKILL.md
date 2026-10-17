@@ -132,7 +132,7 @@ Spawn records a machine first-check deadline, default 10 minutes (`agents.first_
 Apply the first matching lever to each row, in this order:
 
 1. Mail the stalled worker.
-2. Run `fno backlog encounter <node> --evidence "what it cost"` to vote the node up. When evidence contradicts the filed priority, use `fno backlog update <node> --priority p1`. `p0` needs `--blocks-everything` and means the fleet is down.
+2. Run `fno backlog encounter <node> --evidence "what it cost"` to vote the node up. When evidence contradicts the filed priority, use `fno backlog update <node> priority=p1`. `p0` needs `--blocks-everything` and means the fleet is down.
 3. If no role covers a row, start a new small epic. Do not grow a running epic. A vote or priority does not dispatch. See [A finding starts a new epic](#a-finding-starts-a-new-epic).
 4. If the row is the problem, run `fno backlog undefer` or `supersede`.
 5. Keep a worker on the territory's top unplanned node. Run the verb the line names: `start /fno:blueprint subagent <id>` or `target-ready: /fno:target <id>`. This designs or builds work without a user request. The floor is `dispatch.blueprint_floor`. A lead can still blueprint one medium node by hand.
@@ -154,9 +154,9 @@ To pause or redirect a running worker, use `fno agents ask <name> "<instruction>
 
 ### A finding starts a new epic
 
-An epic stays small enough to finish. Its finish line is set at the start. So never parent new work into a running epic. A finding goes one of two ways. It starts a new small epic: `fno backlog idea "EPIC: <theme>" --type epic --difficulty <low|medium|high>`, then `fno backlog update <node> --parent <new-epic-id>`. The lead that leads the old epic takes the new one with `fno agents org promote <handle> --scope <old-epic-id> --scope <new-epic-id>`. A lead runs that for an epic its own session created, naming every epic it holds. Any other epic needs an attended shell or a role that contains both. Or the finding waits unparented for the lead's next epic. A titled `fno backlog idea` with no `--parent` is linked into your epic, and its `rollup: role-linked` receipt prints the undo. When the finding is new work, run it: `fno backlog update <node> --parent null`.
+An epic stays small enough to finish. Its finish line is set at the start. So never parent new work into a running epic. A finding goes one of two ways. It starts a new small epic: `fno backlog idea "EPIC: <theme>" --type epic --difficulty <low|medium|high>`, then `fno backlog update <node> parent=<new-epic-id>`. The lead that leads the old epic takes the new one with `fno agents org promote <handle> --scope <old-epic-id> --scope <new-epic-id>`. A lead runs that for an epic its own session created, naming every epic it holds. Any other epic needs an attended shell or a role that contains both. Or the finding waits unparented for the lead's next epic. A titled `fno backlog idea` with no `--parent` is linked into your epic, and its `rollup: role-linked` receipt prints the undo. When the finding is new work, run it: `fno backlog update <node> parent=null`.
 
-Rank is not yours. It is the user's pin. `fno backlog rank` refuses agent sessions. To put a row next, set `--priority p0`. This is bounded and receipted. It appears as a split vote in `fno backlog demand`.
+Rank is not yours. It is the user's pin. `fno backlog rank` refuses agent sessions. To put a row next, set `priority=p0`. This is bounded and receipted. It appears as a split vote in `fno backlog demand`.
 
 Then read [the fleet FAQ](../../docs/fleet-faq.md) for one thing only: an entry whose `Graduates to:` line landed since your last check-in. Move it to Retired in a PR, naming the PR that closed it. Retirement normally rides the PR that closes the gap, so it needs no beat. This check is the backstop, for a gap somebody closed without reading that file.
 
@@ -187,7 +187,7 @@ Read a ruling back with `fno backlog decisions <subject>` or `fno inbox decision
 
 The tenured lead does not dispatch. A `--once` pass dispatches only through its kickoff and its org, as [the one-wave pass](references/once.md) says. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `lead_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
 
-Before a titled lead launches a blueprint on a node, write its confirmed scope and known files or verbs into the node: `fno backlog update <node> --dispatch-brief "<scope; known files and verbs>"`. The brief is a starting point, not a fence, and never lists what to ignore. The blueprint prompt remains `$fno:blueprint <node>`; the brief travels on the node so every launcher gets the same scope.
+Before a titled lead launches a blueprint on a node, write its confirmed scope and known files or verbs into the node: `fno backlog update <node> 'dispatch_brief=<scope; known files and verbs>'`. The brief is a starting point, not a fence, and never lists what to ignore. The blueprint prompt remains `$fno:blueprint <node>`. The brief travels on the node so every launcher gets the same scope.
 
 `fno doctor event emit -t lead_dispatch_exception -s loop -d '{"scope":"<scope>","arm":"<arm>","node":"<id>"}'`
 

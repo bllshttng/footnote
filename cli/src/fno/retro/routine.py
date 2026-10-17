@@ -189,7 +189,7 @@ def triage_pr(
     # trigger sentinel's node_id; fall back to the graph node carrying this
     # pr_number - repo-scoped when ``repo`` is known, because the graph is
     # global and bare PR numbers collide across projects. Unresolvable ->
-    # nodes land without the link (manual `backlog update --caused-by`
+    # nodes land without the link (manual `backlog update caused_by=<id>`
     # remains).
     caused_by = origin_node_id
     # pr_number 0 is the synthetic-path placeholder (`int(... or 0)` upstream);

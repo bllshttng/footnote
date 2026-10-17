@@ -102,7 +102,7 @@ def test_a_non_epic_node_is_refused_not_stamped_at_a_bottom_rung(territory) -> N
     assert "Implementers get no roles" in msg
     # AC2-HP: the refusal names the exact fix when the node IS meant to be an
     # epic - one command away, not a dead end.
-    assert "fno backlog update n-1 --type epic" in msg
+    assert "fno backlog update n-1 type=epic" in msg
 
 
 def test_an_unresolvable_scope_is_refused(territory) -> None:

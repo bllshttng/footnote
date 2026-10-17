@@ -314,10 +314,10 @@ Then, only when non-empty, transcribe onto the node (idempotent; last writer
 wins, so a re-run with a changed pin overwrites cleanly):
 
 ```bash
-[[ -n "$MODEL_PIN" ]] && fno backlog update "$NODE_ID" --model "$MODEL_PIN"
+[[ -n "$MODEL_PIN" ]] && fno backlog update "$NODE_ID" "model=$MODEL_PIN"
 ```
 
-The `fno backlog update --model` verb validates the value as a single
+The `fno backlog update model=<id>` form validates the value as a single
 non-whitespace token; a malformed pin exits non-zero and leaves the node
 unchanged (surface the error, do not fabricate a pin). When `/blueprint`
 decomposes a scope:epic into child nodes, apply the same transcription to each
@@ -340,10 +340,10 @@ Precedence is `model:` (exact) over the provider default. An exact pin on the sa
 ```bash
 # Plan frontmatter `difficulty:` (scope to the frontmatter block).
 DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^difficulty:[[:space:]]*/,""); sub(/[[:space:]]*#.*$/,""); print; exit}' "$PLAN_INDEX")"
-[[ -n "$DIFFICULTY" ]] && fno backlog update "$NODE_ID" --difficulty "$DIFFICULTY"
+[[ -n "$DIFFICULTY" ]] && fno backlog update "$NODE_ID" "difficulty=$DIFFICULTY"
 ```
 
-`fno backlog update --difficulty` validates the band (`high|medium|low`). An invalid value exits non-zero and leaves the node unchanged (surface it, do not fabricate a band). The retired `--model-tier` spelling exits 2 with a message naming `--difficulty`.
+`fno backlog update difficulty=<band>` validates the band (`high|medium|low`). An invalid value exits non-zero and leaves the node unchanged (surface it, do not fabricate a band). The retired model-tier spelling exits 2 with a message naming `difficulty=<band>`.
 
 ## Blueprint Provenance Stamp
 
@@ -626,7 +626,7 @@ adopting.
 If any entry in `collisions` has `severity: "high"`, take the first branch that fits and adopt or stop by it:
 
 - **Beastmode.** `fno do target status` shows `authority: full` on the `attended` line (a live `/target beastmode` session). Take the `recommended_action` for each entry, append one `## Autonomous Decisions` entry naming the collision and the action, and continue without prompting.
-- **Nobody can answer.** This session has no AskUserQuestion tool: a codex thread, a subagent, a headless or spawned run. Never ask in chat and wait, because nobody reads that chat and the plan never adopts. Take option 1. After intake, run `fno backlog update <new-id> --acknowledge-collisions <ids>` with every high entry's `with_node_id`. Then run one `fno backlog note <new-id> "collision disposition: proceeded unattended; <id>: <n> shared files, recommended <action>; ..."`, so whoever reads the node can still absorb or supersede.
+- **Nobody can answer.** This session has no AskUserQuestion tool: a codex thread, a subagent, a headless or spawned run. Never ask in chat and wait, because nobody reads that chat and the plan never adopts. Take option 1. After intake, run `fno backlog update <new-id> collisions_acknowledged=<ids>` with every high entry's `with_node_id`. Then run one `fno backlog note <new-id> "collision disposition: proceeded unattended, <action>"` per high entry. Whoever reads the node can still absorb or supersede it.
 - **A person can answer.** Present the entries via AskUserQuestion before adopting, as the block below shows, and apply the choice:
 
 > Your plan touches files also touched by these in-flight plans:
@@ -642,32 +642,19 @@ If any entry in `collisions` has `severity: "high"`, take the first branch that 
 
 Apply the user's choice:
 
-- **Option 1 (proceed):** continue to step 3b. Once the new node ID is
-  known, run `fno backlog update <new-id> --acknowledge-collisions
-  ab-XYZ,ab-ABC,...` so the new node carries an audit trail of the
-  collisions deliberately ignored.
-- **Option 2 (modify):** print the existing plan path and exit cleanly.
-  The user edits the older plan; the new file is left on disk for
-  reference but not adopted.
+- **Option 1 (proceed):** continue to step 3b. Once the new node ID is known, run `fno backlog update <new-id> 'collisions_acknowledged=ab-XYZ,ab-ABC,...'` so the new node carries an audit trail of the collisions deliberately ignored.
+- **Option 2 (modify):** print the existing plan path and exit cleanly. The user edits the older plan. The new file is left on disk for reference but not adopted.
 - **Option 3 (supersede):** continue to step 3b. After adoption, run `fno backlog supersede <new-id> --replaces ab-XYZ --cause "..." --surface <path>`. Use the colliding plan's rationale or ask the user for a reason.
 - **Option 4 (cancel):** delete the plan file and exit cleanly.
 
 Medium and low-severity collisions are reported as single-line warnings on
 stderr (`Warning: M shared files with ab-XYZ`) and never block auto-intake.
 
-The `no-collision-check` positional modifier (and `--no-collision-check`
-flag) skip this step entirely. Use case: "I know this collides; I'm doing
-it on purpose." When this modifier is used, after auto-intake run
-`fno backlog update <new-id> --acknowledge-collisions __skipped_check__`
-so the audit trail distinguishes "I checked and accepted" from "I never
-checked at all."
+The `no-collision-check` positional modifier (and `--no-collision-check` flag) skips this step entirely. Use case: "I know this collides; I'm doing it on purpose." When this modifier is used, run `fno backlog update <new-id> collisions_acknowledged=__skipped_check__` after auto-intake. The audit trail then distinguishes "I checked and accepted" from "I never checked at all."
 
 ## Cross-project peer heads-up (step 3a-bis; Files-to-Modify intersection)
 
-After the plan file is written and any collision check has resolved, but
-BEFORE auto-intake, scan the plan's Files-to-Modify table for paths that
-match a peer-owned surface. Mechanical resolution, not LLM judgment. Skip the
-whole step silently when no `peers` block exists (opt-in by design).
+After the plan file is written and any collision check has resolved, but BEFORE auto-intake, scan the plan's Files-to-Modify table for paths that match a peer-owned surface. Mechanical resolution, not LLM judgment. Skip the whole step silently when no `peers` block exists (opt-in by design).
 
 ```python
 from fno.inbox.settings import read_peer_surfaces, read_surface_patterns

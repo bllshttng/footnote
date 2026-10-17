@@ -105,7 +105,7 @@ Heal skips every outside PR with a `skip_outside` receipt, fail closed on an unr
 
 Both open-PR binding legs and the board's mergeable queue skip a row whose `isCrossRepository` reads true. Reconcile never binds a fork PR. Pr-watch, the grant queue, the review lanes and the board never see one. Only a positive true skips. A row without the field classifies as before.
 
-Uncovered cases, kept on purpose: a hand bind of a fork PR with `fno backlog update <id> --pr-number` still cannot merge, but nothing gates a review-fix dispatch onto it. The owner's raw `gh pr merge` is the owner's call. A same-repo branch from a non-member bot is caught by the merge and heal predicate but not by the binding legs, which read cross-repo only. A member who lost access keeps reading inside until the cache file is removed. A useful bot PR can never merge through fno. The owner merges it by hand.
+Uncovered cases, kept on purpose: a hand bind of a fork PR with `fno backlog update <id> pr_number=<n>` still cannot merge, but nothing gates a review-fix dispatch onto it. The owner's raw `gh pr merge` is the owner's call. A same-repo branch from a non-member bot is caught by the merge and heal predicate but not by the binding legs, which read cross-repo only. A member who lost access keeps reading inside until the cache file is removed. A useful bot PR can never merge through fno. The owner merges it by hand.
 
 ### The PR steward
 

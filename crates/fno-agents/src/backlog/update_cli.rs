@@ -49,6 +49,9 @@ struct UpdateArgs {
     project: Option<String>,
     cwd: Option<String>,
     completion_note: Option<String>,
+    /// `completion_note=text` (a replace, not an append); written before the
+    /// append slot so a same-call `+=` joins the replaced text.
+    completion_note_replace: Option<String>,
     acknowledge_collisions: Option<String>,
     /// Raw token; parse validates the int shape with typer's message.
     fixes_pr: Option<String>,
@@ -125,6 +128,7 @@ impl UpdateArgs {
             project: None,
             cwd: None,
             completion_note: None,
+            completion_note_replace: None,
             acknowledge_collisions: None,
             fixes_pr: None,
             reverted: None,
@@ -263,14 +267,8 @@ impl UpdateArgs {
                 "--fixes-pr" => {
                     take_value!(a.fixes_pr);
                     if let Some(v) = &a.fixes_pr {
-                        if v.parse::<i64>().is_err() {
-                            return ParsedUpdate::Refusal {
-                                message: format!(
-                                    "Error: Invalid value for '--fixes-pr': \
-                                     '{v}' is not a valid integer."
-                                ),
-                                exit: 2,
-                            };
+                        if let Some(message) = check_fixes_pr_int("--fixes-pr", v) {
+                            return ParsedUpdate::Refusal { message, exit: 2 };
                         }
                     }
                 }
@@ -354,10 +352,12 @@ impl UpdateArgs {
                 other => {
                     if let Some(op) = update_ops::parse_op_token(raw) {
                         match update_ops::check(&op) {
-                            Ok(kind) => {
-                                lower_op(&mut a, op, kind);
-                                i += 1;
-                            }
+                            Ok(kind) => match lower_op(&mut a, op, kind) {
+                                Ok(()) => i += 1,
+                                Err(message) => {
+                                    return ParsedUpdate::Refusal { message, exit: 2 };
+                                }
+                            },
                             Err(message) => {
                                 return ParsedUpdate::Refusal { message, exit: 2 };
                             }
@@ -425,8 +425,13 @@ fn parse_click_bool(v: &str) -> Option<bool> {
 /// the writers and validators behind the legacy flags run unchanged:
 /// `blocked_by+=x` lands in the same vec `--add-blocker` fills, `tags+=x`
 /// in the same vec `--tag` fills. List replace tokens keep their commas; the
-/// writer splits them with `parse_list`.
-fn lower_op(a: &mut UpdateArgs, op: update_ops::FieldOp, _kind: update_ops::FieldKind) {
+/// writer splits them with `parse_list`. A slot conflict (a second
+/// `additional_prs` token, a bad boolean) refuses naming the token shape.
+fn lower_op(
+    a: &mut UpdateArgs,
+    op: update_ops::FieldOp,
+    _kind: update_ops::FieldKind,
+) -> Result<(), String> {
     a.ops.push(op.clone());
     let value = op.value;
     match (op.field.as_str(), op.op) {
@@ -434,6 +439,14 @@ fn lower_op(a: &mut UpdateArgs, op: update_ops::FieldOp, _kind: update_ops::Fiel
         ("details", update_ops::Op::Add) => a.details_append.push(value),
         ("dispatch_brief", update_ops::Op::Set) => a.dispatch_brief = Some(value),
         ("dispatch_brief", update_ops::Op::Add) => a.brief_append.push(value),
+        ("completion_note", update_ops::Op::Add) => a.completion_note = Some(value),
+        ("completion_note", update_ops::Op::Set) => {
+            if value.to_lowercase() == "null" {
+                a.completion_note = Some(value);
+            } else {
+                a.completion_note_replace = Some(value);
+            }
+        }
         ("tags", update_ops::Op::Set) => {
             a.tags_replace = Some(parse_list(std::slice::from_ref(&value)))
         }
@@ -448,7 +461,87 @@ fn lower_op(a: &mut UpdateArgs, op: update_ops::FieldOp, _kind: update_ops::Fiel
         ("related", update_ops::Op::Set) => a.related.push(value),
         ("related", update_ops::Op::Add) => a.related_add.push(value),
         ("related", update_ops::Op::Remove) => a.related_remove.push(value),
+        ("additional_prs", update_ops::Op::Add) => {
+            if a.add_pr.is_some() {
+                return Err("Error: additional_prs takes one += per call.".to_string());
+            }
+            if let Some(message) = check_pr_int("additional_prs+=", &value) {
+                return Err(message);
+            }
+            a.add_pr = Some(value);
+        }
+        ("additional_prs", update_ops::Op::Remove) => {
+            if a.remove_pr.is_some() {
+                return Err("Error: additional_prs takes one -= per call.".to_string());
+            }
+            if let Some(message) = check_pr_int("additional_prs-=", &value) {
+                return Err(message);
+            }
+            a.remove_pr = Some(value);
+        }
+        ("title", update_ops::Op::Set) => a.title = Some(value),
+        ("domain", update_ops::Op::Set) => a.domain = Some(value),
+        ("size", update_ops::Op::Set) => a.size = Some(value),
+        ("model", update_ops::Op::Set) => a.model = Some(value),
+        ("type", update_ops::Op::Set) => a.type_ = Some(value),
+        ("batch", update_ops::Op::Set) => a.batch = Some(value),
+        ("orphan_ok", update_ops::Op::Set) => a.orphan_ok = Some(value),
+        ("priority", update_ops::Op::Set) => a.priority = Some(value),
+        ("project", update_ops::Op::Set) => a.project = Some(value),
+        ("cwd", update_ops::Op::Set) => a.cwd = Some(value),
+        ("difficulty", update_ops::Op::Set) => a.difficulty = Some(value),
+        ("dispatch_verb", update_ops::Op::Set) => a.dispatch_verb = Some(value),
+        ("locked_by", update_ops::Op::Set) => a.locked_by = Some(value),
+        ("plan_path", update_ops::Op::Set) => a.plan_path = Some(value),
+        ("parent", update_ops::Op::Set) => a.parent = Some(value),
+        ("caused_by", update_ops::Op::Set) => a.caused_by = Some(value),
+        ("pr_number", update_ops::Op::Set) => a.pr_number = Some(value),
+        ("pr_url", update_ops::Op::Set) => a.pr_url = Some(value),
+        ("collisions_acknowledged", update_ops::Op::Set) => a.acknowledge_collisions = Some(value),
+        ("source_node_id", update_ops::Op::Set) => a.source_node = Some(value),
+        ("fixes_pr", update_ops::Op::Set) => {
+            if let Some(message) = check_fixes_pr_int("fixes_pr=", &value) {
+                return Err(message);
+            }
+            a.fixes_pr = Some(value);
+        }
+        ("public", update_ops::Op::Set) => match parse_click_bool(&value) {
+            Some(b) => a.public = Some(b),
+            None => {
+                return Err(format!(
+                    "Error: Invalid value for 'public=': '{value}' is not a valid boolean."
+                ))
+            }
+        },
+        ("reverted", update_ops::Op::Set) => match parse_click_bool(&value) {
+            Some(b) => a.reverted = Some(b),
+            None => {
+                return Err(format!(
+                    "Error: Invalid value for 'reverted=': '{value}' is not a valid boolean."
+                ))
+            }
+        },
+        ("has_brief", update_ops::Op::Set) => a.has_brief = Some(value),
         _ => {} // check() refused every field outside OP_FIELDS at parse
+    }
+    Ok(())
+}
+
+/// The integer gate `--fixes-pr` and `fixes_pr=` share; the label is the
+/// spelling the refusal quotes.
+fn check_fixes_pr_int(label: &str, v: &str) -> Option<String> {
+    check_pr_int(label, v)
+}
+
+/// The integer gate the PR-number tokens share: the legacy flags carried
+/// typer's INTEGER type, so an operator token refuses the same shape.
+fn check_pr_int(label: &str, v: &str) -> Option<String> {
+    if v.parse::<i64>().is_err() {
+        Some(format!(
+            "Error: Invalid value for '{label}': '{v}' is not a valid integer."
+        ))
+    } else {
+        None
     }
 }
 
@@ -620,9 +713,9 @@ fn run_native(args: &UpdateArgs) -> Result<(), Refusal> {
     if let Some(v) = &args.model_tier {
         let _ = v;
         return Err(refused(
-            "--model-tier was retired: the work-difficulty axis is --difficulty \
-             low|medium|high, an intrinsic property of the work \
-             (`fno backlog update <id> --difficulty <band>`).",
+            "--model-tier was retired: the work-difficulty axis is difficulty=<band>, \
+             an intrinsic property of the work \
+             (`fno backlog update <id> difficulty=<band>`).",
             2,
         ));
     }
@@ -1806,13 +1899,24 @@ fn apply_mutators(
                 .collect();
             obj.insert("collisions_acknowledged".into(), json!(ids));
         }
+        if let Some(text) = &args.completion_note_replace {
+            // Whitespace-only replace is a no-op, the same no-op the append
+            // spelling keeps (help: "Whitespace-only is a no-op").
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                obj.insert("completion_note".into(), json!(trimmed));
+            }
+        }
         if let Some(note) = &args.completion_note {
             if note.to_lowercase() == "null" {
                 obj.insert("completion_note".into(), Value::Null);
             } else {
                 let trimmed = note.trim();
                 if !trimmed.is_empty() {
-                    let existing = node
+                    // Reads the CURRENT row, so a same-call replace joins the
+                    // replaced text (the details append reads obj for the
+                    // same reason).
+                    let existing = obj
                         .get("completion_note")
                         .and_then(Value::as_str)
                         .map(str::trim)
