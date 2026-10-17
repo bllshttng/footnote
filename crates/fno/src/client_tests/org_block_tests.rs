@@ -33,7 +33,7 @@ fn the_org_block_shrinks_the_sideline_and_yields_when_too_short() {
     view.org.toggle();
     let expanded = view
         .org
-        .expanded_lines(&view.layout.agents, view.sideline_paint_w(), 40)
+        .expanded_lines(&view.layout.agents, view.sideline_paint_w() - 1, 40)
         .len();
     assert_eq!(view.org_block_rows(), expanded);
     assert_eq!(view.sideline_visible_rows(), full - expanded);
@@ -112,5 +112,56 @@ impl View {
     pub(crate) fn expand_pull_sections(&mut self) {
         self.section_view
             .insert(SectionKey::Elsewhere, SectionView::Expanded);
+    }
+}
+
+// `draw_sideline` paints at `panel_w - 1` (the divider column is not text). An
+// org line fitted to the full panel width lost its last character to that
+// clip: `team 0/3 live · 1 observed` painted as `· 1 observe`. Sweep the
+// panel width so some width lands a fitted line exactly on the boundary.
+#[test]
+fn a_fitted_org_line_paints_whole_at_every_panel_width() {
+    let mut view = View::new(
+        (24, 100),
+        "main".into(),
+        LayoutView {
+            squads: Vec::new(),
+            active_squad: 0,
+            panes: Vec::new(),
+            focus: 0,
+            area: (0, 0),
+            agents: Vec::new(),
+            focus_node: None,
+        },
+    );
+    view.org.apply(crate::org_overlay::FoldPart::Gate(Ok(
+        crate::org_overlay::GateReading {
+            slots: Some(0),
+            max_live: Some(3),
+            ..Default::default()
+        },
+    )));
+    // Text columns only: the last column of the panel is the divider glyph.
+    for width in 20..=70u16 {
+        view.sideline_width = width;
+        let panel_w = view.panel_w() as usize;
+        let (_, lines) = view.org_block_layout(24);
+        let want = lines
+            .iter()
+            .find(|l| l.starts_with("  team"))
+            .expect("the minimized glance carries a team line");
+        let (rows, cols) = (24usize, 100usize);
+        let mut cells = vec![crate::proto::Cell::default(); rows * cols];
+        view.draw_sideline(&mut cells, rows, cols, panel_w);
+        let painted = (0..rows)
+            .map(|r| {
+                cells[r * cols..r * cols + panel_w - 1]
+                    .iter()
+                    .map(|c| c.c)
+                    .collect::<String>()
+            })
+            .find(|row| row.starts_with("  team"))
+            .expect("the team line painted");
+        assert_eq!(painted.trim_end(), want.trim_end(), "panel width {width}");
     }
 }

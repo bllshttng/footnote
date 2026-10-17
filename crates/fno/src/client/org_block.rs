@@ -8,6 +8,13 @@ use super::View;
 use crate::proto::{cell_flags, Cell, Color};
 
 impl View {
+    /// The width an org line may fill: the paint width less the divider
+    /// column the painter never writes into. Fitting to the full paint width
+    /// lets a line that just fits lose its last character to the clip.
+    fn org_text_w(&self) -> usize {
+        self.sideline_paint_w().saturating_sub(1)
+    }
+
     /// Rows the org block owns at the bottom of the sideline: the minimized
     /// glance's `MINIMIZED_ROWS`, the expanded reading's height when
     /// expanded, and ZERO when the terminal cannot hold it beside at least
@@ -27,7 +34,7 @@ impl View {
             self.org
                 .expanded_lines(
                     &self.layout.agents,
-                    self.sideline_paint_w(),
+                    self.org_text_w(),
                     (available / 2).max(3),
                 )
                 .len()
@@ -61,14 +68,14 @@ impl View {
         let mut lines = if self.org.is_expanded() {
             self.org.expanded_lines(
                 &self.layout.agents,
-                self.sideline_paint_w(),
+                self.org_text_w(),
                 (available / 2).max(3),
             )
         } else {
             self.org
-                .minimized_lines(&self.layout.agents, self.sideline_paint_w())
+                .minimized_lines(&self.layout.agents, self.org_text_w())
         };
-        lines.extend(self.observer_lines());
+        lines.extend(self.observer_lines(self.org_text_w()));
         let available = term_rows
             .saturating_sub(1)
             .saturating_sub(self.bottom_row_is_chrome() as usize);

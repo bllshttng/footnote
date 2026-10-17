@@ -16,7 +16,8 @@ const MASK: char = '\u{2022}';
 
 /// The secret shapes. Leftmost-first: the named shapes win before the generic
 /// 40-character run can touch them. In a `key=value` match, group 2 is the key
-/// prefix and group 3 the value.
+/// prefix and group 3 the value. In a `scheme://user:pass@` match, group 4 is
+/// the prefix through the colon and group 5 the password.
 const SECRET_SHAPES: &str = concat!(
     "(?i)(",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----",
@@ -28,6 +29,7 @@ const SECRET_SHAPES: &str = concat!(
     "|xox[abprs]-[A-Za-z0-9-]{10,}",
     "|bearer\\s+\\S{16,}",
     "|((?:password|passwd|secret|token|api[_-]?key)\\s*[=:]\\s*)(\\S+)",
+    "|([a-z][a-z0-9+.-]*://[^\\s:/@]*:)([^\\s@/]+)@",
     "|[A-Za-z0-9+/_=-]{40,}",
     ")"
 );
@@ -47,7 +49,11 @@ pub fn path_rx() -> &'static Regex {
 fn mask_ranges(text: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for caps in secret_rx().captures_iter(text) {
-        let m = caps.get(3).or_else(|| caps.get(0)).expect("group 0");
+        let m = caps
+            .get(3)
+            .or_else(|| caps.get(5))
+            .or_else(|| caps.get(0))
+            .expect("group 0");
         out.push((m.start(), m.end()));
     }
     for m in path_rx().find_iter(text) {
@@ -170,5 +176,33 @@ mod tests {
         }
         assert!(text.contains("cd /Users/\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}/repo"));
         assert!(text.contains("token=\u{2022}"));
+    }
+
+    #[test]
+    fn url_passwords_are_masked_and_the_rest_of_the_url_stays() {
+        for (url, password) in [
+            (
+                "postgres://demo:hunter2-fake@localhost:5432/demo",
+                "hunter2-fake",
+            ),
+            ("redis://:s3cr3t-fake@cache.internal:6379/0", "s3cr3t-fake"),
+            (
+                "https://deploy:ghx-fake-pw@git.example.com/org/repo.git",
+                "ghx-fake-pw",
+            ),
+        ] {
+            let line = format!("DATABASE_URL={url} ok");
+            let got = redact_text(&line);
+            assert!(!got.contains(password), "{password} leaked: {got}");
+            let (user_part, host_part) = url.split_once(password).unwrap();
+            assert!(got.contains(user_part), "scheme and user kept: {got}");
+            assert!(
+                got.ends_with(&format!("{host_part} ok")),
+                "host kept: {got}"
+            );
+            assert_eq!(got.chars().count(), line.chars().count(), "width kept");
+        }
+        let plain = "see https://example.com:8080/a@b and http://host:80/x";
+        assert_eq!(redact_text(plain), plain, "no userinfo, nothing masked");
     }
 }

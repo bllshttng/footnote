@@ -252,6 +252,8 @@ impl<'a> Renderer<'a> {
 
 /// The secret shapes the scrub replaces with `[redacted]`. Leftmost-first:
 /// the named shapes win before the generic 40-character run can touch them.
+/// Group 2 is a `key=value` prefix; group 4 is a `scheme://user:` prefix whose
+/// password (group 5) and trailing `@` the scrub replaces.
 const SECRET_SHAPES: &str = concat!(
     "(?i)(",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----",
@@ -263,6 +265,7 @@ const SECRET_SHAPES: &str = concat!(
     "|xox[abprs]-[A-Za-z0-9-]{10,}",
     "|bearer\\s+\\S{16,}",
     "|((?:password|passwd|secret|token|api[_-]?key)\\s*[=:]\\s*)(\\S+)",
+    "|([a-z][a-z0-9+.-]*://[^\\s:/@]*:)([^\\s@/]+)@",
     "|[A-Za-z0-9+/_=-]{40,}",
     ")"
 );
@@ -294,9 +297,12 @@ fn scrub_text(text: &str, in_corrections: bool, scrub: &mut Scrub) -> String {
     let secrets = secret_rx().find_iter(&out).count();
     if secrets > 0 {
         out = secret_rx()
-            .replace_all(&out, |caps: &regex::Captures| match caps.get(2) {
-                Some(val) => format!("{}[redacted]", val.as_str()),
-                None => "[redacted]".to_string(),
+            .replace_all(&out, |caps: &regex::Captures| {
+                match (caps.get(2), caps.get(4)) {
+                    (Some(key), _) => format!("{}[redacted]", key.as_str()),
+                    (None, Some(url)) => format!("{}[redacted]@", url.as_str()),
+                    (None, None) => "[redacted]".to_string(),
+                }
             })
             .into_owned();
         scrub.secrets += secrets;
@@ -1164,6 +1170,29 @@ mod tests {
             "correction line lost: {correction}"
         );
         assert!(out.notes.iter().any(|n| n.starts_with("scrubbed: ")));
+    }
+
+    #[test]
+    fn url_userinfo_passwords_are_scrubbed_and_the_host_stays() {
+        let mut scrub = Scrub::default();
+        let got = scrub_text(
+            "db postgres://demo:hunter2-fake@localhost:5432/demo, cache redis://:s3cr3t-fake@r:6379 and https://u:pw-fake@git.example.com/x.git",
+            false,
+            &mut scrub,
+        );
+        for planted in ["hunter2-fake", "s3cr3t-fake", "pw-fake"] {
+            assert!(!got.contains(planted), "{planted} leaked: {got}");
+        }
+        assert!(
+            got.contains("postgres://demo:[redacted]@localhost:5432/demo"),
+            "{got}"
+        );
+        assert!(got.contains("redis://:[redacted]@r:6379"), "{got}");
+        assert!(
+            got.contains("https://u:[redacted]@git.example.com/x.git"),
+            "{got}"
+        );
+        assert_eq!(scrub.secrets, 3);
     }
 
     #[test]

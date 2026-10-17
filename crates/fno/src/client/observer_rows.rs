@@ -8,6 +8,17 @@ use crate::proto::{BacklogCard, ObserverRow};
 /// Observer lines shown before the rest fold into one `+N more` line.
 const MAX_LINES: usize = 3;
 
+/// Cut `line` to `width` characters, ending in `…` when it had to shrink, so a
+/// long observer name reads as clipped instead of as a different name.
+fn clip(line: String, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line;
+    }
+    let mut out: String = line.chars().take(width.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
 /// One line per observer, `◉ teacher · ssh · lead-5317`, then a `+N more`
 /// line when the list is longer than [`MAX_LINES`]. `pane_name` names the
 /// watched pane; an unnamed pane reads `pane 3`.
@@ -52,8 +63,9 @@ impl View {
         n.min(MAX_LINES) + usize::from(n > MAX_LINES)
     }
 
-    /// The sideline lines for the current observers; empty when nobody watches.
-    pub(in crate::client) fn observer_lines(&self) -> Vec<String> {
+    /// The sideline lines for the current observers, each fitted to `width`;
+    /// empty when nobody watches.
+    pub(in crate::client) fn observer_lines(&self, width: usize) -> Vec<String> {
         lines(&self.observers, |pane| {
             self.layout
                 .agents
@@ -61,6 +73,9 @@ impl View {
                 .find(|a| a.pane_id == Some(pane))
                 .map(|a| a.name.clone())
         })
+        .into_iter()
+        .map(|l| clip(l, width))
+        .collect()
     }
 }
 
@@ -100,5 +115,14 @@ mod tests {
         let got = lines(&five, |_| None);
         assert_eq!(got.len(), 4);
         assert_eq!(got[3], "\u{25c9} +2 more watching");
+    }
+
+    #[test]
+    fn a_long_observer_line_ends_in_an_ellipsis_at_the_width() {
+        let line = "\u{25c9} teacher \u{b7} ssh \u{b7} lead-5317".to_string();
+        assert_eq!(clip(line.clone(), 40), line);
+        let cut = clip(line, 12);
+        assert_eq!(cut.chars().count(), 12);
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
     }
 }
